@@ -1,5 +1,9 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("vita") {
+        // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.
+        println!("cargo:rustc-link-arg=-Wl,--undefined=sceUserMainThreadStackSize");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // A level change loads the destination while the viewer and outgoing
         // scene are still live. Windows' 1 MiB default exhausts the main thread
