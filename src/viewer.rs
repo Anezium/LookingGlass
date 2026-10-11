@@ -719,6 +719,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut played = resume.is_none();
     let mut post_game = false;
     let mut save_frame = crate::save_preview::Frame::default();
+    #[cfg(target_os = "vita")]
+    let mut last_save_frame: Option<std::time::Instant> = None;
     macro_rules! level_snapshot {
         () => {
             Level {
@@ -870,6 +872,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     retry.remember(game_snapshot!());
     loop {
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::begin_frame(&maps[current]);
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
         input.update(&preferences, window_focused());
         let overlay_before = menu || inventory_menu || console.open || paused;
@@ -3001,6 +3005,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             alice.draw_first_person(fullbright);
         }
         if saves_enabled {
+            #[cfg(target_os = "vita")]
+            if last_save_frame.is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(2)) {
+                last_save_frame = Some(std::time::Instant::now());
+                let _profile = crate::frame_profile::span("save_preview");
+                save_frame.update();
+            }
+            #[cfg(not(target_os = "vita"))]
             save_frame.update();
         }
         set_default_camera();
@@ -3353,6 +3364,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if !active { frame_profile.cancel(); }
         drop(frame_profile);
+        #[cfg(target_os = "vita")]
+        if crate::frame_profile::end_frame(
+            &maps[current],
+            active && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none()
+                && !story.busy() && !interactions.school.as_ref().is_some_and(|s| s.cinematic()),
+        ) {
+            // JSON I/O is outside frame_cpu, but remains visible in backend FPS.
+            if let Err(e) = crate::frame_profile::report(&maps[current]) {
+                eprintln!("Frame profile report failed: {e:#}");
+            }
+        }
         frame += 1;
         if is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(
