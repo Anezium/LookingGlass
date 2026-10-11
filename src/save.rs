@@ -479,6 +479,21 @@ impl Store {
         )
     }
 }
+/// What the viewer does with the map after a bench validation.
+/// `Restored::build` already called `Scene::load`. Loading again builds the village twice
+/// and the second scene is thrown away when that `Restored` is installed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchScene {
+    ReuseValidated,
+    LoadFresh,
+}
+pub fn bench_scene(validated: bool) -> BenchScene {
+    if validated {
+        BenchScene::ReuseValidated
+    } else {
+        BenchScene::LoadFresh
+    }
+}
 fn read_limited(path: &Path) -> Result<Vec<u8>> {
     let file =
         File::open(path).with_context(|| format!("No readable save at {}", path.display()))?;
@@ -878,6 +893,24 @@ mod tests {
         assert!(store.read_bench_auto().is_err());
         assert!(store.read(Slot::Auto).unwrap().backup);
         assert_eq!(fs::read(&path).unwrap(), b"invalid json");
+    }
+    #[test]
+    fn bench_startup_reuses_a_validated_scene_and_loads_when_the_auto_save_is_absent() {
+        assert_eq!(bench_scene(false), BenchScene::LoadFresh);
+        let scratch = format12::Scratch::new("bench-scene");
+        let store = scratch.store();
+        assert!(store.read_bench_auto().is_err());
+        assert_eq!(
+            bench_scene(store.read_bench_auto().is_ok()),
+            BenchScene::LoadFresh
+        );
+        let game = format12::game(vec![format12::level("gvillage", None, serde_json::Value::Null)]);
+        store.write(Slot::Auto, &game).unwrap();
+        assert!(store.read_bench_auto().is_ok());
+        assert_eq!(
+            bench_scene(store.read_bench_auto().is_ok()),
+            BenchScene::ReuseValidated
+        );
     }
     #[test]
     fn manual_slots_have_separate_files_and_cannot_escape_save_directory() {

@@ -569,7 +569,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let bench_resume = if bench_session && saves_enabled {
         match store.read_bench_auto().and_then(|loaded| {
             // Validate the complete restoration before bypassing the front end.
-            // Reuse it below instead of restoring a second time.
+            // The scene built here is installed below; load_scene must not run again.
             println!("bench: loading auto save {}", loaded.game.current);
             let restored = save::Restored::build(&mut assets, loaded.game.clone())?;
             bench_restored = Some(restored);
@@ -637,113 +637,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         .iter()
         .position(|m| m == &options.map)
         .context("Map not found")?;
-    let mut scene = load_scene(&mut assets, &maps[current], options.difficulty)?;
-    let mut level_art = LevelArt::default();
-    let mut skip_scene = crate::cinematic::Skip::default();
-    let mut power_art = crate::powerups::Art::load(&mut assets)?;
-    let mut hints = crate::cheshire::Hints::load(&mut assets, &scene.map, &maps[current])?;
     let mut console = crate::console::Console::new();
-    let mut steam = crate::particles::Steam::load(&mut assets, &scene.map)?;
-    let mut interactions = Interactions::load(&scene.map)?;
-    interactions.set_entry(
-        &mut assets,
-        &scene.map,
-        &maps[current],
-        options.entry.as_deref(),
-    )?;
-    if options.npc_preview || options.combat_preview || options.larva_preview {
-        interactions.encounters = None;
-    }
-    interactions.sync(&mut scene.world);
-    save::validate_entry(&scene.map, options.entry.as_deref())?;
-    let mut entry_spawn = options.entry.clone();
-    let mut npcs = crate::npc::Npcs::load(
-        &mut assets,
-        &scene.map,
-        &maps[current],
-        entry_spawn.as_deref(),
-        options.npc_preview,
-        options.combat_preview,
-    )?;
-    if options.larva_preview && maps[current] == "centipede1" {
-        npcs = crate::npc::Npcs::larva_preview(&mut assets)?;
-    }
-    let catalog = Catalog::load(&mut assets)?;
-    let mut stats = starting_stats(&options, &maps[current], entry_spawn.as_deref());
-    println!(
-        "Level loadout {}: {}",
-        maps[current],
-        stats.weapon_summary()
-    );
-    let mut hud = Hud::load(&mut assets)?;
-    if options.hud_preview {
-        hud.announce("HUD preview / sample resources and all toys");
-    }
-    if options.weapon_preview {
-        hud.announce("Weapon preview / all toys equipped with 1-0");
-    }
-    if options.combat_preview {
-        hud.announce("Combat preview / 1 Blade, 2 Cards, 3 Mallet / Home retry");
-    }
-    let mut pickups =
-        inventory::pickups_for_visit(&scene.map, &maps[current], entry_spawn.as_deref(), &catalog);
-    let mut pickup_clock = 0.;
     let mut pickup_feedback = inventory::PickupFeedback::default();
-    let mut environment_clock = 0.;
-    audio.load(&mut assets, &maps[current], &scene.map);
-    let mut story = crate::story::Story::load(&mut assets, &maps[current]);
-    if options.shelf_preview {
-        anyhow::ensure!(maps[current] == "skool1", "--shelf-preview requires skool1");
-        let mut staging = Player::spawn(&scene.world, scene.map.spawn().0)
-            .context("School staging entrance blocked")?;
-        let school = interactions
-            .school
-            .as_mut()
-            .context("School staging unavailable")?;
-        for event in [
-            "Theatre_Cinematic",
-            "Skool1_OG_MoveShelf",
-            "shelf_cinematic",
-        ] {
-            school.event(event);
-        }
-        for _ in 0..1250 {
-            interactions.advance_school(
-                crate::movement::FIXED_DT,
-                &scene.map,
-                &mut scene.world,
-                &mut staging,
-            )?;
-        }
-        hud.announce("Shelf crossing preview / WASD move, Space jump");
-    }
-    if let Some(event) = &options.story_preview {
-        anyhow::ensure!(story.trigger(event), "Unknown story preview {event}");
-    } else if options.start_at.is_none() && !options.fly && !options.shelf_preview {
-        interactions.entry_story(&mut story);
-    }
-    let (mut pos, mut yaw) = interaction::spawn(&scene.map, entry_spawn.as_deref());
-    if let Some(feet) = options.start_at {
-        pos = feet + Vec3::Z * EYE_HEIGHT;
-    }
-    if options.larva_preview && maps[current] == "centipede1" {
-        (pos, yaw) = npcs.larva_preview_start(&scene.world)?;
-        hud.announce("Larva encounter / WASD move, mouse attack / Home retry");
-    }
-    if options.shelf_preview {
-        // The exact formerly stalled contact from the real-data drop regression.
-        pos = vec3(220., 3300., 413.13885) + Vec3::Z * EYE_HEIGHT;
-        yaw = std::f32::consts::FRAC_PI_4 * 3.;
-    }
-    let spawn = Player::spawn(&scene.world, pos);
-    let mut flying = options.fly || spawn.is_none();
-    // Some map starts still expect a cinematic or scripted moving support.
-    let mut spawn_landing = true;
-    let mut player = spawn.unwrap_or_else(|| Player::new(pos - Vec3::Z * EYE_HEIGHT));
-    let mut alice = Character::load(&mut assets).context("Loading Alice's character")?;
-    let mut aim_pointer = crate::targeting::Pointer::load(&mut assets)?;
-    alice.reset(&player, yaw);
-    level_art.prepare(&mut assets, &scene, &interactions, true)?;
     let mut third_person = true;
     let mut follow_camera = crate::camera::Follow::default();
     let mut camera_handoff = crate::camera::Handoff::default();
@@ -766,53 +661,33 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut chapter_requested = None;
     let mut mouse_look = MouseLook::default();
     let mut was_focused = true;
-    let mut campaign = Campaign::default();
     let mut played = resume.is_none();
     let mut post_game = false;
     let mut save_frame = crate::save_preview::Frame::default();
-    #[cfg(target_os = "vita")]
-    let mut preview_throttle = crate::frame_profile::PreviewThrottle::default();
-    #[cfg(target_os = "vita")]
-    let mut bench_camera: Option<(Vec3, Vec3, bool)> = None;
-    macro_rules! level_snapshot {
-        () => {
-            Level {
-                map: maps[current].clone(),
-                entry: entry_spawn.clone(),
-                interactions: interactions.snapshot(),
-                npcs: npcs.snapshot(),
-                story: story.snapshot(),
-                hints: hints.snapshot(),
-                environment_clock,
-                pickup_clock,
-            }
-        };
-    }
-    macro_rules! game_snapshot {
-        () => {{
-            let level = level_snapshot!();
-            let key = level.key();
-            let mut saved_campaign = campaign.clone();
-            saved_campaign.levels.insert(key.clone(), level);
-            Game {
-                current: key,
-                campaign: saved_campaign,
-                stats: stats.clone(),
-                player: player.clone(),
-                view: View {
-                    position: pos,
-                    yaw,
-                    pitch,
-                    third_person,
-                    flying,
-                    fullbright,
-                    spawn_landing,
-                },
-                recovery: recovery.clone(),
-                character: alice.snapshot(),
-            }
-        }};
-    }
+    let mut scene: Scene;
+    let mut level_art: LevelArt;
+    let mut skip_scene: crate::cinematic::Skip;
+    let mut power_art: crate::powerups::Art;
+    let mut hints: crate::cheshire::Hints;
+    let mut steam: crate::particles::Steam;
+    let mut interactions: Interactions;
+    let mut entry_spawn: Option<String>;
+    let mut npcs: crate::npc::Npcs;
+    let catalog: Catalog;
+    let mut stats: Stats;
+    let mut hud: Hud;
+    let mut pickups: Vec<inventory::Pickup>;
+    let mut pickup_clock: f32;
+    let mut environment_clock: f32;
+    let mut story: crate::story::Story;
+    let mut pos: Vec3;
+    let mut yaw: f32;
+    let mut flying: bool;
+    let mut spawn_landing: bool;
+    let mut player: Player;
+    let mut alice: Character;
+    let mut aim_pointer: crate::targeting::Pointer;
+    let mut campaign: Campaign;
     macro_rules! apply_loaded {
         ($restored:expr) => { apply_loaded!($restored, true) };
         ($restored:expr, $pause:expr) => {{
@@ -876,6 +751,178 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             save_frame.clear();
         }};
     }
+    #[cfg(target_os = "vita")]
+    let prepared = bench_restored.take();
+    #[cfg(not(target_os = "vita"))]
+    let prepared: Option<save::Restored> = None;
+    let mut bench_applied = false;
+    // The validated bench scene is already built. Installing it here skips load_scene,
+    // which would construct a second village and then discard it.
+    let validated = prepared.is_some();
+    if save::bench_scene(validated) == save::BenchScene::ReuseValidated {
+        power_art = crate::powerups::Art::load(&mut assets)?;
+        catalog = Catalog::load(&mut assets)?;
+        hud = Hud::load(&mut assets)?;
+        aim_pointer = crate::targeting::Pointer::load(&mut assets)?;
+        let fresh = starting_stats(&options, &maps[current], options.entry.as_deref());
+        println!(
+            "Level loadout {}: {}",
+            maps[current],
+            fresh.weapon_summary()
+        );
+        apply_loaded!(prepared.unwrap(), false);
+        bench_applied = true;
+    } else {
+        scene = load_scene(&mut assets, &maps[current], options.difficulty)?;
+        level_art = LevelArt::default();
+        skip_scene = crate::cinematic::Skip::default();
+        power_art = crate::powerups::Art::load(&mut assets)?;
+        hints = crate::cheshire::Hints::load(&mut assets, &scene.map, &maps[current])?;
+        steam = crate::particles::Steam::load(&mut assets, &scene.map)?;
+        interactions = Interactions::load(&scene.map)?;
+        interactions.set_entry(
+            &mut assets,
+            &scene.map,
+            &maps[current],
+            options.entry.as_deref(),
+        )?;
+        if options.npc_preview || options.combat_preview || options.larva_preview {
+            interactions.encounters = None;
+        }
+        interactions.sync(&mut scene.world);
+        save::validate_entry(&scene.map, options.entry.as_deref())?;
+        entry_spawn = options.entry.clone();
+        npcs = crate::npc::Npcs::load(
+            &mut assets,
+            &scene.map,
+            &maps[current],
+            entry_spawn.as_deref(),
+            options.npc_preview,
+            options.combat_preview,
+        )?;
+        if options.larva_preview && maps[current] == "centipede1" {
+            npcs = crate::npc::Npcs::larva_preview(&mut assets)?;
+        }
+        catalog = Catalog::load(&mut assets)?;
+        stats = starting_stats(&options, &maps[current], entry_spawn.as_deref());
+        println!(
+            "Level loadout {}: {}",
+            maps[current],
+            stats.weapon_summary()
+        );
+        hud = Hud::load(&mut assets)?;
+        if options.hud_preview {
+            hud.announce("HUD preview / sample resources and all toys");
+        }
+        if options.weapon_preview {
+            hud.announce("Weapon preview / all toys equipped with 1-0");
+        }
+        if options.combat_preview {
+            hud.announce("Combat preview / 1 Blade, 2 Cards, 3 Mallet / Home retry");
+        }
+        pickups =
+            inventory::pickups_for_visit(&scene.map, &maps[current], entry_spawn.as_deref(), &catalog);
+        pickup_clock = 0.;
+        environment_clock = 0.;
+        audio.load(&mut assets, &maps[current], &scene.map);
+        story = crate::story::Story::load(&mut assets, &maps[current]);
+        if options.shelf_preview {
+            anyhow::ensure!(maps[current] == "skool1", "--shelf-preview requires skool1");
+            let mut staging = Player::spawn(&scene.world, scene.map.spawn().0)
+                .context("School staging entrance blocked")?;
+            let school = interactions
+                .school
+                .as_mut()
+                .context("School staging unavailable")?;
+            for event in [
+                "Theatre_Cinematic",
+                "Skool1_OG_MoveShelf",
+                "shelf_cinematic",
+            ] {
+                school.event(event);
+            }
+            for _ in 0..1250 {
+                interactions.advance_school(
+                    crate::movement::FIXED_DT,
+                    &scene.map,
+                    &mut scene.world,
+                    &mut staging,
+                )?;
+            }
+            hud.announce("Shelf crossing preview / WASD move, Space jump");
+        }
+        if let Some(event) = &options.story_preview {
+            anyhow::ensure!(story.trigger(event), "Unknown story preview {event}");
+        } else if options.start_at.is_none() && !options.fly && !options.shelf_preview {
+            interactions.entry_story(&mut story);
+        }
+        (pos, yaw) = interaction::spawn(&scene.map, entry_spawn.as_deref());
+        if let Some(feet) = options.start_at {
+            pos = feet + Vec3::Z * EYE_HEIGHT;
+        }
+        if options.larva_preview && maps[current] == "centipede1" {
+            (pos, yaw) = npcs.larva_preview_start(&scene.world)?;
+            hud.announce("Larva encounter / WASD move, mouse attack / Home retry");
+        }
+        if options.shelf_preview {
+            // The exact formerly stalled contact from the real-data drop regression.
+            pos = vec3(220., 3300., 413.13885) + Vec3::Z * EYE_HEIGHT;
+            yaw = std::f32::consts::FRAC_PI_4 * 3.;
+        }
+        let spawn = Player::spawn(&scene.world, pos);
+        flying = options.fly || spawn.is_none();
+        // Some map starts still expect a cinematic or scripted moving support.
+        spawn_landing = true;
+        player = spawn.unwrap_or_else(|| Player::new(pos - Vec3::Z * EYE_HEIGHT));
+        alice = Character::load(&mut assets).context("Loading Alice's character")?;
+        aim_pointer = crate::targeting::Pointer::load(&mut assets)?;
+        alice.reset(&player, yaw);
+        level_art.prepare(&mut assets, &scene, &interactions, true)?;
+        campaign = Campaign::default();
+    }
+    #[cfg(target_os = "vita")]
+    let mut preview_throttle = crate::frame_profile::PreviewThrottle::default();
+    #[cfg(target_os = "vita")]
+    let mut bench_camera: Option<(Vec3, Vec3, bool)> = None;
+    macro_rules! level_snapshot {
+        () => {
+            Level {
+                map: maps[current].clone(),
+                entry: entry_spawn.clone(),
+                interactions: interactions.snapshot(),
+                npcs: npcs.snapshot(),
+                story: story.snapshot(),
+                hints: hints.snapshot(),
+                environment_clock,
+                pickup_clock,
+            }
+        };
+    }
+    macro_rules! game_snapshot {
+        () => {{
+            let level = level_snapshot!();
+            let key = level.key();
+            let mut saved_campaign = campaign.clone();
+            saved_campaign.levels.insert(key.clone(), level);
+            Game {
+                current: key,
+                campaign: saved_campaign,
+                stats: stats.clone(),
+                player: player.clone(),
+                view: View {
+                    position: pos,
+                    yaw,
+                    pitch,
+                    third_person,
+                    flying,
+                    fullbright,
+                    spawn_landing,
+                },
+                recovery: recovery.clone(),
+                character: alice.snapshot(),
+            }
+        }};
+    }
     if resume.is_none()
         && saves_enabled
         && opening_requested
@@ -900,16 +947,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         clock.pause();
     }
-    if let Some(loaded) = resume {
-        let backup = loaded.backup;
+    if bench_applied {
         #[cfg(target_os = "vita")]
-        let restored = match bench_restored.take() {
-            Some(restored) => Ok(restored),
-            None => save::Restored::build(&mut assets, loaded.game),
-        };
-        #[cfg(not(target_os = "vita"))]
-        let restored = save::Restored::build(&mut assets, loaded.game);
-        match restored {
+        println!(
+            "bench: auto save restored {}",
+            save::visit_key(&maps[current], entry_spawn.as_deref())
+        );
+        hud.announce("Game restored / P or click to resume");
+    } else if let Some(loaded) = resume {
+        let backup = loaded.backup;
+        match save::Restored::build(&mut assets, loaded.game) {
             Ok(restored) => {
                 #[cfg(target_os = "vita")]
                 let pause_on_load = !bench_session;
