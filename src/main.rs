@@ -167,17 +167,34 @@ fn main() {
     }
 }
 
+#[cfg(target_os = "vita")]
+fn default_save_dir() -> PathBuf {
+    PathBuf::from("ux0:data/alice/private/saves")
+}
+#[cfg(not(target_os = "vita"))]
+fn default_save_dir() -> PathBuf {
+    PathBuf::from("private/saves")
+}
+#[cfg(target_os = "vita")]
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("ux0:data/alice")
+}
+#[cfg(not(target_os = "vita"))]
+fn default_data_dir() -> PathBuf {
+    std::fs::read_to_string("private/data-path.txt")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| PathBuf::from(path.trim()))
+        .unwrap_or_else(|| PathBuf::from("alice_202106/Alice1/bin/base"))
+}
+
 fn run() -> Result<()> {
     let mut o = Options {
         difficulty: Default::default(),
-        save_dir: PathBuf::from("private/saves"),
+        save_dir: default_save_dir(),
         load: None,
         new_game: false,
-        data: std::fs::read_to_string("private/data-path.txt")
-            .ok()
-            .filter(|path| !path.trim().is_empty())
-            .map(|path| PathBuf::from(path.trim()))
-            .unwrap_or_else(|| PathBuf::from("alice_202106/Alice1/bin/base")),
+        data: default_data_dir(),
         map: "skool1".into(),
         direct_map: false,
         entry: None,

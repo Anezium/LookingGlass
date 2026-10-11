@@ -4,6 +4,12 @@ use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(target_os = "vita")]
+pub fn path(name: &str) -> PathBuf {
+    PathBuf::from("ux0:data/alice/private").join(name)
+}
+
+#[cfg(not(target_os = "vita"))]
 pub fn path(name: &str) -> PathBuf {
     std::env::var_os("LOOKING_GLASS_SETTINGS_DIR")
         .map(PathBuf::from)
