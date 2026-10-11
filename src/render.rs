@@ -89,6 +89,7 @@ struct Batch {
     motion: Option<crate::sky_sequence::Motion>,
     full_indices: Vec<u16>,
     parts: Vec<Part>,
+    visibility_work: VisibilityWork,
     bounds: (Vec3, Vec3),
     detail: Vec<crate::model_detail::Level>,
     animation: Option<crate::ambient_animation::Frames>,
@@ -136,6 +137,11 @@ struct Part {
     indices: std::ops::Range<usize>,
     min: Vec3,
     max: Vec3,
+}
+#[derive(Default)]
+struct VisibilityWork {
+    pvs_parts: Vec<usize>,
+    visible_parts: Vec<usize>,
 }
 struct DrawContext<'a> {
     enabled: bool,
@@ -432,11 +438,16 @@ fn load_layers(
 }
 fn world_stages(spec: Option<&texture::MaterialSpec>) -> Vec<Stage> {
     let Some(spec) = spec else { return Vec::new() };
-    let mut stages: Vec<_> = spec.stages.iter()
+    let mut stages: Vec<_> = spec
+        .stages
+        .iter()
         .filter(|s| !s.images.iter().any(|i| i == "$lightmap") && !s.unsupported)
-        .cloned().collect();
-    if let Some(base) = spec.stages.first().filter(|s|
-        s.images.iter().any(|i| i == "$lightmap") && s.blend == Blend::Opaque)
+        .cloned()
+        .collect();
+    if let Some(base) = spec
+        .stages
+        .first()
+        .filter(|s| s.images.iter().any(|i| i == "$lightmap") && s.blend == Blend::Opaque)
     {
         // Only an immediately following filter can absorb the lightmap into
         // its diffuse draw. Detail/additive stages need the original opaque
@@ -496,6 +507,103 @@ fn axial_billboard(quad: &mut [Vertex], camera: Vec3) {
     }
 }
 
+// Keep PVS, view-dependent bounds/LOD, and index copies in separate intervals.
+// Scratch lists preserve source part order and retain capacity between views.
+fn select_batch_indices(
+    batch: &mut Batch,
+    transform: Option<&(usize, Vec3, Quat)>,
+    offset: Vec3,
+    backdrop: bool,
+    context: &mut DrawContext<'_>,
+) -> bool {
+    let bounds_profile = crate::frame_profile::span("world_visibility_bounds");
+    let (min, max) = transform_bounds(batch.bounds.0, batch.bounds.1, transform, offset);
+    let can_cull = (context.enabled || context.required_pvs)
+        && !batch
+            .deforms
+            .iter()
+            .any(crate::materials::Deform::moves_vertices)
+        && batch.motion.is_none();
+    if can_cull && context.enabled && outside_bounds(min, max) {
+        return false;
+    }
+    drop(bounds_profile);
+    if can_cull && !batch.parts.is_empty() {
+        {
+            let _pvs = crate::frame_profile::span("world_visibility_pvs");
+            batch.visibility_work.pvs_parts.clear();
+            for (i, p) in batch.parts.iter().enumerate() {
+                if !context.faces.as_ref().is_some_and(|v| !v[p.face]) {
+                    batch.visibility_work.pvs_parts.push(i);
+                }
+            }
+        }
+        {
+            let _bounds = crate::frame_profile::span("world_visibility_bounds");
+            batch.visibility_work.visible_parts.clear();
+            for &i in &batch.visibility_work.pvs_parts {
+                let p = &batch.parts[i];
+                let (lo, hi) = transform_bounds(p.min, p.max, transform, offset);
+                if !context.enabled || !outside_bounds(lo, hi) {
+                    batch.visibility_work.visible_parts.push(i);
+                }
+            }
+        }
+        {
+            let _indices = crate::frame_profile::span("world_visibility_indices");
+            batch.mesh.indices.clear();
+            for &i in &batch.visibility_work.visible_parts {
+                batch
+                    .mesh
+                    .indices
+                    .extend_from_slice(&batch.full_indices[batch.parts[i].indices.clone()]);
+            }
+        }
+    } else {
+        {
+            let _pvs = crate::frame_profile::span("world_visibility_pvs");
+            // Inline movers and animated props never use stale leaf membership.
+            if can_cull
+                && batch.model.is_none()
+                && batch.animation.is_none()
+                && batch.parts.is_empty()
+                && !backdrop
+                && !context.visibility.bounds(context.cluster, min, max)
+            {
+                return false;
+            }
+        }
+        let _indices = crate::frame_profile::span("world_visibility_indices");
+        batch.mesh.indices.clear();
+        batch.mesh.indices.extend_from_slice(&batch.full_indices);
+    }
+    if batch.mesh.indices.is_empty() {
+        return false;
+    }
+    let detail = {
+        let _bounds = crate::frame_profile::span("world_visibility_bounds");
+        if can_cull && context.enabled && !backdrop && batch.parts.is_empty() {
+            let center = (min + max) * 0.5;
+            let radius = (max - min).length() * 0.5;
+            batch
+                .detail
+                .iter()
+                .rev()
+                .position(|l| crate::render_fx::projected_error(center, radius, l.error) <= 0.35)
+                .map(|i| batch.detail.len() - 1 - i)
+        } else {
+            None
+        }
+    };
+    if let Some(i) = detail {
+        let _indices = crate::frame_profile::span("world_visibility_indices");
+        let level = &batch.detail[i];
+        context.stats.detail_saved += (batch.mesh.indices.len() - level.indices.len()) / 3;
+        batch.mesh.indices.clone_from(&level.indices);
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_batch(
     batch: &mut Batch,
@@ -507,72 +615,14 @@ fn draw_batch(
     backdrop: bool,
     context: &mut DrawContext<'_>,
 ) {
-    #[cfg(target_os = "vita")]
     let _visibility_profile = crate::frame_profile::span("world_visibility");
     context.stats.batches += 1;
-    let (min, max) = transform_bounds(batch.bounds.0, batch.bounds.1, transform, offset);
-    let can_cull = (context.enabled || context.required_pvs)
-        && !batch
-            .deforms
-            .iter()
-            .any(crate::materials::Deform::moves_vertices)
-        && batch.motion.is_none();
-    if can_cull && context.enabled && outside_bounds(min, max) {
+    if !select_batch_indices(batch, transform, offset, backdrop, context) {
         context.stats.culled += 1;
         #[cfg(target_os = "vita")]
         crate::frame_profile::record_culled();
         return;
     }
-    batch.mesh.indices.clear();
-    if can_cull && !batch.parts.is_empty() {
-        for p in &batch.parts {
-            if context.faces.as_ref().is_some_and(|v| !v[p.face]) {
-                continue;
-            }
-            let (lo, hi) = transform_bounds(p.min, p.max, transform, offset);
-            if !context.enabled || !outside_bounds(lo, hi) {
-                batch
-                    .mesh
-                    .indices
-                    .extend_from_slice(&batch.full_indices[p.indices.clone()]);
-            }
-        }
-    } else {
-        // Inline movers and animated props are never culled from stale leaf membership.
-        if can_cull
-            && batch.model.is_none()
-            && batch.animation.is_none()
-            && batch.parts.is_empty()
-            && !backdrop
-            && !context.visibility.bounds(context.cluster, min, max)
-        {
-            context.stats.culled += 1;
-            #[cfg(target_os = "vita")]
-            crate::frame_profile::record_culled();
-            return;
-        }
-        batch.mesh.indices.extend_from_slice(&batch.full_indices);
-    }
-    if batch.mesh.indices.is_empty() {
-        context.stats.culled += 1;
-        #[cfg(target_os = "vita")]
-        crate::frame_profile::record_culled();
-        return;
-    }
-    if can_cull && context.enabled && !backdrop && batch.parts.is_empty() {
-        let center = (min + max) * 0.5;
-        let radius = (max - min).length() * 0.5;
-        if let Some(level) = batch
-            .detail
-            .iter()
-            .rev()
-            .find(|l| crate::render_fx::projected_error(center, radius, l.error) <= 0.35)
-        {
-            context.stats.detail_saved += (batch.mesh.indices.len() - level.indices.len()) / 3;
-            batch.mesh.indices.clone_from(&level.indices);
-        }
-    }
-    #[cfg(target_os = "vita")]
     drop(_visibility_profile);
     context.stats.triangles += batch.mesh.indices.len() / 3 * batch.layers.len();
     #[cfg(target_os = "vita")]
@@ -1078,7 +1128,9 @@ impl Scene {
         particles: &crate::particles::Steam,
     ) {
         #[cfg(target_os = "vita")]
-        if crate::frame_profile::mode().no_world() { return; }
+        if crate::frame_profile::mode().no_world() {
+            return;
+        }
         #[cfg(target_os = "vita")]
         let _profile = crate::frame_profile::span("world_draw");
         self.bind_atlas();
@@ -1256,7 +1308,9 @@ impl Scene {
                 let separate = sky
                     || spec.is_some_and(|s| {
                         s.transparent
-                            || s.deforms.iter().any(crate::materials::Deform::moves_vertices)
+                            || s.deforms
+                                .iter()
+                                .any(crate::materials::Deform::moves_vertices)
                             || s.stages.first().is_some_and(|s| s.blend != Blend::Opaque)
                     });
                 let existing = groups
@@ -1299,6 +1353,7 @@ impl Scene {
                         motion: None,
                         full_indices: Vec::new(),
                         parts: Vec::new(),
+                        visibility_work: VisibilityWork::default(),
                         bounds: (Vec3::ZERO, Vec3::ZERO),
                         detail: Vec::new(),
                         animation: None,
@@ -1380,6 +1435,7 @@ impl Scene {
                 motion: None,
                 full_indices: Vec::new(),
                 parts: Vec::new(),
+                visibility_work: VisibilityWork::default(),
                 bounds: (Vec3::ZERO, Vec3::ZERO),
                 detail: Vec::new(),
                 animation: None,
@@ -1470,6 +1526,7 @@ impl Scene {
                         .cloned(),
                     full_indices: surface.indices.clone(),
                     parts: Vec::new(),
+                    visibility_work: VisibilityWork::default(),
                     bounds: surface
                         .frames
                         .iter()
@@ -1527,6 +1584,13 @@ impl Scene {
             batch.base = batch.mesh.vertices.clone();
             batch.center =
                 batch.base.iter().map(|v| v.position).sum::<Vec3>() / batch.base.len() as f32;
+        }
+        for batch in batches.iter_mut().chain(&mut sky_props) {
+            batch.visibility_work.pvs_parts.reserve(batch.parts.len());
+            batch
+                .visibility_work
+                .visible_parts
+                .reserve(batch.parts.len());
         }
         missing.sort();
         missing.dedup();
@@ -1917,6 +1981,7 @@ pub async fn check_layers(scene: &Scene) -> Result<()> {
             motion: None,
             full_indices: vec![0, 1, 2, 0, 2, 3],
             parts: vec![],
+            visibility_work: VisibilityWork::default(),
             bounds: (Vec3::ZERO, Vec3::ZERO),
             detail: vec![],
             animation: None,
@@ -2341,8 +2406,15 @@ mod billboard_tests {
     fn leading_lightmap_keeps_opaque_destination_before_clock_detail_and_glow() {
         let specs = crate::materials::parse("clock\n{\nsurfaceparm nolightmap\n{\nmap $lightmap\nrgbGen identity\n}\n{\nmap detail\nblendfunc GL_DST_COLOR GL_SRC_COLOR\n}\n{\nmap face\nblendfunc filter\n}\n{\nmap face\nblendfunc add\n}\n}\nstone\n{\n{\nmap $lightmap\n}\n{\nmap stone\nblendfunc filter\n}\n}").unwrap();
         let clock = world_stages(Some(&specs["clock"]));
-        assert_eq!(clock.iter().map(|s| s.blend).collect::<Vec<_>>(),
-            [Blend::Opaque, Blend::DoubleFilter, Blend::Filter, Blend::Add]);
+        assert_eq!(
+            clock.iter().map(|s| s.blend).collect::<Vec<_>>(),
+            [
+                Blend::Opaque,
+                Blend::DoubleFilter,
+                Blend::Filter,
+                Blend::Add
+            ]
+        );
         assert_eq!(clock[0].images, ["$whiteimage"]);
         // Ordinary lightmapped walls retain their single-draw fast path.
         assert_eq!(world_stages(Some(&specs["stone"])).len(), 1);

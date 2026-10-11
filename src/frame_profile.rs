@@ -243,6 +243,9 @@ mod vita {
     const LABELS: &[&str] = &[
         "frame_cpu",
         "world_visibility",
+        "world_visibility_bounds",
+        "world_visibility_pvs",
+        "world_visibility_indices",
         "interaction_search_after",
         "lights_build",
         "interaction_doors",
