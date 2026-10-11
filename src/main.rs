@@ -201,7 +201,10 @@ fn default_save_dir() -> PathBuf {
 }
 #[cfg(target_os = "vita")]
 fn default_data_dir() -> PathBuf {
-    PathBuf::from("ux0:data/alice")
+    // Same layout as the desktop data path (`.../bin/base`) and as the Android build, which
+    // imports the six .pk3 into `<root>/base`. The loader-based build on the same console
+    // uses that folder too, so one copy of the data serves both.
+    PathBuf::from("ux0:data/alice/base")
 }
 #[cfg(not(target_os = "vita"))]
 fn default_data_dir() -> PathBuf {
