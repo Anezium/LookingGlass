@@ -42,4 +42,5 @@ vita_make_fself_flags = ["-s"]
 vita_mksfoex_flags = ["-d", "ATTRIBUTE2=12"]
 
 [package.metadata.vita.profile.release]
-strip_symbols = true
+# vita-elf-create reads sceUserMainThreadStackSize by name; strip-unneeded removes it.
+strip_symbols = false
