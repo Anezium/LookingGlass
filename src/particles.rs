@@ -360,21 +360,34 @@ impl ModelBurst {
         let s = &self.0;
         let (birth, count) = s.burst.unwrap();
         let age = age - birth;
-        if age < 0. || age >= s.life.high { return Vec::new(); }
-        (0..count.min(128)).filter_map(|i| {
-            let mut seed = seed.wrapping_add(i.wrapping_mul(2654435761));
-            let life = s.life.sample(&mut seed);
-            if age >= life { return None; }
-            let offset = sampled(s.offset, &mut seed) + sampled(s.axis_offset, &mut seed);
-            let velocity = sampled(s.velocity, &mut seed) + Vec3::X * s.forward;
-            let accel = sampled(s.accel, &mut seed);
-            Some(ModelParticle {
-                model: self.model().into(), tag: s.tag.clone(), age,
-                offset: offset + velocity * age + accel * (0.5 * age * age),
-                scale: (s.size.sample(&mut seed) + s.growth * age).max(0.),
-                alpha: s.alpha * if s.fade { (1. - age / life).max(0.) } else { 1. },
+        if age < 0. || age >= s.life.high {
+            return Vec::new();
+        }
+        (0..count.min(128))
+            .filter_map(|i| {
+                let mut seed = seed.wrapping_add(i.wrapping_mul(2654435761));
+                let life = s.life.sample(&mut seed);
+                if age >= life {
+                    return None;
+                }
+                let offset = sampled(s.offset, &mut seed) + sampled(s.axis_offset, &mut seed);
+                let velocity = sampled(s.velocity, &mut seed) + Vec3::X * s.forward;
+                let accel = sampled(s.accel, &mut seed);
+                Some(ModelParticle {
+                    model: self.model().into(),
+                    tag: s.tag.clone(),
+                    age,
+                    offset: offset + velocity * age + accel * (0.5 * age * age),
+                    scale: (s.size.sample(&mut seed) + s.growth * age).max(0.),
+                    alpha: s.alpha
+                        * if s.fade {
+                            (1. - age / life).max(0.)
+                        } else {
+                            1.
+                        },
+                })
             })
-        }).collect()
+            .collect()
     }
 }
 pub(crate) fn declared_lights(
@@ -399,16 +412,33 @@ pub(crate) fn declared_lights(
         .collect())
 }
 /// Preserve attachment names and start-off flags for a controller-owned actor.
-pub(crate) fn attached_lights(assets: &mut Assets, name: &str) -> Result<Vec<(String, Option<String>, bool, crate::lighting::Light)>> {
+pub(crate) fn attached_lights(
+    assets: &mut Assets,
+    name: &str,
+) -> Result<Vec<(String, Option<String>, bool, crate::lighting::Light)>> {
     let text = String::from_utf8_lossy(&assets.read(&format!("models/{name}.tik"))?).into_owned();
-    Ok(parse(&text).into_iter().filter_map(|s| {
-        s.light.map(|(color, radius, only_models, flare)| (s.name, s.tag, !s.start_off, crate::lighting::Light {
-            position: sampled(s.offset, &mut 1), color, radius, only_models, flare,
-        }))
-    }).collect())
+    Ok(parse(&text)
+        .into_iter()
+        .filter_map(|s| {
+            s.light.map(|(color, radius, only_models, flare)| {
+                (
+                    s.name,
+                    s.tag,
+                    !s.start_off,
+                    crate::lighting::Light {
+                        position: sampled(s.offset, &mut 1),
+                        color,
+                        radius,
+                        only_models,
+                        flare,
+                    },
+                )
+            })
+        })
+        .collect())
 }
-mod light_style;
 mod check;
+mod light_style;
 pub(crate) use check::ambient_render;
 
 #[derive(Clone)]
@@ -466,10 +496,15 @@ fn random(seed: &mut u32) -> f32 {
 impl Steam {
     /// Emission and living puffs for a placed entity, used by mechanism checks.
     pub fn emission(&self, id: crate::entity::Id) -> Option<(bool, usize)> {
-        self.emitters.iter().any(|e|e.id==id.0).then(|| (
-            self.emitters.iter().any(|e|e.id==id.0 && e.enabled),
-            self.puffs.iter().filter(|p|self.emitters[p.emitter].id==id.0).count()
-        ))
+        self.emitters.iter().any(|e| e.id == id.0).then(|| {
+            (
+                self.emitters.iter().any(|e| e.id == id.0 && e.enabled),
+                self.puffs
+                    .iter()
+                    .filter(|p| self.emitters[p.emitter].id == id.0)
+                    .count(),
+            )
+        })
     }
     /// Reconstruct emitter switches from the saved animation clock. No historical
     /// bursts are replayed on loading, and paused clocks never advance emission.
@@ -820,13 +855,25 @@ impl Steam {
             return;
         }
         let dt = dt.min(0.05);
+        #[cfg(target_os = "vita")]
+        let (before, mut sweeps, mut constrained, mut frozen, mut stationary, mut impacts) =
+            (self.puffs.len() as u64, 0u64, 0u64, 0u64, 0u64, 0u64);
         for p in &mut self.puffs {
+            #[cfg(target_os = "vita")]
+            let _integrate_profile = crate::frame_profile::span("particles_integrate");
+
             let dt = if self.emitters[p.emitter].spec.no_deadtime {
                 dt
             } else {
                 world_dt.clamp(0., dt)
             };
-            if dt == 0. { continue; }
+            if dt == 0. {
+                #[cfg(target_os = "vita")]
+                {
+                    frozen += 1;
+                }
+                continue;
+            }
             p.age += dt;
             p.velocity += p.accel * dt;
             let mut next = p.position + p.velocity * dt;
@@ -843,17 +890,48 @@ impl Steam {
             }
             // The enclosed pixie requests axis bounds, not world collision.
             // Its casing still occludes the sprite through the depth buffer.
-            if self.emitters[p.emitter].spec.constrain.is_none()
-                && world.sweep(p.position, next, Vec3::ZERO).fraction < 1.
-            {
-                p.age = p.life;
+            #[cfg(target_os = "vita")]
+            drop(_integrate_profile);
+            if self.emitters[p.emitter].spec.constrain.is_none() {
+                #[cfg(target_os = "vita")]
+                let _hotspot = crate::frame_profile::span("particles_sweep");
+                #[cfg(target_os = "vita")]
+                {
+                    sweeps += 1;
+                    stationary += u64::from(p.position == next);
+                }
+                if world.sweep(p.position, next, Vec3::ZERO).fraction < 1. {
+                    p.age = p.life;
+                    #[cfg(target_os = "vita")]
+                    {
+                        impacts += 1;
+                    }
+                }
+            } else {
+                #[cfg(target_os = "vita")]
+                {
+                    constrained += 1;
+                }
             }
-            if self.emitters[p.emitter].spec.image == "bubble" && world.liquid_at(next) == 0 {
-                p.age = p.life;
+            if self.emitters[p.emitter].spec.image == "bubble" {
+                #[cfg(target_os = "vita")]
+                let _hotspot = crate::frame_profile::span("particles_liquid");
+                if world.liquid_at(next) == 0 {
+                    p.age = p.life;
+                }
             }
             p.position = next;
         }
-        self.puffs.retain(|p| p.age < p.life);
+        {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("particles_retain");
+            self.puffs.retain(|p| p.age < p.life);
+        }
+        #[cfg(target_os = "vita")]
+        let retained = self.puffs.len() as u64;
+        #[cfg(target_os = "vita")]
+        let _emit_profile = crate::frame_profile::span("particles_emit");
+
         for (index, e) in self.emitters.iter_mut().enumerate() {
             let dt = if e.spec.no_deadtime {
                 dt
@@ -907,6 +985,20 @@ impl Steam {
                 });
             }
         }
+        #[cfg(target_os = "vita")]
+        drop(_emit_profile);
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[
+            ("puffs_before", before),
+            ("puffs_after", self.puffs.len() as u64),
+            ("puffs_sweeps", sweeps),
+            ("puffs_constrained", constrained),
+            ("puffs_frozen", frozen),
+            ("puffs_stationary_sweeps", stationary),
+            ("puffs_impacts", impacts),
+            ("puffs_deaths", before - retained),
+            ("puffs_births", self.puffs.len() as u64 - retained),
+        ]);
     }
     pub fn depths(&self, camera: Vec3, direction: Vec3) -> impl Iterator<Item = (usize, f32)> + '_ {
         self.puffs
@@ -1436,9 +1528,22 @@ mod tests {
             reversed |= p.velocity.x < 0.;
         }
         assert!(reversed && steam.puffs[0].position != start);
-        let paused = (steam.puffs[0].position, steam.puffs[0].velocity, steam.puffs[0].age);
-        for _ in 0..60 { steam.update_clocks(0.05, 0., Vec3::ZERO, &world); }
-        assert_eq!(paused, (steam.puffs[0].position, steam.puffs[0].velocity, steam.puffs[0].age));
+        let paused = (
+            steam.puffs[0].position,
+            steam.puffs[0].velocity,
+            steam.puffs[0].age,
+        );
+        for _ in 0..60 {
+            steam.update_clocks(0.05, 0., Vec3::ZERO, &world);
+        }
+        assert_eq!(
+            paused,
+            (
+                steam.puffs[0].position,
+                steam.puffs[0].velocity,
+                steam.puffs[0].age
+            )
+        );
         steam.update(0.05, Vec3::ZERO, &world);
         assert_ne!(steam.puffs[0].position, paused.0);
     }

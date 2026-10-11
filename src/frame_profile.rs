@@ -18,6 +18,8 @@ pub struct Span {
     start: Option<Instant>,
     #[cfg(target_os = "vita")]
     category: Option<&'static str>,
+    #[cfg(target_os = "vita")]
+    token: Option<u64>,
 }
 pub fn span(label: &'static str) -> Span {
     Span {
@@ -25,10 +27,14 @@ pub fn span(label: &'static str) -> Span {
         start: enabled().then(Instant::now),
         #[cfg(target_os = "vita")]
         category: None,
+        #[cfg(target_os = "vita")]
+        token: vita::enter(label),
     }
 }
 impl Span {
     pub fn cancel(&mut self) {
+        #[cfg(target_os = "vita")]
+        vita::cancel(self.token.take());
         self.start = None;
     }
 }
@@ -37,7 +43,7 @@ impl Drop for Span {
         if let Some(start) = self.start {
             let ms = start.elapsed().as_secs_f64() * 1000.;
             #[cfg(target_os = "vita")]
-            vita::record(self.label, self.category, ms);
+            vita::record(self.label, self.category, self.token, ms);
             #[cfg(not(target_os = "vita"))]
             SAMPLES.with(|s| {
                 let mut s = s.borrow_mut();
@@ -72,8 +78,9 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 
 #[cfg(target_os = "vita")]
 pub use vita::{
-    begin_frame, end_frame, mode, record_batch, record_culled, record_geometry, record_layer,
-    record_world_submission, report, world_span, Mode,
+    begin_frame, counts, end_frame, flush_boundary, mode, record_batch, record_culled,
+    record_geometry, record_layer, record_lg_submission, record_model, record_world_submission,
+    report, world_span, Mode,
 };
 
 #[cfg(target_os = "vita")]
@@ -83,6 +90,81 @@ mod vita {
     const MODE_FILE: &str = "ux0:data/alice/private/profile_mode";
     const LABELS: &[&str] = &[
         "frame_cpu",
+        "world_visibility",
+        "interaction_search_after",
+        "lights_build",
+        "interaction_doors",
+        "transparent_keys",
+        "transparent_order",
+        "transparent_pack",
+        "transparent_submit",
+        "transparent_compact",
+        "save_grab_screen",
+        "movers_duchess",
+        "movers_pandemonium",
+        "movers_pool",
+        "movers_beyond",
+        "movers_fortress",
+        "movers_village",
+        "movers_school",
+        "movers_gym",
+        "movers_school2",
+        "village_fixed",
+        "movers_levels",
+        "movers_presentation",
+        "village_cinema",
+        "village_sample",
+        "village_collider_build",
+        "village_ground_probe",
+        "village_dynamic_publish",
+        "village_rider_contact",
+        "village_final_publish",
+        "particles_integrate",
+        "particles_sweep",
+        "particles_liquid",
+        "particles_retain",
+        "particles_emit",
+        "collider_vertices",
+        "collider_edges",
+        "collider_transform",
+        "collider_extract",
+        "fixed_clock",
+        "flush_atlas",
+        "flush_depth_begin",
+        "flush_depth_end",
+        "flush_clear_depth",
+        "flush_fx_begin",
+        "flush_fx_finish",
+        "flush_fx_check",
+        "flush_skin_appearance",
+        "flush_save_preview",
+        "frame_input",
+        "frame_interaction_search",
+        "frame_interactions",
+        "frame_movers",
+        "frame_movement",
+        "frame_story",
+        "frame_particles",
+        "frame_combat",
+        "frame_alice",
+        "frame_audio",
+        "frame_camera",
+        "frame_audio_mix",
+        "frame_scene",
+        "frame_world",
+        "frame_characters",
+        "frame_objects",
+        "frame_world_particles",
+        "frame_effects",
+        "frame_first_person",
+        "frame_capture",
+        "frame_hud",
+        "frame_save",
+        "steam_animate",
+        "steam_sync",
+        "steam_collected",
+        "village_particle_bindings",
+        "lights_select",
         "world_draw",
         "world_prep",
         "world_submit",
@@ -171,6 +253,14 @@ mod vita {
         frames: Vec<f64>,
         invocations: Vec<f64>,
         calls: usize,
+        exclusive: Vec<f64>,
+        frame_calls: Vec<f64>,
+        invocation_total_ms: f64,
+    }
+    #[derive(Default)]
+    struct CounterSamples {
+        frames: Vec<u64>,
+        total: u64,
     }
     #[derive(Default)]
     struct State {
@@ -180,7 +270,15 @@ mod vita {
         frames: usize,
         recording: bool,
         clocks_raised: bool,
-        pending: Vec<(&'static str, f64)>,
+        pending: Vec<(&'static str, f64, f64)>,
+        stack: Vec<(u64, &'static str, f64)>,
+        next_token: u64,
+        since_flush: u64,
+        hierarchy_errors: usize,
+        pending_counts: BTreeMap<(&'static str, &'static str), u64>,
+        counters: BTreeMap<(&'static str, &'static str), CounterSamples>,
+        pending_models: BTreeMap<usize, u64>,
+        models: BTreeMap<usize, CounterSamples>,
         pending_world: WorldCounts,
         labels: BTreeMap<&'static str, LabelSamples>,
         world: WorldCounts,
@@ -224,14 +322,117 @@ mod vita {
         });
         s
     }
-    pub(super) fn record(label: &'static str, category: Option<&'static str>, ms: f64) {
+    // The stack tracks actual scoped nesting. Categories duplicate statistics,
+    // but never become stack children. Tokens distinguish discarded/menu frames.
+    pub(super) fn enter(label: &'static str) -> Option<u64> {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.recording {
+                return None;
+            }
+            s.next_token += 1;
+            let token = s.next_token;
+            s.stack.push((token, label, 0.));
+            Some(token)
+        })
+    }
+    pub(super) fn cancel(token: Option<u64>) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if let Some(token) = token {
+                if let Some(i) = s.stack.iter().position(|x| x.0 == token) {
+                    s.stack.remove(i);
+                }
+            }
+        });
+    }
+    pub(super) fn record(
+        label: &'static str,
+        category: Option<&'static str>,
+        token: Option<u64>,
+        ms: f64,
+    ) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.recording {
+                return;
+            }
+            let Some(token) = token else {
+                return;
+            };
+            let Some(i) = s.stack.iter().position(|x| x.0 == token) else {
+                return;
+            };
+            if i + 1 != s.stack.len() {
+                s.hierarchy_errors += 1;
+            }
+            let (_, _, children) = s.stack.remove(i);
+            if let Some(parent) = s.stack.last_mut() {
+                parent.2 += ms;
+            }
+            let exclusive = ms - children;
+            s.pending.push((label, ms, exclusive));
+            if let Some(category) = category {
+                s.pending.push((category, ms, exclusive));
+            }
+        });
+    }
+    // Call once after local integer loops. No per-plan or per-triplet timing.
+    pub fn counts(values: &[(&'static str, u64)]) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.recording {
+                return;
+            }
+            let owner = s.stack.iter().rev().find_map(|(_, label, _)| match *label {
+                "movers"
+                | "particles"
+                | "frame_movement"
+                | "frame_camera"
+                | "frame_scene"
+                | "frame_interactions"
+                | "frame_combat"
+                | "frame_alice"
+                | "frame_interaction_search"
+                | "frame_hud" => Some(*label),
+                _ => None,
+            });
+            for &(name, value) in values {
+                *s.pending_counts.entry(("", name)).or_default() += value;
+                if let Some(owner) = owner {
+                    *s.pending_counts.entry((owner, name)).or_default() += value;
+                }
+            }
+        });
+    }
+    pub fn record_model(model: usize) {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             if s.recording {
-                s.pending.push((label, ms));
-                if let Some(category) = category {
-                    s.pending.push((category, ms));
-                }
+                *s.pending_models.entry(model).or_default() += 1;
+            }
+        });
+    }
+    pub fn record_lg_submission() {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.recording {
+                s.since_flush += 1;
+                *s.pending_counts
+                    .entry(("", "lg_3d_submissions"))
+                    .or_default() += 1;
+            }
+        });
+    }
+    pub fn flush_boundary(site: &'static str) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.recording {
+                let n = s.since_flush;
+                s.since_flush = 0;
+                *s.pending_counts
+                    .entry((site, "lg_3d_submissions_since_flush"))
+                    .or_default() += n;
             }
         });
     }
@@ -300,6 +501,9 @@ mod vita {
                 s.mode = next_mode;
                 s.frames = 0;
                 s.labels.clear();
+                s.counters.clear();
+                s.models.clear();
+                s.hierarchy_errors = 0;
                 s.world = WorldCounts::default();
                 s.windows.clear();
                 s.window_world = WorldCounts::default();
@@ -326,6 +530,10 @@ mod vita {
                 );
             }
             s.pending.clear();
+            s.pending_counts.clear();
+            s.pending_models.clear();
+            s.stack.clear();
+            s.since_flush = 0;
             s.pending_world = WorldCounts::default();
             s.recording = enabled();
         });
@@ -339,16 +547,39 @@ mod vita {
             }
             let pending = std::mem::take(&mut s.pending);
             let mut totals = BTreeMap::<&'static str, f64>::new();
-            for (label, ms) in pending {
+            let mut exclusive_totals = BTreeMap::<&'static str, f64>::new();
+            let mut calls = BTreeMap::<&'static str, f64>::new();
+            for (label, ms, exclusive) in pending {
                 let v = s.labels.entry(label).or_default(); v.calls += 1;
-                if v.invocations.len() < 10000 { v.invocations.push(ms); }
+                if v.invocations.len() < 1024 { v.invocations.push(ms); }
+                v.invocation_total_ms += ms;
+                *exclusive_totals.entry(label).or_default() += exclusive;
+                *calls.entry(label).or_default() += 1.;
                 *totals.entry(label).or_default() += ms;
             }
             for &label in LABELS {
                 let value = *totals.get(label).unwrap_or(&0.);
                 let v = s.labels.entry(label).or_default();
-                if v.frames.len() < 10000 { v.frames.push(value); }
+                if v.frames.len() < 10000 {
+                    v.frames.push(value);
+                    v.exclusive.push(*exclusive_totals.get(label).unwrap_or(&0.));
+                    v.frame_calls.push(*calls.get(label).unwrap_or(&0.));
+                }
             }
+            let pending_counts = std::mem::take(&mut s.pending_counts);
+            let previous = s.frames.min(10000);
+            for (name, value) in &pending_counts {
+                let v = s.counters.entry(name.clone()).or_insert_with(|| CounterSamples { frames: vec![0; previous], total: 0 });
+                v.total += value;
+            }
+            for (name, v) in &mut s.counters {
+                if v.frames.len() < 10000 { v.frames.push(*pending_counts.get(name).unwrap_or(&0)); }
+            }
+            let pending_models = std::mem::take(&mut s.pending_models);
+            for (model, value) in &pending_models {
+                let v = s.models.entry(*model).or_insert_with(|| CounterSamples { frames: vec![0; previous], total: 0 }); v.total += value;
+            }
+            for (model,v) in &mut s.models { if v.frames.len() < 10000 { v.frames.push(*pending_models.get(model).unwrap_or(&0)); } }
             let counts = std::mem::take(&mut s.pending_world);
             s.world.add(&counts); s.window_world.add(&counts);
             s.window_cpu_ms += totals.get("frame_cpu").copied().unwrap_or(0.);
@@ -376,13 +607,22 @@ mod vita {
         let (name, value) = STATE.with(|s| {
             let s=s.borrow();
             let spans=s.labels.iter().map(|(label,v)| {
-                (*label, serde_json::json!({"per_frame":stats(&v.frames),"calls":v.calls,"per_invocation":stats(&v.invocations)}))
+                (*label, serde_json::json!({"per_frame":stats(&v.frames),"exclusive_per_frame":stats(&v.exclusive),"calls_per_frame":stats(&v.frame_calls),"calls":v.calls,"per_invocation":stats(&v.invocations),"all_invocations_total_ms":v.invocation_total_ms,"frame_values_ms":v.frames,"exclusive_frame_values_ms":v.exclusive,"frame_calls":v.frame_calls}))
             }).collect::<BTreeMap<_,_>>();
+            let counters = s.counters.iter().map(|(name, v)| {
+                let mut sorted = v.frames.clone(); sorted.sort_unstable(); let n = sorted.len();
+                (if name.0.is_empty() { name.1.to_owned() } else { format!("{}/{}",name.0,name.1) }, serde_json::json!({"total":v.total,"samples":n,"median":sorted.get(n/2),"p95":sorted.get(n*95/100),"mean":if n>0 {Some(v.frames.iter().sum::<u64>() as f64/n as f64)} else {None},"frame_values":v.frames}))
+            }).collect::<BTreeMap<_,_>>();
+            let model_rebuilds = s.models.iter().map(|(model,v)| {
+                let mut sorted = v.frames.clone(); sorted.sort_unstable(); let n = sorted.len();
+                (*model, serde_json::json!({"total":v.total,"median":sorted.get(n/2),"p95":sorted.get(n*95/100),"frame_values":v.frames}))
+            }).collect::<BTreeMap<_,_>>();
+            let storage_bytes: usize = s.labels.values().map(|v| 8 * (v.frames.capacity() + v.exclusive.capacity() + v.frame_calls.capacity() + v.invocations.capacity())).sum::<usize>() + s.counters.values().map(|v| 8*v.frames.capacity()).sum::<usize>() + s.models.values().map(|v|8*v.frames.capacity()).sum::<usize>() + s.pending.capacity()*std::mem::size_of::<(&str,f64,f64)>();
             (format!("{map}-{}-{}.json",s.mode.name(),s.frames), serde_json::json!({
                 "map":map,"mode":s.mode.name(),"gameplay_frames":s.frames,"clocks_raised":s.clocks_raised,
                 "quantiles":"sorted[n/2] and sorted[floor(n*0.95)] (zero-based)",
-                "population":"cumulative accepted gameplay frames since map/mode entry; zero for labels absent in a frame; max 10000 stored samples per series",
-                "spans":spans,"world_counts":s.world,"windows":s.windows,
+                "population":"cumulative accepted gameplay frames since map/mode entry; zero for labels absent in a frame; max 10000 frame samples per series; first 1024 invocation samples per label; all invocation totals/calls retained",
+                "spans":spans,"counters":counters,"model_rebuilds":model_rebuilds,"hierarchy_errors":s.hierarchy_errors,"profile_vector_capacity_bytes":storage_bytes,"world_counts":s.world,"windows":s.windows,
             }))
         });
         std::fs::create_dir_all(PROFILE_DIR)?;

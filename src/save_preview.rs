@@ -218,7 +218,12 @@ impl Frame {
         unsafe {
             {
                 #[cfg(target_os = "vita")]
+                crate::frame_profile::flush_boundary("flush_save_preview");
+                #[cfg(target_os = "vita")]
                 let _flush_profile = crate::frame_profile::span("gl_flush");
+                #[cfg(target_os = "vita")]
+                let _flush_site_profile = crate::frame_profile::span("flush_save_preview");
+
                 get_internal_gl().flush();
             }
         }
@@ -231,7 +236,11 @@ impl Frame {
                 w as u16, h as u16, BLACK,
             )));
         }
-        self.texture.as_ref().unwrap().grab_screen();
+        {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("save_grab_screen");
+            self.texture.as_ref().unwrap().grab_screen();
+        }
     }
     pub fn preview(&self) -> Option<Preview> {
         Preview::encode(self.texture.as_ref()?.get_texture_data())

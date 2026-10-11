@@ -560,11 +560,27 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             "Save loading is unavailable in a staged preview"
         );
         Some(store.read(slot)?)
-    } else if saves_enabled && !options.new_game && !options.direct_map && options.frames.is_none() {
-        match start::choose(&mut options, &mut escape_menu, &mut preferences,
-            &mut input, &mut audio, &store, &maps).await {
-            start::Start::Chapter => { opening_requested = false; None }
-            start::Start::NewGame => { opening_requested = true; None }
+    } else if saves_enabled && !options.new_game && !options.direct_map && options.frames.is_none()
+    {
+        match start::choose(
+            &mut options,
+            &mut escape_menu,
+            &mut preferences,
+            &mut input,
+            &mut audio,
+            &store,
+            &maps,
+        )
+        .await
+        {
+            start::Start::Chapter => {
+                opening_requested = false;
+                None
+            }
+            start::Start::NewGame => {
+                opening_requested = true;
+                None
+            }
             start::Start::Load(loaded) => Some(*loaded),
             start::Start::Quit => return Ok(()),
         }
@@ -875,6 +891,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(target_os = "vita")]
         crate::frame_profile::begin_frame(&maps[current]);
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
+        #[cfg(target_os = "vita")]
+        let mut viewer_block = crate::frame_profile::span("frame_input");
+
         input.update(&preferences, window_focused());
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
@@ -916,8 +935,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
                 Action::Quit => break,
                 Action::Chapters => {
-                    match escape_menu.choose_chapter(&maps, current, entry_spawn.as_deref(),
-                        &mut options.difficulty, &preferences, &mut audio, &mut input).await {
+                    match escape_menu
+                        .choose_chapter(
+                            &maps,
+                            current,
+                            entry_spawn.as_deref(),
+                            &mut options.difficulty,
+                            &preferences,
+                            &mut audio,
+                            &mut input,
+                        )
+                        .await
+                    {
                         crate::menu::ChapterChoice::Begin(choice) => {
                             chapter_requested = Some(choice);
                             escape_menu.close();
@@ -1825,6 +1854,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .pandemonium
                     .as_ref()
                     .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
+                #[cfg(target_os = "vita")]
+                {
+                    drop(viewer_block);
+                    viewer_block = crate::frame_profile::span("frame_interaction_search");
+                }
                 let talk =
                     interactions.conversation(&scene.world, player.eye(), aim, &npcs, &story);
                 let owner = use_owner(
@@ -1848,6 +1882,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         }
                     }
                 }
+                #[cfg(target_os = "vita")]
+                {
+                    drop(viewer_block);
+                    viewer_block = crate::frame_profile::span("frame_interactions");
+                }
                 events.merge(interactions.update(
                     world_dt,
                     &scene.map,
@@ -1870,11 +1909,21 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Some(sound) = events.sound {
                     audio.world_effect(&sound);
                 }
+                #[cfg(target_os = "vita")]
+                {
+                    drop(viewer_block);
+                    viewer_block = crate::frame_profile::span("frame_movers");
+                }
                 let was_cinematic = interactions.scripted();
                 let mover_dt = if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt };
                 interactions.companions_for_movers(&npcs.companions());
                 interactions.actors_for_movers(&npcs.targets());
                 interactions.advance_school(mover_dt, &scene.map, &mut scene.world, &mut player)?;
+                #[cfg(target_os = "vita")]
+                {
+                    drop(viewer_block);
+                    viewer_block = crate::frame_profile::span("frame_movement");
+                }
                 if was_cinematic && !interactions.scripted() {
                     yaw = player.script_facing;
                     pitch = 0.;
@@ -2039,10 +2088,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             story.trigger(&event);
                         }
                     }
-                    for message in
-                        inventory::collect_with(&mut stats, &pickups, player.feet, &scene.world,
-                            |item| power_art.collected(item, pickup_clock))
-                    {
+                    for message in inventory::collect_with(
+                        &mut stats,
+                        &pickups,
+                        player.feet,
+                        &scene.world,
+                        |item| power_art.collected(item, pickup_clock),
+                    ) {
                         hud.announce(message);
                     }
                     if stats.copies(6) > dice_before {
@@ -2058,6 +2110,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         } else {
             clock.pause();
+        }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_story");
         }
         let story_active = !paused
             && !menu
@@ -2201,7 +2258,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if saves_enabled { if let Err(e) = store.mark_complete() { eprintln!("Completion marker failed: {e:#}"); } }
             mouse_look.release();
             input.suppress();
-            match crate::movie::play(&mut assets, &mut audio, &ui, &mut input, &preferences, "ending").await {
+            match crate::movie::play(
+                &mut assets,
+                &mut audio,
+                &ui,
+                &mut input,
+                &preferences,
+                "ending",
+            )
+            .await
+            {
                 Ok(false) => break,
                 Err(e) => eprintln!("Ending film failed: {e:#}"),
                 Ok(true) => (),
@@ -2304,7 +2370,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     skip_scene = crate::cinematic::Skip::default();
                     autosave_requested = options.frames.is_none();
                     retry.remember(game_snapshot!());
-                    let visit = crate::campaign::choice_position(&level_choices, current, entry_spawn.as_deref());
+                    let visit = crate::campaign::choice_position(
+                        &level_choices,
+                        current,
+                        entry_spawn.as_deref(),
+                    );
                     hud.announce(&level_choices[visit].title);
                 }
                 Err(e) => {
@@ -2313,9 +2383,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
         }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_particles");
+        }
         if !paused && !menu && !inventory_menu && !console_input && focused && stats.alive() {
             environment_clock += world_dt;
-            steam.animate(environment_clock);
+            {
+                #[cfg(target_os = "vita")]
+                let _hotspot = crate::frame_profile::span("steam_animate");
+                steam.animate(environment_clock);
+            }
             if interactions
                 .school
                 .as_ref()
@@ -2323,15 +2402,28 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             {
                 steam.stop();
             }
-            steam.sync(&interactions.event_world);
+            {
+                #[cfg(target_os = "vita")]
+                let _hotspot = crate::frame_profile::span("steam_sync");
+                steam.sync(&interactions.event_world);
+            }
             if let Some(v) = &interactions.village {
-                v.place_particles(&mut steam);
+                {
+                    #[cfg(target_os = "vita")]
+                    let _hotspot = crate::frame_profile::span("village_particle_bindings");
+                    v.place_particles(&mut steam);
+                }
             }
             if let Some(p) = &interactions.pandemonium {
                 p.gate_particles(&mut steam);
             }
             interactions.place_level_particles(&mut steam);
             steam.update_clocks(dt, world_dt, pos, &scene.world);
+        }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_combat");
         }
         // Scene controllers may finish during movement, dialogue or boss updates.
         // Resolve the handoff once, after all three, before animation/aim/rendering.
@@ -2390,6 +2482,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if interactions.levels.iter().any(|s| s.ctl.dismiss_summons()) {
             alice.dismiss_summon();
+        }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_combat");
         }
         interactions.activate_enemies();
         let scripted_motion = interactions.scripted();
@@ -2506,6 +2603,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         let death_animation =
             !stats.alive() && focused && !paused && !menu && !inventory_menu && !console_input;
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_alice");
+        }
         let mut targets = if story.busy() {
             Vec::new()
         } else {
@@ -2678,6 +2780,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 });
             }
         }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_audio");
+        }
         for sound in weapon_sounds {
             audio.weapon_effect(sound);
         }
@@ -2700,6 +2807,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let rage_scene = interactions.beyond.as_ref().and_then(|b| b.rage_scene());
         if let Some((time, finished)) = rage_scene {
             alice.rage_scene(time, finished, &player);
+        }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_camera");
         }
         let mut pand_camera = interactions.camera_after(
             interactions
@@ -2821,12 +2933,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             .map_or(Vec3::ZERO, |p| p.quake_offset())
             + interactions.levels.iter().map(|s| s.ctl.quake_offset()).sum::<Vec3>();
         let (camera, target) = (view.eye + quake, view.target + quake);
-        let show_alice = !interactions.level_hides_player() && if scripted_camera.is_some() {
-            rage_scene.is_some_and(|(_, finished)| !finished)
-                || (cinematic_camera.is_some_and(|(_, _, show)| show) && pand_camera.is_none())
-        } else {
-            gameplay_alice && camera.distance(player.feet + Vec3::Z * 32.) > 30.
-        };
+        let show_alice = !interactions.level_hides_player()
+            && if scripted_camera.is_some() {
+                rage_scene.is_some_and(|(_, finished)| !finished)
+                    || (cinematic_camera.is_some_and(|(_, _, show)| show) && pand_camera.is_none())
+            } else {
+                gameplay_alice && camera.distance(player.feet + Vec3::Z * 32.) > 30.
+            };
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_audio_mix");
+        }
         audio.prepare(
             &mut assets,
             &scene.world,
@@ -2843,6 +2961,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             console_input || menu || paused || inventory_menu || !focused,
             !story_active,
         );
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_scene");
+        }
         scene.atmosphere.liquid =
             crate::water::Liquid::from_contents(scene.world.liquid_at(camera)).tint();
         interactions.presentation.apply(&mut scene);
@@ -2850,7 +2973,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let (mut mirror_extra, mut mirror_hide) = (Vec::new(), Vec::new());
         for slot in &interactions.levels { let (extra, hide) = slot.ctl.reflection(); mirror_extra.extend(extra); mirror_hide.extend(hide); }
         scene.set_reflection(mirror_extra, mirror_hide);
-        scene.set_reflection_actor(interactions.levels.iter().find_map(|s| s.ctl.reflection_actor()));
+        scene.set_reflection_actor(
+            interactions
+                .levels
+                .iter()
+                .find_map(|s| s.ctl.reflection_actor()),
+        );
         if let Some(fog) = interactions.levels.iter().find_map(|s| s.ctl.scene_fog()) {
             scene.atmosphere.distance = fog;
         }
@@ -2866,7 +2994,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 .beyond
                 .as_ref()
                 .and_then(|b| b.scene_fovy(screen_width() / screen_height()))
-                .or_else(|| interactions.levels.iter().find_map(|s| s.ctl.scene_fovy(screen_width() / screen_height())))
+                .or_else(|| {
+                    interactions
+                        .levels
+                        .iter()
+                        .find_map(|s| s.ctl.scene_fovy(screen_width() / screen_height()))
+                })
                 .unwrap_or(75.0f32.to_radians()),
             z_near: 2.,
             z_far: 30000.,
@@ -2887,9 +3020,21 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .map(|r| (r.model, player.feet + Vec3::Z * 40.))
             });
         scene.update_ropes(world_dt, rope_hand, &transforms);
-        steam.animate(environment_clock);
-        steam.sync(&interactions.event_world);
-        steam.collected(&pickups, &stats);
+        {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("steam_animate");
+            steam.animate(environment_clock);
+        }
+        {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("steam_sync");
+            steam.sync(&interactions.event_world);
+        }
+        {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("steam_collected");
+            steam.collected(&pickups, &stats);
+        }
         if interactions
             .school
             .as_ref()
@@ -2898,16 +3043,26 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             steam.stop();
         }
         if let Some(v) = &interactions.village {
-            v.place_particles(&mut steam);
+            {
+                #[cfg(target_os = "vita")]
+                let _hotspot = crate::frame_profile::span("village_particle_bindings");
+                v.place_particles(&mut steam);
+            }
         }
         if let Some(p) = &interactions.pandemonium {
             p.gate_particles(&mut steam);
         }
         interactions.place_level_particles(&mut steam);
+        #[cfg(target_os = "vita")]
+        let _lights_profile = crate::frame_profile::span("lights_build");
         let mut lights = steam.lights();
         lights.extend(alice.lights());
         lights.extend(npcs.lights());
-        for slot in &interactions.levels { lights.extend(slot.ctl.lights()); }
+        for slot in &interactions.levels {
+            lights.extend(slot.ctl.lights());
+        }
+        #[cfg(target_os = "vita")]
+        drop(_lights_profile);
         #[cfg(target_os = "vita")]
         let draw_world = !crate::frame_profile::mode().no_world();
         #[cfg(not(target_os = "vita"))]
@@ -2915,14 +3070,28 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if draw_world {
             scene.prepare_camera_portals(&world_camera, environment_clock, fullbright, &transforms);
         }
-        crate::lighting::select(lights, camera, &scene.world);
+        {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("lights_select");
+            crate::lighting::select(lights, camera, &scene.world);
+        }
         crate::render_fx::begin_view(
             &world_camera,
             environment_clock,
             &scene.atmosphere,
             fullbright,
         );
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_world");
+        }
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_characters");
+        }
         if draw_world && show_alice && stats.invisible <= 0. {
             crate::lighting::shadow(&scene.world, player.feet, 22.);
         }
@@ -2938,6 +3107,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         );
         level_art.story_pose(&story);
         level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_objects");
+        }
         if draw_world {
             power_art.draw(
                 &pickups,
@@ -2948,6 +3122,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 pickup_clock,
             );
         }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_world_particles");
+        }
         {
             scene.draw_with_particles(
                 camera,
@@ -2957,6 +3136,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 &transforms,
                 &steam,
             );
+            #[cfg(target_os = "vita")]
+            {
+                drop(viewer_block);
+                viewer_block = crate::frame_profile::span("frame_effects");
+            }
             if let Some(s) = &interactions.encounters {
                 s.draw_waves();
             }
@@ -3004,6 +3188,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::lighting::flares(camera, (target - camera).normalize_or_zero());
         }
         crate::render_fx::finish();
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_first_person");
+        }
         if !third_person
             && !pand_cinematic
             && !flying
@@ -3013,6 +3202,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             crate::render::clear_view_depth();
             alice.draw_first_person(fullbright);
+        }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_capture");
         }
         if saves_enabled {
             #[cfg(target_os = "vita")]
@@ -3025,8 +3219,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             #[cfg(not(target_os = "vita"))]
             save_frame.update();
         }
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_hud");
+        }
         set_default_camera();
         if active {
+            #[cfg(target_os = "vita")]
+            let _search_profile = crate::frame_profile::span("interaction_search_after");
+
             use crate::interaction::friendly::{use_owner, UseOwner};
             let rope = player.rope_prompt(&scene.world);
             let world_rope = interactions
@@ -3333,6 +3535,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             ui.cursor();
         }
         console.draw(&ui);
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_save");
+        }
         if save_requested || autosave_requested {
             if !saves_enabled {
                 if save_requested {
@@ -3373,7 +3580,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
         }
-        if !active { frame_profile.cancel(); }
+        #[cfg(target_os = "vita")]
+        drop(viewer_block);
+        if !active {
+            frame_profile.cancel();
+        }
         drop(frame_profile);
         #[cfg(target_os = "vita")]
         if crate::frame_profile::end_frame(

@@ -101,10 +101,15 @@ pub fn appearance(a: Appearance) {
 pub fn begin(camera: Vec3, direction: Vec3, time: f32, atmosphere: &Atmosphere, fullbright: bool) {
     unsafe {
         {
-                #[cfg(target_os = "vita")]
-                let _flush_profile = crate::frame_profile::span("gl_flush");
-                get_internal_gl().flush();
-            }
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::flush_boundary("flush_fx_begin");
+            #[cfg(target_os = "vita")]
+            let _flush_profile = crate::frame_profile::span("gl_flush");
+            #[cfg(target_os = "vita")]
+            let _flush_site_profile = crate::frame_profile::span("flush_fx_begin");
+
+            get_internal_gl().flush();
+        }
     }
     FRAME.with(|f| {
         *f.borrow_mut() = Frame {
@@ -181,21 +186,44 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
             gl.quad_gl.texture(p.mesh.texture.as_ref());
             gl.quad_gl.draw_mode(DrawMode::Triangles);
             for chunk in indices.chunks(65532) {
+                #[cfg(target_os = "vita")]
+                let _compact_profile = crate::frame_profile::span("transparent_compact");
                 let vertices: Vec<_> = chunk.iter().map(|&i| p.mesh.vertices[i as usize]).collect();
                 let compact: Vec<u16> = (0..vertices.len() as u16).collect();
                 #[cfg(target_os = "vita")]
                 if let Some(static_batch) = p.world_static {
-                    crate::frame_profile::record_layer(compact.len()/3, vertices.len(), static_batch);
+                    crate::frame_profile::record_layer(
+                        compact.len() / 3,
+                        vertices.len(),
+                        static_batch,
+                    );
                 }
+                #[cfg(target_os = "vita")]
+                drop(_compact_profile);
+                #[cfg(target_os = "vita")]
+                crate::frame_profile::counts(&[
+                    ("transparent_vertices_copied", vertices.len() as u64),
+                    ("lg_fx_submissions", 1),
+                ]);
+                #[cfg(target_os = "vita")]
+                crate::frame_profile::record_lg_submission();
                 gl.quad_gl.geometry(&vertices, &compact);
             }
         } else {
             #[cfg(target_os = "vita")]
             if !p.world_geometry_counted && !p.mesh.indices.is_empty() {
                 if let Some(static_batch) = p.world_static {
-                    crate::frame_profile::record_layer(p.mesh.indices.len()/3, p.mesh.vertices.len(), static_batch);
+                    crate::frame_profile::record_layer(
+                        p.mesh.indices.len() / 3,
+                        p.mesh.vertices.len(),
+                        static_batch,
+                    );
                 }
             }
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::counts(&[("lg_fx_submissions", 1)]);
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::record_lg_submission();
             draw_mesh(&p.mesh);
         }
     });
@@ -241,10 +269,18 @@ pub fn finish() -> (usize, usize) {
     // of one water surface. All layers of a triangle stay in authored order.
     #[cfg(target_os = "vita")]
     let transparent_profile = crate::frame_profile::span("transparent_sort");
+    #[cfg(target_os = "vita")]
+    let _keys_profile = crate::frame_profile::span("transparent_keys");
+    #[cfg(target_os = "vita")]
+    let mut candidates = 0u64;
     let mut order = Vec::new();
     for (g, group) in groups.iter().enumerate() {
         let mesh = &group.passes[0].mesh;
         for (t, triangle) in mesh.indices.chunks_exact(3).enumerate() {
+            #[cfg(target_os = "vita")]
+            {
+                candidates += 1;
+            }
             if projection.is_some_and(|m| {
                 outside([
                     m * mesh.vertices[triangle[0] as usize].position.extend(1.),
@@ -262,10 +298,28 @@ pub fn finish() -> (usize, usize) {
             order.push(((center - camera).dot(direction), g, t));
         }
     }
+    #[cfg(target_os = "vita")]
+    drop(_keys_profile);
+    #[cfg(target_os = "vita")]
+    crate::frame_profile::counts(&[
+        ("transparent_candidates", candidates),
+        ("transparent_triangles", order.len() as u64),
+        ("transparent_rejected", candidates - order.len() as u64),
+        ("transparent_groups", groups.len() as u64),
+    ]);
+    #[cfg(target_os = "vita")]
+    let _order_profile = crate::frame_profile::span("transparent_order");
     order.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    #[cfg(target_os = "vita")]
+    drop(_order_profile);
     crate::render::depth_read_only(|| {
         let mut start = 0;
         while start < order.len() {
+            #[cfg(target_os = "vita")]
+            let _pack_profile = crate::frame_profile::span("transparent_pack");
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::counts(&[("transparent_segments", 1)]);
+
             let group = order[start].1;
             let mut end = start + 1;
             let passes = &groups[group].passes;
@@ -293,6 +347,11 @@ pub fn finish() -> (usize, usize) {
                             .map(|&i| mesh.vertices[i as usize]),
                     );
                 }
+                #[cfg(target_os = "vita")]
+                crate::frame_profile::counts(&[(
+                    "transparent_vertices_copied",
+                    vertices.len() as u64,
+                )]);
                 let indices = (0..vertices.len() as u16).collect();
                 #[cfg(target_os = "vita")]
                 let has_world = world_triangles.iter().sum::<usize>() > 0;
@@ -303,6 +362,10 @@ pub fn finish() -> (usize, usize) {
                     }
                     crate::frame_profile::record_world_submission();
                 }
+                #[cfg(target_os = "vita")]
+                drop(_pack_profile);
+                #[cfg(target_os = "vita")]
+                let _submit_profile = crate::frame_profile::span("transparent_submit");
                 draw_pass(
                     &Pass {
                         #[cfg(target_os = "vita")]
@@ -337,8 +400,14 @@ pub fn finish() -> (usize, usize) {
             for &(_, _, t) in &order[start..end] {
                 indices.extend_from_slice(&passes[0].mesh.indices[t * 3..t * 3 + 3]);
             }
-            for p in passes {
-                draw_pass(p, Some(&indices));
+            #[cfg(target_os = "vita")]
+            drop(_pack_profile);
+            {
+                #[cfg(target_os = "vita")]
+                let _submit_profile = crate::frame_profile::span("transparent_submit");
+                for p in passes {
+                    draw_pass(p, Some(&indices));
+                }
             }
             start = end;
         }
@@ -347,10 +416,15 @@ pub fn finish() -> (usize, usize) {
     drop(transparent_profile);
     unsafe {
         {
-                #[cfg(target_os = "vita")]
-                let _flush_profile = crate::frame_profile::span("gl_flush");
-                get_internal_gl().flush();
-            }
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::flush_boundary("flush_fx_finish");
+            #[cfg(target_os = "vita")]
+            let _flush_profile = crate::frame_profile::span("gl_flush");
+            #[cfg(target_os = "vita")]
+            let _flush_site_profile = crate::frame_profile::span("flush_fx_finish");
+
+            get_internal_gl().flush();
+        }
     }
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
@@ -427,6 +501,8 @@ fn pass_at(
 }
 pub fn effect(mesh: &Mesh, blend: Blend) {
     if !active() {
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::record_lg_submission();
         draw_mesh(mesh);
         return;
     }
@@ -611,6 +687,8 @@ pub(crate) fn skin_effect(mesh: &Mesh, age: f32, alpha: f32) {
 
 fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
     if !active() {
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::record_lg_submission();
         draw_mesh(mesh);
         return;
     }
@@ -1061,10 +1139,15 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 ensure!(dropped == 0, "Queue budget exceeded in {name}");
                 unsafe {
                     {
-                #[cfg(target_os = "vita")]
-                let _flush_profile = crate::frame_profile::span("gl_flush");
-                get_internal_gl().flush();
-            }
+                        #[cfg(target_os = "vita")]
+                        crate::frame_profile::flush_boundary("flush_fx_check");
+                        #[cfg(target_os = "vita")]
+                        let _flush_profile = crate::frame_profile::span("gl_flush");
+                        #[cfg(target_os = "vita")]
+                        let _flush_site_profile = crate::frame_profile::span("flush_fx_check");
+
+                        get_internal_gl().flush();
+                    }
                     macroquad::miniquad::gl::glFinish();
                 }
                 if i > 1 {

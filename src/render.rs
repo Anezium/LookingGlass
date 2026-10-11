@@ -507,6 +507,8 @@ fn draw_batch(
     backdrop: bool,
     context: &mut DrawContext<'_>,
 ) {
+    #[cfg(target_os = "vita")]
+    let _visibility_profile = crate::frame_profile::span("world_visibility");
     context.stats.batches += 1;
     let (min, max) = transform_bounds(batch.bounds.0, batch.bounds.1, transform, offset);
     let can_cull = (context.enabled || context.required_pvs)
@@ -570,6 +572,8 @@ fn draw_batch(
             batch.mesh.indices.clone_from(&level.indices);
         }
     }
+    #[cfg(target_os = "vita")]
+    drop(_visibility_profile);
     context.stats.triangles += batch.mesh.indices.len() / 3 * batch.layers.len();
     #[cfg(target_os = "vita")]
     let static_batch = batch.animation.is_none()
@@ -679,6 +683,12 @@ fn draw_batch(
         let material = &materials[layer.material];
         #[cfg(target_os = "vita")]
         let layer_prep = crate::frame_profile::world_span("world_prep", static_batch);
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[
+            ("world_layer_vertices", batch.mesh.vertices.len() as u64),
+            ("world_prep_layers", 1),
+        ]);
+
         for (j, (v, base)) in batch.mesh.vertices.iter_mut().zip(&batch.base).enumerate() {
             let mut n = batch.normals[j];
             for deform in &batch.deforms {
@@ -791,6 +801,8 @@ fn draw_batch(
                     static_batch,
                 );
             }
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::record_lg_submission();
             draw_mesh(&mesh);
         } else {
             #[cfg(target_os = "vita")]
@@ -801,6 +813,8 @@ fn draw_batch(
                     static_batch,
                 );
             }
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::record_lg_submission();
             draw_mesh(&batch.mesh);
         }
     }
@@ -1022,7 +1036,12 @@ impl Scene {
         unsafe {
             {
                 #[cfg(target_os = "vita")]
+                crate::frame_profile::flush_boundary("flush_atlas");
+                #[cfg(target_os = "vita")]
                 let _flush_profile = crate::frame_profile::span("gl_flush");
+                #[cfg(target_os = "vita")]
+                let _flush_site_profile = crate::frame_profile::span("flush_atlas");
+
                 get_internal_gl().flush();
             }
         }
@@ -1796,10 +1815,15 @@ impl Scene {
 pub fn depth_read_only(draw: impl FnOnce()) {
     unsafe {
         {
-                #[cfg(target_os = "vita")]
-                let _flush_profile = crate::frame_profile::span("gl_flush");
-                get_internal_gl().flush();
-            }
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::flush_boundary("flush_depth_begin");
+            #[cfg(target_os = "vita")]
+            let _flush_profile = crate::frame_profile::span("gl_flush");
+            #[cfg(target_os = "vita")]
+            let _flush_site_profile = crate::frame_profile::span("flush_depth_begin");
+
+            get_internal_gl().flush();
+        }
         macroquad::miniquad::gl::glDepthMask(0);
     }
     struct Restore;
@@ -1814,10 +1838,15 @@ pub fn depth_read_only(draw: impl FnOnce()) {
     draw();
     unsafe {
         {
-                #[cfg(target_os = "vita")]
-                let _flush_profile = crate::frame_profile::span("gl_flush");
-                get_internal_gl().flush();
-            }
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::flush_boundary("flush_depth_end");
+            #[cfg(target_os = "vita")]
+            let _flush_profile = crate::frame_profile::span("gl_flush");
+            #[cfg(target_os = "vita")]
+            let _flush_site_profile = crate::frame_profile::span("flush_depth_end");
+
+            get_internal_gl().flush();
+        }
     }
 }
 
@@ -1835,10 +1864,15 @@ pub fn depth_pipeline(color_blend: Option<BlendState>) -> PipelineParams {
 pub fn clear_view_depth() {
     unsafe {
         {
-                #[cfg(target_os = "vita")]
-                let _flush_profile = crate::frame_profile::span("gl_flush");
-                get_internal_gl().flush();
-            }
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::flush_boundary("flush_clear_depth");
+            #[cfg(target_os = "vita")]
+            let _flush_profile = crate::frame_profile::span("gl_flush");
+            #[cfg(target_os = "vita")]
+            let _flush_site_profile = crate::frame_profile::span("flush_clear_depth");
+
+            get_internal_gl().flush();
+        }
         macroquad::miniquad::gl::glDepthMask(1);
         macroquad::miniquad::gl::glClear(macroquad::miniquad::gl::GL_DEPTH_BUFFER_BIT);
     }

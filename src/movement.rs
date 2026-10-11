@@ -422,7 +422,12 @@ impl Player {
                 self.velocity += (target - self.velocity).clamp_length_max(700. * FIXED_DT);
             }
             world.traversal.push(self.feet, &mut self.velocity);
-            crate::traversal::current::apply(&world.traversal.currents, world, self.feet, &mut self.velocity);
+            crate::traversal::current::apply(
+                &world.traversal.currents,
+                world,
+                self.feet,
+                &mut self.velocity,
+            );
             let (mut next, mut velocity) = slide(world, self.feet, self.velocity, FIXED_DT);
             let bank = world.body_trace(next, next - Vec3::Z * 2.);
             let supported = !bank.start_solid
@@ -492,7 +497,12 @@ impl Player {
         }
         let before_push_z = self.velocity.z;
         let launch = world.traversal.push(self.feet, &mut self.velocity);
-        crate::traversal::current::apply(&world.traversal.currents, world, self.feet, &mut self.velocity);
+        crate::traversal::current::apply(
+            &world.traversal.currents,
+            world,
+            self.feet,
+            &mut self.velocity,
+        );
         if launch {
             self.knockback_time = 0.2;
         }
@@ -761,6 +771,10 @@ pub struct FixedClock {
 }
 impl FixedClock {
     pub fn advance(&mut self, seconds: f64, world: &World, player: &mut Player, input: Controls) {
+        #[cfg(target_os = "vita")]
+        let _fixed_clock_profile = crate::frame_profile::span("fixed_clock");
+        #[cfg(target_os = "vita")]
+        let ticks_before = self.ticks;
         self.accumulator += if seconds.is_finite() {
             seconds.clamp(0., 0.25)
         } else {
@@ -781,6 +795,8 @@ impl FixedClock {
             self.accumulator -= STEP;
             self.ticks += 1;
         }
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("fixed_clock_ticks", (self.ticks - ticks_before) as u64)]);
     }
     pub fn pause(&mut self) {
         self.accumulator = 0.;

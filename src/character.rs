@@ -1172,7 +1172,10 @@ impl Character {
         if self.animator.motion != Motion::Death {
             self.water_art.draw(
                 &pose,
-                Transform { translation: feet, rotation },
+                Transform {
+                    translation: feet,
+                    rotation,
+                },
                 self.scale,
                 self.animator.time,
                 fullbright,
@@ -1402,10 +1405,15 @@ impl SkinMaterial {
             // Flush before resetting, including when no later actor is drawn.
             unsafe {
                 {
-                #[cfg(target_os = "vita")]
-                let _flush_profile = crate::frame_profile::span("gl_flush");
-                get_internal_gl().flush();
-            }
+                    #[cfg(target_os = "vita")]
+                    crate::frame_profile::flush_boundary("flush_skin_appearance");
+                    #[cfg(target_os = "vita")]
+                    let _flush_profile = crate::frame_profile::span("gl_flush");
+                    #[cfg(target_os = "vita")]
+                    let _flush_site_profile = crate::frame_profile::span("flush_skin_appearance");
+
+                    get_internal_gl().flush();
+                }
             }
             self.bind();
         }
@@ -1915,13 +1923,29 @@ pub(crate) fn draw_skin_scaled(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, bone_scales: &[f32],
 ) {
-    draw_skin_deformed(skeleton, meshes, pose, transform, scale, fullbright, (bone_scales, 1.));
+    draw_skin_deformed(
+        skeleton,
+        meshes,
+        pose,
+        transform,
+        scale,
+        fullbright,
+        (bone_scales, 1.),
+    );
 }
 pub(crate) fn draw_skin_alpha(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, alpha: f32,
 ) {
-    draw_skin_deformed(skeleton, meshes, pose, transform, scale, fullbright, (&[], alpha));
+    draw_skin_deformed(
+        skeleton,
+        meshes,
+        pose,
+        transform,
+        scale,
+        fullbright,
+        (&[], alpha),
+    );
 }
 fn draw_skin_deformed(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],

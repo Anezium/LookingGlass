@@ -46,7 +46,15 @@ impl SweepBounds {
             if delta[axis] != 0. { inverse[axis] = 1. / delta[axis]; }
         }
         let padding = half + Vec3::splat(SKIN);
-        Self { bounds: Bounds { min: start.min(end) - padding, max: start.max(end) + padding }, start, inverse, padding }
+        Self {
+            bounds: Bounds {
+                min: start.min(end) - padding,
+                max: start.max(end) + padding,
+            },
+            start,
+            inverse,
+            padding,
+        }
     }
     fn overlaps(&self, bounds: Bounds) -> bool {
         if !bounds.overlaps(self.bounds) { return false; }
@@ -85,6 +93,8 @@ impl Hull {
     /// the BSP's precomputed bevels alone leaves phantom solid corners outside
     /// the model bounds, so a downward trace can report start-solid at clear feet.
     fn transformed(source: &[Plane], origin: Vec3, rotation: Quat) -> Result<Self> {
+        #[cfg(target_os = "vita")]
+        let _vertices_profile = crate::frame_profile::span("collider_vertices");
         let mut vertices = Vec::<Vec3>::new();
         for (i, a) in source.iter().enumerate() {
             for (j, b) in source.iter().enumerate().skip(i + 1) {
@@ -110,6 +120,26 @@ impl Hull {
             vertices.len() >= 4,
             "Inline collision brush has no closed volume"
         );
+        #[cfg(target_os = "vita")]
+        drop(_vertices_profile);
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[
+            ("collider_source_planes", source.len() as u64),
+            (
+                "collider_plane_triplets",
+                (source.len() as u64).saturating_sub(2)
+                    * (source.len() as u64).saturating_sub(1)
+                    * source.len() as u64
+                    / 6,
+            ),
+            ("collider_local_vertices", vertices.len() as u64),
+            (
+                "collider_vertex_pairs",
+                vertices.len() as u64 * (vertices.len() as u64).saturating_sub(1) / 2,
+            ),
+        ]);
+        #[cfg(target_os = "vita")]
+        let _edges_profile = crate::frame_profile::span("collider_edges");
         let mut edges = Vec::<Vec3>::new();
         for (i, a) in vertices.iter().enumerate() {
             for b in &vertices[i + 1..] {
@@ -134,6 +164,10 @@ impl Hull {
                 }
             }
         }
+        #[cfg(target_os = "vita")]
+        drop(_edges_profile);
+        #[cfg(target_os = "vita")]
+        let _transform_profile = crate::frame_profile::span("collider_transform");
         let points = vertices
             .iter()
             .map(|v| origin + rotation * *v)
@@ -288,30 +322,62 @@ impl Collider {
             .models
             .get(index)
             .ok_or_else(|| anyhow::anyhow!("Invalid inline model {index}"))?;
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("collider_model_calls", 1)]);
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::record_model(index);
+        #[cfg(target_os = "vita")]
+        let mut brushes_rebuilt = 0u64;
         let mut hulls = Vec::new();
         for i in model.brushes.clone() {
             let brush = &map.brushes[i];
             if solids_only && map.shaders[brush.shader].contents & PLAYER_MASK == 0 {
                 continue;
             }
+            #[cfg(target_os = "vita")]
+            let _extract_profile = crate::frame_profile::span("collider_extract");
             let planes = map.side_planes[brush.sides.clone()]
                 .iter()
                 .map(|&p| map.planes[p])
                 .collect::<Vec<_>>();
+            #[cfg(target_os = "vita")]
+            {
+                brushes_rebuilt += 1;
+            }
+            #[cfg(target_os = "vita")]
+            drop(_extract_profile);
             hulls.push(Hull::transformed(&planes, origin, rotation)?);
         }
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("collider_brushes_rebuilt", brushes_rebuilt)]);
         Ok(Self::from_hulls(hulls))
     }
     pub fn trace(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        #[cfg(target_os = "vita")]
+        let (mut tested, mut clipped) = (0u64, 0u64);
         let mut out = Trace::default();
         let query = SweepBounds::new(start, end, half);
         if self.bounds.is_some_and(|b| query.overlaps(b)) {
             for h in self.hulls().iter() {
+                #[cfg(target_os = "vita")]
+                {
+                    tested += 1;
+                }
                 if query.overlaps(h.bounds) {
+                    #[cfg(target_os = "vita")]
+                    {
+                        clipped += 1;
+                    }
                     clip_hull(h, start, end, half, &mut out);
                 }
             }
         }
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[
+            ("collider_trace_calls", 1),
+            ("collider_hulls_tested", tested),
+            ("collider_hulls_clipped", clipped),
+        ]);
         out
     }
     pub fn touches(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
@@ -560,11 +626,15 @@ impl World {
 
     /// Trace a box centre from start to end. Zero extents give a point trace.
     pub fn sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("sweep_calls", 1)]);
         self.sweep_except(start, end, half, None)
     }
     /// Damage traces may contact a destructible obstacle itself, but must still
     /// respect every other obstacle. Movement never supplies an exception.
     pub fn sweep_except(&self, start: Vec3, end: Vec3, half: Vec3, ignore: Option<usize>) -> Trace {
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("sweep_except_calls", 1)]);
         let mut result = self.sweep_geometry(start, end, half);
         for (id, collider) in &self.weapon_obstacles {
             if Some(*id) == ignore {
@@ -581,6 +651,8 @@ impl World {
         self.camera_obstacles = obstacles;
     }
     pub fn camera_sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("camera_sweep_calls", 1)]);
         let mut result = self.sweep(start, end, half);
         for collider in &self.camera_obstacles {
             let trace = collider.trace(start, end, half);
@@ -607,7 +679,11 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("sweep_geometry_calls", 1)]);
         let mut result = self.ledge_trace(start, end, half);
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("dynamic_colliders_tested", self.dynamic.len() as u64)]);
         for collider in &self.dynamic {
             let t = collider.trace(start, end, half);
             result.start_solid |= t.start_solid;
@@ -621,19 +697,43 @@ impl World {
     }
     /// Static support probes for hanging; moving/rotating entities are excluded.
     pub fn ledge_trace(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("ledge_trace_calls", 1)]);
+        #[cfg(target_os = "vita")]
+        let (mut tested, mut clipped, mut support_hulls) = (0u64, 0u64, 0u64);
         let query = SweepBounds::new(start, end, half);
         let mut result = Trace::default();
         if let Some(tree) = &self.tree {
             tree.visit(&query, &mut |index| {
+                #[cfg(target_os = "vita")]
+                {
+                    tested += 1;
+                }
                 let hull = &self.hulls[index];
                 if query.overlaps(hull.bounds) {
+                    #[cfg(target_os = "vita")]
+                    {
+                        clipped += 1;
+                    }
                     clip_hull(hull, start, end, half, &mut result);
                 }
             });
         }
         for c in &self.settled_supports {
-            for hull in c.hulls().iter() { clip_hull(hull, start, end, half, &mut result); }
+            for hull in c.hulls().iter() {
+                #[cfg(target_os = "vita")]
+                {
+                    support_hulls += 1;
+                }
+                clip_hull(hull, start, end, half, &mut result);
+            }
         }
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[
+            ("static_hulls_tested", tested),
+            ("static_hulls_clipped", clipped),
+            ("settled_hulls_clipped", support_hulls),
+        ]);
         result
     }
     /// Keep movers, doors and live weapon obstacles when using an actor collision mask.

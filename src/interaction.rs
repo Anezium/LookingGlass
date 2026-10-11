@@ -83,9 +83,10 @@ pub fn spawn(map: &Bsp, name: Option<&str>) -> (Vec3, f32) {
                 && e.get("targetname").is_some_and(|s| s == "hedge3_start1")
         }) {
             if let Some(at) = e.get("origin").and_then(|s| vector(s)) {
-                if let Some(feet) = World::from_bsp(map).ok().and_then(|w| {
-                    w.actor_footing(at, PLAYER_CENTER, PLAYER_HALF, 64.)
-                }) {
+                if let Some(feet) = World::from_bsp(map)
+                    .ok()
+                    .and_then(|w| w.actor_footing(at, PLAYER_CENTER, PLAYER_HALF, 64.))
+                {
                     return (feet + Vec3::Z * 48., value(e, "angle", 0.).to_radians());
                 }
             }
@@ -982,8 +983,18 @@ impl Interactions {
         }
     }
     pub fn sync(&self, world: &mut World) {
-        world.set_camera_obstacles(self.levels.iter().flat_map(|s| s.ctl.camera_colliders()).collect());
-        world.set_settled_supports(self.levels.iter().flat_map(|s| s.ctl.settled_supports()).collect());
+        world.set_camera_obstacles(
+            self.levels
+                .iter()
+                .flat_map(|s| s.ctl.camera_colliders())
+                .collect(),
+        );
+        world.set_settled_supports(
+            self.levels
+                .iter()
+                .flat_map(|s| s.ctl.settled_supports())
+                .collect(),
+        );
         world
             .traversal
             .sync(&self.event_world, self.pandemonium.is_some());
@@ -1045,9 +1056,13 @@ impl Interactions {
     ) -> Result<()> {
         let _profile = crate::frame_profile::span("movers");
         if let Some(d) = &mut self.duchess {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_duchess");
             d.advance(dt, map, world, player)?;
         }
         if let Some(p) = &mut self.pandemonium {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_pandemonium");
             let fixed = self
                 .doors
                 .iter()
@@ -1057,6 +1072,8 @@ impl Interactions {
             p.advance(dt, map, world, player, &fixed)?;
         }
         if let Some(p) = &mut self.pool {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_pool");
             let fixed = self
                 .doors
                 .iter()
@@ -1066,6 +1083,8 @@ impl Interactions {
             p.advance(dt, map, world, player, &fixed)?;
         }
         if let Some(f) = &mut self.beyond {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_beyond");
             let fixed = self
                 .doors
                 .iter()
@@ -1083,6 +1102,8 @@ impl Interactions {
             }
         }
         if let Some(f) = &mut self.fortress {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_fortress");
             let fixed = self
                 .doors
                 .iter()
@@ -1106,15 +1127,28 @@ impl Interactions {
             }
         }
         if let Some(village) = &mut self.village {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_village");
+            #[cfg(target_os = "vita")]
+            let _fixed_profile = crate::frame_profile::span("village_fixed");
             let fixed = self
                 .doors
                 .iter()
                 .filter(|d| d.enabled && self.event_world.enabled(d.id))
                 .map(|d| d.collider.clone())
                 .collect::<Vec<_>>();
+            #[cfg(target_os = "vita")]
+            drop(_fixed_profile);
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::counts(&[
+                ("village_fixed_doors", fixed.len() as u64),
+                ("village_doors_total", self.doors.len() as u64),
+            ]);
             village.advance(dt, map, world, player, &fixed)?;
         }
         if let Some(school) = &mut self.school {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_school");
             let fixed = self
                 .doors
                 .iter()
@@ -1125,6 +1159,8 @@ impl Interactions {
             school.advance(dt, map, world, player, &fixed)?;
         }
         if let Some(gym) = &mut self.gym {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_gym");
             let fixed = self
                 .doors
                 .iter()
@@ -1136,6 +1172,8 @@ impl Interactions {
             gym.advance(clock, map, world, player, &fixed)?;
         }
         if let Some(s) = &mut self.school2 {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_school2");
             let fixed = self
                 .doors
                 .iter()
@@ -1145,8 +1183,15 @@ impl Interactions {
                 .collect::<Vec<_>>();
             s.advance(dt, map, world, player, &fixed)?;
         }
-        self.level_advance(dt, map, world, player)?;
+        {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_levels");
+            self.level_advance(dt, map, world, player)?;
+        }
         if dt > 0. {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("movers_presentation");
+
             for slot in &mut self.levels {
                 if let Some(name) = slot.ctl.take_presentation_event() { self.presentation.event(name); }
             }
@@ -1367,6 +1412,8 @@ impl Interactions {
                 }
             }
         }
+        #[cfg(target_os = "vita")]
+        let _doors_profile = crate::frame_profile::span("interaction_doors");
         for d in &mut self.doors {
             if !d.enabled || !self.event_world.enabled(d.id) {
                 continue;
@@ -1399,6 +1446,8 @@ impl Interactions {
                 d.collider = collider;
             }
         }
+        #[cfg(target_os = "vita")]
+        drop(_doors_profile);
         self.sync(world);
         Ok(events)
     }
