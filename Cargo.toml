@@ -29,3 +29,17 @@ opt-level = 1
 
 [profile.release]
 lto = "thin"
+
+[patch.crates-io]
+# Branch vita-0.4.8; Cargo allows only one of branch/tag/rev.
+miniquad = { git = "https://github.com/Anezium/miniquad", rev = "acb849baa909c881060eb167f6ab68ca8e62f721" }
+
+[package.metadata.vita]
+title_id = "ALICELG01"
+title_name = "Alice Vita (Looking Glass)"
+build_std = "std,panic_unwind"
+vita_make_fself_flags = ["-s"]
+vita_mksfoex_flags = ["-d", "ATTRIBUTE2=12"]
+
+[package.metadata.vita.profile.release]
+strip_symbols = true
