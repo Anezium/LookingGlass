@@ -78,9 +78,9 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 
 #[cfg(target_os = "vita")]
 pub use vita::{
-    begin_frame, counts, end_frame, flush_boundary, mode, record_batch, record_culled,
+    begin_frame, bench_frames, counts, end_frame, flush_boundary, mode, record_batch, record_culled,
     record_geometry, record_layer, record_lg_submission, record_model, record_world_submission,
-    report, world_span, Mode,
+    report, startup_bench, world_span, Mode,
 };
 
 #[cfg(target_os = "vita")]
@@ -188,6 +188,7 @@ mod vita {
         NoPrep,
         NoWorld,
         Clk444,
+        Bench,
     }
     impl Mode {
         fn read() -> Self {
@@ -199,6 +200,7 @@ mod vita {
                 "noprep" => Self::NoPrep,
                 "noworld" => Self::NoWorld,
                 "clk444" => Self::Clk444,
+                "bench" => Self::Bench,
                 _ => Self::Full,
             }
         }
@@ -209,6 +211,7 @@ mod vita {
                 Self::NoPrep => "noprep",
                 Self::NoWorld => "noworld",
                 Self::Clk444 => "clk444",
+                Self::Bench => "bench",
             }
         }
         pub fn throttle_preview(self) -> bool {
@@ -218,7 +221,7 @@ mod vita {
             self == Self::NoPrep
         }
         pub fn no_world(self) -> bool {
-            self == Self::NoWorld
+            matches!(self, Self::NoWorld | Self::Bench)
         }
     }
     #[derive(Default, Clone, serde::Serialize)]
@@ -311,6 +314,16 @@ mod vita {
     }
     pub fn mode() -> Mode {
         STATE.with(|s| s.borrow().mode)
+    }
+    // Startup happens before the viewer's first begin_frame/poll.
+    pub fn startup_bench() -> bool {
+        Mode::read() == Mode::Bench && enabled()
+    }
+    pub fn bench_frames() -> Option<usize> {
+        STATE.with(|s| {
+            let s = s.borrow();
+            (enabled() && s.mode == Mode::Bench).then_some(s.frames)
+        })
     }
     pub fn world_span(label: &'static str, static_batch: bool) -> Span {
         let mut s = super::span(label);

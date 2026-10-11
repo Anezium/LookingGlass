@@ -553,8 +553,35 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let store = Store::new(options.save_dir.clone(), assets.fingerprint()?);
     let maps = assets.maps();
     let mut audio = Audio::new(options.no_audio, options.audio_capture.clone());
+    #[cfg(target_os = "vita")]
+    let mut bench_session = crate::frame_profile::startup_bench();
+    #[cfg(target_os = "vita")]
+    let mut bench_restored = None;
+    #[cfg(target_os = "vita")]
+    let bench_resume = if bench_session && saves_enabled {
+        match store.read_bench_auto().and_then(|loaded| {
+            // Validate the complete restoration before bypassing the front end.
+            // Reuse it below instead of restoring a second time.
+            println!("bench: loading auto save {}", loaded.game.current);
+            let restored = save::Restored::build(&mut assets, loaded.game.clone())?;
+            bench_restored = Some(restored);
+            Ok(loaded)
+        }) {
+            Ok(loaded) => Some(loaded),
+            Err(e) => {
+                eprintln!("bench: no auto save ({e:#})");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "vita"))]
+    let bench_resume: Option<save::Loaded> = None;
     let mut opening_requested = options.new_game && options.map == "gvillage";
-    let resume = if let Some(slot) = options.load {
+    let resume = if let Some(loaded) = bench_resume {
+        Some(loaded)
+    } else if let Some(slot) = options.load {
         anyhow::ensure!(
             saves_enabled,
             "Save loading is unavailable in a staged preview"
@@ -737,6 +764,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut save_frame = crate::save_preview::Frame::default();
     #[cfg(target_os = "vita")]
     let mut last_save_frame: Option<std::time::Instant> = None;
+    #[cfg(target_os = "vita")]
+    let mut bench_camera: Option<(Vec3, Vec3, bool)> = None;
     macro_rules! level_snapshot {
         () => {
             Level {
@@ -865,9 +894,24 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     if let Some(loaded) = resume {
         let backup = loaded.backup;
-        match save::Restored::build(&mut assets, loaded.game) {
+        #[cfg(target_os = "vita")]
+        let restored = match bench_restored.take() {
+            Some(restored) => Ok(restored),
+            None => save::Restored::build(&mut assets, loaded.game),
+        };
+        #[cfg(not(target_os = "vita"))]
+        let restored = save::Restored::build(&mut assets, loaded.game);
+        match restored {
             Ok(restored) => {
-                apply_loaded!(restored);
+                #[cfg(target_os = "vita")]
+                let pause_on_load = !bench_session;
+                #[cfg(not(target_os = "vita"))]
+                let pause_on_load = true;
+                apply_loaded!(restored, pause_on_load);
+                #[cfg(target_os = "vita")]
+                if bench_session {
+                    println!("bench: auto save restored {}", save::visit_key(&maps[current], entry_spawn.as_deref()));
+                }
                 hud.announce(if backup {
                     "Previous save restored / P or click to resume"
                 } else {
@@ -894,7 +938,24 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(target_os = "vita")]
         let mut viewer_block = crate::frame_profile::span("frame_input");
 
-        input.update(&preferences, window_focused());
+        #[cfg(target_os = "vita")]
+        let bench = crate::frame_profile::mode() == crate::frame_profile::Mode::Bench;
+        #[cfg(not(target_os = "vita"))]
+        let bench = false;
+        #[cfg(target_os = "vita")]
+        {
+            bench_session |= bench;
+            if crate::frame_profile::bench_frames().is_none_or(|n| n == 0) {
+                bench_camera = None;
+            }
+        }
+        #[cfg(target_os = "vita")]
+        let saves_writable = saves_enabled && !bench_session;
+        #[cfg(not(target_os = "vita"))]
+        let saves_writable = saves_enabled;
+        // The frontend remains interactive if the reference save could not load.
+        // Inside the bench, retain physics with neutral input, including sticks.
+        input.update(&preferences, window_focused() && !bench);
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
         if input.disconnected {
@@ -904,7 +965,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if is_quit_requested() {
             break;
         }
-        if window_focused() && !console.open {
+        if window_focused() && !console.open && !bench {
             if (is_key_pressed(KeyCode::Escape) || input.pad_pressed("Start"))
                 && !menu
                 && !inventory_menu
@@ -956,7 +1017,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     }
                 }
                 Action::Save(slot) => {
-                    escape_menu.message = if !saves_enabled {
+                    escape_menu.message = if !saves_writable {
                         "Saving is unavailable in a staged preview".into()
                     } else if !stats.alive() {
                         "Retry or load a game before saving".into()
@@ -994,7 +1055,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
                 Action::NewGame(difficulty) => {
                     // Preserve the current session before a new campaign replaces it.
-                    let saved = if saves_enabled && stats.alive() && !post_game {
+                    let saved = if saves_writable && stats.alive() && !post_game {
                         store.write_with_preview(
                             Slot::Auto,
                             &game_snapshot!(),
@@ -1045,7 +1106,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // order when typing/pasting delivers several characters in one frame.
         let mut chars = std::iter::from_fn(get_char_pressed).collect::<Vec<_>>();
         chars.reverse();
-        let toggle_console = focused
+        let toggle_console = focused && !bench
             && (is_key_pressed(KeyCode::GraveAccent)
                 || chars.iter().any(|c| matches!(c, '`' | '~' | '\u{00ac}')));
         let console_input = console.open || toggle_console;
@@ -1425,6 +1486,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && !inventory_menu
                 && !console_input
                 && !scripted_view
+                && !bench
                 && stats.alive(),
             &mut yaw,
             &mut pitch,
@@ -1551,6 +1613,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             held(KeyCode::Enter) || input.pad_held("A"),
             dt,
         );
+        #[cfg(target_os = "vita")]
+        // Use the same scene owner/end-state path as a held Cross skip.
+        let skip_requested = skip_requested
+            || (bench && skip_id.is_some() && !paused && !menu && !inventory_menu
+                && !console_input && focused && !flying && stats.alive());
         if skip_requested {
             let speaking = skip_id.is_some_and(|id| story.progress(id).is_some());
             if interactions.skip_cinematic(&scene.map, &mut scene.world, &mut player, &mut story)? {
@@ -1567,6 +1634,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 recovery.clear();
                 spawn_landing = true;
                 hud.announce("Scene skipped");
+                #[cfg(target_os = "vita")]
+                if bench {
+                    println!("bench: skipped scene {}", skip_id.unwrap_or("unknown"));
+                }
             }
         }
         // A failed attempt must roll the entire world back with Alice. Do this
@@ -1791,7 +1862,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && focused
             && stats.alive()
         {
-            if !scripted_view {
+            if !scripted_view && !bench {
                 let look = input.look(&preferences);
                 yaw -= look.x * dt * 2.5;
                 pitch += look.y * dt * 2.;
@@ -1969,6 +2040,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     jump: !overlay_before && pressed(KeyCode::Space),
                     run: preferences.run(held(KeyCode::LeftShift)),
                 };
+                #[cfg(target_os = "vita")]
+                if bench {
+                    control = Controls::default();
+                }
                 interactions.filter_level_controls(&mut control);
                 let controlled = interactions
                     .pandemonium
@@ -2242,7 +2317,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             pos = player.eye();
         }
-        if story_active && saves_enabled && interactions.levels.iter().any(|s| s.ctl.checkpoint_requested()) {
+        if story_active && saves_writable && interactions.levels.iter().any(|s| s.ctl.checkpoint_requested()) {
             match store.write_finale_checkpoint(&game_snapshot!()) {
                 Ok(()) => {
                     for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
@@ -2255,7 +2330,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if story_active && interactions.levels.iter().any(|s| s.ctl.ending_ready()) && !post_game {
             post_game = true;
             campaign.completed.insert(save::visit_key(&maps[current], entry_spawn.as_deref()));
-            if saves_enabled { if let Err(e) = store.mark_complete() { eprintln!("Completion marker failed: {e:#}"); } }
+            if saves_writable { if let Err(e) = store.mark_complete() { eprintln!("Completion marker failed: {e:#}"); } }
             mouse_look.release();
             input.suppress();
             match crate::movie::play(
@@ -2871,18 +2946,24 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let scripted_camera = pand_camera.or_else(|| {
             cinematic_camera.map(|(eye, target, _)| crate::cinematic::Camera::look(eye, target))
         });
-        let (eye, aim, gameplay_alice) = if third_person && !flying {
-            follow_camera.update(
-                &scene.world,
-                player.feet,
-                direction,
-                preferences.camera_distance,
-                if active { dt } else { 0. },
-            )
-        } else {
-            follow_camera.reset();
-            (pos, pos + direction, false)
-        };
+        let (eye, aim, gameplay_alice) = (|| {
+            #[cfg(target_os = "vita")]
+            if let Some(pose) = bench_camera {
+                return pose;
+            }
+            if third_person && !flying {
+                follow_camera.update(
+                    &scene.world,
+                    player.feet,
+                    direction,
+                    preferences.camera_distance,
+                    if active { dt } else { 0. },
+                )
+            } else {
+                follow_camera.reset();
+                (pos, pos + direction, false)
+            }
+        })();
         let fade = interactions
             .fade_after(
                 interactions
@@ -2920,19 +3001,27 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 },
             );
         }
-        let view = camera_handoff.update(
-            &scene.world,
-            scripted_camera,
-            crate::cinematic::Camera::look(eye, aim),
-            fade,
-            if active { dt } else { 0. },
-        );
+        let view = (|| {
+            #[cfg(target_os = "vita")]
+            if let Some((eye, target, _)) = bench_camera {
+                return crate::cinematic::Camera::look(eye, target);
+            }
+            camera_handoff.update(
+                &scene.world,
+                scripted_camera,
+                crate::cinematic::Camera::look(eye, aim),
+                fade,
+                if active { dt } else { 0. },
+            )
+        })();
         let quake = interactions
             .pool
             .as_ref()
             .map_or(Vec3::ZERO, |p| p.quake_offset())
             + interactions.levels.iter().map(|s| s.ctl.quake_offset()).sum::<Vec3>();
         let (camera, target) = (view.eye + quake, view.target + quake);
+        #[cfg(target_os = "vita")]
+        let (camera, target) = bench_camera.map_or((camera, target), |(eye, target, _)| (eye, target));
         let show_alice = !interactions.level_hides_player()
             && if scripted_camera.is_some() {
                 rage_scene.is_some_and(|(_, finished)| !finished)
@@ -3541,7 +3630,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_save");
         }
         if save_requested || autosave_requested {
-            if !saves_enabled {
+            if !saves_writable {
                 if save_requested {
                     hud.announce("Saving is unavailable in a staged preview");
                 }
@@ -3587,18 +3676,35 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(frame_profile);
         #[cfg(target_os = "vita")]
-        if crate::frame_profile::end_frame(
-            &maps[current],
-            active && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none()
-                && !story.busy() && !interactions.school.as_ref().is_some_and(|s| s.cinematic()),
-        ) {
-            // JSON I/O is outside frame_cpu, but remains visible in backend FPS.
-            if let Err(e) = crate::frame_profile::report(&maps[current]) {
-                eprintln!("Frame profile report failed: {e:#}");
+        {
+            let gameplay = active && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none()
+                && !story.busy() && !interactions.school.as_ref().is_some_and(|s| s.cinematic());
+            let report_due = crate::frame_profile::end_frame(&maps[current], gameplay);
+            if bench && gameplay && crate::frame_profile::bench_frames().is_some_and(|n| n > 0)
+                && bench_camera.is_none()
+            {
+                bench_camera = Some((camera, target, gameplay_alice));
+                println!("bench: camera frozen map={} feet={:?}", maps[current], player.feet);
+            }
+            if report_due {
+                // JSON I/O is outside frame_cpu, but remains visible in backend FPS.
+                let report = crate::frame_profile::report(&maps[current]);
+                if bench && crate::frame_profile::bench_frames() == Some(120) {
+                    // Fail visibly on report I/O errors; never announce a nonexistent report.
+                    if let Err(e) = report {
+                        eprintln!("bench: report failed ({e:#})");
+                    } else {
+                        println!("bench: done 120 frames, report ux0:data/alice/private/frame_profile/{}-bench-120.json", maps[current]);
+                    }
+                    break;
+                }
+                if let Err(e) = report {
+                    eprintln!("Frame profile report failed: {e:#}");
+                }
             }
         }
         frame += 1;
-        if is_key_pressed(KeyCode::F12) {
+        if !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(
                 "private/screenshots/{}-{frame}.png",
                 maps[current]
@@ -3616,7 +3722,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         next_frame().await;
     }
-    if saves_enabled && played && stats.alive() && options.frames.is_none() && !post_game {
+    #[cfg(target_os = "vita")]
+    let saves_writable = saves_enabled && !bench_session;
+    #[cfg(not(target_os = "vita"))]
+    let saves_writable = saves_enabled;
+    if saves_writable && played && stats.alive() && options.frames.is_none() && !post_game {
         if let Err(e) =
             store.write_with_preview(Slot::Auto, &game_snapshot!(), save_frame.preview().as_ref())
         {

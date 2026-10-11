@@ -422,6 +422,11 @@ impl Store {
             preview: crate::save_preview::Preview::from_value(e.preview),
         })
     }
+    // The simulation bench must use the exact reference save, never its backup.
+    #[cfg(any(target_os = "vita", test))]
+    pub fn read_bench_auto(&self) -> Result<Loaded> {
+        read_limited(&self.path(Slot::Auto, false)).and_then(|b| self.decode(&b))
+    }
     pub fn read(&self, slot: Slot) -> Result<Loaded> {
         match read_limited(&self.path(slot, false)).and_then(|b| self.decode(&b)) {
             Ok(s) => Ok(s),
@@ -852,6 +857,28 @@ mod format12;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bench_auto_reads_only_the_reference_without_modifying_it_or_falling_back() {
+        let scratch = format12::Scratch::new("bench-auto");
+        let store = scratch.store();
+        assert!(store.read_bench_auto().is_err());
+        let game = format12::game(vec![format12::level("gvillage", None, serde_json::Value::Null)]);
+        store.write(Slot::Auto, &game).unwrap();
+        let path = scratch.file(Slot::Auto);
+        let reference = fs::read(&path).unwrap();
+        let loaded = store.read_bench_auto().unwrap();
+        assert_eq!(loaded.game.current, "gvillage$first");
+        assert!(!loaded.backup);
+        assert_eq!(fs::read(&path).unwrap(), reference);
+        fs::write(store.path(Slot::Auto, true), &reference).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(store.read_bench_auto().is_err());
+        assert!(store.read(Slot::Auto).unwrap().backup);
+        fs::write(&path, b"invalid json").unwrap();
+        assert!(store.read_bench_auto().is_err());
+        assert!(store.read(Slot::Auto).unwrap().backup);
+        assert_eq!(fs::read(&path).unwrap(), b"invalid json");
+    }
     #[test]
     fn manual_slots_have_separate_files_and_cannot_escape_save_directory() {
         let store = Store::new(PathBuf::from("test-saves"), "fixture".into());
