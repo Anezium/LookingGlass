@@ -182,9 +182,17 @@ fn main() {
 
 fn app_main() {
     #[cfg(target_os = "vita")]
-    macroquad::miniquad::native::vita::set_config(
-        macroquad::miniquad::native::vita::VitaConfig::default(),
-    );
+    {
+        use macroquad::miniquad::native::vita::{set_config, InputConfig, LeftStickMode, VitaConfig};
+        set_config(VitaConfig {
+            input: InputConfig {
+                left_stick: LeftStickMode::Mouse { speed: 8.0 },
+                cross_is_left_click: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
     if let Err(error) = run() {
         eprintln!("Looking Glass: {error:#}");
         std::process::exit(1);

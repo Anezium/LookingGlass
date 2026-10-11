@@ -640,7 +640,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "miniquad"
 version = "0.4.8"
-source = "git+https://github.com/Anezium/miniquad?rev=39d52acd2bcd8f8c88404d7314a946f0df7aa13a#39d52acd2bcd8f8c88404d7314a946f0df7aa13a"
+source = "git+https://github.com/Anezium/miniquad?rev=b09eb16664ba0e66e4c7374514a2e852f498f379#b09eb16664ba0e66e4c7374514a2e852f498f379"
 dependencies = [
  "libc",
  "ndk-sys 0.2.2",
