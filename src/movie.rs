@@ -264,6 +264,11 @@ pub async fn play(
     preferences: &Preferences,
     name: &str,
 ) -> Result<bool> {
+    #[cfg(target_os = "vita")]
+    {
+        eprintln!("story movie {name} skipped on Vita (streaming decoder pending)");
+        return Ok(true);
+    }
     ensure!(matches!(name, "opening" | "ending"), "Unknown story movie");
     let mut video = Video::new(assets.read(&format!("video/{name}.roq"))?)?;
     video.next()?;
