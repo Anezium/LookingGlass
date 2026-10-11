@@ -9,10 +9,23 @@ use std::collections::BTreeMap;
 #[cfg_attr(not(any(test, target_os = "vita")), allow(dead_code))]
 pub const VITA_TEXTURE_MAX_DIM: u16 = 512;
 
+/// Upload immutable game pixels in DXT5 on Vita; dynamic textures use the
+/// separate upload helper so ordinary subimage updates remain valid.
+pub(crate) fn upload_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D {
+    #[cfg(target_os = "vita")]
+    {
+        return macroquad::miniquad::native::vita::with_dxt5_uploads(|| {
+            upload_dynamic_rgba8(width, height, pixels)
+        });
+    }
+    #[cfg(not(target_os = "vita"))]
+    upload_dynamic_rgba8(width, height, pixels)
+}
+
 /// Upload RGBA8 pixels. On Vita, images larger than [`VITA_TEXTURE_MAX_DIM`] are
 /// halved on the CPU until they fit, then uploaded. The packed game data is not
 /// rewritten, and nothing is compressed or cached on disk.
-pub(crate) fn upload_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D {
+pub(crate) fn upload_dynamic_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D {
     #[cfg(target_os = "vita")]
     {
         let (dst_w, dst_h, limited) = limit_rgba8(width, height, pixels, VITA_TEXTURE_MAX_DIM);
