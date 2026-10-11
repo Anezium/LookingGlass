@@ -171,9 +171,9 @@ impl Visibility {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn two_rooms() -> Visibility {
+    pub(crate) fn two_rooms() -> Visibility {
         Visibility {
             nodes: vec![Node {
                 plane: 0,

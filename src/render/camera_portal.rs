@@ -382,7 +382,7 @@ impl Scene {
             return;
         }
         let cluster = self.map.visibility.cluster(camera.position, &self.map.planes);
-        let faces = self.map.visibility.faces(cluster);
+        let faces = self.face_mask_cache.faces(&self.map.visibility, cluster);
         let mut portals = std::mem::take(&mut self.camera_portals);
         for portal in &mut portals {
             portal.ready = false;
@@ -450,7 +450,7 @@ impl Scene {
             let mut context = DrawContext {
                 enabled: self.optimize,
                 required_pvs: true,
-                faces: self.map.visibility.faces(cluster),
+                faces: self.face_mask_cache.faces(&self.map.visibility, cluster),
                 cluster,
                 visibility: &self.map.visibility,
                 stats: DrawStats::default(),

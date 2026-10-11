@@ -88,12 +88,15 @@ pub fn projected_error(center: Vec3, radius: f32, error: f32) -> f32 {
         let Some(m) = f.projection else {
             return f32::INFINITY;
         };
-        let clip = m * center.extend(1.);
-        let distance = (clip.w - radius).max(0.001);
-        // Projection row magnitude also handles rolled cameras without knowing FOV.
-        let row = vec3(m.x_axis.y, m.y_axis.y, m.z_axis.y).length();
-        error * row * screen_height() * 0.5 / distance
+        projected_error_for(m, screen_height(), center, radius, error)
     })
+}
+pub(crate) fn projected_error_for(m: Mat4, height: f32, center: Vec3, radius: f32, error: f32) -> f32 {
+    let clip = m * center.extend(1.);
+    let distance = (clip.w - radius).max(0.001);
+    // Projection row magnitude also handles rolled cameras without knowing FOV.
+    let row = vec3(m.x_axis.y, m.y_axis.y, m.z_axis.y).length();
+    error * row * height * 0.5 / distance
 }
 pub fn appearance(a: Appearance) {
     FRAME.with(|f| f.borrow_mut().appearance = a);

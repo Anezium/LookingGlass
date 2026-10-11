@@ -22,6 +22,8 @@ use std::{
 
 mod billboard_check;
 mod sky_face_check;
+#[cfg(test)]
+mod visibility_tests;
 pub use sky_face_check::check_school_floor;
 mod water_check;
 pub use water_check::check as check_water;
@@ -112,6 +114,7 @@ pub struct Scene {
     pub world: World,
     pub atmosphere: Atmosphere,
     batches: Vec<Batch>,
+    face_mask_cache: FaceMaskCache,
     decoration_start: usize,
     materials: Vec<Rc<Material>>,
     bound_materials: Vec<Rc<Material>>,
@@ -142,11 +145,171 @@ struct Part {
 struct VisibilityWork {
     pvs_parts: Vec<usize>,
     visible_parts: Vec<usize>,
+    pvs: Option<PvsEntry>,
+    parts_cover_full: bool,
+}
+enum PvsParts {
+    All,
+    Empty,
+    SomeParts(Vec<usize>),
+}
+enum PvsResult {
+    Parts(PvsParts),
+    Bounds(bool),
+}
+struct PvsEntry {
+    cluster: Option<usize>,
+    result: PvsResult,
+    bounds: Option<(Vec3, Vec3)>,
+}
+impl VisibilityWork {
+    fn invalidate(&mut self) {
+        if let Some(PvsEntry {
+            result: PvsResult::Parts(PvsParts::SomeParts(parts)),
+            ..
+        }) = self.pvs.take()
+        {
+            self.pvs_parts = parts;
+        }
+        self.pvs_parts.clear();
+        self.visible_parts.clear();
+    }
+    fn parts(&mut self, parts: &[Part], cluster: Option<usize>, faces: Option<&[bool]>) {
+        if self
+            .pvs
+            .as_ref()
+            .is_some_and(|e| e.cluster == cluster && matches!(e.result, PvsResult::Parts(_)))
+        {
+            return;
+        }
+        self.invalidate();
+        for (i, p) in parts.iter().enumerate() {
+            if !faces.is_some_and(|v| !v[p.face]) {
+                self.pvs_parts.push(i);
+            }
+        }
+        let result = if self.pvs_parts.len() == parts.len() {
+            PvsParts::All
+        } else if self.pvs_parts.is_empty() {
+            PvsParts::Empty
+        } else {
+            PvsParts::SomeParts(std::mem::take(&mut self.pvs_parts))
+        };
+        self.pvs = Some(PvsEntry {
+            cluster,
+            result: PvsResult::Parts(result),
+            bounds: None,
+        });
+    }
+    fn bounds(
+        &mut self,
+        visibility: &crate::visibility::Visibility,
+        cluster: Option<usize>,
+        min: Vec3,
+        max: Vec3,
+    ) -> bool {
+        if let Some(PvsEntry {
+            cluster: key,
+            result: PvsResult::Bounds(visible),
+            bounds,
+        }) = &self.pvs
+        {
+            if *key == cluster && *bounds == Some((min, max)) {
+                return *visible;
+            }
+        }
+        self.invalidate();
+        let visible = visibility.bounds(cluster, min, max);
+        self.pvs = Some(PvsEntry {
+            cluster,
+            result: PvsResult::Bounds(visible),
+            bounds: Some((min, max)),
+        });
+        visible
+    }
+}
+#[derive(Default)]
+struct FaceMaskCache {
+    // The outer None is uninitialised; a None cluster is a valid fail-open key.
+    entry: Option<(Option<usize>, Option<Rc<[bool]>>)>,
+}
+impl FaceMaskCache {
+    fn faces(
+        &mut self,
+        visibility: &crate::visibility::Visibility,
+        cluster: Option<usize>,
+    ) -> Option<Rc<[bool]>> {
+        if let Some((key, faces)) = &self.entry {
+            if *key == cluster {
+                return faces.clone();
+            }
+        }
+        let faces = visibility.faces(cluster).map(Rc::<[bool]>::from);
+        self.entry = Some((cluster, faces.clone()));
+        faces
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexSelection {
+    Full,
+    Filtered,
+    Detail(usize),
+}
+// This guard owns the batch borrow until all submissions have finished. A return
+// or unwind restores both Vecs, so the immutable source cannot be lost.
+struct IndexLease<'a> {
+    batch: &'a mut Batch,
+    swapped: bool,
+}
+impl std::ops::Deref for IndexLease<'_> {
+    type Target = Batch;
+    fn deref(&self) -> &Batch {
+        self.batch
+    }
+}
+impl std::ops::DerefMut for IndexLease<'_> {
+    fn deref_mut(&mut self) -> &mut Batch {
+        self.batch
+    }
+}
+impl Drop for IndexLease<'_> {
+    fn drop(&mut self) {
+        if self.swapped {
+            std::mem::swap(&mut self.batch.mesh.indices, &mut self.batch.full_indices);
+        }
+    }
+}
+impl<'a> IndexLease<'a> {
+    fn new(batch: &'a mut Batch, selection: IndexSelection, read_only: bool) -> Self {
+        let _indices = crate::frame_profile::span("world_visibility_indices");
+        let swapped = selection == IndexSelection::Full && read_only;
+        if swapped {
+            std::mem::swap(&mut batch.mesh.indices, &mut batch.full_indices);
+        } else {
+            batch.mesh.indices.clear();
+            match selection {
+                IndexSelection::Full => batch.mesh.indices.extend_from_slice(&batch.full_indices),
+                IndexSelection::Filtered => {
+                    for &i in &batch.visibility_work.visible_parts {
+                        batch
+                            .mesh
+                            .indices
+                            .extend_from_slice(&batch.full_indices[batch.parts[i].indices.clone()]);
+                    }
+                }
+                IndexSelection::Detail(i) => batch
+                    .mesh
+                    .indices
+                    .extend_from_slice(&batch.detail[i].indices),
+            }
+        }
+        Self { batch, swapped }
+    }
 }
 struct DrawContext<'a> {
     enabled: bool,
     required_pvs: bool,
-    faces: Option<Vec<bool>>,
+    faces: Option<Rc<[bool]>>,
     cluster: Option<usize>,
     visibility: &'a crate::visibility::Visibility,
     stats: DrawStats,
@@ -461,6 +624,25 @@ fn world_stages(spec: Option<&texture::MaterialSpec>) -> Vec<Stage> {
     stages
 }
 impl Batch {
+    fn prepare_visibility(&mut self) {
+        self.visibility_work.invalidate();
+        self.visibility_work.pvs_parts.reserve(self.parts.len());
+        self.visibility_work.visible_parts.reserve(self.parts.len());
+        self.mesh.indices.reserve(
+            self.full_indices
+                .len()
+                .saturating_sub(self.mesh.indices.len()),
+        );
+        let mut end = 0;
+        self.visibility_work.parts_cover_full = self.parts.iter().all(|p| {
+            let contiguous = p.indices.start == end;
+            end = p.indices.end;
+            contiguous
+        }) && end == self.full_indices.len();
+    }
+    fn indices_read_only(&self, queue_active: bool) -> bool {
+        self.face_side == crate::materials::FaceSide::Both && (!self.transparent() || queue_active)
+    }
     fn transparent(&self) -> bool {
         let s = &self.layers[0].spec;
         !self.sky && s.blend != Blend::Opaque && !(s.depth_write && s.alpha_test > 0)
@@ -507,15 +689,35 @@ fn axial_billboard(quad: &mut [Vertex], camera: Vec3) {
     }
 }
 
-// Keep PVS, view-dependent bounds/LOD, and index copies in separate intervals.
-// Scratch lists preserve source part order and retain capacity between views.
+// The production callbacks use the current projection. Tests supply the same
+// geometry calculations without requiring a window or game archives.
 fn select_batch_indices(
     batch: &mut Batch,
     transform: Option<&(usize, Vec3, Quat)>,
     offset: Vec3,
     backdrop: bool,
     context: &mut DrawContext<'_>,
-) -> bool {
+) -> Option<IndexSelection> {
+    select_batch_indices_for(
+        batch,
+        transform,
+        offset,
+        backdrop,
+        context,
+        outside_bounds,
+        crate::render_fx::projected_error,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn select_batch_indices_for(
+    batch: &mut Batch,
+    transform: Option<&(usize, Vec3, Quat)>,
+    offset: Vec3,
+    backdrop: bool,
+    context: &mut DrawContext<'_>,
+    outside: impl Fn(Vec3, Vec3) -> bool,
+    projected_error: impl Fn(Vec3, f32, f32) -> f32,
+) -> Option<IndexSelection> {
     let bounds_profile = crate::frame_profile::span("world_visibility_bounds");
     let (min, max) = transform_bounds(batch.bounds.0, batch.bounds.1, transform, offset);
     let can_cull = (context.enabled || context.required_pvs)
@@ -524,84 +726,89 @@ fn select_batch_indices(
             .iter()
             .any(crate::materials::Deform::moves_vertices)
         && batch.motion.is_none();
-    if can_cull && context.enabled && outside_bounds(min, max) {
-        return false;
+    if can_cull && context.enabled && outside(min, max) {
+        return None;
     }
     drop(bounds_profile);
-    if can_cull && !batch.parts.is_empty() {
+    let selection = if can_cull && !batch.parts.is_empty() {
         {
             let _pvs = crate::frame_profile::span("world_visibility_pvs");
-            batch.visibility_work.pvs_parts.clear();
-            for (i, p) in batch.parts.iter().enumerate() {
-                if !context.faces.as_ref().is_some_and(|v| !v[p.face]) {
-                    batch.visibility_work.pvs_parts.push(i);
-                }
-            }
+            batch
+                .visibility_work
+                .parts(&batch.parts, context.cluster, context.faces.as_deref());
         }
-        {
-            let _bounds = crate::frame_profile::span("world_visibility_bounds");
-            batch.visibility_work.visible_parts.clear();
-            for &i in &batch.visibility_work.pvs_parts {
-                let p = &batch.parts[i];
-                let (lo, hi) = transform_bounds(p.min, p.max, transform, offset);
-                if !context.enabled || !outside_bounds(lo, hi) {
-                    batch.visibility_work.visible_parts.push(i);
-                }
+        let _bounds = crate::frame_profile::span("world_visibility_bounds");
+        let work = &mut batch.visibility_work;
+        work.visible_parts.clear();
+        let mut index_count = 0;
+        let mut visit = |i: usize| {
+            let p = &batch.parts[i];
+            let (lo, hi) = transform_bounds(p.min, p.max, transform, offset);
+            if !context.enabled || !outside(lo, hi) {
+                work.visible_parts.push(i);
+                index_count += p.indices.len();
             }
+        };
+        match &work.pvs.as_ref().unwrap().result {
+            PvsResult::Parts(PvsParts::All) => (0..batch.parts.len()).for_each(&mut visit),
+            PvsResult::Parts(PvsParts::SomeParts(parts)) => {
+                parts.iter().copied().for_each(&mut visit)
+            }
+            PvsResult::Parts(PvsParts::Empty) => {}
+            PvsResult::Bounds(_) => unreachable!(),
         }
-        {
-            let _indices = crate::frame_profile::span("world_visibility_indices");
-            batch.mesh.indices.clear();
-            for &i in &batch.visibility_work.visible_parts {
-                batch
-                    .mesh
-                    .indices
-                    .extend_from_slice(&batch.full_indices[batch.parts[i].indices.clone()]);
-            }
+        if index_count == 0 {
+            return None;
+        }
+        if work.visible_parts.len() == batch.parts.len() && work.parts_cover_full {
+            IndexSelection::Full
+        } else {
+            IndexSelection::Filtered
         }
     } else {
         {
             let _pvs = crate::frame_profile::span("world_visibility_pvs");
-            // Inline movers and animated props never use stale leaf membership.
+            // Preserve the original mover, animation, deformation and sky guards.
             if can_cull
                 && batch.model.is_none()
                 && batch.animation.is_none()
                 && batch.parts.is_empty()
                 && !backdrop
-                && !context.visibility.bounds(context.cluster, min, max)
             {
-                return false;
+                // Only the normal fixed pose may reuse bounds membership. A
+                // transformed view computes it directly and leaves the cache intact.
+                let visible = if transform.is_none() && offset == Vec3::ZERO {
+                    batch
+                        .visibility_work
+                        .bounds(context.visibility, context.cluster, min, max)
+                } else {
+                    context.visibility.bounds(context.cluster, min, max)
+                };
+                if !visible {
+                    return None;
+                }
             }
         }
-        let _indices = crate::frame_profile::span("world_visibility_indices");
-        batch.mesh.indices.clear();
-        batch.mesh.indices.extend_from_slice(&batch.full_indices);
-    }
-    if batch.mesh.indices.is_empty() {
-        return false;
-    }
-    let detail = {
-        let _bounds = crate::frame_profile::span("world_visibility_bounds");
-        if can_cull && context.enabled && !backdrop && batch.parts.is_empty() {
-            let center = (min + max) * 0.5;
-            let radius = (max - min).length() * 0.5;
-            batch
-                .detail
-                .iter()
-                .rev()
-                .position(|l| crate::render_fx::projected_error(center, radius, l.error) <= 0.35)
-                .map(|i| batch.detail.len() - 1 - i)
-        } else {
-            None
+        if batch.full_indices.is_empty() {
+            return None;
         }
+        IndexSelection::Full
     };
-    if let Some(i) = detail {
-        let _indices = crate::frame_profile::span("world_visibility_indices");
-        let level = &batch.detail[i];
-        context.stats.detail_saved += (batch.mesh.indices.len() - level.indices.len()) / 3;
-        batch.mesh.indices.clone_from(&level.indices);
+    let _bounds = crate::frame_profile::span("world_visibility_bounds");
+    if can_cull && context.enabled && !backdrop && batch.parts.is_empty() {
+        let center = (min + max) * 0.5;
+        let radius = (max - min).length() * 0.5;
+        if let Some(i) = batch
+            .detail
+            .iter()
+            .rposition(|l| projected_error(center, radius, l.error) <= 0.35)
+        {
+            context.stats.detail_saved +=
+                (batch.full_indices.len() - batch.detail[i].indices.len()) / 3;
+            return Some(IndexSelection::Detail(i));
+        }
     }
-    true
+    Some(selection)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -617,12 +824,16 @@ fn draw_batch(
 ) {
     let _visibility_profile = crate::frame_profile::span("world_visibility");
     context.stats.batches += 1;
-    if !select_batch_indices(batch, transform, offset, backdrop, context) {
+    let Some(selection) = select_batch_indices(batch, transform, offset, backdrop, context) else {
         context.stats.culled += 1;
         #[cfg(target_os = "vita")]
         crate::frame_profile::record_culled();
         return;
-    }
+    };
+    let full_index_count = batch.full_indices.len();
+    let read_only = batch.indices_read_only(crate::render_fx::active());
+    let mut index_lease = IndexLease::new(batch, selection, read_only);
+    let batch = &mut *index_lease;
     drop(_visibility_profile);
     context.stats.triangles += batch.mesh.indices.len() / 3 * batch.layers.len();
     #[cfg(target_os = "vita")]
@@ -718,7 +929,8 @@ fn draw_batch(
                 .distance_squared(camera)
         };
         triangles.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
-        batch.mesh.indices = triangles.into_iter().flatten().collect();
+        batch.mesh.indices.clear();
+        batch.mesh.indices.extend(triangles.into_iter().flatten());
     }
     #[cfg(target_os = "vita")]
     drop(prep_profile);
@@ -769,10 +981,7 @@ fn draw_batch(
         let _submit = crate::frame_profile::world_span("world_submit", static_batch);
         if crate::render_fx::active() && batch.transparent() && !backdrop && !batch.sky {
             if let Ok(mut pass) = crate::render_fx::pass(
-                selected_mesh(
-                    &batch.mesh,
-                    batch.mesh.indices.len() < batch.full_indices.len(),
-                ),
+                selected_mesh(&batch.mesh, batch.mesh.indices.len() < full_index_count),
                 &layer.spec,
                 false,
                 layer.lit,
@@ -841,7 +1050,7 @@ fn draw_batch(
             },
         );
         gl_use_material(material);
-        if batch.mesh.indices.len() < batch.full_indices.len() {
+        if batch.mesh.indices.len() < full_index_count {
             let mesh = selected_mesh(&batch.mesh, true);
             #[cfg(target_os = "vita")]
             if !mesh.indices.is_empty() {
@@ -1138,7 +1347,7 @@ impl Scene {
         let mut context = DrawContext {
             enabled: self.optimize,
             required_pvs: self.sky_backdrop.is_some(),
-            faces: self.map.visibility.faces(cluster),
+            faces: self.face_mask_cache.faces(&self.map.visibility, cluster),
             cluster,
             visibility: &self.map.visibility,
             stats: DrawStats::default(),
@@ -1586,11 +1795,7 @@ impl Scene {
                 batch.base.iter().map(|v| v.position).sum::<Vec3>() / batch.base.len() as f32;
         }
         for batch in batches.iter_mut().chain(&mut sky_props) {
-            batch.visibility_work.pvs_parts.reserve(batch.parts.len());
-            batch
-                .visibility_work
-                .visible_parts
-                .reserve(batch.parts.len());
+            batch.prepare_visibility();
         }
         missing.sort();
         missing.dedup();
@@ -1642,6 +1847,7 @@ impl Scene {
         println!("Loaded {name}: {triangles} triangles, {} batches, {animated} animated batches, {} fog volumes, distance fog {}, {} fallback images",batches.len(),atmosphere.volumes.len(),atmosphere.distance.w,missing.len());
         Ok(Self {
             camera_portals,
+            face_mask_cache: FaceMaskCache::default(),
             rope_shapes,
             optimize: true,
             stats: DrawStats::default(),
@@ -1689,6 +1895,7 @@ impl Scene {
                     (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
                     |(lo, hi), v| (lo.min(v.position), hi.max(v.position)),
                 );
+                batch.visibility_work.invalidate();
                 batch.center = (batch.bounds.0 + batch.bounds.1) * 0.5;
             }
         }
@@ -1718,7 +1925,7 @@ impl Scene {
             // rooms. Their authored PVS is required even in the uncapped
             // diagnostic baseline; only optional frustum/LOD work is toggled.
             required_pvs: self.sky_backdrop.is_some(),
-            faces: self.map.visibility.faces(cluster),
+            faces: self.face_mask_cache.faces(&self.map.visibility, cluster),
             cluster,
             visibility: &self.map.visibility,
             stats: DrawStats::default(),
@@ -1731,7 +1938,7 @@ impl Scene {
                 context.enabled = true;
                 let cluster = self.map.visibility.cluster(origin, &self.map.planes);
                 context.cluster = cluster;
-                context.faces = self.map.visibility.faces(cluster);
+                context.faces = self.face_mask_cache.faces(&self.map.visibility, cluster);
                 // Portal scene uses the view rotation but its authored fixed origin.
                 // Translating geometry is equivalent and preserves the caller's projection.
                 let offset = camera - origin;
@@ -1828,7 +2035,7 @@ impl Scene {
         }
         context.cluster = cluster;
         context.enabled = self.optimize;
-        context.faces = self.map.visibility.faces(cluster);
+        context.faces = self.face_mask_cache.faces(&self.map.visibility, cluster);
         let transform = |b: &Batch| b.model.and_then(|i| transforms.iter().find(|t| t.0 == i));
         let center = |b: &Batch| transform(b).map_or(b.center, |(_, p, r)| *p + *r * b.center);
         let mut order = (0..self.batches.len())
