@@ -148,7 +148,19 @@ pub struct Options {
     pub shelf_preview: bool,
 }
 
+// VitaSDK consumes this exported process parameter before main runs.
+// See https://vita-rust.github.io/book/dev/mem.html#stack and
+// https://github.com/vitasdk/vita-toolchain/blob/master/README.md#special-symbols
+#[cfg(target_os = "vita")]
+#[used]
+#[export_name = "sceUserMainThreadStackSize"]
+pub static SCE_USER_MAIN_THREAD_STACK_SIZE: u32 = 8 * 1024 * 1024;
+
 fn main() {
+    #[cfg(target_os = "vita")]
+    macroquad::miniquad::native::vita::set_config(
+        macroquad::miniquad::native::vita::VitaConfig::default(),
+    );
     if let Err(error) = run() {
         eprintln!("Looking Glass: {error:#}");
         std::process::exit(1);

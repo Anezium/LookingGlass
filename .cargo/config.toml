@@ -1,0 +1,4 @@
+# cargo-vita supplies the target and build-std, as in macroquad-basic.
+# Keep the exported process parameter when the linker collects unused sections.
+[target.armv7-sony-vita-newlibeabihf]
+rustflags = ["-C", "link-arg=-Wl,--undefined=sceUserMainThreadStackSize"]
