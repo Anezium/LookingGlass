@@ -13,6 +13,14 @@ use crate::{
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 
+#[cfg(target_os = "vita")]
+#[link(name = "SceProcessmgr_stub")]
+extern "C" {
+    fn sceKernelPowerTick(tick_type: i32) -> i32;
+}
+#[cfg(target_os = "vita")]
+const SCE_KERNEL_POWER_TICK_DEFAULT: i32 = 0;
+
 pub fn config() -> macroquad::conf::Conf {
     #[cfg(target_os = "vita")]
     let (width, height, high_dpi) = (960, 544, false);
@@ -934,6 +942,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     loop {
         #[cfg(target_os = "vita")]
         {
+            // Synthetic companion input does not reset the screen/idle timers.
+            unsafe { sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT) };
             crate::frame_profile::begin_frame(&maps[current]);
             preview_throttle.advance_frame();
         }
