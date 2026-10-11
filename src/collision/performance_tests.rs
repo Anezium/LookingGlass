@@ -59,7 +59,7 @@ fn segment_broad_phase_preserves_collision_and_prunes_diagonal_queries() {
 #[test]
 #[ignore = "Requires LOOKING_GLASS_TEST_DATA pointing to the user's supplied PK3 directory"]
 fn original_maze_and_clockwork_traces_match() {
-    let mut a=crate::assets::Assets::open(&std::path::PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA").unwrap())).unwrap();
+    let mut a=crate::assets::Assets::mount(&std::path::PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA").unwrap())).unwrap();
     for name in ["hedge2","hedge3","hatter1"] {
         let map=Bsp::parse(&a.read(&format!("maps/{name}.bsp")).unwrap()).unwrap();
         for w in [World::from_bsp(&map).unwrap(),World::actor_world(&map).unwrap()] {compare(&w,10000);}

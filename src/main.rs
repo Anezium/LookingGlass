@@ -567,7 +567,7 @@ fn run() -> Result<()> {
     if o.capture.is_some() && o.frames.is_none() {
         bail!("--capture requires --frames");
     }
-    let mut assets = Assets::open(&o.data)?;
+    let mut assets = Assets::mount(&o.data)?;
     if mode == "campaign-playtest" {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = campaign_playtest::run(&mut assets, chain, o.difficulty).await {
