@@ -158,6 +158,7 @@ impl EntryReader {
         let pack = self.pack.clone();
         let name = self.name.clone();
         let worker = thread::Builder::new()
+            .stack_size(256 * 1024)
             .name("asset-stream".into())
             .spawn(move || {
                 let run = || -> Result<()> {
