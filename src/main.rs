@@ -153,10 +153,34 @@ pub struct Options {
 // https://github.com/vitasdk/vita-toolchain/blob/master/README.md#special-symbols
 #[cfg(target_os = "vita")]
 #[used]
-#[export_name = "sceUserMainThreadStackSize"]
+#[unsafe(export_name = "sceUserMainThreadStackSize")]
 pub static SCE_USER_MAIN_THREAD_STACK_SIZE: u32 = 8 * 1024 * 1024;
 
+// Rust's system allocator uses the VitaSDK newlib heap.
+#[cfg(target_os = "vita")]
+#[used]
+#[unsafe(export_name = "_newlib_heap_size_user")]
+pub static NEWLIB_HEAP_SIZE_USER: u32 = 256 * 1024 * 1024;
+
+#[cfg(target_os = "vita")]
 fn main() {
+    // Keep startup on a small main frame; the game gets its own explicit stack.
+    // Both stacks (8 MiB each) plus newlib (256 MiB) request 272 MiB.
+    // vitaGL uses the remaining free memory through its existing threshold.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(app_main)
+        .expect("Cannot start the Vita game thread")
+        .join()
+        .expect("The Vita game thread panicked");
+}
+
+#[cfg(not(target_os = "vita"))]
+fn main() {
+    app_main();
+}
+
+fn app_main() {
     #[cfg(target_os = "vita")]
     macroquad::miniquad::native::vita::set_config(
         macroquad::miniquad::native::vita::VitaConfig::default(),
