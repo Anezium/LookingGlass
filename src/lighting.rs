@@ -26,6 +26,10 @@ pub fn select(mut lights: Vec<Light>, eye: Vec3, world: &World) {
     lights.truncate(32);
     // A bounded visibility query rejects lights fully hidden from this room.
     lights.retain(|l| world.sweep(eye, l.position, Vec3::ZERO).fraction >= 0.995);
+    // vita-so 6a9b8cd: PerformancePreset::Performance.max_dynamic_lights() = 2.
+    #[cfg(target_os = "vita")]
+    lights.truncate(2);
+    #[cfg(not(target_os = "vita"))]
     lights.truncate(8);
     LIGHTS.with(|v| *v.borrow_mut() = lights);
 }

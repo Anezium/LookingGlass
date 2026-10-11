@@ -14,12 +14,16 @@ use anyhow::{Context, Result};
 use macroquad::prelude::*;
 
 pub fn config() -> macroquad::conf::Conf {
+    #[cfg(target_os = "vita")]
+    let (width, height, high_dpi) = (960, 544, false);
+    #[cfg(not(target_os = "vita"))]
+    let (width, height, high_dpi) = (1200, 680, true);
     macroquad::conf::Conf {
         miniquad_conf: Conf {
             window_title: "Looking Glass".into(),
-            window_width: 1200,
-            window_height: 680,
-            high_dpi: true,
+            window_width: width,
+            window_height: height,
+            high_dpi,
             sample_count: 1,
             ..Default::default()
         },
