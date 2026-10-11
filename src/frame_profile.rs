@@ -88,9 +88,9 @@ pub use vita::{
 mod vita {
     use super::*;
     pub const PROFILE_DIR: &str = "ux0:data/alice/private/frame_profile";
-    use std::cell::Cell;
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering::Relaxed};
 
-    // Hot paths only touch fixed integer cells. Names and maps are used once
+    // Hot paths only touch fixed integer atomics. Names and maps are used once
     // per accepted frame, never per sweep/hull/puff.
     #[derive(Clone, Copy)]
     #[repr(u8)]
@@ -168,52 +168,50 @@ mod vita {
         "frame_interaction_search",
         "frame_hud",
     ];
-    thread_local! {
-        static HOT_RECORDING: Cell<bool> = const { Cell::new(false) };
-        static OWNER: Cell<u8> = const { Cell::new(0) };
-        static HOT_COUNTS: [[Cell<u32>; COUNTER_NAMES.len() + 1]; OWNER_NAMES.len()] = const {
-            [const { [const { Cell::new(0) }; COUNTER_NAMES.len() + 1] }; OWNER_NAMES.len()]
-        };
-    }
+    // The viewer thread owns profiling, including begin/end_frame and owners.
+    // Relaxed loads/stores avoid newlib TLS calls and atomic RMW loops; these
+    // counters are not a cross-thread aggregation API.
+    static HOT_RECORDING: AtomicBool = AtomicBool::new(false);
+    static OWNER: AtomicU8 = AtomicU8::new(0);
+    static HOT_COUNTS: [[AtomicU32; COUNTER_NAMES.len() + 1]; OWNER_NAMES.len()] =
+        [const { [const { AtomicU32::new(0) }; COUNTER_NAMES.len() + 1] }; OWNER_NAMES.len()];
     pub fn set_owner(owner: Owner) {
-        OWNER.with(|cell| cell.set(owner as u8));
+        OWNER.store(owner as u8, Relaxed);
     }
     pub struct CounterOwner(u8);
     pub fn counter_owner(owner: Owner) -> CounterOwner {
-        CounterOwner(OWNER.with(|cell| cell.replace(owner as u8)))
+        let previous = OWNER.load(Relaxed);
+        OWNER.store(owner as u8, Relaxed);
+        CounterOwner(previous)
     }
     impl Drop for CounterOwner {
         fn drop(&mut self) {
-            OWNER.with(|cell| cell.set(self.0));
+            OWNER.store(self.0, Relaxed);
         }
     }
     #[inline]
     pub fn add_counter(counter: Counter, value: u32) {
-        if !HOT_RECORDING.with(Cell::get) {
+        if !HOT_RECORDING.load(Relaxed) {
             return;
         }
-        let owner = OWNER.with(Cell::get) as usize;
-        HOT_COUNTS.with(|counts| {
-            let cell = &counts[0][counter as usize];
-            cell.set(cell.get() + value);
-            let seen = &counts[0][COUNTER_NAMES.len()];
-            seen.set(seen.get() | (1 << counter as u8));
-            if owner != 0 {
-                let cell = &counts[owner][counter as usize];
-                cell.set(cell.get() + value);
-                let seen = &counts[owner][COUNTER_NAMES.len()];
-                seen.set(seen.get() | (1 << counter as u8));
-            }
-        });
+        let owner = OWNER.load(Relaxed) as usize;
+        let cell = &HOT_COUNTS[0][counter as usize];
+        cell.store(cell.load(Relaxed) + value, Relaxed);
+        let seen = &HOT_COUNTS[0][COUNTER_NAMES.len()];
+        seen.store(seen.load(Relaxed) | (1 << counter as u8), Relaxed);
+        if owner != 0 {
+            let cell = &HOT_COUNTS[owner][counter as usize];
+            cell.store(cell.load(Relaxed) + value, Relaxed);
+            let seen = &HOT_COUNTS[owner][COUNTER_NAMES.len()];
+            seen.store(seen.load(Relaxed) | (1 << counter as u8), Relaxed);
+        }
     }
     fn reset_hot_counts() {
-        HOT_COUNTS.with(|counts| {
-            for row in counts {
-                for cell in row {
-                    cell.set(0);
-                }
+        for row in &HOT_COUNTS {
+            for cell in row {
+                cell.store(0, Relaxed);
             }
-        });
+        }
         set_owner(Owner::None);
     }
 
@@ -655,7 +653,7 @@ mod vita {
     }
     pub fn begin_frame(map: &str) {
         reset_hot_counts();
-        HOT_RECORDING.with(|cell| cell.set(enabled()));
+        HOT_RECORDING.store(enabled(), Relaxed);
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             let next_mode = if s.poll_frames % 60 == 0 {
@@ -708,7 +706,7 @@ mod vita {
         });
     }
     pub fn end_frame(map: &str, gameplay: bool) -> bool {
-        HOT_RECORDING.with(|cell| cell.set(false));
+        HOT_RECORDING.store(false, Relaxed);
         STATE.with(|s| {
             let mut s = s.borrow_mut(); s.recording = false;
             if !enabled() || s.map != map || !gameplay {
@@ -736,18 +734,18 @@ mod vita {
                     v.frame_calls.push(*calls.get(label).unwrap_or(&0.));
                 }
             }
-            HOT_COUNTS.with(|counts| {
-                for (owner, row) in OWNER_NAMES.iter().zip(counts) {
-                    let seen = row[COUNTER_NAMES.len()].get();
-                    for (index, (name, cell)) in COUNTER_NAMES.iter().zip(row).enumerate() {
-                        let value = cell.get() as u64;
-                        // Preserve zero-valued counters as well as late-series backfill.
-                        if seen & (1 << index) != 0 {
-                            *s.pending_counts.entry((owner, name)).or_default() += value;
-                        }
+            for (owner, row) in OWNER_NAMES.iter().zip(&HOT_COUNTS) {
+                let seen = row[COUNTER_NAMES.len()].load(Relaxed);
+                row[COUNTER_NAMES.len()].store(0, Relaxed);
+                for (index, (name, cell)) in COUNTER_NAMES.iter().zip(row).enumerate() {
+                    let value = cell.load(Relaxed) as u64;
+                    cell.store(0, Relaxed);
+                    // Preserve zero-valued counters as well as late-series backfill.
+                    if seen & (1 << index) != 0 {
+                        *s.pending_counts.entry((owner, name)).or_default() += value;
                     }
                 }
-            });
+            }
             let pending_counts = std::mem::take(&mut s.pending_counts);
             let previous = s.frames.min(10000);
             for (name, value) in &pending_counts {
