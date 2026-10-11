@@ -83,6 +83,8 @@ struct Layer {
     lit: bool,
 }
 struct Batch {
+    #[cfg(target_os = "vita")]
+    static_offset: Option<Vec3>,
     face_side: crate::materials::FaceSide,
     motion: Option<crate::sky_sequence::Motion>,
     full_indices: Vec<u16>,
@@ -508,10 +510,15 @@ fn draw_batch(
     context.stats.batches += 1;
     let (min, max) = transform_bounds(batch.bounds.0, batch.bounds.1, transform, offset);
     let can_cull = (context.enabled || context.required_pvs)
-        && !batch.deforms.iter().any(crate::materials::Deform::moves_vertices)
+        && !batch
+            .deforms
+            .iter()
+            .any(crate::materials::Deform::moves_vertices)
         && batch.motion.is_none();
     if can_cull && context.enabled && outside_bounds(min, max) {
         context.stats.culled += 1;
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::record_culled();
         return;
     }
     batch.mesh.indices.clear();
@@ -538,12 +545,16 @@ fn draw_batch(
             && !context.visibility.bounds(context.cluster, min, max)
         {
             context.stats.culled += 1;
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::record_culled();
             return;
         }
         batch.mesh.indices.extend_from_slice(&batch.full_indices);
     }
     if batch.mesh.indices.is_empty() {
         context.stats.culled += 1;
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::record_culled();
         return;
     }
     if can_cull && context.enabled && !backdrop && batch.parts.is_empty() {
@@ -560,21 +571,40 @@ fn draw_batch(
         }
     }
     context.stats.triangles += batch.mesh.indices.len() / 3 * batch.layers.len();
-    for (j, (v, base)) in batch.mesh.vertices.iter_mut().zip(&batch.base).enumerate() {
-        // Billboards use source UV corners to build geometry. Animated layer
-        // UVs from the previous frame must not move or rotate those corners.
-        v.uv = base.uv;
-        let mut p = batch
-            .animation
-            .as_ref()
-            .map_or(base.position, |animation| animation.position(j, time));
-        for deform in &batch.deforms {
-            p = deform.position(p, batch.normals[j], base.uv, time);
+    #[cfg(target_os = "vita")]
+    let static_batch = batch.animation.is_none()
+        && batch.deforms.is_empty()
+        && batch.motion.is_none()
+        && transform.is_none();
+    #[cfg(target_os = "vita")]
+    let retransform = !(crate::frame_profile::mode().skip_static_prep()
+        && static_batch
+        && batch.static_offset == Some(offset));
+    #[cfg(not(target_os = "vita"))]
+    let retransform = true;
+    #[cfg(target_os = "vita")]
+    let prep_profile = crate::frame_profile::world_span("world_prep", static_batch);
+    if retransform {
+        for (j, (v, base)) in batch.mesh.vertices.iter_mut().zip(&batch.base).enumerate() {
+            // Billboards use source UV corners to build geometry. Animated layer
+            // UVs from the previous frame must not move or rotate those corners.
+            v.uv = base.uv;
+            let mut p = batch
+                .animation
+                .as_ref()
+                .map_or(base.position, |animation| animation.position(j, time));
+            for deform in &batch.deforms {
+                p = deform.position(p, batch.normals[j], base.uv, time);
+            }
+            if let Some(motion) = &batch.motion {
+                p = motion.point(p, time);
+            }
+            v.position = transform.map_or(p, |(_, o, r)| *o + *r * p) + offset;
         }
-        if let Some(motion) = &batch.motion {
-            p = motion.point(p, time);
-        }
-        v.position = transform.map_or(p, |(_, o, r)| *o + *r * p) + offset;
+    }
+    #[cfg(target_os = "vita")]
+    {
+        batch.static_offset = if static_batch { Some(offset) } else { None };
     }
     if let Some(locked) = batch.deforms.iter().find_map(|d| {
         if let crate::materials::Deform::Sprite(lock) = d {
@@ -636,18 +666,25 @@ fn draw_batch(
         triangles.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
         batch.mesh.indices = triangles.into_iter().flatten().collect();
     }
+    #[cfg(target_os = "vita")]
+    drop(prep_profile);
+    #[cfg(target_os = "vita")]
+    if batch.mesh.indices.is_empty() {
+        crate::frame_profile::record_culled();
+    } else {
+        crate::frame_profile::record_batch(static_batch, retransform);
+    }
     let mut queued = Vec::new();
     for layer in &batch.layers {
         let material = &materials[layer.material];
+        #[cfg(target_os = "vita")]
+        let layer_prep = crate::frame_profile::world_span("world_prep", static_batch);
         for (j, (v, base)) in batch.mesh.vertices.iter_mut().zip(&batch.base).enumerate() {
             let mut n = batch.normals[j];
             for deform in &batch.deforms {
                 n = deform.normal(base.position, n, time);
             }
-            let n = batch
-                .motion
-                .as_ref()
-                .map_or(n, |m| m.normal(n, time));
+            let n = batch.motion.as_ref().map_or(n, |m| m.normal(n, time));
             let normal = transform.map_or(n, |(_, _, r)| *r * n);
             let uv = if batch.sky && !batch.portal {
                 let ray = (v.position - camera).normalize_or_zero();
@@ -666,6 +703,10 @@ fn draw_batch(
                 )) as u8;
         }
         batch.mesh.texture = Some(layer.textures[layer.spec.frame(time)].clone());
+        #[cfg(target_os = "vita")]
+        drop(layer_prep);
+        #[cfg(target_os = "vita")]
+        let _submit = crate::frame_profile::world_span("world_submit", static_batch);
         if crate::render_fx::active() && batch.transparent() && !backdrop && !batch.sky {
             if let Ok(mut pass) = crate::render_fx::pass(
                 selected_mesh(
@@ -677,6 +718,10 @@ fn draw_batch(
                 layer.lit,
                 Default::default(),
             ) {
+                #[cfg(target_os = "vita")]
+                {
+                    pass.world_static = Some(static_batch);
+                }
                 pass.material = material.clone();
                 queued.push(pass);
             }
@@ -737,12 +782,31 @@ fn draw_batch(
         );
         gl_use_material(material);
         if batch.mesh.indices.len() < batch.full_indices.len() {
-            draw_mesh(&selected_mesh(&batch.mesh, true));
+            let mesh = selected_mesh(&batch.mesh, true);
+            #[cfg(target_os = "vita")]
+            if !mesh.indices.is_empty() {
+                crate::frame_profile::record_layer(
+                    mesh.indices.len() / 3,
+                    mesh.vertices.len(),
+                    static_batch,
+                );
+            }
+            draw_mesh(&mesh);
         } else {
+            #[cfg(target_os = "vita")]
+            if !batch.mesh.indices.is_empty() {
+                crate::frame_profile::record_layer(
+                    batch.mesh.indices.len() / 3,
+                    batch.mesh.vertices.len(),
+                    static_batch,
+                );
+            }
             draw_mesh(&batch.mesh);
         }
     }
     if !queued.is_empty() {
+        #[cfg(target_os = "vita")]
+        let _submit = crate::frame_profile::world_span("world_submit", static_batch);
         crate::render_fx::submit(queued, true);
     }
 }
@@ -956,7 +1020,11 @@ impl Scene {
         // Extra sampler bindings are read when Macroquad flushes, unlike copied
         // per-draw uniforms. Finish an older scene before changing shared samplers.
         unsafe {
-            get_internal_gl().flush();
+            {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            }
         }
         for material in &self.bound_materials {
             material.set_texture("LightAtlas", self.atlas.clone());
@@ -990,6 +1058,10 @@ impl Scene {
         transforms: &[(usize, Vec3, Quat)],
         particles: &crate::particles::Steam,
     ) {
+        #[cfg(target_os = "vita")]
+        if crate::frame_profile::mode().no_world() { return; }
+        #[cfg(target_os = "vita")]
+        let _profile = crate::frame_profile::span("world_draw");
         self.bind_atlas();
         let cluster = self.map.visibility.cluster(camera, &self.map.planes);
         let mut context = DrawContext {
@@ -1202,6 +1274,8 @@ impl Scene {
                     }
                     let i = batches.len();
                     batches.push(Batch {
+                        #[cfg(target_os = "vita")]
+                        static_offset: None,
                         face_side: crate::materials::FaceSide::Both,
                         motion: None,
                         full_indices: Vec::new(),
@@ -1281,6 +1355,8 @@ impl Scene {
             let vertices = shape.vertices(rope.origin, Quat::IDENTITY);
             let count = vertices.len();
             batches.push(Batch {
+                #[cfg(target_os = "vita")]
+                static_offset: None,
                 face_side: crate::materials::FaceSide::Both,
                 motion: None,
                 full_indices: Vec::new(),
@@ -1362,6 +1438,8 @@ impl Scene {
                     *n = n.normalize_or_zero();
                 }
                 let batch = Batch {
+                    #[cfg(target_os = "vita")]
+                    static_offset: None,
                     face_side: if placement.sky {
                         spec.map_or(crate::materials::FaceSide::Front, |s| s.face_side)
                     } else {
@@ -1540,6 +1618,11 @@ impl Scene {
         transparent: bool,
         transforms: &[(usize, Vec3, Quat)],
     ) {
+        #[cfg(target_os = "vita")]
+        if crate::frame_profile::mode().no_world() {
+            self.stats = DrawStats::default();
+            return;
+        }
         let _profile = crate::frame_profile::span("world_draw");
         self.bind_atlas();
         if !transparent {
@@ -1712,7 +1795,11 @@ impl Scene {
 /// without supplying an equivalent read-only depth attachment.
 pub fn depth_read_only(draw: impl FnOnce()) {
     unsafe {
-        get_internal_gl().flush();
+        {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            }
         macroquad::miniquad::gl::glDepthMask(0);
     }
     struct Restore;
@@ -1726,7 +1813,11 @@ pub fn depth_read_only(draw: impl FnOnce()) {
     let _restore = Restore;
     draw();
     unsafe {
-        get_internal_gl().flush();
+        {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            }
     }
 }
 
@@ -1743,7 +1834,11 @@ pub fn depth_pipeline(color_blend: Option<BlendState>) -> PipelineParams {
 /// first-person toy its own depth layer, then draw only the 2-D HUD afterwards.
 pub fn clear_view_depth() {
     unsafe {
-        get_internal_gl().flush();
+        {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            }
         macroquad::miniquad::gl::glDepthMask(1);
         macroquad::miniquad::gl::glClear(macroquad::miniquad::gl::GL_DEPTH_BUFFER_BIT);
     }
@@ -1782,6 +1877,8 @@ pub async fn check_layers(scene: &Scene) -> Result<()> {
         })
         .collect::<Vec<_>>();
         let mut b = Batch {
+            #[cfg(target_os = "vita")]
+            static_offset: None,
             face_side: crate::materials::FaceSide::Both,
             motion: None,
             full_indices: vec![0, 1, 2, 0, 2, 3],

@@ -216,7 +216,11 @@ impl Frame {
             return;
         }
         unsafe {
-            get_internal_gl().flush();
+            {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            }
         }
         if self
             .texture

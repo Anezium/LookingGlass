@@ -1401,7 +1401,11 @@ impl SkinMaterial {
             // Macroquad writes queued uniforms back into the shared pipeline.
             // Flush before resetting, including when no later actor is drawn.
             unsafe {
+                {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
                 get_internal_gl().flush();
+            }
             }
             self.bind();
         }
@@ -1927,6 +1931,8 @@ fn draw_skin_deformed(
         let Some(mesh) = mesh else {
             continue;
         };
+        #[cfg(target_os = "vita")]
+        let skin_profile = crate::frame_profile::span("skinning");
         for (src, dst) in surface.vertices.iter().zip(&mut mesh.vertices) {
             let position = if bone_scales.is_empty() { src.position(pose) } else {
                 src.weights.iter().map(|w| pose[w.bone].point(w.offset * bone_scales[w.bone]) * w.amount).sum()
@@ -1956,6 +1962,8 @@ fn draw_skin_deformed(
                 (alpha.clamp(0., 1.) * 255.) as u8,
             ];
         }
+        #[cfg(target_os = "vita")]
+        drop(skin_profile);
         crate::render_fx::skin(mesh);
     }
 }

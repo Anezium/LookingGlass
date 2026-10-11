@@ -348,7 +348,11 @@ impl Scene {
         Ok(())
     }
     pub(crate) fn check_reflection_pixels(&self) -> Result<()> {
-        unsafe { get_internal_gl().flush(); }
+        unsafe { {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            } }
         let mirrors: Vec<_> = self.camera_portals.iter().filter(|p| p.mirror && p.ready).collect();
         ensure!(!mirrors.is_empty(), "Visible mirror was not prepared");
         for p in mirrors {

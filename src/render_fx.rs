@@ -21,6 +21,10 @@ pub struct Appearance {
     pub power: f32,
 }
 pub struct Pass {
+    #[cfg(target_os = "vita")]
+    pub world_static: Option<bool>,
+    #[cfg(target_os = "vita")]
+    world_geometry_counted: bool,
     pub mesh: Mesh,
     pub material: Rc<Material>,
     pub lit: bool,
@@ -96,7 +100,11 @@ pub fn appearance(a: Appearance) {
 }
 pub fn begin(camera: Vec3, direction: Vec3, time: f32, atmosphere: &Atmosphere, fullbright: bool) {
     unsafe {
-        get_internal_gl().flush();
+        {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            }
     }
     FRAME.with(|f| {
         *f.borrow_mut() = Frame {
@@ -139,6 +147,8 @@ fn outside(points: [Vec4; 3]) -> bool {
     (0..3).any(|axis| points.iter().all(|p| p[axis] < -p.w) || points.iter().all(|p| p[axis] > p.w))
 }
 fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
+    #[cfg(target_os = "vita")]
+    let _world_submit = p.world_static.map(|static_batch| crate::frame_profile::world_span("world_submit", static_batch));
     FRAME.with(|f| {
         let f = f.borrow();
         let m = &p.material;
@@ -173,9 +183,19 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
             for chunk in indices.chunks(65532) {
                 let vertices: Vec<_> = chunk.iter().map(|&i| p.mesh.vertices[i as usize]).collect();
                 let compact: Vec<u16> = (0..vertices.len() as u16).collect();
+                #[cfg(target_os = "vita")]
+                if let Some(static_batch) = p.world_static {
+                    crate::frame_profile::record_layer(compact.len()/3, vertices.len(), static_batch);
+                }
                 gl.quad_gl.geometry(&vertices, &compact);
             }
         } else {
+            #[cfg(target_os = "vita")]
+            if !p.world_geometry_counted && !p.mesh.indices.is_empty() {
+                if let Some(static_batch) = p.world_static {
+                    crate::frame_profile::record_layer(p.mesh.indices.len()/3, p.mesh.vertices.len(), static_batch);
+                }
+            }
             draw_mesh(&p.mesh);
         }
     });
@@ -219,6 +239,8 @@ pub fn finish() -> (usize, usize) {
     });
     // Sorting triangles rather than whole objects fixes effects on opposite sides
     // of one water surface. All layers of a triangle stay in authored order.
+    #[cfg(target_os = "vita")]
+    let transparent_profile = crate::frame_profile::span("transparent_sort");
     let mut order = Vec::new();
     for (g, group) in groups.iter().enumerate() {
         let mesh = &group.passes[0].mesh;
@@ -257,7 +279,13 @@ pub fn finish() -> (usize, usize) {
                     end += 1;
                 }
                 let mut vertices = Vec::with_capacity((end - start) * 3);
+                #[cfg(target_os = "vita")]
+                let mut world_triangles = [0_usize; 2];
                 for &(_, g, t) in &order[start..end] {
+                    #[cfg(target_os = "vita")]
+                    if let Some(static_batch) = groups[g].passes[0].world_static {
+                        world_triangles[usize::from(!static_batch)] += 1;
+                    }
                     let mesh = &groups[g].passes[0].mesh;
                     vertices.extend(
                         mesh.indices[t * 3..t * 3 + 3]
@@ -266,8 +294,21 @@ pub fn finish() -> (usize, usize) {
                     );
                 }
                 let indices = (0..vertices.len() as u16).collect();
+                #[cfg(target_os = "vita")]
+                let has_world = world_triangles.iter().sum::<usize>() > 0;
+                #[cfg(target_os = "vita")]
+                if has_world {
+                    for (kind, triangles) in world_triangles.into_iter().enumerate() {
+                        crate::frame_profile::record_geometry(triangles, triangles*3, kind == 0);
+                    }
+                    crate::frame_profile::record_world_submission();
+                }
                 draw_pass(
                     &Pass {
+                        #[cfg(target_os = "vita")]
+                        world_static: has_world.then_some(world_triangles[1] == 0),
+                        #[cfg(target_os = "vita")]
+                        world_geometry_counted: true,
                         cutout_reference: p.cutout_reference,
                         mesh: Mesh {
                             vertices,
@@ -302,8 +343,14 @@ pub fn finish() -> (usize, usize) {
             start = end;
         }
     });
+    #[cfg(target_os = "vita")]
+    drop(transparent_profile);
     unsafe {
-        get_internal_gl().flush();
+        {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            }
     }
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
@@ -346,6 +393,10 @@ fn pass_at(
             .map_or(1., |w| w.sample(clock))
             .clamp(0., 2.);
     Ok(Pass {
+        #[cfg(target_os = "vita")]
+        world_static: None,
+        #[cfg(target_os = "vita")]
+        world_geometry_counted: false,
         mesh,
         material: crate::render::world_material(
             crate::render::blend_index(stage.blend)
@@ -1009,7 +1060,11 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 let (_, dropped) = if mode != "legacy" { finish() } else { (0, 0) };
                 ensure!(dropped == 0, "Queue budget exceeded in {name}");
                 unsafe {
-                    get_internal_gl().flush();
+                    {
+                #[cfg(target_os = "vita")]
+                let _flush_profile = crate::frame_profile::span("gl_flush");
+                get_internal_gl().flush();
+            }
                     macroquad::miniquad::gl::glFinish();
                 }
                 if i > 1 {

@@ -2908,7 +2908,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         lights.extend(alice.lights());
         lights.extend(npcs.lights());
         for slot in &interactions.levels { lights.extend(slot.ctl.lights()); }
-        scene.prepare_camera_portals(&world_camera, environment_clock, fullbright, &transforms);
+        #[cfg(target_os = "vita")]
+        let draw_world = !crate::frame_profile::mode().no_world();
+        #[cfg(not(target_os = "vita"))]
+        let draw_world = true;
+        if draw_world {
+            scene.prepare_camera_portals(&world_camera, environment_clock, fullbright, &transforms);
+        }
         crate::lighting::select(lights, camera, &scene.world);
         crate::render_fx::begin_view(
             &world_camera,
@@ -2917,7 +2923,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             fullbright,
         );
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
-        if show_alice && stats.invisible <= 0. {
+        if draw_world && show_alice && stats.invisible <= 0. {
             crate::lighting::shadow(&scene.world, player.feet, 22.);
         }
         alice.atmosphere(&scene.atmosphere, camera);
@@ -2932,14 +2938,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         );
         level_art.story_pose(&story);
         level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
-        power_art.draw(
-            &pickups,
-            &stats,
-            &save::visit_key(&maps[current], entry_spawn.as_deref()),
-            &scene.atmosphere,
-            camera,
-            pickup_clock,
-        );
+        if draw_world {
+            power_art.draw(
+                &pickups,
+                &stats,
+                &save::visit_key(&maps[current], entry_spawn.as_deref()),
+                &scene.atmosphere,
+                camera,
+                pickup_clock,
+            );
+        }
         {
             scene.draw_with_particles(
                 camera,
@@ -2992,7 +3000,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             );
             hud.draw_pickups(&pickups, &stats, camera, pickup_clock);
         }
-        crate::lighting::flares(camera, (target - camera).normalize_or_zero());
+        if draw_world {
+            crate::lighting::flares(camera, (target - camera).normalize_or_zero());
+        }
         crate::render_fx::finish();
         if !third_person
             && !pand_cinematic
@@ -3006,7 +3016,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if saves_enabled {
             #[cfg(target_os = "vita")]
-            if last_save_frame.is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(2)) {
+            if !crate::frame_profile::mode().throttle_preview()
+                || last_save_frame.is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(2)) {
                 last_save_frame = Some(std::time::Instant::now());
                 let _profile = crate::frame_profile::span("save_preview");
                 save_frame.update();
