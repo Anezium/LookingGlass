@@ -1055,6 +1055,9 @@ impl Interactions {
         player: &mut Player,
     ) -> Result<()> {
         let _profile = crate::frame_profile::span("movers");
+        #[cfg(target_os = "vita")]
+        let _counter_owner =
+            crate::frame_profile::counter_owner(crate::frame_profile::Owner::Movers);
         if let Some(d) = &mut self.duchess {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_duchess");

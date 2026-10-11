@@ -1,5 +1,7 @@
 //! Bounded declarative emitters from local TIKI definitions. No client script VM.
 use crate::{assets::Assets, bsp::Bsp, collision::World, environment::Atmosphere, texture};
+#[cfg(target_os = "vita")]
+use crate::frame_profile::{add_counter, Counter};
 use anyhow::Result;
 use macroquad::{
     miniquad::{BlendFactor, BlendState, BlendValue, Equation, ShaderSource},
@@ -851,13 +853,16 @@ impl Steam {
     }
     pub fn update_clocks(&mut self, dt: f32, world_dt: f32, eye: Vec3, world: &World) {
         let _profile = crate::frame_profile::span("particles");
+        #[cfg(target_os = "vita")]
+        let _counter_owner =
+            crate::frame_profile::counter_owner(crate::frame_profile::Owner::Particles);
         if !dt.is_finite() || dt <= 0. {
             return;
         }
         let dt = dt.min(0.05);
         #[cfg(target_os = "vita")]
         let (before, mut sweeps, mut constrained, mut frozen, mut stationary, mut impacts) =
-            (self.puffs.len() as u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+            (self.puffs.len() as u32, 0u32, 0u32, 0u32, 0u32, 0u32);
         for p in &mut self.puffs {
             #[cfg(target_os = "vita")]
             let _integrate_profile = crate::frame_profile::span("particles_integrate");
@@ -894,11 +899,9 @@ impl Steam {
             drop(_integrate_profile);
             if self.emitters[p.emitter].spec.constrain.is_none() {
                 #[cfg(target_os = "vita")]
-                let _hotspot = crate::frame_profile::span("particles_sweep");
-                #[cfg(target_os = "vita")]
                 {
                     sweeps += 1;
-                    stationary += u64::from(p.position == next);
+                    stationary += u32::from(p.position == next);
                 }
                 if world.sweep(p.position, next, Vec3::ZERO).fraction < 1. {
                     p.age = p.life;
@@ -928,7 +931,7 @@ impl Steam {
             self.puffs.retain(|p| p.age < p.life);
         }
         #[cfg(target_os = "vita")]
-        let retained = self.puffs.len() as u64;
+        let retained = self.puffs.len() as u32;
         #[cfg(target_os = "vita")]
         let _emit_profile = crate::frame_profile::span("particles_emit");
 
@@ -988,17 +991,17 @@ impl Steam {
         #[cfg(target_os = "vita")]
         drop(_emit_profile);
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[
-            ("puffs_before", before),
-            ("puffs_after", self.puffs.len() as u64),
-            ("puffs_sweeps", sweeps),
-            ("puffs_constrained", constrained),
-            ("puffs_frozen", frozen),
-            ("puffs_stationary_sweeps", stationary),
-            ("puffs_impacts", impacts),
-            ("puffs_deaths", before - retained),
-            ("puffs_births", self.puffs.len() as u64 - retained),
-        ]);
+        {
+            add_counter(Counter::PuffsBefore, before);
+            add_counter(Counter::PuffsAfter, self.puffs.len() as u32);
+            add_counter(Counter::PuffsSweeps, sweeps);
+            add_counter(Counter::PuffsConstrained, constrained);
+            add_counter(Counter::PuffsFrozen, frozen);
+            add_counter(Counter::PuffsStationarySweeps, stationary);
+            add_counter(Counter::PuffsImpacts, impacts);
+            add_counter(Counter::PuffsDeaths, before - retained);
+            add_counter(Counter::PuffsBirths, self.puffs.len() as u32 - retained);
+        }
     }
     pub fn depths(&self, camera: Vec3, direction: Vec3) -> impl Iterator<Item = (usize, f32)> + '_ {
         self.puffs

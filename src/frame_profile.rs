@@ -78,15 +78,169 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 
 #[cfg(target_os = "vita")]
 pub use vita::{
-    begin_frame, bench_frames, counts, end_frame, flush_boundary, mode, record_batch, record_culled,
-    record_geometry, record_layer, record_lg_submission, record_model, record_world_submission,
-    report, startup_bench, world_span, Mode,
+    add_counter, begin_frame, bench_frames, counter_owner, counts, end_frame, flush_boundary, mode,
+    record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_model,
+    record_world_submission, report, set_owner, startup_bench, world_span, Counter, Mode, Owner,
+    PreviewThrottle,
 };
 
 #[cfg(target_os = "vita")]
 mod vita {
     use super::*;
     pub const PROFILE_DIR: &str = "ux0:data/alice/private/frame_profile";
+    use std::cell::Cell;
+
+    // Hot paths only touch fixed integer cells. Names and maps are used once
+    // per accepted frame, never per sweep/hull/puff.
+    #[derive(Clone, Copy)]
+    #[repr(u8)]
+    pub enum Counter {
+        SweepCalls,
+        SweepExceptCalls,
+        CameraSweepCalls,
+        SweepGeometryCalls,
+        LedgeTraceCalls,
+        ColliderTraceCalls,
+        DynamicCollidersTested,
+        StaticHullsTested,
+        StaticHullsClipped,
+        ColliderHullsTested,
+        ColliderHullsClipped,
+        SettledHullsClipped,
+        PuffsBefore,
+        PuffsAfter,
+        PuffsSweeps,
+        PuffsConstrained,
+        PuffsFrozen,
+        PuffsStationarySweeps,
+        PuffsImpacts,
+        PuffsDeaths,
+        PuffsBirths,
+    }
+    const COUNTER_NAMES: &[&str] = &[
+        "sweep_calls",
+        "sweep_except_calls",
+        "camera_sweep_calls",
+        "sweep_geometry_calls",
+        "ledge_trace_calls",
+        "collider_trace_calls",
+        "dynamic_colliders_tested",
+        "static_hulls_tested",
+        "static_hulls_clipped",
+        "collider_hulls_tested",
+        "collider_hulls_clipped",
+        "settled_hulls_clipped",
+        "puffs_before",
+        "puffs_after",
+        "puffs_sweeps",
+        "puffs_constrained",
+        "puffs_frozen",
+        "puffs_stationary_sweeps",
+        "puffs_impacts",
+        "puffs_deaths",
+        "puffs_births",
+    ];
+    #[derive(Clone, Copy)]
+    #[repr(u8)]
+    pub enum Owner {
+        None,
+        Movers,
+        Particles,
+        Movement,
+        Camera,
+        Scene,
+        Interactions,
+        Combat,
+        Alice,
+        InteractionSearch,
+        Hud,
+    }
+    const OWNER_NAMES: &[&str] = &[
+        "",
+        "movers",
+        "particles",
+        "frame_movement",
+        "frame_camera",
+        "frame_scene",
+        "frame_interactions",
+        "frame_combat",
+        "frame_alice",
+        "frame_interaction_search",
+        "frame_hud",
+    ];
+    thread_local! {
+        static HOT_RECORDING: Cell<bool> = const { Cell::new(false) };
+        static OWNER: Cell<u8> = const { Cell::new(0) };
+        static HOT_COUNTS: [[Cell<u32>; COUNTER_NAMES.len() + 1]; OWNER_NAMES.len()] = const {
+            [const { [const { Cell::new(0) }; COUNTER_NAMES.len() + 1] }; OWNER_NAMES.len()]
+        };
+    }
+    pub fn set_owner(owner: Owner) {
+        OWNER.with(|cell| cell.set(owner as u8));
+    }
+    pub struct CounterOwner(u8);
+    pub fn counter_owner(owner: Owner) -> CounterOwner {
+        CounterOwner(OWNER.with(|cell| cell.replace(owner as u8)))
+    }
+    impl Drop for CounterOwner {
+        fn drop(&mut self) {
+            OWNER.with(|cell| cell.set(self.0));
+        }
+    }
+    #[inline]
+    pub fn add_counter(counter: Counter, value: u32) {
+        if !HOT_RECORDING.with(Cell::get) {
+            return;
+        }
+        let owner = OWNER.with(Cell::get) as usize;
+        HOT_COUNTS.with(|counts| {
+            let cell = &counts[0][counter as usize];
+            cell.set(cell.get() + value);
+            let seen = &counts[0][COUNTER_NAMES.len()];
+            seen.set(seen.get() | (1 << counter as u8));
+            if owner != 0 {
+                let cell = &counts[owner][counter as usize];
+                cell.set(cell.get() + value);
+                let seen = &counts[owner][COUNTER_NAMES.len()];
+                seen.set(seen.get() | (1 << counter as u8));
+            }
+        });
+    }
+    fn reset_hot_counts() {
+        HOT_COUNTS.with(|counts| {
+            for row in counts {
+                for cell in row {
+                    cell.set(0);
+                }
+            }
+        });
+        set_owner(Owner::None);
+    }
+
+    // Advance once per viewer frame, independently of wall-clock duration.
+    pub struct PreviewThrottle {
+        frames_since_capture: u32,
+    }
+    impl Default for PreviewThrottle {
+        fn default() -> Self {
+            Self {
+                frames_since_capture: 120,
+            }
+        }
+    }
+    impl PreviewThrottle {
+        pub fn advance_frame(&mut self) {
+            self.frames_since_capture = (self.frames_since_capture + 1).min(120);
+        }
+        pub fn capture(&mut self, mode: Mode) -> bool {
+            if mode.throttle_preview() && self.frames_since_capture < 120 {
+                return false;
+            }
+            self.frames_since_capture = 0;
+            true
+        }
+    }
+
     const MODE_FILE: &str = "ux0:data/alice/private/profile_mode";
     const LABELS: &[&str] = &[
         "frame_cpu",
@@ -500,6 +654,8 @@ mod vita {
         record_geometry(triangles, vertices, static_batch);
     }
     pub fn begin_frame(map: &str) {
+        reset_hot_counts();
+        HOT_RECORDING.with(|cell| cell.set(enabled()));
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             let next_mode = if s.poll_frames % 60 == 0 {
@@ -552,6 +708,7 @@ mod vita {
         });
     }
     pub fn end_frame(map: &str, gameplay: bool) -> bool {
+        HOT_RECORDING.with(|cell| cell.set(false));
         STATE.with(|s| {
             let mut s = s.borrow_mut(); s.recording = false;
             if !enabled() || s.map != map || !gameplay {
@@ -579,6 +736,18 @@ mod vita {
                     v.frame_calls.push(*calls.get(label).unwrap_or(&0.));
                 }
             }
+            HOT_COUNTS.with(|counts| {
+                for (owner, row) in OWNER_NAMES.iter().zip(counts) {
+                    let seen = row[COUNTER_NAMES.len()].get();
+                    for (index, (name, cell)) in COUNTER_NAMES.iter().zip(row).enumerate() {
+                        let value = cell.get() as u64;
+                        // Preserve zero-valued counters as well as late-series backfill.
+                        if seen & (1 << index) != 0 {
+                            *s.pending_counts.entry((owner, name)).or_default() += value;
+                        }
+                    }
+                }
+            });
             let pending_counts = std::mem::take(&mut s.pending_counts);
             let previous = s.frames.min(10000);
             for (name, value) in &pending_counts {

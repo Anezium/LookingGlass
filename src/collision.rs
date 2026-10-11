@@ -2,6 +2,8 @@
 //! No original executable or gameplay code is called by this module.
 pub mod model_shape;
 use crate::bsp::{Bsp, Plane};
+#[cfg(target_os = "vita")]
+use crate::frame_profile::{add_counter, Counter};
 use anyhow::{ensure, Result};
 #[cfg(test)]
 use macroquad::prelude::vec3;
@@ -354,7 +356,7 @@ impl Collider {
     }
     pub fn trace(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         #[cfg(target_os = "vita")]
-        let (mut tested, mut clipped) = (0u64, 0u64);
+        let (mut tested, mut clipped) = (0u32, 0u32);
         let mut out = Trace::default();
         let query = SweepBounds::new(start, end, half);
         if self.bounds.is_some_and(|b| query.overlaps(b)) {
@@ -373,11 +375,11 @@ impl Collider {
             }
         }
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[
-            ("collider_trace_calls", 1),
-            ("collider_hulls_tested", tested),
-            ("collider_hulls_clipped", clipped),
-        ]);
+        {
+            add_counter(Counter::ColliderTraceCalls, 1);
+            add_counter(Counter::ColliderHullsTested, tested);
+            add_counter(Counter::ColliderHullsClipped, clipped);
+        }
         out
     }
     pub fn touches(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
@@ -627,14 +629,18 @@ impl World {
     /// Trace a box centre from start to end. Zero extents give a point trace.
     pub fn sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[("sweep_calls", 1)]);
+        {
+            add_counter(Counter::SweepCalls, 1);
+        }
         self.sweep_except(start, end, half, None)
     }
     /// Damage traces may contact a destructible obstacle itself, but must still
     /// respect every other obstacle. Movement never supplies an exception.
     pub fn sweep_except(&self, start: Vec3, end: Vec3, half: Vec3, ignore: Option<usize>) -> Trace {
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[("sweep_except_calls", 1)]);
+        {
+            add_counter(Counter::SweepExceptCalls, 1);
+        }
         let mut result = self.sweep_geometry(start, end, half);
         for (id, collider) in &self.weapon_obstacles {
             if Some(*id) == ignore {
@@ -652,7 +658,9 @@ impl World {
     }
     pub fn camera_sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[("camera_sweep_calls", 1)]);
+        {
+            add_counter(Counter::CameraSweepCalls, 1);
+        }
         let mut result = self.sweep(start, end, half);
         for collider in &self.camera_obstacles {
             let trace = collider.trace(start, end, half);
@@ -680,10 +688,14 @@ impl World {
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[("sweep_geometry_calls", 1)]);
+        {
+            add_counter(Counter::SweepGeometryCalls, 1);
+        }
         let mut result = self.ledge_trace(start, end, half);
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[("dynamic_colliders_tested", self.dynamic.len() as u64)]);
+        {
+            add_counter(Counter::DynamicCollidersTested, self.dynamic.len() as u32);
+        }
         for collider in &self.dynamic {
             let t = collider.trace(start, end, half);
             result.start_solid |= t.start_solid;
@@ -698,9 +710,11 @@ impl World {
     /// Static support probes for hanging; moving/rotating entities are excluded.
     pub fn ledge_trace(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[("ledge_trace_calls", 1)]);
+        {
+            add_counter(Counter::LedgeTraceCalls, 1);
+        }
         #[cfg(target_os = "vita")]
-        let (mut tested, mut clipped, mut support_hulls) = (0u64, 0u64, 0u64);
+        let (mut tested, mut clipped, mut support_hulls) = (0u32, 0u32, 0u32);
         let query = SweepBounds::new(start, end, half);
         let mut result = Trace::default();
         if let Some(tree) = &self.tree {
@@ -729,11 +743,11 @@ impl World {
             }
         }
         #[cfg(target_os = "vita")]
-        crate::frame_profile::counts(&[
-            ("static_hulls_tested", tested),
-            ("static_hulls_clipped", clipped),
-            ("settled_hulls_clipped", support_hulls),
-        ]);
+        {
+            add_counter(Counter::StaticHullsTested, tested);
+            add_counter(Counter::StaticHullsClipped, clipped);
+            add_counter(Counter::SettledHullsClipped, support_hulls);
+        }
         result
     }
     /// Keep movers, doors and live weapon obstacles when using an actor collision mask.

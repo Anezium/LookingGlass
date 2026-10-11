@@ -763,7 +763,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut post_game = false;
     let mut save_frame = crate::save_preview::Frame::default();
     #[cfg(target_os = "vita")]
-    let mut last_save_frame: Option<std::time::Instant> = None;
+    let mut preview_throttle = crate::frame_profile::PreviewThrottle::default();
     #[cfg(target_os = "vita")]
     let mut bench_camera: Option<(Vec3, Vec3, bool)> = None;
     macro_rules! level_snapshot {
@@ -933,7 +933,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     retry.remember(game_snapshot!());
     loop {
         #[cfg(target_os = "vita")]
-        crate::frame_profile::begin_frame(&maps[current]);
+        {
+            crate::frame_profile::begin_frame(&maps[current]);
+            preview_throttle.advance_frame();
+        }
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
         #[cfg(target_os = "vita")]
         let mut viewer_block = crate::frame_profile::span("frame_input");
@@ -1929,6 +1932,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 {
                     drop(viewer_block);
                     viewer_block = crate::frame_profile::span("frame_interaction_search");
+                    crate::frame_profile::set_owner(crate::frame_profile::Owner::InteractionSearch);
                 }
                 let talk =
                     interactions.conversation(&scene.world, player.eye(), aim, &npcs, &story);
@@ -1957,6 +1961,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 {
                     drop(viewer_block);
                     viewer_block = crate::frame_profile::span("frame_interactions");
+                    crate::frame_profile::set_owner(crate::frame_profile::Owner::Interactions);
                 }
                 events.merge(interactions.update(
                     world_dt,
@@ -1984,6 +1989,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 {
                     drop(viewer_block);
                     viewer_block = crate::frame_profile::span("frame_movers");
+                    crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
                 }
                 let was_cinematic = interactions.scripted();
                 let mover_dt = if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt };
@@ -1994,6 +2000,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 {
                     drop(viewer_block);
                     viewer_block = crate::frame_profile::span("frame_movement");
+                    crate::frame_profile::set_owner(crate::frame_profile::Owner::Movement);
                 }
                 if was_cinematic && !interactions.scripted() {
                     yaw = player.script_facing;
@@ -2190,6 +2197,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_story");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         let story_active = !paused
             && !menu
@@ -2462,6 +2470,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_particles");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         if !paused && !menu && !inventory_menu && !console_input && focused && stats.alive() {
             environment_clock += world_dt;
@@ -2499,6 +2508,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_combat");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::Combat);
         }
         // Scene controllers may finish during movement, dialogue or boss updates.
         // Resolve the handoff once, after all three, before animation/aim/rendering.
@@ -2562,6 +2572,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_combat");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::Combat);
         }
         interactions.activate_enemies();
         let scripted_motion = interactions.scripted();
@@ -2682,6 +2693,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_alice");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::Alice);
         }
         let mut targets = if story.busy() {
             Vec::new()
@@ -2859,6 +2871,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_audio");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         for sound in weapon_sounds {
             audio.weapon_effect(sound);
@@ -2887,6 +2900,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_camera");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::Camera);
         }
         let mut pand_camera = interactions.camera_after(
             interactions
@@ -3033,6 +3047,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_audio_mix");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         audio.prepare(
             &mut assets,
@@ -3054,6 +3069,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_scene");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::Scene);
         }
         scene.atmosphere.liquid =
             crate::water::Liquid::from_contents(scene.world.liquid_at(camera)).tint();
@@ -3174,12 +3190,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_world");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_characters");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         if draw_world && show_alice && stats.invisible <= 0. {
             crate::lighting::shadow(&scene.world, player.feet, 22.);
@@ -3200,6 +3218,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_objects");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         if draw_world {
             power_art.draw(
@@ -3215,6 +3234,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_world_particles");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         {
             scene.draw_with_particles(
@@ -3229,6 +3249,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             {
                 drop(viewer_block);
                 viewer_block = crate::frame_profile::span("frame_effects");
+                crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             }
             if let Some(s) = &interactions.encounters {
                 s.draw_waves();
@@ -3281,6 +3302,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_first_person");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         if !third_person
             && !pand_cinematic
@@ -3296,12 +3318,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_capture");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         if saves_enabled {
             #[cfg(target_os = "vita")]
-            if !crate::frame_profile::mode().throttle_preview()
-                || last_save_frame.is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(2)) {
-                last_save_frame = Some(std::time::Instant::now());
+            if preview_throttle.capture(crate::frame_profile::mode()) {
                 let _profile = crate::frame_profile::span("save_preview");
                 save_frame.update();
             }
@@ -3312,6 +3333,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_hud");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
         set_default_camera();
         if active {
@@ -3628,6 +3650,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_save");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         if save_requested || autosave_requested {
             if !saves_writable {
