@@ -32,7 +32,7 @@ lto = "thin"
 
 [patch.crates-io]
 # Branch vita-input; Cargo allows only one of branch/tag/rev.
-miniquad = { git = "https://github.com/Anezium/miniquad", rev = "b09eb16664ba0e66e4c7374514a2e852f498f379" }
+miniquad = { git = "https://github.com/Anezium/miniquad", rev = "b3c0eecfa20ddbbfd40a502d7de742e5945d5d14" }
 
 [package.metadata.vita]
 title_id = "ALICELG01"
