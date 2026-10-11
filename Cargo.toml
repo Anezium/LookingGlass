@@ -31,8 +31,8 @@ opt-level = 1
 lto = "thin"
 
 [patch.crates-io]
-# Branch vita-dxt5; Cargo allows only one of branch/tag/rev.
-miniquad = { git = "https://github.com/Anezium/miniquad", rev = "6867af45ea7c62ad84f24641930a46a9e2066afb" }
+# Branch vita-compact-buffers; Cargo allows only one of branch/tag/rev.
+miniquad = { git = "https://github.com/Anezium/miniquad", rev = "881d71676a5fcc1f60e9f2d7c7cbad7983d6d10a" }
 
 [package.metadata.vita]
 title_id = "ALICELG01"
