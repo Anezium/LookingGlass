@@ -33,6 +33,22 @@ impl Convex {
             vertices.len() >= 4,
             "Inline collision brush has no closed volume"
         );
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[
+            ("collider_source_planes", source.len() as u64),
+            (
+                "collider_plane_triplets",
+                (source.len() as u64).saturating_sub(2)
+                    * (source.len() as u64).saturating_sub(1)
+                    * source.len() as u64
+                    / 6,
+            ),
+            ("collider_local_vertices", vertices.len() as u64),
+            (
+                "collider_vertex_pairs",
+                vertices.len() as u64 * (vertices.len() as u64).saturating_sub(1) / 2,
+            ),
+        ]);
         let mut edges = Vec::<Vec3>::new();
         for (i, a) in vertices.iter().enumerate() {
             for b in &vertices[i + 1..] {
@@ -47,13 +63,10 @@ impl Convex {
                     .count()
                     >= 2
                 {
-                    let edge = (*b - *a).normalize();
-                    if !edges
-                        .iter()
-                        .any(|e| e.distance_squared(edge).min(e.distance_squared(-edge)) < 1e-10)
-                    {
-                        edges.push(edge);
-                    }
+                    // Keep the unnormalized edge and its original order. The
+                    // legacy path normalizes/deduplicates after rotation; doing
+                    // that locally changes rounding at nearly parallel bevels.
+                    edges.push(*b - *a);
                 }
             }
         }
@@ -65,6 +78,16 @@ impl Convex {
         })
     }
     fn at(&self, origin: Vec3, rotation: Quat) -> Hull {
+        let mut edges = Vec::<Vec3>::new();
+        for delta in &self.edges {
+            let edge = (rotation * *delta).normalize();
+            if !edges
+                .iter()
+                .any(|e| e.distance_squared(edge).min(e.distance_squared(-edge)) < 1e-10)
+            {
+                edges.push(edge);
+            }
+        }
         let points = self
             .vertices
             .iter()
@@ -85,9 +108,9 @@ impl Convex {
             add_support(&mut planes, &points, axis);
             add_support(&mut planes, &points, -axis);
         }
-        for edge in &self.edges {
+        for edge in edges {
             for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
-                let n = (rotation * *edge).cross(axis);
+                let n = edge.cross(axis);
                 if n.length_squared() > 0.000001 {
                     add_support(&mut planes, &points, n.normalize());
                     add_support(&mut planes, &points, -n.normalize());
@@ -156,6 +179,8 @@ impl Template {
             .models
             .get(index)
             .ok_or_else(|| anyhow::anyhow!("Invalid moving model"))?;
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[("collider_local_builds", 1)]);
         let mut brushes = Vec::new();
         let mut patches = Vec::new();
         for i in model.brushes.clone() {
@@ -210,6 +235,15 @@ impl Template {
             }),
         }
     }
+    /// Place cached geometry immediately, with the exact union of hull bounds.
+    /// Unlike `at`, this keeps Collider::model's broad phase and profiles the
+    /// entire placement in the caller's construction span. Only world supports
+    /// and bevels are regenerated; local plane triplets/vertex pairs are cached.
+    pub fn at_eager(&self, origin: Vec3, rotation: Quat) -> Collider {
+        #[cfg(target_os = "vita")]
+        let _transform_profile = crate::frame_profile::span("collider_transform");
+        Collider::from_hulls(self.geometry.at(origin, rotation))
+    }
     pub fn at(&self, origin: Vec3, rotation: Quat) -> Collider {
         // Conservative transformed bounds reject distant contacts without building
         // thousands of patch hulls. The exact hulls are cached on the first query.
@@ -246,6 +280,257 @@ impl Template {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn brush_map() -> Bsp {
+        use crate::bsp::{MapBrush, Model, Shader};
+        let box_planes = |min, max| World::fixture(&[(min, max)]).hulls.remove(0).planes;
+        let shelf = box_planes(vec3(-80., -12., -5.), vec3(80., 12., 5.));
+        let mut chamfered = box_planes(Vec3::splat(-24.), Vec3::splat(24.));
+        for normal in [
+            vec3(1., 1., 0.),
+            vec3(-1., 1., 0.),
+            vec3(-1., -1., 0.),
+            vec3(1., -1., 0.),
+        ] {
+            chamfered.push(Plane {
+                normal: normal.normalize(),
+                distance: 32.,
+            });
+        }
+        let prism = vec![
+            Plane {
+                normal: -Vec3::Y,
+                distance: 20.,
+            },
+            Plane {
+                normal: vec3(1., 1., 0.).normalize(),
+                distance: 30.,
+            },
+            Plane {
+                normal: vec3(-1., 1., 0.).normalize(),
+                distance: 30.,
+            },
+            Plane {
+                normal: Vec3::Z,
+                distance: 8.,
+            },
+            Plane {
+                normal: -Vec3::Z,
+                distance: 8.,
+            },
+        ];
+        let oblique = box_planes(vec3(-35., -17., -9.), vec3(35., 17., 9.))
+            .into_iter()
+            .map(|p| Plane {
+                normal: Quat::from_rotation_x(0.37) * Quat::from_rotation_z(0.23) * p.normal,
+                ..p
+            })
+            .collect();
+        let mut map = crate::interaction::tests::fixture();
+        map.models.clear();
+        map.brushes.clear();
+        map.planes.clear();
+        map.side_planes.clear();
+        map.entities.clear();
+        map.shaders.extend([
+            Shader {
+                name: "nonsolid".into(),
+                flags: 0,
+                contents: 0,
+            },
+            Shader {
+                name: "playerclip".into(),
+                flags: 0,
+                contents: 0x10000,
+            },
+        ]);
+        for (i, source) in [shelf, chamfered, prism, oblique].into_iter().enumerate() {
+            let start = map.planes.len();
+            map.planes.extend(source);
+            let end = map.planes.len();
+            map.side_planes.extend(start..end);
+            map.brushes.push(MapBrush {
+                sides: start..end,
+                shader: if i == 2 { 2 } else { 0 },
+            });
+            map.models.push(Model {
+                min: Vec3::splat(-100.),
+                max: Vec3::splat(100.),
+                surfaces: 0..0,
+                brushes: i..i + 1,
+            });
+        }
+        // An invalid non-solid brush must be skipped by both solid-only paths.
+        map.brushes.push(MapBrush {
+            sides: 0..0,
+            shader: 1,
+        });
+        map.models.push(Model {
+            min: Vec3::splat(-100.),
+            max: Vec3::splat(100.),
+            surfaces: 0..0,
+            brushes: 0..5,
+        });
+        map.models.push(Model {
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+            surfaces: 0..0,
+            brushes: 4..5,
+        });
+        map
+    }
+    fn poses() -> Vec<(Vec3, Quat)> {
+        let mut poses = [0., 0.0001, 0.31, 1.2, 2.5, std::f32::consts::FRAC_PI_2]
+            .into_iter()
+            .map(|a| (vec3(400., -200., 50.), Quat::from_rotation_z(a)))
+            .collect::<Vec<_>>();
+        poses.extend([
+            (Vec3::ZERO, Quat::IDENTITY),
+            (
+                vec3(-4188., 6004., 32.03125),
+                Quat::from_euler(glam::EulerRot::ZYX, 0.73, -0.41, 1.13),
+            ),
+            (
+                vec3(-120., 210., -32.),
+                Quat::from_euler(glam::EulerRot::ZYX, -1.71, 0.85, -0.37),
+            ),
+        ]);
+        poses
+    }
+    // Independently recover the reference hull vertices from its world planes.
+    fn vertices(planes: &[Plane]) -> Vec<Vec3> {
+        let mut points = Vec::<Vec3>::new();
+        for (i, a) in planes.iter().enumerate() {
+            for (j, b) in planes.iter().enumerate().skip(i + 1) {
+                for c in &planes[j + 1..] {
+                    let det = a.normal.dot(b.normal.cross(c.normal));
+                    if det.abs() < 0.00001 {
+                        continue;
+                    }
+                    let p = (a.distance * b.normal.cross(c.normal)
+                        + b.distance * c.normal.cross(a.normal)
+                        + c.distance * a.normal.cross(b.normal))
+                        / det;
+                    if p.is_finite()
+                        && planes.iter().all(|a| a.normal.dot(p) <= a.distance + 0.01)
+                        && !points.iter().any(|a| a.distance_squared(p) < 0.0001)
+                    {
+                        points.push(p);
+                    }
+                }
+            }
+        }
+        points
+    }
+    fn near(a: Vec3, b: Vec3) {
+        assert!((a - b).abs().max_element() <= 1e-3, "{a:?} != {b:?}");
+    }
+    fn same_trace(a: Trace, b: Trace) {
+        assert_eq!(a.start_solid, b.start_solid);
+        assert_eq!(a.all_solid, b.all_solid);
+        assert!((a.fraction - b.fraction).abs() <= 1e-3, "{a:?} != {b:?}");
+        near(a.normal, b.normal);
+    }
+    #[test]
+    fn eager_brush_model_matches_legacy_planes_bounds_and_vertices() {
+        let map = brush_map();
+        for model in 0..map.models.len() {
+            let shape = Template::brush_model(&map, model).unwrap();
+            for (origin, rotation) in poses() {
+                let old = Collider::model(&map, model, origin, rotation, true).unwrap();
+                let new = shape.at_eager(origin, rotation);
+                assert!(new.lazy.is_none());
+                assert_eq!(old.bounds.is_some(), new.bounds.is_some());
+                if let (Some(a), Some(b)) = (old.bounds, new.bounds) {
+                    near(a.min, b.min);
+                    near(a.max, b.max);
+                }
+                assert_eq!(old.hulls().len(), new.hulls().len());
+                for (a, b) in old.hulls().iter().zip(new.hulls()) {
+                    near(a.bounds.min, b.bounds.min);
+                    near(a.bounds.max, b.bounds.max);
+                    assert_eq!(a.planes.len(), b.planes.len());
+                    for (p, q) in a.planes.iter().zip(&b.planes) {
+                        near(p.normal, q.normal);
+                        assert!((p.distance - q.distance).abs() <= 1e-3);
+                    }
+                    let a = vertices(&a.planes);
+                    let b = vertices(&b.planes);
+                    assert_eq!(a.len(), b.len());
+                    for (a, b) in a.into_iter().zip(b) {
+                        near(a, b);
+                    }
+                }
+                for brush in &shape.geometry.brushes {
+                    let reference = vertices(&brush.source);
+                    assert_eq!(reference.len(), brush.vertices.len());
+                    for (a, b) in reference.into_iter().zip(&brush.vertices) {
+                        near(origin + rotation * a, origin + rotation * *b);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn eager_brush_model_matches_legacy_sweeps_and_rider_contacts() {
+        let map = brush_map();
+        let mut hits = 0;
+        let mut solids = 0;
+        let mut riders = 0;
+        for model in 0..map.models.len() {
+            let shape = Template::brush_model(&map, model).unwrap();
+            for (origin, rotation) in poses() {
+                let old = Collider::model(&map, model, origin, rotation, true).unwrap();
+                let new = shape.at_eager(origin, rotation);
+                for half in [Vec3::ZERO, Vec3::ONE, PLAYER_HALF] {
+                    for x in -4..=4 {
+                        for y in -4..=4 {
+                            let offset = vec3(x as f32 * 25., y as f32 * 25., 0.);
+                            for delta in [
+                                Vec3::Z * 150.,
+                                Vec3::X * 150.,
+                                vec3(120., -90., 100.),
+                                Vec3::ZERO,
+                            ] {
+                                let start = origin + offset + delta;
+                                let end = origin + offset - delta;
+                                let a = old.trace(start, end, half);
+                                let b = new.trace(start, end, half);
+                                hits += usize::from(a.fraction < 1.);
+                                solids += usize::from(a.start_solid);
+                                same_trace(a, b);
+                                assert_eq!(
+                                    old.touches(start, end, half),
+                                    new.touches(start, end, half)
+                                );
+                            }
+                            let feet = origin + offset + Vec3::Z * 5.;
+                            let a = old.rider_feet(feet);
+                            let b = new.rider_feet(feet);
+                            assert_eq!(a.is_some(), b.is_some());
+                            if let (Some((a, n)), Some((b, m))) = (a, b) {
+                                riders += 1;
+                                near(a, b);
+                                near(n, m);
+                            }
+                        }
+                    }
+                }
+                let mut a = World::fixture(&[]);
+                let mut b = World::fixture(&[]);
+                a.set_dynamic(vec![old]);
+                b.set_dynamic(vec![new]);
+                for x in -4..=4 {
+                    let feet = origin + vec3(x as f32 * 25., 0., 80.);
+                    same_trace(
+                        a.body_trace(feet, feet - Vec3::Z * 160.),
+                        b.body_trace(feet, feet - Vec3::Z * 160.),
+                    );
+                    assert_eq!(a.body_clear(feet), b.body_clear(feet));
+                }
+            }
+        }
+        assert!(hits > 0 && solids > 0 && riders > 0);
+    }
     #[test]
     fn cached_convex_keeps_separating_planes_after_rotation() {
         let source = World::fixture(&[(vec3(-80., -12., -5.), vec3(80., 12., 5.))])

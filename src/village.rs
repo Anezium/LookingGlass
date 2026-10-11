@@ -8,7 +8,7 @@ pub fn check(assets: &mut crate::assets::Assets) -> Result<()> {
 }
 use crate::{
     bsp::Bsp,
-    collision::{Collider, World, PLAYER_CENTER, PLAYER_HALF},
+    collision::{model_shape::Template, Collider, World, PLAYER_CENTER, PLAYER_HALF},
     interaction::{vector, Events},
     movement::Player,
 };
@@ -52,6 +52,7 @@ struct Object {
     pose: Pose,
     time: f32,
     solid: bool,
+    shape: Template,
     collider: Collider,
 }
 pub struct Village {
@@ -321,7 +322,7 @@ impl Village {
                 .collect(),
         }
     }
-    pub fn restore(&mut self, s: &Snapshot, map: &Bsp) -> Result<()> {
+    pub fn restore(&mut self, s: &Snapshot, _map: &Bsp) -> Result<()> {
         anyhow::ensure!(
             self.objects.len() == s.objects.len() && (0.0..=1.).contains(&s.hatch_time),
             "Invalid saved village state"
@@ -333,7 +334,7 @@ impl Village {
             );
             o.pose = *pose;
             o.time = *time;
-            o.collider = Collider::model(map, o.model, pose.origin, pose.rotation(), true)?;
+            o.collider = o.shape.at_eager(pose.origin, pose.rotation());
         }
         self.cinema.restore(s.cinema.as_ref())?;
         self.hatch_open = s.hatch_open;
@@ -347,6 +348,8 @@ impl Village {
             let base = vector(&e["origin"]).context("Invalid village brush origin")?;
             let name = e["targetname"].clone();
             let pose = sample(&name, base, 0., 0.);
+            let shape = Template::brush_model(map, model)?;
+            let collider = shape.at_eager(pose.origin, pose.rotation());
             objects.push(Object {
                 solid: !name.starts_with("spinrod"),
                 name,
@@ -354,7 +357,8 @@ impl Village {
                 base,
                 pose,
                 time: 0.,
-                collider: Collider::model(map, model, pose.origin, pose.rotation(), true)?,
+                shape,
+                collider,
             });
         }
         #[cfg(target_os = "vita")]
@@ -425,7 +429,7 @@ impl Village {
     pub fn advance(
         &mut self,
         dt: f32,
-        map: &Bsp,
+        _map: &Bsp,
         world: &mut World,
         player: &mut Player,
         fixed: &[Collider],
@@ -498,7 +502,7 @@ impl Village {
                 let collider = {
                     #[cfg(target_os = "vita")]
                     let _hotspot = crate::frame_profile::span("village_collider_build");
-                    Collider::model(map, o.model, next.origin, next.rotation(), true)?
+                    o.shape.at_eager(next.origin, next.rotation())
                 };
                 let solid = o.solid && !(o.name == "openthis" && self.hatch_open);
                 #[cfg(target_os = "vita")]
