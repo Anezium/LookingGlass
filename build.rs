@@ -4,10 +4,10 @@ fn main() {
         // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.
         println!("cargo:rustc-link-arg=-Wl,--undefined=sceUserMainThreadStackSize");
         println!("cargo:rustc-link-arg=-Wl,--undefined=_newlib_heap_size_user");
-        // Simulation bench link: .eh_frame ends at 0x81b5f510. Reserve
-        // 10992 bytes before RW for SCE metadata (at least 3348 bytes).
+        // Hot-counter bench link: .eh_frame ends at 0x81b74e78. Reserve
+        // 8584 bytes before RW for SCE metadata (at least 3348 bytes).
         // Verify the final program headers after every code change.
-        println!("cargo:rustc-link-arg=-Wl,--section-start=.init_array=0x81b62000");
+        println!("cargo:rustc-link-arg=-Wl,--section-start=.init_array=0x81b77000");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // A level change loads the destination while the viewer and outgoing
