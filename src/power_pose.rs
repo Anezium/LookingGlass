@@ -295,7 +295,7 @@ impl Art {
                 .with_context(|| format!("Missing original skin {skin}"))?;
             let mut image = texture::decode(assets, &path)?;
             skin_pixels(name, &mut image);
-            let tex = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+            let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
             tex.set_filter(FilterMode::Linear);
             layers.push(crate::render_fx::register(assets, &tex, &[skin], specs)?);
             textures.insert(name, tex);

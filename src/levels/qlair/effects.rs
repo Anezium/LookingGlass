@@ -269,7 +269,7 @@ impl Art {
         ] {
             if let Some(path) = crate::texture::resolve(a, name, &materials) {
                 let image = crate::texture::decode(a, &path)?;
-                let texture = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+                let texture = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                 layers.push(crate::render_fx::register(
                     a,
                     &texture,

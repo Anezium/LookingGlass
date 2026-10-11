@@ -59,7 +59,7 @@ impl Art {
                     .context("Missing Meta Essence texture")?;
                 if !textures.contains_key(&path) {
                     let image = texture::decode(assets, &path)?;
-                    let tex = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+                    let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                     tex.set_filter(FilterMode::Linear);
                     textures.insert(path.clone(), tex);
                 }

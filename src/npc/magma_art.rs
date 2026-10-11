@@ -37,7 +37,7 @@ impl Skins {
                     let path = texture::resolve(assets, &shader, specs)
                         .with_context(|| format!("Magma skin {shader}"))?;
                     let image = texture::decode(assets, &path)?;
-                    let t = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+                    let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                     t.set_filter(FilterMode::Linear);
                     layers.push(crate::render_fx::register(
                         assets,

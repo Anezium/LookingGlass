@@ -272,7 +272,7 @@ pub async fn play(
     ensure!(matches!(name, "opening" | "ending"), "Unknown story movie");
     let mut video = Video::new(assets.read(&format!("video/{name}.roq"))?)?;
     video.next()?;
-    let texture = Texture2D::from_rgba8(video.width, video.height, video.pixels());
+    let texture = crate::texture::upload_rgba8(video.width, video.height, video.pixels());
     texture.set_filter(FilterMode::Linear);
     audio.update(0., Vec3::ZERO, 0., true, true);
     let soundtrack = audio.movie_sound(assets, &format!("video/{name}.mp3"))?;

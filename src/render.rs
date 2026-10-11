@@ -205,7 +205,7 @@ fn selected_mesh(mesh: &Mesh, compact: bool) -> Mesh {
     }
 }
 fn upload(image: texture::RgbaImage) -> Texture2D {
-    let t = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+    let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
     t.set_filter(FilterMode::Linear);
     // World UVs tile. Use the sampler's wrap instead of fract() in the shader:
     // fract introduces derivative discontinuities and incorrect mip levels.
@@ -1086,16 +1086,16 @@ impl Scene {
                 }
             }
         }
-        let atlas = Texture2D::from_rgba8((cols * 128) as u16, (rows * 128) as u16, &atlas);
+        let atlas = crate::texture::upload_rgba8((cols * 128) as u16, (rows * 128) as u16, &atlas);
         atlas.set_filter(FilterMode::Linear);
-        let fallback = Texture2D::from_rgba8(
+        let fallback = crate::texture::upload_rgba8(
             2,
             2,
             &[
                 120, 80, 135, 255, 65, 48, 80, 255, 65, 48, 80, 255, 120, 80, 135, 255,
             ],
         );
-        let white = Texture2D::from_rgba8(1, 1, &[255; 4]);
+        let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
         let mut models = vec![0usize];
         for e in &map.entities {
             if e.get("classname")
@@ -1500,7 +1500,7 @@ impl Scene {
             sky_motion: sky_motions.remove("skycamera01"),
             sky_props,
             sky_backdrop: (name == "fortress1")
-                .then(|| Texture2D::from_rgba8(1, 1, &[0, 0, 0, 255])),
+                .then(|| crate::texture::upload_rgba8(1, 1, &[0, 0, 0, 255])),
         })
     }
     pub fn update_ropes(
@@ -1802,7 +1802,7 @@ pub async fn check_layers(scene: &Scene) -> Result<()> {
                 texture: None,
             },
             layers: vec![Layer {
-                textures: vec![Texture2D::from_rgba8(1, 1, &rgba)],
+                textures: vec![crate::texture::upload_rgba8(1, 1, &rgba)],
                 spec: Stage {
                     blend: blend_mode,
                     alpha_test: test,
@@ -1942,7 +1942,7 @@ pub async fn check_layers(scene: &Scene) -> Result<()> {
     // The ordinary fog regression above must stay unchanged in other maps.
     // Fortress alone substitutes the sky at the fully fogged end of the ramp.
     clear_background(BLACK);
-    let sky = Texture2D::from_rgba8(1, 1, &[32, 96, 160, 255]);
+    let sky = crate::texture::upload_rgba8(1, 1, &[32, 96, 160, 255]);
     for m in &scene.materials {
         m.set_texture("SkyBackdrop", sky.clone());
         m.set_uniform("SkySize", Vec2::ONE);

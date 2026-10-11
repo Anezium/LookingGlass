@@ -200,7 +200,7 @@ fn load_texture(assets: &mut Assets, path: &str, additive: bool) -> Result<Textu
             }
         }
     }
-    let tex = Texture2D::from_rgba8(im.width, im.height, &im.pixels);
+    let tex = crate::texture::upload_rgba8(im.width, im.height, &im.pixels);
     tex.set_filter(FilterMode::Linear);
     Ok(tex)
 }

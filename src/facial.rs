@@ -206,7 +206,7 @@ impl Face {
                 .or_else(|| texture::resolve(assets, &skin, specs))
                 .context("Missing blink texture")?;
             let image = texture::decode(assets, &path)?;
-            let closed = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+            let closed = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
             closed.set_filter(FilterMode::Linear);
             Some(Blink {
                 surface: index,

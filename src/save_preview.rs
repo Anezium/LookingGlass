@@ -48,7 +48,8 @@ impl Preview {
     }
     pub fn texture(&self) -> Option<Texture2D> {
         let image = self.image().ok()?;
-        let texture = Texture2D::from_rgba8(image.width() as u16, image.height() as u16, &image);
+        let texture =
+            crate::texture::upload_rgba8(image.width() as u16, image.height() as u16, &image);
         texture.set_filter(FilterMode::Linear);
         Some(texture)
     }

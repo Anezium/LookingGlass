@@ -33,7 +33,7 @@ impl Art {
         let path =
             texture::resolve(assets, name, specs).context("Missing electrical hit material")?;
         let image = texture::decode(assets, &path)?;
-        let texture = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+        let texture = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
         texture.set_filter(FilterMode::Linear);
         let art = Rc::new(Self {
             _surface: render_fx::register(assets, &texture, &[name.into()], specs)?,

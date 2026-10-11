@@ -22,7 +22,7 @@ impl Art {
             let path = texture::resolve(a, name, specs)
                 .with_context(|| format!("Missing frozen shader {name}"))?;
             let im = texture::decode(a, &path)?;
-            let tex = Texture2D::from_rgba8(im.width, im.height, &im.pixels);
+            let tex = crate::texture::upload_rgba8(im.width, im.height, &im.pixels);
             tex.set_filter(FilterMode::Linear);
             surfaces.push(render_fx::register(a, &tex, &[name.into()], specs)?);
             textures.push(tex);

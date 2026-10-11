@@ -1422,7 +1422,7 @@ impl Model {
                 t.clone()
             } else {
                 let image = texture::decode(assets, &path)?;
-                let t = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+                let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                 t.set_filter(FilterMode::Linear);
                 textures.insert(path, t.clone());
                 t

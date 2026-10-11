@@ -175,7 +175,7 @@ impl BitmapFont {
 
 pub fn load_texture(assets: &mut Assets, path: &str) -> Result<Texture2D> {
     let im = texture::decode(assets, path)?;
-    let tex = Texture2D::from_rgba8(im.width, im.height, &im.pixels);
+    let tex = crate::texture::upload_rgba8(im.width, im.height, &im.pixels);
     tex.set_filter(FilterMode::Linear);
     Ok(tex)
 }

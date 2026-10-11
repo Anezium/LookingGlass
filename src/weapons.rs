@@ -881,7 +881,7 @@ impl Prop {
                 .or_else(|| texture::resolve(assets, skin, specs))
                 .with_context(|| format!("Weapon texture {skin}"))?;
             let image = texture::decode(assets, &path)?;
-            let tex = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+            let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
             tex.set_filter(FilterMode::Linear);
             material_layers.push(crate::render_fx::register(
                 assets,
@@ -1414,17 +1414,17 @@ impl Visuals {
                 pixels.extend_from_slice(&[255, 255, 255, ((1. - d).max(0.).powi(3) * 255.) as u8]);
             }
         }
-        let spark_texture = Texture2D::from_rgba8(32, 32, &pixels);
+        let spark_texture = crate::texture::upload_rgba8(32, 32, &pixels);
         spark_texture.set_filter(FilterMode::Linear);
         let path = texture::resolve(assets, "meta", &specs)
             .context("Missing Blade reappearance sprite")?;
         let image = texture::decode(assets, &path)?;
-        let return_texture = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+        let return_texture = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
         return_texture.set_filter(FilterMode::Linear);
         let swipe_name = "powerups/lightningswipe";
         let path = texture::resolve(assets, swipe_name, &specs).context("Missing Mallet swipe")?;
         let image = texture::decode(assets, &path)?;
-        let swipe_texture = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+        let swipe_texture = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
         swipe_texture.set_filter(FilterMode::Linear);
         let swipe_surface =
             crate::render_fx::register(assets, &swipe_texture, &[swipe_name.into()], &specs)?;

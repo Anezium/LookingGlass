@@ -34,7 +34,7 @@ impl Art {
         let path = crate::texture::resolve(a, "acid_splat_decal", &specs)
             .context("Missing acid impact material")?;
         let image = crate::texture::decode(a, &path)?;
-        let mark = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+        let mark = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
         Ok(Self {
             ui: crate::ui::Ui::load(a)?,
             actors,

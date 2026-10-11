@@ -621,7 +621,7 @@ impl Character {
                 tex.clone()
             } else {
                 let image = texture::decode(assets, &path)?;
-                let tex = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+                let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                 tex.set_filter(FilterMode::Linear);
                 textures.insert(path, tex.clone());
                 tex
@@ -1628,7 +1628,7 @@ pub async fn check_shared_material() -> Result<()> {
         ..Default::default()
     };
     set_camera(&camera);
-    let white = Texture2D::from_rgba8(1, 1, &[255; 4]);
+    let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
     let quad = |x: f32| Mesh {
         vertices: [
             vec3(x - 0.7, -1., 0.),

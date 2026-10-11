@@ -56,7 +56,7 @@ impl Art {
             let path = texture::resolve(a, name, specs)
                 .with_context(|| format!("Missing attack material {name}"))?;
             let image = texture::decode(a, &path)?;
-            let tex = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+            let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
             tex.set_filter(FilterMode::Linear);
             let surface = render_fx::register(a, &tex, &[name.into()], specs)?;
             layers.insert(name, (tex, surface));

@@ -743,7 +743,7 @@ impl Steam {
                         continue;
                     };
                     let image = texture::decode(assets, &path)?;
-                    let t = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+                    let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                     t.set_filter(FilterMode::Linear);
                     textures.push(t);
                 }
@@ -983,7 +983,7 @@ impl PickupBurst {
         let path = texture::resolve(assets, "supra_p", &specs)
             .ok_or_else(|| anyhow::anyhow!("Missing gnome disappearance sprite"))?;
         let image = texture::decode(assets, &path)?;
-        let texture = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+        let texture = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
         texture.set_filter(FilterMode::Linear);
         let material = BURST_MATERIAL.with(|cache| -> Result<std::rc::Rc<Material>> {
             if let Some(m) = cache.borrow().upgrade() {
@@ -1243,7 +1243,7 @@ impl Attached {
                     continue;
                 };
                 let image = texture::decode(assets, &path)?;
-                let t = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+                let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                 t.set_filter(FilterMode::Linear);
                 textures.push(t);
             }

@@ -491,14 +491,14 @@ pub fn register(
         let mut textures = Vec::new();
         for name in &stage.images {
             if name == "$whiteimage" || name == "*white" {
-                textures.push(Texture2D::from_rgba8(1, 1, &[255; 4]));
+                textures.push(crate::texture::upload_rgba8(1, 1, &[255; 4]));
                 continue;
             }
             let Some(path) = texture::resolve(assets, name, &BTreeMap::new()) else {
                 continue;
             };
             let image = texture::decode(assets, &path)?;
-            let tex = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+            let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
             tex.set_filter(FilterMode::Linear);
             // Model shaders tile too (notably the Queen's tentacle and base).
             // CPU UV modifiers may leave [0,1]; clamping samples one edge texel.
@@ -652,7 +652,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     use anyhow::ensure;
     std::fs::create_dir_all("private/render-fx")?;
     let mut scene = crate::render::Scene::load(assets, "skool1")?;
-    let white = Texture2D::from_rgba8(1, 1, &[255; 4]);
+    let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
     let quad = |z: f32, color: Color| Mesh {
         vertices: [
             vec3(-1., -1., z),
@@ -719,9 +719,9 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     }
     println!("PASS triangle-sorted water/actor/pickup/effect alpha ordering across three submission permutations");
     let mut blue = quad(0., WHITE);
-    blue.texture = Some(Texture2D::from_rgba8(1, 1, &[0, 0, 255, 255]));
+    blue.texture = Some(crate::texture::upload_rgba8(1, 1, &[0, 0, 255, 255]));
     let mut red = quad(1., WHITE);
-    red.texture = Some(Texture2D::from_rgba8(1, 1, &[255, 0, 0, 255]));
+    red.texture = Some(crate::texture::upload_rgba8(1, 1, &[255, 0, 0, 255]));
     for alpha in [0_f32, 0.12, 0.75, 1.] {
         clear_background(BLACK);
         set_camera(&camera);
@@ -747,7 +747,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         next_frame().await;
     }
     let layers = crate::materials::parse("ghost_fixture\n{\nsurfaceparm trans\n{\nmap $whiteimage\nblendfunc blend\nrgbgen const 1 0 0\n}\n{\nmap $whiteimage\nblendfunc filter\nrgbgen const .5 .5 .5\n}\n}")?;
-    let ghost_texture = Texture2D::from_rgba8(1, 1, &[255; 4]);
+    let ghost_texture = crate::texture::upload_rgba8(1, 1, &[255; 4]);
     let owner = register(assets, &ghost_texture, &["ghost_fixture".into()], &layers)?;
     let mut ghost = quad(1., WHITE);
     ghost.texture = Some(ghost_texture);
@@ -810,7 +810,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     drop(owner);
     next_frame().await;
     let mut translucent = quad(1., WHITE);
-    translucent.texture = Some(Texture2D::from_rgba8(1, 1, &[255, 0, 0, 64]));
+    translucent.texture = Some(crate::texture::upload_rgba8(1, 1, &[255, 0, 0, 64]));
     clear_background(BLACK);
     set_camera(&camera);
     begin(camera.position, -Vec3::Z, 0., &Atmosphere::default(), false);

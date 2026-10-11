@@ -98,7 +98,7 @@ pub fn load_art(assets: &mut Assets) -> Result<()> {
         for name in names {
             if let Some(path) = texture::resolve(assets, name, &specs) {
                 let image = texture::decode(assets, &path)?;
-                let t = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+                let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                 t.set_filter(FilterMode::Linear);
                 if slot {
                     FLARE.with(|s| *s.borrow_mut() = Some(t));

@@ -113,7 +113,7 @@ impl Art {
         let path = texture::resolve(a, "textures/special/swipe_jacks", specs)
             .context("Jacks swipe missing")?;
         let image = texture::decode(a, &path)?;
-        let swipe = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+        let swipe = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
         swipe.set_filter(FilterMode::Linear);
         let mut shell = vec![];
         for clip in ["idle", "up", "down"] {

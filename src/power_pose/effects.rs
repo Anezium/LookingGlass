@@ -28,7 +28,7 @@ impl Aura {
             &texture::resolve(assets, &spec.stages[0].images[0], specs)
                 .context("Missing Rage reflection image")?,
         )?;
-        let texture = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+        let texture = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
         texture.set_filter(FilterMode::Linear);
         unsafe {
             get_internal_gl().quad_context.texture_set_wrap(
@@ -113,7 +113,7 @@ impl Pickup {
                 }
                 stage.alpha_test = 0;
             }
-            let texture = Texture2D::from_rgba8(image.width, image.height, &image.pixels);
+            let texture = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
             texture.set_filter(FilterMode::Linear);
             unsafe {
                 get_internal_gl().quad_context.texture_set_wrap(
