@@ -186,6 +186,7 @@ fn app_main() {
         use macroquad::miniquad::native::vita::{set_config, InputConfig, LeftStickMode, VitaConfig};
         set_config(VitaConfig {
             compact_stream_buffers: true,
+            log_frame_time_every: Some(10),
             input: InputConfig {
                 left_stick: LeftStickMode::Mouse { speed: 8.0 },
                 cross_is_left_click: true,
