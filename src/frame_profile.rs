@@ -849,7 +849,7 @@ mod vita {
         if !enabled() {
             return Ok(());
         }
-        let (name, value) = STATE.with(|s| {
+        let (name, mut value) = STATE.with(|s| {
             let s=s.borrow();
             let spans=s.labels.iter().map(|(label,v)| {
                 (*label, serde_json::json!({"per_frame":stats(&v.frames),"exclusive_per_frame":stats(&v.exclusive),"calls_per_frame":stats(&v.frame_calls),"calls":v.calls,"per_invocation":stats(&v.invocations),"all_invocations_total_ms":v.invocation_total_ms,"frame_values_ms":v.frames,"exclusive_frame_values_ms":v.exclusive,"frame_calls":v.frame_calls}))
@@ -872,6 +872,8 @@ mod vita {
                 "spans":spans,"counters":counters,"model_rebuilds":model_rebuilds,"hierarchy_errors":s.hierarchy_errors,"profile_vector_capacity_bytes":storage_bytes,"world_counts":s.world,"windows":s.windows,
             }))
         });
+        #[cfg(feature = "vita_renderer")]
+        { value["vita_renderer"] = crate::render::vita_renderer::report(); }
         std::fs::create_dir_all(PROFILE_DIR)?;
         let path = std::path::Path::new(PROFILE_DIR).join(name);
         std::fs::write(&path, serde_json::to_vec_pretty(&value)?)?;

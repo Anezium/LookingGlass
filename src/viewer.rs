@@ -3202,6 +3202,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             ..Default::default()
         };
         set_camera(&world_camera);
+        #[cfg(feature = "vita_renderer")]
+        crate::render::vita_renderer::record_view(&world_camera);
+        #[cfg(feature = "vita_renderer")]
+        let world_only = crate::render::vita_renderer::world_only();
+        #[cfg(not(feature = "vita_renderer"))]
+        let world_only = false;
         let mut transforms = interactions.transforms();
         transforms.extend(scene.world.traversal.transforms(&player));
         let rope_hand = interactions
@@ -3271,12 +3277,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let _hotspot = crate::frame_profile::span("lights_select");
             crate::lighting::select(lights, camera, &scene.world);
         }
-        crate::render_fx::begin_view(
-            &world_camera,
-            environment_clock,
-            &scene.atmosphere,
-            fullbright,
-        );
+        if !world_only || !scene.retained_active() {
+            crate::render_fx::begin_view(
+                &world_camera, environment_clock, &scene.atmosphere, fullbright,
+            );
+        } else {
+            use macroquad::camera::Camera;
+            crate::render_fx::set_projection(world_camera.matrix());
+        }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3290,28 +3298,30 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_characters");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
-        if draw_world && show_alice && stats.invisible <= 0. {
-            crate::lighting::shadow(&scene.world, player.feet, 22.);
+        if !world_only {
+            if draw_world && show_alice && stats.invisible <= 0. {
+                crate::lighting::shadow(&scene.world, player.feet, 22.);
+            }
+            alice.atmosphere(&scene.atmosphere, camera);
+            if show_alice && !interactions.school.as_ref().is_some_and(|s| s.cinematic()) {
+                alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
+            }
+            npcs.draw(
+                camera,
+                (target - camera).normalize_or_zero(),
+                &scene.atmosphere,
+                fullbright,
+            );
+            level_art.story_pose(&story);
+            level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
         }
-        alice.atmosphere(&scene.atmosphere, camera);
-        if show_alice && !interactions.school.as_ref().is_some_and(|s| s.cinematic()) {
-            alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
-        }
-        npcs.draw(
-            camera,
-            (target - camera).normalize_or_zero(),
-            &scene.atmosphere,
-            fullbright,
-        );
-        level_art.story_pose(&story);
-        level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_objects");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
-        if draw_world {
+        if draw_world && !world_only {
             power_art.draw(
                 &pickups,
                 &stats,
@@ -3342,60 +3352,62 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 viewer_block = crate::frame_profile::span("frame_effects");
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             }
-            if let Some(s) = &interactions.encounters {
-                s.draw_waves();
-            }
-            if let Some(s) = &interactions.school2 {
-                for b in &s.boojums {
-                    b.draw_waves();
+            if !world_only {
+                if let Some(s) = &interactions.encounters {
+                    s.draw_waves();
                 }
+                if let Some(s) = &interactions.school2 {
+                    for b in &s.boojums {
+                        b.draw_waves();
+                    }
+                }
+                if let (Some(p), Some(art)) = (&interactions.pandemonium, &mut level_art.pandemonium) {
+                    art.draw_effects(p, camera, &scene.atmosphere);
+                }
+                if let (Some(d), Some(art)) = (&interactions.duchess, &mut level_art.duchess) {
+                    art.effects(d, camera, &scene.atmosphere);
+                }
+                level_art.effects(&interactions, camera, &scene.atmosphere);
+                alice.draw_effects(camera, fullbright, show_alice);
+                let can_aim = !interactions.level_blocks_weapons() && !flying
+                    && !pand_cinematic
+                    && scripted_camera.is_none()
+                    && !story.busy()
+                    && !menu
+                    && !inventory_menu
+                    && !console.open
+                    && stats.alive()
+                    && player.script_motion == 0
+                    && player.ledge.is_none()
+                    && !player.climbing();
+                aim_pointer.draw(
+                    &crate::combat::Context {
+                        world: &scene.world,
+                        targets: &targets,
+                    },
+                    crate::targeting::Sight {
+                        eye: player.eye(),
+                        direction,
+                        weapon: can_aim.then(|| stats.equipped()).flatten(),
+                    },
+                    if active { dt } else { 0. },
+                    camera,
+                    &scene.atmosphere,
+                );
+                hud.draw_pickups(&pickups, &stats, camera, pickup_clock);
             }
-            if let (Some(p), Some(art)) = (&interactions.pandemonium, &mut level_art.pandemonium) {
-                art.draw_effects(p, camera, &scene.atmosphere);
-            }
-            if let (Some(d), Some(art)) = (&interactions.duchess, &mut level_art.duchess) {
-                art.effects(d, camera, &scene.atmosphere);
-            }
-            level_art.effects(&interactions, camera, &scene.atmosphere);
-            alice.draw_effects(camera, fullbright, show_alice);
-            let can_aim = !interactions.level_blocks_weapons() && !flying
-                && !pand_cinematic
-                && scripted_camera.is_none()
-                && !story.busy()
-                && !menu
-                && !inventory_menu
-                && !console.open
-                && stats.alive()
-                && player.script_motion == 0
-                && player.ledge.is_none()
-                && !player.climbing();
-            aim_pointer.draw(
-                &crate::combat::Context {
-                    world: &scene.world,
-                    targets: &targets,
-                },
-                crate::targeting::Sight {
-                    eye: player.eye(),
-                    direction,
-                    weapon: can_aim.then(|| stats.equipped()).flatten(),
-                },
-                if active { dt } else { 0. },
-                camera,
-                &scene.atmosphere,
-            );
-            hud.draw_pickups(&pickups, &stats, camera, pickup_clock);
         }
-        if draw_world {
+        if draw_world && !world_only {
             crate::lighting::flares(camera, (target - camera).normalize_or_zero());
         }
-        crate::render_fx::finish();
+        if !world_only || !scene.retained_active() { crate::render_fx::finish(); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_first_person");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
-        if !third_person
+        if !world_only && !third_person
             && !pand_cinematic
             && !flying
             && stats.alive()
@@ -3427,316 +3439,318 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
         set_default_camera();
-        if active {
-            #[cfg(target_os = "vita")]
-            let _search_profile = crate::frame_profile::span("interaction_search_after");
+        if !world_only {
+            if active {
+                #[cfg(target_os = "vita")]
+                let _search_profile = crate::frame_profile::span("interaction_search_after");
 
-            use crate::interaction::friendly::{use_owner, UseOwner};
-            let rope = player.rope_prompt(&scene.world);
-            let world_rope = interactions
-                .pandemonium
-                .as_ref()
-                .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
-            let talk =
-                interactions.conversation(&scene.world, player.eye(), direction, &npcs, &story);
-            let world = interactions.prompt(&scene.world, player.eye(), direction);
-            let owner = use_owner(
-                story.busy(),
-                interactions.scripted(),
-                rope.is_some(),
-                world_rope,
-                talk.is_some(),
-                world.is_some(),
-            );
-            let prompt = match owner {
-                UseOwner::Talk => talk.map(|c| c.prompt()),
-                UseOwner::SharedRope => rope.map(str::to_owned),
-                UseOwner::World => world.map(str::to_owned),
-                _ => None,
-            };
-            if let Some(prompt) = prompt {
-                let prompt = prompt
-                    .replace("E  ", &format!("{}  ", input.label(&preferences, "E")))
-                    .replace("E /", &format!("{} /", input.label(&preferences, "E")));
-                ui.toast(&prompt, screen_height() - 112.);
-            }
-        }
-        let help = get_time() < help_until;
-        if player.immersion.level == 3
-            && stats.alive()
-            && !menu
-            && !inventory_menu
-            && !console_input
-        {
-            crate::hud::air(&player.breath, &ui);
-        }
-        let objective = interactions
-            .school
-            .as_ref()
-            .filter(|_| help)
-            .map(|s| s.objective())
-            .or_else(|| {
-                interactions
-                    .school2
-                    .as_ref()
-                    .filter(|_| help)
-                    .map(|s| s.quest.objective())
-            })
-            .or_else(|| {
-                interactions
+                use crate::interaction::friendly::{use_owner, UseOwner};
+                let rope = player.rope_prompt(&scene.world);
+                let world_rope = interactions
                     .pandemonium
                     .as_ref()
-                    .filter(|_| help)
-                    .map(|p| p.objective())
-            })
-            .or_else(|| {
-                interactions
-                    .fortress
-                    .as_ref()
-                    .filter(|_| help)
-                    .map(|f| f.objective())
-            })
-            .or_else(|| {
-                interactions
-                    .pool
-                    .as_ref()
-                    .filter(|_| help)
-                    .map(|p| p.objective())
-            })
-            .or_else(|| interactions.levels_objective().filter(|_| help))
-            .or_else(|| help.then(|| story.objective().map(str::to_owned)).flatten());
-        let show_details = help || menu;
-        if paused && !menu && !inventory_menu && !console_input && !help {
-            ui.paused(&if input.using_pad {
-                "A or Start to resume".into()
-            } else {
-                format!("{} or click to resume", input.label(&preferences, "P"))
-            });
-        }
-        if help && !menu && !inventory_menu && !console_input {
-            let canvas = crate::ui::Canvas::new(screen_width(), screen_height());
-            ui.panel(canvas.rect(Rect::new(16., 118., 608., 343.)));
-            ui.font.draw(
-                canvas,
-                "A little guidance",
-                Rect::new(38., 133., 564., 32.),
-                28.,
-                crate::ui::INK,
-            );
-            if let Some(objective) = &objective {
-                let rows = crate::story::wrap(objective, 548., |t| ui.body.width(t, 14.));
-                for (i, line) in rows.iter().take(3).enumerate() {
-                    ui.body.draw_left(
+                    .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
+                let talk =
+                    interactions.conversation(&scene.world, player.eye(), direction, &npcs, &story);
+                let world = interactions.prompt(&scene.world, player.eye(), direction);
+                let owner = use_owner(
+                    story.busy(),
+                    interactions.scripted(),
+                    rope.is_some(),
+                    world_rope,
+                    talk.is_some(),
+                    world.is_some(),
+                );
+                let prompt = match owner {
+                    UseOwner::Talk => talk.map(|c| c.prompt()),
+                    UseOwner::SharedRope => rope.map(str::to_owned),
+                    UseOwner::World => world.map(str::to_owned),
+                    _ => None,
+                };
+                if let Some(prompt) = prompt {
+                    let prompt = prompt
+                        .replace("E  ", &format!("{}  ", input.label(&preferences, "E")))
+                        .replace("E /", &format!("{} /", input.label(&preferences, "E")));
+                    ui.toast(&prompt, screen_height() - 112.);
+                }
+            }
+            let help = get_time() < help_until;
+            if player.immersion.level == 3
+                && stats.alive()
+                && !menu
+                && !inventory_menu
+                && !console_input
+            {
+                crate::hud::air(&player.breath, &ui);
+            }
+            let objective = interactions
+                .school
+                .as_ref()
+                .filter(|_| help)
+                .map(|s| s.objective())
+                .or_else(|| {
+                    interactions
+                        .school2
+                        .as_ref()
+                        .filter(|_| help)
+                        .map(|s| s.quest.objective())
+                })
+                .or_else(|| {
+                    interactions
+                        .pandemonium
+                        .as_ref()
+                        .filter(|_| help)
+                        .map(|p| p.objective())
+                })
+                .or_else(|| {
+                    interactions
+                        .fortress
+                        .as_ref()
+                        .filter(|_| help)
+                        .map(|f| f.objective())
+                })
+                .or_else(|| {
+                    interactions
+                        .pool
+                        .as_ref()
+                        .filter(|_| help)
+                        .map(|p| p.objective())
+                })
+                .or_else(|| interactions.levels_objective().filter(|_| help))
+                .or_else(|| help.then(|| story.objective().map(str::to_owned)).flatten());
+            let show_details = help || menu;
+            if paused && !menu && !inventory_menu && !console_input && !help {
+                ui.paused(&if input.using_pad {
+                    "A or Start to resume".into()
+                } else {
+                    format!("{} or click to resume", input.label(&preferences, "P"))
+                });
+            }
+            if help && !menu && !inventory_menu && !console_input {
+                let canvas = crate::ui::Canvas::new(screen_width(), screen_height());
+                ui.panel(canvas.rect(Rect::new(16., 118., 608., 343.)));
+                ui.font.draw(
+                    canvas,
+                    "A little guidance",
+                    Rect::new(38., 133., 564., 32.),
+                    28.,
+                    crate::ui::INK,
+                );
+                if let Some(objective) = &objective {
+                    let rows = crate::story::wrap(objective, 548., |t| ui.body.width(t, 14.));
+                    for (i, line) in rows.iter().take(3).enumerate() {
+                        ui.body.draw_left(
+                            canvas,
+                            line,
+                            Rect::new(46., 174. + i as f32 * 18., 548., 18.),
+                            14.,
+                            crate::ui::INK,
+                        );
+                    }
+                }
+                let movement = if input.using_pad {
+                    format!(
+                        "Left stick: move   {}: jump / rise   {}: dive",
+                        input.label(&preferences, "Space"),
+                        input.label(&preferences, "Ctrl")
+                    )
+                } else {
+                    preferences.controls_text(if flying {
+                        "W A S D move   Q / E down / up   Shift faster"
+                    } else if player.script_motion == 1 {
+                        "W A S D swing   Space / Ctrl climb   E release"
+                    } else if player.swimming {
+                        "W A S D swim   Space rise   Ctrl dive   E use"
+                    } else {
+                        "W A S D move   Space jump   Shift run   E interact"
+                    })
+                };
+                let lines = [
+                    movement,
+                    format!(
+                        "{}: look   {}: change view",
+                        if input.using_pad {
+                            "Right stick"
+                        } else {
+                            "Mouse / look keys"
+                        },
+                        input.label(&preferences, "V")
+                    ),
+                    format!(
+                        "{} / {}: primary / alternate attack",
+                        input.label(&preferences, "Mouse 1"),
+                        input.label(&preferences, "Mouse 2")
+                    ),
+                    format!(
+                        "{} / {}: toy   {}: inventory",
+                        input.label(&preferences, "Wheel Up"),
+                        input.label(&preferences, "Wheel Down"),
+                        input.label(&preferences, "I")
+                    ),
+                    format!(
+                        "{}: Cheshire hints    {}: advance dialogue",
+                        input.label(&preferences, "C"),
+                        input.label(&preferences, "E")
+                    ),
+                    format!(
+                        "{}: recover    Save / Load in the main menu",
+                        input.label(&preferences, "R")
+                    ),
+                    format!(
+                        "{}: menus   {}: chapters   {}: help",
+                        if input.using_pad { "Start" } else { "Esc" },
+                        input.label(&preferences, "Tab"),
+                        input.label(&preferences, "H")
+                    ),
+                ];
+                for (i, line) in lines.iter().enumerate() {
+                    ui.font.draw_left(
                         canvas,
                         line,
-                        Rect::new(46., 174. + i as f32 * 18., 548., 18.),
-                        14.,
+                        Rect::new(46., 239. + i as f32 * 27., 548., 24.),
+                        21.,
                         crate::ui::INK,
                     );
                 }
             }
-            let movement = if input.using_pad {
-                format!(
-                    "Left stick: move   {}: jump / rise   {}: dive",
-                    input.label(&preferences, "Space"),
-                    input.label(&preferences, "Ctrl")
-                )
-            } else {
-                preferences.controls_text(if flying {
-                    "W A S D move   Q / E down / up   Shift faster"
-                } else if player.script_motion == 1 {
-                    "W A S D swing   Space / Ctrl climb   E release"
-                } else if player.swimming {
-                    "W A S D swim   Space rise   Ctrl dive   E use"
-                } else {
-                    "W A S D move   Space jump   Shift run   E interact"
-                })
-            };
-            let lines = [
-                movement,
-                format!(
-                    "{}: look   {}: change view",
-                    if input.using_pad {
-                        "Right stick"
-                    } else {
-                        "Mouse / look keys"
-                    },
-                    input.label(&preferences, "V")
-                ),
-                format!(
-                    "{} / {}: primary / alternate attack",
-                    input.label(&preferences, "Mouse 1"),
-                    input.label(&preferences, "Mouse 2")
-                ),
-                format!(
-                    "{} / {}: toy   {}: inventory",
-                    input.label(&preferences, "Wheel Up"),
-                    input.label(&preferences, "Wheel Down"),
-                    input.label(&preferences, "I")
-                ),
-                format!(
-                    "{}: Cheshire hints    {}: advance dialogue",
-                    input.label(&preferences, "C"),
-                    input.label(&preferences, "E")
-                ),
-                format!(
-                    "{}: recover    Save / Load in the main menu",
-                    input.label(&preferences, "R")
-                ),
-                format!(
-                    "{}: menus   {}: chapters   {}: help",
-                    if input.using_pad { "Start" } else { "Esc" },
-                    input.label(&preferences, "Tab"),
-                    input.label(&preferences, "H")
-                ),
-            ];
-            for (i, line) in lines.iter().enumerate() {
-                ui.font.draw_left(
-                    canvas,
-                    line,
-                    Rect::new(46., 239. + i as f32 * 27., 548., 24.),
-                    21.,
-                    crate::ui::INK,
+            if menu {
+                chapters.draw(
+                    &ui,
+                    &level_choices,
+                    &maps,
+                    options.difficulty,
+                    focused && !console_input,
+                    input.using_pad,
                 );
             }
-        }
-        if menu {
-            chapters.draw(
-                &ui,
-                &level_choices,
-                &maps,
-                options.difficulty,
-                focused && !console_input,
-                input.using_pad,
-            );
-        }
-        if (!show_details || inventory_menu) && !interactions.scripted() {
-            hud.draw(&stats, &catalog, inventory_menu, &input, &preferences);
-            if !paused && !inventory_menu && !console_input && stats.alive() {
-                hud.draw_notice();
-            }
-        }
-        if !menu && !inventory_menu && !console_input && stats.alive() {
-            let cover = camera_handoff.overlay();
-            if cover.a > 0. {
-                draw_rectangle(0., 0., screen_width(), screen_height(), cover);
-            }
-            if let Some(f) = &interactions.fortress {
-                let (mut color, alpha) = f.cinema.fade(&f.state.cinema);
-                color.a = alpha;
-                if alpha > 0. {
-                    draw_rectangle(0., 0., screen_width(), screen_height(), color);
+            if (!show_details || inventory_menu) && !interactions.scripted() {
+                hud.draw(&stats, &catalog, inventory_menu, &input, &preferences);
+                if !paused && !inventory_menu && !console_input && stats.alive() {
+                    hud.draw_notice();
                 }
             }
-            if let Some(p) = &interactions.pandemonium {
-                let fade = p.fade();
-                if fade > 0. {
-                    draw_rectangle(
-                        0.,
-                        0.,
-                        screen_width(),
-                        screen_height(),
-                        Color {
-                            a: fade,
-                            ..p.fade_color()
+            if !menu && !inventory_menu && !console_input && stats.alive() {
+                let cover = camera_handoff.overlay();
+                if cover.a > 0. {
+                    draw_rectangle(0., 0., screen_width(), screen_height(), cover);
+                }
+                if let Some(f) = &interactions.fortress {
+                    let (mut color, alpha) = f.cinema.fade(&f.state.cinema);
+                    color.a = alpha;
+                    if alpha > 0. {
+                        draw_rectangle(0., 0., screen_width(), screen_height(), color);
+                    }
+                }
+                if let Some(p) = &interactions.pandemonium {
+                    let fade = p.fade();
+                    if fade > 0. {
+                        draw_rectangle(
+                            0.,
+                            0.,
+                            screen_width(),
+                            screen_height(),
+                            Color {
+                                a: fade,
+                                ..p.fade_color()
+                            },
+                        );
+                    }
+                }
+                if let Some(v) = &interactions.village {
+                    let (mut color, alpha) = v.cinema.fade();
+                    color.a = alpha;
+                    if alpha > 0. {
+                        draw_rectangle(0., 0., screen_width(), screen_height(), color);
+                    }
+                }
+                if let Some(p) = &interactions.pool {
+                    let (mut color, alpha) = p.fade();
+                    color.a = alpha;
+                    if alpha > 0. {
+                        draw_rectangle(0., 0., screen_width(), screen_height(), color);
+                    }
+                }
+                if let Some(s) = &interactions.school {
+                    let (mut color, alpha) = s.scene_fade();
+                    color.a = alpha;
+                    if alpha > 0. {
+                        draw_rectangle(0., 0., screen_width(), screen_height(), color);
+                    }
+                }
+                if let Some(b) = &interactions.beyond {
+                    let (mut color, alpha) = b.scene_fade();
+                    color.a = alpha;
+                    if alpha > 0. {
+                        draw_rectangle(0., 0., screen_width(), screen_height(), color);
+                    }
+                }
+                if let Some((mut color, alpha)) = interactions.fade_after(None) {
+                    color.a = alpha;
+                    if alpha > 0. {
+                        draw_rectangle(0., 0., screen_width(), screen_height(), color);
+                    }
+                }
+                if preferences.subtitles {
+                    story.draw(&input.label(&preferences, "E"), &ui);
+                }
+                if let (Some(d), Some(art)) = (&interactions.duchess, &level_art.duchess) {
+                    art.hud(d);
+                }
+                level_art.hud(&interactions);
+                if interactions
+                    .village
+                    .as_ref()
+                    .is_some_and(|v| v.cinema.active())
+                    || interactions
+                        .fortress
+                        .as_ref()
+                        .is_some_and(|f| f.state.cinema.active())
+                    || interactions
+                        .duchess
+                        .as_ref()
+                        .and_then(|d| d.scene_id())
+                        .is_some()
+                    || interactions
+                        .pandemonium
+                        .as_ref()
+                        .and_then(|p| p.scene_id())
+                        .is_some()
+                    || interactions
+                        .beyond
+                        .as_ref()
+                        .is_some_and(|b| b.scene_id().is_some())
+                    || interactions.scene_id_after(None).is_some()
+                    || interactions
+                        .pool
+                        .as_ref()
+                        .is_some_and(|p| p.scene_id().is_some())
+                    || interactions
+                        .school
+                        .as_ref()
+                        .is_some_and(|s| s.scene_id().is_some())
+                {
+                    skip_scene.draw(
+                        &ui,
+                        &if input.using_pad {
+                            "A".into()
+                        } else {
+                            input.label(&preferences, "Enter")
                         },
                     );
                 }
             }
-            if let Some(v) = &interactions.village {
-                let (mut color, alpha) = v.cinema.fade();
-                color.a = alpha;
-                if alpha > 0. {
-                    draw_rectangle(0., 0., screen_width(), screen_height(), color);
-                }
+            if audio.settings.muted && help && !inventory_menu && !console_input {
+                ui.toast("Sound muted - M to restore", 18.);
             }
-            if let Some(p) = &interactions.pool {
-                let (mut color, alpha) = p.fade();
-                color.a = alpha;
-                if alpha > 0. {
-                    draw_rectangle(0., 0., screen_width(), screen_height(), color);
-                }
+            if !notice.is_empty() {
+                ui.toast(&notice, 74.);
             }
-            if let Some(s) = &interactions.school {
-                let (mut color, alpha) = s.scene_fade();
-                color.a = alpha;
-                if alpha > 0. {
-                    draw_rectangle(0., 0., screen_width(), screen_height(), color);
-                }
+            show_mouse(!focused);
+            if focused && (menu || inventory_menu || paused) {
+                ui.cursor();
             }
-            if let Some(b) = &interactions.beyond {
-                let (mut color, alpha) = b.scene_fade();
-                color.a = alpha;
-                if alpha > 0. {
-                    draw_rectangle(0., 0., screen_width(), screen_height(), color);
-                }
-            }
-            if let Some((mut color, alpha)) = interactions.fade_after(None) {
-                color.a = alpha;
-                if alpha > 0. {
-                    draw_rectangle(0., 0., screen_width(), screen_height(), color);
-                }
-            }
-            if preferences.subtitles {
-                story.draw(&input.label(&preferences, "E"), &ui);
-            }
-            if let (Some(d), Some(art)) = (&interactions.duchess, &level_art.duchess) {
-                art.hud(d);
-            }
-            level_art.hud(&interactions);
-            if interactions
-                .village
-                .as_ref()
-                .is_some_and(|v| v.cinema.active())
-                || interactions
-                    .fortress
-                    .as_ref()
-                    .is_some_and(|f| f.state.cinema.active())
-                || interactions
-                    .duchess
-                    .as_ref()
-                    .and_then(|d| d.scene_id())
-                    .is_some()
-                || interactions
-                    .pandemonium
-                    .as_ref()
-                    .and_then(|p| p.scene_id())
-                    .is_some()
-                || interactions
-                    .beyond
-                    .as_ref()
-                    .is_some_and(|b| b.scene_id().is_some())
-                || interactions.scene_id_after(None).is_some()
-                || interactions
-                    .pool
-                    .as_ref()
-                    .is_some_and(|p| p.scene_id().is_some())
-                || interactions
-                    .school
-                    .as_ref()
-                    .is_some_and(|s| s.scene_id().is_some())
-            {
-                skip_scene.draw(
-                    &ui,
-                    &if input.using_pad {
-                        "A".into()
-                    } else {
-                        input.label(&preferences, "Enter")
-                    },
-                );
-            }
+            console.draw(&ui);
         }
-        if audio.settings.muted && help && !inventory_menu && !console_input {
-            ui.toast("Sound muted - M to restore", 18.);
-        }
-        if !notice.is_empty() {
-            ui.toast(&notice, 74.);
-        }
-        show_mouse(!focused);
-        if focused && (menu || inventory_menu || paused) {
-            ui.cursor();
-        }
-        console.draw(&ui);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);

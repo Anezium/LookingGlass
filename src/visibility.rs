@@ -25,6 +25,11 @@ pub struct Visibility {
     face_count: usize,
 }
 impl Visibility {
+    /// The retained renderer prepares every PVS draw list before entering its frame loop.
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) fn cluster_count(&self) -> usize {
+        self.clusters
+    }
     pub fn parse(
         nodes: &[u8],
         leaves: &[u8],
