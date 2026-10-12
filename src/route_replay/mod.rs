@@ -21,10 +21,10 @@ pub struct Sample {
     pub jump: bool,
     pub run: bool,
     pub segment: String,
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub reference_feet:Option<[f32;3]>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
-    pub reference_yaw:Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_feet: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_yaw: Option<f32>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +44,7 @@ pub struct Tape {
 impl Tape {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == VERSION && matches!(self.start.as_str(),"new_game"|"save:slot1"),
+            self.version == VERSION && matches!(self.start.as_str(), "new_game" | "save:slot1"),
             "unsupported route version/start"
         );
         ensure!(
@@ -55,6 +55,12 @@ impl Tape {
             !self.samples.is_empty() && self.samples.len() <= 100_000,
             "invalid sample count"
         );
+        let segments = self
+            .samples
+            .iter()
+            .map(|s| s.segment.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure!(segments.len() <= 64, "too many route segments");
         let mut previous = None;
         for s in &self.samples {
             ensure!(
@@ -103,7 +109,7 @@ pub struct Status {
     pub blade_copies: u32,
     pub alive: bool,
     pub flying: bool,
-    pub feet:[f32;3],
+    pub feet: [f32; 3],
 }
 #[derive(Serialize, Deserialize)]
 struct End {
@@ -117,14 +123,15 @@ struct End {
 pub struct Session {
     mode: Mode,
     root: PathBuf,
+    run_id: String,
     tape: Tape,
     tick: u64,
     cursor: usize,
     moving_ticks: u64,
     post_moving_ticks: u64,
     status: Status,
-    entry_saved:bool,
-    drift_reported:bool,
+    entry_saved: bool,
+    drift_reported: bool,
     segment: String,
     frame_start: Option<Instant>,
     wall: Vec<(String, f64)>,
@@ -201,15 +208,29 @@ impl Session {
             },
             options.save_dir.display()
         );
+        let run_id = format!(
+            "{}-{}",
+            match mode {
+                Mode::Record => "record",
+                Mode::Replay => "replay",
+                Mode::Continue => "continue",
+            },
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos()
+        );
         Ok(Some(Self {
             mode,
+            run_id,
             root,
             tape,
             tick: 0,
             cursor: 0,
             moving_ticks: 0,
             post_moving_ticks: 0,
-            status: Status::default(),entry_saved:false,drift_reported:false,
+            status: Status::default(),
+            entry_saved: false,
+            drift_reported: false,
             segment: "arrival".into(),
             frame_start: None,
             wall: Vec::new(),
@@ -227,15 +248,32 @@ impl Session {
     }
     pub fn resume(&self, store: &Store) -> Result<Option<crate::save::Loaded>> {
         if self.mode != Mode::Continue {
-            return if self.mode==Mode::Replay && self.tape.start=="save:slot1" {Ok(Some(store.read(Slot::parse("slot1")?)?))}else{Ok(None)};
+            return if self.mode == Mode::Replay && self.tape.start == "save:slot1" {
+                Ok(Some(store.read(Slot::parse("slot1")?)?))
+            } else {
+                Ok(None)
+            };
         }
         Ok(Some(
             store.latest().context("route Continue has no save")?.1,
         ))
     }
-    pub fn entry_checkpoint_due(&mut self)->bool {if self.mode==Mode::Record&&self.status.entry_done&&!self.entry_saved {self.entry_saved=true;true}else{false}}
-    #[cfg(not(target_os="vita"))]
-    pub fn recording_pause_seconds(&mut self)->f32 {if self.mode==Mode::Record{std::mem::take(&mut self.driver.planning_seconds)}else{0.}}
+    pub fn entry_checkpoint_due(&mut self) -> bool {
+        if self.mode == Mode::Record && self.status.entry_done && !self.entry_saved {
+            self.entry_saved = true;
+            true
+        } else {
+            false
+        }
+    }
+    #[cfg(not(target_os = "vita"))]
+    pub fn recording_pause_seconds(&mut self) -> f32 {
+        if self.mode == Mode::Record {
+            std::mem::take(&mut self.driver.planning_seconds)
+        } else {
+            0.
+        }
+    }
     pub fn continuing(&self) -> bool {
         self.mode == Mode::Continue
     }
@@ -275,7 +313,10 @@ impl Session {
         self.status = status;
         ensure!(
             self.status.map == "gvillage" && self.status.alive && !self.status.flying,
-            "route left playable village state tick={} segment={} status={}",self.tick,self.segment,serde_json::to_string(&self.status)?
+            "route left playable village state tick={} segment={} status={}",
+            self.tick,
+            self.segment,
+            serde_json::to_string(&self.status)?
         );
         ensure!(self.start.elapsed().as_secs() < 3600, "route wall timeout");
         if !self.status.entry_done {
@@ -347,7 +388,9 @@ impl Session {
                 look: [0.; 2],
                 jump: c.jump,
                 run: c.run,
-                segment: self.segment.clone(),reference_feet:Some(player.feet.to_array()),reference_yaw:Some(*yaw),
+                segment: self.segment.clone(),
+                reference_feet: Some(player.feet.to_array()),
+                reference_yaw: Some(*yaw),
             });
             self.tick += 1;
             if c.wish.length_squared() > 0.01 {
@@ -365,8 +408,12 @@ impl Session {
             self.cursor += 1;
         }
         let s = &self.tape.samples[self.cursor];
-        if !self.drift_reported && s.reference_feet.is_some_and(|f|player.feet.distance(Vec3::from_array(f))>8.) {
-            println!("[lg/route] replay drift tick={} segment={} expected={:?} actual={:?} yaw_expected={:?} yaw_actual={}",self.tick,s.segment,s.reference_feet,player.feet,s.reference_yaw,*yaw);self.drift_reported=true;
+        if !self.drift_reported
+            && s.reference_feet
+                .is_some_and(|f| player.feet.distance(Vec3::from_array(f)) > 8.)
+        {
+            println!("[lg/route] replay drift tick={} segment={} expected={:?} actual={:?} yaw_expected={:?} yaw_actual={}",self.tick,s.segment,s.reference_feet,player.feet,s.reference_yaw,*yaw);
+            self.drift_reported = true;
         }
 
         if self.segment != s.segment {
@@ -397,7 +444,7 @@ impl Session {
         if self.wall.is_empty() {
             return Ok(());
         }
-        let dir = self.root.join("route-frame-windows");
+        let dir = self.root.join("route-frame-windows").join(&self.run_id);
         std::fs::create_dir_all(&dir)?;
         self.windows += 1;
         std::fs::write(
@@ -496,7 +543,7 @@ impl Session {
             "[lg/route] heap end start={:?} end={heap_end:?}",
             self.heap_start
         );
-        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"raw_path":"route-frame-windows/window-*.json","window_capacity_frames":300,"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
+        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"window_capacity_frames":300,"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
         std::fs::write(
             self.root.join(if self.continuing() {
                 "route-continue-report.json"

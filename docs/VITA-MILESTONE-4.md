@@ -179,3 +179,12 @@ The direct actor fast path also bypasses SkinMaterial's unused Macroquad
 atmosphere/appearance uniform updates and binding. Appearance is still captured
 in the owned retained packet, and the direct frame owns its atmosphere. Those
 updates continue on the legacy path or with actor_fast_path=false.
+
+Host-only automatic recording subtracts its physics-planner CPU pauses from the
+next diagnostic input clock. Playback and native clocks do not use that adjustment.
+Recorded reference feet/yaw diagnose divergence without setting any game state.
+Recording also writes an isolated normal LG entry checkpoint in slot1; scripts
+may start from new_game or save:slot1 through the normal single-scene restore.
+Raw window directories have per-launch IDs so Continue cannot overwrite replay
+samples. Script validation limits distinct segment names to 64, bounding histogram
+storage independently of route length.
