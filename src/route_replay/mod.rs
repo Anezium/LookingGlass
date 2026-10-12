@@ -136,6 +136,7 @@ pub struct Session {
     frame_start: Option<Instant>,
     wall: Vec<(String, f64)>,
     start: Instant,
+    startup_seconds:f64,
     done: bool,
     heap_start: Option<u64>,
     windows: u64,
@@ -234,7 +235,7 @@ impl Session {
             segment: "arrival".into(),
             frame_start: None,
             wall: Vec::new(),
-            start: Instant::now(),
+            start: Instant::now(),startup_seconds:0.,
             done: false,
             heap_start: None,
             windows: 0,
@@ -302,6 +303,7 @@ impl Session {
                 self.export_window()?;
             }
         } else {
+            self.startup_seconds=self.start.elapsed().as_secs_f64();
             self.start = Instant::now();
             self.heap_start = crate::frame_profile::heap_used_bytes();
             println!(
@@ -543,7 +545,7 @@ impl Session {
             "[lg/route] heap end start={:?} end={heap_end:?}",
             self.heap_start
         );
-        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"window_capacity_frames":300,"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
+        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
         std::fs::write(
             self.root.join(if self.continuing() {
                 "route-continue-report.json"

@@ -188,3 +188,12 @@ may start from new_game or save:slot1 through the normal single-scene restore.
 Raw window directories have per-launch IDs so Continue cannot overwrite replay
 samples. Script validation limits distinct segment names to 64, bounding histogram
 storage independently of route length.
+
+Final host arrival-checkpoint replay passed: 76.117 moving-input seconds, exactly
+60.000 after knife_cat, map gvillage, one Blade, alive, zero late shader/pipeline
+creations. Separate Continue restores feet/yaw/pitch before physics and passes.
+Both logs contain one Loaded gvillage and one retained loaded line. The corrected
+recording excludes host planner pauses; the initial failed tape is superseded.
+The full New Game variant and native frame/heap/visual results remain pending.
+Arrival scene loading is reported separately and also included in a total, while
+frame_wall_ms windows cover ready arrival through save. Profiler capacity is logged.
