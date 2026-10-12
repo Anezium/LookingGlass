@@ -94,7 +94,8 @@ cargo run --locked --features vita_renderer -- --vita-render-view \
 
 Il emploie la position de référence et la caméra Follow LG à 132 unités ; ce n'est
 pas une reproduction certifiée de la pose console. `--start-at "x y z"` choisit un
-œil alternatif. Sans `--frames` : WASD et Q/E pour déplacer la caméra ; Escape ferme.
+œil alternatif. Sans `--frames` : WASD et Q/E pour déplacer la caméra ; flèches ou glisser
+avec le bouton gauche pour orienter ; Escape ferme.
 Captures hors fenêtres de performance. Logs et captures hôte restent des preuves
 visuelles/structurelles, sans valeur de temps GPU Vita.
 

@@ -1012,13 +1012,39 @@ pub(crate) async fn visualizer(
         ..Default::default()
     };
     record_view(&camera);
+    let look = (target - eye).normalize_or_zero();
+    let mut free_yaw = look.y.atan2(look.x);
+    let mut free_pitch = look.z.asin();
+    let mut previous_mouse = mouse_position();
     for frame in 0..options.frames.unwrap_or(u64::MAX) {
         if is_key_down(KeyCode::Escape) {
             break;
         }
         if options.frames.is_none() {
             let dt = get_frame_time().min(0.1);
-            let right = direction.cross(Vec3::Z);
+            let mouse = mouse_position();
+            let (dx, dy) = if is_mouse_button_down(MouseButton::Left) {
+                (mouse.0 - previous_mouse.0, mouse.1 - previous_mouse.1)
+            } else {
+                (0., 0.)
+            };
+            previous_mouse = mouse;
+            free_yaw += dt
+                * 1.7
+                * (f32::from(is_key_down(KeyCode::Right)) - f32::from(is_key_down(KeyCode::Left)))
+                + dx * 0.004;
+            free_pitch = (free_pitch
+                + dt * 1.7
+                    * (f32::from(is_key_down(KeyCode::Up))
+                        - f32::from(is_key_down(KeyCode::Down)))
+                - dy * 0.004)
+                .clamp(-1.4, 1.4);
+            let direction = vec3(
+                free_pitch.cos() * free_yaw.cos(),
+                free_pitch.cos() * free_yaw.sin(),
+                free_pitch.sin(),
+            );
+            let right = direction.cross(Vec3::Z).normalize_or_zero();
             let offset = (direction
                 * (f32::from(is_key_down(KeyCode::W)) - f32::from(is_key_down(KeyCode::S)))
                 + right
@@ -1028,7 +1054,7 @@ pub(crate) async fn visualizer(
                 * dt
                 * 350.;
             camera.position += offset;
-            camera.target += offset;
+            camera.target = camera.position + direction;
         }
         clear_background(scene.atmosphere.background());
         set_camera(&camera);
