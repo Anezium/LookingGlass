@@ -153,6 +153,8 @@ pub struct Session {
 }
 impl Session {
     pub fn open(options: &mut Options) -> Result<Option<Self>> {
+        let startup=Instant::now();
+        eprintln!("[lg/startup] route_mode read begin");
         #[cfg(target_os = "vita")]
         let root = PathBuf::from("ux0:data/alice/private");
         #[cfg(not(target_os = "vita"))]
@@ -169,6 +171,7 @@ impl Session {
             "record" => Mode::Record,
             _ => return Ok(None),
         };
+        eprintln!("[lg/startup] route_mode ready elapsed_ms={:.3}",startup.elapsed().as_secs_f64()*1000.);
         #[cfg(target_os = "vita")]
         ensure!(mode != Mode::Record, "route recording is host-only");
         let tape = if mode == Mode::Record {
@@ -183,14 +186,18 @@ impl Session {
                 }],
             }
         } else {
+            eprintln!("[lg/startup] route_tape read begin path={}",root.join("route-inputs.json").display());
             let mut bytes = Vec::new();
             std::fs::File::open(root.join("route-inputs.json"))
                 .context("route-inputs.json")?
                 .take(16 * 1024 * 1024 + 1)
                 .read_to_end(&mut bytes)?;
             ensure!(bytes.len() <= 16 * 1024 * 1024, "route file exceeds bound");
+            eprintln!("[lg/startup] route_tape read done bytes={} elapsed_ms={:.3}; parse begin",bytes.len(),startup.elapsed().as_secs_f64()*1000.);
             let t: Tape = serde_json::from_slice(&bytes)?;
+            eprintln!("[lg/startup] route_tape parse done samples={} elapsed_ms={:.3}; validate begin",t.samples.len(),startup.elapsed().as_secs_f64()*1000.);
             t.validate()?;
+            eprintln!("[lg/startup] route_tape validate done elapsed_ms={:.3}",startup.elapsed().as_secs_f64()*1000.);
             t
         };
         options.save_dir = root.join("route-saves");

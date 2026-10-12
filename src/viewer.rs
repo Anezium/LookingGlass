@@ -22,6 +22,7 @@ extern "C" {
 const SCE_KERNEL_POWER_TICK_DEFAULT: i32 = 0;
 
 pub fn config() -> macroquad::conf::Conf {
+    eprintln!("[lg/startup] window_configuration begin");
     #[cfg(target_os = "vita")]
     let (width, height, high_dpi) = (960, 544, false);
     #[cfg(not(target_os = "vita"))]
@@ -537,14 +538,18 @@ fn starting_stats(options: &Options, map: &str, entry: Option<&str>) -> Stats {
 mod start;
 
 pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
+    let startup=std::time::Instant::now();
+    eprintln!("[lg/startup] viewer begin; UI begin");
     // Release cursor/audio before Miniquad destroys its native request queue.
     prevent_quit();
     let ui = crate::ui::Ui::load(&mut assets)?;
+    eprintln!("[lg/startup] UI done elapsed_ms={:.3}; menu begin",startup.elapsed().as_secs_f64()*1000.);
     // Explicit native layout diagnostic; never opens or modifies player saves.
     if options.frames.is_some() && std::env::var_os("LOOKING_GLASS_PRESENTATION_CHECK").is_some() {
         return crate::hud::check_presentation(&mut assets).await;
     }
     let mut escape_menu = crate::menu::Menu::load(&mut assets).context("Loading original menus")?;
+    eprintln!("[lg/startup] menu done elapsed_ms={:.3}",startup.elapsed().as_secs_f64()*1000.);
     let mut preferences = crate::preferences::Preferences::load();
     let mut input = crate::input::Input::default();
     let mut weapon_buttons = crate::weapon_rules::Buttons::default();
@@ -563,9 +568,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         || options.story_preview.is_some());
     #[cfg(feature="vita_renderer")]
     let mut route_session=crate::route_replay::Session::open(&mut options)?;
+    eprintln!("[lg/startup] route options ready; save store begin");
     let store = Store::new(options.save_dir.clone(), assets.fingerprint()?);
+    eprintln!("[lg/startup] save store ready elapsed_ms={:.3}",startup.elapsed().as_secs_f64()*1000.);
     #[cfg(feature="vita_renderer")]
     let route_resume=route_session.as_ref().map(|r|r.resume(&store)).transpose()?.flatten();
+    eprintln!("[lg/startup] requested save ready elapsed_ms={:.3}",startup.elapsed().as_secs_f64()*1000.);
     #[cfg(not(feature="vita_renderer"))]
     let route_resume:Option<save::Loaded>=None;
     let maps = assets.maps();

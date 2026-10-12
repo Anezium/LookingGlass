@@ -105,25 +105,35 @@ const CONFIG_PATH: &str = "private/vita_renderer.json";
 pub fn config() -> &'static Config {
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(|| {
+        let start=std::time::Instant::now();
+        eprintln!("[lg/startup] renderer_config read begin path={CONFIG_PATH}");
         let parsed = (|| -> Result<Config> {
             let bytes = match std::fs::read(CONFIG_PATH) {
                 Ok(bytes) => bytes,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
                 Err(e) => return Err(e.into()),
             };
+            eprintln!("[lg/startup] renderer_config read done bytes={} elapsed_ms={:.3}; parse begin",bytes.len(),start.elapsed().as_secs_f64()*1000.);
             let c: Config = serde_json::from_slice(&bytes)?;
+            eprintln!("[lg/startup] renderer_config parse done elapsed_ms={:.3}; validate begin",start.elapsed().as_secs_f64()*1000.);
             c.validate()?;
+            eprintln!("[lg/startup] renderer_config validate done elapsed_ms={:.3}",start.elapsed().as_secs_f64()*1000.);
             Ok(c)
         })();
         let c = parsed.unwrap_or_else(|e| {
             eprintln!("[lg/vita-renderer] invalid config {CONFIG_PATH}: {e:#}; using defaults");
             Config::default()
         });
+        eprintln!("[lg/startup] renderer_config serialize begin");
+        let serialized=serde_json::to_string(&c).unwrap();
+        eprintln!("[lg/startup] renderer_config serialize done; config log begin");
         println!(
             "[lg/vita-renderer] config {}",
-            serde_json::to_string(&c).unwrap()
+            serialized
         );
+        eprintln!("[lg/startup] renderer_config log done; GPU setup begin experiment={}",c.gpu_experiment);
         apply_gpu_experiment(&c);
+        eprintln!("[lg/startup] GPU setup done; window config ready");
         c
     })
 }

@@ -22,6 +22,8 @@ impl Assets {
     /// Central-directory CRC/size metadata avoids decoding every asset at startup.
     pub fn fingerprint(&mut self) -> Result<String> {
         if let Some(value)=&self.content_fingerprint { return Ok(value.clone()); }
+        let start=std::time::Instant::now();
+        eprintln!("[lg/startup] corpus_identity begin entries={}",self.entries.len());
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
         for (name, &(pack, index)) in &self.entries {
@@ -33,9 +35,12 @@ impl Assets {
         }
         let value=format!("{:x}", hash.finalize());
         self.content_fingerprint=Some(value.clone());
+        eprintln!("[lg/startup] corpus_identity done elapsed_ms={:.3}",start.elapsed().as_secs_f64()*1000.);
         Ok(value)
     }
     pub fn open(base: &Path) -> Result<Self> {
+        let mount_start=std::time::Instant::now();
+        eprintln!("[lg/startup] pk3_mount begin data={}",base.display());
         let mut paths = fs::read_dir(base)
             .with_context(|| {
                 format!(
@@ -47,23 +52,34 @@ impl Assets {
             .filter(|p| p.extension().is_some_and(|s| s.eq_ignore_ascii_case("pk3")))
             .collect::<Vec<_>>();
         paths.sort_by_key(|p| p.file_name().unwrap_or_default().to_ascii_lowercase());
+        eprintln!("[lg/startup] pk3_directory done packs={} elapsed_ms={:.3}",paths.len(),mount_start.elapsed().as_secs_f64()*1000.);
         if paths.is_empty() {
             bail!("No PK3 archives found in {}", base.display());
         }
         let mut entries = BTreeMap::new();
         let mut packs = Vec::new();
         for path in paths {
-            let mut pack = ZipArchive::new(File::open(&path)?)
+            let start=std::time::Instant::now();
+            eprintln!("[lg/startup] pk3_open begin file={}",path.display());
+            let file=File::open(&path)?;
+            eprintln!("[lg/startup] pk3_open done elapsed_ms={:.3}; central_directory begin",start.elapsed().as_secs_f64()*1000.);
+            let mut pack = ZipArchive::new(file)
                 .with_context(|| format!("Invalid PK3: {}", path.display()))?;
+            eprintln!("[lg/startup] pk3_central_directory done entries={} elapsed_ms={:.3}; index begin",pack.len(),start.elapsed().as_secs_f64()*1000.);
             let p = packs.len();
-            for i in 0..pack.len() {
+            let total=pack.len();
+            for i in 0..total {
                 let entry = pack.by_index(i)?;
                 if !entry.is_dir() {
                     entries.insert(normalize(entry.name()), (p, i));
                 }
+                if (i+1)%1024==0 || i+1==total {
+                    eprintln!("[lg/startup] pk3_index progress={}/{} elapsed_ms={:.3}",i+1,total,start.elapsed().as_secs_f64()*1000.);
+                }
             }
             packs.push(pack);
         }
+        eprintln!("[lg/startup] pk3_mount done packs={} names={} elapsed_ms={:.3}",packs.len(),entries.len(),mount_start.elapsed().as_secs_f64()*1000.);
         Ok(Self {
             packs,
             entries,

@@ -578,6 +578,7 @@ fn run() -> Result<()> {
     }
     vita_sim::initialize(&o.save_dir);
     let mut assets = Assets::open(&o.data)?;
+    eprintln!("[lg/startup] assets ready mode={mode}");
     #[cfg(feature = "vita_renderer")]
     if mode == "vita-render-view" {
         macroquad::Window::from_config(viewer::config(), async move {
