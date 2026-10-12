@@ -1,0 +1,13 @@
+[package]
+name = "pk3-host-proof"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+zip = { version = "=0.6.6", default-features = false, features = ["deflate"] }
+sha2 = "=0.10.9"

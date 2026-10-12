@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::{self, Cursor, Read},
+    io::{self, BufReader, Cursor, Read, Seek, SeekFrom},
     sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc},
     thread::{self, JoinHandle},
     path::{Path, PathBuf},
@@ -11,9 +11,55 @@ use zip::ZipArchive;
 
 const MAX_ENTRY: u64 = 128 * 1024 * 1024;
 
+/// Bulk reads with an explicit logical cursor: zip asks for stream_position per
+/// central record. BufReader's ordinary Seek would discard the buffer and query
+/// the filesystem for these calls. Seek within this window stays in memory.
+struct BufferedFile {
+    reader: BufReader<File>,
+    position: u64,
+}
+impl BufferedFile {
+    fn open(path: &Path) -> io::Result<Self> {
+        Ok(Self { reader: BufReader::with_capacity(1024 * 1024, File::open(path)?), position: 0 })
+    }
+}
+impl Read for BufferedFile {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let count = self.reader.read(bytes)?;
+        self.position += count as u64;
+        Ok(count)
+    }
+}
+impl Seek for BufferedFile {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let target = match from {
+            SeekFrom::End(offset) => {
+                let position = self.reader.seek(SeekFrom::End(offset))?;
+                self.position = position;
+                return Ok(position);
+            }
+            SeekFrom::Start(position) => i128::from(position),
+            SeekFrom::Current(offset) => i128::from(self.position) + i128::from(offset),
+        };
+        if !(0..=i128::from(u64::MAX)).contains(&target) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid ZIP seek"));
+        }
+        let delta = target - i128::from(self.position);
+        if let Ok(delta) = i64::try_from(delta) {
+            self.reader.seek_relative(delta)?;
+        } else {
+            self.reader.seek(SeekFrom::Start(target as u64))?;
+        }
+        self.position = target as u64;
+        Ok(self.position)
+    }
+    fn stream_position(&mut self) -> io::Result<u64> { Ok(self.position) }
+}
+
+
 /// Read-only PK3 mount. Later alphabetically sorted packs override earlier packs.
 pub struct Assets {
-    packs: Vec<ZipArchive<File>>,
+    packs: Vec<ZipArchive<BufferedFile>>,
     paths: Vec<PathBuf>,
     entries: BTreeMap<String, (usize, usize)>,
     pub base: PathBuf,
@@ -64,7 +110,7 @@ impl Assets {
         for path in &paths {
             let start=std::time::Instant::now();
             eprintln!("[lg/startup] pk3_open begin file={}",path.display());
-            let file=File::open(&path)?;
+            let file=BufferedFile::open(path)?;
             eprintln!("[lg/startup] pk3_open done elapsed_ms={:.3}; central_directory begin",start.elapsed().as_secs_f64()*1000.);
             let mut pack = ZipArchive::new(file)
                 .with_context(|| format!("Invalid PK3: {}", path.display()))?;
@@ -238,7 +284,7 @@ impl EntryReader {
             .name("asset-stream".into())
             .spawn(move || {
                 let run = || -> Result<()> {
-                    let mut archive = ZipArchive::new(File::open(pack)?)?;
+                    let mut archive = ZipArchive::new(BufferedFile::open(&pack)?)?;
                     let mut entry = archive.by_name(&name)?;
                     anyhow::ensure!(entry.size() <= MAX_ENTRY, "Asset exceeds 128 MiB limit");
                     loop {
@@ -308,6 +354,23 @@ fn normalize(s: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn real_pk3_directory_metadata_matches_unbuffered() -> Result<()> {
+        let Some(base) = std::env::var_os("ALICE_TEST_DATA") else { return Ok(()); };
+        for path in fs::read_dir(base)?.map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("pk3"))) {
+            let mut old = ZipArchive::new(File::open(&path)?)?;
+            let mut new = ZipArchive::new(BufferedFile::open(&path)?)?;
+            assert_eq!(old.len(), new.len());
+            assert_eq!(old.offset(), new.offset());
+            for i in 0..old.len() {
+                let a = old.by_index(i)?;
+                let b = new.by_index(i)?;
+                assert_eq!((a.name(), a.size(), a.compressed_size(), a.crc32(), a.header_start(), a.data_start(), a.central_header_start()),
+                    (b.name(), b.size(), b.compressed_size(), b.crc32(), b.header_start(), b.data_start(), b.central_header_start()), "{} index={i}", path.display());
+            }
+        }
+        Ok(())
+    }
     #[test]
     fn streaming_reports_crc_errors_and_can_be_dropped_early() -> Result<()> {
         use std::io::{Seek, SeekFrom};
