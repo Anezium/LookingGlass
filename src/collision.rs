@@ -375,10 +375,12 @@ impl Collider {
         Ok(Self::from_hulls(hulls))
     }
     pub fn trace(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        self.trace_query(start, end, half, &SweepBounds::new(start, end, half))
+    }
+    fn trace_query(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> Trace {
         #[cfg(target_os = "vita")]
         let (mut tested, mut clipped) = (0u32, 0u32);
         let mut out = Trace::default();
-        let query = SweepBounds::new(start, end, half);
         if self.bounds.is_some_and(|b| query.overlaps(b)) {
             for h in self.hulls().iter() {
                 #[cfg(target_os = "vita")]
@@ -535,6 +537,9 @@ impl Default for Trace {
 pub struct World {
     pub traversal: crate::traversal::Traversal,
     dynamic: Vec<Collider>,
+    dynamic_bounds: Option<Bounds>,
+    #[cfg(test)]
+    pub(crate) legacy_dynamic_sweeps: bool,
     #[cfg(test)]
     pub(crate) dynamic_publications: Option<Vec<Vec<Collider>>>,
     settled_supports: Vec<Collider>,
@@ -634,6 +639,9 @@ impl World {
         Ok(Self {
             traversal: crate::traversal::Traversal::load(map)?,
             dynamic: Vec::new(),
+            dynamic_bounds: None,
+            #[cfg(test)]
+            legacy_dynamic_sweeps: false,
             #[cfg(test)]
             dynamic_publications: None,
             settled_supports: Vec::new(),
@@ -711,15 +719,58 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        #[cfg(test)]
+        if self.legacy_dynamic_sweeps {
+            return self.sweep_geometry_legacy(start, end, half);
+        }
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::SweepGeometryCalls, 1);
         }
         let mut result = self.ledge_trace(start, end, half);
+        if self.dynamic.is_empty() {
+            return result;
+        }
+        let query = SweepBounds::new(start, end, half);
+        // This is the exact first predicate of Collider::trace, applied to a
+        // conservative union. Include SKIN through the unchanged SweepBounds.
+        if self.dynamic_bounds.is_none_or(|b| !b.overlaps(query.bounds)) {
+            #[cfg(target_os = "vita")]
+            add_counter(Counter::DynamicBoundsRejected, 1);
+            return result;
+        }
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::DynamicCollidersTested, self.dynamic.len() as u32);
         }
+        #[cfg(target_os = "vita")]
+        let mut rejected = 0;
+        for collider in &self.dynamic {
+            if collider.bounds.is_none_or(|b| !b.overlaps(query.bounds)) {
+                #[cfg(target_os = "vita")]
+                {
+                    rejected += 1;
+                }
+                continue;
+            }
+            // Reuse reciprocal directions/padding rather than rebuilding them
+            // for every dynamic collider. Slab rejection and clip remain exact.
+            let t = collider.trace_query(start, end, half, &query);
+            result.start_solid |= t.start_solid;
+            result.all_solid |= t.all_solid;
+            if t.fraction < result.fraction {
+                result.fraction = t.fraction;
+                result.normal = t.normal;
+            }
+        }
+        #[cfg(target_os = "vita")]
+        add_counter(Counter::DynamicCollidersRejected, rejected);
+        result
+    }
+    #[cfg(test)]
+    pub(crate) fn sweep_geometry_legacy(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        // Independent 8de8940 dynamic loop, without the new broad phase/cache.
+        let mut result = self.ledge_trace(start, end, half);
         for collider in &self.dynamic {
             let t = collider.trace(start, end, half);
             result.start_solid |= t.start_solid;
@@ -777,12 +828,14 @@ impl World {
     /// Keep movers, doors and live weapon obstacles when using an actor collision mask.
     pub fn copy_dynamic_from(&mut self, other: &Self) {
         self.dynamic.clone_from(&other.dynamic);
+        self.dynamic_bounds = other.dynamic_bounds;
         self.traversal.actor_pushes.clone_from(&other.traversal.actor_pushes);
         self.settled_supports.clone_from(&other.settled_supports);
         self.weapon_obstacles.clone_from(&other.weapon_obstacles);
         self.dynamic_liquids.clone_from(&other.dynamic_liquids);
     }
     pub fn set_dynamic(&mut self, colliders: Vec<Collider>) {
+        self.dynamic_bounds = colliders.iter().filter_map(|c| c.bounds).reduce(Bounds::union);
         #[cfg(test)]
         if let Some(publications) = &mut self.dynamic_publications {
             publications.push(colliders.clone());
@@ -929,6 +982,9 @@ impl World {
         };
         Self {
             dynamic: Vec::new(),
+            dynamic_bounds: None,
+            #[cfg(test)]
+            legacy_dynamic_sweeps: false,
             #[cfg(test)]
             dynamic_publications: None,
             settled_supports: Vec::new(),
@@ -1066,6 +1122,8 @@ fn triangle_hull(a: Vec3, b: Vec3, c: Vec3) -> Option<Hull> {
     })
 }
 
+#[cfg(test)]
+mod dynamic_tests;
 #[cfg(test)]
 mod tests {
     #[test]

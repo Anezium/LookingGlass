@@ -1498,6 +1498,107 @@ impl Attached {
 mod tests {
     use super::*;
     #[test]
+    fn dynamic_broad_phase_preserves_puff_impacts_deaths_and_emissions() {
+        let make = || {
+            let mut fixture = attached_fixture(4);
+            for (i, e) in fixture.steam.emitters.iter_mut().enumerate() {
+                e.spec.rate = 20.;
+                e.spec.life = Range::fixed(1.);
+                e.spec.constrain = (i == 1).then_some(Vec3::splat(3.5));
+                e.spec.no_deadtime = i == 3;
+                e.spec.image = if i == 2 { "bubble" } else { "smoke" }.into();
+            }
+            fixture.steam.puffs = (0..626)
+                .map(|i| {
+                    let position = vec3(
+                        (i % 31) as f32 * 10. - 150.,
+                        (i / 31) as f32 * 4. - 40.,
+                        (i % 5) as f32 * 20. + 1.,
+                    );
+                    Puff {
+                        position,
+                        constraint_center: position,
+                        velocity: if i % 7 == 0 {
+                            Vec3::ZERO
+                        } else {
+                            -Vec3::Z * 80.
+                        },
+                        accel: -Vec3::Z * 10.,
+                        age: if i % 5 == 0 { 0.99 } else { 0. },
+                        life: 1.,
+                        size: 2.,
+                        roll: 0.,
+                        emitter: i % 4,
+                    }
+                })
+                .collect();
+            fixture
+        };
+        let puff_bits = |p: &Puff| {
+            p.position
+                .to_array()
+                .into_iter()
+                .chain(p.constraint_center.to_array())
+                .chain(p.velocity.to_array())
+                .chain(p.accel.to_array())
+                .chain([p.age, p.life, p.size, p.roll])
+                .map(f32::to_bits)
+                .chain([p.emitter as u32])
+                .collect::<Vec<_>>()
+        };
+        let mut a = make();
+        let mut b = make();
+        let boxes = [(vec3(-500., -500., -20.), vec3(500., 500., 0.))];
+        let mut optimized = World::fixture(&boxes);
+        let mut reference = World::fixture(&boxes);
+        reference.legacy_dynamic_sweeps = true;
+        for world in [&mut optimized, &mut reference] {
+            world.add_liquid(vec3(-200., -200., 0.), vec3(200., 200., 120.), 0x20, None);
+        }
+        let mut first_frame_deaths = 0;
+        for frame in 0..120 {
+            optimized.set_dynamic(
+                (0..25)
+                    .map(|i| {
+                        let x = i as f32 * 30. - 350. + (frame as f32 * 0.2).sin() * 10.;
+                        crate::collision::Collider::fixture(vec3(x, -20., 5.), vec3(x + 10., 20., 60.))
+                    })
+                    .collect(),
+            );
+            reference.copy_dynamic_from(&optimized);
+            if frame == 60 {
+                optimized.set_dynamic(Vec::new());
+                reference.set_dynamic(Vec::new());
+            }
+            let world_dt = if (20..30).contains(&frame) { 0. } else { 0.05 };
+            a.steam
+                .update_clocks(0.05, world_dt, Vec3::ZERO, &optimized);
+            b.steam
+                .update_clocks(0.05, world_dt, Vec3::ZERO, &reference);
+            if frame == 0 {
+                first_frame_deaths = 626 - a.steam.puffs.len();
+            }
+            assert_eq!(a.steam.seed, b.steam.seed);
+            assert_eq!(
+                a.steam.puffs.iter().map(&puff_bits).collect::<Vec<_>>(),
+                b.steam.puffs.iter().map(&puff_bits).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                a.steam
+                    .emitters
+                    .iter()
+                    .map(|e| e.carry.to_bits())
+                    .collect::<Vec<_>>(),
+                b.steam
+                    .emitters
+                    .iter()
+                    .map(|e| e.carry.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(first_frame_deaths > 0);
+    }
+    #[test]
     fn constrained_pixie_moves_reverses_and_stays_inside_after_pause() {
         let mut fixture = attached_fixture(1);
         let steam = &mut fixture.steam;
