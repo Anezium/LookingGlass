@@ -755,9 +755,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let prepared = bench_restored.take();
     #[cfg(not(target_os = "vita"))]
     let prepared: Option<save::Restored> = None;
-    let mut bench_applied = false;
-    // The validated bench scene is already built. Installing it here skips load_scene,
-    // which would construct a second village and then discard it.
+    // Menu Continue/Load and --load must reuse their restored scene just like benches.
+    // Prepare before the fresh-game branch; failed restoration keeps the existing
+    // paused fresh-scene/error behavior, without retrying an expensive restore.
+    let mut resume_error = None;
+    let prepared = if prepared.is_some() { prepared } else if let Some(loaded) = &resume {
+        match save::Restored::build(&mut assets, loaded.game.clone()) {
+            Ok(restored) => Some(restored),
+            Err(error) => { resume_error = Some(format!("Could not restore save: {error:#}")); None }
+        }
+    } else { None };
+    let mut resume_applied = false;
     let validated = prepared.is_some();
     if save::bench_scene(validated) == save::BenchScene::ReuseValidated {
         power_art = crate::powerups::Art::load(&mut assets)?;
@@ -770,8 +778,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             maps[current],
             fresh.weapon_summary()
         );
-        apply_loaded!(prepared.unwrap(), false);
-        bench_applied = true;
+        #[cfg(target_os = "vita")]
+        let pause_on_load = !bench_session;
+        #[cfg(not(target_os = "vita"))]
+        let pause_on_load = true;
+        apply_loaded!(prepared.unwrap(), pause_on_load);
+        resume_applied = true;
+        println!("[lg/startup] restored scene reused map={} source={}", maps[current],
+            if options.load.is_some() { "load" } else { "continue-or-bench" });
     } else {
         scene = load_scene(&mut assets, &maps[current], options.difficulty)?;
         level_art = LevelArt::default();
@@ -947,37 +961,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         clock.pause();
     }
-    if bench_applied {
+    if resume_applied {
         #[cfg(target_os = "vita")]
-        println!(
-            "bench: auto save restored {}",
-            save::visit_key(&maps[current], entry_spawn.as_deref())
-        );
-        hud.announce("Game restored / P or click to resume");
-    } else if let Some(loaded) = resume {
-        let backup = loaded.backup;
-        match save::Restored::build(&mut assets, loaded.game) {
-            Ok(restored) => {
-                #[cfg(target_os = "vita")]
-                let pause_on_load = !bench_session;
-                #[cfg(not(target_os = "vita"))]
-                let pause_on_load = true;
-                apply_loaded!(restored, pause_on_load);
-                #[cfg(target_os = "vita")]
-                if bench_session {
-                    println!("bench: auto save restored {}", save::visit_key(&maps[current], entry_spawn.as_deref()));
-                }
-                hud.announce(if backup {
-                    "Previous save restored / P or click to resume"
-                } else {
-                    "Game restored / P or click to resume"
-                });
-            }
-            Err(e) => {
-                paused = true;
-                notice = format!("Could not restore save: {e:#}");
-            }
-        }
+        if bench_session { println!("bench: auto save restored {}", save::visit_key(&maps[current], entry_spawn.as_deref())); }
+        hud.announce(if resume.as_ref().is_some_and(|loaded| loaded.backup) {
+            "Previous save restored / P or click to resume"
+        } else { "Game restored / P or click to resume" });
+    } else if let Some(error) = resume_error {
+        paused = true;
+        notice = error;
     } else if saves_enabled
         && !options.new_game
         && store.latest().is_none()
