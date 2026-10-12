@@ -8,14 +8,16 @@ use std::{
     path::{Path, PathBuf},
 };
 use zip::ZipArchive;
+#[path = "assets/pk3.rs"]
+mod pk3;
 
 const MAX_ENTRY: u64 = 128 * 1024 * 1024;
 
 /// Read-only PK3 mount. Later alphabetically sorted packs override earlier packs.
 pub struct Assets {
-    packs: Vec<ZipArchive<File>>,
+    packs: Vec<ZipArchive<pk3::PackReader>>,
     paths: Vec<PathBuf>,
-    entries: BTreeMap<String, (usize, usize)>,
+    entries: BTreeMap<String, (usize, usize, u64, u32)>,
     pub base: PathBuf,
     content_fingerprint: Option<String>,
 }
@@ -29,12 +31,11 @@ impl Assets {
         eprintln!("[lg/startup] corpus_identity begin entries={}",self.entries.len());
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
-        for (name, &(pack, index)) in &self.entries {
-            let entry = self.packs[pack].by_index(index)?;
+        for (name, &(_, _, size, crc)) in &self.entries {
             hash.update((name.len() as u64).to_le_bytes());
             hash.update(name.as_bytes());
-            hash.update(entry.size().to_le_bytes());
-            hash.update(entry.crc32().to_le_bytes());
+            hash.update(size.to_le_bytes());
+            hash.update(crc.to_le_bytes());
         }
         let value=format!("{:x}", hash.finalize());
         self.content_fingerprint=Some(value.clone());
@@ -66,20 +67,21 @@ impl Assets {
             eprintln!("[lg/startup] pk3_open begin file={}",path.display());
             let file=File::open(&path)?;
             eprintln!("[lg/startup] pk3_open done elapsed_ms={:.3}; central_directory begin",start.elapsed().as_secs_f64()*1000.);
-            let mut pack = ZipArchive::new(file)
+            let (pack, metadata) = pk3::open(file)
                 .with_context(|| format!("Invalid PK3: {}", path.display()))?;
             eprintln!("[lg/startup] pk3_central_directory done entries={} elapsed_ms={:.3}; index begin",pack.len(),start.elapsed().as_secs_f64()*1000.);
             let p = packs.len();
             let total=pack.len();
-            for i in 0..total {
-                let entry = pack.by_index(i)?;
-                if !entry.is_dir() {
-                    entries.insert(normalize(entry.name()), (p, i));
+            let index_start = std::time::Instant::now();
+            for (i, entry) in metadata.into_iter().enumerate() {
+                if !entry.name.ends_with(['/', '\\']) {
+                    entries.insert(normalize(&entry.name), (p, i, entry.size, entry.crc));
                 }
                 if (i+1)%1024==0 || i+1==total {
                     eprintln!("[lg/startup] pk3_index progress={}/{} elapsed_ms={:.3}",i+1,total,start.elapsed().as_secs_f64()*1000.);
                 }
             }
+            eprintln!("[lg/startup] pk3_index done entries={total} elapsed_ms={:.3}", index_start.elapsed().as_secs_f64()*1000.);
             packs.push(pack);
         }
         eprintln!("[lg/startup] pk3_mount done packs={} names={} elapsed_ms={:.3}",packs.len(),entries.len(),mount_start.elapsed().as_secs_f64()*1000.);
@@ -103,7 +105,7 @@ impl Assets {
     }
     /// Stream an override-resolved entry through a bounded ZIP reader.
     pub fn open_stream(&mut self, name: &str) -> Result<EntryReader> {
-        let &(p, i) = self
+        let &(p, i, _, _) = self
             .entries
             .get(&normalize(name))
             .with_context(|| format!("Asset not found: {name}"))?;
@@ -124,7 +126,7 @@ impl Assets {
         })
     }
     pub fn read(&mut self, name: &str) -> Result<Vec<u8>> {
-        let &(p, i) = self
+        let &(p, i, _, _) = self
             .entries
             .get(&normalize(name))
             .with_context(|| format!("Asset not found: {name}"))?;
@@ -238,7 +240,7 @@ impl EntryReader {
             .name("asset-stream".into())
             .spawn(move || {
                 let run = || -> Result<()> {
-                    let mut archive = ZipArchive::new(File::open(pack)?)?;
+                    let mut archive = ZipArchive::new(pk3::PackReader::new(File::open(pack)?)?)?;
                     let mut entry = archive.by_name(&name)?;
                     anyhow::ensure!(entry.size() <= MAX_ENTRY, "Asset exceeds 128 MiB limit");
                     loop {
@@ -308,6 +310,98 @@ fn normalize(s: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    #[ignore = "requires user-supplied PK3s; set LG_PK3_TEST_DATA"]
+    fn real_pk3_metadata_identity_and_phase_timings() -> Result<()> {
+        use sha2::{Digest, Sha256};
+        use std::time::Instant;
+        let base = PathBuf::from(std::env::var("LG_PK3_TEST_DATA")?);
+        let mut paths = fs::read_dir(&base)?.map(|e| e.map(|e| e.path()))
+            .collect::<io::Result<Vec<_>>>()?;
+        paths.retain(|p| p.extension().is_some_and(|s| s.eq_ignore_ascii_case("pk3")));
+        paths.sort_by_key(|p| p.file_name().unwrap_or_default().to_ascii_lowercase());
+        assert!(!paths.is_empty());
+        let mut reference_identity = String::new();
+        let mut reference_names = Vec::new();
+        for run in 0..5 {
+            let mut old_packs = Vec::new();
+            let mut old_entries = BTreeMap::new();
+            let mut new_entries = BTreeMap::new();
+            let mut phases = [0.; 5];
+            for (p, path) in paths.iter().enumerate() {
+                let start = Instant::now();
+                let mut old = ZipArchive::new(File::open(path)?)?;
+                let old_cd = start.elapsed().as_secs_f64() * 1000.;
+                let start = Instant::now();
+                for i in 0..old.len() {
+                    let e = old.by_index(i)?;
+                    if !e.is_dir() { old_entries.insert(normalize(e.name()), (p, i)); }
+                }
+                let old_index = start.elapsed().as_secs_f64() * 1000.;
+                let start = Instant::now();
+                let (mut new, metadata, reads) = pk3::open_counted(File::open(path)?)?;
+                let new_cd = start.elapsed().as_secs_f64() * 1000.;
+                assert!(reads <= 2, "{} used {reads} reads during directory + metadata", path.display());
+                let start = Instant::now();
+                for (i, e) in metadata.iter().enumerate() {
+                    if !e.name.ends_with(['/', '\\']) {
+                        new_entries.insert(normalize(&e.name), (p, i, e.size, e.crc));
+                    }
+                }
+                let new_index = start.elapsed().as_secs_f64() * 1000.;
+                // Verify every entry, in directory order, including overridden
+                // entries and directories. Local data offsets are checked too.
+                if run == 0 {
+                    assert_eq!(old.len(), metadata.len());
+                    for (i, e) in metadata.iter().enumerate() {
+                        let a = old.by_index(i)?;
+                        let b = new.by_index(i)?;
+                        assert_eq!(e.name, a.name());
+                        assert_eq!((e.size, e.crc, e.compressed_size, e.header_start, e.central_start),
+                            (a.size(), a.crc32(), a.compressed_size(), a.header_start(), a.central_header_start()));
+                        assert_eq!((b.name(), b.size(), b.crc32(), b.compressed_size(), b.header_start(), b.data_start()),
+                            (a.name(), a.size(), a.crc32(), a.compressed_size(), a.header_start(), a.data_start()));
+                    }
+                }
+                eprintln!("[j6/bench] run={run} pack={} entries={} central_ms={old_cd:.3}->{new_cd:.3} index_ms={old_index:.3}->{new_index:.3}", path.file_name().unwrap().to_string_lossy(), old.len());
+                for (sum, ms) in phases.iter_mut().zip([old_cd, new_cd, old_index, new_index]) { *sum += ms; }
+                old_packs.push(old);
+            }
+            let start = Instant::now();
+            let mut hash = Sha256::new();
+            for (name, &(p, i)) in &old_entries {
+                let e = old_packs[p].by_index(i)?;
+                hash.update((name.len() as u64).to_le_bytes());
+                hash.update(name.as_bytes());
+                hash.update(e.size().to_le_bytes());
+                hash.update(e.crc32().to_le_bytes());
+            }
+            phases[4] = start.elapsed().as_secs_f64() * 1000.;
+            let expected = format!("{:x}", hash.finalize());
+            assert_eq!(old_entries.iter().map(|(n, &(p, i))| (n, p, i)).collect::<Vec<_>>(),
+                new_entries.iter().map(|(n, &(p, i, _, _))| (n, p, i)).collect::<Vec<_>>());
+            let mut assets = Assets::open(&base)?;
+            assert_eq!(assets.entries, new_entries);
+            let start = Instant::now();
+            assert_eq!(assets.fingerprint()?, expected);
+            let identity_ms = start.elapsed().as_secs_f64() * 1000.;
+            eprintln!("[j6/bench] totals run={run} names={} central_ms={:.3}->{:.3} index_ms={:.3}->{:.3} identity_ms={:.3}->{identity_ms:.3} identity={expected}", old_entries.len(), phases[0], phases[1], phases[2], phases[3], phases[4]);
+            reference_identity = expected;
+            reference_names = old_entries.keys().cloned().collect();
+            // Verify real decompression through both readers, outside timing.
+            if run == 0 {
+                for name in ["maps/gvillage.bsp", "ui/main.urc", "ui/loadsave.urc", "ui/quit.urc"] {
+                    let &(p, i) = old_entries.get(name).context("Missing test asset")?;
+                    let mut bytes = Vec::new();
+                    old_packs[p].by_index(i)?.read_to_end(&mut bytes)?;
+                    assert_eq!(assets.read(name)?, bytes);
+                }
+            }
+        }
+        assert_eq!(reference_names.len(), 10_221);
+        eprintln!("[j6/proof] identity={reference_identity} resolved_names={}", reference_names.len());
+        Ok(())
+    }
     #[test]
     fn streaming_reports_crc_errors_and_can_be_dropped_early() -> Result<()> {
         use std::io::{Seek, SeekFrom};

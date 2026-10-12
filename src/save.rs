@@ -825,8 +825,11 @@ pub fn rebuild_headless(assets: &mut Assets, mut game: Game) -> Result<Headless>
 }
 impl Restored {
     pub fn build(assets: &mut Assets, mut game: Game) -> Result<Self> {
+        let mut timing = crate::startup::Phase::new("save_restore");
         let (level, migrate) = prepare(assets, &mut game, true)?;
+        timing.mark("prepare_migrate");
         let mut scene = Scene::load(assets, &level.map)?;
+        timing.mark("scene_ready");
         scene.map.difficulty = game.stats.difficulty;
         let Logic {
             interactions,
@@ -840,6 +843,7 @@ impl Restored {
             &mut scene.world,
             migrate,
         )?;
+        timing.mark("logic_story_hints");
         let mut npcs = Npcs::load(
             assets,
             &scene.map,
@@ -849,11 +853,14 @@ impl Restored {
             false,
         )?;
         npcs.restore(&level.npcs)?;
+        timing.mark("npc_models_restore");
         let mut alice = Character::load(assets)?;
         alice.restore(&game.character)?;
         scene.world.set_weapon_obstacles(alice.ice_targets());
         alice.power_appearance(&game.stats);
+        timing.mark("alice_models_restore");
         let steam = crate::particles::Steam::load(assets, &scene.map)?;
+        timing.mark("steam_textures");
         Ok(Self {
             scene,
             interactions,

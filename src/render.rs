@@ -1448,19 +1448,28 @@ impl Scene {
         name: &str,
         difficulty: crate::powerups::Difficulty,
     ) -> Result<Self> {
-        let mut map = Bsp::parse(&assets.read(&format!("maps/{name}.bsp"))?)
+        let mut timing = crate::startup::Phase::new("map_load");
+        eprintln!("[lg/startup] map_load map={name}");
+        let bytes = assets.read(&format!("maps/{name}.bsp"))?;
+        timing.mark("bsp_read");
+        let mut map = Bsp::parse(&bytes)
             .with_context(|| format!("Loading {name}"))?;
+        drop(bytes);
+        timing.mark("bsp_parse");
         map.difficulty = difficulty;
         let world = World::from_bsp(&map)?;
+        timing.mark("collision_world");
         Self::from_parts(assets, name, map, world)
     }
     /// The window half of loading a scene, for a map and collision that `campaign::load_visit`
     /// already built (with the difficulty applied) so that the viewer and a headless route share
     /// one copy of them.
     pub fn from_parts(assets: &mut Assets, name: &str, map: Bsp, world: World) -> Result<Self> {
+        let mut timing = crate::startup::Phase::new("scene_build");
         crate::lighting::load_art(assets)?;
         let specs = texture::read_materials(assets)?;
         let atmosphere = Atmosphere::load(assets, name, &map, &specs)?;
+        timing.mark("lighting_material_specs_atmosphere");
         let count = map.lightmaps.len() / 49152;
         let cols = 8usize;
         let rows = count.div_ceil(cols).max(1);
@@ -1485,6 +1494,7 @@ impl Scene {
             ],
         );
         let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
+        timing.mark("lightmap_textures");
         let mut models = vec![0usize];
         for e in &map.entities {
             if e.get("classname")
@@ -1529,6 +1539,7 @@ impl Scene {
         let mut groups = BTreeMap::<(usize, usize), usize>::new();
         let sky_origin = crate::sky::origin(assets, name, &map)?;
         let mut sky_motions = crate::sky_sequence::motions(assets, &map, name)?;
+        timing.mark("inline_models_portals_sky");
         for model in models {
             if world.traversal.ropes.iter().any(|r| r.model == model) {
                 continue;
@@ -1716,6 +1727,7 @@ impl Scene {
         let mut sky_props = Vec::new();
         let decoration_start = batches.len();
         let decorations = crate::decorations::Catalog::load(assets, &map, name)?;
+        timing.mark("world_meshes_textures_decoration_models");
         println!("Decorations {name}: {} placements, {} baked duplicates avoided, {} scripted props deferred", decorations.placements.len(), decorations.baked, decorations.deferred.len());
         for placement in &decorations.placements {
             let def = &placement.model.def;
@@ -1853,6 +1865,7 @@ impl Scene {
                     .any(|l| l.spec.images.len() > 1 || !l.spec.mods.is_empty())
             })
             .count();
+        timing.mark("decoration_meshes_visibility");
         let mut materials = (0..BLEND_COUNT)
             .map(|i| {
                 world_material(
@@ -1884,6 +1897,7 @@ impl Scene {
             );
         }
         let mut bound_materials = Vec::new();
+        timing.mark("world_shaders");
         for material in &materials {
             if !bound_materials.iter().any(|m| Rc::ptr_eq(m, material)) {
                 bound_materials.push(material.clone());
@@ -1928,6 +1942,7 @@ impl Scene {
             scene.bound_materials.clear();
             scene.materials.clear();
         }
+        timing.mark("retained_renderer");
         Ok(scene)
     }
     pub fn update_ropes(

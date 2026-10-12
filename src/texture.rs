@@ -26,6 +26,9 @@ pub(crate) fn upload_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D 
 /// halved on the CPU until they fit, then uploaded. The packed game data is not
 /// rewritten, and nothing is compressed or cached on disk.
 pub(crate) fn upload_dynamic_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D {
+    // Vita's synchronous Texture2D upload includes backend DXT5 conversion
+    // when called through upload_rgba8; this reports that combined cost.
+    let _timing = crate::startup::WorkTimer::new(crate::startup::Work::TextureUpload);
     #[cfg(target_os = "vita")]
     {
         let (dst_w, dst_h, limited) = limit_rgba8(width, height, pixels, VITA_TEXTURE_MAX_DIM);
@@ -217,7 +220,10 @@ pub fn resolve(
 }
 
 pub fn decode(assets: &mut Assets, name: &str) -> Result<RgbaImage> {
+    let read_timing = crate::startup::WorkTimer::new(crate::startup::Work::TextureRead);
     let bytes = assets.read(name)?;
+    drop(read_timing);
+    let _decode_timing = crate::startup::WorkTimer::new(crate::startup::Work::TextureDecode);
     if name.ends_with(".ftx") {
         return decode_ftx(&bytes).with_context(|| name.to_owned());
     }

@@ -249,10 +249,16 @@ pub fn load_visit(
     difficulty: Difficulty,
     play_entry: bool,
 ) -> Result<Loaded> {
-    let mut map = Bsp::parse(&assets.read(&format!("maps/{name}.bsp"))?)
+    let mut timing = crate::startup::Phase::new("campaign_map_load");
+    let bytes = assets.read(&format!("maps/{name}.bsp"))?;
+    timing.mark("bsp_read");
+    let mut map = Bsp::parse(&bytes)
         .with_context(|| format!("Loading {name}"))?;
+    drop(bytes);
+    timing.mark("bsp_parse");
     map.difficulty = difficulty;
     let mut world = World::from_bsp(&map)?;
+    timing.mark("collision_world");
     save::validate_entry(&map, entry)?;
     let (mut interactions, mut story, hints) = if let Some(saved) = cached {
         let mut saved = saved.clone();
@@ -271,6 +277,7 @@ pub fn load_visit(
         interactions.entry_story(&mut story);
     }
     interactions.sync(&mut world);
+    timing.mark("entities_logic_story");
     Ok(Loaded {
         map,
         world,

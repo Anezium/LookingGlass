@@ -3,6 +3,7 @@ mod ambient_animation;
 mod animation_events;
 mod ant;
 mod assets;
+mod startup;
 mod audio;
 mod beyond;
 mod beyond_check;

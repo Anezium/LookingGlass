@@ -605,9 +605,11 @@ impl Renderer {
         let groups_ms=started.elapsed().as_secs_f64()*1000.;
         println!("[lg/vita-renderer] load groups {:.3} ms recipes={recipes_ms:.3} chunks={chunks_ms:.3} source_chunks={source_chunks} groups={} vertices={} layer_triangles={}",groups_ms,pending.len(),vertices,triangles);
         let upload_start=std::time::Instant::now();
+        let mut startup_timing = crate::startup::Phase::new("retained_upload");
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
         crate::frame_profile::shader_creation();
+        let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
         let shader = ctx
             .new_shader(
                 ShaderSource::Glsl {
@@ -617,6 +619,7 @@ impl Renderer {
                 shader::meta(),
             )
             .context("retained world shader")?;
+        drop(shader_timing);
         let attributes = [
             VertexAttribute::new("position", VertexFormat::Float3),
             VertexAttribute::new("texcoord", VertexFormat::Float2),
@@ -673,7 +676,9 @@ impl Renderer {
         let mut low_pipelines=Vec::new();
         let low_shader=if c.quality=="low" {
             crate::frame_profile::shader_creation();
+            let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
             let low=ctx.new_shader(ShaderSource::Glsl{vertex:shader::VERTEX,fragment:&shader::low_fragment()},shader::meta())?;
+            drop(shader_timing);
             for cull in [CullFace::Nothing,CullFace::Back,CullFace::Front] {
                 crate::frame_profile::pipeline_creation();
                 low_pipelines.push(ctx.new_pipeline(&[BufferLayout{stride:52,..Default::default()}],&attributes,low,PipelineParams{depth_test:Comparison::LessOrEqual,depth_write:true,cull_face:cull,front_face_order:FrontFaceOrder::Clockwise,..Default::default()}));
@@ -708,6 +713,7 @@ impl Renderer {
             });
         }
         crate::frame_profile::shader_creation();
+        let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
         let sky_shader = ctx.new_shader(
             ShaderSource::Glsl {
                 vertex: shader::SKY_VERTEX,
@@ -723,6 +729,7 @@ impl Renderer {
                 },
             },
         )?;
+        drop(shader_timing);
         crate::frame_profile::pipeline_creation();
         let sky_pipeline = ctx.new_pipeline(
             &[BufferLayout::default()],
@@ -745,6 +752,7 @@ impl Renderer {
         };
         let upload_ms=upload_start.elapsed().as_secs_f64()*1000.;
         println!("[lg/vita-renderer] load pipelines/uploads {:.3} ms payload_bytes={bytes}",upload_ms);
+        startup_timing.mark("shaders_pipelines_buffers");
         let pvs_start=std::time::Instant::now();
         let (pvs,cache_status)=pvs_cache::load_or_build(&groups,&scene.map.visibility,corpus);
         if c.pvs_verify {
@@ -754,6 +762,7 @@ impl Renderer {
         }
         let pvs_ms=pvs_start.elapsed().as_secs_f64()*1000.;
         println!("[lg/vita-renderer] load PVS {:.3} ms method={} cache={cache_status}",pvs_ms,c.pvs_method);
+        startup_timing.mark("pvs_build_cache");
         let unique = pvs
             .clusters
             .iter()

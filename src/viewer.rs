@@ -750,9 +750,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 &catalog,
             );
             level_art = LevelArt::default();
+            let mut install_timing = crate::startup::Phase::new("restore_install");
             level_art.prepare(&mut assets, &scene, &interactions, true)?;
+            install_timing.mark("level_art_models_textures");
             skip_scene = crate::cinematic::Skip::default();
             audio.load(&mut assets, &maps[current], &scene.map);
+            install_timing.mark("audio_load");
             clock.pause();
             paused = $pause;
             menu = false;
@@ -785,10 +788,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut resume_applied = false;
     let validated = prepared.is_some();
     if save::bench_scene(validated) == save::BenchScene::ReuseValidated {
+        let mut timing = crate::startup::Phase::new("restore_resources");
         power_art = crate::powerups::Art::load(&mut assets)?;
+        timing.mark("power_art");
         catalog = Catalog::load(&mut assets)?;
+        timing.mark("inventory_catalog");
         hud = Hud::load(&mut assets)?;
+        timing.mark("hud_textures");
         aim_pointer = crate::targeting::Pointer::load(&mut assets)?;
+        timing.mark("aim_pointer");
         let fresh = starting_stats(&options, &maps[current], options.entry.as_deref());
         println!(
             "Level loadout {}: {}",
@@ -800,6 +808,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         let pause_on_load = true;
         apply_loaded!(prepared.unwrap(), pause_on_load);
+        timing.mark("installed");
         resume_applied = true;
         println!("[lg/startup] restored scene reused map={} source={}", maps[current],
             if options.load.is_some() { "load" } else { "continue-or-bench" });

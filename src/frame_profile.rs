@@ -50,6 +50,7 @@ pub(crate) fn creation_report() -> serde_json::Value {
 #[cfg(feature="vita_renderer")]
 pub(crate) fn current_creations() -> [u64;2] { CREATIONS.with(|c| c.borrow().current) }
 pub(crate) fn load_material(shader: macroquad::miniquad::ShaderSource<'_>, params: macroquad::material::MaterialParams) -> Result<macroquad::material::Material, macroquad::Error> {
+    let _timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
     shader_creation(); pipeline_creation();
     macroquad::material::load_material(shader,params)
 }

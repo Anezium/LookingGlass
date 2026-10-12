@@ -271,7 +271,9 @@ impl Bsp {
             })
             .collect::<Result<Vec<_>>>()?;
         let entity_text = std::str::from_utf8(lumps[14])?.trim_end_matches('\0');
+        let entity_start = std::time::Instant::now();
         let entities = parse_entities(entity_text)?;
+        eprintln!("[lg/startup] bsp_entities done entries={} elapsed_ms={:.3}", entities.len(), entity_start.elapsed().as_secs_f64()*1000.);
         let visibility = crate::visibility::Visibility::parse(
             lumps[9],
             lumps[8],
