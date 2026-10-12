@@ -3424,6 +3424,9 @@ impl Npcs {
         crate::frame_profile::counts(&[
             ("characters_lod_exact",lod_counts[0]),("characters_lod_culled",lod_counts[1]),
             ("characters_lod_refreshed",lod_counts[2]),("characters_lod_reused",lod_counts[3]),
+            // Whole ambient actor passes, not surface layers or GPU draw calls.
+            ("characters_lod_layer_passes_skipped",lod_counts[1]),
+            ("characters_lod_submit_passes_skipped",lod_counts[1]),
             ("characters_lod_protected",lod_counts[4]),
         ]);
         gl_use_default_material();

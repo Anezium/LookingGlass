@@ -56,8 +56,8 @@ only their visual puffs are capped. `puffs_after` is the live population; `puffs
 
 Hypotheses, not measurements: cap 128 versus roughly 644 live puffs could remove about
 80% of per-puff work; every=4 could remove about 75% of eligible sweep calls; `none` removes
-all puff sweep calls. These estimates overlap and cannot be added. The supplied ~45 ms
-particle span is an older baseline; liquid/constraint/emission work still remains.
+all puff sweep calls. These estimates overlap and cannot be added. The measured sim8
+particle span is 35.102 ms mean; liquid/constraint/emission work still remains.
 
 ## Characters: the safe set is deliberately narrow
 
@@ -78,7 +78,7 @@ Proof of isolation:
   at `src/npc.rs:2924`, not the drawn skeleton or mesh.
 - `Model::draw_pose` builds a temporary global pose (`src/npc.rs:1106`) and feeds it to mesh
   skinning. Attachment points consume it at `src/npc.rs:1153`; all actors with such consumers
-  are excluded. Clockwork rig/muzzle pose queries (`src/npc.rs:3861`) are also excluded.
+  are excluded. Clockwork rig/muzzle pose queries (`src/npc.rs:3864`) are also excluded.
 - Alice's separate draw path (`src/viewer.rs:3256`), every Puppet, LevelArt and cinematic
   handoff pose (`src/viewer.rs:84`) are untouched. Alice never enters this cache.
 - `Npcs::snapshot` clones only actors and gameplay state (`src/npc.rs:1928`). The per-actor
@@ -102,13 +102,21 @@ change one field. `anim-cull` is an additional independent opt-in so defaults ne
 frustum culling silently.
 
 Per-frame counters: `characters_lod_exact`, `characters_lod_culled`,
-`characters_lod_refreshed`, `characters_lod_reused`, `characters_lod_protected`. They describe
+`characters_lod_refreshed`, `characters_lod_reused`, `characters_lod_protected`,
+`characters_lod_layer_passes_skipped`, `characters_lod_submit_passes_skipped`. The two explicit
+pass-skip counters equal `characters_lod_culled`: each is one whole ambient actor whose layer
+preparation and submission are both bypassed, not a surface-layer count or GPU draw count.
+The Hidden return is before `Model::draw_pose` and `render_fx::skin`; it avoids both costs. They describe
 the ambient branch after pre-existing visibility/ownership gates. Controller/LevelArt/Alice
 renders are protected by absence of any LOD hook, not counted in this ambient-only series.
 
-Hypothesis: refresh every 4 can avoid 75% of eligible skin/normal/pose work, and frustum
-culling also avoids submissions. The supplied entire skinning span was only ~9 ms; the gain
-must be weighted by the eligible population, and cached submission/layers still cost time.
+Hypothesis: refresh every 4 can avoid 75% of eligible skin/normal/pose work, whereas frustum
+culling avoids the entire eligible actor path, including layers and submission. Sim8 measured
+35.730 ms mean in frame_characters, 13.186 in layers, 11.079 in submission, and 9.293 in skinning.
+The NPC group is 24.489 ms in an overlapping breakdown, not an extra additive cost. Thus whole
+offscreen culls target the dominant cost; visible far mesh reuse still pays layers/submission
+and should not be sold as a fix for that bottleneck. Gains must be weighted by the safe/cullable
+population.
 GPU/resource correctness of cached meshes and scene-wide visuals still require console review.
 
 ## Movers: defer placement, never movement or contacts
@@ -150,10 +158,20 @@ The last two are global on-demand geometry diagnostics, including pre-existing l
 Subtract neither one blindly from mover gains: deferred work can reappear in query owners.
 
 Hypothesis: every=4 avoids up to 75% of far eager placement/probe/publication work, before
-on-demand builds. The old ~51 ms placement cost is an upper scaling reference, not a measured
-sim8 residual. Actual savings depend on far population and query activity. Combining fewer
+on-demand builds. The measured sim8 placement residual is 11.831 ms mean; all movers total 20.266 ms. Actual savings depend on far population and query activity. Combining fewer
 puff queries with lazy placement may help; gains cannot be added as independent constants.
 No 25 ms simulation claim is made without a new console run.
+
+## Updated measured base (orchestrator handoff at 15:13 CEST)
+
+Read-only evidence: `~/vita-j0/village-sim8/console/report.json`, `analysis.json`,
+`result-reading.md`. Bench frames 31-120, means: frame_cpu 109.036 ms versus 162.170 on
+its parent; movers 20.266, village_collider_build 11.831, particles 35.102 versus 43.774,
+characters 35.730. Global collider_trace_calls falls from 17,980 to 250 per frame. These
+are base measurements, not sim9 gains. No further particle/mover tuning was done after
+this handoff; character whole-pass skip counters make the layer/submission savings explicit.
+Bench contains retained character/effect drawing and is not a pure simulation clock.
+No additive 25 ms budget prediction is inferred from its overlapping spans.
 
 ## Validation and deliberate exclusions
 
