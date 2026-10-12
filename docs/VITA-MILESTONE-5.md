@@ -23,37 +23,32 @@ comparison isolates the knob; adjacent actor grouping already existed in milesto
 zero failed, one pre-existing ignored. Evidence remains outside Git under
 ~/vita-j0/village-retained-world/jalon-5/host/.
 
-## Startup timeout under investigation
+## Startup timeout and archive audit
 
-Pilot P3 on milestone 4 logged only vita-sim configuration between 19:04 and 19:19.
-Code order: sim configuration -> PK3 mount/index in Assets::open -> renderer JSON
-read in viewer::config -> native GL initialization -> viewer UI -> route JSON and
-validation -> corpus identity/save read -> scene build -> first scaled framebuffer.
-Thus route-inputs.json, slot1, render-scale and the splash thread are downstream
-of the missing renderer-config line. Assets::open has no application mutex and
-its mounting algorithm is unchanged from milestone 3.1; milestone 4 only memoized
-the later fingerprint calculation. The renderer config line is emitted after its
-file read, parse and validation, so those steps are also possible timeout sites.
-No native rebuild until the pilot's P0 outcome or an obvious code cause.
+4.1 P0 (20:08:58 CEST) reaches pk3_open done / central_directory begin for
+pak0.pk3, then stops inside ZipArchive::new(File). The earlier route-tape,
+renderer-config and GPU-setup hypotheses are downstream of this marker.
+Moving route-inputs.json aside did not change the stall. The known-good 3.1
+console health control is pending; degraded storage is not yet proven.
 
-Startup phase logs now bracket directory scanning, every archive open/central
-index, index progress (1024 entries), window/renderer configuration, UI/menu,
-route read/parse/validation, corpus identity and requested save. Host checks pass;
-playable-low + vita-sim-all Continue completed normally. Host measured mount:
-484.6 ms for 6 packs / 10221 resolved names; renderer JSON read/parse/validation:
-0.13 ms; route tape 3434923 bytes / 9169 samples read+parse+validate: 5.55 ms;
-requested save read: about 3.5 ms. These are host timings, not estimates for Vita.
-No application mutex or unbounded application loop was found in the pre-config
-mount path. Filesystem/PK3 I/O or renderer-config read remain possible native
-block sites; the existing milestone-4 log cannot distinguish them. P0 is pending.
+Comparison e6e2d70..061faaa changes no archive opening, scanning/sorting,
+central-directory/index construction, buffering, mmap, read sizes or threading.
+Only fingerprint() memoization changed after mount completion. Cargo.toml,
+Cargo.lock and .cargo are identical, including ZIP/miniquad pins. The sim8/9
+integration does not alter archive reading. Startup order is preserved in 4.1
+and milestone 5 while the pilot finishes the health control.
 
-The independent splash allocator issue remains plausible from code: vgl.c starts
-invoke_splashscreen before registering later blit/scissor resources; splashscreen.c
-allocates GPU buffers and signals completion before freeing its buffers/context.
-The shipped libvitaGL.a has separate vgl.o -> invoke_splashscreen relocation and
-splashscreen.o entry points; mem_utils.o has no LwMutex imports. This establishes
-allocator overlap, not the root cause of the 18:14 abort. Splash startup occurs
-after renderer configuration and cannot explain P3's observed missing config line.
+Trace markers bracket scan, each open/central index, index progress, window/config,
+UI/menu, route read/parse/validation, corpus identity and save load. Host mount:
+484.6 ms for 6 packs / 10221 names; renderer JSON: 0.13 ms; tape 3434923 bytes /
+9169 samples: 5.55 ms; save: about 3.5 ms. These are host timings only.
+
+The independent splash allocator issue is proven as overlapping ownership in code:
+vgl.c starts invoke_splashscreen before later resources; splashscreen.c signals
+completion before freeing buffers/context. The shipped archive has separate
+vgl.o -> invoke_splashscreen relocation and splashscreen.o entry points, while
+mem_utils.o has no LwMutex imports. The 18:14 abort's exact cause is a hypothesis.
+The SDK splash starts after renderer config and cannot explain this ZIP stall.
 
 ## Splash allocator ownership
 
@@ -82,4 +77,16 @@ Named-save and host-record modes retain their previous entry policy. Original LG
 controller/progression/save code remains unchanged. Tape reads are capped at
 16 MiB and use a 64 KiB buffered reader only after route-mode selection inside the
 initialized viewer. Host suite: 742 passed, zero failed, one pre-existing ignored.
-The film/entry/Blade/knife_cat/input/save/Continue host run is in progress.
+The pre-streaming host New Game route passed film, entry, Blade, knife_cat and
+60 seconds of input/save; camera alignment required zero corrective ticks at
+that run. Streaming-path and second-launch Continue validation follows below.
+
+## Native film support
+
+The base still deliberately skipped native story films. New Game now reuses the
+bounded ZIP/movie reader from vita-stream-on-hotfix 962f6e3 (including its 256 KiB
+worker stack) without merging its unrelated changes or renaming the mount API.
+Only film entry reads use open_stream after window initialization. ZIP workers
+send owned 32 KiB chunks through a one-slot queue; drop disconnects before join.
+GPU uploads stay on the viewer thread. Normal mount/read paths and benchmark film
+suppression stay unchanged. Host/New Game and Continue validation follows below.

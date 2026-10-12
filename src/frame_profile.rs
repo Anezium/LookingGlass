@@ -241,7 +241,7 @@ pub use vita::{
     add_counter, begin_frame, bench_accepted_frames, bench_frames, characters_span, counter_owner,
     counts, end_frame, flush_boundary, mode, simulation_frozen,
     record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_lg_submissions, record_model,
-    record_world_submission, report, set_owner, startup_bench, world_span, Counter, Owner,
+    record_world_submission, report, set_owner, startup_bench, story_movies_blocked, world_span, Counter, Owner,
 };
 
 #[cfg(target_os = "vita")]
@@ -603,6 +603,8 @@ mod vita {
     pub fn startup_bench() -> bool {
         Mode::read().is_bench() && enabled()
     }
+    /// Read benchmark policy before the first frame, without suppressing New Game films.
+    pub fn story_movies_blocked() -> bool { Mode::read().is_bench() }
     pub fn bench_frames() -> Option<usize> {
         STATE.with(|s| {
             let s = s.borrow();

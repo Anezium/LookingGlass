@@ -272,6 +272,18 @@ fn music_cues(text: &str) -> Result<BTreeMap<String, Music>> {
     }
     Ok(cues)
 }
+/// Story films retain their small MP3 in memory; the video itself is streamed.
+pub fn movie_soundtrack(assets: &mut Assets, path: &str) -> Result<Decoder<Cursor<Vec<u8>>>> {
+    let bytes = assets.read(path)?;
+    let name = path.strip_prefix("video/").unwrap_or(path);
+    let name = name.strip_suffix(".mp3").unwrap_or(name);
+    eprintln!("movie soundtrack {name}: {} bytes in memory", bytes.len());
+    if bytes.len() > 16 * 1024 * 1024 {
+        eprintln!("warning: movie soundtrack {name} exceeds 16 MiB in memory");
+    }
+    Ok(Decoder::new(Cursor::new(bytes))?)
+}
+
 #[cfg(test)]
 fn music_spec(text: &str) -> Result<Option<Music>> {
     Ok(music_cues(text)?.remove("normal"))
@@ -1329,7 +1341,7 @@ impl Audio {
         } else {
             self.settings.effects
         });
-        sink.append(Decoder::new(Cursor::new(assets.read(path)?))?);
+        sink.append(movie_soundtrack(assets, path)?);
         Ok(Some(sink))
     }
     /// Menu cues use the existing output/mixer but continue while gameplay is paused.

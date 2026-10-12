@@ -2,7 +2,9 @@ use anyhow::{bail, Context, Result};
 use std::{
     collections::BTreeMap,
     fs::{self, File},
-    io::Read,
+    io::{self, Cursor, Read},
+    sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc},
+    thread::{self, JoinHandle},
     path::{Path, PathBuf},
 };
 use zip::ZipArchive;
@@ -12,6 +14,7 @@ const MAX_ENTRY: u64 = 128 * 1024 * 1024;
 /// Read-only PK3 mount. Later alphabetically sorted packs override earlier packs.
 pub struct Assets {
     packs: Vec<ZipArchive<File>>,
+    paths: Vec<PathBuf>,
     entries: BTreeMap<String, (usize, usize)>,
     pub base: PathBuf,
     content_fingerprint: Option<String>,
@@ -58,7 +61,7 @@ impl Assets {
         }
         let mut entries = BTreeMap::new();
         let mut packs = Vec::new();
-        for path in paths {
+        for path in &paths {
             let start=std::time::Instant::now();
             eprintln!("[lg/startup] pk3_open begin file={}",path.display());
             let file=File::open(&path)?;
@@ -82,6 +85,7 @@ impl Assets {
         eprintln!("[lg/startup] pk3_mount done packs={} names={} elapsed_ms={:.3}",packs.len(),entries.len(),mount_start.elapsed().as_secs_f64()*1000.);
         Ok(Self {
             packs,
+            paths,
             entries,
             base: base.to_path_buf(),
             content_fingerprint: None,
@@ -96,6 +100,28 @@ impl Assets {
     }
     pub fn pack_count(&self) -> usize {
         self.packs.len()
+    }
+    /// Stream an override-resolved entry through a bounded ZIP reader.
+    pub fn open_stream(&mut self, name: &str) -> Result<EntryReader> {
+        let &(p, i) = self
+            .entries
+            .get(&normalize(name))
+            .with_context(|| format!("Asset not found: {name}"))?;
+        // The lookup is normalized, but by_name needs the archive's original spelling.
+        let original = self.packs[p].by_index(i)?.name().to_owned();
+        let entry = self.packs[p].by_name(&original)?;
+        if entry.size() > MAX_ENTRY {
+            bail!("Asset exceeds 128 MiB limit: {name}");
+        }
+        Ok(EntryReader {
+            pack: self.paths[p].clone(),
+            name: original,
+            stream: None,
+            usage: Arc::new(StreamUse {
+                live: AtomicUsize::new(0),
+                peak: Arc::new(AtomicUsize::new(0)),
+            }),
+        })
     }
     pub fn read(&mut self, name: &str) -> Result<Vec<u8>> {
         let &(p, i) = self
@@ -127,6 +153,153 @@ impl Assets {
             .collect()
     }
 }
+// zip 0.6.6's ZipFile erases Send on its borrowed reader. Keep it entirely on
+// one worker thread; only owned chunks cross the bounded channel. This also lets
+// a stream can outlive the mount without borrowing Assets.
+const STREAM_CHUNK: usize = 32 * 1024;
+struct StreamUse {
+    live: AtomicUsize,
+    peak: Arc<AtomicUsize>,
+}
+impl StreamUse {
+    fn reserve(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let now = self.live.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        let mut seen = self.peak.load(Ordering::Relaxed);
+        while now > seen {
+            match self.peak.compare_exchange_weak(
+                seen,
+                now,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => seen = actual,
+            }
+        }
+    }
+    fn release(&self, bytes: usize) {
+        if bytes > 0 {
+            self.live.fetch_sub(bytes, Ordering::Relaxed);
+        }
+    }
+}
+struct EntryStream {
+    receiver: Option<mpsc::Receiver<io::Result<Vec<u8>>>>,
+    buffer: Cursor<Vec<u8>>,
+    worker: Option<JoinHandle<()>>,
+    finished: bool,
+    usage: Arc<StreamUse>,
+}
+impl Drop for EntryStream {
+    fn drop(&mut self) {
+        let leftover = std::mem::replace(&mut self.buffer, Cursor::new(Vec::new()));
+        self.usage.release(leftover.into_inner().capacity());
+        // Disconnect before joining so a producer blocked on send can exit.
+        if let Some(receiver) = self.receiver.take() {
+            while let Ok(message) = receiver.try_recv() {
+                if let Ok(bytes) = message {
+                    self.usage.release(bytes.capacity());
+                }
+            }
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+pub(crate) struct EntryReader {
+    pack: PathBuf,
+    name: String,
+    stream: Option<EntryStream>,
+    usage: Arc<StreamUse>,
+}
+impl EntryReader {
+    #[cfg(test)]
+    fn peak_bytes(&self) -> usize {
+        self.usage.peak.load(Ordering::Relaxed)
+    }
+    #[cfg(target_os = "vita")]
+    pub(crate) fn peak_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.usage.peak)
+    }
+    fn start(&mut self) -> io::Result<()> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let pack = self.pack.clone();
+        let name = self.name.clone();
+        let usage = Arc::clone(&self.usage);
+        // std's default thread stack on Vita is not a settled size: one port
+        // reports 64 KiB, the std we read reserves 2 MiB. Pin 256 KiB so ZIP
+        // inflate on this worker does not depend on that default.
+        let worker = thread::Builder::new()
+            .stack_size(256 * 1024)
+            .name("asset-stream".into())
+            .spawn(move || {
+                let run = || -> Result<()> {
+                    let mut archive = ZipArchive::new(File::open(pack)?)?;
+                    let mut entry = archive.by_name(&name)?;
+                    anyhow::ensure!(entry.size() <= MAX_ENTRY, "Asset exceeds 128 MiB limit");
+                    loop {
+                        let mut bytes = vec![0; STREAM_CHUNK];
+                        let count = entry.read(&mut bytes)?;
+                        if count == 0 {
+                            let _ = sender.send(Ok(Vec::new()));
+                            return Ok(());
+                        }
+                        bytes.truncate(count);
+                        let reserved = bytes.capacity();
+                        usage.reserve(reserved);
+                        if sender.send(Ok(bytes)).is_err() {
+                            usage.release(reserved);
+                            return Ok(());
+                        }
+                    }
+                };
+                if let Err(error) = run() {
+                    let _ = sender.send(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
+                }
+            })?;
+        self.stream = Some(EntryStream {
+            receiver: Some(receiver),
+            buffer: Cursor::new(Vec::new()),
+            worker: Some(worker),
+            finished: false,
+            usage: Arc::clone(&self.usage),
+        });
+        Ok(())
+    }
+}
+impl Read for EntryReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.stream.is_none() {
+            self.start()?;
+        }
+        let stream = self.stream.as_mut().unwrap();
+        loop {
+            let count = stream.buffer.read(output)?;
+            if count > 0 {
+                return Ok(count);
+            }
+            if stream.finished {
+                return Ok(0);
+            }
+            let bytes = stream
+                .receiver
+                .as_ref()
+                .unwrap()
+                .recv()
+                .map_err(|_| io::Error::other("Asset reader worker stopped"))??;
+            stream.finished = bytes.is_empty();
+            let previous = std::mem::replace(&mut stream.buffer, Cursor::new(bytes));
+            stream.usage.release(previous.into_inner().capacity());
+        }
+    }
+}
 fn normalize(s: &str) -> String {
     s.replace('\\', "/").to_ascii_lowercase()
 }
@@ -135,6 +308,34 @@ fn normalize(s: &str) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn streaming_reports_crc_errors_and_can_be_dropped_early() -> Result<()> {
+        use std::io::{Seek, SeekFrom};
+        let dir = std::env::temp_dir().join(format!("looking-glass-stream-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("pak0.pk3");
+        let mut archive = zip::ZipWriter::new(File::create(&path)?);
+        archive.start_file("large.bin", zip::write::FileOptions::default())?;
+        archive.write_all(&vec![7; STREAM_CHUNK * 8])?;
+        archive.finish()?;
+        let mut assets = Assets::open(&dir)?;
+        // Producer may already be blocked on the bounded queue when its reader drops.
+        let mut reader = assets.open_stream("large.bin")?;
+        reader.read_exact(&mut [0; 1])?;
+        drop(reader);
+        let offset = assets.packs[0].by_name("large.bin")?.data_start();
+        let mut file = fs::OpenOptions::new().write(true).open(&path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(&[8])?;
+        drop(file);
+        let mut reader = assets.open_stream("large.bin")?;
+        assert!(io::copy(&mut reader, &mut io::sink()).is_err());
+        drop(reader);
+        drop(assets);
+        fs::remove_file(path)?;
+        fs::remove_dir(dir)?;
+        Ok(())
+    }
     #[test]
     fn later_pack_wins_and_paths_are_case_insensitive() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("looking-glass-vfs-{}", std::process::id()));
@@ -148,9 +349,20 @@ mod tests {
         let mut a = Assets::open(&dir)?;
         assert_eq!(a.read("TEXTURES\\test.ftx")?, b"new");
         assert!(a.read("missing").is_err());
+        assert!(a.open_stream("missing").is_err());
+        let mut reader = a.open_stream("TEXTURES\\test.ftx")?;
+        let mut prefix = [0; 2]; reader.read_exact(&mut prefix)?;
+        assert_eq!(&prefix, b"ne");
+        let mut tail = Vec::new(); reader.read_to_end(&mut tail)?;
+        assert_eq!(tail, b"w");
+        assert_eq!(reader.peak_bytes(), STREAM_CHUNK);
+        let mut independent = a.open_stream("textures/test.ftx")?;
+        drop(reader);
         let identity=a.fingerprint()?;
         assert_eq!(identity,a.fingerprint()?);
         drop(a);
+        let mut replay = Vec::new(); independent.read_to_end(&mut replay)?;
+        assert_eq!(replay, b"new"); drop(independent);
         let mut z=zip::ZipWriter::new(File::create(dir.join("pak5.pk3"))?);
         z.start_file("Textures/Test.ftx",zip::write::FileOptions::default())?;
         z.write_all(b"changed")?;z.finish()?;

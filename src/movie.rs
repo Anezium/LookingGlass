@@ -4,7 +4,7 @@
 use crate::{assets::Assets, audio::Audio, input::Input, preferences::Preferences, ui::Ui};
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::*;
-use std::sync::Arc;
+use std::io::{self, Read};
 
 fn word(b: &[u8], at: usize) -> Result<u16> {
     Ok(u16::from_le_bytes(
@@ -13,14 +13,31 @@ fn word(b: &[u8], at: usize) -> Result<u16> {
             .try_into()?,
     ))
 }
-fn chunk(b: &[u8], at: usize) -> Result<(u16, usize, u16)> {
-    let h = b.get(at..at + 8).context("Truncated movie chunk")?;
-    let size = u32::from_le_bytes(h[2..6].try_into()?) as usize;
+fn header(reader: &mut impl Read) -> Result<u16> {
+    let mut h = [0; 8];
+    reader
+        .read_exact(&mut h)
+        .context("Truncated movie header")?;
     ensure!(
-        size <= 16 * 1024 * 1024 && at + 8 + size <= b.len(),
-        "Invalid movie chunk size"
+        word(&h, 0)? == 0x1084 && h[2..6] == [255; 4],
+        "Not a RoQ movie"
     );
-    Ok((word(h, 0)?, size, word(h, 6)?))
+    let fps = word(&h, 6)?;
+    ensure!((1..=60).contains(&fps), "Invalid movie rate");
+    Ok(fps)
+}
+fn chunk(reader: &mut impl Read) -> Result<Option<(u16, usize, u16)>> {
+    let mut h = [0; 8];
+    // A clean end is allowed only between chunks, never inside their headers.
+    if reader.read(&mut h[..1])? == 0 {
+        return Ok(None);
+    }
+    reader
+        .read_exact(&mut h[1..])
+        .context("Truncated movie chunk")?;
+    let size = u32::from_le_bytes(h[2..6].try_into()?) as usize;
+    ensure!(size <= 16 * 1024 * 1024, "Invalid movie chunk size");
+    Ok(Some((word(&h, 0)?, size, word(&h, 6)?)))
 }
 struct Codes<'a> {
     bytes: &'a [u8],
@@ -45,8 +62,8 @@ impl Codes<'_> {
     }
 }
 pub struct Video {
-    data: Arc<[u8]>,
-    at: usize,
+    chunk: Vec<u8>,
+    started: bool,
     pub width: u16,
     pub height: u16,
     pub fps: u16,
@@ -58,25 +75,23 @@ pub struct Video {
     working: Vec<u8>,
 }
 impl Video {
-    pub fn new(data: Vec<u8>) -> Result<Self> {
-        ensure!(
-            data.len() <= 128 * 1024 * 1024 && data.len() >= 24,
-            "Invalid movie size"
-        );
-        ensure!(
-            word(&data, 0)? == 0x1084 && data[2..6] == [255; 4],
-            "Not a RoQ movie"
-        );
-        let fps = word(&data, 6)?;
-        ensure!((1..=60).contains(&fps), "Invalid movie rate");
-        let (mut width, mut height, mut frames, mut at) = (0, 0, 0, 8);
-        while at < data.len() {
-            let (kind, size, _) = chunk(&data, at)?;
+    /// First pass: validate the stream and count frames without retaining chunk payloads.
+    /// Reopen the same entry and pass that reader to next for the sequential decode.
+    pub fn new(mut reader: impl Read) -> Result<Self> {
+        let fps = header(&mut reader)?;
+        let (mut width, mut height, mut frames, mut total) = (0, 0, 0, 8);
+        while let Some((kind, size, _)) = chunk(&mut reader)? {
+            total += 8 + size;
+            ensure!(total <= 128 * 1024 * 1024, "Invalid movie size");
             match kind {
                 0x1001 => {
                     ensure!(width == 0 && size == 8, "Repeated/invalid movie dimensions");
-                    width = word(&data, at + 8)?;
-                    height = word(&data, at + 10)?;
+                    let mut info = [0; 8];
+                    reader
+                        .read_exact(&mut info)
+                        .context("Truncated movie dimensions")?;
+                    width = word(&info, 0)?;
+                    height = word(&info, 2)?;
                     ensure!(
                         (16..=2048).contains(&width)
                             && (16..=2048).contains(&height)
@@ -85,9 +100,10 @@ impl Video {
                         "Invalid movie dimensions"
                     );
                     ensure!(
-                        word(&data, at + 12)? == 8 && word(&data, at + 14)? == 4,
+                        word(&info, 4)? == 8 && word(&info, 6)? == 4,
                         "Unsupported movie block sizes"
                     );
+                    continue;
                 }
                 0x1002 => ensure!(width > 0, "Codebook before movie dimensions"),
                 0x1011 => {
@@ -96,7 +112,8 @@ impl Video {
                 }
                 _ => anyhow::bail!("Unsupported movie chunk {kind:x}"),
             }
-            at += 8 + size;
+            let copied = io::copy(&mut reader.by_ref().take(size as u64), &mut io::sink())?;
+            ensure!(copied == size as u64, "Truncated movie chunk payload");
         }
         ensure!(
             frames > 0 && frames <= fps as usize * 600,
@@ -107,8 +124,8 @@ impl Video {
             p[3] = 255;
         }
         Ok(Self {
-            data: data.into(),
-            at: 8,
+            chunk: Vec::new(),
+            started: false,
             width,
             height,
             fps,
@@ -189,69 +206,110 @@ impl Video {
         }
         Ok(())
     }
-    pub fn next(&mut self) -> Result<bool> {
-        let data = self.data.clone();
-        while self.at < data.len() {
-            let (kind, size, arg) = chunk(&data, self.at)?;
-            let bytes = &data[self.at + 8..self.at + 8 + size];
-            self.at += 8 + size;
-            if kind == 0x1002 {
-                let cells = if arg >> 8 == 0 {
-                    256
-                } else {
-                    (arg >> 8) as usize
-                };
-                let groups = if arg & 255 == 0 && size > cells * 6 {
-                    256
-                } else {
-                    (arg & 255) as usize
-                };
-                ensure!(
-                    size == cells * 6 + groups * 4,
-                    "Invalid movie codebook length"
-                );
-                for (i, cell) in bytes[..cells * 6].chunks_exact(6).enumerate() {
-                    self.cells[i].copy_from_slice(cell);
-                }
-                for (i, group) in bytes[cells * 6..].chunks_exact(4).enumerate() {
-                    self.groups[i].copy_from_slice(group);
-                }
-            } else if kind == 0x1011 {
-                let mut codes = Codes {
-                    bytes,
-                    at: 0,
-                    flags: 0,
-                    left: 0,
-                };
-                for y in (0..self.height as usize).step_by(16) {
-                    for x in (0..self.width as usize).step_by(16) {
-                        for i in 0..4 {
-                            self.block(
-                                &mut codes,
-                                x + i % 2 * 8,
-                                y + i / 2 * 8,
-                                8,
-                                ((arg >> 8) as u8 as i8 as i32, arg as u8 as i8 as i32),
-                            )?;
+    pub fn next(&mut self, reader: &mut impl Read) -> Result<bool> {
+        if !self.started {
+            ensure!(
+                header(reader)? == self.fps,
+                "Movie rate changed between passes"
+            );
+            self.started = true;
+        }
+        let mut buffer = std::mem::take(&mut self.chunk);
+        let result = (|| {
+            while let Some((kind, size, arg)) = chunk(reader)? {
+                buffer.resize(size, 0);
+                reader
+                    .read_exact(&mut buffer)
+                    .context("Truncated movie chunk payload")?;
+                let bytes = buffer.as_slice();
+                if kind == 0x1002 {
+                    let cells = if arg >> 8 == 0 {
+                        256
+                    } else {
+                        (arg >> 8) as usize
+                    };
+                    let groups = if arg & 255 == 0 && size > cells * 6 {
+                        256
+                    } else {
+                        (arg & 255) as usize
+                    };
+                    ensure!(
+                        size == cells * 6 + groups * 4,
+                        "Invalid movie codebook length"
+                    );
+                    for (i, cell) in bytes[..cells * 6].chunks_exact(6).enumerate() {
+                        self.cells[i].copy_from_slice(cell);
+                    }
+                    for (i, group) in bytes[cells * 6..].chunks_exact(4).enumerate() {
+                        self.groups[i].copy_from_slice(group);
+                    }
+                } else if kind == 0x1011 {
+                    let mut codes = Codes {
+                        bytes,
+                        at: 0,
+                        flags: 0,
+                        left: 0,
+                    };
+                    for y in (0..self.height as usize).step_by(16) {
+                        for x in (0..self.width as usize).step_by(16) {
+                            for i in 0..4 {
+                                self.block(
+                                    &mut codes,
+                                    x + i % 2 * 8,
+                                    y + i / 2 * 8,
+                                    8,
+                                    ((arg >> 8) as u8 as i8 as i32, arg as u8 as i8 as i32),
+                                )?;
+                            }
                         }
                     }
+                    // The encoder may leave one unused flag word after the last block.
+                    ensure!(
+                        bytes.len() - codes.at <= 2,
+                        "Trailing movie frame data: {} bytes after frame {}",
+                        bytes.len() - codes.at,
+                        self.decoded
+                    );
+                    std::mem::swap(&mut self.previous, &mut self.working);
+                    self.decoded += 1;
+                    if self.decoded == 1 {
+                        self.working.copy_from_slice(&self.previous);
+                    }
+                    return Ok(true);
                 }
-                // The encoder may leave one unused flag word after the last block.
-                ensure!(
-                    bytes.len() - codes.at <= 2,
-                    "Trailing movie frame data: {} bytes after frame {}",
-                    bytes.len() - codes.at,
-                    self.decoded
-                );
-                std::mem::swap(&mut self.previous, &mut self.working);
-                self.decoded += 1;
-                if self.decoded == 1 {
-                    self.working.copy_from_slice(&self.previous);
-                }
-                return Ok(true);
             }
-        }
-        Ok(false)
+            Ok(false)
+        })();
+        self.chunk = buffer;
+        result
+    }
+}
+
+#[cfg(target_os = "vita")]
+struct MovieEndLog {
+    name: String,
+    frames: usize,
+    duration: f64,
+    played: std::cell::Cell<f64>,
+    peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+#[cfg(target_os = "vita")]
+impl MovieEndLog {
+    fn note(&self, played: f64) {
+        self.played.set(played);
+    }
+}
+#[cfg(target_os = "vita")]
+impl Drop for MovieEndLog {
+    fn drop(&mut self) {
+        eprintln!(
+            "story movie {} end: frames={} duration={:.2}s played={:.2}s reader_peak={}",
+            self.name,
+            self.frames,
+            self.duration,
+            self.played.get(),
+            self.peak.load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 }
 
@@ -264,15 +322,33 @@ pub async fn play(
     preferences: &Preferences,
     name: &str,
 ) -> Result<bool> {
+    ensure!(matches!(name, "opening" | "ending"), "Unknown story movie");
+    // Bench, renderbench and fullbench restore a save. They must not open a film.
     #[cfg(target_os = "vita")]
-    {
-        eprintln!("story movie {name} skipped on Vita (streaming decoder pending)");
+    if crate::frame_profile::story_movies_blocked() {
+        eprintln!("story movie {name} skipped: benchmark mode");
         return Ok(true);
     }
-    ensure!(matches!(name, "opening" | "ending"), "Unknown story movie");
-    let mut video = Video::new(assets.read(&format!("video/{name}.roq"))?)?;
-    video.next()?;
+    let path = format!("video/{name}.roq");
+    let mut video = Video::new(assets.open_stream(&path)?)?;
+    let mut reader = assets.open_stream(&path)?;
+    video.next(&mut reader)?;
     let texture = crate::texture::upload_dynamic_rgba8(video.width, video.height, video.pixels());
+    #[cfg(target_os = "vita")]
+    let duration = video.frames as f64 / video.fps as f64;
+    #[cfg(target_os = "vita")]
+    eprintln!(
+        "story movie {name} start: frames={} duration={duration:.2}s",
+        video.frames
+    );
+    #[cfg(target_os = "vita")]
+    let movie_log = MovieEndLog {
+        name: name.to_owned(),
+        frames: video.frames,
+        duration,
+        played: std::cell::Cell::new(0.),
+        peak: reader.peak_counter(),
+    };
     texture.set_filter(FilterMode::Linear);
     audio.update(0., Vec3::ZERO, 0., true, true);
     let soundtrack = audio.movie_sound(assets, &format!("video/{name}.mp3"))?;
@@ -292,6 +368,8 @@ pub async fn play(
             if let Some(s) = &soundtrack {
                 s.stop();
             }
+            #[cfg(target_os = "vita")]
+            movie_log.note(elapsed);
             return Ok(false);
         }
         if focused && (input.ui(KeyCode::P) || input.pad_pressed("Start")) {
@@ -320,12 +398,14 @@ pub async fn play(
                 elapsed = s.get_pos().as_secs_f64();
             }
             let wanted = (elapsed * video.fps as f64) as usize + 1;
+            #[cfg(target_os = "vita")]
+            movie_log.note(elapsed);
             if wanted > video.frames {
                 break;
             }
             let before = video.decoded;
             while video.decoded < wanted {
-                video.next()?;
+                ensure!(video.next(&mut reader)?, "Incomplete movie decode");
             }
             if video.decoded != before {
                 texture.update_from_bytes(video.width as u32, video.height as u32, video.pixels());
@@ -362,14 +442,18 @@ pub async fn play(
     }
     input.suppress();
     next_frame().await;
+    #[cfg(target_os = "vita")]
+    movie_log.note(elapsed);
     Ok(true)
 }
 
 pub fn check(assets: &mut Assets) -> Result<()> {
     use rodio::Source;
     for name in ["opening", "ending"] {
-        let mut video = Video::new(assets.read(&format!("video/{name}.roq"))?)?;
-        while video.next()? {
+        let path = format!("video/{name}.roq");
+        let mut video = Video::new(assets.open_stream(&path)?)?;
+        let mut reader = assets.open_stream(&path)?;
+        while video.next(&mut reader)? {
             if [1, 301, 901].contains(&video.decoded) {
                 image::save_buffer(
                     format!("private/movie-{name}-{}.png", video.decoded),
@@ -381,9 +465,8 @@ pub fn check(assets: &mut Assets) -> Result<()> {
             }
         }
         ensure!(video.decoded == video.frames, "Incomplete movie decode");
-        let sound = rodio::Decoder::new(std::io::Cursor::new(
-            assets.read(&format!("video/{name}.mp3"))?,
-        ))?;
+        drop(reader);
+        let sound = crate::audio::movie_soundtrack(assets, &format!("video/{name}.mp3"))?;
         let rate = sound.sample_rate();
         let channels = sound.channels();
         let samples = sound.count();
@@ -412,18 +495,47 @@ mod tests {
         b.extend_from_slice(&[0x11, 0x10, 2, 0, 0, 0, 0, 0, 0, 0]);
         b
     }
+    // Deliberately has no Seek and splits headers/payloads across short reads.
+    struct ShortReader<'a>(&'a [u8]);
+    impl Read for ShortReader<'_> {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            let count = output.len().min(1);
+            self.0.read(&mut output[..count])
+        }
+    }
+    #[test]
+    fn streaming_passes_accept_short_reads_and_preserve_frames() -> Result<()> {
+        let mut bytes = sample();
+        bytes.extend_from_slice(&[0x11, 0x10, 2, 0, 0, 0, 0, 0, 0, 0]);
+        let mut video = Video::new(ShortReader(&bytes))?;
+        assert_eq!(video.frames, 2);
+        let mut reader = ShortReader(&bytes);
+        for _ in 0..2 {
+            assert!(video.next(&mut reader)?);
+            assert!(video.pixels().chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+        }
+        assert!(!video.next(&mut reader)?);
+        assert_eq!(video.decoded, video.frames);
+        // Truncation that appears only in the reopened stream is also rejected.
+        let mut video = Video::new(bytes.as_slice())?;
+        let mut truncated = &bytes[..bytes.len() - 1];
+        assert!(video.next(&mut truncated)?);
+        assert!(video.next(&mut truncated).is_err());
+        Ok(())
+    }
     #[test]
     fn movie_bounds_and_truncation_are_checked() {
         let b = sample();
         for n in 0..b.len() {
-            assert!(Video::new(b[..n].to_vec()).is_err());
+            assert!(Video::new(&b[..n]).is_err());
         }
         let mut invalid = b.clone();
         invalid[16] = 255;
-        assert!(Video::new(invalid).is_err());
-        let mut v = Video::new(b).unwrap();
-        assert!(v.next().unwrap());
-        assert!(!v.next().unwrap());
+        assert!(Video::new(invalid.as_slice()).is_err());
+        let mut v = Video::new(b.as_slice()).unwrap();
+        let mut reader = b.as_slice();
+        assert!(v.next(&mut reader).unwrap());
+        assert!(!v.next(&mut reader).unwrap());
     }
     #[test]
     fn invalid_motion_is_rejected_without_reading_outside_frames() {
@@ -432,7 +544,8 @@ mod tests {
         b[32] = 0;
         b[33] = 0x40;
         b.push(0xff);
-        let mut v = Video::new(b).unwrap();
-        assert!(v.next().is_err());
+        let mut v = Video::new(b.as_slice()).unwrap();
+        let mut reader = b.as_slice();
+        assert!(v.next(&mut reader).is_err());
     }
 }
