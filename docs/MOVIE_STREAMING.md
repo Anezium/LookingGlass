@@ -1,14 +1,21 @@
 # Story movie streaming
 
-`vita-stream` starts at `vita-input` (`bd653d5`). The opening and ending use
-one implementation on every platform; the Vita-only movie skip is removed.
+`vita-stream-on-hotfix` replays the bounded RoQ reader on `vita-bench-modes`
+(`8de8940`). The opening and ending use one implementation on every platform.
+The Vita-only "streaming decoder pending" skip is gone. `bench`, `renderbench`
+and `fullbench` still skip the film: those modes restore a save and must not
+start one. On Vita, playback prints one start line and one end line:
+`story movie <name> start: frames=<n> duration=<s>s` and
+`story movie <name> end: frames=<n> duration=<s>s played=<s>s reader_peak=<bytes>`.
 
 `Assets::mount` mounts the packs. `Assets::open` resolves the same normalized
 paths and pack overrides as `read`, and returns an owned `Read + Send` stream.
 zip 0.6.6's `ZipFile` erases `Send` on its borrowed reader, so a worker opens
-an independent archive and reads its entry with `by_name`. A channel with one
-queued 32 KiB chunk bounds read-ahead; dropping the reader disconnects and joins
-the worker. ZIP errors, including CRC failures, reach the reader. There is no
+an independent archive and reads its entry with `by_name`. That worker's stack
+is 256 KiB: Vita's default std thread stack is not a settled size. A channel
+with one queued 32 KiB chunk bounds read-ahead; dropping the reader disconnects
+and joins the worker. `reader_peak` is the high-water mark of those chunk
+buffers. ZIP errors, including CRC failures, reach the reader. There is no
 seek adapter, temporary file, new dependency or platform-specific path.
 
 `Video::new` scans a reader to validate the header, dimensions and chunk bounds

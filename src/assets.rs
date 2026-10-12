@@ -4,7 +4,10 @@ use std::{
     fs::{self, File},
     io::{self, Cursor, Read},
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    },
     thread::{self, JoinHandle},
 };
 use zip::ZipArchive;
@@ -81,7 +84,7 @@ impl Assets {
         self.packs.len()
     }
     /// Stream an override-resolved entry through a bounded ZIP reader.
-    pub fn open(&mut self, name: &str) -> Result<impl Read + Send> {
+    pub fn open(&mut self, name: &str) -> Result<EntryReader> {
         let &(p, i) = self
             .entries
             .get(&normalize(name))
@@ -96,6 +99,10 @@ impl Assets {
             pack: self.paths[p].clone(),
             name: original,
             stream: None,
+            usage: Arc::new(StreamUse {
+                live: AtomicUsize::new(0),
+                peak: Arc::new(AtomicUsize::new(0)),
+            }),
         })
     }
     pub fn read(&mut self, name: &str) -> Result<Vec<u8>> {
@@ -132,31 +139,82 @@ impl Assets {
 // one worker thread; only owned chunks cross the bounded channel. This also lets
 // a stream can outlive the mount without borrowing Assets.
 const STREAM_CHUNK: usize = 32 * 1024;
+struct StreamUse {
+    live: AtomicUsize,
+    peak: Arc<AtomicUsize>,
+}
+impl StreamUse {
+    fn reserve(&self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let now = self.live.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        let mut seen = self.peak.load(Ordering::Relaxed);
+        while now > seen {
+            match self.peak.compare_exchange_weak(
+                seen,
+                now,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => seen = actual,
+            }
+        }
+    }
+    fn release(&self, bytes: usize) {
+        if bytes > 0 {
+            self.live.fetch_sub(bytes, Ordering::Relaxed);
+        }
+    }
+}
 struct EntryStream {
     receiver: Option<mpsc::Receiver<io::Result<Vec<u8>>>>,
     buffer: Cursor<Vec<u8>>,
     worker: Option<JoinHandle<()>>,
     finished: bool,
+    usage: Arc<StreamUse>,
 }
 impl Drop for EntryStream {
     fn drop(&mut self) {
+        let leftover = std::mem::replace(&mut self.buffer, Cursor::new(Vec::new()));
+        self.usage.release(leftover.into_inner().capacity());
         // Disconnect before joining so a producer blocked on send can exit.
-        self.receiver.take();
+        if let Some(receiver) = self.receiver.take() {
+            while let Ok(message) = receiver.try_recv() {
+                if let Ok(bytes) = message {
+                    self.usage.release(bytes.capacity());
+                }
+            }
+        }
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
     }
 }
-struct EntryReader {
+pub(crate) struct EntryReader {
     pack: PathBuf,
     name: String,
     stream: Option<EntryStream>,
+    usage: Arc<StreamUse>,
 }
 impl EntryReader {
+    #[cfg(test)]
+    fn peak_bytes(&self) -> usize {
+        self.usage.peak.load(Ordering::Relaxed)
+    }
+    #[cfg(target_os = "vita")]
+    pub(crate) fn peak_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.usage.peak)
+    }
     fn start(&mut self) -> io::Result<()> {
         let (sender, receiver) = mpsc::sync_channel(1);
         let pack = self.pack.clone();
         let name = self.name.clone();
+        let usage = Arc::clone(&self.usage);
+        // std's default thread stack on Vita is not a settled size: one port
+        // reports 64 KiB, the std we read reserves 2 MiB. Pin 256 KiB so ZIP
+        // inflate on this worker does not depend on that default.
         let worker = thread::Builder::new()
             .stack_size(256 * 1024)
             .name("asset-stream".into())
@@ -168,8 +226,15 @@ impl EntryReader {
                     loop {
                         let mut bytes = vec![0; STREAM_CHUNK];
                         let count = entry.read(&mut bytes)?;
+                        if count == 0 {
+                            let _ = sender.send(Ok(Vec::new()));
+                            return Ok(());
+                        }
                         bytes.truncate(count);
-                        if sender.send(Ok(bytes)).is_err() || count == 0 {
+                        let reserved = bytes.capacity();
+                        usage.reserve(reserved);
+                        if sender.send(Ok(bytes)).is_err() {
+                            usage.release(reserved);
                             return Ok(());
                         }
                     }
@@ -183,6 +248,7 @@ impl EntryReader {
             buffer: Cursor::new(Vec::new()),
             worker: Some(worker),
             finished: false,
+            usage: Arc::clone(&self.usage),
         });
         Ok(())
     }
@@ -211,7 +277,8 @@ impl Read for EntryReader {
                 .recv()
                 .map_err(|_| io::Error::other("Asset reader worker stopped"))??;
             stream.finished = bytes.is_empty();
-            stream.buffer = Cursor::new(bytes);
+            let previous = std::mem::replace(&mut stream.buffer, Cursor::new(bytes));
+            stream.usage.release(previous.into_inner().capacity());
         }
     }
 }
@@ -276,6 +343,8 @@ mod tests {
         let mut tail = Vec::new();
         reader.read_to_end(&mut tail)?;
         assert_eq!(tail, b"w");
+        // One 32 KiB chunk is reserved; the empty terminator is not.
+        assert_eq!(reader.peak_bytes(), STREAM_CHUNK);
         // Independent reopening preserves the normalized lookup and pack precedence.
         let mut replay_reader = a.open("textures/test.ftx")?;
         assert_eq!(a.read("textures/test.ftx")?, b"new");

@@ -285,6 +285,34 @@ impl Video {
     }
 }
 
+#[cfg(target_os = "vita")]
+struct MovieEndLog {
+    name: String,
+    frames: usize,
+    duration: f64,
+    played: std::cell::Cell<f64>,
+    peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+#[cfg(target_os = "vita")]
+impl MovieEndLog {
+    fn note(&self, played: f64) {
+        self.played.set(played);
+    }
+}
+#[cfg(target_os = "vita")]
+impl Drop for MovieEndLog {
+    fn drop(&mut self) {
+        eprintln!(
+            "story movie {} end: frames={} duration={:.2}s played={:.2}s reader_peak={}",
+            self.name,
+            self.frames,
+            self.duration,
+            self.played.get(),
+            self.peak.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+}
+
 /// Returns false when the window was closed; true when watched or deliberately skipped.
 pub async fn play(
     assets: &mut Assets,
@@ -295,11 +323,32 @@ pub async fn play(
     name: &str,
 ) -> Result<bool> {
     ensure!(matches!(name, "opening" | "ending"), "Unknown story movie");
+    // Bench, renderbench and fullbench restore a save. They must not open a film.
+    #[cfg(target_os = "vita")]
+    if crate::frame_profile::story_movies_blocked() {
+        eprintln!("story movie {name} skipped: benchmark mode");
+        return Ok(true);
+    }
     let path = format!("video/{name}.roq");
     let mut video = Video::new(assets.open(&path)?)?;
     let mut reader = assets.open(&path)?;
     video.next(&mut reader)?;
     let texture = crate::texture::upload_dynamic_rgba8(video.width, video.height, video.pixels());
+    #[cfg(target_os = "vita")]
+    let duration = video.frames as f64 / video.fps as f64;
+    #[cfg(target_os = "vita")]
+    eprintln!(
+        "story movie {name} start: frames={} duration={duration:.2}s",
+        video.frames
+    );
+    #[cfg(target_os = "vita")]
+    let movie_log = MovieEndLog {
+        name: name.to_owned(),
+        frames: video.frames,
+        duration,
+        played: std::cell::Cell::new(0.),
+        peak: reader.peak_counter(),
+    };
     texture.set_filter(FilterMode::Linear);
     audio.update(0., Vec3::ZERO, 0., true, true);
     let soundtrack = audio.movie_sound(assets, &format!("video/{name}.mp3"))?;
@@ -319,6 +368,8 @@ pub async fn play(
             if let Some(s) = &soundtrack {
                 s.stop();
             }
+            #[cfg(target_os = "vita")]
+            movie_log.note(elapsed);
             return Ok(false);
         }
         if focused && (input.ui(KeyCode::P) || input.pad_pressed("Start")) {
@@ -347,6 +398,8 @@ pub async fn play(
                 elapsed = s.get_pos().as_secs_f64();
             }
             let wanted = (elapsed * video.fps as f64) as usize + 1;
+            #[cfg(target_os = "vita")]
+            movie_log.note(elapsed);
             if wanted > video.frames {
                 break;
             }
@@ -389,6 +442,8 @@ pub async fn play(
     }
     input.suppress();
     next_frame().await;
+    #[cfg(target_os = "vita")]
+    movie_log.note(elapsed);
     Ok(true)
 }
 

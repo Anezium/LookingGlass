@@ -176,7 +176,7 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 pub use vita::{
     add_counter, begin_frame, bench_accepted_frames, bench_frames, simulation_frozen, counter_owner, counts, end_frame, flush_boundary, mode,
     record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_model,
-    record_world_submission, report, set_owner, startup_bench, world_span, Counter, Owner,
+    record_world_submission, report, set_owner, startup_bench, story_movies_blocked, world_span, Counter, Owner,
 };
 
 #[cfg(target_os = "vita")]
@@ -503,6 +503,11 @@ mod vita {
     // Startup happens before the viewer's first begin_frame/poll.
     pub fn startup_bench() -> bool {
         Mode::read().is_bench() && enabled()
+    }
+    /// Benchmark sessions load a save and must not start a story film, even
+    /// before the first profiled frame polls the mode into thread state.
+    pub fn story_movies_blocked() -> bool {
+        Mode::read().is_bench()
     }
     pub fn bench_frames() -> Option<usize> {
         STATE.with(|s| {
