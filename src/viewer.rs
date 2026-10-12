@@ -3138,6 +3138,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let world_camera = Camera3D {
             position: camera,
             target,
+            #[cfg(target_os = "vita")]
+            viewport: crate::frame_profile::gpu_probe().world_viewport(),
             up: pand_camera.map_or(Vec3::Z, |c| c.up),
             fovy: interactions
                 .beyond

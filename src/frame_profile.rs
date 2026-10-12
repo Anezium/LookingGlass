@@ -1,5 +1,48 @@
-//! Optional local CPU profiling; inactive during ordinary play.
+//! Optional local CPU profiling and Vita startup-only GPU diagnostics.
 use std::{cell::RefCell, collections::BTreeMap, time::Instant};
+
+/// Independent, startup-only rendering diagnostic. Ordinary host rendering
+/// never reads the Vita marker or changes its rendering policy.
+#[cfg(any(target_os = "vita", test))]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum GpuProbe {
+    #[default]
+    None,
+    Quarter,
+    OneLayer,
+    Gpu222,
+}
+#[cfg(any(target_os = "vita", test))]
+impl GpuProbe {
+    fn parse(value: &str) -> Self {
+        match value.trim() {
+            "quarter" => Self::Quarter,
+            "onelayer" => Self::OneLayer,
+            "gpu222" => Self::Gpu222,
+            _ => Self::None,
+        }
+    }
+    fn read_from(path: &std::path::Path) -> Self {
+        Self::parse(&std::fs::read_to_string(path).unwrap_or_default())
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Quarter => "quarter",
+            Self::OneLayer => "onelayer",
+            Self::Gpu222 => "gpu222",
+        }
+    }
+    pub fn gpu_clock_mhz(self) -> i32 {
+        if self == Self::Gpu222 { 222 } else { 111 }
+    }
+    pub fn world_viewport(self) -> Option<(i32, i32, i32, i32)> {
+        (self == Self::Quarter).then_some((0, 0, 480, 272))
+    }
+    pub fn world_layer_count(self, available: usize) -> usize {
+        if self == Self::OneLayer { available.min(1) } else { available }
+    }
+}
 
 #[cfg(any(target_os = "vita", test))]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -175,7 +218,8 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 #[cfg(target_os = "vita")]
 pub use vita::{
     add_counter, begin_frame, bench_accepted_frames, bench_frames, simulation_frozen, counter_owner, counts, end_frame, flush_boundary, mode,
-    record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_model,
+    gpu_probe, record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_model,
+    record_world_draw_submission,
     record_world_submission, report, set_owner, startup_bench, world_span, Counter, Owner,
 };
 
@@ -462,6 +506,7 @@ mod vita {
         stack: Vec<(u64, &'static str, f64)>,
         next_token: u64,
         since_flush: u64,
+        world_draw_submissions: u64,
         hierarchy_errors: usize,
         pending_counts: BTreeMap<(&'static str, &'static str), u64>,
         counters: BTreeMap<(&'static str, &'static str), CounterSamples>,
@@ -497,11 +542,25 @@ mod vita {
             ]
         }
     }
+    pub fn gpu_probe() -> GpuProbe {
+        static PROBE: std::sync::OnceLock<GpuProbe> = std::sync::OnceLock::new();
+        *PROBE.get_or_init(|| {
+            let probe = GpuProbe::read_from(std::path::Path::new("ux0:data/alice/private/gpu_probe"));
+            println!("[lg/profile] gpu_probe={}", probe.name());
+            // Always reset GPU, including none and disabled profiling. Other
+            // clock domains are controls and are not changed by this probe.
+            let mhz = probe.gpu_clock_mhz();
+            let rc = unsafe { scePowerSetGpuClockFrequency(mhz) };
+            println!("[lg/profile] gpu_probe_clocks gpu_mhz={mhz} rc={rc} actual={:?}", clocks());
+            probe
+        })
+    }
     pub fn mode() -> Mode {
         STATE.with(|s| s.borrow().mode)
     }
     // Startup happens before the viewer's first begin_frame/poll.
     pub fn startup_bench() -> bool {
+        gpu_probe();
         Mode::read().is_bench() && enabled()
     }
     pub fn bench_frames() -> Option<usize> {
@@ -634,6 +693,16 @@ mod vita {
             }
         });
     }
+    /// LG draw_mesh / quad_gl.geometry calls containing world batch geometry.
+    /// Macroquad may merge these before issuing private backend draw calls.
+    pub fn record_world_draw_submission() {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.recording {
+                s.world_draw_submissions += 1;
+            }
+        });
+    }
     pub fn flush_boundary(site: &'static str) {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
@@ -697,6 +766,7 @@ mod vita {
         record_geometry(triangles, vertices, static_batch);
     }
     pub fn begin_frame(map: &str) {
+        gpu_probe();
         let now = Instant::now();
         reset_hot_counts();
         HOT_RECORDING.store(enabled(), Relaxed);
@@ -757,6 +827,7 @@ mod vita {
             s.pending_models.clear();
             s.stack.clear();
             s.since_flush = 0;
+            s.world_draw_submissions = 0;
             s.pending_world = WorldCounts::default();
             s.recording = enabled();
         });
@@ -811,6 +882,10 @@ mod vita {
                     }
                 }
             }
+            let layers_drawn = s.pending_world.layers_drawn as u64;
+            s.pending_counts.insert(("", "layers_drawn"), layers_drawn);
+            let world_draw_submissions = s.world_draw_submissions;
+            s.pending_counts.insert(("", "world_draw_submissions"), world_draw_submissions);
             let pending_counts = std::mem::take(&mut s.pending_counts);
             let previous = s.frames.min(10000);
             for (name, value) in &pending_counts {
@@ -865,6 +940,8 @@ mod vita {
             let storage_bytes: usize = s.labels.values().map(|v| 8 * (v.frames.capacity() + v.exclusive.capacity() + v.frame_calls.capacity() + v.invocations.capacity())).sum::<usize>() + s.counters.values().map(|v| 8*v.frames.capacity()).sum::<usize>() + s.models.values().map(|v|8*v.frames.capacity()).sum::<usize>() + s.pending.capacity()*std::mem::size_of::<(&str,f64,f64)>() + 8*s.frame_wall_ms.capacity();
             (format!("{map}-{}-{}.json",s.mode.name(),s.frames), serde_json::json!({
                 "map":map,"mode":s.mode.name(),"gameplay_frames":s.frames,"clocks_raised":s.clocks_raised,
+                "gpu_probe":gpu_probe().name(),"clocks":clocks(),
+                "world_draw_submissions_kind":"LG draw_mesh / quad_gl.geometry calls containing world batches; not backend/GPU draws; transparent calls may contain merged batches",
                 "warmup_frames":s.mode.warmup_frames(),
                 "frame_wall_ms":{"frame_values_ms":s.frame_wall_ms,"per_frame":stats(&s.frame_wall_ms)},
                 "quantiles":"sorted[n/2] and sorted[floor(n*0.95)] (zero-based)",
@@ -883,6 +960,38 @@ mod vita {
 #[cfg(test)]
 mod bench_policy_tests {
     use super::*;
+    #[test]
+    fn gpu_probe_parsing_and_independent_render_policies() {
+        for (name, probe) in [("none", GpuProbe::None), ("quarter", GpuProbe::Quarter),
+            ("onelayer", GpuProbe::OneLayer), ("gpu222", GpuProbe::Gpu222)] {
+            assert_eq!(GpuProbe::parse(&format!(" {name}\n")), probe);
+            assert_eq!(probe.name(), name);
+            assert_eq!(probe.gpu_clock_mhz(), if probe == GpuProbe::Gpu222 { 222 } else { 111 });
+            assert_eq!(probe.world_viewport(), if probe == GpuProbe::Quarter { Some((0,0,480,272)) } else { None });
+            for available in 0..5 {
+                assert_eq!(probe.world_layer_count(available), if probe == GpuProbe::OneLayer { available.min(1) } else { available });
+            }
+        }
+        for value in ["", "unknown", "Quarter", "quarter\nonelayer", "renderbench"] {
+            assert_eq!(GpuProbe::parse(value), GpuProbe::None);
+        }
+    }
+    #[test]
+    fn gpu_probe_file_defaults_and_reading() {
+        let dir = std::env::temp_dir().join(format!("lg-gpu-probe-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gpu_probe");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(GpuProbe::read_from(&path), GpuProbe::None);
+        assert_eq!(GpuProbe::read_from(&dir), GpuProbe::None); // unreadable as a file
+        std::fs::write(&path, [0xff]).unwrap();
+        assert_eq!(GpuProbe::read_from(&path), GpuProbe::None); // invalid UTF-8
+        for name in ["none", "quarter", "onelayer", "gpu222"] {
+            std::fs::write(&path, format!("{name}\n")).unwrap();
+            assert_eq!(GpuProbe::read_from(&path).name(), name);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     #[test]
     fn benchmark_modes_parse_and_keep_world_visible() {
         for (name, mode) in [("renderbench", Mode::RenderBench), ("fullbench", Mode::FullBench)] {

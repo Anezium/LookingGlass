@@ -210,6 +210,10 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
                 ]);
                 #[cfg(target_os = "vita")]
                 crate::frame_profile::record_lg_submission();
+                #[cfg(target_os = "vita")]
+                if p.world_static.is_some() {
+                    crate::frame_profile::record_world_draw_submission();
+                }
                 gl.quad_gl.geometry(&vertices, &compact);
             }
         } else {
@@ -227,6 +231,10 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
             crate::frame_profile::counts(&[("lg_fx_submissions", 1)]);
             #[cfg(target_os = "vita")]
             crate::frame_profile::record_lg_submission();
+            #[cfg(target_os = "vita")]
+            if p.world_static.is_some() {
+                crate::frame_profile::record_world_draw_submission();
+            }
             draw_mesh(&p.mesh);
         }
     });

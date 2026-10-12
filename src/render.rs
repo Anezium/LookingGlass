@@ -835,7 +835,11 @@ fn draw_batch(
     let mut index_lease = IndexLease::new(batch, selection, read_only);
     let batch = &mut *index_lease;
     drop(_visibility_profile);
-    context.stats.triangles += batch.mesh.indices.len() / 3 * batch.layers.len();
+    #[cfg(target_os = "vita")]
+    let layer_count = crate::frame_profile::gpu_probe().world_layer_count(batch.layers.len());
+    #[cfg(not(target_os = "vita"))]
+    let layer_count = batch.layers.len();
+    context.stats.triangles += batch.mesh.indices.len() / 3 * layer_count;
     #[cfg(target_os = "vita")]
     let static_batch = batch.animation.is_none()
         && batch.deforms.is_empty()
@@ -941,7 +945,9 @@ fn draw_batch(
         crate::frame_profile::record_batch(static_batch, retransform);
     }
     let mut queued = Vec::new();
-    for layer in &batch.layers {
+    // Select before queuing transparency so later authored stages never enter
+    // either the immediate or deferred path during the onelayer diagnostic.
+    for layer in &batch.layers[..layer_count] {
         let material = &materials[layer.material];
         #[cfg(target_os = "vita")]
         let layer_prep = crate::frame_profile::world_span("world_prep", static_batch);
@@ -1062,6 +1068,8 @@ fn draw_batch(
             }
             #[cfg(target_os = "vita")]
             crate::frame_profile::record_lg_submission();
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::record_world_draw_submission();
             draw_mesh(&mesh);
         } else {
             #[cfg(target_os = "vita")]
@@ -1074,6 +1082,8 @@ fn draw_batch(
             }
             #[cfg(target_os = "vita")]
             crate::frame_profile::record_lg_submission();
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::record_world_draw_submission();
             draw_mesh(&batch.mesh);
         }
     }
