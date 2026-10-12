@@ -29,14 +29,16 @@ zero failed, one pre-existing ignored. Evidence remains outside Git under
 pak0.pk3, then stops inside ZipArchive::new(File). The earlier route-tape,
 renderer-config and GPU-setup hypotheses are downstream of this marker.
 Moving route-inputs.json aside did not change the stall. The known-good 3.1
-console health control is pending; degraded storage is not yet proven.
+control now also stalls (pilot report feat/memory-192 bf0e1cd): this identifies a
+console storage/runtime-state issue rather than a milestone-4 archive regression.
 
 Comparison e6e2d70..061faaa changes no archive opening, scanning/sorting,
 central-directory/index construction, buffering, mmap, read sizes or threading.
 Only fingerprint() memoization changed after mount completion. Cargo.toml,
 Cargo.lock and .cargo are identical, including ZIP/miniquad pins. The sim8/9
 integration does not alter archive reading. Startup order is preserved in 4.1
-and milestone 5 while the pilot finishes the health control.
+and milestone 5. Console sessions wait for human unlock/reboot around 23:00,
+then the pilot runs 3.1 health control, 4.1 P0 and milestone 4 routes.
 
 Trace markers bracket scan, each open/central index, index progress, window/config,
 UI/menu, route read/parse/validation, corpus identity and save load. Host mount:
@@ -59,8 +61,8 @@ original LG opening film is separate and unchanged. startup_splash=true is the
 explicit legacy control. The vitaGL archive/pins stay unchanged; the final ELF
 must show vgl.o's call reaching __wrap_invoke_splashscreen. This removes the code
 proven overlap; it does not prove the 18:14 abort's exact corruption mechanism.
-Startup ordering is unchanged while the pilot evaluates the 4.1 trace and health
-control. Host feature check passes. RW reservation moves to 0x82080000 for the
+Startup ordering and PK3/index/route trace markers are retained. Host feature
+check passes. RW reservation moves to 0x82080000 for the
 larger trace/actor build; final ELF margin remains a required package check.
 
 ## New Game route and camera handoff
@@ -90,3 +92,24 @@ Only film entry reads use open_stream after window initialization. ZIP workers
 send owned 32 KiB chunks through a one-slot queue; drop disconnects before join.
 GPU uploads stay on the viewer thread. Normal mount/read paths and benchmark film
 suppression stay unchanged. Host/New Game and Continue validation follows below.
+
+## Delivery checkpoint
+
+Native code revision aaefe28 built successfully once, with unchanged Cargo.lock,
+miniquad and VitaGL library. VPK SHA-256:
+7ee07b3ca0decec81fd687fd964daa8df454e525795f1c29f63291e3591ab0a9.
+ELF RX end 0x81ed9248, RW start 0x82080000: 1,732,024-byte gap (required 3,348).
+Imports, packaged SELF and the vglInit call to __wrap_invoke_splashscreen verified.
+This checkpoint changes documentation only after that build.
+
+Host suite: 744 passed, zero failed, one pre-existing ignored. Every opening
+(3,731) and ending (1,952) frame decoded with original soundtracks validated.
+Both named-arrival and streamed New Game routes completed entry/Blade/knife_cat,
+60 seconds of moving input, normal Auto save and separate Continue with identical
+restored state. Each launch built one scene; shader/pipeline creations after
+60 frames were zero. Both host runs needed zero heading corrections; the unit
+test separately verifies wrapped, bounded corrective look input. Live puffs peaked
+at 23; direct dynamic draws at 86 (arrival) / 88 (New Game). Host timings are not
+native performance evidence. Packet/evidence: ~/vita-j0/village-retained-world/jalon-5/.
+No console/FTP/emulator access by this agent. Native gains, visuals and long-route
+heap behavior await the pilot. PACKAGE-READY is written last after final checksums.
