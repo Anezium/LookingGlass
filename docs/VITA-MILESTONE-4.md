@@ -45,7 +45,9 @@ save avoids its entry camera history; native input replay still requires pilot p
 
 Route reports export raw frame_wall_ms in 300-frame windows with per-launch IDs,
 bounded segment histograms, complete configuration, scene startup/total time,
-heap start/end/delta and profiler capacity. Native route mode disables cumulative
+heap start/end/delta, profiler capacity, live-puff and direct dynamic draw means/peaks.
+Per-frame counter windows use fixed storage and stay aligned with wall windows;
+the final save-only row is zero and excluded from counter means. Native route mode disables cumulative
 profiler vectors and periodic preview readbacks. Program/pipeline creations after
 60 frames are zero in the host delivery recording/replay.
 
@@ -78,7 +80,12 @@ Host alpha/depth, lights, ghost/dissolve and scaled moving-depth/native HUD fixt
 pass, with no shader/pipeline creation after startup.
 
 Playable-low combines scale 0.75, GPU222, FX material/ring/cache controls and
-vita-sim-all. Actor layers remain two and interop stays on. Native CPU/GPU gains,
+vita-sim-all, pairing puff_collide=none with puff_cap=128: suppressing impact
+deaths alone can increase live puffs and FX work. Actor layers remain two and interop stays on. Native CPU/GPU gains,
 scaled visuals, SD cost and long-run heap stability are unmeasured here. The pilot
 and automatic Vita3K gate receive the packet through PACKAGE-READY; no host or
 emulator timing is presented as console performance.
+
+The sim9 pilot reported one splash-time allocator crash before any village frame.
+Threading and the SDK allocator are unchanged here; archive startup failures
+separately from route results, with the dump and load timeline.

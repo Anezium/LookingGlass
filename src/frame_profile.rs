@@ -1,5 +1,20 @@
 //! Optional local CPU profiling; inactive during ordinary play.
 use std::{cell::RefCell, collections::BTreeMap, time::Instant};
+#[cfg(feature="vita_renderer")]
+use std::sync::atomic::{AtomicU32, Ordering};
+
+// Fixed storage remains available when route mode disables the cumulative profiler.
+// Publish once at particle preparation / FX finish, never once per draw.
+#[cfg(feature="vita_renderer")]
+static ROUTE_PUFFS: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature="vita_renderer")]
+static ROUTE_FX_DRAWS: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature="vita_renderer")]
+pub(crate) fn route_live_puffs(n: usize) { ROUTE_PUFFS.store(n.min(u32::MAX as usize) as u32, Ordering::Relaxed); }
+#[cfg(feature="vita_renderer")]
+pub(crate) fn route_fx_draws(n: u64) { ROUTE_FX_DRAWS.fetch_add(n.min(u32::MAX as u64) as u32, Ordering::Relaxed); }
+#[cfg(feature="vita_renderer")]
+pub(crate) fn route_counters() -> [u32;2] { [ROUTE_PUFFS.load(Ordering::Relaxed),ROUTE_FX_DRAWS.load(Ordering::Relaxed)] }
 
 // Count LG-owned creation calls, including Macroquad material compilation.
 // Framework startup shaders are outside the viewer frame window.
@@ -16,7 +31,11 @@ pub(crate) fn pipeline_creation() {
     #[cfg(target_os="vita")]
     counts(&[("pipeline_creations",1)]);
 }
-pub(crate) fn begin_creation_frame() { CREATIONS.with(|c| c.borrow_mut().current=[0;2]); }
+pub(crate) fn begin_creation_frame() {
+    CREATIONS.with(|c| c.borrow_mut().current=[0;2]);
+    #[cfg(feature="vita_renderer")]
+    { ROUTE_PUFFS.store(0,Ordering::Relaxed); ROUTE_FX_DRAWS.store(0,Ordering::Relaxed); }
+}
 #[cfg(not(target_os="vita"))]
 pub(crate) fn end_creation_frame() {
     CREATIONS.with(|c| { let mut c=c.borrow_mut(); let current=c.current; c.frames.push(current); });

@@ -1210,6 +1210,8 @@ impl Steam {
             .map(move |(i, p)| (i, (p.position - camera).dot(direction)))
     }
     pub fn prepare_draw(&self, camera: Vec3, atmosphere: &Atmosphere) {
+        #[cfg(feature="vita_renderer")]
+        crate::frame_profile::route_live_puffs(self.puffs.len());
         for m in &self.materials {
             atmosphere.apply(m, camera);
         }

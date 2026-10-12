@@ -155,6 +155,7 @@ struct Stats {
 }
 impl Stats {
     fn report(&self) {
+        crate::frame_profile::route_fx_draws(self.draws);
         let values = [
             ("vita_fx_gpu_draws", self.draws),
             ("vita_fx_triangles", self.triangles),
