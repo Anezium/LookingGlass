@@ -1376,6 +1376,8 @@ struct Appearance {
 
 impl SkinMaterial {
     pub(crate) fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, eye: Vec3) {
+        #[cfg(feature="vita_renderer")]
+        if crate::render_fx::retained_active()&&crate::render::vita_renderer::config().actor_fast_path{return;}
         atmosphere.apply(&self.0, eye);
     }
 
@@ -1390,6 +1392,8 @@ impl SkinMaterial {
             ghost: appearance.ghost,
             power: appearance.power,
         });
+        #[cfg(feature="vita_renderer")]
+        if crate::render_fx::retained_active()&&crate::render::vita_renderer::config().actor_fast_path{return;}
         self.0.set_uniform("Dissolve", appearance.dissolve);
         self.0
             .set_uniform("Ghost", if appearance.ghost { 1_f32 } else { 0_f32 });

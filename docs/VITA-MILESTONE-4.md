@@ -163,3 +163,19 @@ depth surface for an FBO. The Vita scaled path uses that owned hidden depth;
 desktop GL attaches an explicit Depth32 image. It does not issue unsupported
 native depth-texture attachment calls. Effective depth enable/write/function and
 component queries are logged; hardware early-Z efficiency still needs measurement.
+
+Further direct actor preparation: actor_fast_path uses a texture-ID hash lookup
+instead of scanning the registry, computes a managed texture ID once, and borrows
+immutable Stage metadata instead of cloning image-name/modifier vectors per layer.
+Fade state is applied to the owned direct packet. The legacy/diagnostic path remains
+available with actor_fast_path=false. No skinning, controller or save logic changes.
+
+The first strict host replay failed before the Blade while the adaptive host
+recording passed. It is not yet an unattended-route proof. Replay failures now
+include tick, segment and full map/alive/flight/feet status for diagnosis. This
+must be resolved or the packet must be labeled as the authorized partial delivery.
+
+The direct actor fast path also bypasses SkinMaterial's unused Macroquad
+atmosphere/appearance uniform updates and binding. Appearance is still captured
+in the owned retained packet, and the direct frame owns its atmosphere. Those
+updates continue on the legacy path or with actor_fast_path=false.

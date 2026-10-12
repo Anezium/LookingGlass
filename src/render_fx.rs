@@ -73,6 +73,8 @@ thread_local! {
     static FRAME: RefCell<Frame> = RefCell::default();
     static SKIN_OPACITY: std::cell::Cell<f32> = const { std::cell::Cell::new(1.) };
     static SURFACES: RefCell<Vec<(macroquad::miniquad::TextureId, Weak<Surface>)>> = RefCell::default();
+    #[cfg(feature="vita_renderer")]
+    static SURFACE_LOOKUP:RefCell<std::collections::HashMap<macroquad::miniquad::TextureId,Weak<Surface>>>=RefCell::default();
 }
 const MAX_VERTICES: usize = 1_000_000;
 pub fn copy_mesh(m: &Mesh) -> Mesh {
@@ -765,6 +767,8 @@ pub fn register(
         s.retain(|(_, v)| v.strong_count() > 0);
         s.push((base.raw_miniquad_id(), Rc::downgrade(&surface)));
     });
+    #[cfg(feature="vita_renderer")]
+    SURFACE_LOOKUP.with(|s|{let mut s=s.borrow_mut();s.retain(|_,v|v.strong_count()>0);s.insert(base.raw_miniquad_id(),Rc::downgrade(&surface));});
     Ok(surface)
 }
 pub fn skin(mesh: &Mesh) {
@@ -801,14 +805,15 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
         draw_mesh(mesh);
         return;
     }
-    let surface = mesh.texture.as_ref().and_then(|t| {
-        SURFACES.with(|s| {
-            s.borrow()
-                .iter()
-                .rev()
-                .find(|(id, _)| *id == t.raw_miniquad_id())
-                .and_then(|(_, v)| v.upgrade())
-        })
+    #[cfg(feature="vita_renderer")]
+    let fast=retained_active()&&crate::render::vita_renderer::config().actor_fast_path;
+    #[cfg(not(feature="vita_renderer"))]
+    let fast=false;
+    let surface=mesh.texture.as_ref().and_then(|t|{
+        let id=t.raw_miniquad_id();
+        #[cfg(feature="vita_renderer")]
+        if fast {return SURFACE_LOOKUP.with(|s|s.borrow().get(&id).and_then(Weak::upgrade));}
+        SURFACES.with(|s|s.borrow().iter().rev().find(|(key,_)|*key==id).and_then(|(_,v)|v.upgrade()))
     });
     let (camera, time, appearance) = FRAME.with(|f| {
         let f = f.borrow();
@@ -869,10 +874,6 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
             }]
             .clone(),
         );
-        #[cfg(feature="vita_renderer")]
-        let fast=retained_active()&&crate::render::vita_renderer::config().actor_fast_path;
-        #[cfg(not(feature="vita_renderer"))]
-        let fast=false;
         for v in &mut copy.vertices {
             if fast && !layer.stage.environment && layer.stage.dot_alpha.is_none() {
                 if !layer.stage.mods.is_empty() || layer.stage.vector_uv.is_some(){
@@ -886,16 +887,15 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
                 v.color[3]=(255.*alpha*layer.stage.opacity(n,(camera-v.position).normalize_or_zero(),v.color[3])) as u8;
             }
         }
-        let mut stage = layer.stage.clone();
-        if clock.is_none() && alpha < 1. {
-            if stage.blend == Blend::Opaque {
-                stage.blend = Blend::Alpha;
-            }
-            stage.alpha_test = 0;
-            stage.depth_write = false;
-            stage.depth_equal = false;
-        }
+        let fade=clock.is_none()&&alpha<1.;
+        let stage=if fast {std::borrow::Cow::Borrowed(&layer.stage)}else{
+            let mut s=layer.stage.clone();
+            if fade {if s.blend==Blend::Opaque{s.blend=Blend::Alpha;}s.alpha_test=0;s.depth_write=false;s.depth_equal=false;}
+            std::borrow::Cow::Owned(s)
+        };
         if let Ok(mut p) = pass_at(copy, &stage, true, !stage.identity, appearance, time) {
+            #[cfg(feature="vita_renderer")]
+            if fast&&fade {if stage.blend==Blend::Opaque{p.blend_index=crate::render::blend_index(Blend::Alpha);}p.cutout=0.;p.depth_equal=false;}
             // Multiplicative layers ignore source alpha. Fade their colour to
             // the blend's neutral value so a hidden ghost leaves no silhouette.
             p.filter_fade = match stage.blend {

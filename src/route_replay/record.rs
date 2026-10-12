@@ -7,6 +7,7 @@ pub(super) struct Driver {
     queue: VecDeque<Controls>,
     pub done: bool,
     pub error: Option<String>,
+    pub planning_seconds:f32,
     post: bool,
     post_start: Option<u64>,
     loiter: bool,
@@ -80,8 +81,10 @@ impl Driver {
             }
             return Controls::default();
         }
+        let plan_start=Instant::now();
         let path = crate::route::Route::plan(world, player, goal, 20.)
             .or_else(|_| crate::route::Route::plan(world, player, goal, 48.));
+        self.planning_seconds+=plan_start.elapsed().as_secs_f32();
         match path {
             Ok(path) => {
                 for (c, _) in path {

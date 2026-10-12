@@ -997,7 +997,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature="vita_renderer")]
         if let Some(route)=&mut route_session {
             let village=interactions.village.as_ref().context("route requires village cinema")?;
-            route.begin_frame(crate::route_replay::Status{map:maps[current].clone(),entry_done:village.cinema.state.done.contains("entry"),knife_done:village.cinema.state.done.contains("knife_cat"),blade_copies:stats.copies(0) as u32,alive:stats.alive(),flying})?;
+            route.begin_frame(crate::route_replay::Status{map:maps[current].clone(),entry_done:village.cinema.state.done.contains("entry"),knife_done:village.cinema.state.done.contains("knife_cat"),blade_copies:stats.copies(0) as u32,alive:stats.alive(),flying,feet:player.feet.to_array()})?;
+            if route.entry_checkpoint_due(){store.write(save::Slot::parse("slot1")?,&game_snapshot!())?;println!("[lg/route] recorded entry checkpoint");}
             if route.should_finish() {route.finish(&store,&game_snapshot!(),yaw,pitch)?;break;}
             paused=false;
         }
@@ -1179,6 +1180,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             continue;
         }
         let elapsed = get_frame_time();
+        #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+        let elapsed=if let Some(r)=&mut route_session {(elapsed-r.recording_pause_seconds()).max(0.)}else{elapsed};
         let mut weapon_click;
         let mut weapon_input_enabled = false;
         let mut pending_transition = None;

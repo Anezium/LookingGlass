@@ -21,6 +21,10 @@ pub struct Sample {
     pub jump: bool,
     pub run: bool,
     pub segment: String,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub reference_feet:Option<[f32;3]>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub reference_yaw:Option<f32>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,7 +44,7 @@ pub struct Tape {
 impl Tape {
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == VERSION && self.start == "new_game",
+            self.version == VERSION && matches!(self.start.as_str(),"new_game"|"save:slot1"),
             "unsupported route version/start"
         );
         ensure!(
@@ -99,6 +103,7 @@ pub struct Status {
     pub blade_copies: u32,
     pub alive: bool,
     pub flying: bool,
+    pub feet:[f32;3],
 }
 #[derive(Serialize, Deserialize)]
 struct End {
@@ -118,6 +123,8 @@ pub struct Session {
     moving_ticks: u64,
     post_moving_ticks: u64,
     status: Status,
+    entry_saved:bool,
+    drift_reported:bool,
     segment: String,
     frame_start: Option<Instant>,
     wall: Vec<(String, f64)>,
@@ -202,7 +209,7 @@ impl Session {
             cursor: 0,
             moving_ticks: 0,
             post_moving_ticks: 0,
-            status: Status::default(),
+            status: Status::default(),entry_saved:false,drift_reported:false,
             segment: "arrival".into(),
             frame_start: None,
             wall: Vec::new(),
@@ -220,12 +227,15 @@ impl Session {
     }
     pub fn resume(&self, store: &Store) -> Result<Option<crate::save::Loaded>> {
         if self.mode != Mode::Continue {
-            return Ok(None);
+            return if self.mode==Mode::Replay && self.tape.start=="save:slot1" {Ok(Some(store.read(Slot::parse("slot1")?)?))}else{Ok(None)};
         }
         Ok(Some(
             store.latest().context("route Continue has no save")?.1,
         ))
     }
+    pub fn entry_checkpoint_due(&mut self)->bool {if self.mode==Mode::Record&&self.status.entry_done&&!self.entry_saved {self.entry_saved=true;true}else{false}}
+    #[cfg(not(target_os="vita"))]
+    pub fn recording_pause_seconds(&mut self)->f32 {if self.mode==Mode::Record{std::mem::take(&mut self.driver.planning_seconds)}else{0.}}
     pub fn continuing(&self) -> bool {
         self.mode == Mode::Continue
     }
@@ -265,7 +275,7 @@ impl Session {
         self.status = status;
         ensure!(
             self.status.map == "gvillage" && self.status.alive && !self.status.flying,
-            "route left playable village state"
+            "route left playable village state tick={} segment={} status={}",self.tick,self.segment,serde_json::to_string(&self.status)?
         );
         ensure!(self.start.elapsed().as_secs() < 3600, "route wall timeout");
         if !self.status.entry_done {
@@ -337,7 +347,7 @@ impl Session {
                 look: [0.; 2],
                 jump: c.jump,
                 run: c.run,
-                segment: self.segment.clone(),
+                segment: self.segment.clone(),reference_feet:Some(player.feet.to_array()),reference_yaw:Some(*yaw),
             });
             self.tick += 1;
             if c.wish.length_squared() > 0.01 {
@@ -355,6 +365,10 @@ impl Session {
             self.cursor += 1;
         }
         let s = &self.tape.samples[self.cursor];
+        if !self.drift_reported && s.reference_feet.is_some_and(|f|player.feet.distance(Vec3::from_array(f))>8.) {
+            println!("[lg/route] replay drift tick={} segment={} expected={:?} actual={:?} yaw_expected={:?} yaw_actual={}",self.tick,s.segment,s.reference_feet,player.feet,s.reference_yaw,*yaw);self.drift_reported=true;
+        }
+
         if self.segment != s.segment {
             self.segment.clone_from(&s.segment);
         }
