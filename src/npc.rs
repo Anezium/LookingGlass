@@ -3107,6 +3107,11 @@ impl Npcs {
         atmosphere: &Atmosphere,
         fullbright: bool,
     ) {
+        #[cfg(feature="vita_renderer")]
+        let render_config={let mut c=crate::vita_sim::effective().clone();c.anim_cull|=crate::render_fx::retained_active()&&crate::render::vita_renderer::config().actor_frustum_cull;c};
+        #[cfg(feature="vita_renderer")]
+        let config=&render_config;
+        #[cfg(not(feature="vita_renderer"))]
         let config = crate::vita_sim::effective();
         let lod_enabled = config.anim_cull || config.anim_far_every > 1;
         #[cfg(target_os = "vita")]
@@ -3427,6 +3432,7 @@ impl Npcs {
             // Whole ambient actor passes, not surface layers or GPU draw calls.
             ("characters_lod_layer_passes_skipped",lod_counts[1]),
             ("characters_lod_submit_passes_skipped",lod_counts[1]),
+            ("vita_actor_frustum_skipped",lod_counts[1]),
             ("characters_lod_protected",lod_counts[4]),
         ]);
         gl_use_default_material();

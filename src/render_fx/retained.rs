@@ -237,7 +237,7 @@ fn unchanged_merged(
     let mut vertex = 0;
     let mut index = 0;
     for id in std::iter::once(target).chain(sources.iter().copied()) {
-        let mesh = &groups[id].passes[0].mesh;
+        let mesh = groups[id].passes[0].geometry();
         let v_end = vertex + mesh.vertices.len();
         let i_end = index + mesh.indices.len();
         if v_end > cached.vertices.len()
@@ -311,11 +311,12 @@ impl Gpu {
         Ok(gpu)
     }
     fn upload(&mut self, slot: usize, p: &Pass) -> Result<usize> {
+        let mesh=p.geometry();
         ensure!(
-            valid_mesh(&p.mesh),
+            valid_mesh(mesh),
             "invalid actor range: {} vertices / {} indices",
-            p.mesh.vertices.len(),
-            p.mesh.indices.len()
+            mesh.vertices.len(),
+            mesh.indices.len()
         );
         // Resolve managed Texture2D IDs before borrowing the Macroquad context.
         let white = self.white.raw_miniquad_id();
@@ -331,8 +332,8 @@ impl Gpu {
             slot
         };
         let ctx = unsafe { get_internal_gl() }.quad_context;
-        let vc = p.mesh.vertices.len().next_power_of_two();
-        let ic = p.mesh.indices.len().next_power_of_two();
+        let vc = mesh.vertices.len().next_power_of_two();
+        let ic = mesh.indices.len().next_power_of_two();
         while self.buffers.len() <= slot {
             self.buffers.push(make_buffers(ctx, vc, ic, ring, white));
             self.stats.growths += 1;
@@ -348,21 +349,21 @@ impl Gpu {
         b.bindings.images[0] = texture;
         let cache = crate::render::vita_renderer::config().fx_upload_cache;
         let unchanged = cache
-            && b.previous_indices == p.mesh.indices
-            && vertices_equal(&b.previous_vertices, &p.mesh.vertices);
+            && b.previous_indices == mesh.indices
+            && vertices_equal(&b.previous_vertices, &mesh.vertices);
         if unchanged {
             self.stats.upload_hits += 1;
         } else {
             // Ring pages use Dynamic/glBufferSubData; Stream retains the orphan option.
-            ctx.buffer_update(b.vertex, BufferSource::slice(&p.mesh.vertices));
-            ctx.buffer_update(b.index, BufferSource::slice(&p.mesh.indices));
+            ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));
+            ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));
             self.stats.upload_bytes +=
-                (p.mesh.vertices.len() * 40 + p.mesh.indices.len() * 2) as u64;
+                (mesh.vertices.len() * 40 + mesh.indices.len() * 2) as u64;
             self.stats.uploads += 1;
             if cache {
                 b.previous_vertices.clear();
-                b.previous_vertices.extend_from_slice(&p.mesh.vertices);
-                b.previous_indices.clone_from(&p.mesh.indices);
+                b.previous_vertices.extend_from_slice(&mesh.vertices);
+                b.previous_indices.clone_from(&mesh.indices);
             }
         }
         Ok(slot)
@@ -400,6 +401,9 @@ impl Gpu {
             .pipelines
             .get(&key)
             .expect("prewarmed LG actor pipeline");
+        // Several actor layers can share one uploaded vertex/index page.
+        // Texture bindings still belong to the individual layer packet.
+        self.buffers[slot].bindings.images[0]=p.mesh.texture.as_ref().map_or_else(||self.white.raw_miniquad_id(),Texture2D::raw_miniquad_id);
         let ctx = unsafe { get_internal_gl() }.quad_context;
         ctx.apply_pipeline(pipeline);
         unsafe {
@@ -407,9 +411,9 @@ impl Gpu {
         }
         ctx.apply_bindings(&self.buffers[slot].bindings);
         ctx.apply_uniforms(UniformsSource::table(u));
-        ctx.draw(0, p.mesh.indices.len() as i32, 1);
+        ctx.draw(0, p.geometry().indices.len() as i32, 1);
         self.stats.draws += 1;
-        self.stats.triangles += p.mesh.indices.len() as u64 / 3;
+        self.stats.triangles += p.geometry().indices.len() as u64 / 3;
         self.stats.uniform_bytes += std::mem::size_of_val(u) as u64;
     }
 }
@@ -534,12 +538,12 @@ fn merge_cached(
             if let Source::Actor(id) = source {
                 let g = &groups[id];
                 let p = g.passes.first();
-                let eligible = g.passes.len() == 1 && p.is_some_and(|p| valid_mesh(&p.mesh));
+                let eligible = g.passes.len() == 1 && p.is_some_and(|p| valid_mesh(p.geometry()) && (p.effect || crate::render::vita_renderer::config().actor_batching));
                 Signature {
                     source,
                     key: eligible.then(|| packet_key(p.unwrap())),
-                    vertices: p.map_or(0, |p| p.mesh.vertices.len()),
-                    indices: p.map_or(0, |p| p.mesh.indices.len()),
+                    vertices: p.map_or(0, |p| p.geometry().vertices.len()),
+                    indices: p.map_or(0, |p| p.geometry().indices.len()),
                     particle: p.is_some_and(|p| p.effect),
                 }
             } else {
@@ -611,6 +615,7 @@ fn merge_cached(
             .collect::<Vec<_>>();
         if let Some(mut cached) = pool.remove(&target) {
             if hit && unchanged_merged(&cached, groups, target, &sources) {
+                groups[target].passes[0].geometry=None;
                 groups[target].passes[0].mesh = cached;
                 for &source in &sources {
                     groups[source].passes.clear();
@@ -618,21 +623,25 @@ fn merge_cached(
                 count("vita_fx_unchanged_merged_groups", 1);
                 continue;
             }
-            let old = &groups[target].passes[0].mesh;
+            let old = groups[target].passes[0].geometry();
             cached.vertices.clear();
             cached.indices.clear();
-            cached.texture = old.texture.clone();
+            cached.texture = groups[target].passes[0].mesh.texture.clone();
             cached.vertices.extend_from_slice(&old.vertices);
             cached.indices.extend_from_slice(&old.indices);
+            groups[target].passes[0].geometry=None;
             groups[target].passes[0].mesh = cached;
         }
+        groups[target].passes[0].own_geometry();
         for source in sources {
             let mut source = groups[source].passes.pop().expect("merge plan source");
+            source.own_geometry();
             let dest = &mut groups[target].passes[0].mesh;
             let offset = dest.vertices.len() as u16;
             dest.vertices.append(&mut source.mesh.vertices);
             dest.indices
                 .extend(source.mesh.indices.into_iter().map(|i| i + offset));
+            if !source.effect {count("vita_actor_batched_packets",1);}
         }
     }
     count("vita_fx_merged_meshes", cache.steps.len() as u64);
@@ -730,10 +739,10 @@ pub(crate) fn finish(
             groups
                 .iter()
                 .enumerate()
-                .filter(|(_, g)| g.transparent && !g.passes[0].mesh.vertices.is_empty())
+                .filter(|(_, g)| g.transparent && !g.passes[0].geometry().vertices.is_empty())
                 .map(|(id, g)| {
                     (
-                        (center(&g.passes[0].mesh) - camera).dot(direction),
+                        (center(g.passes[0].geometry()) - camera).dot(direction),
                         Source::Actor(id),
                     )
                 }),
@@ -742,7 +751,7 @@ pub(crate) fn finish(
     };
     let mut recycled = Vec::new();
     let c = crate::render::vita_renderer::config();
-    if c.merge_fx && c.fx_batching != "none" {
+    if (c.merge_fx && c.fx_batching != "none") || c.actor_batching {
         let _span = crate::frame_profile::span("vita_fx_merge_groups");
         let mut opaque = groups
             .iter()
@@ -767,14 +776,19 @@ pub(crate) fn finish(
     let mut invalid = 0;
     {
         let _span = crate::frame_profile::span("vita_fx_upload");
+        let mut shared_uploads=std::collections::HashMap::<usize,usize>::new();
         for group in &groups {
             let start = packets.len();
             for p in &group.passes {
-                if p.mesh.indices.is_empty() {
+                if p.geometry().indices.is_empty() {
                     continue;
                 }
-                match gpu.upload(packets.len(), p) {
+                let shared=p.geometry.as_ref().map(|m|std::rc::Rc::as_ptr(m) as usize);
+                let previous=shared.and_then(|id|shared_uploads.get(&id).copied());
+                let upload=if let Some(b)=previous {count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p)};
+                match upload {
                     Ok(b) => {
+                        if let Some(id)=shared {shared_uploads.insert(id,b);}
                         let u = FRAME.with(|f| uniforms(p, &f.borrow()));
                         packets.push((p, b, u));
                     }
@@ -915,6 +929,7 @@ mod tests {
         super::super::Group {
             transparent: true,
             passes: vec![Pass {
+                geometry:None,
                 effect: false,
                 blend_index: 1,
                 depth_equal: false,
@@ -935,6 +950,22 @@ mod tests {
                 filter_fade: 0.,
             }],
         }
+    }
+    #[test]
+    fn shared_actor_layers_merge_without_mutating_source_geometry() {
+        let mut groups=vec![fixture_group(),fixture_group()];
+        let shared=std::rc::Rc::new(super::super::copy_mesh(&groups[0].passes[0].mesh));
+        for g in &mut groups {
+            g.passes[0].geometry=Some(shared.clone());
+            g.passes[0].mesh.vertices.clear();g.passes[0].mesh.indices.clear();
+        }
+        let mut cache=MergeCache::default();let mut pool=BTreeMap::new();
+        let mut list=vec![(2.,Source::Actor(0)),(1.,Source::Actor(1))];
+        merge_cached(&mut cache,&mut groups,&mut list,false,true,&mut pool);
+        assert_eq!(list,vec![(0.,Source::Actor(0))]);
+        assert_eq!(groups[0].passes[0].geometry().indices,vec![0,1,2,3,4,5]);
+        assert_eq!(shared.indices,vec![0,1,2]);
+        assert_eq!(shared.vertices.len(),3);
     }
     #[test]
     fn coalescing_keeps_whole_mesh_order_and_world_barriers() {

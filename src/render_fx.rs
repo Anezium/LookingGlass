@@ -9,6 +9,8 @@ use crate::{
 use anyhow::Result;
 #[cfg(feature = "vita_renderer")]
 pub(crate) mod retained;
+#[cfg(feature="vita_renderer")]
+mod actor_cache;
 use macroquad::prelude::*;
 use std::{
     cell::RefCell,
@@ -23,6 +25,8 @@ pub struct Appearance {
     pub power: f32,
 }
 pub struct Pass {
+    #[cfg(feature="vita_renderer")]
+    geometry:Option<Rc<Mesh>>,
     #[cfg(feature="vita_renderer")]
     effect:bool,
     #[cfg(feature = "vita_renderer")]
@@ -44,6 +48,17 @@ pub struct Pass {
     pub model: bool,
     pub appearance: Appearance,
     pub filter_fade: f32,
+}
+#[cfg(feature="vita_renderer")]
+impl Pass {
+    fn geometry(&self)->&Mesh { self.geometry.as_deref().unwrap_or(&self.mesh) }
+    fn own_geometry(&mut self) {
+        if let Some(geometry)=self.geometry.take() {
+            let texture=self.mesh.texture.take();
+            self.mesh=Rc::try_unwrap(geometry).unwrap_or_else(|m|copy_mesh(&m));
+            self.mesh.texture=texture;
+        }
+    }
 }
 struct Group {
     #[cfg(feature = "vita_renderer")]
@@ -306,7 +321,7 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
         }
         FRAME.with(|f| {
             let mut f = f.borrow_mut();
-            let count = passes.iter().map(|p| p.mesh.vertices.len()).sum::<usize>();
+            let count = passes.iter().map(|p| p.geometry().vertices.len()).sum::<usize>();
             if f.vertices.saturating_add(count) > MAX_VERTICES {
                 f.dropped += 1;
                 return;
@@ -461,6 +476,8 @@ pub fn finish() -> (usize, usize) {
                 draw_pass(
                     &Pass {
                         #[cfg(feature="vita_renderer")]
+                        geometry:None,
+                        #[cfg(feature="vita_renderer")]
                         effect:p.effect,
                         #[cfg(feature = "vita_renderer")]
                         blend_index: p.blend_index,
@@ -565,6 +582,8 @@ fn pass_at(
             .map_or(1., |w| w.sample(clock))
             .clamp(0., 2.);
     Ok(Pass {
+        #[cfg(feature="vita_renderer")]
+        geometry:None,
         #[cfg(feature="vita_renderer")]
         effect:false,
         #[cfg(feature = "vita_renderer")]
@@ -698,6 +717,8 @@ struct Layer {
 pub struct Surface {
     layers: Vec<Layer>,
     transparent: bool,
+    #[cfg(feature="vita_renderer")]
+    actors:RefCell<std::collections::HashMap<usize,actor_cache::State>>,
 }
 pub fn register(
     assets: &mut Assets,
@@ -761,6 +782,8 @@ pub fn register(
     let surface = Rc::new(Surface {
         layers,
         transparent,
+        #[cfg(feature="vita_renderer")]
+        actors:RefCell::default(),
     });
     SURFACES.with(|s| {
         let mut s = s.borrow_mut();
@@ -848,6 +871,17 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
         }
         return;
     };
+    #[cfg(feature="vita_renderer")]
+    if fast && clock.is_none() && alpha==1. && crate::render::vita_renderer::config().actor_layer_cache {
+        if let Some(passes)=actor_cache::prepare(&surface,mesh,time,appearance) {
+            #[cfg(target_os="vita")]
+            drop(layers_profile);
+            #[cfg(target_os="vita")]
+            let _submit_profile=crate::frame_profile::characters_span("characters_submit");
+            submit(passes,surface.transparent);
+            return;
+        }
+    }
     let mut passes = Vec::new();
     #[cfg(feature = "vita_renderer")]
     let limit = if retained_active() {
