@@ -38,6 +38,9 @@ impl Default for Config {
 }
 impl Config {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
+        // Serde also accepts a struct as a sequence; configuration must be an object.
+        ensure!(serde_json::from_slice::<serde_json::Value>(bytes)?.is_object(),
+            "vita_sim configuration must be a JSON object");
         let config: Self = serde_json::from_slice(bytes)?;
         ensure!(config.puff_cap <= 4096, "puff_cap must be between 0 and 4096");
         for (name, value) in [
