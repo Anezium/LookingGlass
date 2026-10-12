@@ -1,13 +1,19 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("vita") {
+        if std::env::var_os("CARGO_FEATURE_VITA3K_DIAGNOSTICS").is_some() {
+            for symbol in ["update_scissor_test", "sceGxmDraw", "sceGxmDrawPrecomputed", "sceGxmFinish", "vglGetProcAddress", "vglSwapBuffers", "sceGxmDisplayQueueAddEntry", "sceGxmEndScene", "sceGxmNotificationWait"] {
+                println!("cargo:rustc-link-arg=-Wl,--wrap={symbol}");
+            }
+        }
         // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.
         println!("cargo:rustc-link-arg=-Wl,--undefined=sceUserMainThreadStackSize");
         println!("cargo:rustc-link-arg=-Wl,--undefined=_newlib_heap_size_user");
         // Milestone 4 adds route diagnostics and reviewed simulation code; the old RW start
         // overlaps exception metadata. Keep SCE metadata slack (>=3348 bytes),
         // and verify the final program headers for every packaged build.
-        println!("cargo:rustc-link-arg=-Wl,--section-start=.init_array=0x81c80000");
+        let init_array = if std::env::var_os("CARGO_FEATURE_VITA3K_DIAGNOSTICS").is_some() { "0x81e00000" } else { "0x81c80000" };
+        println!("cargo:rustc-link-arg=-Wl,--section-start=.init_array={init_array}");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         // A level change loads the destination while the viewer and outgoing
