@@ -1,9 +1,12 @@
-# Renderer du monde Vita — jalon 2
+# Renderer du monde Vita — jalons 2/3
 
 Base : `vita-bench-modes` à `8de8940cf17addf73c6cde0b902770bf77f40017`.
 Branche : `vita-renderer`. Feature optionnelle `vita_renderer`, désactivée par défaut.
 Miniquad reste épinglé à `6f891804`, macroquad à 0.4.14. Pas de changement du lockfile.
-Le plan et le point d'étape sont dans le dépôt Alice, branche `feat/retained-plan`.
+Le plan et les points d’étape sont dans le dépôt Alice, branche `feat/retained-plan`.
+Jalon 2 figé : `vita-renderer` à 70dcb6c. Jalon 3 séparé : `vita-renderer-j3`,
+rebase propre sur single-load 3590678 ; les cinq commits rejoués sont identiques
+selon `git range-diff`. Aucun changement de la référence du pilote.
 
 ## Chemin et périmètre
 
@@ -19,14 +22,40 @@ reçoit la matrice de `Interactions::transforms`, sans réécriture des sommets.
 indices ne sont ni filtrés, copiés ni triés pendant la frame. Le cull GPU et les
 uniformes remplacent les boucles par sommet de la préparation précédente.
 
-Ordre : fond atmosphérique (un triangle), opaque/cutout, acteurs/objets legacy,
-alpha du monde trié par distance des centres de groupes, puis effets legacy/HUD.
-Le monde a 16 pipelines directs fixes : cinq classes de blend × trois culls, plus ciel.
-Le masque d'écriture de profondeur est global par phase et restauré ensuite.
-Le monde direct n'utilise aucune paire `flush_depth_begin/end` ni `render_fx::pass`.
-Avec acteurs présents, deux frontières d'interop macroquad sont comptées ; les flushs
-propres aux acteurs/effets legacy restent au jalon 2. Avec le diagnostic monde seul,
-la queue d'effets legacy n'est pas ouverte.
+Ordre avec `alpha_interop=true` (jalon 3) : fond atmosphérique, opaque/cutout du
+monde, opaque des acteurs, **alpha commun monde/acteurs/objets/effets par groupe**,
+première personne après clear de profondeur, puis HUD. Les couches d’un acteur
+restent contiguës et dans l’ordre déclaré. Clé : profondeur du centre sur l’axe de
+vue ; ordre stable à égalité. Pas de tri/compaction par triangle. Les intersections
+au sein d’un groupe restent approximatives, à capturer.
+
+La géométrie animée LG des acteurs est conservée, puis streamée une fois par paquet
+entier. Le shader direct reprend exactement les sources LG : apparences, cutout,
+blends/facteurs, fog et lumières sélectionnées/models-only. Les uniformes de chaque
+paquet sont indépendants. Les buffers stream sont réutilisés ; le backend compact
+épinglé retraite leur stockage Vita via glBufferData. Ils appartiennent à Scene et
+sont détruits avec elle. Aucun upload ni lecture de géométrie **du monde** dans cette file.
+
+`merge_fx=true` réunit les **meshes dynamiques entiers adjacents** de même état,
+au plus 60 000 sommets / 180 000 indices. Une surface du monde ou un acteur multi-pass
+fait barrière. L’ordre final est déjà connu : les indices des acteurs sont décalés
+une fois, sans trier leurs triangles, puis uploadés. Les copies/indices dynamiques
+restent comptés séparément des quatre invariants à zéro du monde. Cette fusion réduit
+notamment les draws des puffs adjacents ; elle ne regroupe pas à travers un transparent
+du monde. La production/skinning LG peut rester le coût dominant hors monde.
+
+Deux flushs explicites maximum de l’intervalle 3-D complet : `flush_vita_3d_begin`
+puis `flush_vita_3d_packets` (file Macroquad résiduelle avant émission directe).
+Les scopes de profondeur différée et ghost/dissolve capturent leur politique dans
+les paquets ; ils ne déclenchent pas de flush local. Première personne : clear direct,
+nouvelle file sans flush supplémentaire. Le masque profondeur est restauré à 1.
+Les captures/previews hors banc et le flush final automatique HUD/next_frame restent
+extérieurs à cet intervalle ; aucun gain GPU n’est déduit de leur déplacement.
+
+`alpha_interop=false` retrouve le pont du jalon 2 : acteurs opaques Macroquad,
+monde alpha avant l’ancienne file des transparents/effets ; paires de flush legacy.
+`renderer=legacy` conserve le chemin ancien. Autres cartes : legacy. Monde seul :
+la file acteurs n’est pas ouverte et le chemin direct du jalon 2 reste identique.
 
 ## Réglages du même VPK
 
@@ -41,7 +70,13 @@ Le pilote change le fichier, ferme puis relance l'application ; pas de recompila
   "max_layers": 2,
   "sort_alpha": true,
   "sky": true,
-  "cell_size": 256.0
+  "cell_size": 256.0,
+  "alpha_interop": true,
+  "actor_max_layers": 2,
+  "merge_fx": true,
+  "pvs_cache": false,
+  "pvs_method": "sources",
+  "pvs_verify": false
 }
 ```
 
@@ -54,6 +89,17 @@ Le pilote change le fichier, ferme puis relance l'application ; pas de recompila
 - `sky` : fond atmosphérique simplifié activé, ou seul clear atmosphérique.
 - `cell_size` : 64 à 2048 unités, modifie les groupes **au chargement**. Une grande
   cellule réduit les draws mais augmente la géométrie/les pixels inutiles.
+
+- `alpha_interop` : scheduler commun on/off, seulement avec gvillage/vita hors monde seul.
+- `actor_max_layers` : 1 ou 2 couches d’acteurs/objets ; appliqué au chemin direct,
+  avant préparation des surfaces enregistrées. Couches supplémentaires supprimées et comptées.
+- `merge_fx` : fusion des paquets dynamiques adjacents de même état on/off ; comparaison
+  du coût par draw, sans toucher à la taille des groupes du monde.
+
+- `pvs_method` : `sources` (défaut) ou `legacy`, comparaison du précalcul au chargement.
+- `pvs_cache` : cache privé PVS on/off (défaut off jusqu’aux mesures Vita).
+- `pvs_verify` : comparaison exhaustive au compilateur précédent ; défaut off.
+  Diagnostic coûteux, réservé aux preuves hors mesures ; son temps entre dans load_pvs_ms.
 
 Fichier absent : défauts ci-dessus. Champ inconnu, erreur JSON ou valeur hors limites :
 erreur explicite dans le log et tous les réglages par défaut. Vérifier le log effectif.
@@ -75,8 +121,42 @@ erreur explicite dans le log et tous les réglages par défaut. Vérifier le log
 - TAN décoratif, billboards et corde en pose chargée. Les matrices des parents
   interactifs restent actives. Aucun changement des colliders, scripts ou saves.
 - PVS par groupe et frustum par AABB : inclusion de toute une surface/groupe,
-  donc triangles supplémentaires possibles. L'ordre alpha monde/acteurs peut
-  différer du tri global legacy : cas à capturer et revoir au jalon 3.
+  donc triangles supplémentaires possibles. L’ordre alpha par groupe
+  diffère du tri triangle legacy ; croisements/auto-intersections restent à capturer.
+
+## Chargement — jalon 3
+
+L’observation pilote « environ dix minutes contre cinq » du jalon 2 n’est pas encore
+quantifiée. Ce paquet reste intact. Le jalon 3 inclut le single-load 3590678 et publie
+`load groups` (recettes, chunks, compteurs), `load pipelines/uploads`, `PVS sources`,
+`PVS phases`, `load PVS`, puis `loaded` avec ces temps en inventaire. Ils commencent
+après le premier `Loaded gvillage` ; comparer aussi lancement → Loaded → loaded →
+caméra gelée. Les 60 frames de warmup ne font pas partie du chargement Scene pur.
+
+Ancien PVS : `Visibility::bounds` parcourt les feuilles pour chaque groupe **et chaque
+cluster** ; `faces` reconstruit son masque à chaque cluster. Nouveau : inversion
+faces → clusters une fois, intersections AABB → clusters une fois par groupe, union
+pour les déformations, puis tests de bits de visibilité. Géométrie hors feuilles et
+PVS None restent conservateurs. Gvillage défaut : 163 scans AABB, au lieu de
+163 × 2 139, et 8 039 IDs de clusters sources. Hôte : égalité exacte des listes
+None + 2 139 clusters contre l’ancien compilateur ; aucun chiffre extrapolé à la Vita.
+
+Cache optionnel : `ux0:data/alice/private/renderer-cache/pvs-<SHA256>.bin` (hôte private).
+Clé : version et toutes les entrées de visibilité, groupes/plages, AABB, faces,
+opaque/animé/déformé, ordre de pipelines. Format entier u32 little-endian partagé
+PC/ARM32, listes internées, checksum du corps, borne 16 Mio, IDs/ranges vérifiés.
+Corruption/incompatibilité/absence : reconstruire, jamais croire un PVS tronqué.
+Écriture temporaire puis rename ; échec d’I/O : jeu maintenu, erreur explicite.
+Cache lu/construit **avant** warmup, sans toucher aux sauvegardes. Aucun GPU ID,
+texture ni asset dans ce fichier ; aucun fichier privé dans Git/VPK. Le cache
+évite le précalcul PVS, pas le parsing/chargement LG ni les uploads. Le comparer
+miss/hit/cache off sur Vita : SD, checksum et allocations peuvent annuler le gain.
+
+Pré-calcul des buffers complets sur PC et chargement incrémental restent possibles,
+mais demandent une identité de corpus/recettes portable et une préparation Scene
+asynchrone ; les textures et assets LG doivent toujours charger. Ne pas engager cette
+refonte avant les temps par phase natifs. Le chargement jusqu’au gameplay et son pic
+mémoire comptent dans le jalon 4, au même titre que les performances en jeu.
 
 ## Vérification et mesure
 
@@ -108,9 +188,23 @@ pipeline/texture et octets d'uniformes comptent les appels directs émis par LG 
 ils ne constituent pas un compteur interne de vitaGL ni une mesure de surtirage.
 Les spans `vita_cluster_frustum`, `vita_world_parameters`, `vita_world_submit`
 et `vita_alpha_group_sort` sont séparés ; `vita_world_total` est leur parent,
-avec les frontières et le ciel. Les uniformes utilisent un scratch préalloué ;
+avec les frontières et le ciel. En interop, la préparation alpha appartient à ce parent,
+mais son émission différée est `vita_world_alpha_submit`, enfant de `vita_joint_alpha_submit` ;
+les analyser séparément, sans prétendre qu’un seul span continu couvre tout le monde. Les uniformes utilisent un scratch préalloué ;
 les quatre compteurs upload/retransformation/indices/triangles triés restent à zéro.
 `gpu_geometry_bytes` est le payload uploadé, pas la mémoire physique de vitaGL.
+
+Jalon 3 : `--vita-alpha-check` sur hôte vérifie les vrais shaders monde/acteurs,
+l’ordre commun indépendant de l’ordre de soumission, occultation opaque,
+clear première personne, couches multiplicatives/low-alpha, ghost/dissolve et lumières.
+Les fixtures et captures sont synthétiques et hors banc. `vita_fx_gpu_draws`, uploads,
+meshes fusionnés, sommets/indices ajoutés et capacité stream sont hors monde ;
+`vita_joint_alpha_groups` mesure les entrées après fusion. Les spans sont séparés
+(upload, fusion, tri commun, submit opaque/alpha) sans instrumentation par sommet.
+
+Les sondes legacy à ee297f8 motivent une couche, moins de draws et moins de surtirage.
+Aucune hausse d’horloges ni baisse de résolution par défaut : GPU222 reste une
+expérience distincte pilotée et nommée. Les timings hôte ne prédisent pas ceux de Vita.
 
 Console/FTP réservés au pilote. Le paquet de jalon contient ELF, VPK, SHA-256,
 révisions, vérification imports/heap/piles/marge ELF, réglages et grille de runs.

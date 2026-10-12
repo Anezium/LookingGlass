@@ -1,5 +1,8 @@
 //! Direct, retained world draws. CPU geometry and PVS compilation happen at load time.
 mod shader;
+mod pvs_cache;
+#[cfg(not(target_os = "vita"))]
+pub(crate) mod interop_check;
 use super::Scene;
 use crate::materials::{Blend, Deform, FaceSide, Stage, TcMod};
 use anyhow::{ensure, Context, Result};
@@ -19,6 +22,13 @@ pub struct Config {
     pub sort_alpha: bool,
     pub sky: bool,
     pub cell_size: f32,
+    /// Compare grouped actor/world alpha to the milestone-2 bridge.
+    pub alpha_interop: bool,
+    pub actor_max_layers: usize,
+    pub merge_fx: bool,
+    pub pvs_cache: bool,
+    pub pvs_method: String,
+    pub pvs_verify: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -29,6 +39,12 @@ impl Default for Config {
             sort_alpha: true,
             sky: true,
             cell_size: 256.,
+            alpha_interop: true,
+            actor_max_layers: 2,
+            merge_fx: true,
+            pvs_cache: false,
+            pvs_method: "sources".into(),
+            pvs_verify: false,
         }
     }
 }
@@ -42,6 +58,11 @@ impl Config {
             (1..=2).contains(&self.max_layers),
             "max_layers must be 1 or 2"
         );
+        ensure!(
+            (1..=2).contains(&self.actor_max_layers),
+            "actor_max_layers must be 1 or 2"
+        );
+        ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
         ensure!(
             self.cell_size.is_finite() && (64. ..=2048.).contains(&self.cell_size),
             "invalid cell_size"
@@ -118,8 +139,12 @@ pub(crate) fn record_view(camera: &Camera3D) {
     });
 }
 pub fn report() -> serde_json::Value {
-    serde_json::json!({"feature":true, "configuration":config(), "config_path":CONFIG_PATH,
-        "world_only_active":world_only(), "inventory":*INVENTORY.lock().unwrap(),"view":*VIEW.lock().unwrap()})
+    let result=serde_json::json!({"feature":true, "configuration":config(), "config_path":CONFIG_PATH,
+        "world_only_active":world_only(), "inventory":*INVENTORY.lock().unwrap(),"view":*VIEW.lock().unwrap()});
+    #[cfg(not(target_os="vita"))]
+    { let mut result=result; result["host_frame_counts"]=crate::render_fx::retained::host_report(); return result; }
+    #[cfg(target_os="vita")]
+    result
 }
 
 #[repr(C)]
@@ -222,6 +247,40 @@ struct Pvs {
 }
 impl Pvs {
     fn new(groups: &[Group], visibility: &crate::visibility::Visibility) -> Self {
+        if config().pvs_method=="legacy" {return Self::legacy(groups,visibility);}
+        Self::sources(groups,visibility)
+    }
+    fn sources(groups:&[Group],visibility:&crate::visibility::Visibility)->Self {
+        let source_start=std::time::Instant::now();
+        let faces=visibility.face_clusters();
+        let faces_ms=source_start.elapsed().as_secs_f64()*1000.;
+        let sources=groups.iter().map(|g| {
+            if g.recipe.model.is_some() || g.recipe.motion.is_some() {return None;}
+            if g.faces.is_empty() {return visibility.bounds_clusters(g.min,g.max);}
+            let mut clusters=g.faces.iter().flat_map(|&f|faces[f].iter().copied()).collect::<Vec<_>>();
+            if g.recipe.deform.is_some() {
+                let bounds=visibility.bounds_clusters(g.min,g.max)?;
+                clusters.extend(bounds);
+            }
+            clusters.sort_unstable();clusters.dedup();Some(clusters)
+        }).collect::<Vec<_>>();
+        println!("[lg/vita-renderer] PVS sources groups={} source_cluster_ids={} leaf_bounds_queries={}",groups.len(),sources.iter().filter_map(|s|s.as_ref()).map(Vec::len).sum::<usize>(),groups.iter().filter(|g|g.recipe.model.is_none() && g.recipe.motion.is_none() && (g.faces.is_empty() || g.recipe.deform.is_some())).count());
+        let sources_ms=source_start.elapsed().as_secs_f64()*1000.;
+        let lists_start=std::time::Instant::now();
+        let result=Self::compile(visibility.cluster_count(),|cluster| {
+            let mut out=Lists::default();
+            for (id,source) in sources.iter().enumerate() {
+                if cluster.is_none() || source.as_ref().is_none_or(|s|visibility.sees_clusters(cluster.unwrap(),s)) {
+                    if groups[id].recipe.opaque {out.opaque.push(id);} else {out.alpha.push(id);}
+                }
+            }
+            out.opaque.sort_by_key(|&id|(groups[id].recipe.rank,groups[id].recipe.blend,groups[id].recipe.cull,id));
+            out
+        });
+        println!("[lg/vita-renderer] PVS phases face_sources={faces_ms:.3} ms sources_total={sources_ms:.3} ms lists={:.3} ms",lists_start.elapsed().as_secs_f64()*1000.);
+        result
+    }
+    fn legacy(groups: &[Group], visibility: &crate::visibility::Visibility) -> Self {
         let list = |cluster| {
             let mask = visibility.faces(cluster);
             let mut out = Lists::default();
@@ -283,6 +342,7 @@ impl Pvs {
     }
 }
 struct Prepared {
+    depth: f32,
     group: usize,
     texture: TextureId,
     uniforms: shader::Uniforms,
@@ -297,6 +357,7 @@ pub struct Renderer {
     sky_bindings: Bindings,
     alpha_order: Vec<(f32, usize)>,
     prepared: Vec<Prepared>,
+    fx_gpu: Option<crate::render_fx::retained::Gpu>,
 }
 fn blend_class(blend: Blend) -> usize {
     match blend {
@@ -320,9 +381,11 @@ fn deform_extent(deform: &Option<Deform>) -> Vec3 {
 }
 impl Renderer {
     pub(super) fn new(scene: &Scene) -> Result<Self> {
+        let started=std::time::Instant::now();
         let c = config();
         let mut pending: Vec<Pending> = Vec::new();
         let mut keys: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut recipes_ms=0.;let mut chunks_ms=0.;let mut source_chunks=0;
         let mut dropped_layers = 0;
         let mut frozen_deforms = 0;
         let mut frozen_models = 0;
@@ -347,6 +410,7 @@ impl Renderer {
                     dropped_layers += 1;
                     continue;
                 }
+                let recipe_started=std::time::Instant::now();
                 let recipe = Recipe {
                     stage: layer.spec.clone(),
                     textures: layer.textures.clone(),
@@ -393,12 +457,15 @@ impl Renderer {
                         .map(|p| (Some(p.face), p.indices.clone(), (p.min + p.max) * 0.5))
                         .collect()
                 };
+                recipes_ms+=recipe_started.elapsed().as_secs_f64()*1000.;
+                let chunks_started=std::time::Instant::now();
                 for (face, range, center) in parts {
                     let cell = (center / c.cell_size).floor();
                     let key = format!("{signature}|{}|{cell:?}", recipe.rank);
                     let source = &b.full_indices[range];
                     // Split unusually large parts on triangle boundaries as well as between faces.
                     for source in source.chunks(59997) {
+                        source_chunks+=1;
                         let candidates = keys.entry(key.clone()).or_default();
                         let id = candidates
                             .iter()
@@ -416,6 +483,7 @@ impl Renderer {
                         pending[id].geometry.append(bi, b, source, face);
                     }
                 }
+                chunks_ms+=chunks_started.elapsed().as_secs_f64()*1000.;
             }
         }
         ensure!(
@@ -434,6 +502,9 @@ impl Renderer {
             .iter()
             .map(|p| p.recipe.textures[0].raw_miniquad_id())
             .collect::<Vec<_>>();
+        let groups_ms=started.elapsed().as_secs_f64()*1000.;
+        println!("[lg/vita-renderer] load groups {:.3} ms recipes={recipes_ms:.3} chunks={chunks_ms:.3} source_chunks={source_chunks} groups={} vertices={} layer_triangles={}",groups_ms,pending.len(),vertices,triangles);
+        let upload_start=std::time::Instant::now();
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
         let shader = ctx
@@ -558,7 +629,17 @@ impl Renderer {
             ),
             images: vec![],
         };
-        let pvs = Pvs::new(&groups, &scene.map.visibility);
+        let upload_ms=upload_start.elapsed().as_secs_f64()*1000.;
+        println!("[lg/vita-renderer] load pipelines/uploads {:.3} ms payload_bytes={bytes}",upload_ms);
+        let pvs_start=std::time::Instant::now();
+        let (pvs,cache_status)=pvs_cache::load_or_build(&groups,&scene.map.visibility);
+        if c.pvs_verify {
+            let original=Pvs::legacy(&groups,&scene.map.visibility);
+            ensure!(original.unknown.as_ref()==pvs.unknown.as_ref() && original.clusters.iter().zip(&pvs.clusters).all(|(a,b)|a.as_ref()==b.as_ref()),"retained PVS differs from legacy compilation");
+            println!("PASS retained PVS matches legacy compiler for None and all {} clusters",pvs.clusters.len());
+        }
+        let pvs_ms=pvs_start.elapsed().as_secs_f64()*1000.;
+        println!("[lg/vita-renderer] load PVS {:.3} ms method={} cache={cache_status}",pvs_ms,c.pvs_method);
         let unique = pvs
             .clusters
             .iter()
@@ -578,7 +659,7 @@ impl Renderer {
             .sum();
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
             "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16,"uniform_staging_capacity_bytes":groups.len()*std::mem::size_of::<Prepared>(),"dropped_layers":dropped_layers,
-            "frozen_ambient_models":frozen_models,"frozen_deforms":frozen_deforms,"dynamic_world_lights":0,"geometry_uploads_per_frame":0});
+            "frozen_ambient_models":frozen_models,"frozen_deforms":frozen_deforms,"dynamic_world_lights":0,"geometry_uploads_per_frame":0,"load_groups_ms":groups_ms,"load_recipes_ms":recipes_ms,"load_chunks_ms":chunks_ms,"source_chunks":source_chunks,"load_pipelines_upload_ms":upload_ms,"load_pvs_ms":pvs_ms,"load_total_ms":started.elapsed().as_secs_f64()*1000.,"pvs_cache_status":cache_status,"pvs_method":c.pvs_method});
         println!("[lg/vita-renderer] loaded {inventory}");
         *INVENTORY.lock().unwrap() = Some(inventory);
         // PVS provenance is no longer needed after compilation.
@@ -588,6 +669,7 @@ impl Renderer {
         Ok(Self {
             alpha_order: Vec::with_capacity(groups.len()),
             prepared: Vec::with_capacity(groups.len()),
+            fx_gpu: None,
             groups,
             pvs,
             pipelines,
@@ -624,13 +706,17 @@ impl Renderer {
             };
             if in_frustum(projection * model, g.min, g.max) {
                 self.alpha_order.push((
-                    (model.transform_point3(g.center) - eye).length_squared(),
+                    if crate::render_fx::retained_active() {
+                        crate::render_fx::group_depth(model.transform_point3(g.center))
+                    } else {
+                        (model.transform_point3(g.center) - eye).length_squared()
+                    },
                     id,
                 ));
             }
         }
         drop(visibility_span);
-        if alpha && config().sort_alpha {
+        if alpha && config().sort_alpha && !crate::render_fx::retained_active() {
             let _sort = crate::frame_profile::span("vita_alpha_group_sort");
             self.alpha_order
                 .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -638,7 +724,7 @@ impl Renderer {
         self.prepared.clear();
         {
             let _parameters = crate::frame_profile::span("vita_world_parameters");
-            for &(_, id) in &self.alpha_order {
+            for &(depth, id) in &self.alpha_order {
                 let g = &self.groups[id];
                 let model = model_matrix(&g.recipe, time, transforms).unwrap();
                 let mut u = uniforms(
@@ -653,14 +739,35 @@ impl Renderer {
                 u.atmosphere(&scene.atmosphere, eye);
                 let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
                 self.prepared.push(Prepared {
+                    depth,
                     group: id,
                     texture,
                     uniforms: u,
                 });
             }
         }
-        // Only interop with queued legacy actors needs a boundary; direct draws never queue geometry.
-        if !world_only() {
+        if alpha && crate::render_fx::retained_active() {
+            // Keep immutable bindings and uniforms until all actor/effect groups are known.
+            let stats = super::DrawStats {
+                culled: self
+                    .pvs
+                    .unknown
+                    .alpha
+                    .len()
+                    .saturating_sub(self.prepared.len()),
+                batches: self.prepared.len(),
+                triangles: self
+                    .prepared
+                    .iter()
+                    .map(|p| self.groups[p.group].indices as usize / 3)
+                    .sum(),
+                ..Default::default()
+            };
+            count("vita_world_culled_groups", stats.culled as u64);
+            return stats;
+        }
+        // Direct actor packets never queue Macroquad geometry.
+        if !world_only() && !crate::render_fx::retained_active() {
             let _flush = crate::frame_profile::span("gl_flush");
             let _site = crate::frame_profile::span("flush_vita_world_interop");
             #[cfg(target_os = "vita")]
@@ -765,6 +872,55 @@ impl Renderer {
         // No flush_depth_begin/end: draws have already reached miniquad/vitaGL.
         stats
     }
+    pub(super) fn begin_fx(&mut self) {
+        self.prepared.clear();
+    }
+    pub(super) fn finish_fx(&mut self, interop_flush: bool) -> (usize, usize) {
+        let mut gpu = self.fx_gpu.take().unwrap_or_else(|| {
+            crate::render_fx::retained::Gpu::new().expect("retained actor shader")
+        });
+        let world = self
+            .prepared
+            .iter()
+            .enumerate()
+            .map(|(id, p)| (p.depth, id))
+            .collect::<Vec<_>>();
+        let result = crate::render_fx::retained::finish(&mut gpu, &world, interop_flush, |id| {
+            let _span = crate::frame_profile::span("vita_world_alpha_submit");
+            let p = &self.prepared[id];
+            let g = &mut self.groups[p.group];
+            g.bindings.images[0] = p.texture;
+            let ctx = unsafe { get_internal_gl() }.quad_context;
+            ctx.apply_pipeline(&self.pipelines[g.recipe.blend * 3 + g.recipe.cull]);
+            ctx.apply_bindings(&g.bindings);
+            ctx.apply_uniforms(UniformsSource::table(&p.uniforms));
+            ctx.draw(0, g.indices, 1);
+            count("vita_world_gpu_draws", 1);
+            count("vita_world_alpha_triangles", g.indices as u64 / 3);
+            count(
+                "vita_world_uniform_bytes",
+                std::mem::size_of::<shader::Uniforms>() as u64,
+            );
+            // Every alternation can change state; this counter is conservative.
+            count("vita_world_alpha_state_applications", 1);
+            #[cfg(target_os = "vita")]
+            {
+                crate::frame_profile::record_batch(
+                    g.recipe.model.is_none() && g.recipe.motion.is_none(),
+                    false,
+                );
+                crate::frame_profile::record_world_submission();
+                crate::frame_profile::record_geometry(
+                    g.indices as usize / 3,
+                    0,
+                    g.recipe.model.is_none(),
+                );
+            }
+        });
+        self.prepared.clear();
+        self.fx_gpu = Some(gpu);
+        result
+    }
 }
 impl Drop for Renderer {
     fn drop(&mut self) {
@@ -788,7 +944,7 @@ fn count(name: &'static str, n: u64) {
     #[cfg(target_os = "vita")]
     crate::frame_profile::counts(&[(name, n)]);
     #[cfg(not(target_os = "vita"))]
-    let _ = (name, n);
+    crate::render_fx::retained::count(name,n);
 }
 fn model_matrix(recipe: &Recipe, time: f32, transforms: &[(usize, Vec3, Quat)]) -> Option<Mat4> {
     let rigid = if let Some(id) = recipe.model {
@@ -1059,6 +1215,7 @@ pub(crate) async fn visualizer(
         clear_background(scene.atmosphere.background());
         set_camera(&camera);
         crate::render_fx::set_projection(camera.matrix());
+        crate::render_fx::retained::host_reset();
         let time = frame as f32 / 60.;
         scene.draw(camera.position, time, false, false, &transforms);
         if scene.retained_active() {

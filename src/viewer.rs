@@ -3278,9 +3278,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::lighting::select(lights, camera, &scene.world);
         }
         if !world_only || !scene.retained_active() {
-            crate::render_fx::begin_view(
-                &world_camera, environment_clock, &scene.atmosphere, fullbright,
-            );
+            scene.begin_fx_view(&world_camera, environment_clock, fullbright, true);
         } else {
             use macroquad::camera::Camera;
             crate::render_fx::set_projection(world_camera.matrix());
@@ -3400,7 +3398,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if draw_world && !world_only {
             crate::lighting::flares(camera, (target - camera).normalize_or_zero());
         }
-        if !world_only || !scene.retained_active() { crate::render_fx::finish(); }
+        let direct_fx = crate::render_fx::retained_active();
+        if !world_only || !scene.retained_active() { scene.finish_fx(true); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3414,8 +3413,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && player.script_motion == 0
             && !interactions.school.as_ref().is_some_and(|s| s.cinematic())
         {
-            crate::render::clear_view_depth();
-            alice.draw_first_person(fullbright);
+            if direct_fx {
+                // All 3-D packets have reached miniquad; the view toy needs only a depth clear.
+                crate::render::clear_direct_view_depth();
+                scene.begin_fx_view(&world_camera, environment_clock, fullbright, false);
+                alice.draw_first_person(fullbright);
+                scene.finish_fx(false);
+            } else {
+                crate::render::clear_view_depth();
+                alice.draw_first_person(fullbright);
+            }
         }
         #[cfg(target_os = "vita")]
         {
@@ -3825,6 +3832,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             )))?;
         }
         if options.frames.is_some_and(|limit| frame >= limit) {
+            #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+            println!("[lg/vita-renderer] host frame report {}",crate::render::vita_renderer::report());
             crate::frame_profile::report(&maps[current])?;
             if let Some(path) = &options.capture {
                 save_capture(path)?;

@@ -259,6 +259,8 @@ fn run() -> Result<()> {
         match arg.as_str() {
             #[cfg(feature = "vita_renderer")]
             "--vita-render-view" => mode = "vita-render-view",
+            #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
+            "--vita-alpha-check" => mode = "vita-alpha-check",
             "--difficulty" => {
                 o.difficulty = powerups::Difficulty::parse(
                     &args.next().context("--difficulty requires a name")?,
@@ -575,6 +577,16 @@ fn run() -> Result<()> {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = render::vita_renderer::visualizer(assets, o).await {
                 eprintln!("Retained world visualizer failed: {e:#}");
+                std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
+    #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
+    if mode == "vita-alpha-check" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = render::vita_renderer::interop_check::check().await {
+                eprintln!("Retained alpha check failed: {e:#}");
                 std::process::exit(1);
             }
         });

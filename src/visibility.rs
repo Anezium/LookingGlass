@@ -157,6 +157,40 @@ impl Visibility {
     fn sees(&self, from: usize, to: usize) -> bool {
         from == to || self.rows[from * self.stride + to / 8] & (1 << (to % 8)) != 0
     }
+    /// Inverted face provenance for retained loading: build once, query PVS bits later.
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) fn face_clusters(&self) -> Vec<Vec<usize>> {
+        let mut result=vec![Vec::new();self.face_count];
+        for leaf in &self.leaves {
+            if leaf.cluster<0 {continue;}
+            for &face in &leaf.faces {result[face].push(leaf.cluster as usize);}
+        }
+        for clusters in &mut result {clusters.sort_unstable();clusters.dedup();}
+        result
+    }
+    /// The old bounds test's overlap set is independent of the viewer cluster.
+    /// None preserves its fail-open policy when geometry overlaps no compiled leaf.
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) fn bounds_clusters(&self,min:Vec3,max:Vec3) -> Option<Vec<usize>> {
+        let mut result=self.leaves.iter().filter(|l|l.cluster>=0 && min.cmple(l.max).all() && max.cmpge(l.min).all()).map(|l|l.cluster as usize).collect::<Vec<_>>();
+        result.sort_unstable();result.dedup();
+        (!result.is_empty()).then_some(result)
+    }
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) fn sees_clusters(&self,from:usize,clusters:&[usize])->bool {
+        clusters.iter().any(|&to|self.sees(from,to))
+    }
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) fn retained_cache_key(&self,hash:&mut impl sha2::Digest) {
+        hash.update((self.clusters as u64).to_le_bytes());hash.update((self.stride as u64).to_le_bytes());hash.update((self.face_count as u64).to_le_bytes());
+        hash.update((self.rows.len() as u64).to_le_bytes());hash.update(&self.rows);
+        hash.update((self.leaves.len() as u64).to_le_bytes());
+        for leaf in &self.leaves {
+            hash.update(leaf.cluster.to_le_bytes());
+            for n in leaf.min.to_array().into_iter().chain(leaf.max.to_array()){hash.update(n.to_bits().to_le_bytes());}
+            hash.update((leaf.faces.len() as u64).to_le_bytes());for &face in &leaf.faces{hash.update((face as u64).to_le_bytes());}
+        }
+    }
     pub fn bounds(&self, cluster: Option<usize>, min: Vec3, max: Vec3) -> bool {
         let Some(c) = cluster.filter(|&c| c < self.clusters) else {
             return true;
@@ -202,6 +236,19 @@ pub(crate) mod tests {
             stride: 1,
             clusters: 2,
             face_count: 2,
+        }
+    }
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn retained_sources_preserve_faces_overlaps_and_fail_open_bounds() {
+        let v=two_rooms();let faces=v.face_clusters();
+        for c in 0..v.cluster_count() {
+            let mask=v.faces(Some(c)).unwrap();
+            for (face,sources) in faces.iter().enumerate(){assert_eq!(v.sees_clusters(c,sources),mask[face]);}
+            for (min,max) in [(Vec3::splat(-1.),Vec3::splat(1.)),(vec3(2.,-1.,-1.),vec3(3.,1.,1.)),(Vec3::splat(100.),Vec3::splat(101.))] {
+                let source=v.bounds_clusters(min,max);
+                assert_eq!(source.as_ref().is_none_or(|s|v.sees_clusters(c,s)),v.bounds(Some(c),min,max));
+            }
         }
     }
     #[test]

@@ -1400,7 +1400,7 @@ impl SkinMaterial {
     fn draw(&self, appearance: Appearance, draw: impl FnOnce()) {
         self.bind_appearance(appearance);
         draw();
-        if appearance != Appearance::default() {
+        if appearance != Appearance::default() && !crate::render_fx::retained_active() {
             // Macroquad writes queued uniforms back into the shared pipeline.
             // Flush before resetting, including when no later actor is drawn.
             unsafe {
@@ -1415,6 +1415,9 @@ impl SkinMaterial {
                     get_internal_gl().flush();
                 }
             }
+            self.bind();
+        } else if appearance != Appearance::default() {
+            // Each retained packet already captured Appearance; reset without a flush.
             self.bind();
         }
     }

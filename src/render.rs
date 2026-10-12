@@ -34,13 +34,13 @@ pub use billboard_check::check as check_billboards;
 
 pub(crate) const BLEND_COUNT: usize = 109;
 
-const VERTEX: &str = r#"#version 100
+pub(crate) const VERTEX: &str = r#"#version 100
 attribute vec3 position; attribute vec2 texcoord; attribute vec4 color0; attribute vec4 normal;
 uniform mat4 Model; uniform mat4 Projection;
 varying highp vec2 uv; varying highp vec3 lm; varying lowp vec4 color; varying highp vec3 worldPosition;
 void main(){worldPosition=(Model*vec4(position,1.0)).xyz; gl_Position=Projection*vec4(worldPosition,1.0);uv=texcoord;lm=normal.xyz;color=color0/255.0;}
 "#;
-const FRAGMENT: &str = r#"#version 100
+pub(crate) const FRAGMENT: &str = r#"#version 100
 precision mediump float;
 varying highp vec2 uv; varying highp vec3 lm; varying lowp vec4 color;
 uniform sampler2D Texture; uniform sampler2D LightAtlas; uniform vec2 AtlasGrid;
@@ -415,7 +415,7 @@ pub(crate) fn blend_index(b: Blend) -> usize {
         Blend::Factors(s, d) => 9 + s as usize * 10 + d as usize,
     }
 }
-fn blend(i: usize) -> Option<BlendState> {
+pub(crate) fn blend(i: usize) -> Option<BlendState> {
     if i >= 9 {
         let factor = |i| match i {
             0 => BlendFactor::Zero,
@@ -995,7 +995,7 @@ fn draw_batch(
                 {
                     pass.world_static = Some(static_batch);
                 }
-                pass.material = material.clone();
+                pass.material = Some(material.clone());
                 queued.push(pass);
             }
             continue;
@@ -1944,6 +1944,45 @@ impl Scene {
             }
         }
     }
+    /// The retained scheduler owns all actor/world alpha; other scenes keep the legacy queue.
+    pub(crate) fn begin_fx_view(
+        &mut self,
+        camera: &Camera3D,
+        time: f32,
+        fullbright: bool,
+        flush: bool,
+    ) {
+        #[cfg(not(feature = "vita_renderer"))]
+        let _ = flush;
+        #[cfg(feature = "vita_renderer")]
+        if vita_renderer::config().alpha_interop
+            && self.retained.is_some()
+            && !vita_renderer::world_only()
+        {
+            self.retained.as_mut().unwrap().begin_fx();
+            crate::render_fx::retained::begin_view(
+                camera,
+                time,
+                &self.atmosphere,
+                fullbright,
+                flush,
+            );
+            return;
+        }
+        crate::render_fx::begin_view(camera, time, &self.atmosphere, fullbright);
+    }
+    pub(crate) fn finish_fx(&mut self, flush: bool) {
+        #[cfg(not(feature = "vita_renderer"))]
+        let _ = flush;
+        #[cfg(feature = "vita_renderer")]
+        if crate::render_fx::retained_active() {
+            if let Some(renderer) = self.retained.as_mut() {
+                renderer.finish_fx(flush);
+                return;
+            }
+        }
+        crate::render_fx::finish();
+    }
     pub fn draw(
         &mut self,
         camera: Vec3,
@@ -2138,6 +2177,11 @@ impl Scene {
 /// This is specific to our OpenGL renderer; do not replace with a Metal backend
 /// without supplying an equivalent read-only depth attachment.
 pub fn depth_read_only(draw: impl FnOnce()) {
+    #[cfg(feature = "vita_renderer")]
+    if crate::render_fx::retained_active() {
+        crate::render_fx::retained_depth_scope(draw);
+        return;
+    }
     unsafe {
         {
             #[cfg(target_os = "vita")]
@@ -2181,6 +2225,17 @@ pub fn depth_pipeline(color_blend: Option<BlendState>) -> PipelineParams {
         depth_write: true,
         color_blend,
         ..Default::default()
+    }
+}
+
+/// Direct 3-D has already submitted its packets. Bind the intended target even
+/// after a readback, clear depth without colour, and leave the Macroquad queue alone.
+pub(crate) fn clear_direct_view_depth() {
+    unsafe {
+        macroquad::miniquad::gl::glDepthMask(1);
+        let ctx=get_internal_gl().quad_context;
+        ctx.begin_default_pass(macroquad::miniquad::PassAction::Clear { color:None,depth:Some(1.),stencil:None });
+        ctx.end_render_pass();
     }
 }
 

@@ -82,6 +82,24 @@ pub fn apply(material: &Material, model: bool, enabled: bool) {
         }
     });
 }
+/// The direct actor shader receives the same selected lights and models-only mask.
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn packed(model: bool, enabled: bool) -> [[f32; 4]; 16] {
+    LIGHTS.with(|lights| {
+        let lights = lights.borrow();
+        let mut result = [[0.; 4]; 16];
+        for i in 0..8 {
+            if let Some(l) = lights
+                .get(i)
+                .filter(|l| enabled && (model || !l.only_models))
+            {
+                result[i * 2] = l.position.extend(l.radius).to_array();
+                result[i * 2 + 1] = l.color.extend(1.).to_array();
+            }
+        }
+        result
+    })
+}
 pub fn load_art(assets: &mut Assets) -> Result<()> {
     if SHADOW.with(|s| s.borrow().is_some()) {
         return Ok(());

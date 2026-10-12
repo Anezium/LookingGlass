@@ -7,6 +7,8 @@ use crate::{
     texture,
 };
 use anyhow::Result;
+#[cfg(feature = "vita_renderer")]
+pub(crate) mod retained;
 use macroquad::prelude::*;
 use std::{
     cell::RefCell,
@@ -21,12 +23,16 @@ pub struct Appearance {
     pub power: f32,
 }
 pub struct Pass {
+    #[cfg(feature = "vita_renderer")]
+    blend_index: usize,
+    #[cfg(feature = "vita_renderer")]
+    depth_equal: bool,
     #[cfg(target_os = "vita")]
     pub world_static: Option<bool>,
     #[cfg(target_os = "vita")]
     world_geometry_counted: bool,
     pub mesh: Mesh,
-    pub material: Rc<Material>,
+    pub material: Option<Rc<Material>>,
     pub lit: bool,
     pub clamp: bool,
     pub cutout: f32,
@@ -38,11 +44,17 @@ pub struct Pass {
     pub filter_fade: f32,
 }
 struct Group {
+    #[cfg(feature = "vita_renderer")]
+    transparent: bool,
     passes: Vec<Pass>,
 }
 #[derive(Default)]
 struct Frame {
     active: bool,
+    #[cfg(feature = "vita_renderer")]
+    direct: bool,
+    #[cfg(feature = "vita_renderer")]
+    depth_read_only: bool,
     camera: Vec3,
     direction: Vec3,
     time: f32,
@@ -71,6 +83,44 @@ pub fn copy_mesh(m: &Mesh) -> Mesh {
 pub fn active() -> bool {
     FRAME.with(|f| f.borrow().active)
 }
+pub(crate) fn retained_active() -> bool {
+    #[cfg(feature = "vita_renderer")]
+    {
+        FRAME.with(|f| {
+            let f = f.borrow();
+            f.active && f.direct
+        })
+    }
+    #[cfg(not(feature = "vita_renderer"))]
+    {
+        false
+    }
+}
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn group_depth(center: Vec3) -> f32 {
+    FRAME.with(|f| {
+        let f = f.borrow();
+        (center - f.camera).dot(f.direction)
+    })
+}
+/// Deferred packets carry depth policy; no GL state change surrounds the closure.
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn retained_depth_scope(draw: impl FnOnce()) {
+    let old = FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        let old = f.depth_read_only;
+        f.depth_read_only = true;
+        old
+    });
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FRAME.with(|f| f.borrow_mut().depth_read_only = self.0);
+        }
+    }
+    let _restore = Restore(old);
+    draw();
+}
 pub fn time() -> f32 {
     FRAME.with(|f| f.borrow().time)
 }
@@ -91,7 +141,13 @@ pub fn projected_error(center: Vec3, radius: f32, error: f32) -> f32 {
         projected_error_for(m, screen_height(), center, radius, error)
     })
 }
-pub(crate) fn projected_error_for(m: Mat4, height: f32, center: Vec3, radius: f32, error: f32) -> f32 {
+pub(crate) fn projected_error_for(
+    m: Mat4,
+    height: f32,
+    center: Vec3,
+    radius: f32,
+    error: f32,
+) -> f32 {
     let clip = m * center.extend(1.);
     let distance = (clip.w - radius).max(0.001);
     // Projection row magnitude also handles rolled cameras without knowing FOV.
@@ -138,7 +194,7 @@ pub fn begin_view(camera: &Camera3D, time: f32, atmosphere: &Atmosphere, fullbri
     set_projection(camera.matrix());
 }
 fn same_style(a: &Pass, b: &Pass) -> bool {
-    Rc::ptr_eq(&a.material, &b.material)
+    a.material.as_ref().zip(b.material.as_ref()).is_some_and(|(a,b)| Rc::ptr_eq(a,b))
         && a.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
             == b.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
         && a.lit == b.lit
@@ -159,7 +215,7 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
     let _world_submit = p.world_static.map(|static_batch| crate::frame_profile::world_span("world_submit", static_batch));
     FRAME.with(|f| {
         let f = f.borrow();
-        let m = &p.material;
+        let m = p.material.as_ref().expect("legacy pass material");
         f.atmosphere.apply(m, f.camera);
         m.set_uniform("Fullbright", if f.fullbright { 1_f32 } else { 0. });
         m.set_uniform("Lit", if p.lit { 1_f32 } else { 0. });
@@ -235,6 +291,30 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
     if passes.is_empty() {
         return;
     }
+    #[cfg(feature = "vita_renderer")]
+    if retained_active() {
+        let limit = crate::render::vita_renderer::config().actor_max_layers;
+        let mut passes = passes;
+        if passes.len() > limit {
+            retained::count("vita_fx_dropped_layers", (passes.len() - limit) as u64);
+            passes.truncate(limit);
+        }
+        FRAME.with(|f| {
+            let mut f = f.borrow_mut();
+            let count = passes.iter().map(|p| p.mesh.vertices.len()).sum::<usize>();
+            if f.vertices.saturating_add(count) > MAX_VERTICES {
+                f.dropped += 1;
+                return;
+            }
+            f.vertices += count;
+            let transparent = transparent || f.depth_read_only;
+            f.groups.push(Group {
+                passes,
+                transparent,
+            });
+        });
+        return;
+    }
     if !transparent {
         for p in &passes {
             draw_pass(p, None);
@@ -242,7 +322,7 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
         FRAME.with(|f| {
             f.borrow_mut()
                 .retained
-                .extend(passes.into_iter().map(|p| (p.material, p.mesh.texture)))
+                .extend(passes.into_iter().map(|p| (p.material.expect("legacy pass material"), p.mesh.texture)))
         });
         return;
     }
@@ -254,7 +334,11 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
             return;
         }
         f.vertices += count;
-        f.groups.push(Group { passes });
+        f.groups.push(Group {
+            passes,
+            #[cfg(feature = "vita_renderer")]
+            transparent: true,
+        });
     });
 }
 pub fn finish() -> (usize, usize) {
@@ -371,6 +455,10 @@ pub fn finish() -> (usize, usize) {
                 let _submit_profile = crate::frame_profile::span("transparent_submit");
                 draw_pass(
                     &Pass {
+                        #[cfg(feature = "vita_renderer")]
+                        blend_index: p.blend_index,
+                        #[cfg(feature = "vita_renderer")]
+                        depth_equal: p.depth_equal,
                         #[cfg(target_os = "vita")]
                         world_static: has_world.then_some(world_triangles[1] == 0),
                         #[cfg(target_os = "vita")]
@@ -470,19 +558,23 @@ fn pass_at(
             .map_or(1., |w| w.sample(clock))
             .clamp(0., 2.);
     Ok(Pass {
+        #[cfg(feature = "vita_renderer")]
+        blend_index: crate::render::blend_index(stage.blend),
+        #[cfg(feature = "vita_renderer")]
+        depth_equal: stage.depth_equal,
         #[cfg(target_os = "vita")]
         world_static: None,
         #[cfg(target_os = "vita")]
         world_geometry_counted: false,
         mesh,
-        material: crate::render::world_material(
+        material: if retained_active() { None } else { Some(crate::render::world_material(
             crate::render::blend_index(stage.blend)
                 + if stage.depth_equal {
                     crate::render::BLEND_COUNT
                 } else {
                     0
                 },
-        )?,
+        )?) },
         lit,
         clamp: stage.clamp,
         cutout: stage.alpha_test as f32,
@@ -734,7 +826,22 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
         return;
     };
     let mut passes = Vec::new();
-    for layer in &surface.layers {
+    #[cfg(feature = "vita_renderer")]
+    let limit = if retained_active() {
+        crate::render::vita_renderer::config().actor_max_layers
+    } else {
+        usize::MAX
+    };
+    #[cfg(not(feature = "vita_renderer"))]
+    let limit = usize::MAX;
+    #[cfg(feature = "vita_renderer")]
+    if surface.layers.len() > limit {
+        retained::count(
+            "vita_fx_dropped_layers",
+            (surface.layers.len() - limit) as u64,
+        );
+    }
+    for layer in surface.layers.iter().take(limit) {
         let mut copy = copy_mesh(mesh);
         copy.texture = Some(
             layer.textures[if layer.stage.images.is_empty() {
