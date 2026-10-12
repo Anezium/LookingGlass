@@ -136,6 +136,20 @@ fn pose(at: Vec3, yaw: f32) -> Transform {
     }
 }
 impl Cinema {
+    #[cfg(test)]
+    pub(super) fn fixture() -> Self {
+        Self {
+            knife_id: 0,
+            state: State::default(),
+            tracks: BTreeMap::new(),
+            points: BTreeMap::new(),
+            durations: BTreeMap::new(),
+            speeds: BTreeMap::new(),
+            fall_start: Vec3::ZERO,
+            cat_start: Vec3::ZERO,
+            gnome3_lines: [0.; 6],
+        }
+    }
     pub fn load(assets: &mut Assets, map: &Bsp) -> Result<Self> {
         let mut tracks = BTreeMap::new();
         for name in [

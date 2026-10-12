@@ -499,12 +499,21 @@ impl Village {
                     changed_solid +=
                         u64::from(o.solid && !(o.name == "openthis" && self.hatch_open));
                 }
+                let solid = o.solid && !(o.name == "openthis" && self.hatch_open);
+                if !solid {
+                    // Rendering and attachments consume pose, not collider. These
+                    // objects are excluded from every collision/transport decision
+                    // and publication. Restore rebuilds before a hatch can be solid.
+                    let o = &mut self.objects[i];
+                    o.pose = next;
+                    o.time += step;
+                    continue;
+                }
                 let collider = {
                     #[cfg(target_os = "vita")]
                     let _hotspot = crate::frame_profile::span("village_collider_build");
                     o.shape.at_eager(next.origin, next.rotation())
                 };
-                let solid = o.solid && !(o.name == "openthis" && self.hatch_open);
                 #[cfg(target_os = "vita")]
                 let _ground_profile = crate::frame_profile::span("village_ground_probe");
                 #[cfg(target_os = "vita")]
@@ -640,3 +649,8 @@ pub struct Snapshot {
     hatch_open: bool,
     hatch_time: f32,
 }
+
+#[cfg(test)]
+mod legacy_test;
+#[cfg(test)]
+mod tests;

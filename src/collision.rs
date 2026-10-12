@@ -237,6 +237,26 @@ pub struct Liquid {
     pub volume: Collider,
 }
 impl Collider {
+    #[cfg(test)]
+    pub(crate) fn geometry_bits(&self) -> Vec<u32> {
+        let mut bits = Vec::new();
+        bits.push(u32::from(self.bounds.is_some()));
+        if let Some(b) = self.bounds {
+            bits.extend(b.min.to_array().map(f32::to_bits));
+            bits.extend(b.max.to_array().map(f32::to_bits));
+        }
+        bits.push(self.hulls().len() as u32);
+        for h in self.hulls() {
+            bits.extend(h.bounds.min.to_array().map(f32::to_bits));
+            bits.extend(h.bounds.max.to_array().map(f32::to_bits));
+            bits.push(h.planes.len() as u32);
+            for p in &h.planes {
+                bits.extend(p.normal.to_array().map(f32::to_bits));
+                bits.push(p.distance.to_bits());
+            }
+        }
+        bits
+    }
     fn hulls(&self) -> &[Hull] {
         self.lazy.as_ref().map_or(self.hulls.as_slice(), |p|p.hulls())
     }
@@ -515,6 +535,8 @@ impl Default for Trace {
 pub struct World {
     pub traversal: crate::traversal::Traversal,
     dynamic: Vec<Collider>,
+    #[cfg(test)]
+    pub(crate) dynamic_publications: Option<Vec<Vec<Collider>>>,
     settled_supports: Vec<Collider>,
     weapon_obstacles: Vec<(usize, Collider)>,
     camera_obstacles: Vec<Collider>,
@@ -612,6 +634,8 @@ impl World {
         Ok(Self {
             traversal: crate::traversal::Traversal::load(map)?,
             dynamic: Vec::new(),
+            #[cfg(test)]
+            dynamic_publications: None,
             settled_supports: Vec::new(),
             weapon_obstacles: Vec::new(),
             camera_obstacles: Vec::new(),
@@ -759,6 +783,10 @@ impl World {
         self.dynamic_liquids.clone_from(&other.dynamic_liquids);
     }
     pub fn set_dynamic(&mut self, colliders: Vec<Collider>) {
+        #[cfg(test)]
+        if let Some(publications) = &mut self.dynamic_publications {
+            publications.push(colliders.clone());
+        }
         self.dynamic = colliders;
     }
     /// Geometry a controller has permanently settled may support hanging and pull-ups.
@@ -901,6 +929,8 @@ impl World {
         };
         Self {
             dynamic: Vec::new(),
+            #[cfg(test)]
+            dynamic_publications: None,
             settled_supports: Vec::new(),
             weapon_obstacles: Vec::new(),
             camera_obstacles: Vec::new(),
