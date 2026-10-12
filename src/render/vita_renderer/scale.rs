@@ -4,7 +4,7 @@ use macroquad::camera::Camera;
 use std::cell::RefCell;
 struct Target {
     rt: RenderTarget,
-    depth: TextureId,
+    depth: Option<TextureId>,
     width: u32,
     height: u32,
     upscale: Material,
@@ -12,9 +12,11 @@ struct Target {
 thread_local! {static TARGET:RefCell<Option<Target>>=const{RefCell::new(None)};}
 impl Drop for Target {
     fn drop(&mut self) {
-        unsafe { get_internal_gl() }
-            .quad_context
-            .delete_texture(self.depth);
+        if let Some(depth) = self.depth {
+            unsafe { get_internal_gl() }
+                .quad_context
+                .delete_texture(depth);
+        }
     }
 }
 pub(super) fn pass() -> Option<macroquad::miniquad::RenderPass> {
@@ -27,6 +29,15 @@ pub(super) fn pass() -> Option<macroquad::miniquad::RenderPass> {
 pub(super) fn prepare(bg: Color) {
     log_framebuffer();
     if config().render_scale == 1. {
+        // miniquad clear obeys the previous HUD's depth write mask.
+        begin(PassAction::Clear {
+            color: None,
+            depth: Some(1.),
+            stencil: None,
+        });
+        unsafe {
+            get_internal_gl().quad_context.end_render_pass();
+        }
         return;
     }
     let w = (screen_width() * config().render_scale).round() as u32;
@@ -44,36 +55,44 @@ pub(super) fn prepare(bg: Color) {
             );
             rt.texture
                 .set_filter(macroquad::texture::FilterMode::Linear);
-            let ctx = unsafe { get_internal_gl() }.quad_context;
-            let depth = ctx.new_texture(
-                TextureAccess::RenderTarget,
-                TextureSource::Empty,
-                TextureParams {
-                    width: w,
-                    height: h,
-                    format: TextureFormat::Depth32,
-                    sample_count: 1,
-                    ..Default::default()
-                },
-            );
-            // Camera's public render-pass wrapper has no raw constructor. Attach the
-            // owned Depth32 image to its framebuffer, retaining normal wrapper ownership.
-            ctx.begin_pass(Some(rt.render_pass.raw_miniquad_id()), PassAction::Nothing);
-            let raw = unsafe { ctx.texture_raw_id(depth) };
-            if let RawId::OpenGl(id) = raw {
-                unsafe {
-                    macroquad::miniquad::gl::glFramebufferTexture2D(0x8D40, 0x8D00, 0x0DE1, id, 0);
-                    assert_eq!(
-                        macroquad::miniquad::gl::glCheckFramebufferStatus(0x8D40),
-                        0x8CD5,
-                        "incomplete scaled depth target"
-                    );
+            #[cfg(not(target_os = "vita"))]
+            let depth = {
+                let ctx = unsafe { get_internal_gl() }.quad_context;
+                let depth = ctx.new_texture(
+                    TextureAccess::RenderTarget,
+                    TextureSource::Empty,
+                    TextureParams {
+                        width: w,
+                        height: h,
+                        format: TextureFormat::Depth32,
+                        sample_count: 1,
+                        ..Default::default()
+                    },
+                );
+                // Camera's public render-pass wrapper has no raw constructor. Attach the
+                // owned Depth32 image to its framebuffer, retaining normal wrapper ownership.
+                ctx.begin_pass(Some(rt.render_pass.raw_miniquad_id()), PassAction::Nothing);
+                let raw = unsafe { ctx.texture_raw_id(depth) };
+                if let RawId::OpenGl(id) = raw {
+                    unsafe {
+                        macroquad::miniquad::gl::glFramebufferTexture2D(
+                            0x8D40, 0x8D00, 0x0DE1, id, 0,
+                        );
+                        assert_eq!(
+                            macroquad::miniquad::gl::glCheckFramebufferStatus(0x8D40),
+                            0x8CD5,
+                            "incomplete scaled depth target"
+                        );
+                    }
+                } else {
+                    panic!("scaled renderer requires OpenGL");
                 }
-            } else {
-                panic!("scaled renderer requires OpenGL");
-            }
-            ctx.end_render_pass();
-            rt.render_pass.depth_texture = Some(Texture2D::from_miniquad_texture(depth));
+                ctx.end_render_pass();
+                rt.render_pass.depth_texture = Some(Texture2D::from_miniquad_texture(depth));
+                Some(depth)
+            };
+            #[cfg(target_os = "vita")]
+            let depth: Option<TextureId> = None;
             let upscale = crate::frame_profile::load_material(
                 ShaderSource::Glsl {
                     vertex: UPSCALE_VERTEX,
@@ -97,7 +116,7 @@ pub(super) fn prepare(bg: Color) {
                 upscale,
             });
             println!(
-                "[lg/vita-renderer] 3d target {w}x{h} RGBA8/Depth32 samples=1 scale={}",
+                "[lg/vita-renderer] 3d target {w}x{h} RGBA8/depth32 samples=1 scale={}",
                 config().render_scale
             );
         }
@@ -113,6 +132,9 @@ pub(super) fn prepare(bg: Color) {
 }
 pub(super) fn begin(action: PassAction) {
     unsafe {
+        if matches!(action, PassAction::Clear { depth: Some(_), .. }) {
+            macroquad::miniquad::gl::glDepthMask(1);
+        }
         get_internal_gl().quad_context.begin_pass(pass(), action);
     }
 }

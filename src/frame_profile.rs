@@ -119,7 +119,7 @@ impl PreviewThrottle {
         self.frames_since_capture = (self.frames_since_capture + 1).min(120);
     }
     pub fn capture(&mut self, mode: Mode) -> bool {
-        if mode.is_bench() || (mode.throttle_preview() && self.frames_since_capture < 120) {
+        if mode.is_bench() || matches!(mode,Mode::Route|Mode::RouteContinue) || (mode.throttle_preview() && self.frames_since_capture < 120) {
             return false;
         }
         self.frames_since_capture = 0;

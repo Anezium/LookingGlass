@@ -425,10 +425,10 @@ pub async fn scale_check()->Result<()> {
         crate::frame_profile::begin_creation_frame();
         clear_background(BLACK);prepare_3d(BLACK);set_3d_camera(&camera);
         render_fx::retained::begin_view(&camera,0.,&Default::default(),true,true);
-        let mut actor=quad(1.,WHITE);
+        let mut actor=quad(if frame%2==0{1.}else{-1.},WHITE);
         actor.texture=Some(red.clone());
         render_fx::skin(&actor);
-        render_fx::effect(&quad(-1.,Color::new(0.,0.,1.,0.5)),Blend::Alpha);
+        render_fx::effect(&quad(-2.,Color::new(0.,0.,1.,0.5)),Blend::Alpha);
         render_fx::retained::finish(&mut gpu,&[],true,|_|unreachable!());
         present_3d();check_color(Vec3::X,"scaled opaque depth hides rear effect")?;
         set_default_camera();draw_rectangle(screen_width()/2.-4.,screen_height()/2.-4.,8.,8.,GREEN);

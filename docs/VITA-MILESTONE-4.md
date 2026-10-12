@@ -148,3 +148,18 @@ at first Blade use (not repeated compilation). Pipeline objects now prewarm all
 program, keeping creation at startup rather than at the first weapon draw.
 Scaled depth/alpha/native HUD checks passed over 120 frames at scale 0.5, with
 zero shader/pipeline creation after the first frame. Native validation is pending.
+
+Depth clears explicitly enable the depth write mask before clearing: the pinned
+miniquad backend otherwise inherits the previous HUD's disabled write mask.
+The scaled fixture alternates the opaque depth each frame to detect stale depth,
+not merely repeat a frozen pose. Route diagnostics suppress periodic preview
+readbacks as well as cumulative profiler exports; final LG save format is unchanged.
+
+Vita framebuffer inspection: vglInitExtended receives sample_count=1 -> GXM NONE
+(miniquad native/vita/mod.rs:121,210). Local vitaGL initializes native color as
+A8B8G8R8 and depth as DF32M/S8 (gxm.c:464,506). Its texture attachment helper accepts
+only color attachments (shared.h:1326), and gxm.c:631 creates/reuses a hidden DF32M
+depth surface for an FBO. The Vita scaled path uses that owned hidden depth;
+desktop GL attaches an explicit Depth32 image. It does not issue unsupported
+native depth-texture attachment calls. Effective depth enable/write/function and
+component queries are logged; hardware early-Z efficiency still needs measurement.
