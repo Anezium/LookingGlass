@@ -1521,6 +1521,10 @@ impl Scene {
         let retained_world = name == "gvillage" && vita_renderer::config().renderer == "vita";
         #[cfg(not(feature = "vita_renderer"))]
         let retained_world = false;
+        #[cfg(feature = "vita_renderer")]
+        println!("[lg/vita-renderer] selected map={name} renderer={} reason={}",
+            if retained_world { "vita" } else { "legacy" },
+            if name != "gvillage" { "unsupported-map" } else { "configuration" });
         let camera_portals = if retained_world { Vec::new() } else { camera_portal::load(assets, name, &map, &world, &specs)? };
         let mut groups = BTreeMap::<(usize, usize), usize>::new();
         let sky_origin = crate::sky::origin(assets, name, &map)?;
