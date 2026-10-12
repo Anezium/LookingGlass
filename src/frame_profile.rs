@@ -886,6 +886,7 @@ mod vita {
             let storage_bytes: usize = s.labels.values().map(|v| 8 * (v.frames.capacity() + v.exclusive.capacity() + v.frame_calls.capacity() + v.invocations.capacity())).sum::<usize>() + s.counters.values().map(|v| 8*v.frames.capacity()).sum::<usize>() + s.models.values().map(|v|8*v.frames.capacity()).sum::<usize>() + s.pending.capacity()*std::mem::size_of::<(&str,f64,f64)>() + 8*s.frame_wall_ms.capacity();
             (format!("{map}-{}-{}.json",s.mode.name(),s.frames), serde_json::json!({
                 "map":map,"mode":s.mode.name(),"gameplay_frames":s.frames,"clocks_raised":s.clocks_raised,
+                "vita_sim":crate::vita_sim::effective(),
                 "warmup_frames":s.mode.warmup_frames(),
                 "frame_wall_ms":{"frame_values_ms":s.frame_wall_ms,"per_frame":stats(&s.frame_wall_ms)},
                 "quantiles":"sorted[n/2] and sorted[floor(n*0.95)] (zero-based)",

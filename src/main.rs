@@ -109,6 +109,7 @@ mod traversal;
 mod ui;
 mod viewer;
 mod frame_profile;
+mod vita_sim;
 mod viewmodel;
 mod village;
 mod village_route;
@@ -567,6 +568,7 @@ fn run() -> Result<()> {
     if o.capture.is_some() && o.frames.is_none() {
         bail!("--capture requires --frames");
     }
+    vita_sim::initialize(&o.save_dir);
     let mut assets = Assets::open(&o.data)?;
     if mode == "campaign-playtest" {
         macroquad::Window::from_config(viewer::config(), async move {
