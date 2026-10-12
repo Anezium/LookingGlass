@@ -308,14 +308,15 @@ impl Pvs {
         println!("[lg/vita-renderer] PVS sources groups={} source_cluster_ids={} leaf_bounds_queries={}",groups.len(),sources.iter().filter_map(|s|s.as_ref()).map(Vec::len).sum::<usize>(),groups.iter().filter(|g|g.recipe.model.is_none() && g.recipe.motion.is_none() && (g.faces.is_empty() || g.recipe.deform.is_some())).count());
         let sources_ms=source_start.elapsed().as_secs_f64()*1000.;
         let lists_start=std::time::Instant::now();
+        // Sort the immutable material order once rather than once per cluster.
+        let mut opaque_order=(0..groups.len()).filter(|&id|groups[id].recipe.opaque).collect::<Vec<_>>();
+        opaque_order.sort_by_key(|&id|(groups[id].recipe.rank,groups[id].recipe.blend,groups[id].recipe.cull,id));
+        let alpha_order=(0..groups.len()).filter(|&id|!groups[id].recipe.opaque).collect::<Vec<_>>();
         let result=Self::compile(visibility.cluster_count(),|cluster| {
             let mut out=Lists::default();
-            for (id,source) in sources.iter().enumerate() {
-                if cluster.is_none() || source.as_ref().is_none_or(|s|visibility.sees_clusters(cluster.unwrap(),s)) {
-                    if groups[id].recipe.opaque {out.opaque.push(id);} else {out.alpha.push(id);}
-                }
-            }
-            out.opaque.sort_by_key(|&id|(groups[id].recipe.rank,groups[id].recipe.blend,groups[id].recipe.cull,id));
+            let visible=|id:usize| cluster.is_none() || sources[id].as_ref().is_none_or(|s|visibility.sees_clusters(cluster.unwrap(),s));
+            out.opaque.extend(opaque_order.iter().copied().filter(|&id|visible(id)));
+            out.alpha.extend(alpha_order.iter().copied().filter(|&id|visible(id)));
             out
         });
         println!("[lg/vita-renderer] PVS phases face_sources={faces_ms:.3} ms sources_total={sources_ms:.3} ms lists={:.3} ms",lists_start.elapsed().as_secs_f64()*1000.);
@@ -421,7 +422,7 @@ fn deform_extent(deform: &Option<Deform>) -> Vec3 {
     }
 }
 impl Renderer {
-    pub(super) fn new(scene: &Scene) -> Result<Self> {
+    pub(super) fn new(scene: &Scene, corpus: &str) -> Result<Self> {
         let started=std::time::Instant::now();
         let c = config();
         let mut pending: Vec<Pending> = Vec::new();
@@ -677,7 +678,7 @@ impl Renderer {
         let upload_ms=upload_start.elapsed().as_secs_f64()*1000.;
         println!("[lg/vita-renderer] load pipelines/uploads {:.3} ms payload_bytes={bytes}",upload_ms);
         let pvs_start=std::time::Instant::now();
-        let (pvs,cache_status)=pvs_cache::load_or_build(&groups,&scene.map.visibility);
+        let (pvs,cache_status)=pvs_cache::load_or_build(&groups,&scene.map.visibility,corpus);
         if c.pvs_verify {
             let original=Pvs::legacy(&groups,&scene.map.visibility);
             ensure!(original.unknown.as_ref()==pvs.unknown.as_ref() && original.clusters.iter().zip(&pvs.clusters).all(|(a,b)|a.as_ref()==b.as_ref()),"retained PVS differs from legacy compilation");

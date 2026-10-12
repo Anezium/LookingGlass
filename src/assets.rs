@@ -14,12 +14,14 @@ pub struct Assets {
     packs: Vec<ZipArchive<File>>,
     entries: BTreeMap<String, (usize, usize)>,
     pub base: PathBuf,
+    content_fingerprint: Option<String>,
 }
 
 impl Assets {
     /// Stable identity of the mounted, override-resolved corpus, independent of its folder.
     /// Central-directory CRC/size metadata avoids decoding every asset at startup.
     pub fn fingerprint(&mut self) -> Result<String> {
+        if let Some(value)=&self.content_fingerprint { return Ok(value.clone()); }
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
         for (name, &(pack, index)) in &self.entries {
@@ -29,7 +31,9 @@ impl Assets {
             hash.update(entry.size().to_le_bytes());
             hash.update(entry.crc32().to_le_bytes());
         }
-        Ok(format!("{:x}", hash.finalize()))
+        let value=format!("{:x}", hash.finalize());
+        self.content_fingerprint=Some(value.clone());
+        Ok(value)
     }
     pub fn open(base: &Path) -> Result<Self> {
         let mut paths = fs::read_dir(base)
@@ -64,6 +68,7 @@ impl Assets {
             packs,
             entries,
             base: base.to_path_buf(),
+            content_fingerprint: None,
         })
     }
 
@@ -127,7 +132,15 @@ mod tests {
         let mut a = Assets::open(&dir)?;
         assert_eq!(a.read("TEXTURES\\test.ftx")?, b"new");
         assert!(a.read("missing").is_err());
+        let identity=a.fingerprint()?;
+        assert_eq!(identity,a.fingerprint()?);
         drop(a);
+        let mut z=zip::ZipWriter::new(File::create(dir.join("pak5.pk3"))?);
+        z.start_file("Textures/Test.ftx",zip::write::FileOptions::default())?;
+        z.write_all(b"changed")?;z.finish()?;
+        let mut updated=Assets::open(&dir)?;
+        assert_ne!(identity,updated.fingerprint()?);
+        drop(updated);
         for name in ["pak0.pk3", "pak5.pk3"] {
             fs::remove_file(dir.join(name))?;
         }

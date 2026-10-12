@@ -4,15 +4,16 @@ use super::{config, Group, Lists, Pvs};
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
-const MAGIC: &[u8; 8] = b"LGPVS003";
+const MAGIC: &[u8; 8] = b"LGPVS004";
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(target_os = "vita")]
 const ROOT: &str = "ux0:data/alice/private/renderer-cache";
 #[cfg(not(target_os = "vita"))]
 const ROOT: &str = "private/renderer-cache";
-fn key(groups: &[Group], visibility: &crate::visibility::Visibility) -> String {
+fn key(groups: &[Group], visibility: &crate::visibility::Visibility, corpus: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(MAGIC);
+    hash.update((corpus.len() as u64).to_le_bytes()); hash.update(corpus.as_bytes());
     visibility.retained_cache_key(&mut hash);
     hash.update((groups.len() as u64).to_le_bytes());
     for g in groups {
@@ -137,11 +138,12 @@ fn decode(bytes: &[u8], groups: usize, clusters: usize) -> Result<Pvs> {
 pub(super) fn load_or_build(
     groups: &[Group],
     visibility: &crate::visibility::Visibility,
+    corpus: &str,
 ) -> (Pvs, &'static str) {
     if !config().pvs_cache {
         return (Pvs::new(groups, visibility), "disabled");
     }
-    let path = PathBuf::from(ROOT).join(format!("pvs-{}.bin", key(groups, visibility)));
+    let path = PathBuf::from(ROOT).join(format!("pvs-{}.bin", key(groups, visibility, corpus)));
     let mut invalid = false;
     let read = (|| -> Result<Option<Pvs>> {
         let metadata = match std::fs::metadata(&path) {
@@ -153,7 +155,10 @@ pub(super) fn load_or_build(
             metadata.len() <= MAX_BYTES as u64,
             "PVS cache file exceeds bound"
         );
-        let bytes = std::fs::read(&path)?;
+        use std::io::Read;
+        let mut bytes=Vec::with_capacity(metadata.len() as usize);
+        std::fs::File::open(&path)?.take(MAX_BYTES as u64+1).read_to_end(&mut bytes)?;
+        ensure!(bytes.len()<=MAX_BYTES,"PVS cache grew beyond bound");
         Ok(Some(decode(
             &bytes,
             groups.len(),
@@ -179,7 +184,11 @@ pub(super) fn load_or_build(
         let data = encode(&pvs, groups.len())?;
         std::fs::create_dir_all(ROOT)?;
         let tmp = path.with_extension("bin.tmp");
-        std::fs::write(&tmp, data)?;
+        use std::io::Write;
+        let mut file=std::fs::File::create(&tmp)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(tmp, &path)?;
         Ok(())
     })();
@@ -204,6 +213,11 @@ pub(super) fn load_or_build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mounted_data_change_invalidates_pvs_cache() {
+        let visibility=crate::visibility::Visibility::default();
+        assert_ne!(key(&[],&visibility,"old-corpus"),key(&[],&visibility,"new-corpus"));
+    }
     #[test]
     fn portable_lists_preserve_unknown_shared_clusters_and_order() {
         let pvs = Pvs::compile(3, |c| Lists {

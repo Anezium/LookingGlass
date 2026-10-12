@@ -1919,7 +1919,8 @@ impl Scene {
         };
         #[cfg(feature = "vita_renderer")]
         if retained_world {
-            scene.retained = Some(vita_renderer::Renderer::new(&scene)?);
+            let corpus=assets.fingerprint()?;
+            scene.retained = Some(vita_renderer::Renderer::new(&scene, &corpus)?);
             // The retained path owns its immutable buffers and material recipes.
             // Release the old CPU geometry and unused Macroquad world materials.
             scene.batches.clear();
