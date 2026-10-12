@@ -33,6 +33,7 @@ fn fixture() -> (Bsp, Village) {
     })
     .collect();
     let village = Village {
+        placement_tick: 0,
         cinema: cinema::Cinema::fixture(),
         objects,
         emitters: Vec::new(),
@@ -183,11 +184,11 @@ pub(crate) fn assert_config_contacts_and_save(config: crate::vita_sim::Config) {
             let dt = [1. / 120., 0.05, 0.002, 0.][tick % 4];
             let before = a.feet;
             old.advance_legacy(dt, &map, &mut wa, &mut a, &fixed).unwrap();
-            new.advance(dt, &map, &mut wb, &mut b, &fixed).unwrap();
+            new.advance_config(dt, &map, &mut wb, &mut b, &fixed, &config).unwrap();
             steam.update_clocks_config(0.05, dt, b.feet, &wb, &config);
             transported += usize::from(before != a.feet);
-            assert_eq!(serde_json::to_vec(&(&a,old.snapshot())).unwrap(),
-                serde_json::to_vec(&(&b,new.snapshot())).unwrap(), "scenario {scenario}, tick {tick}");
+            assert_eq!(crate::save::simulation_save_bytes(&a,old.snapshot()),
+                crate::save::simulation_save_bytes(&b,new.snapshot()), "scenario {scenario}, tick {tick}");
             for center in [a.feet + PLAYER_CENTER,vec3(0.,300.,100.),vec3(1000.,0.,100.)] {
                 for half in [Vec3::ZERO,PLAYER_HALF] {
                     for delta in [Vec3::ZERO,Vec3::Z * 150.,Vec3::X * 150.] {
@@ -213,4 +214,48 @@ fn puff_collision_modes_preserve_player_contacts_transport_and_save_bytes() {
 #[test]
 fn puff_cadence_preserves_player_contacts_transport_and_save_bytes() {
     assert_config_contacts_and_save(crate::vita_sim::Config { puff_sweep_every: 4, ..Default::default() });
+}
+
+#[test]
+fn mover_cadences_preserve_player_contacts_transport_and_save_bytes() {
+    for every in [2,4,16,120] {
+        assert_config_contacts_and_save(crate::vita_sim::Config { mover_far_every: every, ..Default::default() });
+    }
+}
+#[test]
+fn deferred_colliders_keep_current_pose_and_resume_exactly_on_range_entry() {
+    let (map,mut old) = fixture();
+    let (_,mut new) = fixture();
+    let mut a = Player::new(Vec3::splat(5000.));
+    let mut b = a.clone();
+    let mut wa = World::fixture(&[]);
+    let mut wb = World::fixture(&[]);
+    let config = crate::vita_sim::Config { mover_far_every: 120,..Default::default() };
+    old.advance_legacy(1./120.,&map,&mut wa,&mut a,&[]).unwrap();
+    new.advance_config(1./120.,&map,&mut wb,&mut b,&[],&config).unwrap();
+    assert!(new.objects[0].collider.placement_pending());
+    assert_eq!(serde_json::to_vec(&old.snapshot()).unwrap(),serde_json::to_vec(&new.snapshot()).unwrap());
+    // A projectile/body query at the far object's CURRENT position builds the
+    // exact hull on demand. No earlier pose or delayed movement is published.
+    for (left,right) in old.colliders().zip(new.colliders()) {
+        for x in [-100.,0.,100.,1000.] {
+            assert_eq!(trace_bits(left.trace(vec3(x,0.,200.),vec3(x,0.,0.),PLAYER_HALF)),
+                trace_bits(right.trace(vec3(x,0.,200.),vec3(x,0.,0.),PLAYER_HALF)));
+        }
+    }
+    assert!(!new.objects[0].collider.placement_pending());
+    a = Player::new(vec3(0.,0.,80.03125)); b = a.clone();
+    for _ in 0..120 {
+        old.advance_legacy(1./120.,&map,&mut wa,&mut a,&[]).unwrap();
+        new.advance_config(1./120.,&map,&mut wb,&mut b,&[],&config).unwrap();
+        assert!(!new.objects[0].collider.placement_pending());
+        assert_eq!(serde_json::to_vec(&(&a,old.snapshot())).unwrap(),serde_json::to_vec(&(&b,new.snapshot())).unwrap());
+    }
+}
+#[test]
+fn all_compromises_preserve_player_contacts_transport_and_save_bytes() {
+    assert_config_contacts_and_save(crate::vita_sim::Config {
+        puff_cap:128,puff_collide:crate::vita_sim::PuffCollide::None,puff_sweep_every:4,
+        anim_cull:true,anim_far_distance:Some(800.),anim_far_every:4,mover_far_every:4,
+    });
 }

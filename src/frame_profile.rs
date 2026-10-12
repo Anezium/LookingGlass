@@ -216,6 +216,7 @@ mod vita {
         DynamicCollidersRejected,
         PuffsSkippedSweeps,
         PuffsDropped,
+        LazyHullBuilds,
     }
     const COUNTER_NAMES: &[&str] = &[
         "sweep_calls",
@@ -243,6 +244,7 @@ mod vita {
         "dynamic_colliders_rejected",
         "puffs_skipped_sweeps",
         "puffs_dropped",
+        "lazy_hull_builds",
     ];
     #[derive(Clone, Copy)]
     #[repr(u8)]
@@ -356,6 +358,7 @@ mod vita {
         "village_cinema",
         "village_sample",
         "village_collider_build",
+        "collider_lazy_build",
         "village_ground_probe",
         "village_dynamic_publish",
         "village_rider_contact",

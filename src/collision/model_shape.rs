@@ -186,9 +186,17 @@ pub(super) struct Placed {
     hulls: std::sync::OnceLock<Vec<Hull>>,
 }
 impl Placed {
+    #[cfg(test)]
+    pub(super) fn pending(&self) -> bool { self.hulls.get().is_none() }
     pub(super) fn hulls(&self) -> &[Hull] {
         self.hulls
-            .get_or_init(|| self.geometry.at(self.origin, self.rotation))
+            .get_or_init(|| {
+                #[cfg(target_os = "vita")]
+                let _profile = crate::frame_profile::span("collider_lazy_build");
+                #[cfg(target_os = "vita")]
+                add_counter(Counter::LazyHullBuilds, 1);
+                self.geometry.at(self.origin, self.rotation)
+            })
     }
 }
 impl Geometry {

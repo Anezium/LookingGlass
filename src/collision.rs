@@ -237,6 +237,20 @@ pub struct Liquid {
     pub volume: Collider,
 }
 impl Collider {
+    /// Distance between a collider AABB and Alice's upright body AABB. Missing
+    /// bounds or non-finite inputs cannot certify a safe deferred placement.
+    pub(crate) fn far_from_player(&self, feet: Vec3, margin: f32) -> bool {
+        self.bounds.is_some_and(|b| {
+            let center = feet + PLAYER_CENTER;
+            let half = PLAYER_HALF + Vec3::splat(SKIN);
+            let gap = (b.min - (center + half)).max((center - half) - b.max).max(Vec3::ZERO);
+            gap.is_finite() && gap.length_squared() > margin * margin
+        })
+    }
+    #[cfg(test)]
+    pub(crate) fn placement_pending(&self) -> bool {
+        self.lazy.as_ref().is_some_and(|p| p.pending())
+    }
     #[cfg(test)]
     pub(crate) fn geometry_bits(&self) -> Vec<u32> {
         let mut bits = Vec::new();

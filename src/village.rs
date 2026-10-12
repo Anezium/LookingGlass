@@ -56,6 +56,7 @@ struct Object {
     collider: Collider,
 }
 pub struct Village {
+    placement_tick: u32,
     pub cinema: cinema::Cinema,
     objects: Vec<Object>,
     emitters: Vec<machinery::Attachment>,
@@ -336,6 +337,7 @@ impl Village {
             o.time = *time;
             o.collider = o.shape.at_eager(pose.origin, pose.rotation());
         }
+        self.placement_tick = 0;
         self.cinema.restore(s.cinema.as_ref())?;
         self.hatch_open = s.hatch_open;
         self.hatch_time = s.hatch_time;
@@ -380,6 +382,7 @@ impl Village {
             );
         }
         Ok(Self {
+            placement_tick: 0,
             cinema: cinema::Cinema::load(assets, map)?,
             objects,
             emitters: machinery::attachments(map)?,
@@ -434,6 +437,12 @@ impl Village {
         player: &mut Player,
         fixed: &[Collider],
     ) -> Result<()> {
+        self.advance_config(dt, _map, world, player, fixed, crate::vita_sim::effective())
+    }
+    pub(crate) fn advance_config(
+        &mut self, dt: f32, _map: &Bsp, world: &mut World, player: &mut Player,
+        fixed: &[Collider], config: &crate::vita_sim::Config,
+    ) -> Result<()> {
         if dt <= 0. {
             return Ok(());
         }
@@ -460,12 +469,15 @@ impl Village {
             mut riders,
             mut rejected,
         ) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+        #[cfg(target_os = "vita")]
+        let (mut deferred, mut eager, mut in_range) = (0u64,0u64,0u64);
         let mut remaining = dt.min(0.1);
         while remaining > 0.000001 {
             #[cfg(target_os = "vita")]
             {
                 substeps += 1;
             }
+            self.placement_tick = self.placement_tick.wrapping_add(1);
             let step = remaining.min(1. / 120.);
             remaining -= step;
             if self.hatch_open {
@@ -509,6 +521,33 @@ impl Village {
                     o.time += step;
                     continue;
                 }
+                if config.mover_far_every > 1 {
+                    // Keep the candidate pose exact even on deferred ticks. A
+                    // cold lazy collider owns this pose and builds its exact hull
+                    // on ANY later query (particles, projectiles, other riders).
+                    let candidate = o.shape.at(next.origin, next.rotation());
+                    let far = o.collider.far_from_player(player.feet, 256.)
+                        && candidate.far_from_player(player.feet, 256.);
+                    #[cfg(target_os = "vita")]
+                    { in_range += u64::from(!far); }
+                    if far && self.placement_tick.wrapping_add(i as u32) % config.mover_far_every != 0 {
+                        // The old 3-unit ground probe and next body contact cannot
+                        // reach either AABB across this margin, so no rider or
+                        // rejected move is possible. Brush objects cannot be held
+                        // by Alice. Other movers republish all current colliders
+                        // before their own transport query; final publication is
+                        // unchanged. No temporary world query is omitted here.
+                        let o = &mut self.objects[i];
+                        o.pose = next;
+                        o.collider = candidate;
+                        o.time += step;
+                        #[cfg(target_os = "vita")]
+                        { deferred += 1; }
+                        continue;
+                    }
+                }
+                #[cfg(target_os = "vita")]
+                { eager += 1; }
                 let collider = {
                     #[cfg(target_os = "vita")]
                     let _hotspot = crate::frame_profile::span("village_collider_build");
@@ -621,6 +660,9 @@ impl Village {
         }
         #[cfg(target_os = "vita")]
         crate::frame_profile::counts(&[
+            ("village_deferred_placements", deferred),
+            ("village_eager_placements", eager),
+            ("village_in_range_fallbacks", in_range),
             ("village_substeps", substeps),
             ("village_object_visits", visited),
             ("village_poses_unchanged", unchanged),

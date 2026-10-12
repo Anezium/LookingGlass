@@ -912,3 +912,26 @@ mod tests {
         assert_ne!(visit_key("skool1", None), visit_key("skool2", None));
     }
 }
+
+/// Serialize the real format-12 save types/checksum with a fixed test timestamp.
+/// This keeps simulation equivalence tests independent of wall or frame time.
+#[cfg(test)]
+pub(crate) fn simulation_save_bytes(player: &Player, village: crate::village::Snapshot) -> Vec<u8> {
+    let mut level = format12::level("gvillage", None, serde_json::Value::Null);
+    let mut interactions = serde_json::to_value(&level.interactions).unwrap();
+    interactions["village"] = serde_json::to_value(village).unwrap();
+    level.interactions = serde_json::from_value(interactions).unwrap();
+    let mut game = format12::game(vec![level]);
+    game.player = player.clone();
+    game.view.position = player.eye();
+    game.validate().unwrap();
+    let payload = serde_json::to_value(&game).unwrap();
+    validate_json(&payload).unwrap();
+    require_format_for_levels(VERSION, &payload).unwrap();
+    let checksum = format!("{:x}", Sha256::digest(serde_json::to_vec(&payload).unwrap()));
+    serde_json::to_vec(&Envelope {
+        format: "looking-glass-save".into(), version: VERSION,
+        game_data: "synthetic-game-data".into(), saved_at: 0,
+        checksum, payload, preview: serde_json::Value::Null,
+    }).unwrap()
+}
