@@ -116,6 +116,21 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
+    fn packaged_presets_pass_the_same_strict_parser() {
+        for bytes in [
+            include_bytes!("../configs/vita-sim/vita-sim-defaults.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-puff-cap.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-puff-collide.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-puff-collide-none.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-puff-sweep-every.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-anim-cull.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-anim-far-distance.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-anim-far-every.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-mover-far-every.json").as_slice(),
+            include_bytes!("../configs/vita-sim/vita-sim-all.json").as_slice(),
+        ] { Config::parse(bytes).unwrap(); }
+    }
+    #[test]
     fn host_config_is_next_to_save_folder() {
         assert_eq!(path(Path::new("private/saves")), PathBuf::from("private/vita_sim.json"));
         assert_eq!(path(Path::new("/tmp/game/private/saves")), PathBuf::from("/tmp/game/private/vita_sim.json"));
