@@ -689,7 +689,13 @@ pub(crate) fn skin_effect(mesh: &Mesh, age: f32, alpha: f32) {
 }
 
 fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
+    #[cfg(target_os = "vita")]
+    let layers_profile = crate::frame_profile::characters_span("characters_layers");
     if !active() {
+        #[cfg(target_os = "vita")]
+        drop(layers_profile);
+        #[cfg(target_os = "vita")]
+        let _submit_profile = crate::frame_profile::characters_span("characters_submit");
         #[cfg(target_os = "vita")]
         crate::frame_profile::record_lg_submission();
         draw_mesh(mesh);
@@ -729,6 +735,10 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
             true,
             appearance,
         ) {
+            #[cfg(target_os = "vita")]
+            drop(layers_profile);
+            #[cfg(target_os = "vita")]
+            let _submit_profile = crate::frame_profile::characters_span("characters_submit");
             submit(vec![p], alpha < 1.);
         }
         return;
@@ -774,6 +784,10 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
             passes.push(p);
         }
     }
+    #[cfg(target_os = "vita")]
+    drop(layers_profile);
+    #[cfg(target_os = "vita")]
+    let _submit_profile = crate::frame_profile::characters_span("characters_submit");
     submit(
         passes,
         surface.transparent || (clock.is_none() && alpha < 1.),

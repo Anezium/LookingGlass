@@ -174,7 +174,8 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 
 #[cfg(target_os = "vita")]
 pub use vita::{
-    add_counter, begin_frame, bench_accepted_frames, bench_frames, simulation_frozen, counter_owner, counts, end_frame, flush_boundary, mode,
+    add_counter, begin_frame, bench_accepted_frames, bench_frames, characters_span, counter_owner,
+    counts, end_frame, flush_boundary, mode, simulation_frozen,
     record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_model,
     record_world_submission, report, set_owner, startup_bench, world_span, Counter, Owner,
 };
@@ -253,6 +254,7 @@ mod vita {
         Alice,
         InteractionSearch,
         Hud,
+        Characters,
     }
     const OWNER_NAMES: &[&str] = &[
         "",
@@ -266,6 +268,7 @@ mod vita {
         "frame_alice",
         "frame_interaction_search",
         "frame_hud",
+        "frame_characters",
     ];
     // The viewer thread owns profiling, including begin/end_frame and owners.
     // Relaxed loads/stores avoid newlib TLS calls and atomic RMW loops; these
@@ -276,6 +279,11 @@ mod vita {
         [const { [const { AtomicU32::new(0) }; COUNTER_NAMES.len() + 1] }; OWNER_NAMES.len()];
     pub fn set_owner(owner: Owner) {
         OWNER.store(owner as u8, Relaxed);
+    }
+    // Shared skin helpers also draw effects/first-person meshes. These series
+    // measure only work nested in frame_characters, so its decomposition closes.
+    pub fn characters_span(label: &'static str) -> Option<Span> {
+        (OWNER.load(Relaxed) == Owner::Characters as u8).then(|| span(label))
     }
     pub struct CounterOwner(u8);
     pub fn counter_owner(owner: Owner) -> CounterOwner {
@@ -382,6 +390,15 @@ mod vita {
         "frame_scene",
         "frame_world",
         "frame_characters",
+        "characters_setup",
+        "characters_alice",
+        "characters_npcs",
+        "characters_level_art",
+        "characters_skinning_positions",
+        "characters_skinning_normals",
+        "characters_skinning_shading",
+        "characters_layers",
+        "characters_submit",
         "frame_objects",
         "frame_world_particles",
         "frame_effects",
