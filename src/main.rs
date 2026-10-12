@@ -180,7 +180,12 @@ fn main() {
     app_main();
 }
 
+#[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+mod vita3k_diagnostic;
+
 fn app_main() {
+    #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+    vita3k_diagnostic::initialize();
     #[cfg(target_os = "vita")]
     {
         use macroquad::miniquad::native::vita::{set_config, InputConfig, LeftStickMode, VitaConfig};

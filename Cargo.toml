@@ -9,6 +9,8 @@ description = "Local Rust compatibility research for user-supplied Alice game da
 [features]
 default = []
 vita_renderer = []
+# Explicit diagnostic builds for off-console failure isolation.
+vita3k_diagnostics = []
 
 [dependencies]
 anyhow = "1.0"

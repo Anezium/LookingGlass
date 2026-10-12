@@ -488,6 +488,8 @@ pub(crate) fn world_material(index: usize) -> Result<Rc<Material>> {
             if let Some(owner)=&owner { owner.borrow_mut().insert(index,material.clone()); }
             return Ok(material);
         }
+        #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+        crate::vita3k_diagnostic::material_enter("world_material", index);
         let fragment = crate::lighting::fragment(&crate::environment::fragment(FRAGMENT));
         let mut uniforms = vec![
             UniformDesc::new("AtlasGrid", UniformType::Float2),
@@ -526,6 +528,8 @@ pub(crate) fn world_material(index: usize) -> Result<Rc<Material>> {
             )
             .map_err(|e| anyhow::anyhow!("World shader: {e:?}"))?,
         );
+        #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+        crate::vita3k_diagnostic::material_exit("world_material", index);
         cache.borrow_mut().insert(index, Rc::downgrade(&material));
         if let Some(owner)=&owner { owner.borrow_mut().insert(index,material.clone()); }
         Ok(material)
@@ -1367,7 +1371,10 @@ impl Scene {
         {
             if self.retained.is_some() {
                 self.draw(camera, time, fullbright, true, transforms);
-                if !vita_renderer::world_only() { particles.prepare_draw(camera, &self.atmosphere);
+                let draw_particles = !vita_renderer::world_only();
+                #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+                let draw_particles = crate::vita3k_diagnostic::config().effects.unwrap_or(draw_particles);
+                if draw_particles { particles.prepare_draw(camera, &self.atmosphere);
                     for (i, _) in particles.depths(camera, direction) { particles.draw_one(i, camera, direction); }
                 }
                 return;
@@ -2194,6 +2201,11 @@ impl Scene {
 /// This is specific to our OpenGL renderer; do not replace with a Metal backend
 /// without supplying an equivalent read-only depth attachment.
 pub fn depth_read_only(draw: impl FnOnce()) {
+    #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+    if crate::vita3k_diagnostic::config().depth_flush == Some(false) {
+        draw();
+        return;
+    }
     #[cfg(feature = "vita_renderer")]
     if crate::render_fx::retained_active() {
         crate::render_fx::retained_depth_scope(draw);
@@ -2207,6 +2219,8 @@ pub fn depth_read_only(draw: impl FnOnce()) {
             let _flush_profile = crate::frame_profile::span("gl_flush");
             #[cfg(target_os = "vita")]
             let _flush_site_profile = crate::frame_profile::span("flush_depth_begin");
+            #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+            let _diagnostic = crate::vita3k_diagnostic::trace("flush_depth_begin");
 
             get_internal_gl().flush();
         }
@@ -2230,6 +2244,8 @@ pub fn depth_read_only(draw: impl FnOnce()) {
             let _flush_profile = crate::frame_profile::span("gl_flush");
             #[cfg(target_os = "vita")]
             let _flush_site_profile = crate::frame_profile::span("flush_depth_end");
+            #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+            let _diagnostic = crate::vita3k_diagnostic::trace("flush_depth_end");
 
             get_internal_gl().flush();
         }

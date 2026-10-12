@@ -158,6 +158,8 @@ pub fn appearance(a: Appearance) {
     FRAME.with(|f| f.borrow_mut().appearance = a);
 }
 pub fn begin(camera: Vec3, direction: Vec3, time: f32, atmosphere: &Atmosphere, fullbright: bool) {
+    #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+    let _diagnostic = crate::vita3k_diagnostic::trace("fx_begin");
     unsafe {
         {
             #[cfg(target_os = "vita")]
@@ -211,6 +213,8 @@ fn outside(points: [Vec4; 3]) -> bool {
     (0..3).any(|axis| points.iter().all(|p| p[axis] < -p.w) || points.iter().all(|p| p[axis] > p.w))
 }
 fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
+    #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+    let _diagnostic = crate::vita3k_diagnostic::trace("fx_draw_pass");
     #[cfg(target_os = "vita")]
     let _world_submit = p.world_static.map(|static_batch| crate::frame_profile::world_span("world_submit", static_batch));
     FRAME.with(|f| {
@@ -342,6 +346,8 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
     });
 }
 pub fn finish() -> (usize, usize) {
+    #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+    let _diagnostic = crate::vita3k_diagnostic::trace("fx_finish");
     let (groups, camera, direction, dropped, projection) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -541,6 +547,8 @@ pub fn pass(
     lit: bool,
     appearance: Appearance,
 ) -> Result<Pass> {
+    #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+    let _diagnostic = crate::vita3k_diagnostic::trace("render_fx::pass");
     pass_at(mesh, stage, model, lit, appearance, time())
 }
 fn pass_at(
