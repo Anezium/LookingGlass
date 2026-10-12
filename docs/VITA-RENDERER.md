@@ -76,7 +76,8 @@ Le pilote change le fichier, ferme puis relance l'application ; pas de recompila
   "merge_fx": true,
   "pvs_cache": false,
   "pvs_method": "sources",
-  "pvs_verify": false
+  "pvs_verify": false,
+  "gpu_experiment": "unchanged"
 }
 ```
 
@@ -100,6 +101,12 @@ Le pilote change le fichier, ferme puis relance l'application ; pas de recompila
 - `pvs_cache` : cache privé PVS on/off (défaut off jusqu’aux mesures Vita).
 - `pvs_verify` : comparaison exhaustive au compilateur précédent ; défaut off.
   Diagnostic coûteux, réservé aux preuves hors mesures ; son temps entre dans load_pvs_ms.
+
+- `gpu_experiment` : `unchanged` (défaut, aucun setter), `gpu111` ou `gpu222`.
+  Expérience GPU seule nommée, appliquée une fois au démarrage. ARM/bus/xbar non
+  modifiés ; log rc/before/after et quatre horloges réelles du rapport à vérifier.
+  Ne pas combiner avec `clk444` ; comparer en renderbench. `gpu111` rétablit la référence
+  après un run GPU222. Les horloges peuvent persister entre applications.
 
 Fichier absent : défauts ci-dessus. Champ inconnu, erreur JSON ou valeur hors limites :
 erreur explicite dans le log et tous les réglages par défaut. Vérifier le log effectif.
@@ -203,8 +210,8 @@ meshes fusionnés, sommets/indices ajoutés et capacité stream sont hors monde 
 (upload, fusion, tri commun, submit opaque/alpha) sans instrumentation par sommet.
 
 Les sondes legacy à ee297f8 motivent une couche, moins de draws et moins de surtirage.
-Aucune hausse d’horloges ni baisse de résolution par défaut : GPU222 reste une
-expérience distincte pilotée et nommée. Les timings hôte ne prédisent pas ceux de Vita.
+Aucune hausse d’horloges ni baisse de résolution par défaut : gpu_experiment=gpu222
+est une expérience distincte, nommée et pilotée, dans le même VPK. Les timings hôte ne prédisent pas ceux de Vita.
 
 Console/FTP réservés au pilote. Le paquet de jalon contient ELF, VPK, SHA-256,
 révisions, vérification imports/heap/piles/marge ELF, réglages et grille de runs.

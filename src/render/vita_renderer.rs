@@ -29,6 +29,7 @@ pub struct Config {
     pub pvs_cache: bool,
     pub pvs_method: String,
     pub pvs_verify: bool,
+    pub gpu_experiment: String,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -45,6 +46,7 @@ impl Default for Config {
             pvs_cache: false,
             pvs_method: "sources".into(),
             pvs_verify: false,
+            gpu_experiment: "unchanged".into(),
         }
     }
 }
@@ -62,6 +64,7 @@ impl Config {
             (1..=2).contains(&self.actor_max_layers),
             "actor_max_layers must be 1 or 2"
         );
+        ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
         ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
         ensure!(
             self.cell_size.is_finite() && (64. ..=2048.).contains(&self.cell_size),
@@ -95,8 +98,32 @@ pub fn config() -> &'static Config {
             "[lg/vita-renderer] config {}",
             serde_json::to_string(&c).unwrap()
         );
+        apply_gpu_experiment(&c);
         c
     })
+}
+/// Named GPU-only experiment; default does not call a setter or alter ARM/bus/xbar.
+fn apply_gpu_experiment(c:&Config) {
+    if c.gpu_experiment=="unchanged" {return;}
+    #[cfg(target_os="vita")]
+    unsafe {
+        extern "C" {
+            fn scePowerSetGpuClockFrequency(freq:i32)->i32;
+            fn scePowerGetArmClockFrequency()->i32;
+            fn scePowerGetBusClockFrequency()->i32;
+            fn scePowerGetGpuClockFrequency()->i32;
+            fn scePowerGetGpuXbarClockFrequency()->i32;
+        }
+        let read=||[scePowerGetArmClockFrequency(),scePowerGetBusClockFrequency(),scePowerGetGpuClockFrequency(),scePowerGetGpuXbarClockFrequency()];
+        let before=read();let requested=if c.gpu_experiment=="gpu222" {222}else{111};
+        let rc=scePowerSetGpuClockFrequency(requested);let after=read();
+        println!("[lg/vita-renderer] gpu experiment {} rc={rc} before={before:?} after={after:?}",c.gpu_experiment);
+        if rc<0 || after[2]!=requested || before[0]!=after[0] || before[1]!=after[1] || before[3]!=after[3] {
+            eprintln!("[lg/vita-renderer] GPU experiment did not satisfy its clock contract; inspect actual window clocks");
+        }
+    }
+    #[cfg(not(target_os="vita"))]
+    println!("[lg/vita-renderer] gpu experiment {} ignored on host",c.gpu_experiment);
 }
 /// Diagnostic draw mask only: simulation, accepted frames and save policy stay intact.
 pub fn world_only() -> bool {
