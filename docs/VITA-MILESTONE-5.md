@@ -54,3 +54,16 @@ The shipped libvitaGL.a has separate vgl.o -> invoke_splashscreen relocation and
 splashscreen.o entry points; mem_utils.o has no LwMutex imports. This establishes
 allocator overlap, not the root cause of the 18:14 abort. Splash startup occurs
 after renderer configuration and cannot explain P3's observed missing config line.
+
+## Splash allocator ownership
+
+startup_splash=false (default) suppresses the SDK logo thread via the linker's
+--wrap=invoke_splashscreen hook. vglInit allocations therefore remain on the
+caller; no splash buffer/context allocations or cleanup run concurrently. The
+original LG opening film is separate and unchanged. startup_splash=true is the
+explicit legacy control. The vitaGL archive/pins stay unchanged; the final ELF
+must show vgl.o's call reaching __wrap_invoke_splashscreen. This removes the code
+proven overlap; it does not prove the 18:14 abort's exact corruption mechanism.
+Startup ordering is unchanged while the pilot evaluates the 4.1 trace and health
+control. Host feature check passes. RW reservation moves to 0x82080000 for the
+larger trace/actor build; final ELF margin remains a required package check.

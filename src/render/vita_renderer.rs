@@ -37,6 +37,8 @@ pub struct Config {
     pub actor_shared_geometry:bool,
     pub actor_batching:bool,
     pub actor_frustum_cull:bool,
+    /// SDK logo thread is disabled by default; the LG opening film is unaffected.
+    pub startup_splash:bool,
     pub pvs_cache: bool,
     pub pvs_method: String,
     pub pvs_verify: bool,
@@ -62,6 +64,7 @@ impl Default for Config {
             merge_fx: true,
             fx_batching:"adjacent".into(),fx_streaming:"orphan".into(),fx_merge_cache:true,fx_upload_cache:false,fx_max_layers:2,actor_fast_path:true,
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:false,
+            startup_splash:false,
             pvs_cache: false,
             pvs_method: "sources".into(),
             pvs_verify: false,
@@ -69,6 +72,21 @@ impl Default for Config {
             world_viewport_scale: 1.,
             render_scale:1.,msaa_samples:1,quality:"full".into(),opaque_order:"front_to_back".into(),world_alpha:true,
         }
+    }
+}
+/// The SDK starts its splash thread in the middle of vglInitWithCustomSizes,
+/// while the caller still allocates shader-patcher resources. Suppress that
+/// second allocator owner unless explicitly requesting the legacy diagnostic.
+/// This linker hook changes no vitaGL archive or dependency pin.
+#[cfg(target_os="vita")]
+#[no_mangle]
+pub extern "C" fn __wrap_invoke_splashscreen() {
+    if config().startup_splash {
+        eprintln!("[lg/startup] SDK splash legacy thread requested");
+        extern "C" {fn __real_invoke_splashscreen();}
+        unsafe {__real_invoke_splashscreen();}
+    } else {
+        eprintln!("[lg/startup] SDK splash suppressed; initialization allocator owner=main");
     }
 }
 impl Config {
