@@ -35,3 +35,22 @@ its mounting algorithm is unchanged from milestone 3.1; milestone 4 only memoize
 the later fingerprint calculation. The renderer config line is emitted after its
 file read, parse and validation, so those steps are also possible timeout sites.
 No native rebuild until the pilot's P0 outcome or an obvious code cause.
+
+Startup phase logs now bracket directory scanning, every archive open/central
+index, index progress (1024 entries), window/renderer configuration, UI/menu,
+route read/parse/validation, corpus identity and requested save. Host checks pass;
+playable-low + vita-sim-all Continue completed normally. Host measured mount:
+484.6 ms for 6 packs / 10221 resolved names; renderer JSON read/parse/validation:
+0.13 ms; route tape 3434923 bytes / 9169 samples read+parse+validate: 5.55 ms;
+requested save read: about 3.5 ms. These are host timings, not estimates for Vita.
+No application mutex or unbounded application loop was found in the pre-config
+mount path. Filesystem/PK3 I/O or renderer-config read remain possible native
+block sites; the existing milestone-4 log cannot distinguish them. P0 is pending.
+
+The independent splash allocator issue remains plausible from code: vgl.c starts
+invoke_splashscreen before registering later blit/scissor resources; splashscreen.c
+allocates GPU buffers and signals completion before freeing its buffers/context.
+The shipped libvitaGL.a has separate vgl.o -> invoke_splashscreen relocation and
+splashscreen.o entry points; mem_utils.o has no LwMutex imports. This establishes
+allocator overlap, not the root cause of the 18:14 abort. Splash startup occurs
+after renderer configuration and cannot explain P3's observed missing config line.

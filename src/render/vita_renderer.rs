@@ -110,14 +110,19 @@ const CONFIG_PATH: &str = "private/vita_renderer.json";
 pub fn config() -> &'static Config {
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(|| {
+        let start=std::time::Instant::now();
+        eprintln!("[lg/startup] renderer_config read begin path={CONFIG_PATH}");
         let parsed = (|| -> Result<Config> {
             let bytes = match std::fs::read(CONFIG_PATH) {
                 Ok(bytes) => bytes,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
                 Err(e) => return Err(e.into()),
             };
+            eprintln!("[lg/startup] renderer_config read done bytes={} elapsed_ms={:.3}; parse begin",bytes.len(),start.elapsed().as_secs_f64()*1000.);
             let c: Config = serde_json::from_slice(&bytes)?;
+            eprintln!("[lg/startup] renderer_config parse done elapsed_ms={:.3}; validate begin",start.elapsed().as_secs_f64()*1000.);
             c.validate()?;
+            eprintln!("[lg/startup] renderer_config validate done elapsed_ms={:.3}",start.elapsed().as_secs_f64()*1000.);
             Ok(c)
         })();
         let c = parsed.unwrap_or_else(|e| {
