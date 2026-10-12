@@ -972,9 +972,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             Ok(false) => return Ok(()),
             Err(e) => {
                 eprintln!("Opening film unavailable: {e:#}");
+                #[cfg(feature="vita_renderer")]
+                if route_session.as_ref().is_some_and(|r|r.needs_opening()) {
+                    return Err(e.context("New Game route requires the opening film"));
+                }
                 hud.announce("Opening film unavailable / continuing to Wonderland");
             }
-            Ok(true) => (),
+            Ok(true) => {
+                #[cfg(feature="vita_renderer")]
+                if let Some(route)=&mut route_session {route.opening_complete();}
+            },
         }
         clock.pause();
     }

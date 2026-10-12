@@ -11,6 +11,10 @@ use std::{collections::BTreeMap, io::Read, path::PathBuf, time::Instant};
 #[cfg(not(target_os = "vita"))]
 mod record;
 const VERSION: u32 = 1;
+fn heading_step(yaw:f32,target:f32)->Option<f32> {
+    let error=(target-yaw+std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)-std::f32::consts::PI;
+    (error.abs()>0.0001).then(||yaw+error.clamp(-2.5*FIXED_DT,2.5*FIXED_DT))
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sample {
@@ -79,6 +83,7 @@ impl Tape {
                 "invalid stick value"
             );
             ensure!(s.segment.len() <= 48, "invalid segment name");
+            ensure!(s.reference_yaw.is_none_or(f32::is_finite),"nonfinite route heading");
             previous = Some(s.tick);
         }
         ensure!(
@@ -132,6 +137,10 @@ pub struct Session {
     status: Status,
     entry_saved: bool,
     drift_reported: bool,
+    heading_ticks:u32,
+    heading_total:u64,
+    route_error:Option<String>,
+    opening_played:bool,
     segment: String,
     frame_start: Option<Instant>,
     wall: Vec<(String, f64)>,
@@ -187,11 +196,11 @@ impl Session {
             }
         } else {
             eprintln!("[lg/startup] route_tape read begin path={}",root.join("route-inputs.json").display());
-            let mut bytes = Vec::new();
-            std::fs::File::open(root.join("route-inputs.json"))
-                .context("route-inputs.json")?
-                .take(16 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)?;
+            let file=std::fs::File::open(root.join("route-inputs.json")).context("route-inputs.json")?;
+            let size=file.metadata()?.len();
+            ensure!(size<=16*1024*1024,"route file exceeds bound");
+            let mut bytes=Vec::with_capacity(size as usize);
+            std::io::BufReader::with_capacity(64*1024,file).take(16*1024*1024+1).read_to_end(&mut bytes)?;
             ensure!(bytes.len() <= 16 * 1024 * 1024, "route file exceeds bound");
             eprintln!("[lg/startup] route_tape read done bytes={} elapsed_ms={:.3}; parse begin",bytes.len(),startup.elapsed().as_secs_f64()*1000.);
             let t: Tape = serde_json::from_slice(&bytes)?;
@@ -207,8 +216,9 @@ impl Session {
         options.direct_map = true;
         options.load = None;
         options.difficulty = crate::powerups::Difficulty::Easy;
-        // The diagnostic begins at village arrival; the presentation film is outside the route.
-        options.frames = Some(200_000);
+        // New Game uses the ordinary opening-film path; named-save/record modes
+        // retain the finite diagnostic frame guard. Session also has a wall bound.
+        options.frames = if mode==Mode::Replay && tape.start=="new_game" {None}else{Some(200_000)};
         println!(
             "[lg/route] start mode={} save_dir={}",
             if mode == Mode::Continue {
@@ -243,6 +253,7 @@ impl Session {
             status: Status::default(),
             entry_saved: false,
             drift_reported: false,
+            heading_ticks:0,heading_total:0,route_error:None,opening_played:false,
             segment: "arrival".into(),
             frame_start: None,
             wall: Vec::new(),
@@ -293,6 +304,8 @@ impl Session {
     pub fn continuing(&self) -> bool {
         self.mode == Mode::Continue
     }
+    pub fn needs_opening(&self)->bool {self.mode==Mode::Replay && self.tape.start=="new_game"}
+    pub fn opening_complete(&mut self) {self.opening_played=true;println!("[lg/route] opening film complete");}
     pub fn begin_frame(&mut self, status: Status) -> Result<()> {
         let now = Instant::now();
         if let Some(start) = self.frame_start.take() {
@@ -432,6 +445,26 @@ impl Session {
             self.cursor += 1;
         }
         let s = &self.tape.samples[self.cursor];
+        if crate::render::vita_renderer::config().route_heading_lock {
+            if let Some(target)=s.reference_yaw {
+                if let Some(next)=heading_step(*yaw,target) {
+                    if self.heading_ticks==0 {println!("[lg/route] camera alignment begin tick={} yaw={} target={target}",self.tick,*yaw);}
+                    self.heading_ticks+=1;self.heading_total+=1;
+                    if self.heading_ticks>1200 {
+                        self.route_error=Some(format!("camera alignment exceeded 10s at tick {}",self.tick));
+                        self.done=true;return Controls::default();
+                    }
+                    // Same bounded look integration as a stick input; no player
+                    // pose, facing, scene state or gameplay clock is overwritten.
+                    *yaw=next;self.segment="camera-align".into();
+                    return Controls::default();
+                }
+            }
+        }
+        if self.heading_ticks>0 {
+            println!("[lg/route] camera alignment done tick={} steps={}",self.tick,self.heading_ticks);
+            self.heading_ticks=0;
+        }
         if !self.drift_reported
             && s.reference_feet
                 .is_some_and(|f| player.feet.distance(Vec3::from_array(f)) > 8.)
@@ -488,6 +521,8 @@ impl Session {
         self.done || self.mode == Mode::Continue
     }
     pub fn finish(&mut self, store: &Store, game: &Game, yaw: f32, pitch: f32) -> Result<()> {
+        ensure!(self.route_error.is_none(),"{}",self.route_error.as_deref().unwrap_or(""));
+        ensure!(!self.needs_opening()||self.opening_played,"New Game route did not complete opening film");
         #[cfg(not(target_os = "vita"))]
         ensure!(
             self.driver.error.is_none(),
@@ -576,7 +611,7 @@ impl Session {
             self.heap_start
         );
         let count_summary=|i:usize| serde_json::json!({"samples":self.counter_samples,"mean":(self.counter_samples>0).then(||self.counter_sums[i] as f64/self.counter_samples as f64),"max":self.counter_peaks[i]});
-        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"counter_raw_path":format!("route-frame-windows/{}/counters-*.json",self.run_id),"counter_columns":["live_puffs","fx_gpu_draws"],"counter_population":"Rendered frames; final save-only row is [0,0] and excluded from means. FX draws count direct dynamic actor/object/effect packets, including first-person.","live_puffs":count_summary(0),"fx_gpu_draws":count_summary(1),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.counters.capacity()*std::mem::size_of::<[u32;2]>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
+        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"counter_raw_path":format!("route-frame-windows/{}/counters-*.json",self.run_id),"counter_columns":["live_puffs","fx_gpu_draws"],"counter_population":"Rendered frames; final save-only row is [0,0] and excluded from means. FX draws count direct dynamic actor/object/effect packets, including first-person.","live_puffs":count_summary(0),"fx_gpu_draws":count_summary(1),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.counters.capacity()*std::mem::size_of::<[u32;2]>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"opening_film_played":self.opening_played,"camera_alignment_ticks":self.heading_total,"camera_alignment_seconds":self.heading_total as f64/120.,"input_timeline":"120Hz script excludes scene waits and bounded camera recentering; frame wall includes both","scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
         std::fs::write(
             self.root.join(if self.continuing() {
                 "route-continue-report.json"
@@ -592,6 +627,19 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn heading_recenter_uses_shortest_bounded_look_and_restores_recorded_wish() {
+        for (from,target) in [(4.712389,3.141593),(6.27,0.01),(-3.13,3.13)] {
+            let mut yaw=from;let mut ticks=0;
+            while let Some(next)=heading_step(yaw,target) {
+                assert!((next-yaw).abs()<=2.5*FIXED_DT+0.000001);
+                yaw=next;ticks+=1;assert!(ticks<180);
+            }
+            let wish=vec2(yaw.cos(),yaw.sin())*0.8+vec2(yaw.sin(),-yaw.cos())*0.2;
+            let expected=vec2(target.cos(),target.sin())*0.8+vec2(target.sin(),-target.cos())*0.2;
+            assert!(wish.distance(expected)<0.0001);
+        }
+    }
     fn tape() -> Tape {
         Tape {
             version: 1,

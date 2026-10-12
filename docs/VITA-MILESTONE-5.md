@@ -67,3 +67,19 @@ proven overlap; it does not prove the 18:14 abort's exact corruption mechanism.
 Startup ordering is unchanged while the pilot evaluates the 4.1 trace and health
 control. Host feature check passes. RW reservation moves to 0x82080000 for the
 larger trace/actor build; final ELF margin remains a required package check.
+
+## New Game route and camera handoff
+
+route_heading_lock=true compensates recorded/live cinematic headings through
+ordinary bounded look input (2.5 rad/s). Movement/tape advancement waits during
+alignment; a ten-second failure bound prevents an unattended infinite recenter.
+No player pose, script facing, scene completion or gameplay clock is overwritten.
+reference_yaw is an optional camera target; reference_feet stays diagnostic only.
+Frame wall and named alignment segments include that added time.
+
+New Game tapes now enter the normal opening-film path and require its completion.
+Named-save and host-record modes retain their previous entry policy. Original LG
+controller/progression/save code remains unchanged. Tape reads are capped at
+16 MiB and use a 64 KiB buffered reader only after route-mode selection inside the
+initialized viewer. Host suite: 742 passed, zero failed, one pre-existing ignored.
+The film/entry/Blade/knife_cat/input/save/Continue host run is in progress.

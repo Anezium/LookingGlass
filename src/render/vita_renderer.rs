@@ -39,6 +39,7 @@ pub struct Config {
     pub actor_frustum_cull:bool,
     /// SDK logo thread is disabled by default; the LG opening film is unaffected.
     pub startup_splash:bool,
+    pub route_heading_lock:bool,
     pub pvs_cache: bool,
     pub pvs_method: String,
     pub pvs_verify: bool,
@@ -65,6 +66,7 @@ impl Default for Config {
             fx_batching:"adjacent".into(),fx_streaming:"orphan".into(),fx_merge_cache:true,fx_upload_cache:false,fx_max_layers:2,actor_fast_path:true,
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:false,
             startup_splash:false,
+            route_heading_lock:true,
             pvs_cache: false,
             pvs_method: "sources".into(),
             pvs_verify: false,
