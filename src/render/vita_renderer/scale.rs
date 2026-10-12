@@ -116,8 +116,8 @@ pub(super) fn prepare(bg: Color) {
                 upscale,
             });
             println!(
-                "[lg/vita-renderer] 3d target {w}x{h} RGBA8/depth32 samples=1 scale={}",
-                config().render_scale
+                "[lg/vita-renderer] 3d target {w}x{h} RGBA8/depth32 samples=1 scale={} copy_v_inverted={}",
+                config().render_scale, cfg!(target_os = "vita")
             );
         }
     });
@@ -197,9 +197,18 @@ const UPSCALE_VERTEX: &str = r#"#version 100
 attribute vec3 position; attribute vec2 texcoord; attribute vec4 color0; attribute vec4 normal;
 varying mediump vec2 uv; uniform mat4 Model; uniform mat4 Projection;
 void main(){gl_Position=Projection*Model*vec4(position,1.);uv=texcoord;}"#;
+#[cfg(not(target_os = "vita"))]
 const UPSCALE_FRAGMENT: &str = r#"#version 100
 varying mediump vec2 uv; uniform sampler2D Texture;
 void main(){gl_FragColor=vec4(texture2D(Texture,uv).rgb,1.);}"#;
+
+// The pinned VitaGL build uses HAVE_UNFLIPPED_FBOS. Invert sampled V once
+// relative to the existing Macroquad copy quad; the desktop FBO convention
+// differs. This shader exists only for scaled targets, before the native HUD.
+#[cfg(target_os = "vita")]
+const UPSCALE_FRAGMENT: &str = r#"#version 100
+varying mediump vec2 uv; uniform sampler2D Texture;
+void main(){gl_FragColor=vec4(texture2D(Texture,vec2(uv.x,1.-uv.y)).rgb,1.);}"#;
 
 pub(super) fn log_depth(opaque: bool) {
     static OPAQUE: OnceLock<()> = OnceLock::new();
