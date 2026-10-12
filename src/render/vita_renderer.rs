@@ -429,6 +429,11 @@ impl Renderer {
             .sum();
         let vertices: usize = pending.iter().map(|p| p.geometry.vertices.len()).sum();
         let triangles: usize = pending.iter().map(|p| p.geometry.indices.len() / 3).sum();
+        // Resolve Macroquad's managed handles before borrowing its internal GL context.
+        let first_textures = pending
+            .iter()
+            .map(|p| p.recipe.textures[0].raw_miniquad_id())
+            .collect::<Vec<_>>();
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
         let shader = ctx
@@ -493,7 +498,7 @@ impl Renderer {
             }
         }
         let mut groups = Vec::new();
-        for p in pending {
+        for (p, texture) in pending.into_iter().zip(first_textures) {
             let extent = deform_extent(&p.recipe.deform);
             let vertex = ctx.new_buffer(
                 BufferType::VertexBuffer,
@@ -509,7 +514,7 @@ impl Renderer {
                 bindings: Bindings {
                     vertex_buffers: vec![vertex],
                     index_buffer: index,
-                    images: vec![p.recipe.textures[0].raw_miniquad_id(), atlas],
+                    images: vec![texture, atlas],
                 },
                 indices: p.geometry.indices.len() as i32,
                 min: p.geometry.min - extent,
