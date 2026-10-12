@@ -92,6 +92,14 @@ struct Button {
     hover: String,
     click: Click,
 }
+// Cross produces Enter and a pointer event in the Vita backend. Suppress both
+// edges of that pointer event so it cannot steal the D-pad's selection.
+fn pointer_input_allowed(vita: bool, enter_down: bool, enter_released: bool) -> bool {
+    !vita || !(enter_down || enter_released)
+}
+fn activation_index(pointer: bool, pressed: bool, hit: Option<usize>, confirm: bool, selected: usize) -> Option<usize> {
+    if pointer && pressed { hit } else if confirm { Some(selected) } else { None }
+}
 impl Button {
     fn text(rect: Rect, text: impl Into<String>, click: Click) -> Self {
         Self {
@@ -1283,10 +1291,9 @@ impl Menu {
             // attack/resume button in gameplay, but let menu confirmation use
             // the D-pad-selected widget rather than the virtual cursor's hit.
             // Ignore its release-position event too; touch alone stays usable.
-            #[cfg(target_os = "vita")]
-            let pointer_input = !is_key_down(KeyCode::Enter) && !is_key_released(KeyCode::Enter);
-            #[cfg(not(target_os = "vita"))]
-            let pointer_input = true;
+            let pointer_input = pointer_input_allowed(
+                cfg!(target_os = "vita"), is_key_down(KeyCode::Enter), is_key_released(KeyCode::Enter),
+            );
             let hit = buttons
                 .iter()
                 .position(|b| b.rect.contains(canvas.pointer(mouse)));
@@ -1352,10 +1359,10 @@ impl Menu {
                         Some(Click::Page(Page::Controls))
                     } else if page == Page::Settings && is_key_pressed(KeyCode::Key4) {
                         Some(Click::Page(Page::Game))
-                    } else if pointer_input && is_mouse_button_pressed(MouseButton::Left) {
-                        hit.map(|i| buttons[i].click)
-                    } else if input.ui(KeyCode::Enter) {
-                        Some(buttons[self.selected].click)
+                    } else if let Some(i) = activation_index(pointer_input,
+                        is_mouse_button_pressed(MouseButton::Left), hit,
+                        input.ui(KeyCode::Enter), self.selected) {
+                        Some(buttons[i].click)
                     } else if page == Page::Controls
                         && (input.pad_pressed("LB")
                             || is_key_pressed(KeyCode::PageUp)
@@ -1399,12 +1406,13 @@ impl Menu {
                                 action = Some(a);
                             }
                             Click::Row(row) => {
-                                if !(is_mouse_button_pressed(MouseButton::Left)
+                                if !(pointer_input && is_mouse_button_pressed(MouseButton::Left)
                                     && self.slider(page, row).is_some()
                                     && canvas.pointer(mouse).y
                                         >= buttons[hit.unwrap_or(self.selected)].rect.y + 26.)
                                 {
                                     let previous = page == Page::Video
+                                        && pointer_input
                                         && is_mouse_button_pressed(MouseButton::Left)
                                         && hit.is_some_and(|i| {
                                             canvas.pointer(mouse).x < buttons[i].rect.x + 24.
@@ -1527,6 +1535,23 @@ impl Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn vita_cross_confirms_selection_despite_duplicate_pointer_edges() {
+        // Main Load/Save, Autosave, Load, Quit/Yes, and pause Resume indices.
+        // A stale virtual cursor over another button must never change the action.
+        for selected in [1, Slot::ALL.iter().position(|s| *s == Slot::Auto).unwrap(), 6, 0, 4] {
+            let pointer = pointer_input_allowed(true, true, false);
+            assert_eq!(activation_index(pointer, true, Some(2), true, selected), Some(selected));
+            let pointer = pointer_input_allowed(true, false, true);
+            assert!(!pointer);
+            assert_eq!(activation_index(pointer, false, Some(2), false, selected), None);
+        }
+        // A touch without Cross still activates its own hit region.
+        assert_eq!(activation_index(pointer_input_allowed(true, false, false), true, Some(2), false, 0), Some(2));
+        assert_eq!(activation_index(true, true, None, false, 0), None);
+        // Desktop keeps its existing pointer-first behavior, even with Enter held.
+        assert_eq!(activation_index(pointer_input_allowed(false, true, false), true, Some(2), true, 0), Some(2));
+    }
     #[test]
     fn layouts_are_data_and_bounds_are_checked() {
         let w=layout("menu test\nresource\nButton\n{\nrect 12 16 80 24\ntitle \"Back to game\"\nstuffcommand \"quit\"\n}\n").unwrap();
