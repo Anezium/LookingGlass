@@ -1001,9 +1001,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     {
         hud.announce("A saved game could not be read. F9 retries quick load.");
     }
+    #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics", feature = "vita_renderer"))]
+    if route_session.is_some() {
+        println!("[lg/vita3k-diagnostic] route initial pose map={} feet={:?} yaw={} pitch={}", maps[current], player.feet, yaw, pitch);
+    }
     retry.remember(game_snapshot!());
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
+    #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+    let mut diagnostic_soak: Option<std::time::Instant> = None;
     loop {
         #[cfg(feature="vita_renderer")]
         let route_running=route_session.is_some();
@@ -1025,6 +1031,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             unsafe { sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT) };
             crate::frame_profile::begin_frame(&maps[current]);
             preview_throttle.advance_frame();
+            #[cfg(feature = "vita3k_diagnostics")]
+            if diagnostic_soak.is_some_and(|start| start.elapsed().as_secs() >= crate::vita3k_diagnostic::config().soak_seconds) {
+                println!("bench: done 120 frames mode={}, diagnostic soak complete", crate::frame_profile::mode().name());
+                break;
+            }
             if profile_report_due {
                 // The next begin_frame completes the last measured wall interval.
                 // Exit before simulating or drawing an extra gameplay frame.
@@ -1035,6 +1046,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     if let Err(e) = report {
                         eprintln!("bench: report failed ({e:#})");
                     } else {
+                        #[cfg(feature = "vita3k_diagnostics")]
+                        if crate::vita3k_diagnostic::config().soak_seconds > 0 {
+                            crate::vita3k_diagnostic::start_soak();
+                            diagnostic_soak = Some(std::time::Instant::now());
+                            println!("[lg/vita3k-diagnostic] soak begin seconds={} measured_profile_preserved=true", crate::vita3k_diagnostic::config().soak_seconds);
+                            continue;
+                        }
                         println!("bench: done 120 frames mode={}, report ux0:data/alice/private/frame_profile/{}-{}-120.json", mode.name(), maps[current], mode.name());
                     }
                     break;
@@ -3253,6 +3271,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let world_only = crate::render::vita_renderer::world_only();
         #[cfg(not(feature = "vita_renderer"))]
         let world_only = false;
+        let (draw_actors, draw_objects, draw_effects, draw_hud) = (!world_only, !world_only, !world_only, !world_only);
+        let fx_queue = !world_only || !scene.retained_active();
+        #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+        let (draw_actors, draw_objects, draw_effects, draw_hud, fx_queue) = {
+            let d = crate::vita3k_diagnostic::config();
+            let actors = d.actors.unwrap_or(draw_actors);
+            let objects = d.objects.unwrap_or(draw_objects);
+            let effects = d.effects.unwrap_or(draw_effects);
+            (actors, objects, effects, d.hud.unwrap_or(draw_hud),
+                d.fx_queue.unwrap_or(fx_queue || actors || objects || effects))
+        };
         let mut transforms = interactions.transforms();
         transforms.extend(scene.world.traversal.transforms(&player));
         let rope_hand = interactions
@@ -3322,7 +3351,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let _hotspot = crate::frame_profile::span("lights_select");
             crate::lighting::select(lights, camera, &scene.world);
         }
-        if !world_only || !scene.retained_active() {
+        if fx_queue {
             scene.begin_fx_view(&world_camera, environment_clock, fullbright, true);
         } else {
             use macroquad::camera::Camera;
@@ -3334,14 +3363,20 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_world");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+        let diagnostic_world = crate::vita3k_diagnostic::trace("world_draw");
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
+        #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+        drop(diagnostic_world);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_characters");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
         }
-        if !world_only {
+        if draw_actors {
+            #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+            let _diagnostic = crate::vita3k_diagnostic::trace("actors");
         {
             #[cfg(target_os = "vita")]
             let _characters_profile = crate::frame_profile::span("characters_setup");
@@ -3380,7 +3415,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_objects");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
-        if draw_world && !world_only {
+        if draw_world && draw_objects {
+            #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+            let _diagnostic = crate::vita3k_diagnostic::trace("objects");
             power_art.draw(
                 &pickups,
                 &stats,
@@ -3411,7 +3448,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 viewer_block = crate::frame_profile::span("frame_effects");
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             }
-            if !world_only {
+            if draw_effects {
+                #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+                let _diagnostic = crate::vita3k_diagnostic::trace("effects");
                 if let Some(s) = &interactions.encounters {
                     s.draw_waves();
                 }
@@ -3456,18 +3495,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 hud.draw_pickups(&pickups, &stats, camera, pickup_clock);
             }
         }
-        if draw_world && !world_only {
+        if draw_world && draw_effects {
             crate::lighting::flares(camera, (target - camera).normalize_or_zero());
         }
         let direct_fx = crate::render_fx::retained_active();
-        if !world_only || !scene.retained_active() { scene.finish_fx(true); }
+        if fx_queue { scene.finish_fx(true); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_first_person");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
-        if !world_only && !third_person
+        if draw_actors && !third_person
             && !pand_cinematic
             && !flying
             && stats.alive()
@@ -3509,7 +3548,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
         set_default_camera();
-        if !world_only {
+        if draw_hud {
+            #[cfg(all(target_os = "vita", feature = "vita3k_diagnostics"))]
+            let _diagnostic = crate::vita3k_diagnostic::trace("hud");
             if active {
                 #[cfg(target_os = "vita")]
                 let _search_profile = crate::frame_profile::span("interaction_search_after");

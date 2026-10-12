@@ -795,11 +795,20 @@ mod vita {
         record_world_submission();
         record_geometry(triangles, vertices, static_batch);
     }
+    fn diagnostic_soaking() -> bool {
+        #[cfg(feature = "vita3k_diagnostics")]
+        { return crate::vita3k_diagnostic::soaking(); }
+        #[cfg(not(feature = "vita3k_diagnostics"))]
+        { false }
+    }
     pub fn begin_frame(map: &str) {
+        #[cfg(feature = "vita3k_diagnostics")]
+        crate::vita3k_diagnostic::frame();
         let now = Instant::now();
         super::begin_creation_frame();
         reset_hot_counts();
-        HOT_RECORDING.store(enabled(), Relaxed);
+        let collecting = enabled() && !diagnostic_soaking();
+        HOT_RECORDING.store(collecting, Relaxed);
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             let next_mode = if s.poll_frames % 60 == 0 {
@@ -860,7 +869,7 @@ mod vita {
             s.stack.clear();
             s.since_flush = 0;
             s.pending_world = WorldCounts::default();
-            s.recording = enabled();
+            s.recording = collecting;
             if s.recording && s.accepted_frames>0 && s.accepted_frames==s.mode.warmup_frames() && s.heap_before.is_none() { s.heap_before=Some(heap_used()); }
         });
     }
@@ -874,6 +883,11 @@ mod vita {
                 return false;
             }
             s.accepted_frames += 1;
+            if diagnostic_soaking() {
+                s.pending.clear(); s.pending_counts.clear(); s.pending_models.clear();
+                s.pending_world = WorldCounts::default();
+                return false;
+            }
             if s.accepted_frames <= s.mode.warmup_frames() {
                 s.pending.clear();
                 s.pending_counts.clear();
@@ -984,6 +998,8 @@ mod vita {
         });
         #[cfg(feature = "vita_renderer")]
         { value["vita_renderer"] = crate::render::vita_renderer::report(); }
+        #[cfg(feature = "vita3k_diagnostics")]
+        { value["vita3k_diagnostics"] = serde_json::json!({"build_label":"diagnostic build, not the console binary", "configuration":crate::vita3k_diagnostic::config()}); }
         std::fs::create_dir_all(PROFILE_DIR)?;
         let path = std::path::Path::new(PROFILE_DIR).join(name);
         std::fs::write(&path, serde_json::to_vec_pretty(&value)?)?;

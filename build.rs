@@ -1,13 +1,19 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("vita") {
+        if std::env::var_os("CARGO_FEATURE_VITA3K_DIAGNOSTICS").is_some() {
+            for symbol in ["update_scissor_test", "sceGxmDraw", "sceGxmDrawPrecomputed", "sceGxmFinish", "vglGetProcAddress", "vglSwapBuffers", "sceGxmDisplayQueueAddEntry", "sceGxmEndScene", "sceGxmNotificationWait"] {
+                println!("cargo:rustc-link-arg=-Wl,--wrap={symbol}");
+            }
+        }
         // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.
         println!("cargo:rustc-link-arg=-Wl,--undefined=sceUserMainThreadStackSize");
         println!("cargo:rustc-link-arg=-Wl,--undefined=_newlib_heap_size_user");
         // Startup tracing and actor diagnostics grow code/exception metadata.
         // Reserve SCE metadata slack (>=3348 bytes),
         // and verify the final program headers for every packaged build.
-        println!("cargo:rustc-link-arg=-Wl,--section-start=.init_array=0x82080000");
+        let init_array = if std::env::var_os("CARGO_FEATURE_VITA3K_DIAGNOSTICS").is_some() { "0x82200000" } else { "0x82080000" };
+        println!("cargo:rustc-link-arg=-Wl,--section-start=.init_array={init_array}");
         if std::env::var_os("CARGO_FEATURE_VITA_RENDERER").is_some() {
             println!("cargo:rustc-link-arg=-Wl,--wrap=invoke_splashscreen");
         }
