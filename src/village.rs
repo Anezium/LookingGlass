@@ -653,4 +653,4 @@ pub struct Snapshot {
 #[cfg(test)]
 mod legacy_test;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

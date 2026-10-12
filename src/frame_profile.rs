@@ -214,6 +214,8 @@ mod vita {
         PuffsBirths,
         DynamicBoundsRejected,
         DynamicCollidersRejected,
+        PuffsSkippedSweeps,
+        PuffsDropped,
     }
     const COUNTER_NAMES: &[&str] = &[
         "sweep_calls",
@@ -239,6 +241,8 @@ mod vita {
         "puffs_births",
         "dynamic_bounds_rejected",
         "dynamic_colliders_rejected",
+        "puffs_skipped_sweeps",
+        "puffs_dropped",
     ];
     #[derive(Clone, Copy)]
     #[repr(u8)]

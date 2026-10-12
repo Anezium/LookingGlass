@@ -152,3 +152,65 @@ fn nonsolid_poses_preserve_publications_contacts_transport_and_restore() {
     }
     assert!(transports > 0 && rejected > 0 && omitted > 0);
 }
+
+/// Same rider, obstruction, hatch and restore sequences as the sim8 oracle.
+/// Serialize the actual saved player/village components after every step.
+pub(crate) fn assert_config_contacts_and_save(config: crate::vita_sim::Config) {
+    let mut transported = 0;
+    for scenario in 0..3 {
+        let (map, mut old) = fixture();
+        let (_, mut new) = fixture();
+        let initial = old.snapshot();
+        let feet = if scenario == 2 { vec3(-200., 0., 80.03125) }
+            else { vec3(0., 0., 80.03125) };
+        let mut a = Player::new(feet);
+        let mut b = a.clone();
+        let fixed = if scenario == 1 {
+            vec![Collider::fixture(vec3(-100., -100., 60.),vec3(100., 100., 80.))]
+        } else { Vec::new() };
+        let mut wa = World::fixture(&[]);
+        let mut wb = World::fixture(&[]);
+        let mut steam = crate::particles::tests::world_test_steam();
+        for tick in 0..180 {
+            if tick == 10 || tick == 100 {
+                old.event("openthis"); new.event("openthis");
+            }
+            if tick == 80 {
+                old.restore(&initial, &map).unwrap();
+                new.restore(&initial, &map).unwrap();
+                a = Player::new(feet); b = a.clone();
+            }
+            let dt = [1. / 120., 0.05, 0.002, 0.][tick % 4];
+            let before = a.feet;
+            old.advance_legacy(dt, &map, &mut wa, &mut a, &fixed).unwrap();
+            new.advance(dt, &map, &mut wb, &mut b, &fixed).unwrap();
+            steam.update_clocks_config(0.05, dt, b.feet, &wb, &config);
+            transported += usize::from(before != a.feet);
+            assert_eq!(serde_json::to_vec(&(&a,old.snapshot())).unwrap(),
+                serde_json::to_vec(&(&b,new.snapshot())).unwrap(), "scenario {scenario}, tick {tick}");
+            for center in [a.feet + PLAYER_CENTER,vec3(0.,300.,100.),vec3(1000.,0.,100.)] {
+                for half in [Vec3::ZERO,PLAYER_HALF] {
+                    for delta in [Vec3::ZERO,Vec3::Z * 150.,Vec3::X * 150.] {
+                        assert_eq!(trace_bits(wa.sweep(center+delta,center-delta,half)),
+                            trace_bits(wb.sweep(center+delta,center-delta,half)));
+                    }
+                }
+            }
+        }
+    }
+    assert!(transported > 0);
+}
+#[test]
+fn puff_cap_preserves_player_contacts_transport_and_save_bytes() {
+    assert_config_contacts_and_save(crate::vita_sim::Config { puff_cap: 8, ..Default::default() });
+}
+#[test]
+fn puff_collision_modes_preserve_player_contacts_transport_and_save_bytes() {
+    for mode in [crate::vita_sim::PuffCollide::Moving,crate::vita_sim::PuffCollide::None] {
+        assert_config_contacts_and_save(crate::vita_sim::Config { puff_collide: mode, ..Default::default() });
+    }
+}
+#[test]
+fn puff_cadence_preserves_player_contacts_transport_and_save_bytes() {
+    assert_config_contacts_and_save(crate::vita_sim::Config { puff_sweep_every: 4, ..Default::default() });
+}
