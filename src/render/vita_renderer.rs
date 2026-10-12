@@ -1324,6 +1324,11 @@ mod tests {
         .validate()
         .is_err());
         assert!(serde_json::from_str::<Config>(r#"{"unknown":true}"#).is_err());
+        for experiment in ["unchanged","gpu111","gpu222"] {
+            assert!(Config {gpu_experiment:experiment.into(),..Config::default()}.validate().is_ok());
+        }
+        assert!(Config {gpu_experiment:"gpu444".into(),..Config::default()}.validate().is_err());
+        assert!(Config {pvs_method:"invalid".into(),..Config::default()}.validate().is_err());
     }
     #[test]
     fn frustum_fails_open_for_crossing_boxes() {
