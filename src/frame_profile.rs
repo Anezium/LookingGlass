@@ -1,6 +1,102 @@
 //! Optional local CPU profiling; inactive during ordinary play.
 use std::{cell::RefCell, collections::BTreeMap, time::Instant};
 
+#[cfg(any(target_os = "vita", test))]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Full,
+    NoPreview,
+    NoPrep,
+    NoWorld,
+    Clk444,
+    Bench,
+    RenderBench,
+    FullBench,
+}
+#[cfg(any(target_os = "vita", test))]
+impl Mode {
+    #[cfg(target_os = "vita")]
+    fn read() -> Self {
+        Self::parse(&std::fs::read_to_string("ux0:data/alice/private/profile_mode").unwrap_or_default())
+    }
+    fn parse(value: &str) -> Self {
+        match value.trim() {
+            "nopreview" => Self::NoPreview,
+            "noprep" => Self::NoPrep,
+            "noworld" => Self::NoWorld,
+            "clk444" => Self::Clk444,
+            "bench" => Self::Bench,
+            "renderbench" => Self::RenderBench,
+            "fullbench" => Self::FullBench,
+            _ => Self::Full,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::NoPreview => "nopreview",
+            Self::NoPrep => "noprep",
+            Self::NoWorld => "noworld",
+            Self::Clk444 => "clk444",
+            Self::Bench => "bench",
+            Self::RenderBench => "renderbench",
+            Self::FullBench => "fullbench",
+        }
+    }
+    pub fn is_bench(self) -> bool {
+        matches!(self, Self::Bench | Self::RenderBench | Self::FullBench)
+    }
+    pub fn warmup_frames(self) -> usize {
+        if matches!(self, Self::RenderBench | Self::FullBench) { 60 } else { 0 }
+    }
+    pub fn throttle_preview(self) -> bool {
+        self != Self::Full
+    }
+    pub fn skip_static_prep(self) -> bool {
+        self == Self::NoPrep
+    }
+    pub fn no_world(self) -> bool {
+        matches!(self, Self::NoWorld | Self::Bench)
+    }
+}
+// Advance once per viewer frame, independently of wall-clock duration.
+#[cfg(any(target_os = "vita", test))]
+pub struct PreviewThrottle {
+    frames_since_capture: u32,
+}
+#[cfg(any(target_os = "vita", test))]
+impl Default for PreviewThrottle {
+    fn default() -> Self {
+        Self {
+            frames_since_capture: 120,
+        }
+    }
+}
+#[cfg(any(target_os = "vita", test))]
+impl PreviewThrottle {
+    pub fn advance_frame(&mut self) {
+        self.frames_since_capture = (self.frames_since_capture + 1).min(120);
+    }
+    pub fn capture(&mut self, mode: Mode) -> bool {
+        if mode.is_bench() || (mode.throttle_preview() && self.frames_since_capture < 120) {
+            return false;
+        }
+        self.frames_since_capture = 0;
+        true
+    }
+}
+
+#[cfg(any(target_os = "vita", test))]
+pub fn saves_writable(saves_enabled: bool, bench_session: bool) -> bool {
+    saves_enabled && !bench_session
+}
+
+#[cfg(any(target_os = "vita", test))]
+fn wall_sample(start: Option<Instant>, measured: bool, now: Instant) -> Option<f64> {
+    measured.then(|| start.map(|start| now.duration_since(start).as_secs_f64() * 1000.)).flatten()
+}
+
 #[cfg(not(target_os = "vita"))]
 thread_local! { static SAMPLES: RefCell<BTreeMap<&'static str, Vec<f64>>> = RefCell::default(); }
 
@@ -78,10 +174,9 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 
 #[cfg(target_os = "vita")]
 pub use vita::{
-    add_counter, begin_frame, bench_frames, counter_owner, counts, end_frame, flush_boundary, mode,
+    add_counter, begin_frame, bench_accepted_frames, bench_frames, simulation_frozen, counter_owner, counts, end_frame, flush_boundary, mode,
     record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_model,
-    record_world_submission, report, set_owner, startup_bench, world_span, Counter, Mode, Owner,
-    PreviewThrottle,
+    record_world_submission, report, set_owner, startup_bench, world_span, Counter, Owner,
 };
 
 #[cfg(target_os = "vita")]
@@ -215,31 +310,6 @@ mod vita {
         set_owner(Owner::None);
     }
 
-    // Advance once per viewer frame, independently of wall-clock duration.
-    pub struct PreviewThrottle {
-        frames_since_capture: u32,
-    }
-    impl Default for PreviewThrottle {
-        fn default() -> Self {
-            Self {
-                frames_since_capture: 120,
-            }
-        }
-    }
-    impl PreviewThrottle {
-        pub fn advance_frame(&mut self) {
-            self.frames_since_capture = (self.frames_since_capture + 1).min(120);
-        }
-        pub fn capture(&mut self, mode: Mode) -> bool {
-            if mode.throttle_preview() && self.frames_since_capture < 120 {
-                return false;
-            }
-            self.frames_since_capture = 0;
-            true
-        }
-    }
-
-    const MODE_FILE: &str = "ux0:data/alice/private/profile_mode";
     const LABELS: &[&str] = &[
         "frame_cpu",
         "world_visibility",
@@ -335,50 +405,6 @@ mod vita {
         "world_submit_static",
         "world_submit_dynamic",
     ];
-    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-    pub enum Mode {
-        #[default]
-        Full,
-        NoPreview,
-        NoPrep,
-        NoWorld,
-        Clk444,
-        Bench,
-    }
-    impl Mode {
-        fn read() -> Self {
-            match std::fs::read_to_string(MODE_FILE)
-                .unwrap_or_default()
-                .trim()
-            {
-                "nopreview" => Self::NoPreview,
-                "noprep" => Self::NoPrep,
-                "noworld" => Self::NoWorld,
-                "clk444" => Self::Clk444,
-                "bench" => Self::Bench,
-                _ => Self::Full,
-            }
-        }
-        pub fn name(self) -> &'static str {
-            match self {
-                Self::Full => "full",
-                Self::NoPreview => "nopreview",
-                Self::NoPrep => "noprep",
-                Self::NoWorld => "noworld",
-                Self::Clk444 => "clk444",
-                Self::Bench => "bench",
-            }
-        }
-        pub fn throttle_preview(self) -> bool {
-            self != Self::Full
-        }
-        pub fn skip_static_prep(self) -> bool {
-            self == Self::NoPrep
-        }
-        pub fn no_world(self) -> bool {
-            matches!(self, Self::NoWorld | Self::Bench)
-        }
-    }
     #[derive(Default, Clone, serde::Serialize)]
     struct WorldCounts {
         batches_drawn: usize,
@@ -426,6 +452,10 @@ mod vita {
         mode: Mode,
         poll_frames: usize,
         frames: usize,
+        accepted_frames: usize,
+        frame_start: Option<Instant>,
+        wall_pending: bool,
+        frame_wall_ms: Vec<f64>,
         recording: bool,
         clocks_raised: bool,
         pending: Vec<(&'static str, f64, f64)>,
@@ -472,12 +502,24 @@ mod vita {
     }
     // Startup happens before the viewer's first begin_frame/poll.
     pub fn startup_bench() -> bool {
-        Mode::read() == Mode::Bench && enabled()
+        Mode::read().is_bench() && enabled()
     }
     pub fn bench_frames() -> Option<usize> {
         STATE.with(|s| {
             let s = s.borrow();
-            (enabled() && s.mode == Mode::Bench).then_some(s.frames)
+            (enabled() && s.mode.is_bench()).then_some(s.frames)
+        })
+    }
+    pub fn bench_accepted_frames() -> Option<usize> {
+        STATE.with(|s| {
+            let s = s.borrow();
+            (enabled() && s.mode.is_bench()).then_some(s.accepted_frames)
+        })
+    }
+    pub fn simulation_frozen() -> bool {
+        STATE.with(|s| {
+            let s = s.borrow();
+            enabled() && s.mode == Mode::RenderBench && s.accepted_frames >= s.mode.warmup_frames()
         })
     }
     pub fn world_span(label: &'static str, static_batch: bool) -> Span {
@@ -655,6 +697,7 @@ mod vita {
         record_geometry(triangles, vertices, static_batch);
     }
     pub fn begin_frame(map: &str) {
+        let now = Instant::now();
         reset_hot_counts();
         HOT_RECORDING.store(enabled(), Relaxed);
         STATE.with(|s| {
@@ -665,11 +708,21 @@ mod vita {
                 s.mode
             };
             s.poll_frames += 1;
+            // Attribute begin-to-begin wall time to the PREVIOUS measured frame.
+            // This includes macroquad submission, swap and next_frame, and never
+            // substitutes the last warmup frame for the first measured frame.
+            if let Some(ms) = wall_sample(s.frame_start, s.wall_pending, now) {
+                if s.frame_wall_ms.len() < 10000 { s.frame_wall_ms.push(ms); }
+            }
+            s.wall_pending = false;
+            s.frame_start = Some(now);
             let mode_changed = next_mode != s.mode;
             if s.map != map || mode_changed {
                 s.map = map.to_owned();
                 s.mode = next_mode;
                 s.frames = 0;
+                s.accepted_frames = 0;
+                s.frame_wall_ms.clear();
                 s.labels.clear();
                 s.counters.clear();
                 s.models.clear();
@@ -716,6 +769,15 @@ mod vita {
                 s.pending.clear(); s.pending_world = WorldCounts::default();
                 return false;
             }
+            s.accepted_frames += 1;
+            if s.accepted_frames <= s.mode.warmup_frames() {
+                s.pending.clear();
+                s.pending_counts.clear();
+                s.pending_models.clear();
+                s.pending_world = WorldCounts::default();
+                return false;
+            }
+            s.wall_pending = true;
             let pending = std::mem::take(&mut s.pending);
             let mut totals = BTreeMap::<&'static str, f64>::new();
             let mut exclusive_totals = BTreeMap::<&'static str, f64>::new();
@@ -773,7 +835,7 @@ mod vita {
                 println!("[lg/profile] window {}", window);
                 s.windows.push(window); s.window_world=WorldCounts::default(); s.window_cpu_ms=0.;
             }
-            s.frames % 60 == 0
+            if s.mode.warmup_frames() > 0 { s.frames == 120 } else { s.frames % 60 == 0 }
         })
     }
     fn stats(v: &[f64]) -> serde_json::Value {
@@ -800,11 +862,13 @@ mod vita {
                 let mut sorted = v.frames.clone(); sorted.sort_unstable(); let n = sorted.len();
                 (*model, serde_json::json!({"total":v.total,"median":sorted.get(n/2),"p95":sorted.get(n*95/100),"frame_values":v.frames}))
             }).collect::<BTreeMap<_,_>>();
-            let storage_bytes: usize = s.labels.values().map(|v| 8 * (v.frames.capacity() + v.exclusive.capacity() + v.frame_calls.capacity() + v.invocations.capacity())).sum::<usize>() + s.counters.values().map(|v| 8*v.frames.capacity()).sum::<usize>() + s.models.values().map(|v|8*v.frames.capacity()).sum::<usize>() + s.pending.capacity()*std::mem::size_of::<(&str,f64,f64)>();
+            let storage_bytes: usize = s.labels.values().map(|v| 8 * (v.frames.capacity() + v.exclusive.capacity() + v.frame_calls.capacity() + v.invocations.capacity())).sum::<usize>() + s.counters.values().map(|v| 8*v.frames.capacity()).sum::<usize>() + s.models.values().map(|v|8*v.frames.capacity()).sum::<usize>() + s.pending.capacity()*std::mem::size_of::<(&str,f64,f64)>() + 8*s.frame_wall_ms.capacity();
             (format!("{map}-{}-{}.json",s.mode.name(),s.frames), serde_json::json!({
                 "map":map,"mode":s.mode.name(),"gameplay_frames":s.frames,"clocks_raised":s.clocks_raised,
+                "warmup_frames":s.mode.warmup_frames(),
+                "frame_wall_ms":{"frame_values_ms":s.frame_wall_ms,"per_frame":stats(&s.frame_wall_ms)},
                 "quantiles":"sorted[n/2] and sorted[floor(n*0.95)] (zero-based)",
-                "population":"cumulative accepted gameplay frames since map/mode entry; zero for labels absent in a frame; max 10000 frame samples per series; first 1024 invocation samples per label; all invocation totals/calls retained",
+                "population":"cumulative measured accepted gameplay frames since map/mode entry, after warmup_frames; zero for labels absent in a frame; max 10000 frame samples per series; first 1024 invocation samples per label; all invocation totals/calls retained",
                 "spans":spans,"counters":counters,"model_rebuilds":model_rebuilds,"hierarchy_errors":s.hierarchy_errors,"profile_vector_capacity_bytes":storage_bytes,"world_counts":s.world,"windows":s.windows,
             }))
         });
@@ -813,5 +877,71 @@ mod vita {
         std::fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
         println!("[lg/profile] report {}", path.display());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bench_policy_tests {
+    use super::*;
+    #[test]
+    fn benchmark_modes_parse_and_keep_world_visible() {
+        for (name, mode) in [("renderbench", Mode::RenderBench), ("fullbench", Mode::FullBench)] {
+            assert_eq!(Mode::parse(&format!(" {name}\n")), mode);
+            assert_eq!(mode.name(), name);
+            assert!(mode.is_bench());
+            assert!(!mode.no_world());
+            assert!(!mode.skip_static_prep());
+            assert_eq!(mode.warmup_frames(), 60);
+        }
+    }
+    #[test]
+    fn historical_mode_policies_remain_unchanged() {
+        for (name, mode) in [("full",Mode::Full),("nopreview",Mode::NoPreview),("noprep",Mode::NoPrep),
+            ("noworld",Mode::NoWorld),("clk444",Mode::Clk444),("bench",Mode::Bench)] {
+            assert_eq!(Mode::parse(name),mode);
+            assert_eq!(mode.name(),name);
+            assert_eq!(mode.no_world(),matches!(mode,Mode::NoWorld|Mode::Bench));
+            assert_eq!(mode.skip_static_prep(),mode==Mode::NoPrep);
+            assert_eq!(mode.warmup_frames(),0);
+            assert_eq!(mode.throttle_preview(),mode!=Mode::Full);
+        }
+        assert_eq!(Mode::parse("unknown"),Mode::Full);
+        assert_eq!(Mode::parse(""),Mode::Full);
+    }
+    #[test]
+    fn benchmark_sessions_never_capture_or_write_saves() {
+        for mode in [Mode::Bench,Mode::RenderBench,Mode::FullBench] {
+            let mut throttle=PreviewThrottle::default();
+            for _ in 0..361 {
+                throttle.advance_frame();
+                assert!(!throttle.capture(mode));
+                assert!(!saves_writable(true,mode.is_bench()));
+            }
+        }
+        assert!(saves_writable(true,false));
+        assert!(!saves_writable(false,false));
+        assert!(!saves_writable(false,true));
+    }
+    #[test]
+    fn wall_intervals_belong_to_previous_measured_frame() {
+        use std::time::Duration;
+        let start=Instant::now();
+        let measured_start=start+Duration::from_millis(600);
+        let after_measured=measured_start+Duration::from_millis(25);
+        assert_eq!(wall_sample(None,false,start),None);
+        assert_eq!(wall_sample(Some(start),false,measured_start),None); // warmup/rejection
+        assert_eq!(wall_sample(Some(measured_start),true,after_measured),Some(25.));
+        let last_start=after_measured+Duration::from_millis(10);
+        assert_eq!(wall_sample(Some(after_measured),false,last_start),None);
+        assert_eq!(wall_sample(Some(last_start),true,last_start+Duration::from_millis(40)),Some(40.));
+    }
+    #[test]
+    fn historical_preview_throttles_remain_unchanged() {
+        for mode in [Mode::Full,Mode::NoPreview,Mode::NoPrep,Mode::NoWorld,Mode::Clk444] {
+            let mut throttle=PreviewThrottle::default();
+            let captures=(0..361).filter(|_| {throttle.advance_frame();throttle.capture(mode)}).collect::<Vec<_>>();
+            if mode==Mode::Full {assert_eq!(captures.len(),361);}
+            else {assert_eq!(captures,vec![0,120,240,360]);}
+        }
     }
 }

@@ -939,6 +939,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         hud.announce("A saved game could not be read. F9 retries quick load.");
     }
     retry.remember(game_snapshot!());
+    #[cfg(target_os = "vita")]
+    let mut profile_report_due = false;
     loop {
         #[cfg(target_os = "vita")]
         {
@@ -946,26 +948,46 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             unsafe { sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT) };
             crate::frame_profile::begin_frame(&maps[current]);
             preview_throttle.advance_frame();
+            if profile_report_due {
+                // The next begin_frame completes the last measured wall interval.
+                // Exit before simulating or drawing an extra gameplay frame.
+                profile_report_due = false;
+                let report = crate::frame_profile::report(&maps[current]);
+                let mode = crate::frame_profile::mode();
+                if mode.is_bench() && crate::frame_profile::bench_frames() == Some(120) {
+                    if let Err(e) = report {
+                        eprintln!("bench: report failed ({e:#})");
+                    } else {
+                        println!("bench: done 120 frames mode={}, report ux0:data/alice/private/frame_profile/{}-{}-120.json", mode.name(), maps[current], mode.name());
+                    }
+                    break;
+                }
+                if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
+            }
         }
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
         #[cfg(target_os = "vita")]
         let mut viewer_block = crate::frame_profile::span("frame_input");
 
         #[cfg(target_os = "vita")]
-        let bench = crate::frame_profile::mode() == crate::frame_profile::Mode::Bench;
+        let bench = crate::frame_profile::mode().is_bench();
         #[cfg(not(target_os = "vita"))]
         let bench = false;
         #[cfg(target_os = "vita")]
         {
             bench_session |= bench;
-            if crate::frame_profile::bench_frames().is_none_or(|n| n == 0) {
+            if crate::frame_profile::bench_accepted_frames().is_none_or(|n| n == 0) {
                 bench_camera = None;
             }
         }
         #[cfg(target_os = "vita")]
-        let saves_writable = saves_enabled && !bench_session;
+        let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
         #[cfg(not(target_os = "vita"))]
         let saves_writable = saves_enabled;
+        #[cfg(target_os = "vita")]
+        let simulate = !crate::frame_profile::simulation_frozen();
+        #[cfg(not(target_os = "vita"))]
+        let simulate = true;
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
         input.update(&preferences, window_focused() && !bench);
@@ -1100,7 +1122,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut weapon_input_enabled = false;
         let mut pending_transition = None;
         let mut advance_dialogue = false;
-        let dt = elapsed.clamp(0., 0.05);
+        let dt = if simulate { elapsed.clamp(0., 0.05) } else { 0. };
         let world_dt = stats.powers.world_dt(dt);
         let power_before = stats.active_power().map(|(k, _)| k);
         let loot_visit = save::visit_key(&maps[current], entry_spawn.as_deref());
@@ -1579,8 +1601,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 || (!paused && pressed(KeyCode::R)));
         let restart =
             focused && !menu && !inventory_menu && !console_input && pressed(KeyCode::Home);
-        if let Some(s) = &mut interactions.school {
-            s.sync_inventory(&mut stats);
+        if simulate {
+            if let Some(s) = &mut interactions.school {
+                s.sync_inventory(&mut stats);
+            }
         }
         let in_transport = interactions.duchess.as_ref().is_some_and(|d| d.cinematic())
             || interactions.scripted()
@@ -1868,7 +1892,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     }
                 }
             }
-        } else if !overlay_before
+        } else if simulate && !overlay_before
             && !paused
             && !inventory_menu
             && !console_input
@@ -2200,14 +2224,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     }
                 }
             }
-        } else {
+        } else if simulate {
             clock.pause();
-        }
-        #[cfg(target_os = "vita")]
-        {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_story");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         let story_active = !paused
             && !menu
@@ -2216,6 +2234,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && focused
             && !flying
             && stats.alive();
+        if simulate {
+        #[cfg(target_os = "vita")]
+        {
+            drop(viewer_block);
+            viewer_block = crate::frame_profile::span("frame_story");
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+        }
         hints.sync(&interactions);
         if (summon_cat || (story_active && pressed(KeyCode::C))) && !in_transport {
             let outcome = if !stats.alive() || flying {
@@ -2476,6 +2501,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
         }
+        } // simulation: story and transitions
+        if simulate {
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -2514,8 +2541,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             interactions.place_level_particles(&mut steam);
             steam.update_clocks(dt, world_dt, pos, &scene.world);
         }
+        } // simulation: particles
         #[cfg(target_os = "vita")]
-        {
+        if simulate {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_combat");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Combat);
@@ -2529,7 +2557,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 .as_ref()
                 .and_then(|s| s.return_visit.as_ref())
                 .is_some_and(|s| s.camera().is_some());
-        if camera_handoff.was_scripted() && !still_scripted {
+        if simulate && camera_handoff.was_scripted() && !still_scripted {
             if !third_person {
                 camera_handoff.skip();
             }
@@ -2554,7 +2582,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && focused
             && !flying
             && stats.alive();
-        if active {
+        if active && simulate {
             played = true;
             stats.update(dt);
             pickup_clock += dt;
@@ -2563,6 +2591,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // enemies and attacks resume after the conversation.
         let pand_cinematic =
             interactions.duchess.as_ref().is_some_and(|d| d.cinematic()) || interactions.scripted();
+        if simulate {
         if story.busy()
             || pand_cinematic
             || interactions.school.as_ref().is_some_and(|s| s.cinematic())
@@ -2697,10 +2726,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if !stats.alive() {
             alice.die();
         }
+        } // simulation: combat, encounters and NPC poses
         let death_animation =
             !stats.alive() && focused && !paused && !menu && !inventory_menu && !console_input;
         #[cfg(target_os = "vita")]
-        {
+        if simulate {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_alice");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Alice);
@@ -2730,6 +2760,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             targets.extend(interactions.levels_targets());
         }
         targets.extend(alice.ice_targets());
+        if simulate {
         alice.world_time(dt, world_dt);
         alice.notarget(stats.ignores_alice());
         let weapon_sounds = alice.update_funded(
@@ -2902,8 +2933,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         );
         alice.power_appearance(&stats);
         alice.water_appearance(&player);
+        } // simulation: Alice, weapons and world audio
         let rage_scene = interactions.beyond.as_ref().and_then(|b| b.rage_scene());
-        if let Some((time, finished)) = rage_scene {
+        if let Some((time, finished)) = rage_scene.filter(|_| simulate) {
             alice.rage_scene(time, finished, &player);
         }
         #[cfg(target_os = "vita")]
@@ -3053,6 +3085,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             } else {
                 gameplay_alice && camera.distance(player.feet + Vec3::Z * 32.) > 30.
             };
+        if simulate {
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3075,6 +3108,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             console_input || menu || paused || inventory_menu || !focused,
             !story_active,
         );
+        } // simulation: audio listener and clocks
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3330,7 +3364,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_capture");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
-        if saves_enabled {
+        if saves_writable {
             #[cfg(target_os = "vita")]
             if preview_throttle.capture(crate::frame_profile::mode()) {
                 let _profile = crate::frame_profile::span("save_preview");
@@ -3713,28 +3747,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let gameplay = active && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none()
                 && !story.busy() && !interactions.school.as_ref().is_some_and(|s| s.cinematic());
             let report_due = crate::frame_profile::end_frame(&maps[current], gameplay);
-            if bench && gameplay && crate::frame_profile::bench_frames().is_some_and(|n| n > 0)
+            if bench && gameplay && crate::frame_profile::bench_accepted_frames().is_some_and(|n| n > 0)
                 && bench_camera.is_none()
             {
                 bench_camera = Some((camera, target, gameplay_alice));
                 println!("bench: camera frozen map={} feet={:?}", maps[current], player.feet);
             }
-            if report_due {
-                // JSON I/O is outside frame_cpu, but remains visible in backend FPS.
-                let report = crate::frame_profile::report(&maps[current]);
-                if bench && crate::frame_profile::bench_frames() == Some(120) {
-                    // Fail visibly on report I/O errors; never announce a nonexistent report.
-                    if let Err(e) = report {
-                        eprintln!("bench: report failed ({e:#})");
-                    } else {
-                        println!("bench: done 120 frames, report ux0:data/alice/private/frame_profile/{}-bench-120.json", maps[current]);
-                    }
-                    break;
-                }
-                if let Err(e) = report {
-                    eprintln!("Frame profile report failed: {e:#}");
-                }
-            }
+            // Report at the next begin_frame, once the wall sample is complete.
+            profile_report_due = report_due;
         }
         frame += 1;
         if !bench && is_key_pressed(KeyCode::F12) {
@@ -3756,7 +3776,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         next_frame().await;
     }
     #[cfg(target_os = "vita")]
-    let saves_writable = saves_enabled && !bench_session;
+    let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
     #[cfg(not(target_os = "vita"))]
     let saves_writable = saves_enabled;
     if saves_writable && played && stats.alive() && options.frames.is_none() && !post_game {
