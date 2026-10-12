@@ -1279,6 +1279,14 @@ impl Menu {
             audio.update(0., listener, yaw, true, true);
             let canvas = Canvas::new(screen_width(), screen_height());
             let mouse = Vec2::from(mouse_position());
+            // Vita Cross emits both Enter and a left click. Keep Cross as an
+            // attack/resume button in gameplay, but let menu confirmation use
+            // the D-pad-selected widget rather than the virtual cursor's hit.
+            // Ignore its release-position event too; touch alone stays usable.
+            #[cfg(target_os = "vita")]
+            let pointer_input = !is_key_down(KeyCode::Enter) && !is_key_released(KeyCode::Enter);
+            #[cfg(not(target_os = "vita"))]
+            let pointer_input = true;
             let hit = buttons
                 .iter()
                 .position(|b| b.rect.contains(canvas.pointer(mouse)));
@@ -1305,12 +1313,12 @@ impl Menu {
                         }
                     }
                 } else {
-                    if mouse.distance_squared(self.previous_pointer) > 1. {
+                    if pointer_input && mouse.distance_squared(self.previous_pointer) > 1. {
                         if let Some(i) = hit {
                             self.selected = i;
                         }
                     }
-                    if is_mouse_button_down(MouseButton::Left) {
+                    if pointer_input && is_mouse_button_down(MouseButton::Left) {
                         if let Some(i) = hit {
                             if let Click::Row(row) = buttons[i].click {
                                 let p = canvas.pointer(mouse);
@@ -1344,7 +1352,7 @@ impl Menu {
                         Some(Click::Page(Page::Controls))
                     } else if page == Page::Settings && is_key_pressed(KeyCode::Key4) {
                         Some(Click::Page(Page::Game))
-                    } else if is_mouse_button_pressed(MouseButton::Left) {
+                    } else if pointer_input && is_mouse_button_pressed(MouseButton::Left) {
                         hit.map(|i| buttons[i].click)
                     } else if input.ui(KeyCode::Enter) {
                         Some(buttons[self.selected].click)

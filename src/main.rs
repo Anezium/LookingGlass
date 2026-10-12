@@ -187,11 +187,17 @@ fn app_main() {
     #[cfg(target_os = "vita")]
     {
         use macroquad::miniquad::native::vita::{set_config, InputConfig, LeftStickMode, VitaConfig};
+        use macroquad::miniquad::KeyCode;
         set_config(VitaConfig {
             compact_stream_buffers: true,
             log_frame_time_every: Some(10),
             input: InputConfig {
-                left_stick: LeftStickMode::Mouse { speed: 8.0 },
+                left_stick: LeftStickMode::Keys {
+                    up: KeyCode::W,
+                    down: KeyCode::S,
+                    left: KeyCode::A,
+                    right: KeyCode::D,
+                },
                 cross_is_left_click: true,
                 ..Default::default()
             },
