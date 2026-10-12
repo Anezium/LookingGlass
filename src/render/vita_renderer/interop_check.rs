@@ -45,6 +45,7 @@ impl Plane {
             });
         let texture = white.raw_miniquad_id();
         let ctx = unsafe { get_internal_gl() }.quad_context;
+        crate::frame_profile::shader_creation();
         let shader = ctx.new_shader(
             ShaderSource::Glsl {
                 vertex: shader::VERTEX,
@@ -52,6 +53,7 @@ impl Plane {
             },
             shader::meta(),
         )?;
+        crate::frame_profile::pipeline_creation();
         let pipeline = ctx.new_pipeline(
             &[BufferLayout {
                 stride: 52,
@@ -149,6 +151,19 @@ fn check_color(expected: Vec3, label: &str) -> Result<()> {
     Ok(())
 }
 pub async fn check() -> Result<()> {
+    // Reproduce the milestone-2 weak-cache lifetime without a scene owner.
+    crate::frame_profile::begin_creation_frame();
+    for _ in 0..3 { drop(crate::render::world_material(12)?); }
+    ensure!(crate::frame_profile::current_creations()==[3,3], "weak cache must reproduce per-frame compilation");
+    println!("PASS reproduced weak-cache shader/pipeline recreation: 3 / 3");
+    let owner:crate::render::WorldMaterialKeepalive=Default::default();
+    crate::render::activate_world_materials(&owner);
+    for frame in 0..180 {
+        crate::frame_profile::begin_creation_frame();
+        drop(crate::render::world_material(12)?);
+        if frame>0 { ensure!(crate::frame_profile::current_creations()==[0,0], "scene owner recompiled frame {frame}"); }
+    }
+    println!("PASS scene-owned material reuse: 0 shader / 0 pipeline creations after warmup (180 frames)");
     ensure!(
         config().sort_alpha && config().actor_max_layers == 2,
         "fixture requires sort_alpha=true, actor_max_layers=2"

@@ -178,7 +178,7 @@ fn material(filter: bool) -> Result<Rc<Material>> {
             (BlendFactor::One, BlendFactor::One)
         };
         let m = Rc::new(
-            load_material(
+            crate::frame_profile::load_material(
                 ShaderSource::Glsl {
                     vertex: crate::character::VERTEX,
                     fragment: &crate::environment::fragment(FRAGMENT),

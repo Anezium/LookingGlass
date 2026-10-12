@@ -1391,7 +1391,7 @@ impl Visuals {
         {
             props.push(Prop::load(assets, &name, &specs)?);
         }
-        let effect_material = load_material(
+        let effect_material = crate::frame_profile::load_material(
             ShaderSource::Glsl {
                 vertex: crate::character::VERTEX,
                 fragment: &crate::environment::fragment(EFFECT_FRAGMENT),

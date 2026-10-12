@@ -1591,7 +1591,7 @@ pub(crate) fn skin_material() -> Result<SkinMaterial> {
         if let Some(material) = cache.borrow().upgrade() {
             return Ok(SkinMaterial(material));
         }
-        let material = load_material(
+        let material = crate::frame_profile::load_material(
             ShaderSource::Glsl {
                 vertex: VERTEX,
                 fragment: &crate::environment::fragment(FRAGMENT),

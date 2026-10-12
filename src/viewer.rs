@@ -989,6 +989,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
     loop {
+        #[cfg(not(target_os="vita"))]
+        crate::frame_profile::begin_creation_frame();
         #[cfg(target_os = "vita")]
         {
             // Synthetic companion input does not reset the screen/idle timers.
@@ -3183,6 +3185,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         clear_background(scene.atmosphere.background());
         let world_camera = Camera3D {
+            #[cfg(feature="vita_renderer")]
+            viewport: crate::render::vita_renderer::world_viewport(),
             position: camera,
             target,
             up: pand_camera.map_or(Vec3::Z, |c| c.up),
@@ -3824,6 +3828,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Report at the next begin_frame, once the wall sample is complete.
             profile_report_due = report_due;
         }
+        #[cfg(not(target_os="vita"))]
+        crate::frame_profile::end_creation_frame();
         frame += 1;
         if !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(
@@ -3834,6 +3840,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if options.frames.is_some_and(|limit| frame >= limit) {
             #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
             println!("[lg/vita-renderer] host frame report {}",crate::render::vita_renderer::report());
+            #[cfg(not(target_os="vita"))]
+            println!("[lg/shaders] host frame creations {}",crate::frame_profile::creation_report());
             crate::frame_profile::report(&maps[current])?;
             if let Some(path) = &options.capture {
                 save_capture(path)?;

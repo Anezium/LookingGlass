@@ -1,6 +1,40 @@
 //! Optional local CPU profiling; inactive during ordinary play.
 use std::{cell::RefCell, collections::BTreeMap, time::Instant};
 
+// Count LG-owned creation calls, including Macroquad material compilation.
+// Framework startup shaders are outside the viewer frame window.
+#[derive(Default)]
+struct Creations { current: [u64; 2], #[cfg(not(target_os="vita"))] frames: Vec<[u64; 2]> }
+thread_local! { static CREATIONS: RefCell<Creations> = RefCell::default(); }
+pub(crate) fn shader_creation() {
+    CREATIONS.with(|c| c.borrow_mut().current[0] += 1);
+    #[cfg(target_os="vita")]
+    counts(&[("shader_creations",1)]);
+}
+pub(crate) fn pipeline_creation() {
+    CREATIONS.with(|c| c.borrow_mut().current[1] += 1);
+    #[cfg(target_os="vita")]
+    counts(&[("pipeline_creations",1)]);
+}
+pub(crate) fn begin_creation_frame() { CREATIONS.with(|c| c.borrow_mut().current=[0;2]); }
+#[cfg(not(target_os="vita"))]
+pub(crate) fn end_creation_frame() {
+    CREATIONS.with(|c| { let mut c=c.borrow_mut(); let current=c.current; c.frames.push(current); });
+}
+#[cfg(not(target_os="vita"))]
+pub(crate) fn creation_report() -> serde_json::Value {
+    CREATIONS.with(|c| { let c=c.borrow(); let measured=c.frames.get(60..).unwrap_or_default();
+        serde_json::json!({"warmup_frames":60,"frames":c.frames,"measured_frames":measured.len(),
+          "shader_creations_after_warmup":measured.iter().map(|v|v[0]).sum::<u64>(),
+          "pipeline_creations_after_warmup":measured.iter().map(|v|v[1]).sum::<u64>()}) })
+}
+#[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+pub(crate) fn current_creations() -> [u64;2] { CREATIONS.with(|c| c.borrow().current) }
+pub(crate) fn load_material(shader: macroquad::miniquad::ShaderSource<'_>, params: macroquad::material::MaterialParams) -> Result<macroquad::material::Material, macroquad::Error> {
+    shader_creation(); pipeline_creation();
+    macroquad::material::load_material(shader,params)
+}
+
 #[cfg(any(target_os = "vita", test))]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -456,6 +490,8 @@ mod vita {
         frame_start: Option<Instant>,
         wall_pending: bool,
         frame_wall_ms: Vec<f64>,
+        heap_uordblks: Vec<u64>,
+        heap_before: Option<u64>,
         recording: bool,
         clocks_raised: bool,
         pending: Vec<(&'static str, f64, f64)>,
@@ -476,6 +512,11 @@ mod vita {
     }
     thread_local! { static STATE: RefCell<State> = RefCell::default(); }
 
+    // ABI from VitaSDK malloc.h: ten size_t fields, 32-bit on Vita.
+    #[repr(C)]
+    struct MallInfo { arena:usize, ordblks:usize, smblks:usize, hblks:usize, hblkhd:usize, usmblks:usize, fsmblks:usize, uordblks:usize, fordblks:usize, keepcost:usize }
+    extern "C" { fn mallinfo() -> MallInfo; }
+    fn heap_used()->u64 { unsafe { mallinfo().uordblks as u64 } }
     #[link(name = "ScePower_stub")]
     extern "C" {
         fn scePowerSetArmClockFrequency(freq: i32) -> i32;
@@ -698,6 +739,7 @@ mod vita {
     }
     pub fn begin_frame(map: &str) {
         let now = Instant::now();
+        super::begin_creation_frame();
         reset_hot_counts();
         HOT_RECORDING.store(enabled(), Relaxed);
         STATE.with(|s| {
@@ -714,6 +756,7 @@ mod vita {
             if let Some(ms) = wall_sample(s.frame_start, s.wall_pending, now) {
                 if s.frame_wall_ms.len() < 10000 { s.frame_wall_ms.push(ms); }
             }
+            if s.wall_pending && s.heap_uordblks.len()<10000 { s.heap_uordblks.push(heap_used()); }
             s.wall_pending = false;
             s.frame_start = Some(now);
             let mode_changed = next_mode != s.mode;
@@ -723,6 +766,7 @@ mod vita {
                 s.frames = 0;
                 s.accepted_frames = 0;
                 s.frame_wall_ms.clear();
+                s.heap_uordblks.clear(); s.heap_before=None;
                 s.labels.clear();
                 s.counters.clear();
                 s.models.clear();
@@ -759,9 +803,11 @@ mod vita {
             s.since_flush = 0;
             s.pending_world = WorldCounts::default();
             s.recording = enabled();
+            if s.recording && s.accepted_frames>0 && s.accepted_frames==s.mode.warmup_frames() && s.heap_before.is_none() { s.heap_before=Some(heap_used()); }
         });
     }
     pub fn end_frame(map: &str, gameplay: bool) -> bool {
+        counts(&[("shader_creations",0),("pipeline_creations",0)]);
         HOT_RECORDING.store(false, Relaxed);
         STATE.with(|s| {
             let mut s = s.borrow_mut(); s.recording = false;
@@ -777,22 +823,24 @@ mod vita {
                 s.pending_world = WorldCounts::default();
                 return false;
             }
+            if s.heap_before.is_none() { s.heap_before=Some(heap_used()); }
             s.wall_pending = true;
             let pending = std::mem::take(&mut s.pending);
             let mut totals = BTreeMap::<&'static str, f64>::new();
             let mut exclusive_totals = BTreeMap::<&'static str, f64>::new();
             let mut calls = BTreeMap::<&'static str, f64>::new();
             for (label, ms, exclusive) in pending {
-                let v = s.labels.entry(label).or_default(); v.calls += 1;
+                let previous=s.frames.min(10000);
+                let v = s.labels.entry(label).or_insert_with(|| LabelSamples { frames:vec![0.;previous], exclusive:vec![0.;previous], frame_calls:vec![0.;previous], ..Default::default() }); v.calls += 1;
                 if v.invocations.len() < 1024 { v.invocations.push(ms); }
                 v.invocation_total_ms += ms;
                 *exclusive_totals.entry(label).or_default() += exclusive;
                 *calls.entry(label).or_default() += 1.;
                 *totals.entry(label).or_default() += ms;
             }
-            for &label in LABELS {
+            for &label in LABELS { s.labels.entry(label).or_default(); }
+            for (label, v) in &mut s.labels {
                 let value = *totals.get(label).unwrap_or(&0.);
-                let v = s.labels.entry(label).or_default();
                 if v.frames.len() < 10000 {
                     v.frames.push(value);
                     v.exclusive.push(*exclusive_totals.get(label).unwrap_or(&0.));
@@ -831,7 +879,7 @@ mod vita {
             s.frames += 1;
             if s.frames % 10 == 0 {
                 let window = serde_json::json!({"mode":s.mode.name(), "map":s.map, "gameplay_frames_end":s.frames,
-                    "frame_cpu_mean_ms":s.window_cpu_ms/10., "counts":s.window_world});
+                    "frame_cpu_mean_ms":s.window_cpu_ms/10., "heap_uordblks_bytes":heap_used(), "counts":s.window_world});
                 println!("[lg/profile] window {}", window);
                 s.windows.push(window); s.window_world=WorldCounts::default(); s.window_cpu_ms=0.;
             }
@@ -867,6 +915,9 @@ mod vita {
                 "map":map,"mode":s.mode.name(),"gameplay_frames":s.frames,"clocks_raised":s.clocks_raised,
                 "warmup_frames":s.mode.warmup_frames(),
                 "frame_wall_ms":{"frame_values_ms":s.frame_wall_ms,"per_frame":stats(&s.frame_wall_ms)},
+                "heap":{"source":"newlib mallinfo.uordblks", "before_measured_bytes":s.heap_before,"end_measured_bytes":s.heap_uordblks.last(),
+                  "delta_bytes":s.heap_before.zip(s.heap_uordblks.last().copied()).map(|(a,b)|b as i64-a as i64),
+                  "frame_end_bytes":s.heap_uordblks,"includes_profile_allocations":true},
                 "quantiles":"sorted[n/2] and sorted[floor(n*0.95)] (zero-based)",
                 "population":"cumulative measured accepted gameplay frames since map/mode entry, after warmup_frames; zero for labels absent in a frame; max 10000 frame samples per series; first 1024 invocation samples per label; all invocation totals/calls retained",
                 "spans":spans,"counters":counters,"model_rebuilds":model_rebuilds,"hierarchy_errors":s.hierarchy_errors,"profile_vector_capacity_bytes":storage_bytes,"world_counts":s.world,"windows":s.windows,

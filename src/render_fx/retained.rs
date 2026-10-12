@@ -161,6 +161,7 @@ impl Gpu {
         let fragment =
             crate::lighting::fragment(&crate::environment::fragment(crate::render::FRAGMENT));
         let ctx = unsafe { get_internal_gl() }.quad_context;
+        crate::frame_profile::shader_creation();
         let shader = ctx
             .new_shader(
                 ShaderSource::Glsl {
@@ -244,6 +245,7 @@ impl Gpu {
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let key = (p.blend_index, p.depth_equal);
         let pipeline = self.pipelines.entry(key).or_insert_with(|| {
+            crate::frame_profile::pipeline_creation();
             ctx.new_pipeline(
                 &[BufferLayout {
                     stride: 40,

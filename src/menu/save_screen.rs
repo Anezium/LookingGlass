@@ -56,7 +56,7 @@ pub(super) struct Film {
 }
 impl Film {
     pub fn load(assets: &mut Assets) -> Result<Self> {
-        let material = load_material(
+        let material = crate::frame_profile::load_material(
             ShaderSource::Glsl {
                 vertex: VERTEX,
                 fragment: FRAGMENT,

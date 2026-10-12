@@ -241,7 +241,7 @@ pub(super) fn load(
             if normal.length_squared() < 0.9 || forward.length_squared() < 0.9 {
                 continue;
             }
-            let material = load_material(
+            let material = crate::frame_profile::load_material(
                 ShaderSource::Glsl {
                     vertex: VERTEX,
                     fragment: FRAGMENT,

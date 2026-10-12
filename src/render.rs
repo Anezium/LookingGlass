@@ -110,6 +110,7 @@ struct Batch {
 pub struct Scene {
     #[cfg(feature = "vita_renderer")]
     retained: Option<vita_renderer::Renderer>,
+    world_material_keepalive: WorldMaterialKeepalive,
     camera_portals: Vec<camera_portal::Portal>,
     rope_shapes: Vec<crate::rope::Strand>,
     pub optimize: bool,
@@ -466,15 +467,25 @@ pub(crate) fn blend(i: usize) -> Option<BlendState> {
     };
     Some(BlendState::new(Equation::Add, s, d))
 }
+pub(crate) type WorldMaterialKeepalive = Rc<RefCell<BTreeMap<usize, Rc<Material>>>>;
+pub(crate) fn activate_world_materials(owner:&WorldMaterialKeepalive) {
+    ACTIVE_WORLD_MATERIALS.with(|active| *active.borrow_mut()=Rc::downgrade(owner));
+}
 thread_local! {
+    static ACTIVE_WORLD_MATERIALS: RefCell<Weak<RefCell<BTreeMap<usize,Rc<Material>>>>> = RefCell::default();
     // Macroquad has only 32 simultaneous pipeline slots. Save restoration and
     // map transitions keep two scenes alive; share immutable pipeline definitions.
-    // Weak entries release GPU resources when the last scene goes away.
+    // Weak sharing avoids permanently consuming Macroquad slots. Each active
+    // scene also owns its effect materials: a weak-only cache recompiles passes
+    // after the retained renderer releases the old world materials.
     static WORLD_MATERIALS: RefCell<BTreeMap<usize, Weak<Material>>> = RefCell::default();
 }
 pub(crate) fn world_material(index: usize) -> Result<Rc<Material>> {
+    let owner=ACTIVE_WORLD_MATERIALS.with(|active| active.borrow().upgrade());
+    if let Some(material)=owner.as_ref().and_then(|o|o.borrow().get(&index).cloned()) { return Ok(material); }
     WORLD_MATERIALS.with(|cache| {
         if let Some(material) = cache.borrow().get(&index).and_then(Weak::upgrade) {
+            if let Some(owner)=&owner { owner.borrow_mut().insert(index,material.clone()); }
             return Ok(material);
         }
         let fragment = crate::lighting::fragment(&crate::environment::fragment(FRAGMENT));
@@ -495,7 +506,7 @@ pub(crate) fn world_material(index: usize) -> Result<Rc<Material>> {
         uniforms.extend(crate::lighting::uniforms());
         uniforms.extend(crate::environment::uniforms());
         let material = Rc::new(
-            load_material(
+            crate::frame_profile::load_material(
                 ShaderSource::Glsl {
                     vertex: VERTEX,
                     fragment: &fragment,
@@ -516,6 +527,7 @@ pub(crate) fn world_material(index: usize) -> Result<Rc<Material>> {
             .map_err(|e| anyhow::anyhow!("World shader: {e:?}"))?,
         );
         cache.borrow_mut().insert(index, Rc::downgrade(&material));
+        if let Some(owner)=&owner { owner.borrow_mut().insert(index,material.clone()); }
         Ok(material)
     })
 }
@@ -1877,6 +1889,7 @@ impl Scene {
         let mut scene = Self {
             #[cfg(feature = "vita_renderer")]
             retained: None,
+            world_material_keepalive: Default::default(),
             camera_portals,
             face_mask_cache: FaceMaskCache::default(),
             rope_shapes,
@@ -1952,6 +1965,10 @@ impl Scene {
         fullbright: bool,
         flush: bool,
     ) {
+        #[cfg(target_os="vita")]
+        activate_world_materials(&self.world_material_keepalive);
+        #[cfg(not(target_os="vita"))]
+        if std::env::var_os("LOOKING_GLASS_REPRO_M2_LEAK").is_none() { activate_world_materials(&self.world_material_keepalive); }
         #[cfg(not(feature = "vita_renderer"))]
         let _ = flush;
         #[cfg(feature = "vita_renderer")]
@@ -2592,7 +2609,7 @@ pub async fn check_depth() -> Result<()> {
     let mut materials = Vec::new();
     for i in 0..7 {
         materials.push(
-            load_material(
+            crate::frame_profile::load_material(
                 ShaderSource::Glsl {
                     vertex: crate::character::VERTEX,
                     fragment: &source,

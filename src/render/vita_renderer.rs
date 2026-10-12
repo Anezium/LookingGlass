@@ -30,6 +30,7 @@ pub struct Config {
     pub pvs_method: String,
     pub pvs_verify: bool,
     pub gpu_experiment: String,
+    pub world_viewport_scale: f32,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -47,6 +48,7 @@ impl Default for Config {
             pvs_method: "sources".into(),
             pvs_verify: false,
             gpu_experiment: "unchanged".into(),
+            world_viewport_scale: 1.,
         }
     }
 }
@@ -64,6 +66,7 @@ impl Config {
             (1..=2).contains(&self.actor_max_layers),
             "actor_max_layers must be 1 or 2"
         );
+        ensure!(self.world_viewport_scale.is_finite() && (0.25..=1.).contains(&self.world_viewport_scale),"world_viewport_scale must be between 0.25 and 1");
         ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
         ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
         ensure!(
@@ -140,6 +143,15 @@ pub fn world_only() -> bool {
 fn mask_in_mode(requested: bool, mode: crate::frame_profile::Mode) -> bool {
     requested && mode == crate::frame_profile::Mode::RenderBench
 }
+/// Diagnostic world-only probe. Full-frame actor/HUD alignment remains full-size.
+pub(crate) fn world_viewport() -> Option<(i32,i32,i32,i32)> {
+    if !world_only() || config().world_viewport_scale==1. { return None; }
+    Some((0,0,(screen_width()*config().world_viewport_scale).round() as i32,
+              (screen_height()*config().world_viewport_scale).round() as i32))
+}
+pub(crate) fn apply_world_viewport() {
+    if let Some((x,y,w,h))=world_viewport() { unsafe { get_internal_gl().quad_context.apply_viewport(x,y,w,h); } }
+}
 static INVENTORY: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 #[derive(Clone, Copy, serde::Serialize)]
 struct View {
@@ -151,6 +163,7 @@ struct View {
     far: f32,
     width: f32,
     height: f32,
+    viewport: Option<(i32,i32,i32,i32)>,
 }
 static VIEW: Mutex<Option<View>> = Mutex::new(None);
 pub(crate) fn record_view(camera: &Camera3D) {
@@ -163,6 +176,7 @@ pub(crate) fn record_view(camera: &Camera3D) {
         far: camera.z_far,
         width: screen_width(),
         height: screen_height(),
+        viewport: camera.viewport,
     });
 }
 pub fn report() -> serde_json::Value {
@@ -534,6 +548,7 @@ impl Renderer {
         let upload_start=std::time::Instant::now();
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
+        crate::frame_profile::shader_creation();
         let shader = ctx
             .new_shader(
                 ShaderSource::Glsl {
@@ -576,6 +591,7 @@ impl Renderer {
                 )),
             };
             for cull in [CullFace::Nothing, CullFace::Back, CullFace::Front] {
+                crate::frame_profile::pipeline_creation();
                 pipelines.push(ctx.new_pipeline(
                     &[BufferLayout {
                         stride: 52,
@@ -622,6 +638,7 @@ impl Renderer {
                 faces: p.geometry.faces,
             });
         }
+        crate::frame_profile::shader_creation();
         let sky_shader = ctx.new_shader(
             ShaderSource::Glsl {
                 vertex: shader::SKY_VERTEX,
@@ -637,6 +654,7 @@ impl Renderer {
                 },
             },
         )?;
+        crate::frame_profile::pipeline_creation();
         let sky_pipeline = ctx.new_pipeline(
             &[BufferLayout::default()],
             &[VertexAttribute::new("position", VertexFormat::Float2)],
@@ -809,6 +827,7 @@ impl Renderer {
                 .quad_context
                 .begin_default_pass(PassAction::Nothing);
         }
+        apply_world_viewport();
         let mut stats = super::DrawStats {
             culled: (if alpha {
                 self.pvs.unknown.alpha.len()
@@ -1329,6 +1348,8 @@ mod tests {
         }
         assert!(Config {gpu_experiment:"gpu444".into(),..Config::default()}.validate().is_err());
         assert!(Config {pvs_method:"invalid".into(),..Config::default()}.validate().is_err());
+        for scale in [0.25,0.5,1.] { assert!(Config {world_viewport_scale:scale,..Config::default()}.validate().is_ok()); }
+        for scale in [0.,1.1,f32::NAN] { assert!(Config {world_viewport_scale:scale,..Config::default()}.validate().is_err()); }
     }
     #[test]
     fn frustum_fails_open_for_crossing_boxes() {
