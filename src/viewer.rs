@@ -3321,25 +3321,41 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_characters");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
         }
         if !world_only {
+        {
+            #[cfg(target_os = "vita")]
+            let _characters_profile = crate::frame_profile::span("characters_setup");
             if draw_world && show_alice && stats.invisible <= 0. {
                 crate::lighting::shadow(&scene.world, player.feet, 22.);
             }
             alice.atmosphere(&scene.atmosphere, camera);
+        }
+        {
+            #[cfg(target_os = "vita")]
+            let _characters_profile = crate::frame_profile::span("characters_alice");
             if show_alice && !interactions.school.as_ref().is_some_and(|s| s.cinematic()) {
                 alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
             }
+        }
+        {
+            #[cfg(target_os = "vita")]
+            let _characters_profile = crate::frame_profile::span("characters_npcs");
             npcs.draw(
                 camera,
                 (target - camera).normalize_or_zero(),
                 &scene.atmosphere,
                 fullbright,
             );
+        }
+        {
+            #[cfg(target_os = "vita")]
+            let _characters_profile = crate::frame_profile::span("characters_level_art");
             level_art.story_pose(&story);
             level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
         }
+        } // world-only diagnostic mask includes all character work
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);

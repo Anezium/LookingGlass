@@ -219,7 +219,8 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 
 #[cfg(target_os = "vita")]
 pub use vita::{
-    add_counter, begin_frame, bench_accepted_frames, bench_frames, simulation_frozen, counter_owner, counts, end_frame, flush_boundary, mode,
+    add_counter, begin_frame, bench_accepted_frames, bench_frames, characters_span, counter_owner,
+    counts, end_frame, flush_boundary, mode, simulation_frozen,
     record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_model,
     record_world_submission, report, set_owner, startup_bench, world_span, Counter, Owner,
 };
@@ -256,6 +257,11 @@ mod vita {
         PuffsImpacts,
         PuffsDeaths,
         PuffsBirths,
+        DynamicBoundsRejected,
+        DynamicCollidersRejected,
+        PuffsSkippedSweeps,
+        PuffsDropped,
+        LazyHullBuilds,
     }
     const COUNTER_NAMES: &[&str] = &[
         "sweep_calls",
@@ -279,6 +285,11 @@ mod vita {
         "puffs_impacts",
         "puffs_deaths",
         "puffs_births",
+        "dynamic_bounds_rejected",
+        "dynamic_colliders_rejected",
+        "puffs_skipped_sweeps",
+        "puffs_dropped",
+        "lazy_hull_builds",
     ];
     #[derive(Clone, Copy)]
     #[repr(u8)]
@@ -294,6 +305,7 @@ mod vita {
         Alice,
         InteractionSearch,
         Hud,
+        Characters,
     }
     const OWNER_NAMES: &[&str] = &[
         "",
@@ -307,6 +319,7 @@ mod vita {
         "frame_alice",
         "frame_interaction_search",
         "frame_hud",
+        "frame_characters",
     ];
     // The viewer thread owns profiling, including begin/end_frame and owners.
     // Relaxed loads/stores avoid newlib TLS calls and atomic RMW loops; these
@@ -317,6 +330,11 @@ mod vita {
         [const { [const { AtomicU32::new(0) }; COUNTER_NAMES.len() + 1] }; OWNER_NAMES.len()];
     pub fn set_owner(owner: Owner) {
         OWNER.store(owner as u8, Relaxed);
+    }
+    // Shared skin helpers also draw effects/first-person meshes. These series
+    // measure only work nested in frame_characters, so its decomposition closes.
+    pub fn characters_span(label: &'static str) -> Option<Span> {
+        (OWNER.load(Relaxed) == Owner::Characters as u8).then(|| span(label))
     }
     pub struct CounterOwner(u8);
     pub fn counter_owner(owner: Owner) -> CounterOwner {
@@ -385,6 +403,7 @@ mod vita {
         "village_cinema",
         "village_sample",
         "village_collider_build",
+        "collider_lazy_build",
         "village_ground_probe",
         "village_dynamic_publish",
         "village_rider_contact",
@@ -423,6 +442,15 @@ mod vita {
         "frame_scene",
         "frame_world",
         "frame_characters",
+        "characters_setup",
+        "characters_alice",
+        "characters_npcs",
+        "characters_level_art",
+        "characters_skinning_positions",
+        "characters_skinning_normals",
+        "characters_skinning_shading",
+        "characters_layers",
+        "characters_submit",
         "frame_objects",
         "frame_world_particles",
         "frame_effects",
@@ -925,6 +953,7 @@ mod vita {
             let storage_bytes: usize = s.labels.values().map(|v| 8 * (v.frames.capacity() + v.exclusive.capacity() + v.frame_calls.capacity() + v.invocations.capacity())).sum::<usize>() + s.counters.values().map(|v| 8*v.frames.capacity()).sum::<usize>() + s.models.values().map(|v|8*v.frames.capacity()).sum::<usize>() + s.pending.capacity()*std::mem::size_of::<(&str,f64,f64)>() + 8*s.frame_wall_ms.capacity();
             (format!("{map}-{}-{}.json",s.mode.name(),s.frames), serde_json::json!({
                 "map":map,"mode":s.mode.name(),"gameplay_frames":s.frames,"clocks_raised":s.clocks_raised,
+                "vita_sim":crate::vita_sim::effective(),
                 "warmup_frames":s.mode.warmup_frames(),
                 "frame_wall_ms":{"frame_values_ms":s.frame_wall_ms,"per_frame":stats(&s.frame_wall_ms)},
                 "heap":{"source":"newlib mallinfo.uordblks", "before_measured_bytes":s.heap_before,"end_measured_bytes":s.heap_uordblks.last(),

@@ -1,5 +1,6 @@
 //! Placed, animated characters with bounded local reactions. No original AI/scripts run.
 mod ambient;
+mod visual_lod;
 pub(crate) mod attack_fx;
 mod garden;
 pub(crate) fn garden_check(a:&mut Assets)->Result<()> { garden::check(a) }
@@ -347,6 +348,7 @@ fn metadata(text: &str) -> Result<Metadata> {
     Ok(result)
 }
 struct Data {
+    visual_radius: f32,
     card_cut: Option<crate::dismember::Recipe>,
     card_muzzle: Option<(usize, Vec3)>,
     ladybug_timing: Option<crate::ladybug::Timing>,
@@ -592,7 +594,11 @@ impl Data {
                 "Heart muzzle missing"
             );
         }
+        let visual_radius = clips.values().flat_map(|a| &a.frames)
+            .map(|f| f.min.abs().max(f.max.abs()).length())
+            .fold(0., f32::max) + 128.;
         Ok(Self {
+            visual_radius,
             card_muzzle,
             card_cut: if name == "cardguard_spade" {
                 Some(crate::dismember::card::recipe(assets)?)
@@ -1821,6 +1827,8 @@ pub fn talk_reachable(world: &World, eye: Vec3, aim: Vec3, target: Vec3) -> bool
 }
 
 pub struct Npcs {
+    // GPU-only state, discarded on restore/level change and never serialized.
+    visual_lod: BTreeMap<usize, visual_lod::Cache>,
     attack_fx: std::rc::Rc<attack_fx::Art>,
     /// Battle Royale places enemies above a player-only ceiling.
     actor_world: Option<World>,
@@ -1925,6 +1933,7 @@ impl Npcs {
         }
     }
     pub fn restore(&mut self, s: &Snapshot) -> Result<()> {
+        self.visual_lod.clear();
         if let Some(g) = &self.garden { g.validate(s.garden.as_ref())?; }
         self.card_art.clear();
         self.snark_art.clear();
@@ -2399,6 +2408,7 @@ impl Npcs {
         );
         let garden = garden::Logic::load(map,name,&mut actors)?;
         Ok(Self {
+            visual_lod: BTreeMap::new(),
             attack_fx: attack_fx::Art::load(assets, &specs)?,
             garden,
             resident_diamond: if actors.iter().any(|a| {
@@ -3097,6 +3107,10 @@ impl Npcs {
         atmosphere: &Atmosphere,
         fullbright: bool,
     ) {
+        let config = crate::vita_sim::effective();
+        let lod_enabled = config.anim_cull || config.anim_far_every > 1;
+        #[cfg(target_os = "vita")]
+        let mut lod_counts = [0u64; 5];
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for (id, actor) in self.actors.iter().enumerate() {
@@ -3316,6 +3330,36 @@ impl Npcs {
                 model.draw_guard(guard, fullbright, camera, atmosphere, &self.material);
                 continue;
             }
+            // This branch is exclusively ambient rendering: all gameplay rigs
+            // returned above, and safe() excludes every attachment/effect consumer.
+            let transform = Transform {
+                translation: actor.position(),
+                rotation: Quat::from_rotation_z(actor.yaw),
+            };
+            let decision = if lod_enabled {
+                let safe = visual_lod::safe(actor, model);
+                let radius = model.data.visual_radius * model.data.def.scale * actor.spawn.scale;
+                let outside = config.anim_cull && safe && crate::render::outside_bounds(
+                    transform.translation - Vec3::splat(radius),
+                    transform.translation + Vec3::splat(radius));
+                #[cfg(target_os = "vita")]
+                { lod_counts[4] += u64::from(!safe); }
+                self.visual_lod.entry(id).or_default().decide(config, safe, outside,
+                    offset.length_squared(), transform, actor.spawn.scale, fullbright)
+            } else { visual_lod::Decision::Exact };
+            #[cfg(target_os = "vita")]
+            { lod_counts[match decision {
+                visual_lod::Decision::Exact => 0, visual_lod::Decision::Hidden => 1,
+                visual_lod::Decision::Refresh => 2, visual_lod::Decision::Reuse => 3,
+            }] += 1; }
+            match decision {
+                visual_lod::Decision::Hidden => continue,
+                visual_lod::Decision::Reuse => {
+                    for mesh in &self.visual_lod[&id].meshes { crate::render_fx::skin(mesh); }
+                    continue;
+                }
+                _ => {}
+            }
             let d = &model.data;
             let idle = actor
                 .spawn
@@ -3361,6 +3405,9 @@ impl Npcs {
                 &visual,
                 None,
             );
+            if decision == visual_lod::Decision::Refresh {
+                self.visual_lod.get_mut(&id).expect("ambient cache").capture(model);
+            }
             model.draw_effects(
                 &clip,
                 at,
@@ -3373,6 +3420,15 @@ impl Npcs {
             model.draw_electric(actor.electric);
             self.material.bind();
         }
+        #[cfg(target_os = "vita")]
+        crate::frame_profile::counts(&[
+            ("characters_lod_exact",lod_counts[0]),("characters_lod_culled",lod_counts[1]),
+            ("characters_lod_refreshed",lod_counts[2]),("characters_lod_reused",lod_counts[3]),
+            // Whole ambient actor passes, not surface layers or GPU draw calls.
+            ("characters_lod_layer_passes_skipped",lod_counts[1]),
+            ("characters_lod_submit_passes_skipped",lod_counts[1]),
+            ("characters_lod_protected",lod_counts[4]),
+        ]);
         gl_use_default_material();
     }
 }

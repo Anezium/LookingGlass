@@ -339,7 +339,7 @@ fn transform_bounds(
     }
     (lo, hi)
 }
-fn outside_bounds(min: Vec3, max: Vec3) -> bool {
+pub(crate) fn outside_bounds(min: Vec3, max: Vec3) -> bool {
     let Some(m) = crate::render_fx::projection() else {
         return false;
     };

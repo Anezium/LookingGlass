@@ -93,3 +93,21 @@ depth. world_alpha and sky independently mask those world costs. quality=low
 uses a fragment path without cutout/discard or fog for eligible opaque surfaces;
 cutout and alpha retain the full shader. UV wave/turbulence was already evaluated
 in the vertex shader, so this preset does not claim to remove fragment waves.
+
+## Combined simulation base
+
+The orchestrator authorized merging vita-sim-9 at 15a4f04, including sim8 fc9836b.
+Conflicts were confined to src/main.rs module declarations, frame_profile.rs
+instrumentation and viewer.rs character profiling/masks/upscale placement. Both
+behaviors were retained: sim9's character spans and simulation counters, the
+renderer world-only mask, heap/program diagnostics, route modes and upscale.
+No conflicting collision, progression or save logic required a choice. Both
+startup JSON configurations remain independent; sim9 defaults preserve sim8.
+
+Merge validation: full host suite with vita_renderer, 738 passed, zero failed,
+one pre-existing ignored asset test. The copied 3.1 W1/full.log subsequently
+published a native load breakdown: total 6,096.318 ms, groups 456.799 ms
+(recipes 49.829/chunks 397.703), pipelines/uploads 4,235.530 ms, PVS 1,391.885 ms.
+Thus the earlier 138 s renderer build was already reduced in 3.1; the remaining
+native load cost is primarily pipeline creation/uploads, not cluster iteration.
+Milestone 4's additional PVS changes still require native timing.

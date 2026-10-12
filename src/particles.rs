@@ -471,7 +471,36 @@ struct AnimationBinding {
     duration: f32,
     frame_time: f32,
 }
+#[derive(Clone, Copy, Debug, Default)]
+struct PuffSweep {
+    start: Option<Vec3>,
+    ticks: u32,
+}
+impl PuffSweep {
+    fn segment(&mut self, config: &crate::vita_sim::Config, position: Vec3, next: Vec3, velocity: Vec3) -> Option<(Vec3, Vec3)> {
+        use crate::vita_sim::PuffCollide;
+        let start = *self.start.get_or_insert(position);
+        self.ticks += 1;
+        let moving = velocity.length_squared() >= 1e-6; // 0.001 world units/second.
+        let enabled = match config.puff_collide {
+            PuffCollide::All => true,
+            PuffCollide::Moving => moving,
+            PuffCollide::None => false,
+        };
+        if enabled && self.ticks >= config.puff_sweep_every {
+            self.start = None;
+            self.ticks = 0;
+            Some((start, next))
+        } else {
+            if config.puff_collide == PuffCollide::None {
+                *self = Self::default();
+            }
+            None
+        }
+    }
+}
 struct Puff {
+    sweep: PuffSweep,
     position: Vec3,
     constraint_center: Vec3,
     velocity: Vec3,
@@ -852,6 +881,176 @@ impl Steam {
         self.update_clocks(dt, dt, eye, world);
     }
     pub fn update_clocks(&mut self, dt: f32, world_dt: f32, eye: Vec3, world: &World) {
+        self.update_clocks_config(dt, world_dt, eye, world, crate::vita_sim::effective());
+    }
+    pub(crate) fn update_clocks_config(&mut self, dt: f32, world_dt: f32, eye: Vec3, world: &World, config: &crate::vita_sim::Config) {
+        let _profile = crate::frame_profile::span("particles");
+        #[cfg(target_os = "vita")]
+        let _counter_owner =
+            crate::frame_profile::counter_owner(crate::frame_profile::Owner::Particles);
+        if !dt.is_finite() || dt <= 0. {
+            return;
+        }
+        let dt = dt.min(0.05);
+        #[cfg(target_os = "vita")]
+        let mut skipped = 0u32;
+        #[cfg(target_os = "vita")]
+        let (before, mut sweeps, mut constrained, mut frozen, mut stationary, mut impacts) =
+            (self.puffs.len() as u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+        for p in &mut self.puffs {
+            #[cfg(target_os = "vita")]
+            let _integrate_profile = crate::frame_profile::span("particles_integrate");
+
+            let dt = if self.emitters[p.emitter].spec.no_deadtime {
+                dt
+            } else {
+                world_dt.clamp(0., dt)
+            };
+            if dt == 0. {
+                #[cfg(target_os = "vita")]
+                {
+                    frozen += 1;
+                }
+                continue;
+            }
+            p.age += dt;
+            p.velocity += p.accel * dt;
+            let mut next = p.position + p.velocity * dt;
+            if let Some(bounds) = self.emitters[p.emitter].spec.constrain {
+                for axis in 0..3 {
+                    if bounds[axis] >= 0.
+                        && (next[axis] - p.constraint_center[axis]).abs() > bounds[axis]
+                    {
+                        p.velocity[axis] = -p.velocity[axis];
+                        p.accel[axis] = -p.accel[axis];
+                        next[axis] += p.velocity[axis] * dt;
+                    }
+                }
+            }
+            // The enclosed pixie requests axis bounds, not world collision.
+            // Its casing still occludes the sprite through the depth buffer.
+            #[cfg(target_os = "vita")]
+            drop(_integrate_profile);
+            if self.emitters[p.emitter].spec.constrain.is_none() {
+                if let Some((start, end)) = p.sweep.segment(config, p.position, next, p.velocity) {
+                    #[cfg(target_os = "vita")]
+                    {
+                        sweeps += 1;
+                        stationary += u32::from(start == end);
+                    }
+                    if world.sweep(start, end, Vec3::ZERO).fraction < 1. {
+                        p.age = p.life;
+                        #[cfg(target_os = "vita")]
+                        { impacts += 1; }
+                    }
+                } else {
+                    #[cfg(target_os = "vita")]
+                    { skipped += 1; }
+                }
+            } else {
+                #[cfg(target_os = "vita")]
+                {
+                    constrained += 1;
+                }
+            }
+            if self.emitters[p.emitter].spec.image == "bubble" {
+                #[cfg(target_os = "vita")]
+                let _hotspot = crate::frame_profile::span("particles_liquid");
+                if world.liquid_at(next) == 0 {
+                    p.age = p.life;
+                }
+            }
+            p.position = next;
+        }
+        {
+            #[cfg(target_os = "vita")]
+            let _hotspot = crate::frame_profile::span("particles_retain");
+            self.puffs.retain(|p| p.age < p.life);
+        }
+        #[cfg(target_os = "vita")]
+        let retained = self.puffs.len() as u32;
+        #[cfg(target_os = "vita")]
+        let _emit_profile = crate::frame_profile::span("particles_emit");
+
+        for (index, e) in self.emitters.iter_mut().enumerate() {
+            let dt = if e.spec.no_deadtime {
+                dt
+            } else {
+                world_dt.min(dt)
+            };
+            if !e.enabled
+                || e.spec.rate <= 0.
+                || (e.spec.image.is_empty() && e.spec.light.is_some())
+                || e.origin.distance_squared(eye) > 3000. * 3000.
+            {
+                // Keep the enclosed light ready when its lantern comes into range.
+                e.carry = if e.enabled && e.spec.constrain.is_some() {
+                    (e.carry + dt * e.spec.rate).min(1.)
+                } else { 0. };
+                continue;
+            }
+            e.carry = (e.carry + dt * e.spec.rate).min(32.);
+            while e.carry >= 1. {
+                e.carry -= 1.;
+                if self.puffs.len() >= 4096 {
+                    break;
+                }
+                let offset = sampled(e.spec.offset, &mut self.seed)
+                    + e.rotation * sampled(e.spec.axis_offset, &mut self.seed);
+                let axis = if e.spec.sphere {
+                    vec3(
+                        random(&mut self.seed) * 2. - 1.,
+                        random(&mut self.seed) * 2. - 1.,
+                        random(&mut self.seed) * 2. - 1.,
+                    )
+                    .normalize_or_zero()
+                } else {
+                    e.rotation * Vec3::X
+                };
+                let velocity = sampled(e.spec.velocity, &mut self.seed) + axis * e.spec.forward;
+                self.puffs.push(Puff {
+                    sweep: PuffSweep::default(),
+                    position: e.origin + offset * e.scale,
+                    constraint_center: e.origin + offset,
+                    velocity: e.spec.min_velocity + velocity * e.scale,
+                    accel: sampled(e.spec.accel, &mut self.seed),
+                    age: 0.,
+                    life: e.spec.life.sample(&mut self.seed),
+                    size: 32. * e.spec.size.sample(&mut self.seed) * e.scale,
+                    roll: if e.spec.random_roll {
+                        random(&mut self.seed) * std::f32::consts::TAU
+                    } else {
+                        0.
+                    },
+                    emitter: index,
+                });
+            }
+        }
+        // Stable retain and append order is birth order for world puffs. Drop
+        // the oldest live births first; emitter RNG/credit still run normally.
+        #[cfg(target_os = "vita")]
+        let births = self.puffs.len() as u32 - retained;
+        let dropped = self.puffs.len().saturating_sub(config.puff_cap);
+        if dropped > 0 { self.puffs.drain(..dropped); }
+        #[cfg(target_os = "vita")]
+        drop(_emit_profile);
+        #[cfg(target_os = "vita")]
+        {
+            add_counter(Counter::PuffsBefore, before);
+            add_counter(Counter::PuffsAfter, self.puffs.len() as u32);
+            add_counter(Counter::PuffsSweeps, sweeps);
+            add_counter(Counter::PuffsConstrained, constrained);
+            add_counter(Counter::PuffsFrozen, frozen);
+            add_counter(Counter::PuffsStationarySweeps, stationary);
+            add_counter(Counter::PuffsImpacts, impacts);
+            add_counter(Counter::PuffsDeaths, before - retained);
+            add_counter(Counter::PuffsBirths, births);
+            add_counter(Counter::PuffsSkippedSweeps, skipped);
+            add_counter(Counter::PuffsDropped, dropped as u32);
+        }
+    }
+    #[cfg(test)]
+    fn update_clocks_sim8(&mut self, dt: f32, world_dt: f32, eye: Vec3, world: &World) {
         let _profile = crate::frame_profile::span("particles");
         #[cfg(target_os = "vita")]
         let _counter_owner =
@@ -972,6 +1171,7 @@ impl Steam {
                 };
                 let velocity = sampled(e.spec.velocity, &mut self.seed) + axis * e.spec.forward;
                 self.puffs.push(Puff {
+                    sweep: PuffSweep::default(),
                     position: e.origin + offset * e.scale,
                     constraint_center: e.origin + offset,
                     velocity: e.spec.min_velocity + velocity * e.scale,
@@ -1472,6 +1672,7 @@ impl Attached {
                 } + pose.rotation * Vec3::X * e.spec.forward;
                 let accel = sampled(e.spec.accel, &mut seed);
                 self.steam.puffs.push(Puff {
+                    sweep: PuffSweep::default(),
                     constraint_center: pose.translation + offset,
                     position: pose.translation
                         + offset * scale
@@ -1495,8 +1696,173 @@ impl Attached {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    pub(crate) fn world_test_steam() -> Steam { attached_fixture(2).steam }
+    #[test]
+    fn puff_sweep_cadence_covers_accumulated_segment_and_pause() {
+        use crate::vita_sim::{Config, PuffCollide};
+        let mut sweep = PuffSweep::default();
+        let config = Config { puff_sweep_every: 3, ..Config::default() };
+        assert!(sweep.segment(&config, Vec3::ZERO, Vec3::X, Vec3::X).is_none());
+        assert!(sweep.segment(&config, Vec3::X, Vec3::X * 2., Vec3::X).is_none());
+        assert_eq!(sweep.segment(&config, Vec3::X * 2., Vec3::X * 3., Vec3::X), Some((Vec3::ZERO, Vec3::X * 3.)));
+        let config = Config { puff_collide: PuffCollide::Moving, ..Config::default() };
+        assert!(sweep.segment(&config, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO).is_none());
+        assert!(sweep.segment(&config, Vec3::ZERO, Vec3::ZERO, Vec3::X * 0.0001).is_none());
+        assert_eq!(sweep.segment(&config, Vec3::ZERO, Vec3::X, Vec3::X), Some((Vec3::ZERO, Vec3::X)));
+        let config = Config { puff_collide: PuffCollide::None, ..Config::default() };
+        assert!(sweep.segment(&config, Vec3::ZERO, Vec3::X, Vec3::X).is_none());
+        assert_eq!(sweep.start, None);
+        assert_eq!(sweep.ticks, 0);
+    }
+    #[test]
+    fn delayed_puff_sweep_catches_wall_crossed_on_skipped_tick() {
+        use crate::vita_sim::Config;
+        let world = World::fixture(&[(vec3(1.4,-10.,-10.),vec3(1.6,10.,10.))]);
+        let mut fixture = attached_fixture(1);
+        let steam = &mut fixture.steam;
+        steam.emitters[0].spec.rate = 0.;
+        steam.emitters[0].spec.constrain = None;
+        steam.puffs.push(Puff { sweep: PuffSweep::default(), position: Vec3::ZERO,
+            constraint_center: Vec3::ZERO, velocity: Vec3::X * 20., accel: Vec3::ZERO,
+            age: 0., life: 5., size: 1., roll: 0., emitter: 0 });
+        let config = Config { puff_sweep_every: 3, ..Config::default() };
+        steam.update_clocks_config(0.05,0.05,Vec3::ZERO,&world,&config);
+        steam.update_clocks_config(0.05,0.05,Vec3::ZERO,&world,&config);
+        assert_eq!(steam.puffs[0].position, Vec3::X * 2.);
+        steam.update_clocks_config(0.05,0.,Vec3::ZERO,&world,&config);
+        assert_eq!(steam.puffs[0].sweep.ticks, 2);
+        steam.update_clocks_config(0.05,0.05,Vec3::ZERO,&world,&config);
+        assert!(steam.puffs.is_empty());
+    }
+    #[test]
+    fn puff_cap_drops_oldest_births_preserving_rng_and_emitter_credit() {
+        use crate::vita_sim::{Config, PuffCollide};
+        let world = World::fixture(&[]);
+        for cap in [0,1,8,128,4096] {
+            let mut reference = attached_fixture(1);
+            let mut capped = attached_fixture(1);
+            let full = Config { puff_collide: PuffCollide::None, ..Config::default() };
+            let config = Config { puff_cap: cap, ..full };
+            for tick in 0..40 {
+                reference.steam.update_clocks_config(0.05,0.05,Vec3::ZERO,&world,&full);
+                capped.steam.update_clocks_config(0.05,0.05,Vec3::ZERO,&world,&config);
+                assert!(capped.steam.puffs.len() <= cap);
+                assert_eq!(reference.steam.seed, capped.steam.seed);
+                assert_eq!(reference.steam.emitters[0].carry, capped.steam.emitters[0].carry);
+                let newest = reference.steam.puffs.iter().rev().take(cap).collect::<Vec<_>>();
+                for (a,b) in capped.steam.puffs.iter().rev().zip(newest) {
+                    assert_eq!(a.position,b.position,"tick {tick} cap {cap}");
+                    assert_eq!(a.age,b.age);
+                    assert_eq!(a.life,b.life);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_broad_phase_preserves_puff_impacts_deaths_and_emissions() {
+        let make = || {
+            let mut fixture = attached_fixture(4);
+            for (i, e) in fixture.steam.emitters.iter_mut().enumerate() {
+                e.spec.rate = 20.;
+                e.spec.life = Range::fixed(1.);
+                e.spec.constrain = (i == 1).then_some(Vec3::splat(3.5));
+                e.spec.no_deadtime = i == 3;
+                e.spec.image = if i == 2 { "bubble" } else { "smoke" }.into();
+            }
+            fixture.steam.puffs = (0..626)
+                .map(|i| {
+                    let position = vec3(
+                        (i % 31) as f32 * 10. - 150.,
+                        (i / 31) as f32 * 4. - 40.,
+                        (i % 5) as f32 * 20. + 1.,
+                    );
+                    Puff {
+                        sweep: PuffSweep::default(),
+                        position,
+                        constraint_center: position,
+                        velocity: if i % 7 == 0 {
+                            Vec3::ZERO
+                        } else {
+                            -Vec3::Z * 80.
+                        },
+                        accel: -Vec3::Z * 10.,
+                        age: if i % 5 == 0 { 0.99 } else { 0. },
+                        life: 1.,
+                        size: 2.,
+                        roll: 0.,
+                        emitter: i % 4,
+                    }
+                })
+                .collect();
+            fixture
+        };
+        let puff_bits = |p: &Puff| {
+            p.position
+                .to_array()
+                .into_iter()
+                .chain(p.constraint_center.to_array())
+                .chain(p.velocity.to_array())
+                .chain(p.accel.to_array())
+                .chain([p.age, p.life, p.size, p.roll])
+                .map(f32::to_bits)
+                .chain([p.emitter as u32])
+                .collect::<Vec<_>>()
+        };
+        let mut a = make();
+        let mut b = make();
+        let boxes = [(vec3(-500., -500., -20.), vec3(500., 500., 0.))];
+        let mut optimized = World::fixture(&boxes);
+        let mut reference = World::fixture(&boxes);
+        reference.legacy_dynamic_sweeps = true;
+        for world in [&mut optimized, &mut reference] {
+            world.add_liquid(vec3(-200., -200., 0.), vec3(200., 200., 120.), 0x20, None);
+        }
+        let mut first_frame_deaths = 0;
+        for frame in 0..120 {
+            optimized.set_dynamic(
+                (0..25)
+                    .map(|i| {
+                        let x = i as f32 * 30. - 350. + (frame as f32 * 0.2).sin() * 10.;
+                        crate::collision::Collider::fixture(vec3(x, -20., 5.), vec3(x + 10., 20., 60.))
+                    })
+                    .collect(),
+            );
+            reference.copy_dynamic_from(&optimized);
+            if frame == 60 {
+                optimized.set_dynamic(Vec::new());
+                reference.set_dynamic(Vec::new());
+            }
+            let world_dt = if (20..30).contains(&frame) { 0. } else { 0.05 };
+            a.steam
+                .update_clocks(0.05, world_dt, Vec3::ZERO, &optimized);
+            b.steam
+                .update_clocks_sim8(0.05, world_dt, Vec3::ZERO, &reference);
+            if frame == 0 {
+                first_frame_deaths = 626 - a.steam.puffs.len();
+            }
+            assert_eq!(a.steam.seed, b.steam.seed);
+            assert_eq!(
+                a.steam.puffs.iter().map(&puff_bits).collect::<Vec<_>>(),
+                b.steam.puffs.iter().map(&puff_bits).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                a.steam
+                    .emitters
+                    .iter()
+                    .map(|e| e.carry.to_bits())
+                    .collect::<Vec<_>>(),
+                b.steam
+                    .emitters
+                    .iter()
+                    .map(|e| e.carry.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(first_frame_deaths > 0);
+    }
     #[test]
     fn constrained_pixie_moves_reverses_and_stays_inside_after_pause() {
         let mut fixture = attached_fixture(1);
@@ -1589,7 +1955,7 @@ mod tests {
         assert!(!a.steam.emitters[0].enabled);
         assert!(a.steam.emitters[1].enabled);
     }
-    fn attached_fixture(count: usize) -> Attached {
+    pub(crate) fn attached_fixture(count: usize) -> Attached {
         Attached {
             births: Default::default(),
             age: 0.,

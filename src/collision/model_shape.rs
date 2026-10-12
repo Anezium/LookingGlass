@@ -7,6 +7,39 @@ struct Convex {
     edges: Vec<Vec3>,
 }
 impl Convex {
+    fn orient(&self, rotation: Quat, edges: &mut Vec<Vec3>, normals: &mut Vec<Vec3>) {
+        edges.clear();
+        for delta in &self.edges {
+            let edge = (rotation * *delta).normalize();
+            if !edges
+                .iter()
+                .any(|e| e.distance_squared(edge).min(e.distance_squared(-edge)) < 1e-10)
+            {
+                edges.push(edge);
+            }
+        }
+        normals.clear();
+        normals.extend(self.source.iter().map(|p| rotation * p.normal));
+        let mut support = |normal: Vec3| {
+            if !normals.iter().any(|n| n.distance_squared(normal) < 1e-10) {
+                normals.push(normal);
+            }
+        };
+        // Same first representatives, thresholds and emission order as at().
+        for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+            support(axis);
+            support(-axis);
+        }
+        for edge in edges.iter().copied() {
+            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                let n = edge.cross(axis);
+                if n.length_squared() > 0.000001 {
+                    support(n.normalize());
+                    support(-n.normalize());
+                }
+            }
+        }
+    }
     fn new(source: &[Plane]) -> Result<Self> {
         let mut vertices = Vec::<Vec3>::new();
         for (i, a) in source.iter().enumerate() {
@@ -132,9 +165,18 @@ struct Geometry {
     patches: Vec<[Vec3; 3]>,
     bounds: Option<Bounds>,
 }
+#[derive(Debug, Default)]
+struct EagerCache {
+    rotation: Option<[u32; 4]>,
+    last: Option<([u32; 3], Collider)>,
+    normals: Vec<Vec<Vec3>>,
+    edges: Vec<Vec3>,
+    points: Vec<Vec3>,
+}
 #[derive(Debug)]
 pub struct Template {
     geometry: std::sync::Arc<Geometry>,
+    eager: std::cell::RefCell<EagerCache>,
 }
 #[derive(Debug)]
 pub(super) struct Placed {
@@ -144,12 +186,71 @@ pub(super) struct Placed {
     hulls: std::sync::OnceLock<Vec<Hull>>,
 }
 impl Placed {
+    #[cfg(test)]
+    pub(super) fn pending(&self) -> bool { self.hulls.get().is_none() }
     pub(super) fn hulls(&self) -> &[Hull] {
         self.hulls
-            .get_or_init(|| self.geometry.at(self.origin, self.rotation))
+            .get_or_init(|| {
+                #[cfg(target_os = "vita")]
+                let _profile = crate::frame_profile::span("collider_lazy_build");
+                #[cfg(target_os = "vita")]
+                add_counter(Counter::LazyHullBuilds, 1);
+                self.geometry.at(self.origin, self.rotation)
+            })
     }
 }
 impl Geometry {
+    fn at_cached(&self, origin: Vec3, rotation: Quat, cache: &mut EagerCache) -> Vec<Hull> {
+        // No epsilon or quaternion sign equivalence: only identical input bits
+        // may reuse rotated normals. Translation never affects their selection.
+        let key = Some(rotation.to_array().map(f32::to_bits));
+        let reorient = cache.rotation != key;
+        cache.normals.resize_with(self.brushes.len(), Vec::new);
+        let mut hulls = Vec::with_capacity(self.brushes.len() + self.patches.len());
+        for (brush, normals) in self.brushes.iter().zip(&mut cache.normals) {
+            if reorient {
+                brush.orient(rotation, &mut cache.edges, normals);
+            }
+            cache.points.clear();
+            cache
+                .points
+                .extend(brush.vertices.iter().map(|v| origin + rotation * *v));
+            let planes = normals
+                .iter()
+                .enumerate()
+                .map(|(i, &normal)| {
+                    let distance = if i < brush.source.len() {
+                        brush.source[i].distance + normal.dot(origin)
+                    } else {
+                        // Preserve world-space f32 support products and maximum order.
+                        // Translating a cached distance would round differently.
+                        cache
+                            .points
+                            .iter()
+                            .map(|p| normal.dot(*p))
+                            .fold(f32::NEG_INFINITY, f32::max)
+                    };
+                    Plane { normal, distance }
+                })
+                .collect();
+            hulls.push(Hull {
+                planes,
+                bounds: Bounds {
+                    min: cache.points.iter().copied().reduce(Vec3::min).unwrap(),
+                    max: cache.points.iter().copied().reduce(Vec3::max).unwrap(),
+                },
+            });
+        }
+        cache.rotation = key;
+        hulls.extend(self.patches.iter().filter_map(|p| {
+            triangle_hull(
+                origin + rotation * p[0],
+                origin + rotation * p[1],
+                origin + rotation * p[2],
+            )
+        }));
+        hulls
+    }
     fn at(&self, origin: Vec3, rotation: Quat) -> Vec<Hull> {
         let mut hulls = self
             .brushes
@@ -228,6 +329,7 @@ impl Template {
                 max: max + Vec3::splat(0.125),
             });
         Self {
+            eager: std::cell::RefCell::default(),
             geometry: std::sync::Arc::new(Geometry {
                 brushes,
                 patches,
@@ -238,11 +340,25 @@ impl Template {
     /// Place cached geometry immediately, with the exact union of hull bounds.
     /// Unlike `at`, this keeps Collider::model's broad phase and profiles the
     /// entire placement in the caller's construction span. Only world supports
-    /// and bevels are regenerated; local plane triplets/vertex pairs are cached.
+    /// and bevel distances are regenerated; identical rotations also reuse their
+    /// exact normal sequence. Scratch vectors retain capacity between placements.
     pub fn at_eager(&self, origin: Vec3, rotation: Quat) -> Collider {
         #[cfg(target_os = "vita")]
         let _transform_profile = crate::frame_profile::span("collider_transform");
-        Collider::from_hulls(self.geometry.at(origin, rotation))
+        let mut cache = self.eager.borrow_mut();
+        let origin_key = origin.to_array().map(f32::to_bits);
+        if cache.rotation == Some(rotation.to_array().map(f32::to_bits)) {
+            if let Some((key, collider)) = &cache.last {
+                if *key == origin_key {
+                    // A rejected mover can request the same candidate on the
+                    // next substep. Published Arc geometry stays immutable.
+                    return collider.clone();
+                }
+            }
+        }
+        let collider = Collider::from_hulls(self.geometry.at_cached(origin, rotation, &mut cache));
+        cache.last = Some((origin_key, collider.clone()));
+        collider
     }
     pub fn at(&self, origin: Vec3, rotation: Quat) -> Collider {
         // Conservative transformed bounds reject distant contacts without building
@@ -429,6 +545,128 @@ mod tests {
         assert_eq!(a.all_solid, b.all_solid);
         assert!((a.fraction - b.fraction).abs() <= 1e-3, "{a:?} != {b:?}");
         near(a.normal, b.normal);
+    }
+    fn trace_bits(t: Trace) -> [u32; 6] {
+        [
+            t.fraction.to_bits(),
+            t.normal.x.to_bits(),
+            t.normal.y.to_bits(),
+            t.normal.z.to_bits(),
+            u32::from(t.start_solid),
+            u32::from(t.all_solid),
+        ]
+    }
+    #[test]
+    fn eager_orientation_cache_is_bitwise_exact_across_pose_sequences() {
+        let map = brush_map();
+        let mut comparisons = 0;
+        for model in 0..map.models.len() {
+            let shape = Template::brush_model(&map, model).unwrap();
+            // Cold rotation, unchanged rotation with translation, and return to
+            // an earlier translation. Each next pose also invalidates rotation.
+            for (base, rotation) in poses() {
+                for origin in [
+                    base,
+                    base + vec3(0.003, -0.125, 1.),
+                    base + Vec3::splat(100.),
+                    base,
+                ] {
+                    // Geometry::at is the unchanged 8de8940 eager algorithm.
+                    let reference = Collider::from_hulls(shape.geometry.at(origin, rotation));
+                    let cached = shape.at_eager(origin, rotation);
+                    assert_eq!(reference.geometry_bits(), cached.geometry_bits());
+                    let repeated = shape.at_eager(origin, rotation);
+                    assert!(std::sync::Arc::ptr_eq(&cached.hulls, &repeated.hulls));
+                    assert_eq!(reference.geometry_bits(), repeated.geometry_bits());
+                    for half in [Vec3::ZERO, Vec3::ONE, PLAYER_HALF] {
+                        for x in -4..=4 {
+                            for y in -4..=4 {
+                                let offset = vec3(x as f32 * 25., y as f32 * 25., 0.);
+                                for delta in [
+                                    Vec3::Z * 150.,
+                                    Vec3::X * 150.,
+                                    vec3(120., -90., 100.),
+                                    Vec3::ZERO,
+                                ] {
+                                    let start = origin + offset + delta;
+                                    let end = origin + offset - delta;
+                                    assert_eq!(
+                                        trace_bits(reference.trace(start, end, half)),
+                                        trace_bits(cached.trace(start, end, half))
+                                    );
+                                    comparisons += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Very small rotations, adjacent f32 quarters, signed zero and
+            // equivalent quaternion signs must not use an approximate key.
+            let quarter = std::f32::consts::FRAC_PI_2;
+            for angle in [
+                0.,
+                -0.,
+                1e-6,
+                1e-5,
+                0.0001,
+                f32::from_bits(quarter.to_bits() - 1),
+                quarter,
+                f32::from_bits(quarter.to_bits() + 1),
+            ] {
+                let q = Quat::from_rotation_y(angle);
+                for rotation in [q, -q, q] {
+                    for origin in [vec3(-4188., 6004., 32.03125), Vec3::ZERO] {
+                        let reference = Collider::from_hulls(shape.geometry.at(origin, rotation));
+                        let cached = shape.at_eager(origin, rotation);
+                        assert_eq!(reference.geometry_bits(), cached.geometry_bits());
+                    }
+                }
+            }
+        }
+        assert_eq!(comparisons, 209_952);
+    }
+    #[test]
+    fn eager_cache_preserves_skin_sensitive_redundant_tetrahedron_bevel() {
+        let source = [
+            Plane {
+                normal: -Vec3::X,
+                distance: 0.,
+            },
+            Plane {
+                normal: -Vec3::Y,
+                distance: 0.,
+            },
+            Plane {
+                normal: -Vec3::Z,
+                distance: 0.,
+            },
+            Plane {
+                normal: Vec3::ONE.normalize(),
+                distance: 1. / 3_f32.sqrt(),
+            },
+        ];
+        let shape = Template::from_parts(vec![Convex::new(&source).unwrap()], Vec::new());
+        let normal = -vec3(1., 1., 0.).normalize();
+        for origin in [Vec3::ZERO, vec3(-4188., 6004., 32.03125), Vec3::ZERO] {
+            let old = Collider::from_hulls(shape.geometry.at(origin, Quat::IDENTITY));
+            let new = shape.at_eager(origin, Quat::IDENTITY);
+            assert_eq!(old.geometry_bits(), new.geometry_bits());
+            let start = origin + vec3(-0.25, -0.25, 0.25);
+            let end = origin + vec3(0.25, 0.25, 0.25);
+            let t = new.trace(start, end, Vec3::ZERO);
+            assert_eq!(trace_bits(old.trace(start, end, Vec3::ZERO)), trace_bits(t));
+            assert!(t.normal.distance_squared(normal) < 1e-10);
+            if origin == Vec3::ZERO {
+                assert!((t.fraction - (0.5 - SKIN / (0.5 * 2_f32.sqrt()))).abs() < 1e-6);
+                let mut reduced = old.hulls().to_vec();
+                reduced[0]
+                    .planes
+                    .retain(|p| p.normal.distance_squared(normal) >= 1e-10);
+                let reduced = Collider::from_hulls(reduced).trace(start, end, Vec3::ZERO);
+                assert_ne!(trace_bits(t), trace_bits(reduced));
+            }
+        }
     }
     #[test]
     fn eager_brush_model_matches_legacy_planes_bounds_and_vertices() {

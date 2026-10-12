@@ -1960,6 +1960,9 @@ fn draw_skin_deformed(
         };
         #[cfg(target_os = "vita")]
         let skin_profile = crate::frame_profile::span("skinning");
+        #[cfg(target_os = "vita")]
+        let positions_profile =
+            crate::frame_profile::characters_span("characters_skinning_positions");
         for (src, dst) in surface.vertices.iter().zip(&mut mesh.vertices) {
             let position = if bone_scales.is_empty() { src.position(pose) } else {
                 src.weights.iter().map(|w| pose[w.bone].point(w.offset * bone_scales[w.bone]) * w.amount).sum()
@@ -1967,6 +1970,11 @@ fn draw_skin_deformed(
             dst.position = transform.point(position * scale);
             dst.normal = Vec4::ZERO;
         }
+        #[cfg(target_os = "vita")]
+        drop(positions_profile);
+        #[cfg(target_os = "vita")]
+        let normals_profile =
+            crate::frame_profile::characters_span("characters_skinning_normals");
         for tri in mesh.indices.chunks_exact(3) {
             let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
             let n = (mesh.vertices[b].position - mesh.vertices[a].position)
@@ -1975,6 +1983,11 @@ fn draw_skin_deformed(
                 mesh.vertices[i].normal += n.extend(0.);
             }
         }
+        #[cfg(target_os = "vita")]
+        drop(normals_profile);
+        #[cfg(target_os = "vita")]
+        let shading_profile =
+            crate::frame_profile::characters_span("characters_skinning_shading");
         for v in &mut mesh.vertices {
             let n = v.normal.truncate().normalize_or_zero();
             let light = if fullbright {
@@ -1989,6 +2002,8 @@ fn draw_skin_deformed(
                 (alpha.clamp(0., 1.) * 255.) as u8,
             ];
         }
+        #[cfg(target_os = "vita")]
+        drop(shading_profile);
         #[cfg(target_os = "vita")]
         drop(skin_profile);
         crate::render_fx::skin(mesh);

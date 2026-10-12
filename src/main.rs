@@ -111,6 +111,7 @@ mod viewer;
 mod frame_profile;
 #[cfg(feature="vita_renderer")]
 mod route_replay;
+mod vita_sim;
 mod viewmodel;
 mod village;
 mod village_route;
@@ -573,6 +574,7 @@ fn run() -> Result<()> {
     if o.capture.is_some() && o.frames.is_none() {
         bail!("--capture requires --frames");
     }
+    vita_sim::initialize(&o.save_dir);
     let mut assets = Assets::open(&o.data)?;
     #[cfg(feature = "vita_renderer")]
     if mode == "vita-render-view" {
