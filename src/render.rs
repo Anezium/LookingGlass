@@ -28,6 +28,8 @@ pub use sky_face_check::check_school_floor;
 mod water_check;
 pub use water_check::check as check_water;
 mod camera_portal;
+#[cfg(feature = "vita_renderer")]
+pub(crate) mod vita_renderer;
 pub use billboard_check::check as check_billboards;
 
 pub(crate) const BLEND_COUNT: usize = 109;
@@ -106,6 +108,8 @@ struct Batch {
     model: Option<usize>,
 }
 pub struct Scene {
+    #[cfg(feature = "vita_renderer")]
+    retained: Option<vita_renderer::Renderer>,
     camera_portals: Vec<camera_portal::Portal>,
     rope_shapes: Vec<crate::rope::Strand>,
     pub optimize: bool,
@@ -1085,6 +1089,13 @@ fn draw_batch(
 }
 
 impl Scene {
+    pub(crate) fn retained_active(&self) -> bool {
+        #[cfg(feature = "vita_renderer")]
+        { self.retained.is_some() }
+        #[cfg(not(feature = "vita_renderer"))]
+        { false }
+    }
+
     /// An isolated original prop proves the detail threshold independently of
     /// whether the entrance camera happens to contain a distant decoration.
     pub async fn check_detail(&mut self) -> Result<()> {
@@ -1340,6 +1351,20 @@ impl Scene {
         if crate::frame_profile::mode().no_world() {
             return;
         }
+        #[cfg(feature = "vita_renderer")]
+        {
+            if self.retained.is_some() {
+                self.draw(camera, time, fullbright, true, transforms);
+                if !vita_renderer::world_only() { particles.prepare_draw(camera, &self.atmosphere);
+                    for (i, _) in particles.depths(camera, direction) { particles.draw_one(i, camera, direction); }
+                }
+                return;
+            }
+            if vita_renderer::world_only() {
+                self.draw(camera, time, fullbright, true, transforms);
+                return;
+            }
+        }
         #[cfg(target_os = "vita")]
         let _profile = crate::frame_profile::span("world_draw");
         self.bind_atlas();
@@ -1480,7 +1505,11 @@ impl Scene {
         let mut cache = BTreeMap::<String, Texture2D>::new();
         let mut missing = Vec::new();
         let mut batches = Vec::<Batch>::new();
-        let camera_portals = camera_portal::load(assets, name, &map, &world, &specs)?;
+        #[cfg(feature = "vita_renderer")]
+        let retained_world = name == "gvillage" && vita_renderer::config().renderer == "vita";
+        #[cfg(not(feature = "vita_renderer"))]
+        let retained_world = false;
+        let camera_portals = if retained_world { Vec::new() } else { camera_portal::load(assets, name, &map, &world, &specs)? };
         let mut groups = BTreeMap::<(usize, usize), usize>::new();
         let sky_origin = crate::sky::origin(assets, name, &map)?;
         let mut sky_motions = crate::sky_sequence::motions(assets, &map, name)?;
@@ -1845,7 +1874,9 @@ impl Scene {
             }
         }
         println!("Loaded {name}: {triangles} triangles, {} batches, {animated} animated batches, {} fog volumes, distance fog {}, {} fallback images",batches.len(),atmosphere.volumes.len(),atmosphere.distance.w,missing.len());
-        Ok(Self {
+        let mut scene = Self {
+            #[cfg(feature = "vita_renderer")]
+            retained: None,
             camera_portals,
             face_mask_cache: FaceMaskCache::default(),
             rope_shapes,
@@ -1868,7 +1899,18 @@ impl Scene {
             sky_props,
             sky_backdrop: (name == "fortress1")
                 .then(|| crate::texture::upload_rgba8(1, 1, &[0, 0, 0, 255])),
-        })
+        };
+        #[cfg(feature = "vita_renderer")]
+        if retained_world {
+            scene.retained = Some(vita_renderer::Renderer::new(&scene)?);
+            // The retained path owns its immutable buffers and material recipes.
+            // Release the old CPU geometry and unused Macroquad world materials.
+            scene.batches.clear();
+            scene.sky_props.clear();
+            scene.bound_materials.clear();
+            scene.materials.clear();
+        }
+        Ok(scene)
     }
     pub fn update_ropes(
         &mut self,
@@ -1876,6 +1918,8 @@ impl Scene {
         hand: Option<(usize, Vec3)>,
         transforms: &[(usize, Vec3, Quat)],
     ) {
+        #[cfg(feature = "vita_renderer")]
+        if self.retained.is_some() { return; }
         for shape in &mut self.rope_shapes {
             shape.update(
                 dt,
@@ -1914,6 +1958,16 @@ impl Scene {
             return;
         }
         let _profile = crate::frame_profile::span("world_draw");
+        #[cfg(feature = "vita_renderer")]
+        if let Some(mut renderer) = self.retained.take() {
+            let stats = renderer.draw(self, camera, time, fullbright, transparent, transforms);
+            self.retained = Some(renderer);
+            if !transparent { self.stats = DrawStats::default(); }
+            self.stats.batches += stats.batches;
+            self.stats.culled += stats.culled;
+            self.stats.triangles += stats.triangles;
+            return;
+        }
         self.bind_atlas();
         if !transparent {
             self.stats = DrawStats::default();

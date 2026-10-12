@@ -294,6 +294,12 @@ pub struct Motion {
     shrink: Option<f32>,
 }
 impl Motion {
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) fn matrix(&self, time: f32) -> Mat4 {
+        let (origin, rotation, scale) = self.transform(time);
+        Mat4::from_scale_rotation_translation(Vec3::splat(scale), rotation, origin)
+            * Mat4::from_translation(-self.pivot)
+    }
     pub fn transform(&self, time: f32) -> (Vec3, Quat, f32) {
         let a = self.rotation * time;
         let r = Quat::from_rotation_z(a.y.to_radians())
@@ -436,6 +442,17 @@ pub fn motions(assets: &mut Assets, map: &Bsp, name: &str) -> Result<BTreeMap<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn retained_matrix_matches_rigid_and_scripted_motion() {
+        let m = Motion { pivot:vec3(30.,40.,5.), rotation:vec3(13.,-7.,22.), scale:1.3,
+            delay:0.2, path:vec![(vec3(30.,40.,5.),2.),(vec3(80.,20.,10.),3.)], shrink:None };
+        for time in [0.,0.1,0.8,2.3,7.7] {
+            for p in [Vec3::ZERO,vec3(-20.,80.,3.),m.pivot] {
+                assert!(m.matrix(time).transform_point3(p).distance(m.point(p,time))<0.0001);
+            }
+        }
+    }
     #[test]
     fn sky_path_delay_loop_and_shrink_are_bounded_and_repeatable() {
         let m = Motion {

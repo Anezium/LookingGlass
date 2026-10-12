@@ -257,6 +257,8 @@ fn run() -> Result<()> {
     let mut movie_name = String::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            #[cfg(feature = "vita_renderer")]
+            "--vita-render-view" => mode = "vita-render-view",
             "--difficulty" => {
                 o.difficulty = powerups::Difficulty::parse(
                     &args.next().context("--difficulty requires a name")?,
@@ -568,6 +570,16 @@ fn run() -> Result<()> {
         bail!("--capture requires --frames");
     }
     let mut assets = Assets::open(&o.data)?;
+    #[cfg(feature = "vita_renderer")]
+    if mode == "vita-render-view" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = render::vita_renderer::visualizer(assets, o).await {
+                eprintln!("Retained world visualizer failed: {e:#}");
+                std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
     if mode == "campaign-playtest" {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = campaign_playtest::run(&mut assets, chain, o.difficulty).await {
