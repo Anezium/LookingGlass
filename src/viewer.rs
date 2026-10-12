@@ -32,6 +32,9 @@ pub fn config() -> macroquad::conf::Conf {
             window_width: width,
             window_height: height,
             high_dpi,
+            #[cfg(feature="vita_renderer")]
+            sample_count: crate::render::vita_renderer::config().msaa_samples,
+            #[cfg(not(feature="vita_renderer"))]
             sample_count: 1,
             ..Default::default()
         },
@@ -558,7 +561,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         || options.shelf_preview
         || options.start_at.is_some()
         || options.story_preview.is_some());
+    #[cfg(feature="vita_renderer")]
+    let mut route_session=crate::route_replay::Session::open(&mut options)?;
     let store = Store::new(options.save_dir.clone(), assets.fingerprint()?);
+    #[cfg(feature="vita_renderer")]
+    let route_resume=route_session.as_ref().map(|r|r.resume(&store)).transpose()?.flatten();
+    #[cfg(not(feature="vita_renderer"))]
+    let route_resume:Option<save::Loaded>=None;
     let maps = assets.maps();
     let mut audio = Audio::new(options.no_audio, options.audio_capture.clone());
     #[cfg(target_os = "vita")]
@@ -587,7 +596,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(not(target_os = "vita"))]
     let bench_resume: Option<save::Loaded> = None;
     let mut opening_requested = options.new_game && options.map == "gvillage";
-    let resume = if let Some(loaded) = bench_resume {
+    let resume = if let Some(loaded)=route_resume { Some(loaded) } else if let Some(loaded) = bench_resume {
         Some(loaded)
     } else if let Some(slot) = options.load {
         anyhow::ensure!(
@@ -981,6 +990,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
     loop {
+        #[cfg(feature="vita_renderer")]
+        let route_running=route_session.is_some();
+        #[cfg(not(feature="vita_renderer"))]
+        let route_running=false;
+        #[cfg(feature="vita_renderer")]
+        if let Some(route)=&mut route_session {
+            let village=interactions.village.as_ref().context("route requires village cinema")?;
+            route.begin_frame(crate::route_replay::Status{map:maps[current].clone(),entry_done:village.cinema.state.done.contains("entry"),knife_done:village.cinema.state.done.contains("knife_cat"),blade_copies:stats.copies(0) as u32,alive:stats.alive(),flying})?;
+            if route.should_finish() {route.finish(&store,&game_snapshot!(),yaw,pitch)?;break;}
+            paused=false;
+        }
         #[cfg(not(target_os="vita"))]
         crate::frame_profile::begin_creation_frame();
         #[cfg(target_os = "vita")]
@@ -1031,7 +1051,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let simulate = true;
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
-        input.update(&preferences, window_focused() && !bench);
+        input.update(&preferences, window_focused() && !bench && !route_running);
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
         if input.disconnected {
@@ -1169,7 +1189,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let loot_visit = save::visit_key(&maps[current], entry_spawn.as_deref());
         let mut loot_before = interactions.loot_sources();
         loot_before.extend(npcs.loot_sources());
-        let focused = window_focused();
+        let focused = window_focused() || route_running;
         if !focused && was_focused {
             paused = true;
             clock.pause();
@@ -1563,6 +1583,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && !console_input
                 && !scripted_view
                 && !bench
+                && !route_running
                 && stats.alive(),
             &mut yaw,
             &mut pitch,
@@ -2149,7 +2170,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         control = Controls::default();
                     }
                     scene.world.set_weapon_obstacles(alice.ice_targets());
-                    clock.advance(elapsed as f64, &scene.world, &mut player, control);
+                    #[cfg(feature="vita_renderer")]
+                    if let Some(route)=&mut route_session {
+                        clock.advance_route(elapsed as f64,&scene.world,&mut player,|p|route.control(&scene.world,p,&mut yaw,&mut pitch));
+                    } else {clock.advance(elapsed as f64,&scene.world,&mut player,control);}
+                    #[cfg(not(feature="vita_renderer"))]
+                    clock.advance(elapsed as f64,&scene.world,&mut player,control);
                 }
                 pos = player.eye();
                 audio.movement(
@@ -3176,6 +3202,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             scene.atmosphere.distance.w = distance;
         }
         clear_background(scene.atmosphere.background());
+        #[cfg(feature="vita_renderer")]
+        crate::render::vita_renderer::prepare_3d(scene.atmosphere.background());
         let world_camera = Camera3D {
             #[cfg(feature="vita_renderer")]
             viewport: crate::render::vita_renderer::world_viewport(),
@@ -3197,6 +3225,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             z_far: 30000.,
             ..Default::default()
         };
+        #[cfg(feature="vita_renderer")]
+        crate::render::vita_renderer::set_3d_camera(&world_camera);
+        #[cfg(not(feature="vita_renderer"))]
         set_camera(&world_camera);
         #[cfg(feature = "vita_renderer")]
         crate::render::vita_renderer::record_view(&world_camera);
@@ -3426,6 +3457,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_capture");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        #[cfg(feature="vita_renderer")]
+        crate::render::vita_renderer::present_3d();
         if saves_writable {
             #[cfg(target_os = "vita")]
             if preview_throttle.capture(crate::frame_profile::mode()) {
@@ -3821,7 +3854,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             profile_report_due = report_due;
         }
         #[cfg(not(target_os="vita"))]
-        crate::frame_profile::end_creation_frame();
+        if !route_running {crate::frame_profile::end_creation_frame();}
         frame += 1;
         if !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(

@@ -28,7 +28,7 @@ pub(crate) fn creation_report() -> serde_json::Value {
           "shader_creations_after_warmup":measured.iter().map(|v|v[0]).sum::<u64>(),
           "pipeline_creations_after_warmup":measured.iter().map(|v|v[1]).sum::<u64>()}) })
 }
-#[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+#[cfg(feature="vita_renderer")]
 pub(crate) fn current_creations() -> [u64;2] { CREATIONS.with(|c| c.borrow().current) }
 pub(crate) fn load_material(shader: macroquad::miniquad::ShaderSource<'_>, params: macroquad::material::MaterialParams) -> Result<macroquad::material::Material, macroquad::Error> {
     shader_creation(); pipeline_creation();
@@ -47,6 +47,8 @@ pub enum Mode {
     Bench,
     RenderBench,
     FullBench,
+    Route,
+    RouteContinue,
 }
 #[cfg(any(target_os = "vita", test))]
 impl Mode {
@@ -63,6 +65,8 @@ impl Mode {
             "bench" => Self::Bench,
             "renderbench" => Self::RenderBench,
             "fullbench" => Self::FullBench,
+            "route" => Self::Route,
+            "route-continue" => Self::RouteContinue,
             _ => Self::Full,
         }
     }
@@ -76,6 +80,8 @@ impl Mode {
             Self::Bench => "bench",
             Self::RenderBench => "renderbench",
             Self::FullBench => "fullbench",
+            Self::Route => "route",
+            Self::RouteContinue => "route-continue",
         }
     }
     pub fn is_bench(self) -> bool {
@@ -137,10 +143,15 @@ thread_local! { static SAMPLES: RefCell<BTreeMap<&'static str, Vec<f64>>> = RefC
 fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     #[cfg(target_os = "vita")]
-    let check = || std::path::Path::new(vita::PROFILE_DIR).exists();
+    let check = || std::path::Path::new(vita::PROFILE_DIR).exists() && !matches!(Mode::read(),Mode::Route|Mode::RouteContinue);
     #[cfg(not(target_os = "vita"))]
     let check = || std::env::var_os("LOOKING_GLASS_FRAME_PROFILE").is_some();
     *ON.get_or_init(check)
+}
+
+pub(crate) fn heap_used_bytes()->Option<u64> {
+    #[cfg(target_os="vita")] {Some(vita::heap_used())}
+    #[cfg(not(target_os="vita"))] {None}
 }
 
 pub struct Span {
@@ -516,7 +527,7 @@ mod vita {
     #[repr(C)]
     struct MallInfo { arena:usize, ordblks:usize, smblks:usize, hblks:usize, hblkhd:usize, usmblks:usize, fsmblks:usize, uordblks:usize, fordblks:usize, keepcost:usize }
     extern "C" { fn mallinfo() -> MallInfo; }
-    fn heap_used()->u64 { unsafe { mallinfo().uordblks as u64 } }
+    pub(super) fn heap_used()->u64 { unsafe { mallinfo().uordblks as u64 } }
     #[link(name = "ScePower_stub")]
     extern "C" {
         fn scePowerSetArmClockFrequency(freq: i32) -> i32;
@@ -630,6 +641,7 @@ mod vita {
     }
     // Call once after local integer loops. No per-plan or per-triplet timing.
     pub fn counts(values: &[(&'static str, u64)]) {
+        if !HOT_RECORDING.load(Relaxed) { return; }
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             if !s.recording {

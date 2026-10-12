@@ -77,6 +77,15 @@ void main(){
  gl_FragColor=vec4(fogged(rgb,Alpha.z),a);
 }"#;
 
+/// Low preset keeps diffuse/lightmaps and gain, omits fragment fog and discard
+/// for surfaces already classified opaque with no alpha test. Foliage stays full.
+pub fn low_fragment()->String {
+    let mut result=FRAGMENT.to_string();
+    let start=result.find(" float cut=Surface.z;").unwrap();
+    let end=result.find(" vec3 lighting=").unwrap();result.replace_range(start..end,"");
+    result.replace("fogged(rgb,Alpha.z)","rgb")
+}
+
 #[repr(C)]
 pub struct Uniforms {
     pub mvp: [f32; 16],

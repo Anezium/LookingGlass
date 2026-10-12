@@ -59,3 +59,37 @@ clusters; hit loads 8.4 ms; damaged checksum is rejected and rebuilt (42.4 ms).
 The cold verification's 1,256 ms includes the deliberately slow old compiler and
 is not a cold-build performance result. Native phase timing and SD cost remain
 for the pilot; none of these host numbers are Vita measurements.
+
+## Step 4: input replay and bounded route reports
+
+Host recording uses LG's existing physics planner to propose ordinary stick/jump
+controls. The viewer records and replays those controls at the original 120 Hz
+physics ticks, without changing position, completing scenes or restoring debug
+state. Scene gates wait for entry and knife_cat. The recorded passage stays in
+gvillage, collects the Hallway Blade and issues at least 60 seconds of moving
+inputs. Auto save and Continue use the unchanged LG Store and restored scene.
+Diagnostic saves are isolated in private/route-saves; normal player saves remain
+outside this test. Continue checks map, feet, yaw and pitch against the route end.
+
+Host recording completed with Blade/knife_cat progression and 60.000 seconds of
+moving inputs. Final replay and Continue verification remain required before the
+package handshake. Native route modes disable the cumulative frame profiler,
+export raw frame wall samples in windows of 300, and keep bounded 1 ms histograms
+for whole passage and each segment. SD export and save time count in the wall
+measurement. Reports log heap at route start/end and creation totals after 60
+frames. Raw windows permit exact quantiles; summary quantiles are rounded.
+
+## Runtime GPU experiments
+
+The pinned backend maps sample_count=1 to GXM MULTISAMPLE_NONE. This remains the
+default; MSAA is not a demonstrated explanation of the 150 ms native floor.
+Startup logs configured MSAA and queried framebuffer component/depth bits.
+render_scale below 1 creates one persistent single-sample RGBA8/Depth32 3D target,
+then one opaque linear upscale before the native-resolution HUD. All 3D actors,
+effects and first-person geometry share the target. Native validation is pending.
+GPU-only gpu111/gpu222 experiments leave ARM/bus/xbar settings unchanged and log
+the effective clocks. Opaques default to front-to-back order; alpha never writes
+depth. world_alpha and sky independently mask those world costs. quality=low
+uses a fragment path without cutout/discard or fog for eligible opaque surfaces;
+cutout and alpha retain the full shader. UV wave/turbulence was already evaluated
+in the vertex shader, so this preset does not claim to remove fragment waves.

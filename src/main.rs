@@ -109,6 +109,8 @@ mod traversal;
 mod ui;
 mod viewer;
 mod frame_profile;
+#[cfg(feature="vita_renderer")]
+mod route_replay;
 mod viewmodel;
 mod village;
 mod village_route;

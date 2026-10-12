@@ -1,5 +1,6 @@
 //! Direct, retained world draws. CPU geometry and PVS compilation happen at load time.
 mod shader;
+mod scale;
 mod pvs_cache;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
@@ -31,6 +32,11 @@ pub struct Config {
     pub pvs_verify: bool,
     pub gpu_experiment: String,
     pub world_viewport_scale: f32,
+    pub render_scale:f32,
+    pub msaa_samples:i32,
+    pub quality:String,
+    pub opaque_order:String,
+    pub world_alpha:bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -49,6 +55,7 @@ impl Default for Config {
             pvs_verify: false,
             gpu_experiment: "unchanged".into(),
             world_viewport_scale: 1.,
+            render_scale:1.,msaa_samples:1,quality:"full".into(),opaque_order:"front_to_back".into(),world_alpha:true,
         }
     }
 }
@@ -67,6 +74,10 @@ impl Config {
             "actor_max_layers must be 1 or 2"
         );
         ensure!(self.world_viewport_scale.is_finite() && (0.25..=1.).contains(&self.world_viewport_scale),"world_viewport_scale must be between 0.25 and 1");
+        ensure!(self.render_scale.is_finite()&&(0.25..=1.).contains(&self.render_scale),"invalid render_scale");
+        ensure!(matches!(self.msaa_samples,1|2|4),"msaa_samples must be 1, 2 or 4");
+        ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
+        ensure!(matches!(self.opaque_order.as_str(),"material"|"front_to_back"),"invalid opaque_order");
         ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
         ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
         ensure!(
@@ -146,12 +157,16 @@ fn mask_in_mode(requested: bool, mode: crate::frame_profile::Mode) -> bool {
 /// Diagnostic world-only probe. Full-frame actor/HUD alignment remains full-size.
 pub(crate) fn world_viewport() -> Option<(i32,i32,i32,i32)> {
     if !world_only() || config().world_viewport_scale==1. { return None; }
-    Some((0,0,(screen_width()*config().world_viewport_scale).round() as i32,
-              (screen_height()*config().world_viewport_scale).round() as i32))
+    Some((0,0,(screen_width()*config().render_scale*config().world_viewport_scale).round() as i32,
+              (screen_height()*config().render_scale*config().world_viewport_scale).round() as i32))
 }
 pub(crate) fn apply_world_viewport() {
     if let Some((x,y,w,h))=world_viewport() { unsafe { get_internal_gl().quad_context.apply_viewport(x,y,w,h); } }
 }
+pub(crate) fn prepare_3d(bg:Color){scale::prepare(bg);}
+pub(crate) fn begin_3d_pass(action:PassAction){scale::begin(action);}
+pub(crate) fn set_3d_camera(camera:&Camera3D){scale::camera(camera);}
+pub(crate) fn present_3d(){scale::present();}
 static INVENTORY: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 #[derive(Clone, Copy, serde::Serialize)]
 struct View {
@@ -394,6 +409,8 @@ pub struct Renderer {
     pvs: Pvs,
     pipelines: Vec<Pipeline>,
     shader: ShaderId,
+    low_shader:Option<ShaderId>,
+    low_pipelines:Vec<Pipeline>,
     sky_pipeline: Pipeline,
     sky_shader: ShaderId,
     sky_bindings: Bindings,
@@ -612,6 +629,16 @@ impl Renderer {
                 ));
             }
         }
+        let mut low_pipelines=Vec::new();
+        let low_shader=if c.quality=="low" {
+            crate::frame_profile::shader_creation();
+            let low=ctx.new_shader(ShaderSource::Glsl{vertex:shader::VERTEX,fragment:&shader::low_fragment()},shader::meta())?;
+            for cull in [CullFace::Nothing,CullFace::Back,CullFace::Front] {
+                crate::frame_profile::pipeline_creation();
+                low_pipelines.push(ctx.new_pipeline(&[BufferLayout{stride:52,..Default::default()}],&attributes,low,PipelineParams{depth_test:Comparison::LessOrEqual,depth_write:true,cull_face:cull,front_face_order:FrontFaceOrder::Clockwise,..Default::default()}));
+            }
+            Some(low)
+        }else{None};
         let mut groups = Vec::new();
         for (p, texture) in pending.into_iter().zip(first_textures) {
             let extent = deform_extent(&p.recipe.deform);
@@ -719,7 +746,7 @@ impl Renderer {
             groups,
             pvs,
             pipelines,
-            shader,
+            shader,low_shader,low_pipelines,
             sky_pipeline,
             sky_shader,
             sky_bindings,
@@ -762,6 +789,8 @@ impl Renderer {
             }
         }
         drop(visibility_span);
+        if alpha && !config().world_alpha {self.alpha_order.clear();}
+        if !alpha && config().opaque_order=="front_to_back" {self.alpha_order.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||a.1.cmp(&b.1)));}
         if alpha && config().sort_alpha && !crate::render_fx::retained_active() {
             let _sort = crate::frame_profile::span("vita_alpha_group_sort");
             self.alpha_order
@@ -823,11 +852,7 @@ impl Renderer {
             }
             count("vita_world_interop_flushes", 1);
         }
-        unsafe {
-            get_internal_gl()
-                .quad_context
-                .begin_default_pass(PassAction::Nothing);
-        }
+        begin_3d_pass(PassAction::Nothing);
         apply_world_viewport();
         let mut stats = super::DrawStats {
             culled: (if alpha {
@@ -839,6 +864,7 @@ impl Renderer {
             ..Default::default()
         };
         if !alpha && config().sky {
+            let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
             let bg = scene.atmosphere.background();
             let sky = [
                 [bg.r, bg.g, bg.b, 1.],
@@ -866,7 +892,10 @@ impl Renderer {
             let pi = g.recipe.blend * 3 + g.recipe.cull;
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
-            ctx.apply_pipeline(&self.pipelines[pi]);
+            let low=!alpha && g.recipe.stage.alpha_test==0 && !self.low_pipelines.is_empty();
+            ctx.apply_pipeline(if low {&self.low_pipelines[g.recipe.cull]}else{&self.pipelines[pi]});
+            unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});}
+            if low {count("vita_world_low_draws",1);}
             ctx.apply_bindings(&g.bindings);
             ctx.apply_uniforms(UniformsSource::table(&prepared.uniforms));
             ctx.draw(0, g.indices, 1);
@@ -939,6 +968,7 @@ impl Renderer {
             g.bindings.images[0] = p.texture;
             let ctx = unsafe { get_internal_gl() }.quad_context;
             ctx.apply_pipeline(&self.pipelines[g.recipe.blend * 3 + g.recipe.cull]);
+            unsafe{macroquad::miniquad::gl::glDepthMask(0);}
             ctx.apply_bindings(&g.bindings);
             ctx.apply_uniforms(UniformsSource::table(&p.uniforms));
             ctx.draw(0, g.indices, 1);
@@ -981,6 +1011,8 @@ impl Drop for Renderer {
             ctx.delete_pipeline(*p);
         }
         ctx.delete_pipeline(self.sky_pipeline);
+        for p in &self.low_pipelines {ctx.delete_pipeline(*p);}
+        if let Some(shader)=self.low_shader {ctx.delete_shader(shader);}
         ctx.delete_shader(self.shader);
         ctx.delete_shader(self.sky_shader);
         ctx.delete_buffer(self.sky_bindings.vertex_buffers[0]);

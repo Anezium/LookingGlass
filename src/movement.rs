@@ -798,6 +798,23 @@ impl FixedClock {
         #[cfg(target_os = "vita")]
         crate::frame_profile::counts(&[("fixed_clock_ticks", (self.ticks - ticks_before) as u64)]);
     }
+    /// Diagnostic replay resolves timestamped controls at each ordinary physics tick.
+    #[cfg(feature="vita_renderer")]
+    pub fn advance_route(&mut self,seconds:f64,world:&World,player:&mut Player,mut input:impl FnMut(&Player)->Controls) {
+        #[cfg(target_os="vita")]
+        let _span=crate::frame_profile::span("fixed_clock");
+        #[cfg(target_os="vita")]
+        let before=self.ticks;
+        self.accumulator+=if seconds.is_finite(){seconds.clamp(0.,0.25)}else{0.};
+        const STEP:f64=1./120.;
+        while self.accumulator+1e-10>=STEP {
+            let controls=input(player);player.tick(world,controls);
+            self.accumulator-=STEP;self.ticks+=1;
+        }
+        self.jump_pending=false;self.use_pending=false;
+        #[cfg(target_os="vita")]
+        crate::frame_profile::counts(&[("fixed_clock_ticks",self.ticks-before)]);
+    }
     pub fn pause(&mut self) {
         self.accumulator = 0.;
         self.jump_pending = false;

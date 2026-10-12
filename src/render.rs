@@ -2255,9 +2255,11 @@ pub fn depth_pipeline(color_blend: Option<BlendState>) -> PipelineParams {
 pub(crate) fn clear_direct_view_depth() {
     unsafe {
         macroquad::miniquad::gl::glDepthMask(1);
-        let ctx=get_internal_gl().quad_context;
-        ctx.begin_default_pass(macroquad::miniquad::PassAction::Clear { color:None,depth:Some(1.),stencil:None });
-        ctx.end_render_pass();
+        #[cfg(feature="vita_renderer")]
+        vita_renderer::begin_3d_pass(macroquad::miniquad::PassAction::Clear {color:None,depth:Some(1.),stencil:None});
+        #[cfg(not(feature="vita_renderer"))]
+        get_internal_gl().quad_context.begin_default_pass(macroquad::miniquad::PassAction::Clear {color:None,depth:Some(1.),stencil:None});
+        get_internal_gl().quad_context.end_render_pass();
     }
 }
 
@@ -2276,6 +2278,9 @@ pub fn clear_view_depth() {
             get_internal_gl().flush();
         }
         macroquad::miniquad::gl::glDepthMask(1);
+        #[cfg(feature="vita_renderer")]
+        { vita_renderer::begin_3d_pass(macroquad::miniquad::PassAction::Clear{color:None,depth:Some(1.),stencil:None});get_internal_gl().quad_context.end_render_pass(); }
+        #[cfg(not(feature="vita_renderer"))]
         macroquad::miniquad::gl::glClear(macroquad::miniquad::gl::GL_DEPTH_BUFFER_BIT);
     }
 }

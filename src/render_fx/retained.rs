@@ -241,7 +241,7 @@ impl Gpu {
             images: vec![texture, white, white],
         })
     }
-    fn draw(&mut self, p: &Pass, bindings: &Bindings, u: &[f32; UNIFORM_FLOATS]) {
+    fn draw(&mut self, p: &Pass, bindings: &Bindings, u: &[f32; UNIFORM_FLOATS], depth_write:bool) {
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let key = (p.blend_index, p.depth_equal);
         let pipeline = self.pipelines.entry(key).or_insert_with(|| {
@@ -269,6 +269,7 @@ impl Gpu {
             )
         });
         ctx.apply_pipeline(pipeline);
+        unsafe{macroquad::miniquad::gl::glDepthMask(u8::from(depth_write));}
         ctx.apply_bindings(bindings);
         ctx.apply_uniforms(UniformsSource::table(u));
         ctx.draw(0, p.mesh.indices.len() as i32, 1);
@@ -474,13 +475,11 @@ pub(crate) fn finish(
     let draw_group = |gpu: &mut Gpu, id: usize| {
         for i in ranges[id].clone() {
             let (p, b, u) = &packets[i];
-            gpu.draw(p, b, u);
+            gpu.draw(p, b, u, !groups[id].transparent);
         }
     };
     unsafe {
-        get_internal_gl()
-            .quad_context
-            .begin_default_pass(PassAction::Nothing);
+        crate::render::vita_renderer::begin_3d_pass(PassAction::Nothing);
         macroquad::miniquad::gl::glDepthMask(1);
     }
     {

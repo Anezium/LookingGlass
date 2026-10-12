@@ -295,7 +295,7 @@ impl Route {
     /// Each step is 24 ticks of one of nine headings, with or without a jump; the plan is the list
     /// of inputs with the position each is expected to end at. `Err` is the number of states
     /// searched before giving up.
-    fn plan(
+    pub(crate) fn plan(
         world: &World,
         start: &Player,
         goal: Vec3,
