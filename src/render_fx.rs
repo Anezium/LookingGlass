@@ -23,6 +23,8 @@ pub struct Appearance {
     pub power: f32,
 }
 pub struct Pass {
+    #[cfg(feature="vita_renderer")]
+    effect:bool,
     #[cfg(feature = "vita_renderer")]
     blend_index: usize,
     #[cfg(feature = "vita_renderer")]
@@ -293,7 +295,8 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
     }
     #[cfg(feature = "vita_renderer")]
     if retained_active() {
-        let limit = crate::render::vita_renderer::config().actor_max_layers;
+        let c=crate::render::vita_renderer::config();
+        let limit=if passes.iter().all(|p|p.effect){c.fx_max_layers}else{c.actor_max_layers};
         let mut passes = passes;
         if passes.len() > limit {
             retained::count("vita_fx_dropped_layers", (passes.len() - limit) as u64);
@@ -455,6 +458,8 @@ pub fn finish() -> (usize, usize) {
                 let _submit_profile = crate::frame_profile::span("transparent_submit");
                 draw_pass(
                     &Pass {
+                        #[cfg(feature="vita_renderer")]
+                        effect:p.effect,
                         #[cfg(feature = "vita_renderer")]
                         blend_index: p.blend_index,
                         #[cfg(feature = "vita_renderer")]
@@ -558,6 +563,8 @@ fn pass_at(
             .map_or(1., |w| w.sample(clock))
             .clamp(0., 2.);
     Ok(Pass {
+        #[cfg(feature="vita_renderer")]
+        effect:false,
         #[cfg(feature = "vita_renderer")]
         blend_index: crate::render::blend_index(stage.blend),
         #[cfg(feature = "vita_renderer")]
@@ -609,7 +616,7 @@ pub fn effect(mesh: &Mesh, blend: Blend) {
     } else {
         blend
     };
-    if let Ok(p) = pass(
+    if let Ok(mut p) = pass(
         mesh,
         &Stage {
             blend,
@@ -619,6 +626,7 @@ pub fn effect(mesh: &Mesh, blend: Blend) {
         false,
         Appearance::default(),
     ) {
+        #[cfg(feature="vita_renderer")] {p.effect=true;}
         submit(vec![p], true);
     }
 }
@@ -838,7 +846,7 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
     let mut passes = Vec::new();
     #[cfg(feature = "vita_renderer")]
     let limit = if retained_active() {
-        crate::render::vita_renderer::config().actor_max_layers
+        {let c=crate::render::vita_renderer::config();if clock.is_some(){c.fx_max_layers}else{c.actor_max_layers}}
     } else {
         usize::MAX
     };
@@ -861,15 +869,22 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
             }]
             .clone(),
         );
+        #[cfg(feature="vita_renderer")]
+        let fast=retained_active()&&crate::render::vita_renderer::config().actor_fast_path;
+        #[cfg(not(feature="vita_renderer"))]
+        let fast=false;
         for v in &mut copy.vertices {
-            let n = v.normal.truncate().normalize_or_zero();
-            v.uv = layer.stage.view_uv(v.uv, v.position, n, camera, time);
-            v.color[3] = (255.
-                * alpha
-                * layer
-                    .stage
-                    .opacity(n, (camera - v.position).normalize_or_zero(), v.color[3]))
-                as u8;
+            if fast && !layer.stage.environment && layer.stage.dot_alpha.is_none() {
+                if !layer.stage.mods.is_empty() || layer.stage.vector_uv.is_some(){
+                    v.uv=layer.stage.view_uv(v.uv,v.position,Vec3::ZERO,camera,time);
+                }
+                let opacity=if layer.stage.vertex_alpha{v.color[3] as f32/255.}else{1.};
+                v.color[3]=(255.*alpha*opacity.clamp(0.,1.)) as u8;
+            }else{
+                let n=v.normal.truncate().normalize_or_zero();
+                v.uv=layer.stage.view_uv(v.uv,v.position,n,camera,time);
+                v.color[3]=(255.*alpha*layer.stage.opacity(n,(camera-v.position).normalize_or_zero(),v.color[3])) as u8;
+            }
         }
         let mut stage = layer.stage.clone();
         if clock.is_none() && alpha < 1. {
@@ -888,6 +903,7 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
                 Blend::DoubleFilter | Blend::Factors(4, 2) => alpha - 1.,
                 _ => 0.,
             };
+            #[cfg(feature="vita_renderer")] {p.effect=clock.is_some();}
             passes.push(p);
         }
     }

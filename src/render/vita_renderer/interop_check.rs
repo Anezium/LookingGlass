@@ -413,3 +413,30 @@ pub async fn check() -> Result<()> {
     println!("PASS retained selected dynamic light and models-only mask");
     Ok(())
 }
+
+/// Exercise scaled depth, transparent interop, opaque upscale and native HUD.
+pub async fn scale_check()->Result<()> {
+    ensure!(config().render_scale<1.,"scale fixture requires render_scale below 1");
+    let camera=Camera3D{position:Vec3::Z*10.,target:Vec3::ZERO,up:Vec3::Y,projection:Projection::Orthographics,fovy:4.,z_near:0.1,z_far:50.,..Default::default()};
+    let mut gpu=render_fx::retained::Gpu::new()?;
+    crate::lighting::fixture_lights(vec![]);
+    let red=crate::texture::upload_rgba8(1,1,&[255,0,0,255]);
+    for frame in 0..120 {
+        crate::frame_profile::begin_creation_frame();
+        clear_background(BLACK);prepare_3d(BLACK);set_3d_camera(&camera);
+        render_fx::retained::begin_view(&camera,0.,&Default::default(),true,true);
+        let mut actor=quad(1.,WHITE);
+        actor.texture=Some(red.clone());
+        render_fx::skin(&actor);
+        render_fx::effect(&quad(-1.,Color::new(0.,0.,1.,0.5)),Blend::Alpha);
+        render_fx::retained::finish(&mut gpu,&[],true,|_|unreachable!());
+        present_3d();check_color(Vec3::X,"scaled opaque depth hides rear effect")?;
+        set_default_camera();draw_rectangle(screen_width()/2.-4.,screen_height()/2.-4.,8.,8.,GREEN);
+        check_color(Vec3::Y,"native HUD after opaque upscale")?;
+        if frame>0 {ensure!(crate::frame_profile::current_creations()==[0,0],"scaled path recompiled at frame {frame}");}
+        if frame==119 {crate::viewer::save_capture(std::path::Path::new("private/retained-alpha/scaled-depth-hud.png"))?;}
+        next_frame().await;
+    }
+    println!("PASS scaled depth, alpha interop, native HUD and zero program creation after startup (120 frames)");
+    Ok(())
+}

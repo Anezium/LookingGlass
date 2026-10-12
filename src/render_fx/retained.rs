@@ -143,17 +143,127 @@ fn uniforms(p: &Pass, f: &Frame) -> [f32; UNIFORM_FLOATS] {
     debug_assert_eq!(cursor, UNIFORM_FLOATS);
     output
 }
+#[derive(Default)]
+struct Stats {
+    draws: u64,
+    triangles: u64,
+    uniform_bytes: u64,
+    upload_bytes: u64,
+    uploads: u64,
+    growths: u64,
+    upload_hits: u64,
+}
+impl Stats {
+    fn report(&self) {
+        let values = [
+            ("vita_fx_gpu_draws", self.draws),
+            ("vita_fx_triangles", self.triangles),
+            ("vita_fx_state_applications", self.draws),
+            ("vita_fx_uniform_bytes", self.uniform_bytes),
+            ("vita_fx_geometry_upload_bytes", self.upload_bytes),
+            ("vita_fx_mesh_uploads", self.uploads),
+            ("vita_fx_buffer_growths", self.growths),
+            ("vita_fx_upload_cache_hits", self.upload_hits),
+        ];
+        #[cfg(target_os = "vita")]
+        {
+            crate::frame_profile::counts(&values);
+            crate::frame_profile::record_lg_submissions(self.draws);
+        }
+        #[cfg(not(target_os = "vita"))]
+        for (name, value) in values {
+            count(name, value);
+        }
+    }
+}
 struct Buffers {
     vertex: BufferId,
     index: BufferId,
     vertex_capacity: usize,
     index_capacity: usize,
+    bindings: Bindings,
+    previous_vertices: Vec<Vertex>,
+    previous_indices: Vec<u16>,
+}
+fn vertices_equal(a: &[Vertex], b: &[Vertex]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            a.position == b.position && a.uv == b.uv && a.color == b.color && a.normal == b.normal
+        })
+}
+fn make_buffers(
+    ctx: &mut dyn RenderingBackend,
+    vc: usize,
+    ic: usize,
+    ring: bool,
+    white: TextureId,
+) -> Buffers {
+    let usage = if ring {
+        BufferUsage::Dynamic
+    } else {
+        BufferUsage::Stream
+    };
+    let vertex = ctx.new_buffer(
+        BufferType::VertexBuffer,
+        usage,
+        BufferSource::empty::<Vertex>(vc),
+    );
+    let index = ctx.new_buffer(
+        BufferType::IndexBuffer,
+        usage,
+        BufferSource::empty::<u16>(ic),
+    );
+    Buffers {
+        vertex,
+        index,
+        vertex_capacity: vc,
+        index_capacity: ic,
+        bindings: Bindings {
+            vertex_buffers: vec![vertex],
+            index_buffer: index,
+            images: vec![white; 3],
+        },
+        previous_vertices: Vec::new(),
+        previous_indices: Vec::new(),
+    }
+}
+fn unchanged_merged(
+    cached: &Mesh,
+    groups: &[super::Group],
+    target: usize,
+    sources: &[usize],
+) -> bool {
+    let mut vertex = 0;
+    let mut index = 0;
+    for id in std::iter::once(target).chain(sources.iter().copied()) {
+        let mesh = &groups[id].passes[0].mesh;
+        let v_end = vertex + mesh.vertices.len();
+        let i_end = index + mesh.indices.len();
+        if v_end > cached.vertices.len()
+            || i_end > cached.indices.len()
+            || !vertices_equal(&cached.vertices[vertex..v_end], &mesh.vertices)
+            || !cached.indices[index..i_end]
+                .iter()
+                .zip(&mesh.indices)
+                .all(|(&a, &b)| a as usize == b as usize + vertex)
+        {
+            return false;
+        }
+        vertex = v_end;
+        index = i_end;
+    }
+    vertex == cached.vertices.len() && index == cached.indices.len()
 }
 pub(crate) struct Gpu {
     shader: ShaderId,
     pipelines: BTreeMap<(usize, bool), Pipeline>,
     buffers: Vec<Buffers>,
     white: Texture2D,
+    ring_frame: usize,
+    ring_phase: usize,
+    stats: Stats,
+    merge_cache: [MergeCache; 4],
+    merge_meshes: [BTreeMap<usize, Mesh>; 2],
 }
 impl Gpu {
     pub(crate) fn new() -> Result<Self> {
@@ -175,14 +285,31 @@ impl Gpu {
             "[lg/vita-renderer] actor READY grouped alpha, actor_max_layers={}",
             crate::render::vita_renderer::config().actor_max_layers
         );
-        Ok(Self {
+        let mut gpu = Self {
             shader,
             pipelines: BTreeMap::new(),
             buffers: Vec::new(),
             white,
-        })
+            ring_frame: 0,
+            ring_phase: 0,
+            stats: Stats::default(),
+            merge_cache: Default::default(),
+            merge_meshes: Default::default(),
+        };
+        // Pipeline objects share the one compiled program. Prewarm every LG blend
+        // and depth key so first use of the held Blade does not create one later.
+        for blend in 0..crate::render::BLEND_COUNT {
+            for equal in [false, true] {
+                gpu.prepare_pipeline((blend, equal));
+            }
+        }
+        println!(
+            "[lg/vita-renderer] actor pipeline objects prewarmed={} programs=1",
+            gpu.pipelines.len()
+        );
+        Ok(gpu)
     }
-    fn upload(&mut self, slot: usize, p: &Pass) -> Result<Bindings> {
+    fn upload(&mut self, slot: usize, p: &Pass) -> Result<usize> {
         ensure!(
             valid_mesh(&p.mesh),
             "invalid actor range: {} vertices / {} indices",
@@ -196,55 +323,52 @@ impl Gpu {
             .texture
             .as_ref()
             .map_or(white, Texture2D::raw_miniquad_id);
+        let ring = crate::render::vita_renderer::config().fx_streaming == "ring";
+        let slot = if ring {
+            slot * 6 + (self.ring_frame % 3) * 2 + self.ring_phase
+        } else {
+            slot
+        };
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let vc = p.mesh.vertices.len().next_power_of_two();
         let ic = p.mesh.indices.len().next_power_of_two();
-        if slot == self.buffers.len()
-            || self.buffers[slot].vertex_capacity < vc
-            || self.buffers[slot].index_capacity < ic
-        {
-            let b = Buffers {
-                vertex: ctx.new_buffer(
-                    BufferType::VertexBuffer,
-                    BufferUsage::Stream,
-                    BufferSource::empty::<Vertex>(vc),
-                ),
-                index: ctx.new_buffer(
-                    BufferType::IndexBuffer,
-                    BufferUsage::Stream,
-                    BufferSource::empty::<u16>(ic),
-                ),
-                vertex_capacity: vc,
-                index_capacity: ic,
-            };
-            if slot == self.buffers.len() {
-                self.buffers.push(b);
-            } else {
-                let old = std::mem::replace(&mut self.buffers[slot], b);
-                ctx.delete_buffer(old.vertex);
-                ctx.delete_buffer(old.index);
-            }
-            count("vita_fx_buffer_growths", 1);
+        while self.buffers.len() <= slot {
+            self.buffers.push(make_buffers(ctx, vc, ic, ring, white));
+            self.stats.growths += 1;
         }
-        let b = &self.buffers[slot];
-        // Vita's pinned compact-stream backend orphans in-flight storage with glBufferData.
-        ctx.buffer_update(b.vertex, BufferSource::slice(&p.mesh.vertices));
-        ctx.buffer_update(b.index, BufferSource::slice(&p.mesh.indices));
-        count(
-            "vita_fx_geometry_upload_bytes",
-            (p.mesh.vertices.len() * 40 + p.mesh.indices.len() * 2) as u64,
-        );
-        count("vita_fx_mesh_uploads", 1);
-        Ok(Bindings {
-            vertex_buffers: vec![b.vertex],
-            index_buffer: b.index,
-            images: vec![texture, white, white],
-        })
+        if self.buffers[slot].vertex_capacity < vc || self.buffers[slot].index_capacity < ic {
+            let replacement = make_buffers(ctx, vc, ic, ring, white);
+            let old = std::mem::replace(&mut self.buffers[slot], replacement);
+            ctx.delete_buffer(old.vertex);
+            ctx.delete_buffer(old.index);
+            self.stats.growths += 1;
+        }
+        let b = &mut self.buffers[slot];
+        b.bindings.images[0] = texture;
+        let cache = crate::render::vita_renderer::config().fx_upload_cache;
+        let unchanged = cache
+            && b.previous_indices == p.mesh.indices
+            && vertices_equal(&b.previous_vertices, &p.mesh.vertices);
+        if unchanged {
+            self.stats.upload_hits += 1;
+        } else {
+            // Ring pages use Dynamic/glBufferSubData; Stream retains the orphan option.
+            ctx.buffer_update(b.vertex, BufferSource::slice(&p.mesh.vertices));
+            ctx.buffer_update(b.index, BufferSource::slice(&p.mesh.indices));
+            self.stats.upload_bytes +=
+                (p.mesh.vertices.len() * 40 + p.mesh.indices.len() * 2) as u64;
+            self.stats.uploads += 1;
+            if cache {
+                b.previous_vertices.clear();
+                b.previous_vertices.extend_from_slice(&p.mesh.vertices);
+                b.previous_indices.clone_from(&p.mesh.indices);
+            }
+        }
+        Ok(slot)
     }
-    fn draw(&mut self, p: &Pass, bindings: &Bindings, u: &[f32; UNIFORM_FLOATS], depth_write:bool) {
+    fn prepare_pipeline(&mut self, key: (usize, bool)) {
         let ctx = unsafe { get_internal_gl() }.quad_context;
-        let key = (p.blend_index, p.depth_equal);
-        let pipeline = self.pipelines.entry(key).or_insert_with(|| {
+        self.pipelines.entry(key).or_insert_with(|| {
             crate::frame_profile::pipeline_creation();
             ctx.new_pipeline(
                 &[BufferLayout {
@@ -259,26 +383,33 @@ impl Gpu {
                 ],
                 self.shader,
                 PipelineParams {
-                    depth_test: if p.depth_equal {
+                    depth_test: if key.1 {
                         Comparison::Equal
                     } else {
                         Comparison::LessOrEqual
                     },
-                    ..crate::render::depth_pipeline(crate::render::blend(p.blend_index))
+                    ..crate::render::depth_pipeline(crate::render::blend(key.0))
                 },
             )
         });
+    }
+    fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
+        let key = (p.blend_index, p.depth_equal);
+        let pipeline = self
+            .pipelines
+            .get(&key)
+            .expect("prewarmed LG actor pipeline");
+        let ctx = unsafe { get_internal_gl() }.quad_context;
         ctx.apply_pipeline(pipeline);
-        unsafe{macroquad::miniquad::gl::glDepthMask(u8::from(depth_write));}
-        ctx.apply_bindings(bindings);
+        unsafe {
+            macroquad::miniquad::gl::glDepthMask(u8::from(depth_write));
+        }
+        ctx.apply_bindings(&self.buffers[slot].bindings);
         ctx.apply_uniforms(UniformsSource::table(u));
         ctx.draw(0, p.mesh.indices.len() as i32, 1);
-        count("vita_fx_gpu_draws", 1);
-        count("vita_fx_triangles", p.mesh.indices.len() as u64 / 3);
-        count("vita_fx_state_applications", 1);
-        count("vita_fx_uniform_bytes", std::mem::size_of_val(u) as u64);
-        #[cfg(target_os = "vita")]
-        crate::frame_profile::record_lg_submission();
+        self.stats.draws += 1;
+        self.stats.triangles += p.mesh.indices.len() as u64 / 3;
+        self.stats.uniform_bytes += std::mem::size_of_val(u) as u64;
     }
 }
 impl Drop for Gpu {
@@ -324,6 +455,7 @@ fn center(mesh: &Mesh) -> Vec3 {
     );
     (lo + hi) * 0.5
 }
+#[cfg(test)]
 fn same_packet(a: &Pass, b: &Pass) -> bool {
     a.blend_index == b.blend_index
         && a.depth_equal == b.depth_equal
@@ -339,9 +471,178 @@ fn same_packet(a: &Pass, b: &Pass) -> bool {
         && a.appearance == b.appearance
         && a.filter_fade == b.filter_fade
 }
+#[derive(Clone, PartialEq)]
+struct PacketKey {
+    texture: Option<TextureId>,
+    state: [u32; 20],
+}
+fn packet_key(p: &Pass) -> PacketKey {
+    PacketKey {
+        texture: p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id),
+        state: [
+            p.blend_index as u32,
+            u32::from(p.depth_equal),
+            u32::from(p.lit),
+            u32::from(p.clamp),
+            p.cutout.to_bits(),
+            p.cutout_reference.to_bits(),
+            p.gain.x.to_bits(),
+            p.gain.y.to_bits(),
+            p.gain.z.to_bits(),
+            p.gain.w.to_bits(),
+            p.fog.to_bits(),
+            u32::from(p.model),
+            p.appearance.dissolve.to_bits(),
+            u32::from(p.appearance.ghost),
+            p.appearance.power.to_bits(),
+            p.filter_fade.to_bits(),
+            u32::from(p.effect),
+            0,
+            0,
+            0,
+        ],
+    }
+}
+#[derive(Clone, PartialEq)]
+struct Signature {
+    source: Source,
+    key: Option<PacketKey>,
+    vertices: usize,
+    indices: usize,
+    particle: bool,
+}
+#[derive(Default)]
+struct MergeCache {
+    signature: Vec<Signature>,
+    steps: Vec<(usize, usize)>,
+    kept: Vec<Source>,
+}
+fn merge_cached(
+    cache: &mut MergeCache,
+    groups: &mut [super::Group],
+    list: &mut Vec<(f32, Source)>,
+    material: bool,
+    reuse: bool,
+    pool: &mut BTreeMap<usize, Mesh>,
+) -> Vec<usize> {
+    // Only packet topology/state is cached. Animated vertices always stream anew.
+    // A world packet or actor is a barrier for particle material regrouping.
+    let signature = list
+        .iter()
+        .map(|&(_, source)| {
+            if let Source::Actor(id) = source {
+                let g = &groups[id];
+                let p = g.passes.first();
+                let eligible = g.passes.len() == 1 && p.is_some_and(|p| valid_mesh(&p.mesh));
+                Signature {
+                    source,
+                    key: eligible.then(|| packet_key(p.unwrap())),
+                    vertices: p.map_or(0, |p| p.mesh.vertices.len()),
+                    indices: p.map_or(0, |p| p.mesh.indices.len()),
+                    particle: p.is_some_and(|p| p.effect),
+                }
+            } else {
+                Signature {
+                    source,
+                    key: None,
+                    vertices: 0,
+                    indices: 0,
+                    particle: false,
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let hit = reuse && cache.signature == signature;
+    if hit {
+        count("vita_fx_merge_plan_hits", 1);
+    } else {
+        count("vita_fx_merge_plan_builds", 1);
+        cache.steps.clear();
+        cache.kept.clear();
+        let mut candidates: Vec<(usize, usize, usize, PacketKey, bool)> = Vec::new();
+        for item in &signature {
+            let Source::Actor(id) = item.source else {
+                candidates.clear();
+                cache.kept.push(item.source);
+                continue;
+            };
+            let Some(key) = &item.key else {
+                candidates.clear();
+                cache.kept.push(item.source);
+                continue;
+            };
+            if !material || !item.particle || candidates.last().is_some_and(|c| !c.4) {
+                if candidates.len() > 1 {
+                    let last = candidates.pop().unwrap();
+                    candidates.clear();
+                    candidates.push(last);
+                }
+            }
+            let found = candidates.iter().position(|c| {
+                c.3 == *key && c.1 + item.vertices <= 60000 && c.2 + item.indices <= 180000
+            });
+            if let Some(i) = found {
+                let c = &mut candidates[i];
+                cache.steps.push((c.0, id));
+                c.1 += item.vertices;
+                c.2 += item.indices;
+            } else {
+                if !material || !item.particle {
+                    candidates.clear();
+                }
+                candidates.push((id, item.vertices, item.indices, key.clone(), item.particle));
+                cache.kept.push(item.source);
+            }
+        }
+        cache.signature = signature;
+    }
+    let mut destinations = Vec::new();
+    for &(target, _) in &cache.steps {
+        if !destinations.contains(&target) {
+            destinations.push(target);
+        }
+    }
+    for &target in &destinations {
+        let sources = cache
+            .steps
+            .iter()
+            .filter_map(|&(t, s)| (t == target).then_some(s))
+            .collect::<Vec<_>>();
+        if let Some(mut cached) = pool.remove(&target) {
+            if hit && unchanged_merged(&cached, groups, target, &sources) {
+                groups[target].passes[0].mesh = cached;
+                for &source in &sources {
+                    groups[source].passes.clear();
+                }
+                count("vita_fx_unchanged_merged_groups", 1);
+                continue;
+            }
+            let old = &groups[target].passes[0].mesh;
+            cached.vertices.clear();
+            cached.indices.clear();
+            cached.texture = old.texture.clone();
+            cached.vertices.extend_from_slice(&old.vertices);
+            cached.indices.extend_from_slice(&old.indices);
+            groups[target].passes[0].mesh = cached;
+        }
+        for source in sources {
+            let mut source = groups[source].passes.pop().expect("merge plan source");
+            let dest = &mut groups[target].passes[0].mesh;
+            let offset = dest.vertices.len() as u16;
+            dest.vertices.append(&mut source.mesh.vertices);
+            dest.indices
+                .extend(source.mesh.indices.into_iter().map(|i| i + offset));
+        }
+    }
+    count("vita_fx_merged_meshes", cache.steps.len() as u64);
+    list.clear();
+    list.extend(cache.kept.iter().map(|&s| (0., s)));
+    destinations
+}
 /// Coalesce only adjacent whole dynamic meshes with identical shader state.
 /// The joint order is already final: a world group or layered actor is a barrier.
 /// This offsets actor indices once, never reconstructs or reads world geometry.
+#[cfg(test)]
 fn merge_adjacent(groups: &mut [super::Group], list: &mut Vec<(f32, Source)>) {
     let mut previous = None;
     let mut kept = 0;
@@ -392,6 +693,13 @@ pub(crate) fn finish(
     mut draw_world: impl FnMut(usize),
 ) -> (usize, usize) {
     let _span = crate::frame_profile::span("vita_3d_finish");
+    if flush {
+        gpu.ring_frame += 1;
+        gpu.ring_phase = 0;
+    } else {
+        gpu.ring_phase = 1;
+    }
+    gpu.stats = Stats::default();
     let (mut groups, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -401,6 +709,13 @@ pub(crate) fn finish(
             f.dropped,
         )
     });
+    count(
+        "vita_fx_particle_input_groups",
+        groups
+            .iter()
+            .filter(|g| g.passes.iter().all(|p| p.effect))
+            .count() as u64,
+    );
     if flush {
         boundary("flush_vita_3d_packets");
     }
@@ -424,16 +739,27 @@ pub(crate) fn finish(
         );
         order(list, crate::render::vita_renderer::config().sort_alpha)
     };
-    if crate::render::vita_renderer::config().merge_fx {
+    let mut recycled = Vec::new();
+    let c = crate::render::vita_renderer::config();
+    if c.merge_fx && c.fx_batching != "none" {
         let _span = crate::frame_profile::span("vita_fx_merge_groups");
-        merge_adjacent(&mut groups, &mut list);
         let mut opaque = groups
             .iter()
             .enumerate()
             .filter(|(_, g)| !g.transparent)
             .map(|(id, _)| (0., Source::Actor(id)))
             .collect::<Vec<_>>();
-        merge_adjacent(&mut groups, &mut opaque);
+        for (which, order) in [&mut list, &mut opaque].into_iter().enumerate() {
+            let destinations = merge_cached(
+                &mut gpu.merge_cache[gpu.ring_phase * 2 + which],
+                &mut groups,
+                order,
+                c.fx_batching == "material",
+                c.fx_merge_cache,
+                &mut gpu.merge_meshes[gpu.ring_phase],
+            );
+            recycled.extend(destinations);
+        }
     }
     let mut packets = Vec::new();
     let mut ranges = Vec::with_capacity(groups.len());
@@ -475,7 +801,7 @@ pub(crate) fn finish(
     let draw_group = |gpu: &mut Gpu, id: usize| {
         for i in ranges[id].clone() {
             let (p, b, u) = &packets[i];
-            gpu.draw(p, b, u, !groups[id].transparent);
+            gpu.draw(p, *b, u, !groups[id].transparent);
         }
     };
     unsafe {
@@ -513,6 +839,24 @@ pub(crate) fn finish(
         f.retained.clear();
     });
     gl_use_default_material();
+    drop(packets);
+    for &id in &recycled {
+        if let Some(p) = groups[id].passes.first_mut() {
+            gpu.merge_meshes[gpu.ring_phase].insert(
+                id,
+                std::mem::replace(
+                    &mut p.mesh,
+                    Mesh {
+                        vertices: Vec::new(),
+                        indices: Vec::new(),
+                        texture: None,
+                    },
+                ),
+            );
+        }
+    }
+    gpu.merge_meshes[gpu.ring_phase].retain(|id, _| recycled.contains(id));
+    gpu.stats.report();
     (list.len(), dropped + invalid)
 }
 
@@ -570,6 +914,7 @@ mod tests {
         super::super::Group {
             transparent: true,
             passes: vec![Pass {
+                effect: false,
                 blend_index: 1,
                 depth_equal: false,
                 mesh: Mesh {
@@ -617,6 +962,95 @@ mod tests {
         groups[1].passes[0].mesh.indices[2] = 65535;
         merge_adjacent(&mut groups, &mut list);
         assert_eq!(list.len(), 2);
+    }
+    #[test]
+    fn material_batch_cache_preserves_world_actor_barriers_and_streams_new_vertices() {
+        let make = || {
+            let mut g = (0..5).map(|_| fixture_group()).collect::<Vec<_>>();
+            for x in &mut g {
+                x.passes[0].effect = true;
+            }
+            g[1].passes[0].blend_index = 5;
+            g
+        };
+        let order = vec![
+            (5., Source::Actor(0)),
+            (4., Source::Actor(1)),
+            (3., Source::Actor(2)),
+            (2., Source::World(0)),
+            (1., Source::Actor(3)),
+        ];
+        let mut cache = MergeCache::default();
+        let mut groups = make();
+        let mut list = order.clone();
+        merge_cached(
+            &mut cache,
+            &mut groups,
+            &mut list,
+            true,
+            true,
+            &mut BTreeMap::new(),
+        );
+        assert_eq!(
+            list.iter().map(|p| p.1).collect::<Vec<_>>(),
+            vec![
+                Source::Actor(0),
+                Source::Actor(1),
+                Source::World(0),
+                Source::Actor(3)
+            ]
+        );
+        assert_eq!(groups[0].passes[0].mesh.indices, vec![0, 1, 2, 3, 4, 5]);
+        let mut pool = BTreeMap::new();
+        let merged = std::mem::replace(
+            &mut groups[0].passes[0].mesh,
+            Mesh {
+                vertices: Vec::new(),
+                indices: Vec::new(),
+                texture: None,
+            },
+        );
+        pool.insert(0, merged);
+        let mut unchanged = make();
+        let mut unchanged_list = order.clone();
+        merge_cached(
+            &mut cache,
+            &mut unchanged,
+            &mut unchanged_list,
+            true,
+            true,
+            &mut pool,
+        );
+        assert_eq!(unchanged[0].passes[0].mesh.indices, vec![0, 1, 2, 3, 4, 5]);
+        assert!(unchanged[2].passes.is_empty());
+        let mut fresh = make();
+        fresh[2].passes[0].mesh.vertices[0].position.x = 42.;
+        let mut list = order;
+        merge_cached(
+            &mut cache,
+            &mut fresh,
+            &mut list,
+            true,
+            true,
+            &mut BTreeMap::new(),
+        );
+        assert_eq!(fresh[0].passes[0].mesh.vertices[3].position.x, 42.);
+        let mut fresh = make();
+        fresh[1].passes[0].effect = false;
+        let mut list = vec![
+            (3., Source::Actor(0)),
+            (2., Source::Actor(1)),
+            (1., Source::Actor(2)),
+        ];
+        merge_cached(
+            &mut cache,
+            &mut fresh,
+            &mut list,
+            true,
+            true,
+            &mut BTreeMap::new(),
+        );
+        assert_eq!(list.len(), 3, "actor packet is a particle material barrier");
     }
     #[test]
     fn uniform_packets_keep_actor_appearance_and_depth_independent() {

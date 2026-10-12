@@ -111,3 +111,40 @@ published a native load breakdown: total 6,096.318 ms, groups 456.799 ms
 Thus the earlier 138 s renderer build was already reduced in 3.1; the remaining
 native load cost is primarily pipeline creation/uploads, not cluster iteration.
 Milestone 4's additional PVS changes still require native timing.
+
+## FX and actor CPU controls
+
+fx_batching=adjacent preserves the previous whole-group order. material additionally
+regroups single-layer particle packets with identical state inside each uninterrupted
+particle run. Every world or actor packet remains a barrier. It preserves primitive
+order within each material; cross-material alpha order is an explicit visual compromise.
+none or merge_fx=false disables merging. fx_max_layers is independent of actor_max_layers
+and vita_sim.puff_cap. Defaults retain adjacent batching and two FX/actor layers.
+
+fx_streaming=ring uses persistent Dynamic buffers (glBufferSubData) with three frame
+pages and separate world/first-person slots. orphan preserves the pinned Stream path.
+Bindings are retained with each page. This is ring streaming, not persistent mapping;
+animated geometry still copies. fx_upload_cache optionally skips byte-identical geometry
+using exact initialized vertex-field/index comparisons. fx_merge_cache caches packet
+state/topology plans and reuses unchanged merged geometry after an exact comparison;
+changed vertices are always merged and uploaded. No world geometry enters these caches.
+Counters separate plan hits/builds, unchanged merged groups, upload hits/bytes/growths,
+input particle groups and GPU draws. Draw statistics are accumulated locally and emitted
+once per finish, avoiding five profiler calls per draw. Native timing remains unmeasured.
+
+actor_fast_path skips unused normal/view normalization and UV calculations for simple
+stages. Environment/dot-alpha stages retain the original path. sim9's independent
+anim_cull can bypass an entire proven visual-only ambient actor before layer preparation
+and submission; Alice, scripted and attachment-bearing actors remain protected.
+
+The route requirement is 60 seconds of moving inputs **after** knife_cat, not 60 seconds
+including the approach. The host tape is recorded with that stronger end condition.
+
+The complete host recording reached authored entry/knife_cat, Blade ownership,
+75.567 seconds of moving inputs including exactly 60.000 after knife_cat, then
+saved and exited. It showed zero late shader creation and one late pipeline object
+at first Blade use (not repeated compilation). Pipeline objects now prewarm all
+109 LG blend keys with both depth comparisons against the same single actor
+program, keeping creation at startup rather than at the first weapon draw.
+Scaled depth/alpha/native HUD checks passed over 120 frames at scale 0.5, with
+zero shader/pipeline creation after the first frame. Native validation is pending.

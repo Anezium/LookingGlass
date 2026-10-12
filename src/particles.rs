@@ -1219,6 +1219,9 @@ impl Steam {
         let up = right.cross(direction).normalize_or_zero();
         let p = &self.puffs[index];
         let e = &self.emitters[p.emitter];
+        #[cfg(feature="vita_renderer")]
+        if !crate::render_fx::retained_active(){gl_use_material(&self.materials[usize::from(e.additive)]);}
+        #[cfg(not(feature="vita_renderer"))]
         gl_use_material(&self.materials[usize::from(e.additive)]);
         let radius = p.size * (1. + e.spec.growth * p.age).max(0.);
         let x = (right * p.roll.cos() + up * p.roll.sin()) * radius;

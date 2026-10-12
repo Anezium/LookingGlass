@@ -27,6 +27,12 @@ pub struct Config {
     pub alpha_interop: bool,
     pub actor_max_layers: usize,
     pub merge_fx: bool,
+    pub fx_batching:String,
+    pub fx_streaming:String,
+    pub fx_merge_cache:bool,
+    pub fx_upload_cache:bool,
+    pub fx_max_layers:usize,
+    pub actor_fast_path:bool,
     pub pvs_cache: bool,
     pub pvs_method: String,
     pub pvs_verify: bool,
@@ -50,6 +56,7 @@ impl Default for Config {
             alpha_interop: true,
             actor_max_layers: 2,
             merge_fx: true,
+            fx_batching:"adjacent".into(),fx_streaming:"orphan".into(),fx_merge_cache:true,fx_upload_cache:false,fx_max_layers:2,actor_fast_path:true,
             pvs_cache: false,
             pvs_method: "sources".into(),
             pvs_verify: false,
@@ -73,9 +80,13 @@ impl Config {
             (1..=2).contains(&self.actor_max_layers),
             "actor_max_layers must be 1 or 2"
         );
+        ensure!(matches!(self.fx_batching.as_str(),"none"|"adjacent"|"material"),"invalid fx_batching");
+        ensure!(matches!(self.fx_streaming.as_str(),"orphan"|"ring"),"invalid fx_streaming");
+        ensure!((1..=2).contains(&self.fx_max_layers),"invalid fx_max_layers");
         ensure!(self.world_viewport_scale.is_finite() && (0.25..=1.).contains(&self.world_viewport_scale),"world_viewport_scale must be between 0.25 and 1");
         ensure!(self.render_scale.is_finite()&&(0.25..=1.).contains(&self.render_scale),"invalid render_scale");
         ensure!(matches!(self.msaa_samples,1|2|4),"msaa_samples must be 1, 2 or 4");
+        ensure!(self.render_scale==1. || self.msaa_samples==1,"scaled target requires msaa_samples=1");
         ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
         ensure!(matches!(self.opaque_order.as_str(),"material"|"front_to_back"),"invalid opaque_order");
         ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
@@ -731,7 +742,7 @@ impl Renderer {
             .values()
             .sum();
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
-            "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16,"uniform_staging_capacity_bytes":groups.len()*std::mem::size_of::<Prepared>(),"dropped_layers":dropped_layers,
+            "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16+low_pipelines.len(),"uniform_staging_capacity_bytes":groups.len()*std::mem::size_of::<Prepared>(),"dropped_layers":dropped_layers,
             "frozen_ambient_models":frozen_models,"frozen_deforms":frozen_deforms,"dynamic_world_lights":0,"geometry_uploads_per_frame":0,"load_groups_ms":groups_ms,"load_recipes_ms":recipes_ms,"load_chunks_ms":chunks_ms,"source_chunks":source_chunks,"load_pipelines_upload_ms":upload_ms,"load_pvs_ms":pvs_ms,"load_total_ms":started.elapsed().as_secs_f64()*1000.,"pvs_cache_status":cache_status,"pvs_method":c.pvs_method});
         println!("[lg/vita-renderer] loaded {inventory}");
         *INVENTORY.lock().unwrap() = Some(inventory);
@@ -895,6 +906,7 @@ impl Renderer {
             let low=!alpha && g.recipe.stage.alpha_test==0 && !self.low_pipelines.is_empty();
             ctx.apply_pipeline(if low {&self.low_pipelines[g.recipe.cull]}else{&self.pipelines[pi]});
             unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});}
+            scale::log_depth(!alpha);
             if low {count("vita_world_low_draws",1);}
             ctx.apply_bindings(&g.bindings);
             ctx.apply_uniforms(UniformsSource::table(&prepared.uniforms));
@@ -969,6 +981,7 @@ impl Renderer {
             let ctx = unsafe { get_internal_gl() }.quad_context;
             ctx.apply_pipeline(&self.pipelines[g.recipe.blend * 3 + g.recipe.cull]);
             unsafe{macroquad::miniquad::gl::glDepthMask(0);}
+            scale::log_depth(false);
             ctx.apply_bindings(&g.bindings);
             ctx.apply_uniforms(UniformsSource::table(&p.uniforms));
             ctx.draw(0, g.indices, 1);

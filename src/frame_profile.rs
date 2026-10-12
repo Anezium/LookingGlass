@@ -221,7 +221,7 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 pub use vita::{
     add_counter, begin_frame, bench_accepted_frames, bench_frames, characters_span, counter_owner,
     counts, end_frame, flush_boundary, mode, simulation_frozen,
-    record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_model,
+    record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_lg_submissions, record_model,
     record_world_submission, report, set_owner, startup_bench, world_span, Counter, Owner,
 };
 
@@ -704,16 +704,13 @@ mod vita {
             }
         });
     }
-    pub fn record_lg_submission() {
-        STATE.with(|s| {
-            let mut s = s.borrow_mut();
-            if s.recording {
-                s.since_flush += 1;
-                *s.pending_counts
-                    .entry(("", "lg_3d_submissions"))
-                    .or_default() += 1;
-            }
-        });
+    pub fn record_lg_submission() {record_lg_submissions(1);}
+    pub fn record_lg_submissions(n:u64) {
+        if !HOT_RECORDING.load(Relaxed){return;}
+        STATE.with(|s| {let mut s=s.borrow_mut();if s.recording {
+            s.since_flush+=n;
+            *s.pending_counts.entry(("","lg_3d_submissions")).or_default()+=n;
+        }});
     }
     pub fn flush_boundary(site: &'static str) {
         STATE.with(|s| {

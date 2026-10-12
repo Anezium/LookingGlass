@@ -264,6 +264,8 @@ fn run() -> Result<()> {
             "--vita-render-view" => mode = "vita-render-view",
             #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
             "--vita-alpha-check" => mode = "vita-alpha-check",
+            #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+            "--vita-scale-check" => mode = "vita-scale-check",
             "--difficulty" => {
                 o.difficulty = powerups::Difficulty::parse(
                     &args.next().context("--difficulty requires a name")?,
@@ -595,6 +597,12 @@ fn run() -> Result<()> {
             }
         });
         return Ok(());
+    }
+    #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+    if mode=="vita-scale-check" {
+        macroquad::Window::from_config(viewer::config(),async move{
+            if let Err(e)=render::vita_renderer::interop_check::scale_check().await{eprintln!("Scaled 3D check failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
     }
     if mode == "campaign-playtest" {
         macroquad::Window::from_config(viewer::config(), async move {
