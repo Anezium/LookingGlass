@@ -1,9 +1,10 @@
 # Milestone 4 pilot delivery
 
-Native source **0ec6adefa378c569ef0b07a2d5a73b3850ebf06e**, vita-renderer-j4.
-One native build; VPK SHA-256
-`1814faa163ccf0d1d908a5fccfff158d2bd3905ab7043cc3d0090ab415d0d97c`.
-RX ends at 0x81bd3494, RW starts at 0x81c80000: 707,436 bytes of metadata margin,
+Native source **061faaae373ad204a49aca214cb4ff28d65d9660**, vita-renderer-j4.
+The unreleased draft was replaced once to add requested route counters (two builds).
+Delivered VPK SHA-256
+`0381ee7ae201ffb72afeb9914cc8252fd8221755f22a48f96437c65117f5b9f4`.
+RX ends at 0x81bc4658, RW starts at 0x81c80000: 768,424 bytes of metadata margin,
 above 3,348 required. Imports, SELF inside the VPK, 192 MiB heap and 8 MiB stack
 are verified. No device/FTP/emulator access by this agent.
 
@@ -34,7 +35,7 @@ then applies 60 seconds of small symmetric moving-stick pulses on the platform.
 No flight, warp, debug scene completion or playback clock override. Host recording
 uses LG's physics planner for the approach; host-only planner pauses are excluded
 from its input clock. The final tape uses the separate host recorder **e838669**;
-only that host-only module changed after the native build.
+the native telemetry build includes it; the validated tape is unchanged.
 
 Host delivery replay passes with one Blade, alive in gvillage, 76.117 seconds of
 moving inputs including exactly 60.000 after knife_cat. Separate Continue checks
