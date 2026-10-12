@@ -1215,6 +1215,7 @@ pub(crate) async fn visualizer(
         clear_background(scene.atmosphere.background());
         set_camera(&camera);
         crate::render_fx::set_projection(camera.matrix());
+        #[cfg(not(target_os = "vita"))]
         crate::render_fx::retained::host_reset();
         let time = frame as f32 / 60.;
         scene.draw(camera.position, time, false, false, &transforms);
