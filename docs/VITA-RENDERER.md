@@ -105,6 +105,10 @@ configuration/caméra/horloges/résolution publiées. Les spans CPU ne décident
 Les compteurs `vita_world_gpu_draws`, `vita_world_*_triangles`, changements de
 pipeline/texture et octets d'uniformes comptent les appels directs émis par LG ;
 ils ne constituent pas un compteur interne de vitaGL ni une mesure de surtirage.
+Les spans `vita_cluster_frustum`, `vita_world_parameters`, `vita_world_submit`
+et `vita_alpha_group_sort` sont séparés ; `vita_world_total` est leur parent,
+avec les frontières et le ciel. Les uniformes utilisent un scratch préalloué ;
+les quatre compteurs upload/retransformation/indices/triangles triés restent à zéro.
 `gpu_geometry_bytes` est le payload uploadé, pas la mémoire physique de vitaGL.
 
 Console/FTP réservés au pilote. Le paquet de jalon contient ELF, VPK, SHA-256,

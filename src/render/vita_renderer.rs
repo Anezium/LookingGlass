@@ -282,6 +282,11 @@ impl Pvs {
             .unwrap_or(&self.unknown)
     }
 }
+struct Prepared {
+    group: usize,
+    texture: TextureId,
+    uniforms: shader::Uniforms,
+}
 pub struct Renderer {
     groups: Vec<Group>,
     pvs: Pvs,
@@ -291,6 +296,7 @@ pub struct Renderer {
     sky_shader: ShaderId,
     sky_bindings: Bindings,
     alpha_order: Vec<(f32, usize)>,
+    prepared: Vec<Prepared>,
 }
 fn blend_class(blend: Blend) -> usize {
     match blend {
@@ -566,7 +572,7 @@ impl Renderer {
             .values()
             .sum();
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
-            "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16,"dropped_layers":dropped_layers,
+            "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16,"uniform_staging_capacity_bytes":groups.len()*std::mem::size_of::<Prepared>(),"dropped_layers":dropped_layers,
             "frozen_ambient_models":frozen_models,"frozen_deforms":frozen_deforms,"dynamic_world_lights":0,"geometry_uploads_per_frame":0});
         println!("[lg/vita-renderer] loaded {inventory}");
         *INVENTORY.lock().unwrap() = Some(inventory);
@@ -576,6 +582,7 @@ impl Renderer {
         }
         Ok(Self {
             alpha_order: Vec::with_capacity(groups.len()),
+            prepared: Vec::with_capacity(groups.len()),
             groups,
             pvs,
             pipelines,
@@ -594,7 +601,12 @@ impl Renderer {
         alpha: bool,
         transforms: &[(usize, Vec3, Quat)],
     ) -> super::DrawStats {
-        let _span = crate::frame_profile::span("vita_world_draw");
+        let _span = crate::frame_profile::span("vita_world_total");
+        count("vita_world_geometry_upload_bytes", 0);
+        count("vita_world_retransformed_vertices", 0);
+        count("vita_world_rebuilt_indices", 0);
+        count("vita_world_sorted_triangles", 0);
+        let visibility_span = crate::frame_profile::span("vita_cluster_frustum");
         let projection = crate::render_fx::projection().expect("world camera projection");
         let cluster = scene.map.visibility.cluster(eye, &scene.map.planes);
         let lists = self.pvs.get(cluster);
@@ -612,10 +624,35 @@ impl Renderer {
                 ));
             }
         }
+        drop(visibility_span);
         if alpha && config().sort_alpha {
             let _sort = crate::frame_profile::span("vita_alpha_group_sort");
             self.alpha_order
                 .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        }
+        self.prepared.clear();
+        {
+            let _parameters = crate::frame_profile::span("vita_world_parameters");
+            for &(_, id) in &self.alpha_order {
+                let g = &self.groups[id];
+                let model = model_matrix(&g.recipe, time, transforms).unwrap();
+                let mut u = uniforms(
+                    &g.recipe,
+                    time,
+                    eye,
+                    model,
+                    projection,
+                    fullbright,
+                    scene.atlas_grid,
+                );
+                u.atmosphere(&scene.atmosphere, eye);
+                let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
+                self.prepared.push(Prepared {
+                    group: id,
+                    texture,
+                    uniforms: u,
+                });
+            }
         }
         // Only interop with queued legacy actors needs a boundary; direct draws never queue geometry.
         if !world_only() {
@@ -662,27 +699,17 @@ impl Renderer {
         }
         let mut previous_pipeline = None;
         let mut previous_texture = None;
-        for &(_, id) in &self.alpha_order {
-            let g = &mut self.groups[id];
-            let model = model_matrix(&g.recipe, time, transforms).unwrap();
-            let mut u = uniforms(
-                &g.recipe,
-                time,
-                eye,
-                model,
-                projection,
-                fullbright,
-                scene.atlas_grid,
-            );
-            u.atmosphere(&scene.atmosphere, eye);
-            let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
+        let submit_span = crate::frame_profile::span("vita_world_submit");
+        for prepared in &self.prepared {
+            let g = &mut self.groups[prepared.group];
+            let texture = prepared.texture;
             g.bindings.images[0] = texture;
             let pi = g.recipe.blend * 3 + g.recipe.cull;
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
             ctx.apply_pipeline(&self.pipelines[pi]);
             ctx.apply_bindings(&g.bindings);
-            ctx.apply_uniforms(UniformsSource::table(&u));
+            ctx.apply_uniforms(UniformsSource::table(&prepared.uniforms));
             ctx.draw(0, g.indices, 1);
             if previous_pipeline != Some(pi) {
                 count("vita_world_pipeline_changes", 1);
@@ -722,6 +749,8 @@ impl Renderer {
                 );
             }
         }
+        drop(submit_span);
+        count("vita_world_culled_groups", stats.culled as u64);
         unsafe {
             macroquad::miniquad::gl::glDepthMask(1);
         }
