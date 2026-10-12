@@ -58,6 +58,13 @@ impl Driver {
             self.done = true;
             return Controls::default();
         }
+        if self.post {
+            // Stay on the authored knife platform. Small symmetric ordinary inputs
+            // remain inside it even when cinematic camera handoff headings differ.
+            let elapsed=moving.saturating_sub(self.post_start.unwrap_or(moving));
+            return Controls{wish:vec2(if elapsed/24%2==0{0.25}else{-0.25},0.),run:false,..Default::default()};
+        }
+
         if let Some(c) = self.queue.pop_front() {
             return c;
         }

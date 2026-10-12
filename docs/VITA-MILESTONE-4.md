@@ -197,3 +197,11 @@ recording excludes host planner pauses; the initial failed tape is superseded.
 The full New Game variant and native frame/heap/visual results remain pending.
 Arrival scene loading is reported separately and also included in a total, while
 frame_wall_ms windows cover ready arrival through save. Profiler capacity is logged.
+
+The full New Game replay exposed a cinematic camera heading difference after
+knife_cat (recorded heading 0 versus replay 4.712389). The old wide stairway loop
+failed and is not a delivery proof. Host-only recording now uses small symmetric
+moving-stick pulses on the authored knife platform after the scene. This preserves
+60 seconds of ordinary inputs without depending on that camera handoff heading.
+Native route/game/render code and the one built VPK at 0ec6ade remain unchanged;
+the separately identified host recorder revision produces the runtime input file.
