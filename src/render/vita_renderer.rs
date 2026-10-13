@@ -36,7 +36,11 @@ pub struct Config {
     pub world_state_cache: bool,
     pub world_view_reuse: bool,
     pub world_parameter_reuse: bool,
+    /// Cache view/model fields independently of the advancing material clock.
+    pub world_parameter_time_split: bool,
     pub uniform_field_cache: bool,
+    /// Diagnostic per-draw clocks; normal play keeps only phase/tail timings.
+    pub render_draw_timing: bool,
     pub worker_probe: bool,
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
@@ -123,7 +127,9 @@ impl Default for Config {
             world_state_cache: true,
             world_view_reuse: true,
             world_parameter_reuse: true,
+            world_parameter_time_split: true,
             uniform_field_cache: true,
+            render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
@@ -605,6 +611,30 @@ struct Parameter {
     bits: [u32; 143],
     generation: u64,
     model: [u32; 16],
+    time: u32,
+    time_uv: bool,
+    time_gain: bool,
+}
+impl Parameter {
+    fn update_time(&mut self, time: f32) {
+        if self.time_uv {
+            let (uv, after, turb) = uv_matrices(&self.recipe.stage, time);
+            self.uniforms.uv = uv.to_cols_array();
+            self.uniforms.uv_after = after.to_cols_array();
+            self.uniforms.turb = turb;
+            self.bits[32..48].copy_from_slice(&self.uniforms.uv.map(f32::to_bits));
+            self.bits[48..64].copy_from_slice(&self.uniforms.uv_after.map(f32::to_bits));
+            self.bits[92..96].copy_from_slice(&turb.map(f32::to_bits));
+        }
+        if self.time_gain {
+            self.uniforms.gain = stage_gain(&self.recipe.stage, time);
+            self.bits[72..76].copy_from_slice(&self.uniforms.gain.map(f32::to_bits));
+        }
+        // Preserve the complete original payload even when deformation is off.
+        self.uniforms.deform[2] = time;
+        self.bits[98] = time.to_bits();
+        self.time = time.to_bits();
+    }
 }
 pub struct Renderer {
     _game_thread: crate::game_thread::GameThread,
@@ -978,7 +1008,11 @@ impl Renderer {
         }
         let parameters = parameter_recipes.into_iter().map(|recipe| {
             let u = uniforms(&recipe, 0., Vec3::ZERO, Mat4::IDENTITY, Mat4::IDENTITY, false, scene.atlas_grid);
-            Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0, model: [0;16] }
+            let time_uv = recipe.stage.mods.iter().any(|m| matches!(m,
+                TcMod::Scroll(_) | TcMod::Rotate(_) | TcMod::Stretch(_) | TcMod::Turb(_)));
+            let time_gain = recipe.stage.rgb.is_some() || recipe.stage.alpha.is_some();
+            Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0, model: [0;16],
+                time: 0_f32.to_bits(), time_uv, time_gain }
         }).collect();
         Ok(Self {
             _game_thread: crate::game_thread::GameThread::new(),
@@ -1079,7 +1113,9 @@ impl Renderer {
             let parameters_started = std::time::Instant::now();
             let _parameters = crate::frame_profile::span("vita_world_parameters");
             let parameter_reuse = config().world_parameter_reuse;
-            let key = parameter_view_key(projection, eye, fullbright, scene.atlas_grid, time, &scene.atmosphere);
+            let split = config().world_parameter_time_split;
+            let key = parameter_view_key(projection, eye, fullbright, scene.atlas_grid,
+                if split {0.} else {time}, &scene.atmosphere);
             if self.parameter_key != Some(key) {
                 self.parameter_key = Some(key);
                 self.parameter_generation = self.parameter_generation.wrapping_add(1);
@@ -1089,6 +1125,7 @@ impl Renderer {
                 }
             }
             let mut builds = 0;
+            let mut time_updates = 0;
             for &(depth, id) in &self.alpha_order {
                 let g = &self.groups[id];
                 let model = if reuse { self.models[id].unwrap() }
@@ -1102,7 +1139,11 @@ impl Renderer {
                         p.bits = p.uniforms.bits();
                         p.generation = self.parameter_generation;
                         p.model = model_bits;
+                        p.time = time.to_bits();
                         builds += 1;
+                    } else if split && p.time != time.to_bits() {
+                        p.update_time(time);
+                        time_updates += 1;
                     }
                     None
                 } else {
@@ -1117,6 +1158,7 @@ impl Renderer {
             crate::light_profile::render_add(phase, RenderMetrics {
                 parameter_cpu_ns: parameters_started.elapsed().as_nanos() as u64, ..Default::default() });
             count("vita_world_parameter_builds", builds);
+            count("vita_world_parameter_time_updates", time_updates);
             count("vita_world_parameter_reuses", self.prepared.len() as u64 - builds);
         }
         for cache in &mut self.field_uniforms { cache.interrupt(); }
@@ -1529,8 +1571,6 @@ fn uniforms(
 ) -> shader::Uniforms {
     let s = &recipe.stage;
     let (uv, uv_after, turb) = uv_matrices(s, time);
-    let gain = s.constant_rgb.unwrap_or(Vec3::ONE)
-        * s.rgb.as_ref().map_or(1., |w| w.sample(time)).clamp(0., 2.);
     let mut u = shader::Uniforms {
         mvp: (projection * model).to_cols_array(),
         model: model.to_cols_array(),
@@ -1543,16 +1583,7 @@ fn uniforms(
             s.alpha_test as f32,
             f32::from(fullbright),
         ],
-        gain: gain
-            .extend(
-                s.alpha
-                    .as_ref()
-                    .map(|w| w.sample(time))
-                    .or(s.constant_alpha)
-                    .unwrap_or(1.)
-                    .clamp(0., 1.),
-            )
-            .to_array(),
+        gain: stage_gain(s, time),
         alpha: [
             s.alpha_reference,
             f32::from(s.vertex_alpha),
@@ -1608,6 +1639,12 @@ fn uniforms(
         _ => {}
     }
     u
+}
+fn stage_gain(s: &Stage, time: f32) -> [f32;4] {
+    let gain = s.constant_rgb.unwrap_or(Vec3::ONE)
+        * s.rgb.as_ref().map_or(1., |w| w.sample(time)).clamp(0., 2.);
+    gain.extend(s.alpha.as_ref().map(|w| w.sample(time)).or(s.constant_alpha)
+        .unwrap_or(1.).clamp(0., 1.)).to_array()
 }
 fn wave_kind(kind: &str) -> f32 {
     match kind {
@@ -1743,6 +1780,33 @@ mod tests {
         c.validate().unwrap(); assert!(!c.scaled_depth_fix && c.depth_sentinel);
         assert!(serde_json::from_str::<Config>(r#"{"depth_sentinel":1}"#).is_err());
         assert!(serde_json::from_str::<Config>(r#"{"scaled_depth_fix":"on"}"#).is_err());
+    }
+    #[test]
+    fn time_only_updates_match_complete_uniforms_without_allocating() {
+        let wave = crate::materials::Wave {kind:"sin".into(),values:[0.5,0.3,0.1,0.7]};
+        for mods in [vec![], vec![TcMod::Scale(vec2(2.,0.8))], vec![
+            TcMod::Scroll(vec2(0.2,-0.3)), TcMod::Turb([0.,0.15,0.4,0.7]),
+            TcMod::Rotate(18.), TcMod::Stretch(wave.clone()), TcMod::Scale(vec2(2.,0.8))]] {
+            let dynamic = mods.iter().any(|m|matches!(m,TcMod::Scroll(_)|TcMod::Turb(_)|TcMod::Rotate(_)|TcMod::Stretch(_)));
+            let recipe = Recipe { stage:Stage {mods,rgb:Some(wave.clone()),alpha:Some(wave.clone()),
+                constant_rgb:Some(vec3(0.8,0.7,0.4)),..Default::default()}, textures:vec![],lit:true,
+                rank:0,blend:1,opaque:false,cull:0,model:None,motion:None,
+                deform:Some(Deform::Move(Vec3::Z,wave.clone())) };
+            let model=Mat4::from_translation(Vec3::X*32.);
+            let projection=Mat4::from_scale(Vec3::splat(0.3));
+            let eye=vec3(3.,5.,7.);
+            let u=uniforms(&recipe,0.,eye,model,projection,false,Vec2::ONE);
+            let mut p=Parameter {recipe,bits:u.bits(),uniforms:u,generation:1,model:model.to_cols_array().map(f32::to_bits),
+                time:0,time_uv:dynamic,time_gain:true};
+            for time in [-0.,0.3,3.,20.,0.,f32::from_bits(0x7fc00001)] {
+                let expected=uniforms(&p.recipe,time,eye,model,projection,false,Vec2::ONE).bits();
+                let scope=crate::kernel_alloc::Scope::begin();
+                p.update_time(time);
+                assert_eq!(scope.finish(),0);
+                assert_eq!(p.uniforms.bits(),expected);
+                assert_eq!(p.bits,expected);
+            }
+        }
     }
     #[test]
     fn world_reuse_switches_and_exact_view_inputs() {

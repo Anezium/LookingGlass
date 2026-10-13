@@ -4175,6 +4175,8 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
     let catalog = Catalog::load(assets)?;
     let input = crate::input::Input::default();
     let prefs = crate::preferences::Preferences::default();
+    let clock_step = std::env::var("LOOKING_GLASS_HOST_CLOCK_STEP").ok()
+        .map(|v| v.parse::<f32>()).transpose()?.unwrap_or(0.);
     let mut samples = Vec::with_capacity(360);
     std::fs::create_dir_all("private/renderer-host")?;
     for frame in 0..240 {
@@ -4183,7 +4185,8 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         let view = Camera3D { position: camera + offset, target: target + offset,
             up: Vec3::Z, fovy: 75_f32.to_radians(), z_near: 2., z_far: 30000., ..Default::default() };
         let fullbright = variant == 4;
-        let time = level.environment_clock + if variant == 5 { 0.25 } else { 0. };
+        let time = level.environment_clock + if variant == 5 { 0.25 } else { 0. }
+            + clock_step * frame as f32;
         crate::light_profile::render_host_reset();
         crate::frame_profile::begin_creation_frame();
         clear_background(state.scene.atmosphere.background());
@@ -4269,7 +4272,7 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
     std::fs::write("private/renderer-host/samples.json", serde_json::to_vec_pretty(&serde_json::json!({
         "reference_feet":state.game.player.feet.to_array(),"camera":camera.to_array(),
         "target":target.to_array(),"environment_clock":level.environment_clock,
-        "samples":samples,"console_access":false,"simulation_frozen":true,
+        "samples":samples,"console_access":false,"simulation_frozen":true,"clock_step":clock_step,
         "particle_settle_frames":600,"warmup_frames":60,"steam_visible_pixels_proven":true}))?)?;
     println!("PASS renderer host reference: 120 frozen timing frames, 60 invalidation frames, fifteen captures including HUD and visible steam");
     Ok(())

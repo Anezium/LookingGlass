@@ -469,7 +469,8 @@ impl Gpu {
     }
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
-        let started = std::time::Instant::now();
+        let started = crate::render::vita_renderer::config().render_draw_timing
+            .then(std::time::Instant::now);
         let key = (p.blend_index, p.depth_equal);
         let pipeline = self
             .pipelines
@@ -518,7 +519,7 @@ impl Gpu {
         metrics.uniform_uploads += u64::from(traffic.calls > 0);
         metrics.uniform_bytes += traffic.bytes;
         metrics.uniform_gl_calls += traffic.calls;
-        metrics.cpu_ns += started.elapsed().as_nanos() as u64;
+        if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
     }
 }
 impl Drop for Gpu {

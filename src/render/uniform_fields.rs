@@ -51,7 +51,7 @@ impl Cache {
         for field in &self.fields {
             let changed = !enabled || !self.valid || field.range.clone()
                 .any(|i| self.previous[i] != values[i].to_bits());
-            if field.location >= 0 && changed {
+            if field.location != -1 && changed {
                 if enabled { unsafe {
                     let data = values.as_ptr().add(field.range.start);
                     match field.kind {

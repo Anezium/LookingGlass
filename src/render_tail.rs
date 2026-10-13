@@ -72,7 +72,13 @@ fn buffer(size:isize, data:*const std::ffi::c_void) {
 }
 fn draw() {
     if !crate::light_profile::render_active() { return; }
-    let packet=STATE.with(|s| s.borrow_mut().complete(Instant::now(),!crate::light_profile::cpu_running()));
+    let packet=STATE.with(|s| {
+        let mut s=s.borrow_mut();
+        // Direct world/FX draws have no deferred packet. Avoid a clock read for
+        // each one unless explicitly measuring the legacy per-draw overhead.
+        if !s.tail && !crate::render::vita_renderer::config().render_draw_timing {return None;}
+        s.complete(Instant::now(),!crate::light_profile::cpu_running())
+    });
     if let Some((phase,m))=packet {crate::light_profile::render_add(phase,m);crate::light_profile::deferred_cpu(m.cpu_ns);}
 }
 
