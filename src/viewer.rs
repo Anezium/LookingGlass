@@ -4194,9 +4194,9 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright);
         art.draw(&state.interactions, &state.hints, &state.scene.atmosphere, view.position, fullbright);
         skin.dispatch();
-        crate::kernel_alloc::begin();
+        let allocation_scope = crate::kernel_alloc::Scope::begin();
         state.scene.draw(view.position, time, fullbright, false, &transforms);
-        let world_allocations = crate::kernel_alloc::finish();
+        let world_allocations = allocation_scope.finish();
         skin.collect();
         {
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
