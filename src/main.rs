@@ -187,6 +187,9 @@ fn main() {
 }
 
 fn app_main() {
+    // Read the renderer policy and apply clocks before run() mounts archives.
+    #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
+    let _ = render::vita_renderer::config();
     #[cfg(target_os = "vita")]
     {
         use macroquad::miniquad::native::vita::{set_config, InputConfig, LeftStickMode, VitaConfig};

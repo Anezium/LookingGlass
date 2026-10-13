@@ -13,10 +13,20 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Clocks {
+    #[default]
+    Max,
+    Stock,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub renderer: String,
+    /// Vita startup policy; stock preserves the clocks inherited from the system.
+    pub clocks: Clocks,
     #[serde(alias = "renderer_world_only")]
     pub world_only: bool,
     pub max_layers: usize,
@@ -75,6 +85,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             renderer: "vita".into(),
+            clocks: Clocks::Max,
             world_only: false,
             max_layers: 2,
             sort_alpha: true,
@@ -187,13 +198,58 @@ pub fn config() -> &'static Config {
             "[lg/vita-renderer] config {}",
             serde_json::to_string(&c).unwrap()
         );
+        #[cfg(target_os = "vita")]
+        apply_startup_clocks(c.clocks);
         apply_gpu_experiment(&c);
         c
     })
 }
+/// Called once by the config initializer, before archive mounting on Vita.
+#[cfg(target_os = "vita")]
+fn apply_startup_clocks(mode: Clocks) {
+    extern "C" {
+        fn scePowerSetArmClockFrequency(freq: i32) -> i32;
+        fn scePowerSetBusClockFrequency(freq: i32) -> i32;
+        fn scePowerSetGpuClockFrequency(freq: i32) -> i32;
+        fn scePowerSetGpuXbarClockFrequency(freq: i32) -> i32;
+        fn scePowerGetArmClockFrequency() -> i32;
+        fn scePowerGetBusClockFrequency() -> i32;
+        fn scePowerGetGpuClockFrequency() -> i32;
+        fn scePowerGetGpuXbarClockFrequency() -> i32;
+    }
+    unsafe {
+        let rc: &[i32] = match mode {
+            Clocks::Max => &[
+                scePowerSetArmClockFrequency(444),
+                scePowerSetBusClockFrequency(222),
+                scePowerSetGpuClockFrequency(222),
+                scePowerSetGpuXbarClockFrequency(166),
+            ],
+            Clocks::Stock => &[],
+        };
+        let actual = [
+            scePowerGetArmClockFrequency(),
+            scePowerGetBusClockFrequency(),
+            scePowerGetGpuClockFrequency(),
+            scePowerGetGpuXbarClockFrequency(),
+        ];
+        let name = match mode {
+            Clocks::Max => "max",
+            Clocks::Stock => "stock",
+        };
+        eprintln!("[lg/startup] clocks mode={name} rc={rc:?} actual={actual:?}");
+        if mode == Clocks::Max && (rc.iter().any(|&code| code < 0) || actual != [444, 222, 222, 166]) {
+            eprintln!("[lg/startup] max clocks request not satisfied; inspect actual clocks");
+        }
+    }
+}
 /// Named GPU-only experiment; default does not call a setter or alter ARM/bus/xbar.
 fn apply_gpu_experiment(c:&Config) {
-    if c.gpu_experiment=="unchanged" {return;}
+    let requested = match c.gpu_experiment.as_str() {
+        "gpu111" => 111,
+        "gpu222" => 222,
+        _ => return,
+    };
     #[cfg(target_os="vita")]
     unsafe {
         extern "C" {
@@ -204,7 +260,7 @@ fn apply_gpu_experiment(c:&Config) {
             fn scePowerGetGpuXbarClockFrequency()->i32;
         }
         let read=||[scePowerGetArmClockFrequency(),scePowerGetBusClockFrequency(),scePowerGetGpuClockFrequency(),scePowerGetGpuXbarClockFrequency()];
-        let before=read();let requested=if c.gpu_experiment=="gpu222" {222}else{111};
+        let before=read();
         let rc=scePowerSetGpuClockFrequency(requested);let after=read();
         println!("[lg/vita-renderer] gpu experiment {} rc={rc} before={before:?} after={after:?}",c.gpu_experiment);
         if rc<0 || after[2]!=requested || before[0]!=after[0] || before[1]!=after[1] || before[3]!=after[3] {
@@ -212,7 +268,7 @@ fn apply_gpu_experiment(c:&Config) {
         }
     }
     #[cfg(not(target_os="vita"))]
-    println!("[lg/vita-renderer] gpu experiment {} ignored on host",c.gpu_experiment);
+    println!("[lg/vita-renderer] gpu experiment {} ({requested} MHz) ignored on host",c.gpu_experiment);
 }
 /// Diagnostic draw mask only: simulation, accepted frames and save policy stay intact.
 pub fn world_only() -> bool {
@@ -1429,6 +1485,33 @@ mod tests {
             .map(|d| d.uniform_type.size() * d.array_count)
             .sum();
         assert_eq!(std::mem::size_of::<shader::Uniforms>(), size);
+    }
+    #[test]
+    fn clocks_default_to_max_when_absent() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.clocks, Clocks::Max);
+        assert_eq!(Config::default().clocks, Clocks::Max);
+        let lean: Config = serde_json::from_str(include_str!("../../configs/vita_renderer.lean.json")).unwrap();
+        assert_eq!(lean.clocks, Clocks::Max);
+        assert_eq!(lean.gpu_experiment, "unchanged");
+    }
+    #[test]
+    fn clocks_accept_explicit_max() {
+        let config: Config = serde_json::from_str(r#"{"clocks":"max"}"#).unwrap();
+        assert_eq!(config.clocks, Clocks::Max);
+        assert!(config.validate().is_ok());
+    }
+    #[test]
+    fn clocks_accept_explicit_stock() {
+        let config: Config = serde_json::from_str(r#"{"clocks":"stock"}"#).unwrap();
+        assert_eq!(config.clocks, Clocks::Stock);
+        assert!(config.validate().is_ok());
+    }
+    #[test]
+    fn clocks_reject_invalid_values() {
+        for json in [r#"{"clocks":"invalid"}"#, r#"{"clocks":"MAX"}"#, r#"{"clocks":444}"#, r#"{"clocks":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err(), "accepted {json}");
+        }
     }
     #[test]
     fn settings_bound_gpu_passes_and_reject_bad_values() {
