@@ -2,6 +2,7 @@
 use super::*;
 use macroquad::camera::Camera;
 use std::cell::RefCell;
+use std::mem::ManuallyDrop;
 struct Target {
     rt: RenderTarget,
     depth: Option<TextureId>,
@@ -9,7 +10,11 @@ struct Target {
     height: u32,
     upscale: Material,
 }
-thread_local! {static TARGET:RefCell<Option<Target>>=const{RefCell::new(None)};}
+// Macroquad's context is process-lived. Miniquad's host GL library/context is
+// already gone when main-thread TLS destructors run, so the final target must
+// share that process lifetime. Replacing **slot below still drops an old target
+// during a live frame (including its separately owned host depth attachment).
+thread_local! {static TARGET:RefCell<ManuallyDrop<Option<Target>>>=const{RefCell::new(ManuallyDrop::new(None))};}
 impl Drop for Target {
     fn drop(&mut self) {
         if let Some(depth) = self.depth {
@@ -108,7 +113,7 @@ pub(super) fn prepare(bg: Color) {
                 },
             )
             .expect("opaque upscale shader");
-            *slot = Some(Target {
+            **slot = Some(Target {
                 rt,
                 depth,
                 width: w,
