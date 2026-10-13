@@ -3382,6 +3382,24 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             use macroquad::camera::Camera;
             crate::render_fx::set_projection(world_camera.matrix());
         }
+        #[cfg(feature="vita_renderer")]
+        let mut skin_frame = if crate::render::vita_renderer::config().skin_overlap && !world_only {
+            #[cfg(target_os="vita")]
+            {
+                drop(viewer_block);
+                viewer_block = crate::frame_profile::span("skin_gather");
+                crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
+            }
+            level_art.story_pose(&story);
+            let mut frame = crate::character::skinning::overlap::Frame::begin();
+            if show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic()) {
+                alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
+            }
+            npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
+            level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+            frame.dispatch();
+            Some(frame)
+        } else { None };
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3389,6 +3407,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
+        #[cfg(feature="vita_renderer")]
+        if let Some(frame) = &mut skin_frame {
+            let _collect = crate::frame_profile::span("skin_collect");
+            frame.collect();
+        }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3422,10 +3445,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         {
             let _characters_profile = crate::frame_profile::span("characters_level_art");
+            #[cfg(feature="vita_renderer")]
+            if skin_frame.is_none() { level_art.story_pose(&story); }
+            #[cfg(not(feature="vita_renderer"))]
             level_art.story_pose(&story);
             level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
         }
         } // world-only diagnostic mask includes all character work
+        #[cfg(feature="vita_renderer")]
+        drop(skin_frame);
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
         #[cfg(target_os = "vita")]
@@ -4049,4 +4077,70 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     );
     audio.finish()?;
     Ok(())
+}
+
+/// Native fixed-state integration: the real actor graph, preserved effects, world
+/// ordering, both worker counts, frozen simulation and clean map replacement.
+#[cfg(feature="vita_renderer")]
+pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -> Result<()> {
+    let mut comparisons=0;
+    for name in ["gvillage","skool1","skool2","hedge1","wchess1","garden1"] {
+        for workers in [1,2] {
+            let mut reference=Vec::new();
+            for overlapped in [false,true] {
+                let mut active=enter_level(assets,name,None,None,options,true)?;
+                let mut alice=Character::load(assets)?;
+                let (eye,yaw)=interaction::spawn(&active.scene.map,None);
+                let player=Player::spawn(&active.scene.world,eye).unwrap_or_else(||Player::new(eye-Vec3::Z*EYE_HEIGHT));
+                alice.reset(&player,yaw);
+                let direction=vec3(yaw.cos(),yaw.sin(),0.);
+                let (camera,target,_)=character::follow_camera(&active.scene.world,player.feet,direction);
+                if overlapped { crate::character::skinning::overlap::startup(workers,false); }
+                for frame in 0..3 {
+                    let time=frame as f32/60.;
+                    clear_background(active.scene.atmosphere.background());
+                    let view=Camera3D {position:camera,target,up:Vec3::Z,fovy:75_f32.to_radians(),z_near:2.,z_far:30000.,..Default::default()};
+                    set_camera(&view);
+                    let transforms=active.interactions.transforms();
+                    active.scene.prepare_camera_portals(&view,time,false,&transforms);
+                    active.scene.begin_fx_view(&view,time,false,true);
+                    active.art.story_pose(&active.story);
+                    let mut skin_frame=if overlapped {
+                        let mut f=crate::character::skinning::overlap::Frame::begin();
+                        alice.draw_ghost(player.feet,false,frame==2);
+                        active.npcs.draw(camera,(target-camera).normalize_or_zero(),&active.scene.atmosphere,false);
+                        active.art.draw(&active.interactions,&active.hints,&active.scene.atmosphere,camera,false);
+                        f.dispatch();Some(f)
+                    } else {None};
+                    active.scene.draw(camera,time,false,false,&transforms);
+                    if let Some(f)=&mut skin_frame {f.collect();}
+                    alice.atmosphere(&active.scene.atmosphere,camera);
+                    alice.draw_ghost(player.feet,false,frame==2);
+                    active.npcs.draw(camera,(target-camera).normalize_or_zero(),&active.scene.atmosphere,false);
+                    active.art.draw(&active.interactions,&active.hints,&active.scene.atmosphere,camera,false);
+                    if let Some(f)=&skin_frame {f.assert_consumed();}
+                    drop(skin_frame);
+                    active.scene.draw_with_particles(camera,(target-camera).normalize_or_zero(),time,false,&transforms,&active.steam);
+                    active.art.effects(&active.interactions,camera,&active.scene.atmosphere);
+                    alice.draw_effects(camera,false,true);
+                    active.scene.finish_fx(true);
+                    set_default_camera();
+                    let image=get_screen_data();
+                    let path=format!("private/skin-overlap/{name}-w{workers}-{}-{frame}.png",if overlapped {"overlap"} else {"serial"});
+                    save_capture(std::path::Path::new(&path))?;
+                    if overlapped {
+                        anyhow::ensure!(reference[frame]==image.bytes,"overlap capture differs: {name} workers={workers} frame={frame}");
+                        comparisons+=1;
+                    } else {reference.push(image.bytes);}
+                    next_frame().await;
+                }
+            }
+        }
+    }
+    println!("PASS native early overlap: {comparisons} byte-identical frames across six real maps, worker1/2, Alice ghost, NPC/level art, zero fallback/unconsumed draws");
+    Ok(())
+}
+#[cfg(not(feature="vita_renderer"))]
+pub(crate) async fn check_skin_overlap(_: &mut Assets, _: &Options) -> Result<()> {
+    anyhow::bail!("skin overlap render check requires vita_renderer")
 }

@@ -64,6 +64,17 @@ pub(crate) fn pin(worker: usize, probe: bool) {
         );
     }
 }
+/// Reserve CPU0 for the game thread when both remaining application cores skin.
+pub(crate) fn pin_game(probe: bool) {
+    #[cfg(target_os = "vita")]
+    unsafe {
+        let rc = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x10000);
+        assert!(rc >= 0, "game affinity failed: {rc:#x}");
+        if probe { inventory("game-overlap", Some(0x10000)); }
+    }
+    #[cfg(not(target_os = "vita"))]
+    let _ = probe;
+}
 pub(crate) fn inventory(role: &str, requested: Option<i32>) {
     #[cfg(target_os = "vita")]
     unsafe {
@@ -191,7 +202,7 @@ impl Worker {
         s.work = Some((address, call));
         self.shared.wake.notify_one();
     }
-    fn wait_result(&mut self) -> Result<Measurement, Box<dyn std::any::Any + Send>> {
+    pub(crate) fn wait_result(&mut self) -> Result<Measurement, Box<dyn std::any::Any + Send>> {
         let mut s = self.shared.state.lock().unwrap();
         while s.busy {
             s = self.shared.done.wait(s).unwrap();

@@ -200,7 +200,7 @@ fn app_main() {
         let c = render::vita_renderer::config();
         #[cfg(target_os="vita")]
         light_profile::set_mode(frame_profile::Mode::read());
-        character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench);
+        character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench, c.skin_overlap);
         frame_phases::initialize();
     }
     #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
@@ -409,6 +409,7 @@ fn run() -> Result<()> {
             "--character-check" => mode = "character",
             "--skin-bench" => mode = "skin-bench",
             "--skin-workers-check" => mode = "skin-workers-check",
+            "--skin-overlap-render-check" => mode = "skin-overlap-render-check",
             "--hud-check" => mode = "hud",
             "--loadout-check" => mode = "loadout",
             "--camera-check" => mode = "camera",
@@ -1060,6 +1061,15 @@ fn run() -> Result<()> {
         return water::check(&mut assets);
     }
     let maps = assets.maps();
+    if mode == "skin-overlap-render-check" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e)=viewer::check_skin_overlap(&mut assets,&o).await {
+                eprintln!("Skin overlap render check failed: {e:#}");
+                std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
     if mode == "save-preview" {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = save_preview::check(&mut assets).await {

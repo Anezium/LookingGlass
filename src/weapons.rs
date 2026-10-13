@@ -933,6 +933,7 @@ impl Prop {
         time: f32,
         looping: bool,
     ) {
+        if crate::character::skinning::overlap::gathering() { return; }
         for mesh in self.meshes_at(attachment, scale, fullbright, time, looping) {
             crate::render_fx::skin(mesh);
         }
@@ -947,7 +948,7 @@ impl Prop {
         time: f32,
         looping: bool,
     ) -> &mut [Mesh] {
-        if scale <= 0. {
+        if scale <= 0. || crate::character::skinning::overlap::gathering() {
             return &mut self.meshes[..0];
         }
         for (s, m) in self.model.surfaces.iter().zip(&mut self.meshes) {

@@ -1607,6 +1607,7 @@ impl Attached {
         camera: Vec3,
         atmosphere: &Atmosphere,
     ) {
+        if crate::character::skinning::overlap::gathering() { return; }
         {
             let _sampling = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Sampling);
             self.sample(age, scale, birth_pose, enabled);
@@ -1614,6 +1615,7 @@ impl Attached {
         self.draw_sampled(camera, atmosphere);
     }
     pub(crate) fn draw_sampled(&mut self, camera: Vec3, atmosphere: &Atmosphere) {
+        if crate::character::skinning::overlap::gathering() { return; }
         let _packets = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Packets);
         self.steam.prepare_draw(camera, atmosphere);
         let mut order = if self.reuse_scratch { std::mem::take(&mut self.order) } else { Vec::new() };

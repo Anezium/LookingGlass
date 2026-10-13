@@ -35,6 +35,7 @@ impl Art {
         Ok(a)
     }
     pub fn draw(&self, mesh: &Mesh) {
+    if crate::character::skinning::overlap::gathering() { return; }
         for (i, tex) in self.textures.iter().enumerate() {
             let mut m = render_fx::copy_mesh(mesh);
             m.texture = Some(tex.clone());

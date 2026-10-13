@@ -35,6 +35,8 @@ pub struct Config {
     pub world_state_cache: bool,
     pub worker_probe: bool,
     pub skin_workers: usize,
+    /// Gather final poses before world submission and collect before characters.
+    pub skin_overlap: bool,
     /// None selects light in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     pub skin_worker_bench: bool,
@@ -105,7 +107,7 @@ impl Default for Config {
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
             world_state_cache: true,
-            worker_probe: false, skin_workers: 0, profiler: None, skin_worker_bench: false, fx_prepare_cache: true, frame_phase_probe: false,
+            worker_probe: false, skin_workers: 0, skin_overlap: false, profiler: None, skin_worker_bench: false, fx_prepare_cache: true, frame_phase_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
@@ -158,6 +160,7 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
 impl Config {
     fn validate(&self) -> Result<()> {
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
+        ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
         ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
         ensure!(matches!(self.preview_flip.as_str(), "auto" | "on" | "off"), "preview_flip must be auto, on or off");
@@ -1562,6 +1565,16 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn overlap_is_explicit_validated_and_not_the_default() {
+        assert!(!Config::default().skin_overlap);
+        for n in [1,2] {
+            serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":true,"skin_workers":n})).unwrap().validate().unwrap();
+        }
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":true})).unwrap().validate().is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":"true"})).is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":true,"skin_workers":1,"skin_worker_bench":true})).unwrap().validate().is_err());
+    }
     #[test]
     fn profiler_and_worker_bench_configuration_is_strict() {
         for level in ["light","full"] {

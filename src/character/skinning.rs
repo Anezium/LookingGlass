@@ -134,7 +134,12 @@ pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
 }
 // A persistent thread borrows only plain CPU arrays. Stack closure lives until wait.
 thread_local! { static WORKERS: std::cell::RefCell<Vec<crate::skin_worker::Worker>> = const { std::cell::RefCell::new(Vec::new()) }; }
-pub(crate) fn startup(workers: usize, probe: bool, bench: bool) {
+pub(crate) mod overlap;
+pub(crate) fn startup(workers: usize, probe: bool, bench: bool, overlap: bool) {
+    if overlap {
+        self::overlap::startup(workers, probe);
+        return;
+    }
     if probe {
         crate::skin_worker::inventory("game", None);
     }
@@ -498,6 +503,10 @@ pub(crate) fn workers_check(assets: &mut crate::assets::Assets) -> anyhow::Resul
             }
         }}}}
     }
+    let poses:Vec<_> = clip.frames.iter().take(16).map(|f|skeleton.global_pose(&f.pose)).collect();
+    let overlap_comparisons = overlap::check_skeleton(&skeleton,&poses)?;
+    println!("PASS real Alice early owned overlap snapshots: {overlap_comparisons} exact comparisons, workers=1/2");
+    crate::npc::check_overlap_snapshots(assets)?;
     println!("PASS fixed-pose skin workers: {comparisons} actor comparisons, {} surfaces, {} bones, {} vertices, workers=1/2, exact position/normal/color/UV bits",
         skeleton.surfaces.len(),skeleton.bones.len(),skeleton.surfaces.iter().map(|s|s.vertices.len()).sum::<usize>());
     Ok(())

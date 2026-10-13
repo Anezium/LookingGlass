@@ -43,6 +43,7 @@ struct Row {
     wall_us: u64,
     cpu_us: u64,
     swap_us: u64,
+    skin_collect_wait_us: u64,
 }
 struct Ring {
     rows: [Row; WINDOW],
@@ -84,11 +85,11 @@ impl Ring {
         self.current = Row::default();
     }
     fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
-        writeln!(out, "frame,wall_us,frame_cpu_us,swap_us")?;
+        writeln!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us")?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
             let r = self.rows[i % WINDOW];
-            writeln!(out, "{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us)?;
+            writeln!(out, "{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us, r.skin_collect_wait_us)?;
         }
         Ok(())
     }
@@ -105,6 +106,9 @@ pub(crate) fn begin(map: &str, mode: Mode) {
     if let Err(e) = export_window(map, mode) {
         eprintln!("[lg/light] export failed: {e}");
     }
+}
+pub(crate) fn skin_collect_wait(us: u64) {
+    if active() { RING.with(|r| r.borrow_mut().current.skin_collect_wait_us += us); }
 }
 pub(crate) fn cpu_begin() {
     if active() {
@@ -226,6 +230,7 @@ mod tests {
         for i in 1..=125 {
             r.current.cpu_us = 7;
             r.current.swap_us = 2;
+            r.current.skin_collect_wait_us = i;
             r.pending = true;
             r.begin(origin + std::time::Duration::from_micros(i * 10));
         }
@@ -235,10 +240,10 @@ mod tests {
         assert_eq!(s.lines().count(), 61);
         assert_eq!(
             s.lines().next().unwrap(),
-            "frame,wall_us,frame_cpu_us,swap_us"
+            "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us"
         );
-        assert_eq!(s.lines().nth(1).unwrap(), "66,10,7,2");
-        assert_eq!(s.lines().last().unwrap(), "125,10,7,2");
+        assert_eq!(s.lines().nth(1).unwrap(), "66,10,7,2,66");
+        assert_eq!(s.lines().last().unwrap(), "125,10,7,2,125");
         r.begin(origin + std::time::Duration::from_micros(2000));
         assert_eq!(r.count, 125);
     }

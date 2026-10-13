@@ -311,6 +311,7 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
     });
 }
 pub fn submit(passes: Vec<Pass>, transparent: bool) {
+    if crate::character::skinning::overlap::gathering() { return; }
     crate::game_thread::assert_current();
     if passes.is_empty() {
         return;
@@ -630,6 +631,7 @@ fn pass_at(
     })
 }
 pub fn effect(mesh: &Mesh, blend: Blend) {
+    if crate::character::skinning::overlap::gathering() { return; }
     if !active() {
         #[cfg(target_os = "vita")]
         crate::frame_profile::record_lg_submission();
@@ -659,6 +661,7 @@ pub fn effect(mesh: &Mesh, blend: Blend) {
     }
 }
 pub fn line(a: Vec3, b: Vec3, color: Color) {
+    if crate::character::skinning::overlap::gathering() { return; }
     if !active() {
         draw_line_3d(a, b, color);
         return;
@@ -684,6 +687,7 @@ pub fn line(a: Vec3, b: Vec3, color: Color) {
     );
 }
 pub fn sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Color) {
+    if crate::character::skinning::overlap::gathering() { return; }
     if !active() {
         draw_sphere(center, radius, texture, color);
         return;
@@ -850,6 +854,7 @@ pub(crate) fn skin_effect(mesh: &Mesh, age: f32, alpha: f32) {
 }
 
 fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
+    if crate::character::skinning::overlap::gathering() { return; }
     let layers_profile = crate::frame_profile::characters_span("characters_layers");
     if !active() {
         drop(layers_profile);

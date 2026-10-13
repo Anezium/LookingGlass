@@ -1145,6 +1145,10 @@ impl Character {
             self.scale,
             fullbright,
         );
+        if skinning::overlap::gathering() {
+            for (i, mesh) in hidden { self.meshes[i] = mesh; }
+            return;
+        }
         if skin_visible {
             self.visuals.frozen_body(&self.meshes);
             self.power_art.surface_effects(&self.meshes, &self.power_pose.state);
@@ -1209,7 +1213,7 @@ impl Character {
             },
             || self.draw_body(feet, fullbright, ghost),
         );
-        gl_use_default_material();
+        if !skinning::overlap::gathering() { gl_use_default_material(); }
     }
     pub fn draw_effects(&mut self, camera: Vec3, fullbright: bool, show_alice: bool) {
         self.visuals
@@ -1383,6 +1387,7 @@ struct Appearance {
 
 impl SkinMaterial {
     pub(crate) fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, eye: Vec3) {
+        if skinning::overlap::gathering() { return; }
         #[cfg(feature="vita_renderer")]
         if crate::render_fx::retained_active()&&crate::render::vita_renderer::config().actor_fast_path{return;}
         atmosphere.apply(&self.0, eye);
@@ -1394,6 +1399,7 @@ impl SkinMaterial {
     }
 
     fn bind_appearance(&self, appearance: Appearance) {
+        if skinning::overlap::gathering() { return; }
         crate::render_fx::appearance(crate::render_fx::Appearance {
             dissolve: appearance.dissolve,
             ghost: appearance.ghost,
@@ -1411,6 +1417,7 @@ impl SkinMaterial {
     fn draw(&self, appearance: Appearance, draw: impl FnOnce()) {
         self.bind_appearance(appearance);
         draw();
+        if skinning::overlap::gathering() { return; }
         if appearance != Appearance::default() && !crate::render_fx::retained_active() {
             // Macroquad writes queued uniforms back into the shared pipeline.
             // Flush before resetting, including when no later actor is drawn.
@@ -1981,19 +1988,25 @@ fn draw_skin_deformed(
     let character_setup_profile = crate::frame_profile::characters_span("characters_skin_setup");
     let (cull, flat) = skinning::visual_options(cull, flat, meshes);
     let world_rotation = (use_palette || cull).then(|| skinning::rotation(transform.rotation));
-    if cull && skinning::outside_skin_bounds(cull, &skeleton.skin_bounds, pose, bone_scales,
-        world_rotation.unwrap(), transform.translation, scale) {
-        crate::frame_profile::skinned_draw(true);
-        return false;
-    }
+    let visible = !(cull && skinning::outside_skin_bounds(cull, &skeleton.skin_bounds, pose, bone_scales,
+        world_rotation.unwrap(), transform.translation, scale));
     skinning::with_palette(use_palette, pose, bone_scales, |palette| {
         drop(character_setup_profile);
         drop(setup_profile);
-        crate::frame_profile::skinned_draw(false);
         let params = skinning::Params { pose, scales: bone_scales, palette, transform,
             scale, flat, fullbright, alpha };
+        if let Some(visible) = skinning::overlap::handle(skeleton, meshes, params, visible) {
+            if !skinning::overlap::gathering() {
+                crate::frame_profile::skinned_draw(!visible);
+                if visible { for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); } }
+            }
+            return visible;
+        }
+        crate::frame_profile::skinned_draw(!visible);
+        if !visible { return false; }
         #[cfg(feature = "vita_renderer")]
-        let workers = crate::render::vita_renderer::config().skin_workers;
+        let workers = if crate::render::vita_renderer::config().skin_overlap { 0 }
+            else { crate::render::vita_renderer::config().skin_workers };
         #[cfg(not(feature = "vita_renderer"))]
         let workers = 0;
         #[cfg(feature="vita_renderer")]

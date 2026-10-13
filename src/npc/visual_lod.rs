@@ -1,13 +1,14 @@
 //! Render-only cache for attachment-free ambient actors. No Actor state lives here.
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Decision { Exact, Hidden, Refresh, Reuse }
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(super) enum Decision { #[default] Exact, Hidden, Refresh, Reuse }
 #[derive(Default)]
 pub(super) struct Cache {
     ticks: u32,
     key: Option<([u32; 8], bool)>,
     pub meshes: Vec<Mesh>,
+    pub prepared: Decision,
 }
 impl Cache {
     pub fn decide(&mut self, config: &crate::vita_sim::Config, safe: bool,

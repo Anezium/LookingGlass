@@ -867,6 +867,7 @@ impl Puppet {
         transform: Transform,
         alpha: f32,
     ) {
+        if crate::character::skinning::overlap::gathering() { return; }
         let d = &self.0.data;
         let Some(animation) = d.clips.get(clip) else {
             return;
@@ -1057,6 +1058,7 @@ pub fn guard_timing(assets: &mut Assets) -> Result<Timing> {
 }
 impl Model {
     fn draw_electric(&self, remaining: f32) {
+        if crate::character::skinning::overlap::gathering() { return; }
         if remaining <= 0. {
             return;
         }
@@ -1077,6 +1079,7 @@ impl Model {
         }
     }
     fn draw_frozen(&self) {
+        if crate::character::skinning::overlap::gathering() { return; }
         if let Some(art) = &self.frozen {
             for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
                 if *visible {
@@ -1156,7 +1159,7 @@ impl Model {
         for (i, mesh) in removed {
             self.meshes[i] = mesh;
         }
-        if !attachments {
+        if !attachments || crate::character::skinning::overlap::gathering() {
             return;
         }
         let tag_pose = |bone: usize| Transform {
@@ -1328,6 +1331,7 @@ impl Model {
         camera: Vec3,
         atmosphere: &Atmosphere,
     ) {
+        if crate::character::skinning::overlap::gathering() { return; }
         let d = &self.data;
         let Some(animation) = d.clips.get(clip) else {
             return;
@@ -3168,6 +3172,7 @@ impl Npcs {
             {
                 continue;
             }
+            if !crate::character::skinning::overlap::gathering() {
             if let Some(p) = &actor.resident {
                 if let resident::Body::Card(g) = &p.body {
                     if p.active {
@@ -3296,6 +3301,7 @@ impl Npcs {
                 self.attack_fx.lightning(beam.from, beam.to, camera, beam.age, 500., true, atmosphere);
                 self.material.bind();
             }
+            } // effects are submitted once, after collect
             let offset = actor.target() - camera;
             if offset.length_squared() > 3500. * 3500.
                 || (offset.length_squared() > 200. * 200.
@@ -3306,14 +3312,14 @@ impl Npcs {
             let model = &mut self.models[actor.model];
             if let Some(p) = &actor.resident {
                 p.draw(model, fullbright, &self.material);
-                if p.active {
+                if p.active && !crate::character::skinning::overlap::gathering() {
                     if let resident::Body::Snark(g) = &p.body {
                         if let Some(art) = self.snark_art.get_mut(&id) {
                             art.smoke(g, &model.data, camera, atmosphere);
                         }
                     }
                 }
-                if p.active {
+                if p.active && !crate::character::skinning::overlap::gathering() {
                     if let resident::Body::Card(g) = &p.body {
                         if let Some(art) = self.card_art.get_mut(&id) {
                             art.charge(g, &model.data, camera, atmosphere);
@@ -3325,8 +3331,10 @@ impl Npcs {
             }
             if let Some(p) = &actor.clock {
                 model.draw_clock(p, fullbright, &self.material);
+                if !crate::character::skinning::overlap::gathering() {
                 if let Some(art) = self.clock_art.get_mut(&id) {
                     art.steam(p, &model.data, camera, atmosphere);
+                }
                 }
                 self.material.bind();
                 continue;
@@ -3353,7 +3361,9 @@ impl Npcs {
                 translation: actor.position(),
                 rotation: Quat::from_rotation_z(actor.yaw),
             };
-            let decision = if lod_enabled {
+            let decision = if crate::character::skinning::overlap::ready() {
+                self.visual_lod.get(&id).map_or(visual_lod::Decision::Exact, |lod| lod.prepared)
+            } else if lod_enabled {
                 let safe = visual_lod::safe(actor, model);
                 let radius = model.data.visual_radius * model.data.def.scale * actor.spawn.scale;
                 let outside = config.anim_cull && safe && crate::render::outside_bounds(
@@ -3364,6 +3374,9 @@ impl Npcs {
                 self.visual_lod.entry(id).or_default().decide(config, safe, outside,
                     offset.length_squared(), transform, actor.spawn.scale, fullbright)
             } else { visual_lod::Decision::Exact };
+            if crate::character::skinning::overlap::gathering() {
+                self.visual_lod.entry(id).or_default().prepared = decision;
+            }
             #[cfg(target_os = "vita")]
             { lod_counts[match decision {
                 visual_lod::Decision::Exact => 0, visual_lod::Decision::Hidden => 1,
@@ -3422,7 +3435,7 @@ impl Npcs {
                 &visual,
                 None,
             );
-            if decision == visual_lod::Decision::Refresh {
+            if decision == visual_lod::Decision::Refresh && !crate::character::skinning::overlap::gathering() {
                 self.visual_lod.get_mut(&id).expect("ambient cache").capture(model);
             }
             model.draw_effects(
@@ -3447,7 +3460,7 @@ impl Npcs {
             ("vita_actor_frustum_skipped",lod_counts[1]),
             ("characters_lod_protected",lod_counts[4]),
         ]);
-        gl_use_default_material();
+        if !crate::character::skinning::overlap::gathering() { gl_use_default_material(); }
     }
 }
 
@@ -4523,4 +4536,19 @@ mod tests {
             [1., 2., 0.]
         );
     }
+}
+
+/// Headless real NPC SKB/SKA snapshots use the same overlap buffers as Alice.
+pub(crate) fn check_overlap_snapshots(assets: &mut Assets) -> Result<()> {
+    let mut total=0;
+    for name in ["c_insanechildnew", "c_cheshire", "cardguard_club"] {
+        let d=Data::load(assets,name,&[])?;
+        let clip=&d.clips[&d.idle];
+        let poses:Vec<_> = clip.frames.iter().take(8).map(|f|d.skeleton.global_pose(&f.pose)).collect();
+        let n=crate::character::skinning::overlap::check_skeleton(&d.skeleton,&poses)?;
+        total+=n;
+        println!("PASS real NPC overlap snapshots model={name} exact_comparisons={n} surfaces={} bones={}",d.skeleton.surfaces.len(),d.skeleton.bones.len());
+    }
+    println!("PASS real NPC overlap total={total} workers=1/2");
+    Ok(())
 }
