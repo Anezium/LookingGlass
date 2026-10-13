@@ -1307,7 +1307,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             (focused && !console_input && input.key(&preferences, KeyCode::F9, true))
                 .then_some(Slot::Quick);
         let mut autosave_requested = false;
-        let mut finale_checkpoint_requested = false;
+        let mut finale_checkpoint_requested = None;
         if toggle_console || (console.open && focused && input.ui(KeyCode::Escape)) {
             console.open = !console.open;
             menu = false;
@@ -2486,7 +2486,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             pos = player.eye();
         }
         if story_active && saves_writable && interactions.levels.iter().any(|s| s.ctl.checkpoint_requested()) {
-            if throttle_normal { finale_checkpoint_requested = true; } else {
+            if throttle_normal {
+                // Keep the original checkpoint snapshot; only its thumbnail
+                // capture and disk write wait for the clean render boundary.
+                finale_checkpoint_requested = Some(game_snapshot!());
+            } else {
             match store.write_finale_checkpoint(&game_snapshot!()) {
                 Ok(()) => {
                     for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
@@ -3544,7 +3548,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let preview_mode = crate::frame_profile::mode();
             #[cfg(not(target_os = "vita"))]
             let preview_mode = crate::frame_profile::Mode::Full;
-            let required = save_requested || autosave_requested || finale_checkpoint_requested
+            let required = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
                 || pending_menu_save.is_some() || pending_menu_newgame.is_some() || opening_escape_menu
                 || (!context_before.3 && paused) || (!context_before.0 && menu)
                 || (!context_before.1 && inventory_menu) || quit_after_frame || !save_frame.has_frame();
@@ -3900,8 +3904,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 post_game = false; escape_menu.post_game = false; new_game_requested = Some(difficulty);
             }
         }
-        if finale_checkpoint_requested {
-            match store.write_finale_checkpoint_with_preview(&game_snapshot!(), save_frame.preview().as_ref()) {
+        if let Some(game) = finale_checkpoint_requested {
+            match store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()) {
                 Ok(()) => {
                     for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
                     retry.remember(game_snapshot!()); hud.announce("Checkpoint saved");
