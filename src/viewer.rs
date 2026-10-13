@@ -4224,11 +4224,39 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         }
         next_frame().await;
     }
+    // Draw one live, authored steam puff against an empty depth target as a
+    // visibility witness. World occlusion/joint alpha remain covered above and
+    // by the existing native alpha suite. Neither witness is a timing sample.
+    let (puff, focus) = state.steam.host_steam_puff().context("reference needs a live steam puff")?;
+    let steam_camera = focus + vec3(96.,32.,24.);
+    let steam_direction = (focus - steam_camera).normalize();
+    let steam_view = Camera3D { position:steam_camera, target:focus, up:Vec3::Z,
+        fovy:75_f32.to_radians(), z_near:2., z_far:30000., ..Default::default() };
+    let mut steam_pixels = Vec::new();
+    for visible in [true,false] {
+        clear_background(BLACK);
+        crate::render::vita_renderer::prepare_3d(BLACK);
+        crate::render::vita_renderer::set_3d_camera(&steam_view);
+        state.scene.begin_fx_view(&steam_view, level.environment_clock, false, true);
+        if visible {
+            state.steam.prepare_draw(steam_camera, &state.scene.atmosphere);
+            state.steam.prepare_quads(steam_camera, Some(steam_direction));
+            state.steam.draw_one(puff, steam_camera, steam_direction);
+        }
+        state.scene.finish_fx(true);
+        crate::render::vita_renderer::present_3d(); set_default_camera();
+        let pixels = get_screen_data().bytes;
+        if visible {
+            steam_pixels = pixels;
+            save_capture(std::path::Path::new("private/renderer-host/steam.png"))?;
+        } else { anyhow::ensure!(steam_pixels != pixels, "steam witness has no visible pixels"); }
+        next_frame().await;
+    }
     std::fs::write("private/renderer-host/samples.json", serde_json::to_vec_pretty(&serde_json::json!({
         "reference_feet":state.game.player.feet.to_array(),"camera":camera.to_array(),
         "target":target.to_array(),"environment_clock":level.environment_clock,
         "samples":samples,"console_access":false,"simulation_frozen":true,
-        "particle_settle_frames":600,"warmup_frames":60}))?)?;
-    println!("PASS renderer host reference: 120 frozen timing frames, 60 invalidation frames, seven captures");
+        "particle_settle_frames":600,"warmup_frames":60,"steam_visible_pixels_proven":true}))?)?;
+    println!("PASS renderer host reference: 120 frozen timing frames, 60 invalidation frames, eight captures including visible steam");
     Ok(())
 }

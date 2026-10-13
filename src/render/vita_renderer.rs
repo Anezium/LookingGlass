@@ -1166,7 +1166,7 @@ impl Renderer {
             count("vita_world_gpu_draws", 1);
             count("vita_world_sky_draws", 1);
             crate::light_profile::render_add(phase, RenderMetrics { draws: 1, pipelines: 1,
-                bindings: 1, uniform_uploads: 1, uniform_bytes: 32, ..Default::default() });
+                bindings: 1, uniform_uploads: 1, uniform_bytes: 32, uniform_gl_calls: 2, ..Default::default() });
         }
         if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
@@ -1719,8 +1719,8 @@ mod tests {
     #[test]
     fn world_reuse_switches_and_exact_view_inputs() {
         let c = Config::default();
-        assert!(c.world_view_reuse && c.world_parameter_reuse);
-        for name in ["world_view_reuse", "world_parameter_reuse"] {
+        assert!(c.world_view_reuse && c.world_parameter_reuse && c.uniform_field_cache);
+        for name in ["world_view_reuse", "world_parameter_reuse", "uniform_field_cache"] {
             let mut v = serde_json::to_value(&c).unwrap(); v[name] = serde_json::json!(false);
             serde_json::from_value::<Config>(v.clone()).unwrap().validate().unwrap();
             v[name] = serde_json::json!("off"); assert!(serde_json::from_value::<Config>(v).is_err());

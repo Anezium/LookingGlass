@@ -574,6 +574,11 @@ impl Steam {
             }
         }
     }
+    #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+    pub(crate) fn host_steam_puff(&self) -> Option<(usize, Vec3)> {
+        self.puffs.iter().enumerate().find(|(_,p)| self.emitters[p.emitter].spec.image.contains("steam"))
+            .map(|(i,p)| (i,p.position))
+    }
     pub fn lights(&self) -> Vec<crate::lighting::Light> {
         self.emitters
             .iter()
