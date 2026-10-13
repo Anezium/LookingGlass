@@ -485,6 +485,8 @@ impl Frame {
         assert!(gathering());
         self.gather_us = self.gather_start.elapsed().as_micros() as u64;
         STORE.with(|s| s.borrow_mut().as_mut().unwrap().dispatch());
+        crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
+            crate::light_profile::RenderMetrics { cpu_ns: self.gather_start.elapsed().as_nanos() as u64, ..Default::default() });
         PHASE.with(|p| p.set(Phase::Running));
     }
     pub(crate) fn collect(&mut self) {
@@ -495,6 +497,8 @@ impl Frame {
             let s = s.borrow();
             let s = s.as_ref().unwrap();
             crate::light_profile::skin_collect_wait(s.wait_us);
+            crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
+                crate::light_profile::RenderMetrics { cpu_ns: s.wait_us * 1000, ..Default::default() });
             #[cfg(feature = "vita_renderer")]
             crate::render_fx::retained::count("skin_collect_wait_us", s.wait_us);
         });

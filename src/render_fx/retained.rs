@@ -299,6 +299,7 @@ pub(crate) struct Gpu {
     opaque_storage: Vec<(f32, Source)>,
     recycle_storage: Vec<usize>,
     uniform_cache: UniformCache<UNIFORM_FLOATS>,
+    field_uniforms: crate::render::uniform_fields::Cache,
     submit_cache: SubmitCache<(usize, bool, bool), (BufferId, BufferId, [TextureId; 3]), UNIFORM_FLOATS>,
     merge_cache: [MergeCache; 4],
     merge_meshes: [BTreeMap<usize, super::prepared::Geometry>; 2],
@@ -337,6 +338,7 @@ impl Gpu {
             range_storage: Vec::new(), shared_storage: Default::default(),
             alpha_storage: Vec::new(), opaque_storage: Vec::new(), recycle_storage: Vec::new(),
             uniform_cache: UniformCache::default(), submit_cache: SubmitCache::default(),
+            field_uniforms: crate::render::uniform_fields::Cache::new(meta()),
             merge_cache: Default::default(),
             merge_meshes: Default::default(),
         };
@@ -496,10 +498,11 @@ impl Gpu {
             self.stats.identical_uniforms += u64::from(same);
         }
         let skip = if c.fx_submit_state_cache { !apply[2] } else { c.gpu_uniform_dedupe && same };
+        let mut traffic = crate::render::uniform_fields::Traffic::default();
         if skip { self.stats.uniform_skips += 1; }
         else {
-            ctx.apply_uniforms(UniformsSource::table(u));
-            self.stats.uniform_bytes += std::mem::size_of_val(u) as u64;
+            traffic = self.field_uniforms.apply(ctx, u, c.uniform_field_cache);
+            self.stats.uniform_bytes += traffic.bytes;
         }
         ctx.draw(0, p.geometry().indices.len() as i32, 1);
         self.stats.draws += 1;
@@ -510,8 +513,9 @@ impl Gpu {
         metrics.depth_states += u64::from(apply[0]);
         metrics.bindings += u64::from(apply[1]);
         metrics.texture_bind_slots += u64::from(apply[1]) * 3;
-        metrics.uniform_uploads += u64::from(!skip);
-        metrics.uniform_bytes += u64::from(!skip) * std::mem::size_of_val(u) as u64;
+        metrics.uniform_uploads += u64::from(traffic.calls > 0);
+        metrics.uniform_bytes += traffic.bytes;
+        metrics.uniform_gl_calls += traffic.calls;
         metrics.cpu_ns += started.elapsed().as_nanos() as u64;
     }
 }
@@ -917,6 +921,7 @@ pub(crate) fn finish_world(
     gpu.stats = Stats::default();
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
+    gpu.field_uniforms.interrupt();
     let (mut groups, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -1055,6 +1060,7 @@ pub(crate) fn finish_world(
         }
     }
     count("vita_joint_alpha_groups", list.len() as u64);
+    gpu.field_uniforms.interrupt();
     gpu.submit_cache.interrupt(); // External depth-mask change at the alpha boundary.
     unsafe {
         macroquad::miniquad::gl::glDepthMask(0);
@@ -1067,6 +1073,7 @@ pub(crate) fn finish_world(
                 Source::World(id) => {
                     gpu.uniform_cache.interrupt();
                     gpu.submit_cache.interrupt();
+                    gpu.field_uniforms.interrupt();
                     let start = world_totals.and_then(|t| t.borrow().start());
                     let world_started = std::time::Instant::now();
                     draw_world(id);

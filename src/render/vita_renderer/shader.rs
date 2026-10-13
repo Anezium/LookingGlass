@@ -115,6 +115,12 @@ pub struct Uniforms {
     pub fog_b: [f32; 4],
 }
 impl Uniforms {
+    /// repr(C) contains only adjacent f32 arrays, with no padding. The size
+    /// assertion below binds this view to the shader's complete metadata layout.
+    pub fn values(&self) -> &[f32; 143] {
+        const { assert!(std::mem::size_of::<Uniforms>() == 143 * 4); }
+        unsafe { &*(self as *const Self).cast::<[f32; 143]>() }
+    }
     // Field-wise, bit-exact comparison includes signed zero/NaN payloads and
     // avoids reading padding or depending on a Rust struct reinterpretation.
     pub fn bits(&self) -> [u32; 143] {

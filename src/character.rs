@@ -1991,6 +1991,9 @@ fn draw_skin_deformed(
     let character_setup_profile = crate::frame_profile::characters_span("characters_skin_setup");
     let (cull, flat) = skinning::visual_options(cull, flat, meshes);
     let world_rotation = (use_palette || cull).then(|| skinning::rotation(transform.rotation));
+    #[cfg(feature="vita_renderer")]
+    if cull { crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
+        crate::light_profile::RenderMetrics { visibility_tests: 1, ..Default::default() }); }
     let visible = !(cull && skinning::outside_skin_bounds(cull, &skeleton.skin_bounds, pose, bone_scales,
         world_rotation.unwrap(), transform.translation, scale));
     skinning::with_palette(use_palette, pose, bone_scales, |palette| {

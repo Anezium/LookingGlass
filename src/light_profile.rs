@@ -66,6 +66,8 @@ pub(crate) struct RenderMetrics {
     pub texture_bind_slots: u64,
     pub visibility_tests: u64,
     pub uniform_gl_calls: u64,
+    pub visibility_cpu_ns: u64,
+    pub parameter_cpu_ns: u64,
 }
 pub(crate) const PHASE_NAMES: [&str; 6] = ["world_opaque", "world_alpha", "actors", "fx", "hud", "present"];
 #[derive(Clone, Copy)]
@@ -83,7 +85,7 @@ pub(crate) fn render_add(phase: RenderPhase, value: RenderMetrics) {
         macro_rules! add { ($($field:ident),*) => { $(dst.$field += value.$field;)* }; }
         add!(cpu_ns, draws, pipelines, depth_states, bindings, uniform_uploads,
              uniform_bytes, buffer_updates, buffer_bytes, texture_bind_slots,
-             visibility_tests, uniform_gl_calls);
+             visibility_tests, uniform_gl_calls, visibility_cpu_ns, parameter_cpu_ns);
     });
 }
 pub(crate) struct RenderTimer(RenderPhase, Option<Instant>);
@@ -149,7 +151,7 @@ impl Ring {
     fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
         write!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us")?;
         for phase in PHASE_NAMES {
-            for field in ["cpu_us", "draws", "pipelines", "depth_states", "bindings", "uniform_uploads", "uniform_bytes", "buffer_updates", "buffer_bytes", "texture_bind_slots", "visibility_tests", "uniform_gl_calls"] {
+            for field in ["cpu_us", "draws", "pipelines", "depth_states", "bindings", "uniform_uploads", "uniform_bytes", "buffer_updates", "buffer_bytes", "texture_bind_slots", "visibility_tests", "uniform_gl_calls", "visibility_cpu_us", "parameter_cpu_us"] {
                 write!(out, ",{phase}_{field}")?;
             }
         }
@@ -161,10 +163,10 @@ impl Ring {
                 r.skin_collect_wait_us, r.skin_gather_us, r.skin_fallbacks, r.skin_overflow,
                 r.fx[0],r.fx[1],r.fx[2],r.fx[3],r.fx[4],r.fx[5],r.fx[6],r.fx[7])?;
             for p in r.render {
-                write!(out, ",{},{},{},{},{},{},{},{},{},{},{},{}", p.cpu_ns / 1000,
+                write!(out, ",{},{},{},{},{},{},{},{},{},{},{},{},{},{}", p.cpu_ns / 1000,
                     p.draws, p.pipelines, p.depth_states, p.bindings, p.uniform_uploads,
                     p.uniform_bytes, p.buffer_updates, p.buffer_bytes, p.texture_bind_slots,
-                    p.visibility_tests, p.uniform_gl_calls)?;
+                    p.visibility_tests, p.uniform_gl_calls, p.visibility_cpu_ns / 1000, p.parameter_cpu_ns / 1000)?;
             }
             writeln!(out)?;
         }
@@ -338,10 +340,10 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.lines().count(), 61);
         assert!(s.lines().next().unwrap().contains("world_opaque_draws"));
-        assert_eq!(s.lines().next().unwrap().split(',').count(), 88);
+        assert_eq!(s.lines().next().unwrap().split(',').count(), 100);
         assert!(s.lines().nth(1).unwrap().starts_with("66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0,"));
         assert!(s.lines().last().unwrap().starts_with("125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0,"));
-        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 88));
+        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 100));
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);

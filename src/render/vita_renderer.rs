@@ -35,6 +35,7 @@ pub struct Config {
     pub world_state_cache: bool,
     pub world_view_reuse: bool,
     pub world_parameter_reuse: bool,
+    pub uniform_field_cache: bool,
     pub worker_probe: bool,
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
@@ -117,6 +118,7 @@ impl Default for Config {
             world_state_cache: true,
             world_view_reuse: true,
             world_parameter_reuse: true,
+            uniform_field_cache: true,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
@@ -594,6 +596,7 @@ pub struct Renderer {
     parameters: Vec<Parameter>,
     parameter_key: Option<[u32; 51]>,
     parameter_generation: u64,
+    field_uniforms: [super::uniform_fields::Cache; 2],
     pvs: Pvs,
     pipelines: Vec<Pipeline>,
     shader: ShaderId,
@@ -946,6 +949,7 @@ impl Renderer {
             .values()
             .sum();
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
+            "parameter_recipes": parameter_recipes.len(),
             "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16+low_pipelines.len(),"uniform_staging_capacity_bytes":groups.len()*std::mem::size_of::<Prepared>(),"dropped_layers":dropped_layers,
             "frozen_ambient_models":frozen_models,"frozen_deforms":frozen_deforms,"dynamic_world_lights":0,"geometry_uploads_per_frame":0,"load_groups_ms":groups_ms,"load_recipes_ms":recipes_ms,"load_chunks_ms":chunks_ms,"source_chunks":source_chunks,"load_pipelines_upload_ms":upload_ms,"load_pvs_ms":pvs_ms,"load_total_ms":started.elapsed().as_secs_f64()*1000.,"pvs_cache_status":cache_status,"pvs_method":c.pvs_method});
         println!("[lg/vita-renderer] loaded {inventory}");
@@ -961,6 +965,7 @@ impl Renderer {
         Ok(Self {
             _game_thread: crate::game_thread::GameThread::new(),
             parameters, parameter_key: None, parameter_generation: 0,
+            field_uniforms: std::array::from_fn(|_| super::uniform_fields::Cache::new(shader::meta())),
             alpha_order: Vec::with_capacity(groups.len()),
             prepared: Vec::with_capacity(groups.len()),
             fx_gpu: None,
@@ -993,6 +998,7 @@ impl Renderer {
         count("vita_world_retransformed_vertices", 0);
         count("vita_world_rebuilt_indices", 0);
         count("vita_world_sorted_triangles", 0);
+        let visibility_started = std::time::Instant::now();
         let visibility_span = crate::frame_profile::span("vita_cluster_frustum");
         let projection = crate::render_fx::projection().expect("world camera projection");
         let cluster = scene.map.visibility.cluster(eye, &scene.map.planes);
@@ -1037,7 +1043,8 @@ impl Renderer {
             self.models[id] = result.map(|(_, model)| model);
             if let Some((depth, _)) = result { self.alpha_order.push((depth, id)); }
         }
-        crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: tests, ..Default::default() });
+        crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: tests,
+            visibility_cpu_ns: visibility_started.elapsed().as_nanos() as u64, ..Default::default() });
         count("vita_world_visibility_cache_hits", hits);
         drop(visibility_span);
         if alpha && !config().world_alpha {self.alpha_order.clear();}
@@ -1049,6 +1056,7 @@ impl Renderer {
         }
         self.prepared.clear();
         {
+            let parameters_started = std::time::Instant::now();
             let _parameters = crate::frame_profile::span("vita_world_parameters");
             let parameter_reuse = config().world_parameter_reuse;
             let key = parameter_view_key(projection, eye, fullbright, scene.atlas_grid, time, &scene.atmosphere);
@@ -1086,9 +1094,12 @@ impl Renderer {
                 let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
                 self.prepared.push(Prepared { depth, group: id, texture, uniforms: u });
             }
+            crate::light_profile::render_add(phase, RenderMetrics {
+                parameter_cpu_ns: parameters_started.elapsed().as_nanos() as u64, ..Default::default() });
             count("vita_world_parameter_builds", builds);
             count("vita_world_parameter_reuses", self.prepared.len() as u64 - builds);
         }
+        for cache in &mut self.field_uniforms { cache.interrupt(); }
         if alpha && crate::render_fx::retained_active() {
             // Keep immutable bindings and uniforms until all actor/effect groups are known.
             let stats = super::DrawStats {
@@ -1172,6 +1183,7 @@ impl Renderer {
         #[cfg(target_os = "vita")]
         let mut static_batches = 0usize;
         let mut applications = [0u64; 4];
+        let mut uniform_traffic = [0u64; 3];
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
@@ -1201,7 +1213,13 @@ impl Renderer {
             if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
             totals.add(0, start);
             let start = totals.start();
-            if plan.uniforms { ctx.apply_uniforms(UniformsSource::table(u)); applications[3] += 1; }
+            if plan.uniforms {
+                let traffic = self.field_uniforms[usize::from(low)].apply(ctx, u.values(), config().uniform_field_cache);
+                applications[3] += 1;
+                uniform_traffic[0] += u64::from(traffic.calls > 0);
+                uniform_traffic[1] += traffic.bytes;
+                uniform_traffic[2] += traffic.calls;
+            }
             totals.add(1, start);
             let start = totals.start();
             ctx.draw(0, g.indices, 1);
@@ -1266,7 +1284,8 @@ impl Renderer {
         crate::light_profile::render_add(phase, RenderMetrics {
             draws: stats.batches as u64, pipelines: applications[0], depth_states: applications[1],
             bindings: applications[2], texture_bind_slots: applications[2] * 2,
-            uniform_uploads: applications[3], uniform_bytes: applications[3] * std::mem::size_of::<shader::Uniforms>() as u64,
+            uniform_uploads: uniform_traffic[0], uniform_bytes: uniform_traffic[1],
+            uniform_gl_calls: uniform_traffic[2],
             ..Default::default()
         });
         counts(&[
@@ -1311,7 +1330,7 @@ impl Renderer {
             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
                 crate::light_profile::RenderMetrics { draws: 1, pipelines: 1, depth_states: 1,
                     bindings: 1, texture_bind_slots: 2, uniform_uploads: 1,
-                    uniform_bytes: std::mem::size_of::<shader::Uniforms>() as u64, ..Default::default() });
+                    ..Default::default() });
             let mut totals = totals.borrow_mut();
             let p = &self.prepared[id];
             let g = &mut self.groups[p.group];
@@ -1325,7 +1344,10 @@ impl Renderer {
             ctx.apply_bindings(&g.bindings);
             totals.add(0, start);
             let start = totals.start();
-            ctx.apply_uniforms(UniformsSource::table(u));
+            let traffic = self.field_uniforms[0].apply(ctx, u.values(), config().uniform_field_cache);
+            crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
+                crate::light_profile::RenderMetrics { uniform_bytes: traffic.bytes,
+                    uniform_gl_calls: traffic.calls, ..Default::default() });
             totals.add(1, start);
             let start = totals.start();
             ctx.draw(0, g.indices, 1);
