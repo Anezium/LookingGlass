@@ -1975,39 +1975,44 @@ fn draw_skin_deformed(
     let flat = crate::render::vita_renderer::config().flat_actor_light;
     #[cfg(not(feature = "vita_renderer"))]
     let flat = false;
+    let setup_profile = crate::frame_profile::span("skin_setup");
+    let character_setup_profile = crate::frame_profile::characters_span("characters_skin_setup");
     let (cull, flat) = skinning::visual_options(cull, flat, meshes);
-    let palette = (use_palette || cull).then(|| skinning::palette(pose, bone_scales));
     let world_rotation = (use_palette || cull).then(|| skinning::rotation(transform.rotation));
-    if cull && skinning::outside_skin_bounds(cull, &skeleton.skin_bounds, palette.as_ref().unwrap(),
+    if cull && skinning::outside_skin_bounds(cull, &skeleton.skin_bounds, pose, bone_scales,
         world_rotation.unwrap(), transform.translation, scale) {
         crate::frame_profile::skinned_draw(true);
         return false;
     }
-    crate::frame_profile::skinned_draw(false);
-    for (surface, mesh) in skeleton.surfaces.iter().zip(meshes) {
-        let Some(mesh) = mesh else {
-            continue;
-        };
-        let skin_profile = crate::frame_profile::span("skinning");
-        let positions_profile =
-            crate::frame_profile::characters_span("characters_skinning_positions");
-        for (src, dst) in surface.vertices.iter().zip(&mut mesh.vertices) {
-            let position = if use_palette {
-                skinning::position(src, palette.as_ref().unwrap())
-            } else if bone_scales.is_empty() { src.position(pose) } else {
-                src.weights.iter().map(|w| pose[w.bone].point(w.offset * bone_scales[w.bone]) * w.amount).sum()
+    skinning::with_palette(use_palette, pose, bone_scales, |palette| {
+        drop(character_setup_profile);
+        drop(setup_profile);
+        crate::frame_profile::skinned_draw(false);
+        for (surface, mesh) in skeleton.surfaces.iter().zip(meshes) {
+            let Some(mesh) = mesh else {
+                continue;
             };
-            dst.position = if use_palette { world_rotation.unwrap() * (position * scale) + transform.translation }
-                else { transform.point(position * scale) };
-            dst.normal = Vec4::ZERO;
+            let skin_profile = crate::frame_profile::span("skinning");
+            let positions_profile =
+                crate::frame_profile::characters_span("characters_skinning_positions");
+            for (src, dst) in surface.vertices.iter().zip(&mut mesh.vertices) {
+                let position = if use_palette {
+                    skinning::position(src, palette)
+                } else if bone_scales.is_empty() { src.position(pose) } else {
+                    src.weights.iter().map(|w| pose[w.bone].point(w.offset * bone_scales[w.bone]) * w.amount).sum()
+                };
+                dst.position = if use_palette { world_rotation.unwrap() * (position * scale) + transform.translation }
+                    else { transform.point(position * scale) };
+                dst.normal = Vec4::ZERO;
+            }
+            drop(positions_profile);
+            // Adapted from NextOs-Ports/Looking-Glass-NextOS 15779e4 (felc18-blip).
+            skinning::shade(mesh, flat, fullbright, alpha);
+            drop(skin_profile);
+            crate::render_fx::skin(mesh);
         }
-        drop(positions_profile);
-        // Adapted from NextOs-Ports/Looking-Glass-NextOS 15779e4 (felc18-blip).
-        skinning::shade(mesh, flat, fullbright, alpha);
-        drop(skin_profile);
-        crate::render_fx::skin(mesh);
-    }
-    true
+        true
+    })
 }
 
 /// Sweep a small camera box along the view arm to avoid looking through walls.

@@ -7,13 +7,36 @@ pub(super) fn rotation(q: Quat) -> Mat3 {
     // Basis expansion preserves Quat * Vec3 even for packed non-unit rotations.
     Mat3::from_cols(q * Vec3::X, q * Vec3::Y, q * Vec3::Z)
 }
-pub(crate) fn palette(pose: &[Transform], scales: &[f32]) -> Vec<(Mat3, Vec3)> {
-    pose.iter().enumerate().map(|(i, bone)| {
-        let scale = scales.get(i).copied().unwrap_or(1.);
-        (Mat3::from_cols(bone.rotation * (Vec3::X * scale),
-            bone.rotation * (Vec3::Y * scale), bone.rotation * (Vec3::Z * scale)),
-            bone.translation)
-    }).collect()
+fn palette_bone(bone: &Transform, scale: f32) -> (Mat3, Vec3) {
+    (Mat3::from_cols(bone.rotation * (Vec3::X * scale),
+        bone.rotation * (Vec3::Y * scale), bone.rotation * (Vec3::Z * scale)),
+        bone.translation)
+}
+fn fill_palette(output: &mut Vec<(Mat3, Vec3)>, pose: &[Transform], scales: &[f32]) {
+    output.clear();
+    output.extend(pose.iter().enumerate().map(|(i, bone)| {
+        palette_bone(bone, scales.get(i).copied().unwrap_or(1.))
+    }));
+}
+thread_local! {
+    static PALETTE: std::cell::RefCell<Vec<(Mat3, Vec3)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Borrow only for an accepted palette draw. Submission does not re-enter skinning.
+/// Capacity survives between actors and frames; reference/rejected draws never fill it.
+pub(super) fn with_palette<R>(enabled: bool, pose: &[Transform], scales: &[f32],
+    draw: impl FnOnce(&[(Mat3, Vec3)]) -> R) -> R {
+    if !enabled { return draw(&[]); }
+    PALETTE.with(|p| {
+        let mut p = p.borrow_mut();
+        fill_palette(&mut p, pose, scales);
+        draw(&p)
+    })
+}
+#[cfg(test)]
+fn palette(pose: &[Transform], scales: &[f32]) -> Vec<(Mat3, Vec3)> {
+    let mut p = Vec::new();
+    fill_palette(&mut p, pose, scales);
+    p
 }
 pub(super) fn position(src: &SkinVertex, palette: &[(Mat3, Vec3)]) -> Vec3 {
     src.weights.iter().map(|w| {
@@ -43,8 +66,8 @@ pub(super) fn visual_options(cull: bool, flat: bool, meshes: &[Option<Mesh>]) ->
 }
 
 pub(super) fn outside_skin_bounds(cull: bool, bounds: &[(Vec3, Vec3)],
-    palette: &[(Mat3, Vec3)], world: Mat3, origin: Vec3, scale: f32) -> bool {
-    cull && world_bounds(bounds, palette, world, origin, scale)
+    pose: &[Transform], scales: &[f32], world: Mat3, origin: Vec3, scale: f32) -> bool {
+    cull && world_bounds_from_pose(bounds, pose, scales, world, origin, scale)
         .is_some_and(|(lo, hi)| crate::render::outside_bounds(lo, hi))
 }
 
@@ -79,13 +102,26 @@ pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
 }
 
 // Adapted from NextOs-Ports/Looking-Glass-NextOS 51b6224 (felc18-blip).
-pub(crate) fn world_bounds(bounds: &[(Vec3, Vec3)], palette: &[(Mat3, Vec3)],
+#[cfg(test)]
+fn world_bounds(bounds: &[(Vec3, Vec3)], palette: &[(Mat3, Vec3)],
     world: Mat3, origin: Vec3, scale: f32) -> Option<(Vec3, Vec3)> {
-    if bounds.len() != palette.len() || !world.is_finite() || !origin.is_finite() || !scale.is_finite() { return None; }
+    bounds_with(bounds, palette.len(), |i| palette[i], world, origin, scale)
+}
+/// Stream the transforms needed for occupied bone boxes, without a vertex palette.
+pub(crate) fn world_bounds_from_pose(bounds: &[(Vec3, Vec3)], pose: &[Transform],
+    scales: &[f32], world: Mat3, origin: Vec3, scale: f32) -> Option<(Vec3, Vec3)> {
+    bounds_with(bounds, pose.len(), |i| palette_bone(&pose[i], scales.get(i).copied().unwrap_or(1.)),
+        world, origin, scale)
+}
+fn bounds_with(bounds: &[(Vec3, Vec3)], bones: usize,
+    mut bone: impl FnMut(usize) -> (Mat3, Vec3), world: Mat3, origin: Vec3,
+    scale: f32) -> Option<(Vec3, Vec3)> {
+    if bounds.len() != bones || !world.is_finite() || !origin.is_finite() || !scale.is_finite() { return None; }
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    for (&(min, max), &(rotation, translation)) in bounds.iter().zip(palette) {
+    for (i, &(min, max)) in bounds.iter().enumerate() {
         if min == Vec3::splat(f32::INFINITY) && max == Vec3::splat(f32::NEG_INFINITY) { continue; }
+        let (rotation, translation) = bone(i);
         if !min.is_finite() || !max.is_finite() || !rotation.is_finite() || !translation.is_finite() { return None; }
         let center = world * ((rotation * (min * 0.5 + max * 0.5) + translation) * scale) + origin;
         let matrix = world * rotation * scale;
@@ -120,12 +156,13 @@ pub(crate) fn bench(assets: &mut crate::assets::Assets) -> anyhow::Result<()> {
     let mut output = vec![Vec3::ZERO; vertices.len()];
     let mut max_error = 0_f32;
     for pose in &poses {
-        let p = palette(pose, &scales);
-        for src in &vertices {
-            let old: Vec3 = src.weights.iter().map(|w| pose[w.bone].point(w.offset * scales[w.bone]) * w.amount).sum();
-            let error = (world.point(old * model_scale) - (rotation(world.rotation) * (position(src, &p) * model_scale) + world.translation)).abs().max_element();
-            max_error = max_error.max(error);
-        }
+        with_palette(true, pose, &scales, |p| {
+            for src in &vertices {
+                let old: Vec3 = src.weights.iter().map(|w| pose[w.bone].point(w.offset * scales[w.bone]) * w.amount).sum();
+                let error = (world.point(old * model_scale) - (rotation(world.rotation) * (position(src, p) * model_scale) + world.translation)).abs().max_element();
+                max_error = max_error.max(error);
+            }
+        });
     }
     anyhow::ensure!(max_error < 0.001, "palette error {max_error}");
     let draws = 5000;
@@ -139,11 +176,12 @@ pub(crate) fn bench(assets: &mut crate::assets::Assets) -> anyhow::Result<()> {
                 let pose = black_box(&poses[i % poses.len()]);
                 let scales = black_box(scales.as_slice());
                 if mode == 1 {
-                    let p = palette(pose, scales);
-                    let r = rotation(black_box(world.rotation));
-                    for (src, dst) in vertices.iter().zip(&mut output) {
-                        *dst = r * (position(src, &p) * model_scale) + world.translation;
-                    }
+                    with_palette(true, pose, scales, |p| {
+                        let r = rotation(black_box(world.rotation));
+                        for (src, dst) in vertices.iter().zip(&mut output) {
+                            *dst = r * (position(src, p) * model_scale) + world.translation;
+                        }
+                    });
                 } else {
                     for (src, dst) in vertices.iter().zip(&mut output) {
                         let p: Vec3 = src.weights.iter().map(|w| pose[w.bone].point(w.offset * scales[w.bone]) * w.amount).sum();
@@ -170,8 +208,51 @@ mod tests {
     use super::*;
     use crate::skeletal::Weight;
     #[test]
+    fn palette_scratch_reuses_capacity_and_disabled_draws_do_not_borrow_it() {
+        let pose = [Transform { rotation: Quat::IDENTITY, translation: Vec3::ONE }; 131];
+        let pointer = with_palette(true, &pose, &[], |p| p.as_ptr());
+        for count in [131, 2, 100, 0, 131] {
+            let scales = vec![-0.75; count];
+            with_palette(true, &pose[..count], &scales, |p| {
+                assert_eq!(p.len(), count);
+                assert_eq!(p.as_ptr(), pointer);
+                for &(r, t) in p { assert_eq!(r, Mat3::from_diagonal(Vec3::splat(-0.75))); assert_eq!(t, Vec3::ONE); }
+            });
+        }
+        PALETTE.with(|p| {
+            let scratch = p.borrow_mut();
+            // A reference draw must not even borrow or mutate the scratch palette.
+            with_palette(false, &pose, &[], |p| assert!(p.is_empty()));
+            assert_eq!(scratch.len(), pose.len());
+        });
+    }
+    #[test]
+    fn streamed_bounds_match_palette_and_rejected_draws_leave_scratch_untouched() {
+        let bounds = [(vec3(-3., -2., -1.), vec3(6., 5., 4.)),
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY))];
+        let pose = [Transform { rotation: Quat::from_rotation_y(0.7) * 1.005,
+            translation: vec3(10., 20., 30.) },
+            Transform { rotation: Quat::from_xyzw(f32::NAN, 0., 0., 1.), translation: Vec3::ZERO }];
+        for scales in [&[][..], &[-1.7, 0.][..]] {
+            let p = palette(&pose, scales);
+            for scale in [-0.75, 1.5] {
+                let expected = world_bounds(&bounds, &p, Mat3::IDENTITY, Vec3::ZERO, scale);
+                assert!(expected.is_some());
+                // Bounds/culling can run while scratch is unavailable: no palette fill.
+                PALETTE.with(|scratch| {
+                    let mut scratch = scratch.borrow_mut();
+                    scratch.clear();
+                    assert_eq!(world_bounds_from_pose(&bounds, &pose, scales,
+                        Mat3::IDENTITY, Vec3::ZERO, scale), expected);
+                    assert!(scratch.is_empty());
+                });
+            }
+        }
+        assert!(world_bounds_from_pose(&bounds[..1], &pose, &[], Mat3::IDENTITY, Vec3::ZERO, 1.).is_none());
+    }
+    #[test]
     fn late_overlay_survives_side_and_perspective_near_plane_rejection() {
-        let p = [(Mat3::IDENTITY, Vec3::ZERO)];
+        let pose = [Transform { rotation: Quat::IDENTITY, translation: Vec3::ZERO }];
         let projection = Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_2, 1., 1., 100.);
         crate::render_fx::set_projection(projection);
         // Shock can expand eight units along its outward normal plus 0.2 offset.
@@ -179,12 +260,12 @@ mod tests {
             (vec3(0., 0., -0.4), -Vec3::Z)] {
             let bounds = [(center - Vec3::splat(0.05), center + Vec3::splat(0.05))];
             let shell = center + normal * 8.2;
-            assert!(outside_skin_bounds(true, &bounds, &p, Mat3::IDENTITY, Vec3::ZERO, 1.));
+            assert!(outside_skin_bounds(true, &bounds, &pose, &[], Mat3::IDENTITY, Vec3::ZERO, 1.));
             assert!(!crate::render::outside_matrix(projection, shell, shell));
             let _overlay = CullGuard::preserve(true);
             let (cull, flat) = visual_options(true, true, &[]);
             assert!(!flat);
-            assert!(!outside_skin_bounds(cull, &bounds, &p, Mat3::IDENTITY, Vec3::ZERO, 1.));
+            assert!(!outside_skin_bounds(cull, &bounds, &pose, &[], Mat3::IDENTITY, Vec3::ZERO, 1.));
         }
     }
     #[test]
@@ -224,6 +305,8 @@ mod tests {
                 let world = Transform { rotation: Quat::from_rotation_x(t) * 0.997, translation: vec3(-1200., 4300., -85.) };
                 for scale in [1.5, -0.75, 0.] {
                     let (lo, hi) = world_bounds(&bounds, &p, rotation(world.rotation), world.translation, scale).unwrap();
+                    assert_eq!(world_bounds_from_pose(&bounds, &pose, &scales,
+                        rotation(world.rotation), world.translation, scale), Some((lo, hi)));
                     for a in 0..8 {
                         for b in 0..8 {
                             let vertex: Vec3 = bounds.iter().enumerate().map(|(bone, &(min, max))| {

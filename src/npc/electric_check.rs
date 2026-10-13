@@ -44,9 +44,8 @@ async fn late_shell_near_plane(p: &mut Puppet, name: &str, clip: &str) -> Result
     ensure!(p.0.frozen.is_none(), "{name}: fixture must not use the frozen fallback");
     let d = &p.0.data;
     let pose = d.skeleton.global_pose(&d.clips[clip].sample(0.2, true));
-    let palette = crate::character::skinning::palette(&pose, &[]);
-    let (lo, hi) = crate::character::skinning::world_bounds(&d.skeleton.skin_bounds,
-        &palette, Mat3::IDENTITY, Vec3::ZERO, d.def.scale).context("Fixture skin bounds")?;
+    let (lo, hi) = crate::character::skinning::world_bounds_from_pose(&d.skeleton.skin_bounds,
+        &pose, &[], Mat3::IDENTITY, Vec3::ZERO, d.def.scale).context("Fixture skin bounds")?;
     let art = p.0.electric.as_ref().context("Fixture electrical shell")?;
     let mut candidate = None;
     'search: for step in 0..100 {
