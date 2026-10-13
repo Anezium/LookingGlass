@@ -116,6 +116,8 @@ mod frame_phases;
 mod game_thread;
 mod skin_worker;
 mod light_profile;
+#[cfg(feature="vita_renderer")]
+mod render_tail;
 mod kernel_alloc;
 #[cfg(feature="vita_renderer")]
 mod route_replay;

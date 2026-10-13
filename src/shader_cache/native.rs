@@ -167,10 +167,14 @@ unsafe extern "C" fn link(program:u32) {
             STATE.with(|s|s.borrow_mut().binaries.insert(p.key,b));
         } else {eprintln!("[lg/shader] export_unavailable hash={}",hex(&p.key));}
     }
+    #[cfg(all(target_os="vita",feature="vita_renderer"))]
+    if status!=0 {crate::render_tail::register(program,p.name);}
     let (before,after,avoided)=STATE.with(|s| {let mut s=s.borrow_mut(); s.requests+=1; if p.hit=="compile" {s.compiled+=1;} else {s.avoided+=1;} (s.requests,s.compiled,s.avoided)});
     eprintln!("[lg/shader] name={} source_hash={} cache_key={} vertex_bytes={} fragment_bytes={} cache={} compile_ms={:.3} load_ms={:.3} linked={} before={} after={} avoided={}",p.name,hex(&key("GLSL",b"source",&[&p.vertex,&p.fragment])),hex(&p.key),p.vertex.len(),p.fragment.len(),p.hit,if p.hit=="compile" {p.compile_ms+ms} else {0.},p.create_ms,status,before,after,avoided);
 }
 unsafe extern "C" fn delete_program(program:u32) {
+    #[cfg(all(target_os="vita",feature="vita_renderer"))]
+    crate::render_tail::unregister(program);
     STATE.with(|s|s.borrow_mut().programs.remove(&program)); api::glDeleteProgram(program);
 }
 /// Miniquad resolves function pointers; wrapping glLinkProgram alone misses them.
@@ -182,7 +186,11 @@ pub unsafe extern "C" fn __wrap_vglGetProcAddress(n:*const c_char)->*mut c_void 
         b"glCompileShader"=>compile as *const () as _, b"glDeleteShader"=>delete_shader as *const () as _,
         b"glCreateProgram"=>create_program as *const () as _, b"glAttachShader"=>attach as *const () as _,
         b"glLinkProgram"=>link as *const () as _, b"glDeleteProgram"=>delete_program as *const () as _,
-        _=>api::get_proc(n),
+        _=>{
+            #[cfg(all(target_os="vita",feature="vita_renderer"))]
+            if let Some(p)=crate::render_tail::lookup(CStr::from_ptr(n).to_bytes()) {return p;}
+            api::get_proc(n)
+        },
     }
 }
 

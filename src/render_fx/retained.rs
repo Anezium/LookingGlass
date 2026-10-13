@@ -468,6 +468,7 @@ impl Gpu {
         });
     }
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
+        let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = std::time::Instant::now();
         let key = (p.blend_index, p.depth_equal);
         let pipeline = self
@@ -909,6 +910,7 @@ pub(crate) fn finish_world(
     world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
+    let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::Fx);
     let finish_started = std::time::Instant::now();
     let mut world_ns = 0u64;
     let _span = crate::frame_profile::span("vita_3d_finish");

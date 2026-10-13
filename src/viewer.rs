@@ -3603,8 +3603,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_hud");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
-        let hud_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Hud);
         set_default_camera();
+        let hud_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Hud);
         if !world_only {
             if active {
                 #[cfg(target_os = "vita")]
@@ -4171,6 +4171,10 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         state.steam.update_clocks(1./60., 1./60., camera, &state.scene.world);
     }
     crate::character::skinning::overlap::startup(2, false);
+    let hud = Hud::load(assets)?;
+    let catalog = Catalog::load(assets)?;
+    let input = crate::input::Input::default();
+    let prefs = crate::preferences::Preferences::default();
     let mut samples = Vec::with_capacity(360);
     std::fs::create_dir_all("private/renderer-host")?;
     for frame in 0..240 {
@@ -4212,17 +4216,27 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         state.alice.draw_effects(view.position, fullbright, true);
         state.scene.finish_fx(true);
         crate::render::vita_renderer::present_3d();
-        let cpu_ns = started.elapsed().as_nanos() as u64;
-        if frame >= 60 {
-            samples.push(serde_json::json!({"frame":frame,"variant":variant,"cpu_ns":cpu_ns,"world_allocations":world_allocations,
-                "phases":crate::light_profile::render_host_report(),
-                "counts":crate::render_fx::retained::host_report()}));
-        }
+        let mut cpu_ns = started.elapsed().as_nanos() as u64;
         if matches!(frame, 179 | 189 | 199 | 209 | 219 | 229 | 239) {
             set_default_camera();
             save_capture(std::path::Path::new(&format!("private/renderer-host/pose-{variant}.png")))?;
         }
+        set_default_camera();
+        let hud_start = std::time::Instant::now();
+        {
+            let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Hud);
+            hud.draw(&state.game.stats, &catalog, false, &input, &prefs);
+        }
+        cpu_ns += hud_start.elapsed().as_nanos() as u64;
+        if matches!(frame, 179 | 189 | 199 | 209 | 219 | 229 | 239) {
+            save_capture(std::path::Path::new(&format!("private/renderer-host/hud-{variant}.png")))?;
+        }
         next_frame().await;
+        if frame >= 60 {
+            samples.push(serde_json::json!({"frame":frame,"variant":variant,"cpu_ns":cpu_ns + crate::light_profile::render_host_deferred_ns(),"world_allocations":world_allocations,
+                "phases":crate::light_profile::render_host_report(),
+                "counts":crate::render_fx::retained::host_report()}));
+        }
     }
     // Draw one live, authored steam puff against an empty depth target as a
     // visibility witness. World occlusion/joint alpha remain covered above and
@@ -4257,6 +4271,6 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         "target":target.to_array(),"environment_clock":level.environment_clock,
         "samples":samples,"console_access":false,"simulation_frozen":true,
         "particle_settle_frames":600,"warmup_frames":60,"steam_visible_pixels_proven":true}))?)?;
-    println!("PASS renderer host reference: 120 frozen timing frames, 60 invalidation frames, eight captures including visible steam");
+    println!("PASS renderer host reference: 120 frozen timing frames, 60 invalidation frames, fifteen captures including HUD and visible steam");
     Ok(())
 }

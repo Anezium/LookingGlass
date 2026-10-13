@@ -32,6 +32,7 @@ pub(super) fn pass() -> Option<macroquad::miniquad::RenderPass> {
     })
 }
 pub(super) fn prepare(bg: Color) {
+    crate::render_tail::end();
     log_framebuffer();
     if config().render_scale == 1. {
         // miniquad clear obeys the previous HUD's depth write mask.
@@ -166,6 +167,7 @@ pub(super) fn camera(camera: &Camera3D) {
     }
 }
 pub(super) fn present() {
+    crate::render_tail::begin();
     let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Present);
     TARGET.with(|t| {
         let t = t.borrow();

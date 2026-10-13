@@ -635,6 +635,7 @@ fn deform_extent(deform: &Option<Deform>) -> Vec3 {
 }
 impl Renderer {
     pub(super) fn new(scene: &Scene, corpus: &str) -> Result<Self> {
+        crate::render_tail::install();
         let started=std::time::Instant::now();
         let c = config();
         let mut pending: Vec<Pending> = Vec::new();
@@ -950,6 +951,7 @@ impl Renderer {
             .sum();
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
             "parameter_recipes": parameter_recipes.len(),
+            "world_cache_fixed_payload_bytes": groups.len() * (std::mem::size_of::<(u64,Option<(f32,Mat4)>)>() + std::mem::size_of::<Option<Mat4>>()) + parameter_recipes.len() * std::mem::size_of::<Parameter>(),
             "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16+low_pipelines.len(),"uniform_staging_capacity_bytes":groups.len()*std::mem::size_of::<Prepared>(),"dropped_layers":dropped_layers,
             "frozen_ambient_models":frozen_models,"frozen_deforms":frozen_deforms,"dynamic_world_lights":0,"geometry_uploads_per_frame":0,"load_groups_ms":groups_ms,"load_recipes_ms":recipes_ms,"load_chunks_ms":chunks_ms,"source_chunks":source_chunks,"load_pipelines_upload_ms":upload_ms,"load_pvs_ms":pvs_ms,"load_total_ms":started.elapsed().as_secs_f64()*1000.,"pvs_cache_status":cache_status,"pvs_method":c.pvs_method});
         println!("[lg/vita-renderer] loaded {inventory}");
@@ -992,6 +994,8 @@ impl Renderer {
     ) -> super::DrawStats {
         use crate::light_profile::{RenderMetrics, RenderPhase};
         let phase = if alpha { RenderPhase::WorldAlpha } else { RenderPhase::WorldOpaque };
+        crate::render_tail::end();
+        let _owner = crate::render_tail::owner(phase);
         let _timer = crate::light_profile::render_timer(phase);
         let _span = crate::frame_profile::span("vita_world_total");
         count("vita_world_geometry_upload_bytes", 0);
@@ -1326,6 +1330,7 @@ impl Renderer {
             .collect::<Vec<_>>();
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::new());
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id| {
+            let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
                 crate::light_profile::RenderMetrics { draws: 1, pipelines: 1, depth_states: 1,
