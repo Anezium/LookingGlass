@@ -78,3 +78,42 @@ Compare `map_load` totals and check the scene, actors, alpha, lighting, fog,
 menus, save-film and movie presentation. Test `shader_cache=off` separately and
 truncate one shader entry to verify recompilation/rewrite. Invalid configuration
 values use the existing whole-config validation/fallback policy.
+
+## Other startup work
+
+`menu_load` markers separate material parsing, layouts, textures, the animated
+Alice mirror, and UI/save-film/target creation, with read/decode/upload/shader
+subtotals. The old menu timestamp included preceding UI work. Menu loading also
+creates the Alice skin shader, so shader caching can improve this phase too.
+
+`"texture_cache":"on"` enables an optional cache under
+`ux0:data/alice/private/cache/textures/`; default is `"off"` pending device review.
+Miniquad already chooses DXT5 for immutable POT RGBA images. The hook runs after
+that choice, hashes the resized pixels, dimensions, compression-quality flag and
+SDK build identity, and uses the same envelope/atomic-write rules as shaders.
+It saves the driver's **swizzled** compressed allocation returned by the public
+`vglGetTexDataPointer`. On a hit, the same null-data DXT5 upload allocates and sets
+up driver storage; the cached bytes fill it directly. This avoids compressing
+again or swizzling an already swizzled buffer with `glCompressedTexImage2D`.
+Dynamic images, fonts, movie frames, render targets, NPOT textures and mip levels
+bypass this cache. A missing/invalid entry or null allocation falls back to the
+original upload and rewrites the result. Host mocked-upload tests compare exact
+bytes and cover second-launch reuse, corruption, changed pixels and allocation
+failure. The matching
+[driver allocation implementation](https://github.com/Rinnegatamante/vitaGL/blob/2bdbe89/source/utils/gpu_utils.c)
+and installed header establish the layout/API; actual GPU coherence and visuals
+require hardware. Expected savings are the measured compression portion only,
+less hashing and storage overhead; 3 seconds is an upper bound for map textures.
+Cold writes can make the first launch slower.
+
+The reported save-store 13,038 ms was **viewer elapsed time**, not a separate
+13-second wait. `Store::new` only owns its two arguments; it neither scans saves
+nor waits. The call first computes the corpus identity (65 ms in the supplied
+hardware log). Logs now separate local `elapsed_ms`, `store_construct_ms`, and
+`viewer_elapsed_ms`. Save semantics remain unchanged; no 13-second saving is
+claimed.
+
+For texture testing, enable `texture_cache`, remove only its cache directory,
+then compare first/second launch `[lg/texture-cache] cache=compress|disk` logs,
+menu subtotals and texture appearance. Keep the compressed cache off when
+isolating the shader gain. Do not remove the player's save directory.

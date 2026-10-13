@@ -14,7 +14,7 @@ fn main() {
             format!("{:x}", Sha256::digest(bytes))
         }).collect::<Vec<_>>().join(":");
         println!("cargo:rustc-env=LG_VITAGL_ID={identity}");
-        for symbol in ["vglGetProcAddress"] {
+        for symbol in ["vglGetProcAddress", "glTexImage2D"] {
             println!("cargo:rustc-link-arg=-Wl,--wrap={symbol}");
         }
         // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.

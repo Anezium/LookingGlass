@@ -41,6 +41,8 @@ pub struct Config {
     pub startup_splash:bool,
     /// Persistent binary pairs; process deduplication remains active when off.
     pub shader_cache: String,
+    /// Optional cache of exact device-compressed immutable pixels.
+    pub texture_cache: String,
     pub route_heading_lock:bool,
     pub pvs_cache: bool,
     pub pvs_method: String,
@@ -69,6 +71,7 @@ impl Default for Config {
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:false,
             startup_splash:false,
             shader_cache:"on".into(),
+            texture_cache:"off".into(),
             route_heading_lock:true,
             pvs_cache: false,
             pvs_method: "sources".into(),
@@ -108,6 +111,7 @@ impl Config {
             (1..=2).contains(&self.actor_max_layers),
             "actor_max_layers must be 1 or 2"
         );
+        ensure!(matches!(self.texture_cache.as_str(),"on"|"off"),"texture_cache must be on or off");
         ensure!(matches!(self.shader_cache.as_str(),"on"|"off"),"shader_cache must be on or off");
         ensure!(matches!(self.fx_batching.as_str(),"none"|"adjacent"|"material"),"invalid fx_batching");
         ensure!(matches!(self.fx_streaming.as_str(),"orphan"|"ring"),"invalid fx_streaming");

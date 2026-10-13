@@ -24,10 +24,11 @@ pub(crate) fn upload_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D 
 
 /// Upload RGBA8 pixels. On Vita, images larger than [`VITA_TEXTURE_MAX_DIM`] are
 /// halved on the CPU until they fit, then uploaded. The packed game data is not
-/// rewritten, and nothing is compressed or cached on disk.
+/// rewritten. Immutable uploads can opt into the exact DXT5 disk cache.
 pub(crate) fn upload_dynamic_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D {
     // Vita's synchronous Texture2D upload includes backend DXT5 conversion
-    // when called through upload_rgba8; this reports that combined cost.
+    // when called through upload_rgba8 (or reads its cached result); this reports
+    // that combined cost.
     let _timing = crate::startup::WorkTimer::new(crate::startup::Work::TextureUpload);
     #[cfg(target_os = "vita")]
     {

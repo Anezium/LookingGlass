@@ -50,7 +50,7 @@ pub(crate) fn write(path: &Path, key: &[u8; 32], payload: &[u8]) -> std::io::Res
     let data = encode(key, payload).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "cache payload size"))?;
     if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
     let temporary = path.with_extension("tmp");
-    let result = (|| { let mut f = fs::File::create(&temporary)?; f.write_all(&data)?; f.sync_all()?; fs::rename(&temporary, path) })();
+    let result = (|| { let mut f = fs::File::create(&temporary)?; f.write_all(&data)?; f.sync_all()?; drop(f); fs::rename(&temporary, path) })();
     if result.is_err() { let _ = fs::remove_file(temporary); } result
 }
 pub(crate) fn word(b: &[u8], offset: usize) -> Option<u32> {

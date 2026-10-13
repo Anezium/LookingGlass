@@ -569,8 +569,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(feature="vita_renderer")]
     let mut route_session=crate::route_replay::Session::open(&mut options)?;
     eprintln!("[lg/startup] route options ready; save store begin");
-    let store = Store::new(options.save_dir.clone(), assets.fingerprint()?);
-    eprintln!("[lg/startup] save store ready elapsed_ms={:.3}",startup.elapsed().as_secs_f64()*1000.);
+    let save_store_start = std::time::Instant::now();
+    let fingerprint = assets.fingerprint()?;
+    let store_start = std::time::Instant::now();
+    let store = Store::new(options.save_dir.clone(), fingerprint);
+    eprintln!("[lg/startup] save store ready elapsed_ms={:.3} store_construct_ms={:.3} viewer_elapsed_ms={:.3}",save_store_start.elapsed().as_secs_f64()*1000.,store_start.elapsed().as_secs_f64()*1000.,startup.elapsed().as_secs_f64()*1000.);
     #[cfg(feature="vita_renderer")]
     let route_resume=route_session.as_ref().map(|r|r.resume(&store)).transpose()?.flatten();
     eprintln!("[lg/startup] requested save ready elapsed_ms={:.3}",startup.elapsed().as_secs_f64()*1000.);

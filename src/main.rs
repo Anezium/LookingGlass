@@ -107,6 +107,7 @@ mod story;
 mod tan;
 mod targeting;
 mod texture;
+mod texture_cache;
 mod traversal;
 mod ui;
 mod viewer;

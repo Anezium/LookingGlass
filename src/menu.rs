@@ -243,7 +243,9 @@ pub struct Menu {
 }
 impl Menu {
     pub fn load(assets: &mut Assets) -> Result<Self> {
+        let mut timing = crate::startup::Phase::new("menu_load");
         let specs = texture::read_materials(assets)?;
+        timing.mark("materials");
         let mut layouts = BTreeMap::new();
         let mut credits = Vec::new();
         for name in ["main", "controls", "loadsave", "newgame", "quit", "credits"] {
@@ -295,6 +297,7 @@ impl Menu {
                 "Missing original save widget {name}"
             );
         }
+        timing.mark("layouts");
         let mut names = vec![
             "ui/control/head_2_video",
             "ui/control/head_2_audio",
@@ -353,10 +356,12 @@ impl Menu {
                 );
             }
         }
+        timing.mark("textures");
         let mut mirror =
             crate::npc::Puppet::load(assets, "alice", &["idle_stand_rocktoes"], &specs)?;
         mirror.show_attachments(false);
-        Ok(Self {
+        timing.mark("mirror_actor");
+        let menu = Self {
             page: None,
             message: String::new(),
             post_game: false,
@@ -390,7 +395,9 @@ impl Menu {
                 },
             ),
             material: crate::character::skin_material()?,
-        })
+        };
+        timing.mark("ui_save_film_target");
+        Ok(menu)
     }
     pub fn open(&mut self, page: Page, preferences: &Preferences, audio: audio::Settings) {
         self.page = Some(page);
