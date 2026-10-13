@@ -389,6 +389,7 @@ fn run() -> Result<()> {
             "--no-audio" => o.no_audio = true,
             "--audio-check" => mode = "audio",
             "--character-check" => mode = "character",
+            "--skin-bench" => mode = "skin-bench",
             "--hud-check" => mode = "hud",
             "--loadout-check" => mode = "loadout",
             "--camera-check" => mode = "camera",
@@ -852,6 +853,9 @@ fn run() -> Result<()> {
     }
     if mode == "character" {
         return skeletal::check(&mut assets);
+    }
+    if mode == "skin-bench" {
+        return character::skinning::bench(&mut assets);
     }
     if mode == "hud" {
         return inventory::check(&mut assets);

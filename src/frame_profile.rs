@@ -171,6 +171,12 @@ fn wall_sample(start: Option<Instant>, measured: bool, now: Instant) -> Option<f
 
 #[cfg(not(target_os = "vita"))]
 thread_local! { static SAMPLES: RefCell<BTreeMap<&'static str, Vec<f64>>> = RefCell::default(); }
+#[cfg(not(target_os = "vita"))]
+thread_local! { static CHARACTER_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+#[cfg(not(target_os = "vita"))]
+pub fn characters_span(label: &'static str) -> Option<Span> {
+    CHARACTER_DEPTH.with(|d| (d.get() > 0).then(|| span(label)))
+}
 
 fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -195,6 +201,8 @@ pub struct Span {
     token: Option<u64>,
 }
 pub fn span(label: &'static str) -> Span {
+    #[cfg(not(target_os = "vita"))]
+    if label == "frame_characters" { CHARACTER_DEPTH.with(|d| d.set(d.get() + 1)); }
     Span {
         label,
         start: enabled().then(Instant::now),
@@ -213,6 +221,8 @@ impl Span {
 }
 impl Drop for Span {
     fn drop(&mut self) {
+        #[cfg(not(target_os = "vita"))]
+        if self.label == "frame_characters" { CHARACTER_DEPTH.with(|d| d.set(d.get() - 1)); }
         if let Some(start) = self.start {
             let ms = start.elapsed().as_secs_f64() * 1000.;
             #[cfg(target_os = "vita")]

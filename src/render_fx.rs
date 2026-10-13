@@ -816,12 +816,9 @@ pub(crate) fn skin_effect(mesh: &Mesh, age: f32, alpha: f32) {
 }
 
 fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
-    #[cfg(target_os = "vita")]
     let layers_profile = crate::frame_profile::characters_span("characters_layers");
     if !active() {
-        #[cfg(target_os = "vita")]
         drop(layers_profile);
-        #[cfg(target_os = "vita")]
         let _submit_profile = crate::frame_profile::characters_span("characters_submit");
         #[cfg(target_os = "vita")]
         crate::frame_profile::record_lg_submission();
@@ -863,9 +860,7 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
             true,
             appearance,
         ) {
-            #[cfg(target_os = "vita")]
             drop(layers_profile);
-            #[cfg(target_os = "vita")]
             let _submit_profile = crate::frame_profile::characters_span("characters_submit");
             submit(vec![p], alpha < 1.);
         }
@@ -874,9 +869,7 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
     #[cfg(feature="vita_renderer")]
     if fast && clock.is_none() && alpha==1. && crate::render::vita_renderer::config().actor_layer_cache {
         if let Some(passes)=actor_cache::prepare(&surface,mesh,time,appearance) {
-            #[cfg(target_os="vita")]
             drop(layers_profile);
-            #[cfg(target_os="vita")]
             let _submit_profile=crate::frame_profile::characters_span("characters_submit");
             submit(passes,surface.transparent);
             return;
@@ -941,9 +934,7 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
             passes.push(p);
         }
     }
-    #[cfg(target_os = "vita")]
     drop(layers_profile);
-    #[cfg(target_os = "vita")]
     let _submit_profile = crate::frame_profile::characters_span("characters_submit");
     submit(
         passes,
