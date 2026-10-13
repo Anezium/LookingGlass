@@ -1,0 +1,12 @@
+{
+  "renderer": "vita",
+  "bone_palette": true,
+  "skin_frustum_cull": true,
+  "fast_frustum": true,
+  "flat_actor_light": true,
+  "max_texture_dimension": 128,
+  "draw_distance_cap": 1200.0,
+  "simple_fog": true,
+  "simple_dynamic_lights": true,
+  "render_scale": 0.5
+}

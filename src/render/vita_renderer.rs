@@ -43,6 +43,11 @@ pub struct Config {
     pub skin_frustum_cull: bool,
     /// Conservative center/extent clip-plane test and identity bounds shortcut.
     pub fast_frustum: bool,
+    pub flat_actor_light: bool,
+    pub max_texture_dimension: Option<u16>,
+    pub draw_distance_cap: Option<f32>,
+    pub simple_fog: bool,
+    pub simple_dynamic_lights: bool,
     /// SDK logo thread is disabled by default; the LG opening film is unaffected.
     pub startup_splash:bool,
     /// Persistent binary pairs; process deduplication remains active when off.
@@ -78,6 +83,8 @@ impl Default for Config {
             bone_palette: false,
             skin_frustum_cull: true,
             fast_frustum: true,
+            flat_actor_light: false, max_texture_dimension: None,
+            draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             startup_splash:false,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
@@ -108,6 +115,8 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
+        ensure!(self.max_texture_dimension.is_none_or(|n| (16..=512).contains(&n)), "max_texture_dimension must be null or 16..512");
+        ensure!(self.draw_distance_cap.is_none_or(|n| n.is_finite() && (128. ..=30000.).contains(&n)), "draw_distance_cap must be null or 128..30000");
         ensure!(
             matches!(self.renderer.as_str(), "vita" | "legacy"),
             "renderer must be vita or legacy"
@@ -1418,6 +1427,15 @@ mod tests {
         assert!(Config::default().validate().is_ok());
         assert!(!Config::default().bone_palette);
         assert!(Config::default().skin_frustum_cull && Config::default().fast_frustum);
+        let defaults = Config::default();
+        assert!(!defaults.flat_actor_light && !defaults.simple_fog && !defaults.simple_dynamic_lights);
+        assert!(defaults.max_texture_dimension.is_none() && defaults.draw_distance_cap.is_none());
+        for cap in [0, 15, 513] { assert!(Config {max_texture_dimension:Some(cap), ..Default::default()}.validate().is_err()); }
+        for cap in [0., 127., 30001., f32::NAN] { assert!(Config {draw_distance_cap:Some(cap), ..Default::default()}.validate().is_err()); }
+        let lean: Config = serde_json::from_str(include_str!("../../configs/vita_renderer.lean.json")).unwrap();
+        assert!(lean.validate().is_ok());
+        assert!(lean.flat_actor_light && lean.simple_fog && lean.simple_dynamic_lights);
+
         assert!(serde_json::from_str::<Config>(r#"{"bone_palette":"on"}"#).is_err());
         for layers in [0, 3, usize::MAX] {
             assert!(Config {

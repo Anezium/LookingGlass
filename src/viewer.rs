@@ -396,7 +396,7 @@ pub async fn check_level_swaps(assets: &mut Assets, options: &Options) -> Result
                 up: Vec3::Z,
                 fovy: 75_f32.to_radians(),
                 z_near: 2.,
-                z_far: 30000.,
+                z_far: crate::render::draw_distance_far(30000.),
                 ..Default::default()
             });
             active.scene.draw(camera, 1., false, false, &transforms);
@@ -487,7 +487,7 @@ pub async fn check_level_entry(assets: &mut Assets, options: &Options) -> Result
             up: shot.up,
             fovy: 75_f32.to_radians(),
             z_near: 2.,
-            z_far: 30000.,
+            z_far: crate::render::draw_distance_far(30000.),
             ..Default::default()
         };
         clear_background(BLACK);
@@ -3256,7 +3256,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 })
                 .unwrap_or(75.0f32.to_radians()),
             z_near: 2.,
-            z_far: 30000.,
+            z_far: crate::render::draw_distance_far(30000.),
             ..Default::default()
         };
         #[cfg(feature="vita_renderer")]

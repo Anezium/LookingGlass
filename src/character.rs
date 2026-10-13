@@ -1980,6 +1980,10 @@ fn draw_skin_deformed(
         return false;
     }
     crate::frame_profile::skinned_draw(false);
+    #[cfg(feature = "vita_renderer")]
+    let flat = crate::render::vita_renderer::config().flat_actor_light && skinning::culling_allowed();
+    #[cfg(not(feature = "vita_renderer"))]
+    let flat = false;
     for (surface, mesh) in skeleton.surfaces.iter().zip(meshes) {
         let Some(mesh) = mesh else {
             continue;
@@ -1998,6 +2002,14 @@ fn draw_skin_deformed(
             dst.normal = Vec4::ZERO;
         }
         drop(positions_profile);
+        // Adapted from NextOs-Ports/Looking-Glass-NextOS 15779e4 (felc18-blip).
+        if flat {
+            let light = if fullbright { 255 } else { 217 };
+            for v in &mut mesh.vertices { v.color = [light, light, light, (alpha.clamp(0., 1.) * 255.) as u8]; }
+            drop(skin_profile);
+            crate::render_fx::skin(mesh);
+            continue;
+        }
         let normals_profile =
             crate::frame_profile::characters_span("characters_skinning_normals");
         for tri in mesh.indices.chunks_exact(3) {

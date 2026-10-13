@@ -15,34 +15,53 @@ pub(crate) fn upload_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D 
     #[cfg(target_os = "vita")]
     {
         return macroquad::miniquad::native::vita::with_dxt5_uploads(|| {
-            upload_dynamic_rgba8(width, height, pixels)
+            upload_pixels(width, height, pixels, true)
         });
     }
     #[cfg(not(target_os = "vita"))]
-    upload_dynamic_rgba8(width, height, pixels)
+    upload_pixels(width, height, pixels, true)
 }
 
 /// Upload RGBA8 pixels. On Vita, images larger than [`VITA_TEXTURE_MAX_DIM`] are
 /// halved on the CPU until they fit, then uploaded. The packed game data is not
 /// rewritten. Immutable uploads can opt into the exact DXT5 disk cache.
 pub(crate) fn upload_dynamic_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D {
+    upload_pixels(width, height, pixels, false)
+}
+
+fn upload_cap(immutable: bool, requested: Option<u16>, native: bool) -> Option<u16> {
+    // Streaming movies update the original-sized texture every frame.
+    let cap = requested.filter(|_| immutable);
+    if native { Some(cap.unwrap_or(VITA_TEXTURE_MAX_DIM).min(VITA_TEXTURE_MAX_DIM)) } else { cap }
+}
+
+fn upload_pixels(width: u16, height: u16, pixels: &[u8], immutable: bool) -> Texture2D {
     // Vita's synchronous Texture2D upload includes backend DXT5 conversion
     // when called through upload_rgba8 (or reads its cached result); this reports
     // that combined cost.
     let _timing = crate::startup::WorkTimer::new(crate::startup::Work::TextureUpload);
-    #[cfg(target_os = "vita")]
+    #[cfg(any(target_os = "vita", feature = "vita_renderer"))]
     {
-        let (dst_w, dst_h, limited) = limit_rgba8(width, height, pixels, VITA_TEXTURE_MAX_DIM);
+        // Inspired by NextOs-Ports/Looking-Glass-NextOS 0c716a9 (felc18-blip).
+        #[cfg(feature = "vita_renderer")]
+        let cap = crate::render::vita_renderer::config().max_texture_dimension;
+        #[cfg(not(feature = "vita_renderer"))]
+        let cap = None;
+        let cap = upload_cap(immutable, cap, cfg!(target_os = "vita"));
+        let Some(cap) = cap else { return Texture2D::from_rgba8(width, height, pixels); };
+        let (dst_w, dst_h, limited) = limit_rgba8(width, height, pixels, cap);
+        #[cfg(target_os = "vita")]
         record_reduction(width, height, dst_w, dst_h);
         return Texture2D::from_rgba8(dst_w, dst_h, limited.as_ref());
     }
-    #[cfg(not(target_os = "vita"))]
+    #[cfg(all(not(target_os = "vita"), not(feature = "vita_renderer")))]
     {
+        let _ = immutable;
         Texture2D::from_rgba8(width, height, pixels)
     }
 }
 
-#[cfg(any(test, target_os = "vita"))]
+#[cfg(any(test, target_os = "vita", feature = "vita_renderer"))]
 fn limit_rgba8<'a>(
     width: u16,
     height: u16,
@@ -72,7 +91,7 @@ fn limit_rgba8<'a>(
 }
 
 /// Average each 2x2 block into one pixel. Edges of odd sizes repeat the last texel.
-#[cfg(any(test, target_os = "vita"))]
+#[cfg(any(test, target_os = "vita", feature = "vita_renderer"))]
 fn downsample_2x(width: u16, height: u16, rgba: &[u8]) -> (u16, u16, Vec<u8>) {
     let nw = (width / 2).max(1);
     let nh = (height / 2).max(1);
@@ -269,6 +288,15 @@ mod tests {
         assert!(decode_ftx(&[]).is_err());
     }
 
+    #[test]
+    fn quality_caps_leave_streaming_movie_updates_at_their_original_dimensions() {
+        assert_eq!(upload_cap(false, Some(128), false), None);
+        assert_eq!(upload_cap(false, Some(128), true), Some(512));
+        assert_eq!(upload_cap(true, Some(128), false), Some(128));
+        assert_eq!(upload_cap(true, Some(128), true), Some(128));
+        assert_eq!(upload_cap(true, None, false), None);
+        assert_eq!(upload_cap(true, None, true), Some(512));
+    }
     #[test]
     fn vita_cap_is_the_middle_android_profile() {
         assert_eq!(VITA_TEXTURE_MAX_DIM, 512);

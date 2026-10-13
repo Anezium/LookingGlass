@@ -425,7 +425,7 @@ impl Scene {
                 (portal.destination+mapping*(camera.position-source),mapping*(camera.target-camera.position),mapping*camera.up,portal.forward.extend(-portal.forward.dot(portal.destination)),portal.destination+portal.forward)
             };
             let view=Mat4::look_at_rh(eye,eye+direction,up);
-            let mut projection=Mat4::perspective_rh_gl(camera.fovy,aspect,0.1,camera.z_far);
+            let mut projection=Mat4::perspective_rh_gl(camera.fovy,aspect,0.1,super::draw_distance_far(camera.z_far));
             if portal.mirror { projection.x_axis.x = -projection.x_axis.x; }
             let view = View {
                 matrix: clipped_projection(projection, view, plane) * view,

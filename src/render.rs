@@ -319,6 +319,12 @@ struct DrawContext<'a> {
     visibility: &'a crate::visibility::Visibility,
     stats: DrawStats,
 }
+/// Lossy visual cap; collision, navigation, sound and simulation are unchanged.
+pub(crate) fn draw_distance_far(original: f32) -> f32 {
+    #[cfg(feature="vita_renderer")]
+    if let Some(cap) = vita_renderer::config().draw_distance_cap { return original.min(cap); }
+    original
+}
 fn transform_bounds(
     min: Vec3,
     max: Vec3,

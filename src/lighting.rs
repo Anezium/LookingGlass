@@ -53,6 +53,10 @@ pub fn uniforms() -> Vec<UniformDesc> {
         .collect()
 }
 pub fn fragment(source: &str) -> String {
+    #[cfg(feature = "vita_renderer")]
+    if crate::render::vita_renderer::config().simple_dynamic_lights {
+        return source.replace("// LIGHTS", "vec3 dynamicLight(vec3 position){return vec3(0.0);}\n");
+    }
     let mut s = String::new();
     for i in 0..8 {
         s += &format!("uniform vec4 FxLight{i}; uniform vec4 FxColor{i};\n");

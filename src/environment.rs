@@ -143,6 +143,14 @@ pub fn uniforms() -> Vec<UniformDesc> {
     ]
 }
 pub fn fragment(source: &str) -> String {
+    // Adapted from NextOs-Ports/Looking-Glass-NextOS 005adaa (felc18-blip).
+    #[cfg(feature = "vita_renderer")]
+    if crate::render::vita_renderer::config().simple_fog {
+        // Legacy volume layers also refer directly to FogA/B and fogLength.
+        let declarations = FOG.split_once("float slab(").unwrap().0;
+        let simple = format!("{declarations}\nfloat fogLength(vec3 lo,vec3 hi){{return 0.0;}}\nvec3 fogged(vec3 rgb,float additive){{return rgb;}}\n");
+        return source.replace("// FOG", &simple);
+    }
     source.replace("// FOG", FOG)
 }
 const FOG: &str = r#"

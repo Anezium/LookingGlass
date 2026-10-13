@@ -47,3 +47,26 @@ magnitudes set numerical slack; ambiguous and nonfinite boxes stay visible.
 Tests cover 10,000 randomized boxes, reflection/oblique matrices, near-plane and
 camera-crossing boxes, wholly behind-camera geometry and identity bounds.
 Adapted from NextOs-Ports/Looking-Glass-NextOS 668de14 (felc18-blip), render code only.
+
+All quality levers default **off** (optional numeric fields default **null**):
+- `flat_actor_light`: constant 217/255 actor RGB, skipping triangle normal rebuild.
+  Fullbright stays 255; alpha/skin positions stay live. Protected expanding-overlay
+  scopes keep normals; normal-dependent texture effects are intentionally simplified.
+- `max_texture_dimension`: null or 16..512. Immutable/static uploads through the
+  LG helper use the existing 2x averaging path; Vita's normal 512 ceiling remains.
+  Streaming movies retain their original update dimensions. This includes static
+  UI images using that helper, so 128 can blur menus. Texture cache
+  keys still include actual pixels/dimensions. GPU render targets are unaffected.
+- `draw_distance_cap`: null or 128..30000 world units. Limits the live 3D camera's
+  far plane and inherited portal projections. Simulation/audio distances stay live.
+- `simple_fog`: removes fragment fog while retaining background colors and the
+  world-position varying needed by lights. `simple_dynamic_lights`: removes shader
+  dynamic-light contribution while retaining gameplay, selected lights, flares and
+  contact shadows. Shader cache keys change with shader source.
+
+`configs/vita_renderer.lean.json` enables all five plus palette skinning and the
+conservative switches. It reuses `render_scale:0.5` (480x272 on Vita), preserving
+aspect and native HUD presentation. No additional render-scale implementation or
+NextOS resolution is introduced. Restart after changing any configuration file.
+Inspired by NextOs-Ports/Looking-Glass-NextOS 005adaa, 15779e4 and 0c716a9
+(felc18-blip), MIT engine code only; visual gains/quality require console A/B.
