@@ -6,8 +6,8 @@ use std::cell::Cell;
 thread_local! { static NEXT: Cell<u64> = const { Cell::new(1) }; }
 fn generation() -> u64 { NEXT.with(|n| { let v=n.get(); n.set(v.checked_add(1).expect("FX generation overflow")); v }) }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Version { pub identity: u64, pub vertices: u64, pub topology: u64 }
-pub(super) struct Geometry { pub mesh: Mesh, pub version: Version, pub valid: bool }
+pub(crate) struct Version { pub identity: u64, pub vertices: u64, pub topology: u64 }
+pub(crate) struct Geometry { pub mesh: Mesh, pub version: Version, pub valid: bool }
 impl std::ops::Deref for Geometry { type Target = Mesh; fn deref(&self) -> &Mesh { &self.mesh } }
 pub(super) fn valid(mesh: &Mesh) -> bool {
     !mesh.vertices.is_empty() && !mesh.indices.is_empty() && mesh.vertices.len() <= 65536
@@ -27,7 +27,13 @@ impl Geometry {
         }
         g
     }
-    pub(super) fn new(mesh: Mesh) -> Self {
+    pub(crate) fn update_quad(&mut self, vertices: &[Vertex; 4]) {
+        if vertices_equal(&self.mesh.vertices, vertices) { return; }
+        self.mesh.vertices.clear(); self.mesh.vertices.extend_from_slice(vertices);
+        self.version.vertices = generation();
+        self.valid = true;
+    }
+    pub(crate) fn new(mesh: Mesh) -> Self {
         Self { valid: valid(&mesh), mesh, version: Version {
             identity: generation(), vertices: generation(), topology: generation() } }
     }

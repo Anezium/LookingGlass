@@ -41,6 +41,9 @@ pub struct Config {
     pub profiler: Option<crate::light_profile::Level>,
     pub skin_worker_bench: bool,
     pub fx_prepare_cache: bool,
+    pub particle_producer_reuse: bool,
+    pub fx_merge_in_place: bool,
+    pub fx_worker_prep: bool,
     pub frame_phase_probe: bool,
     pub mover_far_lazy: bool,
     pub mover_lazy_publish: bool,
@@ -107,7 +110,7 @@ impl Default for Config {
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
             world_state_cache: true,
-            worker_probe: false, skin_workers: 0, skin_overlap: false, profiler: None, skin_worker_bench: false, fx_prepare_cache: true, frame_phase_probe: false,
+            worker_probe: false, skin_workers: 0, skin_overlap: false, profiler: None, skin_worker_bench: false, fx_prepare_cache: true, particle_producer_reuse: true, fx_merge_in_place: true, fx_worker_prep: true, frame_phase_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
@@ -1565,6 +1568,15 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn particle_assembly_switches_default_on_and_reject_non_booleans() {
+        let c=Config::default();assert!(c.particle_producer_reuse && c.fx_merge_in_place && c.fx_worker_prep);
+        for key in ["particle_producer_reuse","fx_merge_in_place","fx_worker_prep"] {
+            let mut value=serde_json::json!({});value[key]=serde_json::json!(false);
+            serde_json::from_value::<Config>(value.clone()).unwrap().validate().unwrap();
+            value[key]=serde_json::json!("off");assert!(serde_json::from_value::<Config>(value).is_err());
+        }
+    }
     #[test]
     fn overlap_is_explicit_validated_and_not_the_default() {
         assert!(!Config::default().skin_overlap);

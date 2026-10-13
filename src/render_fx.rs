@@ -12,7 +12,7 @@ pub(crate) mod retained;
 #[cfg(feature="vita_renderer")]
 mod actor_cache;
 #[cfg(feature="vita_renderer")]
-mod prepared;
+pub(crate) mod prepared;
 use macroquad::prelude::*;
 use std::{
     cell::RefCell,
@@ -82,6 +82,8 @@ struct Frame {
     fullbright: bool,
     appearance: Appearance,
     groups: Vec<Group>,
+    #[cfg(feature="vita_renderer")]
+    group_pool: Vec<Vec<Pass>>,
     vertices: usize,
     dropped: usize,
     retained: Vec<(Rc<Material>, Option<Texture2D>)>,
@@ -658,6 +660,19 @@ pub fn effect(mesh: &Mesh, blend: Blend) {
     ) {
         #[cfg(feature="vita_renderer")] {p.effect=true;}
         submit(vec![p], true);
+    }
+}
+/// A producer publication already owns its persistent CPU arrays.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn effect_geometry(geometry: Rc<prepared::Geometry>, texture: Option<Texture2D>, blend: Blend) {
+    debug_assert!(retained_active());
+    let blend = if blend == Blend::Add { Blend::AlphaAdd } else { blend };
+    if let Ok(mut p) = pass(Mesh { vertices: Vec::new(), indices: Vec::new(), texture },
+        &Stage { blend, ..Default::default() }, true, false, Appearance::default()) {
+        p.effect = true; p.geometry = Some(geometry);
+        let mut passes = FRAME.with(|f| f.borrow_mut().group_pool.pop().unwrap_or_default());
+        passes.push(p);
+        submit(passes, true);
     }
 }
 pub fn line(a: Vec3, b: Vec3, color: Color) {

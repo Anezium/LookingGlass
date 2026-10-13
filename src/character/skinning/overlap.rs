@@ -375,6 +375,32 @@ pub(crate) fn startup(workers: usize, probe: bool) {
     crate::skin_worker::pin_game(probe);
     STORE.with(|s| *s.borrow_mut() = Some(Store::new(workers, probe)));
 }
+/// Scoped successor batches use the skin pool after collection, including unwind.
+/// Only Send CPU closures cross the boundary; no new workers are created.
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn cpu_pair(first: impl FnOnce() + Send, second: impl FnOnce() + Send) {
+    let started = std::time::Instant::now();
+    let service = STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        if let Some(store) = store.as_mut().filter(|s| s.pending == 0) {
+            if store.workers.len() == 2 {
+                let (a, b) = store.workers.split_at_mut(1);
+                let times = crate::skin_worker::Worker::pair(&mut a[0], &mut b[0], first, second);
+                return Some(times.iter().map(|m| m.ns / 1000).max().unwrap_or(0));
+            }
+            let time = store.workers[0].execute(first);
+            second();
+            return Some(time.ns / 1000);
+        }
+        first(); second(); None
+    });
+    let Some(service) = service else { return; };
+    let wait = started.elapsed().as_micros() as u64;
+    crate::light_profile::fx_add(crate::light_profile::FxMetric::WorkerWait, wait);
+    crate::render_fx::retained::count("fx_worker_wait_us", wait);
+    crate::render_fx::retained::count("fx_worker_max_service_us", service);
+}
+
 /// A non-Send guard drains pending CPU work before a frame/load/panic can leave scope.
 pub(crate) struct Frame {
     _game: crate::game_thread::GameThread,

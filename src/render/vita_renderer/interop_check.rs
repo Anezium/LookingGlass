@@ -6,6 +6,14 @@ const RED: Color = Color::new(1., 0., 0., 1.);
 const GREEN: Color = Color::new(0., 1., 0., 1.);
 const BLUE: Color = Color::new(0., 0., 1., 1.);
 
+/// Native GL parity exercises both legacy and producer-owned publication paths.
+fn fixture_effect(mesh: &Mesh, blend: Blend) {
+    if config().particle_producer_reuse {
+        let publication=std::rc::Rc::new(render_fx::prepared::Geometry::new(render_fx::copy_mesh(mesh)));
+        render_fx::effect_geometry(publication,mesh.texture.clone(),blend);
+    } else { render_fx::effect(mesh,blend); }
+}
+
 struct Plane {
     _texture: Texture2D,
     shader: ShaderId,
@@ -197,7 +205,7 @@ pub async fn check() -> Result<()> {
             actors.reverse();
         }
         for (z, c) in actors {
-            render_fx::effect(&quad(z, c), Blend::Alpha);
+            fixture_effect(&quad(z, c), Blend::Alpha);
         }
         render_fx::retained::finish(&mut gpu, &[(10., 0)], true, |_| plane.draw());
         check_color(
@@ -220,8 +228,8 @@ pub async fn check() -> Result<()> {
     clear_background(BLACK);
     set_camera(&camera);
     render_fx::retained::begin_view(&camera, 0., &atmosphere, true, true);
-    render_fx::effect(&quad(1., Color::new(1., 0., 0., 0.5)), Blend::Alpha);
-    render_fx::effect(&quad(-1., Color::new(0., 0., 1., 0.5)), Blend::Alpha);
+    fixture_effect(&quad(1., Color::new(1., 0., 0., 0.5)), Blend::Alpha);
+    fixture_effect(&quad(-1., Color::new(0., 0., 1., 0.5)), Blend::Alpha);
     render_fx::retained::finish(&mut gpu, &[], true, |_| unreachable!());
     check_color(
         vec3(0.5, 0., 0.25),
@@ -247,7 +255,7 @@ pub async fn check() -> Result<()> {
         )?],
         false,
     );
-    render_fx::effect(&quad(1., BLUE), Blend::Alpha);
+    fixture_effect(&quad(1., BLUE), Blend::Alpha);
     render_fx::retained::finish(&mut gpu, &[], true, |_| unreachable!());
     check_color(Vec3::X, "opaque actor occludes rear effect")?;
     next_frame().await;
@@ -454,7 +462,7 @@ pub async fn scale_check()->Result<()> {
         let mut actor=quad(if frame%2==0{1.}else{-1.},WHITE);
         actor.texture=Some(red.clone());
         render_fx::skin(&actor);
-        render_fx::effect(&quad(-2.,Color::new(0.,0.,1.,0.5)),Blend::Alpha);
+        fixture_effect(&quad(-2.,Color::new(0.,0.,1.,0.5)),Blend::Alpha);
         render_fx::retained::finish(&mut gpu,&[],true,|_|unreachable!());
         present_3d();check_color(Vec3::X,"scaled opaque depth hides rear effect")?;
         set_default_camera();draw_rectangle(screen_width()/2.-4.,screen_height()/2.-4.,8.,8.,GREEN);

@@ -1,0 +1,138 @@
+//! Numeric per-view snapshot; resources and publications stay on the game thread.
+use super::{Emitter, Puff};
+use macroquad::prelude::*;
+use crate::render_fx::prepared::Geometry;
+use std::rc::Rc;
+#[derive(Clone, Copy)]
+struct Recipe {
+    position: Vec3, size: f32, growth: f32, age: f32, life: f32, roll: f32,
+    alpha: f32, fade: bool, fade_in: f32, color: Vec3, camera: Vec3,
+    right: Vec3, up: Vec3,
+}
+fn basis(direction: Vec3) -> (Vec3, Vec3) {
+    let right = direction.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
+    (right, right.cross(direction).normalize_or_zero())
+}
+fn recipe(p: &Puff, e: &Emitter, camera: Vec3, axes: (Vec3, Vec3)) -> Recipe {
+    Recipe { position: p.position, size: p.size, growth: e.spec.growth, age: p.age,
+        life: p.life, roll: p.roll, alpha: e.spec.alpha, fade: e.spec.fade,
+        fade_in: e.spec.fade_in, color: e.spec.color, camera, right: axes.0, up: axes.1 }
+}
+fn quad(p: &Recipe) -> [Vertex; 4] {
+    let radius = p.size * (1. + p.growth * p.age).max(0.);
+    let x = (p.right * p.roll.cos() + p.up * p.roll.sin()) * radius;
+    let y = (-p.right * p.roll.sin() + p.up * p.roll.cos()) * radius;
+    let opacity = p.alpha * if p.fade { 1. - p.age / p.life } else { 1. }
+        * (p.age / p.fade_in.max(0.02)).min(1.)
+        * (p.camera.distance(p.position) / 28.).min(1.);
+    let color: [u8;4] = Color::new(p.color.x, p.color.y, p.color.z, opacity).into();
+    let positions = [p.position-x-y,p.position+x-y,p.position+x+y,p.position-x+y];
+    let uvs = [vec2(0.,1.),vec2(1.,1.),vec2(1.,0.),vec2(0.,0.)];
+    std::array::from_fn(|i| Vertex {position: positions[i],uv:uvs[i],color,normal:Vec4::ZERO})
+}
+fn kernel(recipes: &[Recipe], output: &mut [[Vertex; 4]]) {
+    for (r, out) in recipes.iter().zip(output) { *out = quad(r); }
+}
+#[derive(Default)]
+pub(super) struct Buffer {
+    recipes: Vec<Recipe>, output: Vec<[Vertex;4]>, publications: Vec<Rc<Geometry>>, live: usize,
+}
+impl Buffer {
+    pub(super) fn prepare(&mut self, puffs: &[Puff], emitters: &[Emitter], camera: Vec3, direction: Option<Vec3>) {
+        let _span = crate::frame_profile::span("particle_producer");
+        self.live = 0;
+        self.recipes.clear();
+        let axes = direction.map(basis); // Shared world camera basis, exactly the old arithmetic.
+        self.recipes.extend(puffs.iter().map(|p| recipe(p, &emitters[p.emitter], camera,
+            axes.unwrap_or_else(|| basis((p.position-camera).normalize_or_zero())))));
+        self.output.resize(puffs.len(), [Vertex::new(0.,0.,0.,0.,0.,WHITE);4]);
+        if puffs.len() >= 32 && crate::render::vita_renderer::config().fx_worker_prep {
+            let mid = puffs.len()/2;
+            let (a,b) = self.output.split_at_mut(mid);
+            let (ra,rb) = self.recipes.split_at(mid);
+            crate::character::skinning::overlap::cpu_pair(||kernel(ra,a),||kernel(rb,b));
+        } else { kernel(&self.recipes,&mut self.output); }
+        for vertices in &self.output {
+            let i = self.live;
+            if self.publications.len() <= i {
+                self.publications.push(Rc::new(Geometry::new(Mesh {vertices:Vec::with_capacity(4),
+                    indices:vec![0,1,2,0,2,3], texture:None})));
+            }
+            // Reflections / queued prior views retain immutable publications.
+            if Rc::get_mut(&mut self.publications[i]).is_none() {
+                self.publications[i] = Rc::new(Geometry::new(Mesh {vertices:Vec::with_capacity(4),
+                    indices:vec![0,1,2,0,2,3],texture:None}));
+            }
+            Rc::get_mut(&mut self.publications[i]).unwrap().update_quad(vertices);
+            self.live += 1;
+        }
+        crate::render_fx::retained::count("particle_reused_quads", self.live as u64);
+    }
+    pub(super) fn geometry(&self, index: usize) -> Option<Rc<Geometry>> {
+        (index < self.live).then(|| self.publications[index].clone())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn same(a: &[Vertex], b: &[Vertex]) -> bool {
+        a.len()==b.len() && a.iter().zip(b).all(|(a,b)| a.position.to_array().map(f32::to_bits)==b.position.to_array().map(f32::to_bits)
+            && a.uv.to_array().map(f32::to_bits)==b.uv.to_array().map(f32::to_bits)
+            && a.normal.to_array().map(f32::to_bits)==b.normal.to_array().map(f32::to_bits) && a.color==b.color)
+    }
+    #[test]
+    fn producer_reuses_arrays_without_allocations_and_worker_output_matches_legacy() {
+        crate::character::skinning::overlap::startup(2,false);
+        let mut steam=super::super::tests::attached_fixture(4).steam;
+        steam.update(0.2,Vec3::ZERO,&crate::collision::World::fixture(&[]));
+        assert!(steam.puffs.len()>=32);
+        let camera=vec3(25.,-10.,5.);
+        let mut buffer=Buffer::default();buffer.prepare(&steam.puffs,&steam.emitters,camera,Some(Vec3::X));
+        let pointers=(buffer.recipes.as_ptr(),buffer.output.as_ptr(),buffer.publications[0].vertices.as_ptr());
+        for _ in 0..8 {
+            let scope=crate::kernel_alloc::Scope::begin();
+            buffer.prepare(&steam.puffs,&steam.emitters,camera,Some(Vec3::X));
+            assert_eq!(scope.finish(),0);
+            assert_eq!(pointers,(buffer.recipes.as_ptr(),buffer.output.as_ptr(),buffer.publications[0].vertices.as_ptr()));
+            for i in 0..steam.puffs.len() {
+                assert!(same(&steam.puff_mesh(i,camera,Vec3::X).vertices,&buffer.geometry(i).unwrap().vertices));
+            }
+        }
+        let scope=crate::kernel_alloc::Scope::begin();
+        for i in 0..steam.puffs.len() {std::hint::black_box(steam.puff_mesh(i,camera,Vec3::X));}
+        assert!(scope.finish()>=steam.puffs.len() as u64*2);
+        let output=&mut buffer.output;let recipes=&buffer.recipes;
+        crate::character::skinning::overlap::cpu_pair(|| {
+            let scope=crate::kernel_alloc::Scope::begin();kernel(recipes,output);assert_eq!(scope.finish(),0);
+        },||{});
+        buffer.prepare(&[],&steam.emitters,camera,Some(Vec3::Z));assert!(buffer.geometry(0).is_none());
+    }
+    #[test]
+    fn world_and_attached_quads_match_legacy_bits_and_keep_snapshots() {
+        let mut steam = super::super::tests::attached_fixture(2).steam;
+        steam.update(0.2, Vec3::ZERO, &crate::collision::World::fixture(&[]));
+        assert!(!steam.puffs.is_empty());
+        for direction in [Vec3::X,Vec3::Z,Vec3::ZERO,vec3(0.2,-0.8,0.3)] {
+            for frame in 0..20 {
+                for (i,p) in steam.puffs.iter_mut().enumerate() {
+                    p.age=frame as f32*0.03; p.roll=i as f32*0.7; p.size=frame as f32;
+                }
+                for attached in [false,true] {
+                    let camera=vec3(17.,-23.,8.);
+                    let mut buffer=Buffer::default();
+                    buffer.prepare(&steam.puffs,&steam.emitters,camera,(!attached).then_some(direction));
+                    for (i,p) in steam.puffs.iter().enumerate() {
+                        let d=if attached {(p.position-camera).normalize_or_zero()} else {direction};
+                        let reference=steam.puff_mesh(i,camera,d);
+                        let g=buffer.geometry(i).unwrap();
+                        assert!(same(&reference.vertices,&g.vertices));
+                        assert_eq!(reference.indices,g.indices);
+                    }
+                    let old=buffer.geometry(0).unwrap(); let bytes=old.vertices.clone();
+                    buffer.prepare(&steam.puffs,&steam.emitters,Vec3::ZERO,Some(Vec3::Z));
+                    assert!(same(&old.vertices,&bytes));
+                }
+            }
+        }
+    }
+}

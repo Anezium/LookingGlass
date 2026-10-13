@@ -549,6 +549,7 @@ mod vita {
         "particles_liquid",
         "particles_retain",
         "particles_emit",
+        "particle_producer",
         "collider_vertices",
         "collider_edges",
         "collider_transform",

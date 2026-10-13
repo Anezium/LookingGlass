@@ -47,6 +47,7 @@ struct Row {
     skin_gather_us: u64,
     skin_fallbacks: u64,
     skin_overflow: u64,
+    fx: [u64; 8],
 }
 struct Ring {
     rows: [Row; WINDOW],
@@ -88,12 +89,13 @@ impl Ring {
         self.current = Row::default();
     }
     fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
-        writeln!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow")?;
+        writeln!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us")?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
             let r = self.rows[i % WINDOW];
-            writeln!(out, "{},{},{},{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us,
-                r.skin_collect_wait_us, r.skin_gather_us, r.skin_fallbacks, r.skin_overflow)?;
+            writeln!(out, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us,
+                r.skin_collect_wait_us, r.skin_gather_us, r.skin_fallbacks, r.skin_overflow,
+                r.fx[0],r.fx[1],r.fx[2],r.fx[3],r.fx[4],r.fx[5],r.fx[6],r.fx[7])?;
         }
         Ok(())
     }
@@ -124,6 +126,15 @@ pub(crate) fn skin_overlap(gather_us: u64, fallbacks: u64, overflow: bool) {
         });
     }
 }
+#[derive(Clone, Copy)]
+pub(crate) enum FxMetric { Producer, Merge, UploadCpu, UploadGl, UploadBytes, FinishPrepare, WorkerWait, FinishRecycle }
+pub(crate) fn fx_add(metric: FxMetric, value: u64) {
+    if active() { RING.with(|r| r.borrow_mut().current.fx[metric as usize] += value); }
+}
+pub(crate) struct FxTimer(FxMetric, Instant);
+pub(crate) fn fx_timer(metric: FxMetric) -> FxTimer { FxTimer(metric, Instant::now()) }
+impl Drop for FxTimer { fn drop(&mut self) { fx_add(self.0, self.1.elapsed().as_micros() as u64); } }
+
 pub(crate) fn cpu_begin() {
     if active() {
         RING.with(|r| r.borrow_mut().cpu_start = Some(Instant::now()));
@@ -257,10 +268,10 @@ mod tests {
         assert_eq!(s.lines().count(), 61);
         assert_eq!(
             s.lines().next().unwrap(),
-            "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow"
+            "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us"
         );
-        assert_eq!(s.lines().nth(1).unwrap(), "66,10,7,2,66,198,0,0");
-        assert_eq!(s.lines().last().unwrap(), "125,10,7,2,125,375,2,1");
+        assert_eq!(s.lines().nth(1).unwrap(), "66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0");
+        assert_eq!(s.lines().last().unwrap(), "125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0");
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);

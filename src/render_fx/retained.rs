@@ -50,9 +50,14 @@ pub(crate) fn begin_view(
         boundary("flush_vita_3d_begin");
     }
     FRAME.with(|f| {
-        *f.borrow_mut() = Frame {
+        let mut f = f.borrow_mut();
+        let mut groups = std::mem::take(&mut f.groups);
+        groups.clear();
+        let group_pool = std::mem::take(&mut f.group_pool);
+        *f = Frame {
             active: true,
             direct: true,
+            groups, group_pool,
             camera: camera.position,
             direction: (camera.target - camera.position).normalize_or_zero(),
             time,
@@ -161,6 +166,7 @@ struct Stats {
     triangles: u64,
     uniform_bytes: u64,
     upload_bytes: u64,
+    upload_gl_us: u64,
     uploads: u64,
     growths: u64,
     upload_hits: u64,
@@ -282,6 +288,9 @@ pub(crate) struct Gpu {
     packet_storage: Vec<(usize, usize, usize, [f32; UNIFORM_FLOATS])>,
     range_storage: Vec<std::ops::Range<usize>>,
     shared_storage: std::collections::HashMap<usize, usize>,
+    alpha_storage: Vec<(f32, Source)>,
+    opaque_storage: Vec<(f32, Source)>,
+    recycle_storage: Vec<usize>,
     uniform_cache: UniformCache<UNIFORM_FLOATS>,
     merge_cache: [MergeCache; 4],
     merge_meshes: [BTreeMap<usize, super::prepared::Geometry>; 2],
@@ -318,6 +327,7 @@ impl Gpu {
             stats: Stats::default(),
             preparation: Default::default(), packet_storage: Vec::new(),
             range_storage: Vec::new(), shared_storage: Default::default(),
+            alpha_storage: Vec::new(), opaque_storage: Vec::new(), recycle_storage: Vec::new(),
             uniform_cache: UniformCache::default(),
             merge_cache: Default::default(),
             merge_meshes: Default::default(),
@@ -393,6 +403,7 @@ impl Gpu {
         }
         let plan = UploadPlan::new(c.fx_upload_cache || version.is_some(), c.gpu_index_dedupe || version.is_some(), same_vertex, same_index);
         if plan.full_hit { self.stats.upload_hits += 1; }
+        let gl_started = std::time::Instant::now();
         if plan.vertex {
             ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));
             self.stats.upload_bytes += (mesh.vertices.len() * 40) as u64;
@@ -401,7 +412,12 @@ impl Gpu {
             ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));
             self.stats.upload_bytes += (mesh.indices.len() * 2) as u64;
         } else if !plan.full_hit { self.stats.index_skips += 1; }
-        if plan.vertex || plan.index { self.stats.uploads += 1; }
+        if plan.vertex || plan.index {
+            self.stats.uploads += 1;
+            let us = gl_started.elapsed().as_micros() as u64;
+            self.stats.upload_gl_us += us;
+            count("vita_fx_upload_gl_us", us);
+        }
         if version.is_none() && track_vertex && !same_vertex {
             b.previous_vertices.clear();
             b.previous_vertices.extend_from_slice(&mesh.vertices);
@@ -578,15 +594,56 @@ struct MergeCache {
     kept: Vec<Source>,
     destinations: Vec<(usize, Vec<usize>)>,
     versions: BTreeMap<usize, Vec<super::prepared::Version>>,
+    version_scratch: BTreeMap<usize, Vec<super::prepared::Version>>,
+    destination_ids: Vec<usize>,
+    candidates: Vec<(usize, usize, usize, PacketKey, bool)>,
+    packing: Vec<PackSource>,
 }
-fn merge_cached(
-    cache: &mut MergeCache,
+/// Descriptors borrow immutable CPU arrays until pack_sources has drained both workers.
+/// No Mesh, Rc, texture or renderer handle is present in a worker closure.
+#[derive(Clone, Copy)]
+struct PackSource { vertices: usize, vertex_len: usize, indices: usize, index_len: usize,
+    vertex_offset: usize, index_offset: usize }
+fn pack_kernel(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16],
+    vertex_base: usize, index_base: usize, copy_indices: bool) {
+    for source in sources {
+        // SAFETY: merge_cached owns all source groups without modifying them until
+        // scoped CPU workers have joined (also on panic); lengths come from slices.
+        let input = unsafe {std::slice::from_raw_parts(source.vertices as *const Vertex, source.vertex_len)};
+        let start = source.vertex_offset - vertex_base;
+        vertices[start..start+input.len()].copy_from_slice(input);
+        if copy_indices {
+            let input = unsafe {std::slice::from_raw_parts(source.indices as *const u16, source.index_len)};
+            let start = source.index_offset - index_base;
+            for (dst, &i) in indices[start..start+input.len()].iter_mut().zip(input) {
+                *dst = i + source.vertex_offset as u16;
+            }
+        }
+    }
+}
+fn pack_sources(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16], copy_indices: bool, worker: bool) {
+    if worker && vertices.len() >= 256 && sources.len() >= 2 {
+        let mid = sources.len()/2;
+        let vb = sources[mid].vertex_offset; let ib = sources[mid].index_offset;
+        let (va,vz) = vertices.split_at_mut(vb); let (ia,iz) = indices.split_at_mut(ib);
+        let (a,z) = sources.split_at(mid);
+        crate::character::skinning::overlap::cpu_pair(
+            ||pack_kernel(a,va,ia,0,0,copy_indices), ||pack_kernel(z,vz,iz,vb,ib,copy_indices));
+    } else { pack_kernel(sources,vertices,indices,0,0,copy_indices); }
+}
+fn merge_cached<'a>(cache: &'a mut MergeCache, groups: &mut [super::Group], list: &mut Vec<(f32,Source)>,
+    material: bool, reuse: bool, pool: &mut BTreeMap<usize, super::prepared::Geometry>) -> &'a [usize] {
+    merge_cached_mode(cache, groups, list, material, reuse, pool, crate::render::vita_renderer::config().fx_merge_in_place)
+}
+fn merge_cached_mode<'a>(
+    cache: &'a mut MergeCache,
     groups: &mut [super::Group],
     list: &mut Vec<(f32, Source)>,
     material: bool,
     reuse: bool,
     pool: &mut BTreeMap<usize, super::prepared::Geometry>,
-) -> Vec<usize> {
+    in_place: bool,
+) -> &'a [usize] {
     // Only packet topology/state is cached. Animated vertices always stream anew.
     // A world packet or actor is a barrier for particle material regrouping.
     let mut signature = std::mem::take(&mut cache.signature);
@@ -624,7 +681,7 @@ fn merge_cached(
         count("vita_fx_merge_plan_builds", 1);
         cache.steps.clear();
         cache.kept.clear();
-        let mut candidates: Vec<(usize, usize, usize, PacketKey, bool)> = Vec::new();
+        let mut candidates = std::mem::take(&mut cache.candidates); candidates.clear();
         for item in &signature {
             let Source::Actor(id) = item.source else {
                 candidates.clear();
@@ -659,6 +716,7 @@ fn merge_cached(
                 cache.kept.push(item.source);
             }
         }
+        cache.candidates = candidates;
         cache.previous_signature.clone_from(&signature);
         cache.destinations.clear();
         for &(target, source) in &cache.steps {
@@ -666,30 +724,64 @@ fn merge_cached(
             else { cache.destinations.push((target, vec![source])); }
         }
         cache.versions.clear();
+        cache.destination_ids.clear();
+        cache.destination_ids.extend(cache.destinations.iter().map(|(id,_)| *id));
     }
     cache.signature = signature;
-    let mut destinations = Vec::with_capacity(cache.destinations.len());
     for (target, sources) in &cache.destinations {
         let target = *target;
-        destinations.push(target);
-        let versions = if crate::render::vita_renderer::config().fx_prepare_cache {
-            std::iter::once(target).chain(sources.iter().copied()).map(|id|
-                groups[id].passes[0].geometry.as_ref().map(|g|g.version)).collect::<Option<Vec<_>>>()
-        } else { None };
+        let mut version_storage = std::mem::take(cache.version_scratch.entry(target).or_default());
+        version_storage.clear();
+        let certified = crate::render::vita_renderer::config().fx_prepare_cache &&
+            std::iter::once(target).chain(sources.iter().copied()).all(|id| {
+                if let Some(g) = &groups[id].passes[0].geometry { version_storage.push(g.version); true } else { false }
+            });
+        let versions = certified.then_some(&version_storage);
         let old_version = pool.get(&target).map(|g|g.version);
         let same_topology = hit && versions.as_ref().zip(cache.versions.get(&target)).is_some_and(|(a,b)|
             a.len()==b.len() && a.iter().zip(b).all(|(a,b)|a.identity==b.identity && a.topology==b.topology));
-        if let Some(mut cached) = pool.remove(&target) {
-            let version_hit = hit && versions.as_ref().is_some_and(|v| cache.versions.get(&target) == Some(v));
-            if hit && (version_hit || versions.is_none() && unchanged_merged(&cached, groups, target, sources)) {
+        let mut cached = pool.remove(&target);
+        if let Some(previous) = cached.as_ref() {
+            let version_hit = hit && versions.is_some_and(|v| cache.versions.get(&target) == Some(v));
+            if hit && (version_hit || versions.is_none() && unchanged_merged(previous, groups, target, sources)) {
+                let cached = cached.take().unwrap();
                 if versions.is_some() { groups[target].passes[0].geometry=Some(std::rc::Rc::new(cached)); }
                 else { groups[target].passes[0].geometry=None; groups[target].passes[0].mesh=cached.mesh; }
                 for &source in sources {
                     groups[source].passes.clear();
                 }
                 count("vita_fx_unchanged_merged_groups", 1);
+                cache.version_scratch.insert(target, version_storage);
                 continue;
             }
+        }
+        if in_place {
+            let mut dest = cached.map(|g|g.mesh).unwrap_or_else(|| Mesh {vertices:Vec::new(),indices:Vec::new(),texture:None});
+            dest.texture = groups[target].passes[0].mesh.texture.clone();
+            cache.packing.clear();
+            let mut vertices = 0; let mut indices = 0;
+            for id in std::iter::once(target).chain(sources.iter().copied()) {
+                let source = groups[id].passes[0].geometry();
+                cache.packing.push(PackSource { vertices:source.vertices.as_ptr() as usize, vertex_len:source.vertices.len(),
+                    indices:source.indices.as_ptr() as usize, index_len:source.indices.len(), vertex_offset:vertices, index_offset:indices });
+                vertices += source.vertices.len(); indices += source.indices.len();
+            }
+            dest.vertices.resize(vertices, Vertex::new(0.,0.,0.,0.,0.,WHITE));
+            let keep_indices = same_topology && dest.indices.len() == indices;
+            if !keep_indices { dest.indices.resize(indices, 0); }
+            pack_sources(&cache.packing, &mut dest.vertices, &mut dest.indices, !keep_indices,
+                crate::render::vita_renderer::config().fx_worker_prep);
+            count("vita_fx_pack_vertices", vertices as u64);
+            count("vita_fx_pack_indices", if keep_indices {0} else {indices as u64});
+            count("vita_fx_certified_indices_reused", if keep_indices {indices as u64} else {0});
+            groups[target].passes[0].geometry = None;
+            groups[target].passes[0].mesh = dest;
+            for &source in sources {
+                if !groups[source].passes[0].effect {count("vita_actor_batched_packets",1);}
+                groups[source].passes.clear();
+            }
+        } else {
+        if let Some(mut cached) = cached {
             let old = groups[target].passes[0].geometry();
             cached.mesh.texture = groups[target].passes[0].mesh.texture.clone();
             cached.mesh.vertices.clear();
@@ -710,17 +802,19 @@ fn merge_cached(
                 .extend(source.mesh.indices.into_iter().map(|i| i + offset));
             if !source.effect {count("vita_actor_batched_packets",1);}
         }
-        if let Some(versions) = versions {
-            cache.versions.insert(target, versions);
+        }
+        if certified {
+            let previous = cache.versions.insert(target, version_storage).unwrap_or_default();
+            cache.version_scratch.insert(target, previous);
             let texture = groups[target].passes[0].mesh.texture.clone();
             let mesh = std::mem::replace(&mut groups[target].passes[0].mesh, Mesh { vertices: Vec::new(), indices: Vec::new(), texture });
             groups[target].passes[0].geometry = Some(std::rc::Rc::new(super::prepared::Geometry::merged(mesh, if hit {old_version} else {None}, same_topology)));
-        }
+        } else { cache.version_scratch.insert(target, version_storage); }
     }
     count("vita_fx_merged_meshes", cache.steps.len() as u64);
     list.clear();
     list.extend(cache.kept.iter().map(|&s| (0., s)));
-    destinations
+    &cache.destination_ids
 }
 /// Coalesce only adjacent whole dynamic meshes with identical shader state.
 /// The joint order is already final: a world group or layered actor is a barrier.
@@ -811,12 +905,11 @@ pub(crate) fn finish_world(
     if flush {
         boundary("flush_vita_3d_packets");
     }
+    let preparation_started = std::time::Instant::now();
     let mut list = {
         let _span = crate::frame_profile::span("vita_joint_alpha_sort");
-        let mut list = world
-            .iter()
-            .map(|&(d, id)| (d, Source::World(id)))
-            .collect::<Vec<_>>();
+        let mut list = std::mem::take(&mut gpu.alpha_storage); list.clear();
+        list.extend(world.iter().map(|&(d,id)| (d,Source::World(id))));
         list.extend(
             groups
                 .iter()
@@ -831,7 +924,7 @@ pub(crate) fn finish_world(
         );
         order(list, crate::render::vita_renderer::config().sort_alpha)
     };
-    let mut recycled = Vec::new();
+    let mut recycled = std::mem::take(&mut gpu.recycle_storage); recycled.clear();
     let c = crate::render::vita_renderer::config();
     if c.fx_prepare_cache {
         let storage = &mut gpu.preparation[gpu.ring_phase];
@@ -843,14 +936,12 @@ pub(crate) fn finish_world(
         }}
         storage.truncate(index); // Unused producers cannot alias a future occupant.
     }
+    crate::light_profile::fx_add(crate::light_profile::FxMetric::FinishPrepare, preparation_started.elapsed().as_micros() as u64);
     if (c.merge_fx && c.fx_batching != "none") || c.actor_batching {
+        let _timer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Merge);
         let _span = crate::frame_profile::span("vita_fx_merge_groups");
-        let mut opaque = groups
-            .iter()
-            .enumerate()
-            .filter(|(_, g)| !g.transparent)
-            .map(|(id, _)| (0., Source::Actor(id)))
-            .collect::<Vec<_>>();
+        let mut opaque = std::mem::take(&mut gpu.opaque_storage); opaque.clear();
+        opaque.extend(groups.iter().enumerate().filter(|(_,g)| !g.transparent).map(|(id,_)| (0.,Source::Actor(id))));
         for (which, order) in [&mut list, &mut opaque].into_iter().enumerate() {
             let destinations = merge_cached(
                 &mut gpu.merge_cache[gpu.ring_phase * 2 + which],
@@ -860,13 +951,15 @@ pub(crate) fn finish_world(
                 c.fx_merge_cache,
                 &mut gpu.merge_meshes[gpu.ring_phase],
             );
-            recycled.extend(destinations);
+            recycled.extend_from_slice(destinations);
         }
+        opaque.clear(); gpu.opaque_storage = opaque;
     }
     let mut packets = std::mem::take(&mut gpu.packet_storage); packets.clear();
     let mut ranges = std::mem::take(&mut gpu.range_storage); ranges.clear();
     let mut invalid = 0;
     {
+        let upload_started = std::time::Instant::now();
         let _span = crate::frame_profile::span("vita_fx_upload");
         let mut uniform_templates=[None;4];
         let mut shared_uploads=std::mem::take(&mut gpu.shared_storage); shared_uploads.clear();
@@ -895,6 +988,11 @@ pub(crate) fn finish_world(
             ranges.push(start..packets.len());
         }
         gpu.shared_storage = shared_uploads;
+        let cpu_us = (upload_started.elapsed().as_micros() as u64).saturating_sub(gpu.stats.upload_gl_us);
+        crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadCpu, cpu_us);
+        crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadGl, gpu.stats.upload_gl_us);
+        crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadBytes, gpu.stats.upload_bytes);
+        count("vita_fx_upload_cpu_us", cpu_us);
     }
     count("vita_fx_capacity_samples", 1);
     count(
@@ -959,6 +1057,7 @@ pub(crate) fn finish_world(
         f.retained.clear();
     });
     gl_use_default_material();
+    let _recycle_timer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::FinishRecycle);
     packets.clear(); gpu.packet_storage = packets;
     ranges.clear(); gpu.range_storage = ranges;
     for &id in &recycled {
@@ -972,12 +1071,115 @@ pub(crate) fn finish_world(
     }
     gpu.merge_meshes[gpu.ring_phase].retain(|id, _| recycled.contains(id));
     gpu.stats.report();
-    (list.len(), dropped + invalid)
+    let list_len = list.len(); list.clear(); gpu.alpha_storage = list;
+    recycled.clear(); gpu.recycle_storage = recycled;
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        let pool_limit = groups.len();
+        for group in &mut groups {
+            group.passes.clear();
+            if f.group_pool.len() < pool_limit { f.group_pool.push(std::mem::take(&mut group.passes)); }
+        }
+        groups.clear(); f.groups = groups;
+    });
+    (list_len, dropped + invalid)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owned_particle_publications_match_legacy_packet_geometry_and_blend_policy() {
+        for blend in [crate::materials::Blend::Alpha,crate::materials::Blend::Add,crate::materials::Blend::AlphaAdd] {
+            FRAME.with(|f| *f.borrow_mut()=Frame {active:true,direct:true,..Default::default()});
+            let mesh=Mesh {vertices:vec![Vertex::new(1.,2.,3.,0.5,0.4,Color::new(0.7,0.4,0.2,0.3));4],
+                indices:vec![0,1,2,0,2,3],texture:None};
+            super::super::effect(&mesh,blend);
+            let publication=std::rc::Rc::new(super::super::prepared::Geometry::new(super::super::copy_mesh(&mesh)));
+            super::super::effect_geometry(publication.clone(),None,blend);
+            let frame=FRAME.with(|f|std::mem::take(&mut *f.borrow_mut()));
+            assert_eq!(frame.groups.len(),2);assert_eq!(frame.vertices,8);
+            assert!(frame.groups.iter().all(|g|g.transparent));
+            let (a,b)=(&frame.groups[0].passes[0],&frame.groups[1].passes[0]);
+            assert!(same_packet(a,b));assert!(a.effect && b.effect);
+            assert!(vertices_equal(&a.geometry().vertices,&b.geometry().vertices));
+            assert_eq!(a.geometry().indices,b.geometry().indices);
+            assert!(std::rc::Rc::ptr_eq(&publication,b.geometry.as_ref().unwrap()));
+            assert!(b.mesh.vertices.is_empty() && b.mesh.indices.is_empty());
+        }
+    }
+    #[test]
+    fn in_place_merge_reuses_certified_indices_and_copies_less_than_owned_sources() {
+        let mut publications = (0..128).map(|_|super::super::prepared::Cache::default()).collect::<Vec<_>>();
+        let mut caches = [MergeCache::default(),MergeCache::default()];
+        let mut pools: [BTreeMap<usize,super::super::prepared::Geometry>;2] = Default::default();
+        let mut allocated = [0u64;2];
+        let mut index_pointer = None;
+        for frame in 0..8 {
+            let mut published=Vec::new();
+            for (i,c) in publications.iter_mut().enumerate() {
+                let mut m=fixture_group().passes.pop().unwrap().mesh;
+                m.vertices[0].position.x = (frame+i) as f32;
+                if frame==6 && i==31 {m.indices.swap(0,1);}
+                published.push(c.observe(&m,None));
+            }
+            let mut outputs=Vec::new();
+            for arm in 0..2 {
+                let mut groups=(0..128).map(|i| {
+                    let mut g=fixture_group();g.passes[0].effect=true;
+                    g.passes[0].mesh.vertices.clear();g.passes[0].mesh.indices.clear();
+                    g.passes[0].geometry=Some(published[i].clone());g
+                }).collect::<Vec<_>>();
+                let mut list=(0..128).map(|i| (i as f32,Source::Actor(i))).collect();
+                let scope=crate::kernel_alloc::Scope::begin();
+                let ids=merge_cached_mode(&mut caches[arm],&mut groups,&mut list,false,true,&mut pools[arm],arm==1);
+                let calls=scope.finish(); if frame>2 {allocated[arm]+=calls;}
+                let mesh=groups[0].passes[0].geometry();
+                outputs.push((mesh.vertices.clone(),mesh.indices.clone(),list.clone()));
+                if arm==1 && frame<6 {
+                    if let Some(pointer)=index_pointer {assert_eq!(pointer,mesh.indices.as_ptr());}
+                    index_pointer=Some(mesh.indices.as_ptr());
+                    if frame>0 {assert!(host_report()["vita_fx_certified_indices_reused"].as_u64().unwrap()>0);}
+                }
+                for &id in ids {
+                    let geometry=groups[id].passes[0].geometry.take().unwrap();
+                    pools[arm].insert(id,std::rc::Rc::try_unwrap(geometry).ok().unwrap());
+                }
+            }
+            assert!(vertices_equal(&outputs[0].0,&outputs[1].0));
+            assert_eq!(outputs[0].1,outputs[1].1);assert_eq!(outputs[0].2,outputs[1].2);
+        }
+        assert!(allocated[1]<allocated[0], "legacy={} in_place={}",allocated[0],allocated[1]);
+    }
+    #[test]
+    fn packing_successor_batches_drain_panics_and_match_serial_with_zero_kernel_allocations() {
+        crate::character::skinning::overlap::startup(2,false);
+        let vertices=vec![Vertex::new(1.,2.,3.,0.4,0.5,WHITE);400];
+        let indices=vec![0,1,2];
+        let sources=[PackSource {vertices:vertices.as_ptr() as usize,vertex_len:400,
+            indices:indices.as_ptr() as usize,index_len:3,vertex_offset:0,index_offset:0},
+            PackSource {vertices:vertices.as_ptr() as usize,vertex_len:400,
+            indices:indices.as_ptr() as usize,index_len:3,vertex_offset:400,index_offset:3}];
+        let mut a=vec![Vertex::new(0.,0.,0.,0.,0.,BLACK);800];let mut b=a.clone();
+        let mut ia=vec![0;6];let mut ib=ia.clone();
+        pack_sources(&sources,&mut a,&mut ia,true,false);
+        pack_sources(&sources,&mut b,&mut ib,true,true); // Warm telemetry and wake paths.
+        let scope=crate::kernel_alloc::Scope::begin();
+        pack_sources(&sources,&mut b,&mut ib,true,true);
+        assert_eq!(scope.finish(),0);
+        assert!(vertices_equal(&a,&b));assert_eq!(ia,ib);
+        crate::character::skinning::overlap::cpu_pair(|| {
+            let scope=crate::kernel_alloc::Scope::begin();
+            let mut v=[Vertex::new(0.,0.,0.,0.,0.,BLACK);400];let mut i=[0;3];
+            pack_kernel(&sources[..1],&mut v,&mut i,0,0,true);assert_eq!(scope.finish(),0);
+        },||{});
+        let finished=std::sync::atomic::AtomicBool::new(false);
+        let failure=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+            crate::character::skinning::overlap::cpu_pair(||panic!("injected packing failure"),||finished.store(true,std::sync::atomic::Ordering::Relaxed))));
+        assert!(failure.is_err());assert!(finished.load(std::sync::atomic::Ordering::Relaxed));
+        pack_sources(&sources,&mut b,&mut ib,true,true);
+        assert!(vertices_equal(&a,&b));
+    }
     #[test]
     fn renderer_owners_and_packets_cannot_be_sent_or_shared_with_workers() {
         trait AmbiguousIfSend<A> { fn check() {} }
@@ -1041,7 +1243,7 @@ mod tests {
                     assert_eq!(a.geometry().indices,b.geometry().indices);
                 }
             }
-            for id in recycled {
+            for &id in recycled {
                 let p=&mut changed[id].passes[0]; let g=p.geometry.take().unwrap();
                 pool.insert(id,std::rc::Rc::try_unwrap(g).ok().unwrap());
             }

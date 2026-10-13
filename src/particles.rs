@@ -511,7 +511,11 @@ struct Puff {
     roll: f32,
     emitter: usize,
 }
+#[cfg(feature="vita_renderer")]
+mod quad;
 pub struct Steam {
+    #[cfg(feature="vita_renderer")]
+    quads: std::cell::RefCell<quad::Buffer>,
     animations: Vec<AnimationBinding>,
     emitters: Vec<Emitter>,
     puffs: Vec<Puff>,
@@ -874,6 +878,7 @@ impl Steam {
             emitters,
             puffs: Vec::new(),
             seed: 0x56789abc,
+            #[cfg(feature="vita_renderer")] quads: Default::default(),
             materials,
         })
     }
@@ -1217,7 +1222,22 @@ impl Steam {
             atmosphere.apply(m, camera);
         }
     }
+    #[cfg(feature="vita_renderer")]
+    pub(crate) fn prepare_quads(&self, camera: Vec3, direction: Option<Vec3>) {
+        if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
+            self.quads.borrow_mut().prepare(&self.puffs, &self.emitters, camera, direction);
+        }
+    }
     pub fn draw_one(&self, index: usize, camera: Vec3, direction: Vec3) {
+        #[cfg(feature="vita_renderer")]
+        if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
+            if let Some(geometry) = self.quads.borrow().geometry(index) {
+                let e = &self.emitters[self.puffs[index].emitter];
+                crate::render_fx::effect_geometry(geometry, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
+                    if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
+                return;
+            }
+        }
         let e = &self.emitters[self.puffs[index].emitter];
         #[cfg(feature="vita_renderer")]
         if !crate::render_fx::retained_active(){gl_use_material(&self.materials[usize::from(e.additive)]);}
@@ -1488,6 +1508,7 @@ impl Attached {
                 emitters: self.steam.emitters.clone(),
                 puffs: Vec::new(),
                 seed: 1,
+                #[cfg(feature="vita_renderer")] quads: Default::default(),
                 materials: self.steam.materials.clone(),
             },
         }
@@ -1594,6 +1615,7 @@ impl Attached {
                 emitters,
                 puffs: Vec::new(),
                 seed: 1,
+                #[cfg(feature="vita_renderer")] quads: Default::default(),
                 materials: shared_materials()?,
             },
         }))
@@ -1616,8 +1638,11 @@ impl Attached {
     }
     pub(crate) fn draw_sampled(&mut self, camera: Vec3, atmosphere: &Atmosphere) {
         if crate::character::skinning::overlap::gathering() { return; }
+        #[cfg(feature="vita_renderer")]
+        let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
         let _packets = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Packets);
         self.steam.prepare_draw(camera, atmosphere);
+        #[cfg(feature="vita_renderer")] self.steam.prepare_quads(camera, None);
         let mut order = if self.reuse_scratch { std::mem::take(&mut self.order) } else { Vec::new() };
         order.clear();
         order.extend(self
@@ -2044,6 +2069,7 @@ pub(crate) mod tests {
                     .collect(),
                 puffs: vec![],
                 seed: 1,
+                #[cfg(feature="vita_renderer")] quads: Default::default(),
                 materials: vec![],
             },
         }
@@ -2261,6 +2287,7 @@ pub(crate) mod tests {
             }],
             puffs: vec![],
             seed: 12345,
+                #[cfg(feature="vita_renderer")] quads: Default::default(),
             materials: vec![],
         };
         let pose = Transform {
