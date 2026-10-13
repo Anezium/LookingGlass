@@ -191,7 +191,7 @@ impl Store {
             output_len: 0,
             layers: if reuse {vec![[zero; 2]; VERTICES]} else {Vec::new()},
             dirty: if reuse {vec![[false; 2]; SURFACES]} else {Vec::new()},
-            previous: Vec::with_capacity(SURFACES),
+            previous: if reuse {Vec::with_capacity(SURFACES)} else {Vec::new()},
             pending: 0,
             cursor: 0,
             overflow: false,
@@ -206,7 +206,7 @@ impl Store {
         let i = unsafe { &mut *self.input.get() };
         i.draws.clear();
         self.previous.clear();
-        self.previous.extend(i.surfaces.iter().cloned());
+        if !self.layers.is_empty() {self.previous.extend(i.surfaces.iter().cloned());}
         i.surfaces.clear();
         i.pose.clear();
         i.scales.clear();
@@ -277,9 +277,10 @@ impl Store {
                 // Workers initialize every field, including UV, from immutable load data.
                 self.output_len = vertices.end;
                 let cpu = surface.cpu();
-                let revision = self.previous.get(i.surfaces.len())
-                    .filter(|old| old.vertices == vertices && Arc::ptr_eq(&old.cpu, &cpu))
-                    .map_or_else(Revision::new, |old| old.revision);
+                let revision = if self.layers.is_empty() {Revision {identity: 0, vertices: [0; 2]}}
+                    else {self.previous.get(i.surfaces.len())
+                        .filter(|old| old.vertices == vertices && Arc::ptr_eq(&old.cpu, &cpu))
+                        .map_or_else(Revision::new, |old| old.revision)};
                 i.surfaces.push(Surface { mesh, vertices, cpu, revision });
             }
         }
