@@ -443,6 +443,16 @@ impl Village {
         &mut self, dt: f32, _map: &Bsp, world: &mut World, player: &mut Player,
         fixed: &[Collider], config: &crate::vita_sim::Config,
     ) -> Result<()> {
+        #[cfg(feature = "vita_renderer")]
+        let lazy_publish = crate::render::vita_renderer::config().mover_lazy_publish;
+        #[cfg(not(feature = "vita_renderer"))]
+        let lazy_publish = false;
+        self.advance_publication_config(dt, _map, world, player, fixed, config, lazy_publish)
+    }
+    fn advance_publication_config(
+        &mut self, dt: f32, _map: &Bsp, world: &mut World, player: &mut Player,
+        fixed: &[Collider], config: &crate::vita_sim::Config, lazy_publish: bool,
+    ) -> Result<()> {
         if dt <= 0. {
             return Ok(());
         }
@@ -571,29 +581,33 @@ impl Village {
                     && !ground.start_solid
                     && ground.fraction < 1.
                     && ground.normal.z > 0.65;
-                #[cfg(target_os = "vita")]
-                let _publish_profile = crate::frame_profile::span("village_dynamic_publish");
-                let dynamic = fixed
-                    .iter()
-                    .cloned()
-                    .chain(
-                        self.objects
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, o)| {
-                                *j != i && o.solid && !(o.name == "openthis" && self.hatch_open)
-                            })
-                            .map(|(_, o)| o.collider.clone()),
-                    )
-                    .collect::<Vec<_>>();
-                #[cfg(target_os = "vita")]
-                {
-                    publishes += 1;
-                    published += dynamic.len() as u64;
-                }
-                world.set_dynamic(dynamic);
-                #[cfg(target_os = "vita")]
-                drop(_publish_profile);
+                #[allow(unused_mut)] // Vita counters make this closure FnMut.
+                let mut publish_without_mover = |world: &mut World| {
+                    #[cfg(target_os = "vita")]
+                    let _publish_profile = crate::frame_profile::span("village_dynamic_publish");
+                    let dynamic = fixed
+                        .iter()
+                        .cloned()
+                        .chain(
+                            self.objects
+                                .iter()
+                                .enumerate()
+                                .filter(|(j, o)| {
+                                        *j != i && o.solid && !(o.name == "openthis" && self.hatch_open)
+                                })
+                                .map(|(_, o)| o.collider.clone()),
+                        )
+                        .collect::<Vec<_>>();
+                    #[cfg(target_os = "vita")]
+                    {
+                        publishes += 1;
+                        published += dynamic.len() as u64;
+                    }
+                    world.set_dynamic(dynamic);
+                    #[cfg(target_os = "vita")]
+                    drop(_publish_profile);
+                };
+                if !lazy_publish { publish_without_mover(world); }
                 #[cfg(target_os = "vita")]
                 let _rider_profile = crate::frame_profile::span("village_rider_contact");
                 let mut carried = next.origin
@@ -613,6 +627,7 @@ impl Village {
                             continue;
                         };
                         carried = feet;
+                        if lazy_publish { publish_without_mover(world); }
                         let trace = world.body_trace(player.feet, carried);
                         if trace.start_solid || trace.fraction < 1. || !world.body_clear(carried) {
                             #[cfg(target_os = "vita")]

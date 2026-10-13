@@ -99,7 +99,7 @@ fn nonsolid_poses_preserve_publications_contacts_transport_and_restore() {
             let before_time = old.objects[0].time;
             old.advance_legacy(dt, &map, &mut wa, &mut a, &fixed)
                 .unwrap();
-            new.advance(dt, &map, &mut wb, &mut b, &fixed).unwrap();
+            new.advance_publication_config(dt, &map, &mut wb, &mut b, &fixed, &crate::vita_sim::Config::default(), false).unwrap();
             transports += usize::from(a.feet != before_feet);
             rejected += usize::from(dt > 0. && old.objects[0].time == before_time);
             assert_eq!(
@@ -258,4 +258,46 @@ fn all_compromises_preserve_player_contacts_transport_and_save_bytes() {
         puff_cap:128,puff_collide:crate::vita_sim::PuffCollide::None,puff_sweep_every:4,
         anim_cull:true,anim_far_distance:Some(800.),anim_far_every:4,mover_far_every:4,
     });
+}
+
+#[test]
+fn lazy_publication_preserves_riders_blocking_interacting_movers_and_final_queries() {
+    let (mut eliminated, mut carried, mut blocked) = (0, 0, 0);
+    for every in [1, 4] { for scenario in 0..4 {
+        let (map, mut old) = fixture(); let (_, mut new) = fixture();
+        // Current versions of all other movers must be queried in original order.
+        if scenario == 3 { for village in [&mut old, &mut new] {
+            village.objects[1].solid = true; village.objects[1].base = vec3(0., 0., 150.);
+        } }
+        let initial = old.snapshot();
+        let feet = if scenario == 2 { vec3(-200., 0., 80.03125) } else { vec3(0., 0., 80.03125) };
+        let mut a = Player::new(feet); let mut b = a.clone();
+        let fixed = if scenario == 1 { vec![Collider::fixture(vec3(-100., -100., 60.), vec3(100., 100., 80.))] } else { vec![] };
+        let mut wa = World::fixture(&[]); let mut wb = World::fixture(&[]);
+        let config = crate::vita_sim::Config { mover_far_every: every, ..Default::default() };
+        for tick in 0..180 {
+            if tick == 10 || tick == 100 { old.event("openthis"); new.event("openthis"); }
+            if tick == 80 { old.restore(&initial, &map).unwrap(); new.restore(&initial, &map).unwrap(); a = Player::new(feet); b = a.clone(); }
+            wa.dynamic_publications = Some(Vec::new()); wb.dynamic_publications = Some(Vec::new());
+            let before = a.feet; let before_time = old.objects[0].time;
+            let dt = [1. / 120., 0.05, 0.002, 0.][tick % 4];
+            old.advance_publication_config(dt, &map, &mut wa, &mut a, &fixed, &config, false).unwrap();
+            new.advance_publication_config(dt, &map, &mut wb, &mut b, &fixed, &config, true).unwrap();
+            carried += usize::from(a.feet != before);
+            blocked += usize::from(dt > 0. && old.objects[0].time == before_time);
+            assert_eq!(crate::save::simulation_save_bytes(&a, old.snapshot()), crate::save::simulation_save_bytes(&b, new.snapshot()));
+            let legacy = wa.dynamic_publications.take().unwrap(); let lazy = wb.dynamic_publications.take().unwrap();
+            assert!(lazy.len() <= legacy.len()); eliminated += legacy.len() - lazy.len();
+            if dt > 0. {
+                assert_eq!(legacy.last().unwrap().iter().map(Collider::geometry_bits).collect::<Vec<_>>(), lazy.last().unwrap().iter().map(Collider::geometry_bits).collect::<Vec<_>>());
+                if scenario == 2 { assert_eq!(lazy.len(), 1, "non-riders only publish the final world"); }
+            }
+            for center in [a.feet + PLAYER_CENTER, vec3(0., 300., 100.), vec3(1000., 0., 100.)] {
+                for half in [Vec3::ZERO, PLAYER_HALF] { for delta in [Vec3::ZERO, Vec3::Z * 150., Vec3::X * 150.] {
+                    assert_eq!(trace_bits(wa.sweep(center + delta, center - delta, half)), trace_bits(wb.sweep(center + delta, center - delta, half)));
+                } }
+            }
+        }
+    } }
+    assert!(eliminated > 0 && carried > 0 && blocked > 0);
 }
