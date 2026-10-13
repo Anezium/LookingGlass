@@ -4153,8 +4153,10 @@ pub(crate) async fn check_skin_overlap(_: &mut Assets, _: &Options) -> Result<()
 /// before timing, no readback in measured windows, no save writes or device IO.
 #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
 pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) -> Result<()> {
+    crate::light_profile::set_mode(crate::frame_profile::Mode::Full);
     let store = Store::new(options.save_dir.clone(), assets.fingerprint()?);
     let loaded = store.read(Slot::Auto)?;
+    anyhow::ensure!(!loaded.backup, "reference primary save must be valid");
     let mut state = save::Restored::build(assets, loaded.game)?;
     let level = state.game.level()?.clone();
     let mut art = LevelArt::default();
