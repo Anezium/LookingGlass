@@ -1113,9 +1113,12 @@ impl Character {
     }
     fn draw_body(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
         let feet = feet + Vec3::Z * self.animator.offset;
-        let pose = self
-            .face
-            .pose(&self.skeleton, &self.actions.pose, self.mouth);
+        let prepared = skinning::prepared::pose(
+            (&self.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
+            &self.actions.pose, self.mouth, &[],
+            || (self.face.pose(&self.skeleton, &self.actions.pose, self.mouth), Vec::new()),
+        );
+        let pose = &prepared.pose;
         self.power_art
             .skin(&mut self.meshes, &self.power_pose.state);
         if self.power_pose.state.skin().is_none() {

@@ -44,6 +44,9 @@ struct Row {
     cpu_us: u64,
     swap_us: u64,
     skin_collect_wait_us: u64,
+    skin_gather_us: u64,
+    skin_fallbacks: u64,
+    skin_overflow: u64,
 }
 struct Ring {
     rows: [Row; WINDOW],
@@ -85,11 +88,12 @@ impl Ring {
         self.current = Row::default();
     }
     fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
-        writeln!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us")?;
+        writeln!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow")?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
             let r = self.rows[i % WINDOW];
-            writeln!(out, "{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us, r.skin_collect_wait_us)?;
+            writeln!(out, "{},{},{},{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us,
+                r.skin_collect_wait_us, r.skin_gather_us, r.skin_fallbacks, r.skin_overflow)?;
         }
         Ok(())
     }
@@ -109,6 +113,16 @@ pub(crate) fn begin(map: &str, mode: Mode) {
 }
 pub(crate) fn skin_collect_wait(us: u64) {
     if active() { RING.with(|r| r.borrow_mut().current.skin_collect_wait_us += us); }
+}
+pub(crate) fn skin_overlap(gather_us: u64, fallbacks: u64, overflow: bool) {
+    if active() {
+        RING.with(|r| {
+            let mut r = r.borrow_mut();
+            r.current.skin_gather_us += gather_us;
+            r.current.skin_fallbacks += fallbacks;
+            r.current.skin_overflow |= u64::from(overflow);
+        });
+    }
 }
 pub(crate) fn cpu_begin() {
     if active() {
@@ -231,6 +245,9 @@ mod tests {
             r.current.cpu_us = 7;
             r.current.swap_us = 2;
             r.current.skin_collect_wait_us = i;
+            r.current.skin_gather_us = i * 3;
+            r.current.skin_fallbacks = i % 3;
+            r.current.skin_overflow = i % 2;
             r.pending = true;
             r.begin(origin + std::time::Duration::from_micros(i * 10));
         }
@@ -240,10 +257,13 @@ mod tests {
         assert_eq!(s.lines().count(), 61);
         assert_eq!(
             s.lines().next().unwrap(),
-            "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us"
+            "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow"
         );
-        assert_eq!(s.lines().nth(1).unwrap(), "66,10,7,2,66");
-        assert_eq!(s.lines().last().unwrap(), "125,10,7,2,125");
+        assert_eq!(s.lines().nth(1).unwrap(), "66,10,7,2,66,198,0,0");
+        assert_eq!(s.lines().last().unwrap(), "125,10,7,2,125,375,2,1");
+        assert_eq!(r.current.skin_gather_us, 0);
+        assert_eq!(r.current.skin_fallbacks, 0);
+        assert_eq!(r.current.skin_overflow, 0);
         r.begin(origin + std::time::Duration::from_micros(2000));
         assert_eq!(r.count, 125);
     }

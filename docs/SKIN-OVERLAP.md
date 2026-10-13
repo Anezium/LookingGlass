@@ -1,4 +1,4 @@
-# Same-frame skin overlap (milestone 14)
+# Same-frame skin overlap (milestone 15)
 
 `skin_overlap` defaults to false. With `skin_workers=1` or `2`, it enables
 an early CPU snapshot of the gameplay character pass. The benchmark switch is
@@ -17,25 +17,40 @@ cache using completed vertices. World-only frames skip the overlap pipeline.
 Portal views are completed before the main-view gather; later special effect
 silhouettes retain their existing game-thread path.
 
-The early visit copies only numeric skin inputs: final global poses, scales,
-palette, ordered weights/indices and vertex fields. Each draw occurrence owns
-separate output ranges, including multiple actors sharing a model and severed
-body pieces. At submission, completed arrays copy back to the original mesh
-storage, preserving actor-cache identity and ordered layer submission. Poses
-and draw options are checked against the original call before using the snapshot;
-a changed call or arena overflow uses the serial kernel. Neither worker receives
-or dereferences a Mesh, texture, material, skeleton owner or renderer handle.
-CPU types have compile-time Send checks; the frame guard remains non-Send.
+Skeleton parsing creates an owning `Arc<SkinSurface>` per mesh, containing only
+immutable weights, indices, skin vertices and bind-output vertices. Gather clones
+these handles and copies per-frame poses, scales, palette and draw flags. It never
+copies weights, indices or vertex arrays, and never clears or initializes output
+vertices on the game thread: the workers initialize their disjoint output ranges
+from load-time bind data. Handles keep all referenced CPU data alive even if the
+skeleton owner or live meshes are dropped. Neither worker receives or dereferences
+a Mesh, texture, material, skeleton owner or renderer handle. CPU types have
+compile-time Send checks; the frame guard remains non-Send.
 
-Startup allocates bounded capacity for 128 draws, 2,048 surfaces, 8,192 poses,
-scales/palette entries, 32,768 vertices and 131,072 weights/indices. Reset,
-numeric capture, dispatch, kernel, collect and copy allocate nothing in steady
-state. This does not claim allocation-free animation sampling or the existing
-render traversal/layer assembly: their original allocations still exist, and the
-early visitor currently repeats presentation sampling during submission. The
-host allocator test measures the skin snapshot pipeline, not all character code.
-Overflow stops further capture for that frame without growing buffers. No
-performance win is claimed until the packaged presets are measured on hardware.
+Alice and NPC/controller skeletal draws prepare their facial/global pose and bone
+scales once in gather. A bounded game-thread cache retains owning presentation
+handles for each draw occurrence; submission checks skeleton/face identity, local
+pose bits, mouth and bone-scale roots before reusing that result for the skin and
+attachments. Palette preparation likewise happens once per occurrence and reuses
+the same values for capture and submission. Duplicate instances of one model and
+severed pieces occupy separate entries. Changed presentation inputs are prepared
+afresh, and the skin snapshot's input checks route them through the serial kernel.
+Serial presentation does not enter these caches or clone their input keys.
+
+At submission, completed position/normal/color fields copy back to the original
+mesh storage. The serial kernel's untouched live UVs remain intact, including
+caller-edited UVs. Pose, flags, CPU handle identity and live topology are checked
+before using the result; a changed call or arena overflow uses the serial kernel.
+
+Startup allocates bounded capacity for 128 draws, 2,048 surface handles, 8,192
+pose/scales/palette entries and 32,768 output vertices. The old 131,072-entry
+weight/index arenas and 32,768-entry source-vertex arena are removed. Reset,
+handle capture, dispatch, worker kernel, collect and copy allocate nothing in
+steady state. Presentation caches retain at most 128 entries each. The existing
+animation sampling still allocates; presentation cache input-key vectors and
+handles warm up on first use. The allocator test measures the numeric skin
+pipeline, not the full render traversal or layer assembly. Overflow stops further
+capture without growing arenas. No performance win is claimed before console A/B.
 
 The actual persistent workers use cores 1 and 2 (masks 0x20000/0x40000), each
 with a 512-KiB stack. Overlap pins the game thread to CPU0 (0x10000) before
@@ -49,12 +64,18 @@ shutdown also drains before any CPU storage is released. Boxed UnsafeCell storag
 keeps shared immutable inputs/task descriptors stable while two disjoint output
 ranges run; no mutable reference to the live Mesh crosses the boundary.
 
-The light profiler CSV adds `skin_collect_wait_us` after `swap_us`: one integer
-residual wait for each accepted measured frame, zero on serial/world-only frames.
-Its fixed 60-row ring exports without a per-frame print or file write. Full
-profiling also records `skin_collect_wait_us`, `skin_worker_service_us`, and
-`skin_overlap_fallback_draws`; a per-frame `[lg/skin-overlap]` line reports wait,
-service, fallback and overflow. Worker service is not an additional frame delay.
+The light CSV keeps its original columns first:
+`frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us`, then appends
+`skin_gather_us,skin_fallbacks,skin_overflow`. Gather time runs from frame-guard
+begin (including arena/cache reset) through the end of traversal, before dispatch.
+Fallbacks count every submitted skin call that used the serial path while the
+overlap frame was ready; overflow is 0/1 for bounded arena overflow. Metrics are
+recorded after character submission so late fallbacks are included. Serial and
+world-only rows keep all overlap metrics zero. The fixed 60-row ring exports
+without a per-frame print or write. Full profiles additionally report gather,
+wait, worker service, fallback and overflow; worker service is not another frame
+delay. Native parity asserts that every gathered presentation was reused exactly
+once, so a duplicated pose/palette computation cannot silently pass that check.
 
 Verification commands (with the existing pinned environment and locked deps):
 
@@ -70,5 +91,6 @@ duplicate shared-model instances, palettes, scales, normals, colors and UV bits.
 The second compares serial/overlap captures over six real maps, both worker
 counts, Alice ghost and the actual NPC/level-art/effect graph. No player saves
 are used. The pipeline tests also cover zero allocations, fixed storage,
+load-handle lifetime, caller-edited UVs, changed topology, pose/palette reuse,
 rejected/cull draws, overflow, input mismatch, both-worker panic recovery and
 frame unwind/drain/reuse.

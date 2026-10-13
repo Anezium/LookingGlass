@@ -26,6 +26,9 @@ thread_local! {
 pub(super) fn with_palette<R>(enabled: bool, pose: &[Transform], scales: &[f32],
     draw: impl FnOnce(&[(Mat3, Vec3)]) -> R) -> R {
     if !enabled { return draw(&[]); }
+    if overlap::gathering() || overlap::ready() {
+        return prepared::palette(pose, scales, draw);
+    }
     PALETTE.with(|p| {
         let mut p = p.borrow_mut();
         fill_palette(&mut p, pose, scales);
@@ -135,6 +138,7 @@ pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
 // A persistent thread borrows only plain CPU arrays. Stack closure lives until wait.
 thread_local! { static WORKERS: std::cell::RefCell<Vec<crate::skin_worker::Worker>> = const { std::cell::RefCell::new(Vec::new()) }; }
 pub(crate) mod overlap;
+pub(crate) mod prepared;
 pub(crate) fn startup(workers: usize, probe: bool, bench: bool, overlap: bool) {
     if overlap {
         self::overlap::startup(workers, probe);

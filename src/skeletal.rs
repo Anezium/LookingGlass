@@ -55,8 +55,29 @@ pub struct SkinVertex {
 }
 pub struct Surface {
     pub name: String,
+    cpu: std::sync::Arc<SkinSurface>,
+}
+/// Load-time CPU data, shared by owning handles; it contains no render resources.
+pub struct SkinSurface {
     pub vertices: Vec<SkinVertex>,
     pub indices: Vec<u16>,
+    pub bind_vertices: Vec<Vertex>,
+}
+impl Surface {
+    pub(crate) fn new(name: String, vertices: Vec<SkinVertex>, indices: Vec<u16>) -> Self {
+        let bind_vertices = vertices.iter().map(|v| Vertex {
+            position: Vec3::ZERO, uv: v.uv, normal: Vec4::ZERO, color: [255; 4],
+        }).collect();
+        Self { name, cpu: std::sync::Arc::new(SkinSurface { vertices, indices, bind_vertices }) }
+    }
+    pub(crate) fn cpu(&self) -> std::sync::Arc<SkinSurface> { self.cpu.clone() }
+    pub(crate) fn shares_cpu(&self, cpu: &std::sync::Arc<SkinSurface>) -> bool {
+        std::sync::Arc::ptr_eq(&self.cpu, cpu)
+    }
+}
+impl std::ops::Deref for Surface {
+    type Target = SkinSurface;
+    fn deref(&self) -> &Self::Target { &self.cpu }
 }
 pub struct Skeleton {
     pub bones: Vec<Bone>,
@@ -164,11 +185,7 @@ impl Skeleton {
                 vertices.push(SkinVertex { uv, weights });
             }
             ensure!(v == p + oc, "Unexpected vertex payload size");
-            surfaces.push(Surface {
-                name,
-                vertices,
-                indices,
-            });
+            surfaces.push(Surface::new(name, vertices, indices));
             p += end;
         }
         ensure!(p == data.len(), "Unexpected trailing skeleton data");
@@ -785,14 +802,10 @@ mod tests {
                 bone("tag_zero_weight", Some(0)),
                 bone("hand", Some(0)),
             ],
-            surfaces: vec![Surface {
-                name: "m".into(),
-                vertices: vec![SkinVertex {
+            surfaces: vec![Surface::new("m".into(), vec![SkinVertex {
                     uv: Vec2::ZERO,
                     weights: vec![weight(0, 0.5), weight(2, 0.5), weight(3, 0.)],
-                }],
-                indices: Vec::new(),
-            }],
+                }], Vec::new())],
         };
         assert_eq!(skeleton.unskinned_tags(), [false, true, false, true, false]);
     }

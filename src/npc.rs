@@ -1111,8 +1111,17 @@ impl Model {
             return;
         }
         let d = &self.data;
-        let mut pose = self.face.pose(&d.skeleton, local, mouth);
-        let scales = if self.bone_scales.is_empty() { Vec::new() } else { crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.bone_scales) };
+        let prepared = crate::character::skinning::prepared::pose(
+            (&d.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
+            local, mouth, &self.bone_scales, || {
+                let mut pose = self.face.pose(&d.skeleton, local, mouth);
+                let scales = if self.bone_scales.is_empty() { Vec::new() }
+                    else { crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.bone_scales) };
+                (pose, scales)
+            },
+        );
+        let pose = &prepared.pose;
+        let scales = &prepared.scales;
         self.face.blink(&mut self.meshes, time, alive);
         let mut removed = Vec::new();
         for (i, surface) in d.skeleton.surfaces.iter().enumerate() {

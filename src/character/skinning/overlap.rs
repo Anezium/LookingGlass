@@ -1,19 +1,18 @@
 //! Same-frame CPU skin snapshots. Render handles never enter this storage.
 //! Buffers are bounded and allocated at startup; overflow uses the serial draw.
 use super::{rotation, shade_arrays, Params};
-use crate::skeletal::{Skeleton, Transform, Weight};
+use crate::skeletal::{Skeleton, SkinSurface, Transform};
 use macroquad::prelude::*;
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
     ops::Range,
+    sync::Arc,
 };
 
 const DRAWS: usize = 128;
 const SURFACES: usize = 2048;
 const BONES: usize = 8192;
 const VERTICES: usize = 32768;
-const WEIGHTS: usize = 131072;
-const INDICES: usize = 131072;
 #[derive(Clone, Copy, PartialEq)]
 enum Phase {
     Idle,
@@ -31,14 +30,10 @@ pub(crate) fn gathering() -> bool {
 pub(crate) fn ready() -> bool {
     PHASE.with(|p| p.get() == Phase::Ready)
 }
-#[derive(Clone)]
-struct InputVertex {
-    weights: Range<usize>,
-}
 struct Surface {
     mesh: usize,
     vertices: Range<usize>,
-    indices: Range<usize>,
+    cpu: Arc<SkinSurface>,
 }
 struct Draw {
     key: usize,
@@ -56,9 +51,6 @@ struct Draw {
 struct Inputs {
     draws: Vec<Draw>,
     surfaces: Vec<Surface>,
-    vertices: Vec<InputVertex>,
-    weights: Vec<Weight>,
-    indices: Vec<u16>,
     pose: Vec<Transform>,
     scales: Vec<f32>,
     palette: Vec<(Mat3, Vec3)>,
@@ -82,11 +74,13 @@ impl Task {
                     (task.output as *mut Vertex).add(surface.vertices.start),
                     surface.vertices.len(),
                 );
-                for (src, dst) in input.vertices[surface.vertices.clone()]
-                    .iter()
+                for ((src, bind), dst) in surface.cpu.vertices
+                    .iter().zip(&surface.cpu.bind_vertices)
                     .zip(&mut *output)
                 {
-                    let weights = &input.weights[src.weights.clone()];
+                    let weights = &src.weights;
+                    // Initialize untouched fields on the worker from load-time data.
+                    *dst = *bind;
                     let position: Vec3 = if !palette.is_empty() {
                         weights
                             .iter()
@@ -116,7 +110,7 @@ impl Task {
                 }
                 shade_arrays(
                     output,
-                    &input.indices[surface.indices.clone()],
+                    &surface.cpu.indices,
                     draw.flat,
                     draw.fullbright,
                     draw.alpha,
@@ -131,6 +125,7 @@ struct Store {
     tasks: [UnsafeCell<Task>; 2],
     input: Box<UnsafeCell<Inputs>>,
     output: Vec<Vertex>,
+    output_len: usize,
     pending: usize,
     cursor: usize,
     overflow: bool,
@@ -160,14 +155,13 @@ impl Store {
             input: Box::new(UnsafeCell::new(Inputs {
                 draws: Vec::with_capacity(DRAWS),
                 surfaces: Vec::with_capacity(SURFACES),
-                vertices: Vec::with_capacity(VERTICES),
-                weights: Vec::with_capacity(WEIGHTS),
-                indices: Vec::with_capacity(INDICES),
                 pose: Vec::with_capacity(BONES),
                 scales: Vec::with_capacity(BONES),
                 palette: Vec::with_capacity(BONES),
             })),
-            output: Vec::with_capacity(VERTICES),
+            output: vec![Vertex { position: Vec3::ZERO, uv: Vec2::ZERO,
+                normal: Vec4::ZERO, color: [0; 4] }; VERTICES],
+            output_len: 0,
             pending: 0,
             cursor: 0,
             overflow: false,
@@ -182,13 +176,10 @@ impl Store {
         let i = unsafe { &mut *self.input.get() };
         i.draws.clear();
         i.surfaces.clear();
-        i.vertices.clear();
-        i.weights.clear();
-        i.indices.clear();
         i.pose.clear();
         i.scales.clear();
         i.palette.clear();
-        self.output.clear();
+        self.output_len = 0;
         self.frame += 1;
         self.cursor = 0;
         self.overflow = false;
@@ -216,29 +207,10 @@ impl Store {
         } else {
             0
         };
-        let weights = if visible {
-            skeleton
-                .surfaces
-                .iter()
-                .zip(meshes)
-                .filter(|(_, m)| m.is_some())
-                .flat_map(|(s, _)| &s.vertices)
-                .map(|v| v.weights.len())
-                .sum()
-        } else {
-            0
-        };
-        let indices = if visible {
-            meshes.iter().flatten().map(|m| m.indices.len()).sum()
-        } else {
-            0
-        };
         let i = unsafe { &mut *self.input.get() };
         if i.draws.len() == DRAWS
             || i.surfaces.len() + surfaces > SURFACES
-            || i.vertices.len() + vertices > VERTICES
-            || i.weights.len() + weights > WEIGHTS
-            || i.indices.len() + indices > INDICES
+            || self.output_len + vertices > VERTICES
             || i.pose.len() + p.pose.len() > BONES
             || i.scales.len() + p.scales.len() > BONES
             || i.palette.len() + p.palette.len() > BONES
@@ -268,27 +240,11 @@ impl Store {
                     continue;
                 };
                 assert_eq!(surface.vertices.len(), m.vertices.len());
-                let vertices = i.vertices.len()..i.vertices.len() + m.vertices.len();
-                let indices = i.indices.len()..i.indices.len() + m.indices.len();
-                for v in &surface.vertices {
-                    let start = i.weights.len();
-                    i.weights.extend(v.weights.iter().map(|w| Weight {
-                        bone: w.bone,
-                        amount: w.amount,
-                        offset: w.offset,
-                    }));
-                    i.vertices.push(InputVertex {
-                        weights: start..i.weights.len(),
-                    });
-                }
-                i.indices.extend_from_slice(&m.indices);
-                // Preserve UV and every untouched field of the original output.
-                self.output.extend_from_slice(&m.vertices);
-                i.surfaces.push(Surface {
-                    mesh,
-                    vertices,
-                    indices,
-                });
+                let vertices = self.output_len..self.output_len + m.vertices.len();
+                // Capacity is checked above; only reserve output space on the game thread.
+                // Workers initialize every field, including UV, from immutable load data.
+                self.output_len = vertices.end;
+                i.surfaces.push(Surface { mesh, vertices, cpu: surface.cpu() });
             }
         }
         i.draws.push(draw);
@@ -300,7 +256,7 @@ impl Store {
         let mid = if self.workers.len() == 1 {
             draws
         } else {
-            let half = self.output.len().div_ceil(2);
+            let half = self.output_len.div_ceil(2);
             i.draws
                 .iter()
                 .position(|d| {
@@ -376,7 +332,8 @@ impl Store {
                     || i.surfaces[d.surfaces.clone()].iter().any(|s| {
                         meshes.get(s.mesh).and_then(Option::as_ref).is_none_or(|m| {
                             m.vertices.len() != s.vertices.len()
-                                || m.indices.as_slice() != &i.indices[s.indices.clone()]
+                                || m.indices.as_slice() != s.cpu.indices.as_slice()
+                                || skeleton.surfaces.get(s.mesh).is_none_or(|surface| !surface.shares_cpu(&s.cpu))
                         })
                     })))
         {
@@ -384,11 +341,15 @@ impl Store {
             return None;
         }
         for surface in &i.surfaces[d.surfaces.clone()] {
-            meshes[surface.mesh]
-                .as_mut()
-                .unwrap()
-                .vertices
-                .copy_from_slice(&self.output[surface.vertices.clone()]);
+            // The serial kernel leaves live UVs untouched (including any caller edits).
+            // Only its three written fields return from the worker; no gather-time
+            // copy of the live/bind vertices is needed to preserve the fourth field.
+            for (dst, src) in meshes[surface.mesh].as_mut().unwrap().vertices.iter_mut()
+                .zip(&self.output[surface.vertices.clone()]) {
+                dst.position = src.position;
+                dst.normal = src.normal;
+                dst.color = src.color;
+            }
         }
         Some(d.visible)
     }
@@ -402,10 +363,10 @@ fn same_transform(a: Transform, b: Transform) -> bool {
     a.translation.to_array().map(f32::to_bits) == b.translation.to_array().map(f32::to_bits)
         && a.rotation.to_array().map(f32::to_bits) == b.rotation.to_array().map(f32::to_bits)
 }
-fn same_pose(a: &[Transform], b: &[Transform]) -> bool {
+pub(super) fn same_pose(a: &[Transform], b: &[Transform]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(&a, &b)| same_transform(a, b))
 }
-fn same_floats(a: &[f32], b: &[f32]) -> bool {
+pub(super) fn same_floats(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
 }
 
@@ -417,14 +378,20 @@ pub(crate) fn startup(workers: usize, probe: bool) {
 /// A non-Send guard drains pending CPU work before a frame/load/panic can leave scope.
 pub(crate) struct Frame {
     _game: crate::game_thread::GameThread,
+    gather_start: std::time::Instant,
+    gather_us: u64,
 }
 impl Frame {
     pub(crate) fn begin() -> Self {
+        let gather_start = std::time::Instant::now();
         assert!(PHASE.with(|p| p.get() == Phase::Idle));
         STORE.with(|s| s.borrow_mut().as_mut().expect("overlap startup").reset());
+        super::prepared::begin();
         PHASE.with(|p| p.set(Phase::Gather));
         Self {
             _game: crate::game_thread::GameThread::default(),
+            gather_start,
+            gather_us: 0,
         }
     }
     pub(crate) fn assert_consumed(&self) {
@@ -436,9 +403,11 @@ impl Frame {
             assert_eq!(s.fallback, 0, "overlap input mismatch");
             assert_eq!(s.cursor, i.draws.len(), "unconsumed gathered skin draws");
         });
+        super::prepared::assert_consumed();
     }
     pub(crate) fn dispatch(&mut self) {
         assert!(gathering());
+        self.gather_us = self.gather_start.elapsed().as_micros() as u64;
         STORE.with(|s| s.borrow_mut().as_mut().unwrap().dispatch());
         PHASE.with(|p| p.set(Phase::Running));
     }
@@ -461,17 +430,20 @@ impl Frame {
 impl Drop for Frame {
     fn drop(&mut self) {
         STORE.with(|s| { if let Some(s)=s.borrow_mut().as_mut() { if s.pending>0 { let _=s.drain(); }
+            crate::light_profile::skin_overlap(self.gather_us, s.fallback as u64, s.overflow);
             #[cfg(feature="vita_renderer")]
             { crate::render_fx::retained::count("skin_overlap_fallback_draws",s.fallback as u64);
+              crate::render_fx::retained::count("skin_gather_us",self.gather_us);
+              crate::render_fx::retained::count("skin_overflow",u64::from(s.overflow));
               crate::render_fx::retained::count("skin_worker_service_us",s.service_us); }
             if crate::light_profile::full() && !std::thread::panicking() {
-                eprintln!("[lg/skin-overlap] frame={} collect_wait_us={} worker_service_us={} fallback_draws={} overflow={}",s.frame,s.wait_us,s.service_us,s.fallback,s.overflow);
+                eprintln!("[lg/skin-overlap] frame={} gather_us={} collect_wait_us={} worker_service_us={} fallback_draws={} overflow={}",s.frame,self.gather_us,s.wait_us,s.service_us,s.fallback,s.overflow);
             }
         }});
         PHASE.with(|p| p.set(Phase::Idle));
     }
 }
-/// Called on the game thread with live render handles; only copied CPU data persists.
+/// Only owning immutable CPU handles and per-frame numeric inputs persist.
 pub(in crate::character) fn handle(
     skeleton: &Skeleton,
     meshes: &mut [Option<Mesh>],
@@ -621,6 +593,7 @@ pub(crate) fn check_skeleton(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skeletal::Weight;
     fn fixture() -> (Skeleton, Vec<Option<Mesh>>, Vec<Transform>) {
         let pose = vec![Transform {
             rotation: Quat::from_rotation_z(0.123),
@@ -631,9 +604,7 @@ mod tests {
                 parent: None,
                 name: "root".into(),
             }],
-            surfaces: vec![crate::skeletal::Surface {
-                name: "body".into(),
-                vertices: [Vec3::ZERO, Vec3::X, Vec3::Y]
+            surfaces: vec![crate::skeletal::Surface::new("body".into(), [Vec3::ZERO, Vec3::X, Vec3::Y]
                     .into_iter()
                     .map(|offset| crate::skeletal::SkinVertex {
                         uv: Vec2::new(0.3, 0.7),
@@ -644,8 +615,7 @@ mod tests {
                         }],
                     })
                     .collect(),
-                indices: vec![0, 1, 2],
-            }],
+                vec![0, 1, 2])],
             skin_bounds: vec![],
         };
         let meshes = vec![Some(Mesh {
@@ -681,6 +651,48 @@ mod tests {
         assert_eq!(check_skeleton(&s, &[pose]).unwrap(), 32);
     }
     #[test]
+    fn load_handles_outlive_skeleton_and_live_mesh_while_workers_run() {
+        let (s, meshes, pose) = fixture();
+        let handle = s.surfaces[0].cpu();
+        let mut store = Store::new(2, false);
+        store.capture(&s, &meshes, params(&pose), true);
+        let input = unsafe { &*store.input.get() };
+        assert!(Arc::ptr_eq(&handle, &input.surfaces[0].cpu));
+        let source = handle.vertices.as_ptr();
+        store.dispatch();
+        drop(s);
+        drop(meshes);
+        drop(handle);
+        assert!(store.drain().is_none());
+        let input = unsafe { &*store.input.get() };
+        assert_eq!(source, input.surfaces[0].cpu.vertices.as_ptr());
+        assert_eq!(store.output_len, 3);
+        assert!(store.output[..3].iter().all(|v| v.position.is_finite()));
+        store.reset();
+    }
+    #[test]
+    fn live_uvs_are_preserved_and_changed_indices_fall_back() {
+        let (s, mut meshes, pose) = fixture();
+        meshes[0].as_mut().unwrap().vertices[0].uv = Vec2::new(-2., 4.);
+        let mut reference = meshes[0].as_ref().unwrap().vertices.clone();
+        let p = params(&pose);
+        super::super::kernel(&mut super::super::Job {
+            input: &s.surfaces[0].vertices, vertices: &mut reference,
+            indices: &s.surfaces[0].indices,
+        }, p);
+        let mut store = Store::new(1, false);
+        store.capture(&s, &meshes, p, true);
+        store.dispatch(); assert!(store.drain().is_none());
+        assert_eq!(store.consume(&s, &mut meshes, p), Some(true));
+        assert!(same_vertices(&reference, &meshes[0].as_ref().unwrap().vertices));
+        store.reset();
+        meshes[0].as_mut().unwrap().indices.swap(1, 2);
+        store.capture(&s, &meshes, p, true);
+        store.dispatch(); assert!(store.drain().is_none());
+        assert_eq!(store.consume(&s, &mut meshes, p), None);
+        assert_eq!(store.fallback, 1);
+    }
+    #[test]
     fn gather_dispatch_collect_copy_are_allocation_free_and_bounded() {
         let (s, mut meshes, pose) = fixture();
         let p = params(&pose);
@@ -694,7 +706,7 @@ mod tests {
             store.dispatch();
             assert!(store.drain().is_none());
             let ptrs = (store.output.as_ptr(), unsafe {
-                (&*store.input.get()).weights.as_ptr()
+                (&*store.input.get()).surfaces.as_ptr()
             });
             for _ in 0..20 {
                 let scope = crate::kernel_alloc::Scope::begin();
@@ -712,7 +724,7 @@ mod tests {
                 assert_eq!(
                     ptrs,
                     (store.output.as_ptr(), unsafe {
-                        (&*store.input.get()).weights.as_ptr()
+                        (&*store.input.get()).surfaces.as_ptr()
                     })
                 );
             }
