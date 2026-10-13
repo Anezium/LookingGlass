@@ -166,6 +166,7 @@ pub(super) fn camera(camera: &Camera3D) {
     }
 }
 pub(super) fn present() {
+    let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Present);
     TARGET.with(|t| {
         let t = t.borrow();
         if let Some(target) = t.as_ref() {

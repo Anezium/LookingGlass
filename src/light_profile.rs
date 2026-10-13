@@ -48,6 +48,64 @@ struct Row {
     skin_fallbacks: u64,
     skin_overflow: u64,
     fx: [u64; 8],
+    render: [RenderMetrics; 6],
+}
+/// Engine submission calls, counted at their owning phase. Texture binds count
+/// image slots passed to apply_bindings; backend cache hits are not GL calls.
+#[derive(Clone, Copy, Default, Debug, serde::Serialize)]
+pub(crate) struct RenderMetrics {
+    pub cpu_ns: u64,
+    pub draws: u64,
+    pub pipelines: u64,
+    pub depth_states: u64,
+    pub bindings: u64,
+    pub uniform_uploads: u64,
+    pub uniform_bytes: u64,
+    pub buffer_updates: u64,
+    pub buffer_bytes: u64,
+    pub texture_bind_slots: u64,
+    pub visibility_tests: u64,
+    pub uniform_gl_calls: u64,
+}
+pub(crate) const PHASE_NAMES: [&str; 6] = ["world_opaque", "world_alpha", "actors", "fx", "hud", "present"];
+#[derive(Clone, Copy)]
+pub(crate) enum RenderPhase { WorldOpaque, WorldAlpha, Actors, Fx, Hud, Present }
+fn render_active() -> bool {
+    if cfg!(target_os = "vita") { return active(); }
+    static HOST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HOST.get_or_init(|| std::env::var_os("LOOKING_GLASS_RENDER_METRICS").is_some())
+}
+pub(crate) fn render_add(phase: RenderPhase, value: RenderMetrics) {
+    if !render_active() { return; }
+    RING.with(|r| {
+        let mut r = r.borrow_mut();
+        let dst = &mut r.current.render[phase as usize];
+        macro_rules! add { ($($field:ident),*) => { $(dst.$field += value.$field;)* }; }
+        add!(cpu_ns, draws, pipelines, depth_states, bindings, uniform_uploads,
+             uniform_bytes, buffer_updates, buffer_bytes, texture_bind_slots,
+             visibility_tests, uniform_gl_calls);
+    });
+}
+pub(crate) struct RenderTimer(RenderPhase, Option<Instant>);
+pub(crate) fn render_timer(phase: RenderPhase) -> RenderTimer {
+    RenderTimer(phase, render_active().then(Instant::now))
+}
+impl Drop for RenderTimer {
+    fn drop(&mut self) {
+        if let Some(start) = self.1 {
+            render_add(self.0, RenderMetrics { cpu_ns: start.elapsed().as_nanos() as u64, ..Default::default() });
+        }
+    }
+}
+#[cfg(not(target_os = "vita"))]
+pub(crate) fn render_host_reset() { RING.with(|r| r.borrow_mut().current.render = Default::default()); }
+#[cfg(not(target_os = "vita"))]
+pub(crate) fn render_host_report() -> serde_json::Value {
+    RING.with(|r| {
+        let row = r.borrow();
+        serde_json::Value::Object(PHASE_NAMES.into_iter().zip(row.current.render)
+            .map(|(name, value)| (name.to_owned(), serde_json::to_value(value).unwrap())).collect())
+    })
 }
 struct Ring {
     rows: [Row; WINDOW],
@@ -89,13 +147,26 @@ impl Ring {
         self.current = Row::default();
     }
     fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
-        writeln!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us")?;
+        write!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us")?;
+        for phase in PHASE_NAMES {
+            for field in ["cpu_us", "draws", "pipelines", "depth_states", "bindings", "uniform_uploads", "uniform_bytes", "buffer_updates", "buffer_bytes", "texture_bind_slots", "visibility_tests", "uniform_gl_calls"] {
+                write!(out, ",{phase}_{field}")?;
+            }
+        }
+        writeln!(out)?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
             let r = self.rows[i % WINDOW];
-            writeln!(out, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us,
+            write!(out, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us,
                 r.skin_collect_wait_us, r.skin_gather_us, r.skin_fallbacks, r.skin_overflow,
                 r.fx[0],r.fx[1],r.fx[2],r.fx[3],r.fx[4],r.fx[5],r.fx[6],r.fx[7])?;
+            for p in r.render {
+                write!(out, ",{},{},{},{},{},{},{},{},{},{},{},{}", p.cpu_ns / 1000,
+                    p.draws, p.pipelines, p.depth_states, p.bindings, p.uniform_uploads,
+                    p.uniform_bytes, p.buffer_updates, p.buffer_bytes, p.texture_bind_slots,
+                    p.visibility_tests, p.uniform_gl_calls)?;
+            }
+            writeln!(out)?;
         }
         Ok(())
     }
@@ -266,12 +337,11 @@ mod tests {
         r.write(&mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.lines().count(), 61);
-        assert_eq!(
-            s.lines().next().unwrap(),
-            "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us"
-        );
-        assert_eq!(s.lines().nth(1).unwrap(), "66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0");
-        assert_eq!(s.lines().last().unwrap(), "125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0");
+        assert!(s.lines().next().unwrap().contains("world_opaque_draws"));
+        assert_eq!(s.lines().next().unwrap().split(',').count(), 88);
+        assert!(s.lines().nth(1).unwrap().starts_with("66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0,"));
+        assert!(s.lines().last().unwrap().starts_with("125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0,"));
+        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 88));
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);

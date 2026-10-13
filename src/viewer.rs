@@ -3420,6 +3420,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(not(target_os = "vita"))]
         let host_characters_profile = crate::frame_profile::span("frame_characters");
+        let actors_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
         if !world_only {
         {
             let _characters_profile = crate::frame_profile::span("characters_setup");
@@ -3456,6 +3457,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         drop(skin_frame);
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
+        drop(actors_timer);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3601,6 +3603,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_hud");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
+        let hud_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Hud);
         set_default_camera();
         if !world_only {
             if active {
@@ -3920,6 +3923,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_save");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        drop(hud_timer);
         if let Some(slot) = pending_menu_save.take() {
             escape_menu.message = match store.write_with_preview(slot, &game_snapshot!(), save_frame.preview().as_ref()) {
                 Ok(()) => { retry.remember(game_snapshot!()); played = true; format!("Game saved in {}", slot.title()) }
@@ -4143,4 +4147,84 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
 #[cfg(not(feature="vita_renderer"))]
 pub(crate) async fn check_skin_overlap(_: &mut Assets, _: &Options) -> Result<()> {
     anyhow::bail!("skin overlap render check requires vita_renderer")
+}
+
+/// Read-only saved-pose render benchmark. Frozen gameplay, live puffs settled
+/// before timing, no readback in measured windows, no save writes or device IO.
+#[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) -> Result<()> {
+    let store = Store::new(options.save_dir.clone(), assets.fingerprint()?);
+    let loaded = store.read(Slot::Auto)?;
+    let mut state = save::Restored::build(assets, loaded.game)?;
+    let level = state.game.level()?.clone();
+    let mut art = LevelArt::default();
+    art.prepare(assets, &state.scene, &state.interactions, true)?;
+    art.story_pose(&state.story);
+    let direction = vec3(state.game.view.yaw.cos(), state.game.view.yaw.sin(), 0.);
+    let (camera, target, _) = character::follow_camera(&state.scene.world, state.game.player.feet, direction);
+    // Rebuild the normal saved emitter population without changing gameplay.
+    for _ in 0..600 {
+        state.steam.animate(level.environment_clock);
+        state.steam.sync(&state.interactions.event_world);
+        state.steam.update_clocks(1./60., 1./60., camera, &state.scene.world);
+    }
+    crate::character::skinning::overlap::startup(2, false);
+    let mut samples = Vec::with_capacity(360);
+    std::fs::create_dir_all("private/renderer-host")?;
+    for frame in 0..240 {
+        let variant = if frame < 180 { 0 } else { (frame - 180) / 10 + 1 };
+        let offset = match variant { 1 => Vec3::X * 32., 2 => Vec3::Y * 64., 3 => Vec3::Z * 16., _ => Vec3::ZERO };
+        let view = Camera3D { position: camera + offset, target: target + offset,
+            up: Vec3::Z, fovy: 75_f32.to_radians(), z_near: 2., z_far: 30000., ..Default::default() };
+        let fullbright = variant == 4;
+        let time = level.environment_clock + if variant == 5 { 0.25 } else { 0. };
+        crate::light_profile::render_host_reset();
+        crate::frame_profile::begin_creation_frame();
+        clear_background(state.scene.atmosphere.background());
+        crate::render::vita_renderer::prepare_3d(state.scene.atmosphere.background());
+        crate::render::vita_renderer::set_3d_camera(&view);
+        let transforms = state.interactions.transforms();
+        let started = std::time::Instant::now();
+        state.scene.prepare_camera_portals(&view, time, fullbright, &transforms);
+        state.scene.begin_fx_view(&view, time, fullbright, true);
+        let mut skin = crate::character::skinning::overlap::Frame::begin();
+        state.alice.draw_ghost(state.game.player.feet, fullbright, false);
+        state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright);
+        art.draw(&state.interactions, &state.hints, &state.scene.atmosphere, view.position, fullbright);
+        skin.dispatch();
+        state.scene.draw(view.position, time, fullbright, false, &transforms);
+        skin.collect();
+        {
+            let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
+            state.alice.atmosphere(&state.scene.atmosphere, view.position);
+            state.alice.draw_ghost(state.game.player.feet, fullbright, false);
+            state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright);
+            art.draw(&state.interactions, &state.hints, &state.scene.atmosphere, view.position, fullbright);
+            skin.assert_consumed();
+        }
+        drop(skin);
+        state.scene.draw_with_particles(view.position, (view.target-view.position).normalize_or_zero(), time, fullbright, &transforms, &state.steam);
+        art.effects(&state.interactions, view.position, &state.scene.atmosphere);
+        state.alice.draw_effects(view.position, fullbright, true);
+        state.scene.finish_fx(true);
+        crate::render::vita_renderer::present_3d();
+        let cpu_ns = started.elapsed().as_nanos() as u64;
+        if frame >= 60 {
+            samples.push(serde_json::json!({"frame":frame,"variant":variant,"cpu_ns":cpu_ns,
+                "phases":crate::light_profile::render_host_report(),
+                "counts":crate::render_fx::retained::host_report()}));
+        }
+        if matches!(frame, 179 | 189 | 199 | 209 | 219 | 229 | 239) {
+            set_default_camera();
+            save_capture(std::path::Path::new(&format!("private/renderer-host/pose-{variant}.png")))?;
+        }
+        next_frame().await;
+    }
+    std::fs::write("private/renderer-host/samples.json", serde_json::to_vec_pretty(&serde_json::json!({
+        "reference_feet":state.game.player.feet.to_array(),"camera":camera.to_array(),
+        "target":target.to_array(),"environment_clock":level.environment_clock,
+        "samples":samples,"console_access":false,"simulation_frozen":true,
+        "particle_settle_frames":600,"warmup_frames":60}))?)?;
+    println!("PASS renderer host reference: 120 frozen timing frames, 60 invalidation frames, seven captures");
+    Ok(())
 }

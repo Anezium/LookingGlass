@@ -409,6 +409,7 @@ fn run() -> Result<()> {
             "--character-check" => mode = "character",
             "--skin-bench" => mode = "skin-bench",
             "--skin-workers-check" => mode = "skin-workers-check",
+            "--renderer-host-check" => mode = "renderer-host-check",
             "--skin-overlap-render-check" => mode = "skin-overlap-render-check",
             "--hud-check" => mode = "hud",
             "--loadout-check" => mode = "loadout",
@@ -1061,6 +1062,16 @@ fn run() -> Result<()> {
         return water::check(&mut assets);
     }
     let maps = assets.maps();
+    #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+    if mode == "renderer-host-check" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = viewer::check_renderer_host(&mut assets, &o).await {
+                eprintln!("Renderer host check failed: {e:#}");
+                std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
     if mode == "skin-overlap-render-check" {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e)=viewer::check_skin_overlap(&mut assets,&o).await {

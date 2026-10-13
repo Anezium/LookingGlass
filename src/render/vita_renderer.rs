@@ -946,6 +946,9 @@ impl Renderer {
         alpha: bool,
         transforms: &[(usize, Vec3, Quat)],
     ) -> super::DrawStats {
+        use crate::light_profile::{RenderMetrics, RenderPhase};
+        let phase = if alpha { RenderPhase::WorldAlpha } else { RenderPhase::WorldOpaque };
+        let _timer = crate::light_profile::render_timer(phase);
         let _span = crate::frame_profile::span("vita_world_total");
         count("vita_world_geometry_upload_bytes", 0);
         count("vita_world_retransformed_vertices", 0);
@@ -973,6 +976,7 @@ impl Renderer {
                 ));
             }
         }
+        crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: ids.len() as u64, ..Default::default() });
         drop(visibility_span);
         if alpha && !config().world_alpha {self.alpha_order.clear();}
         if !alpha && config().opaque_order=="front_to_back" {self.alpha_order.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||a.1.cmp(&b.1)));}
@@ -1071,6 +1075,8 @@ impl Renderer {
             totals.publish(["vita_world_sky_state_bindings", "vita_world_sky_uniforms", "vita_world_sky_draws_time"]);
             count("vita_world_gpu_draws", 1);
             count("vita_world_sky_draws", 1);
+            crate::light_profile::render_add(phase, RenderMetrics { draws: 1, pipelines: 1,
+                bindings: 1, uniform_uploads: 1, uniform_bytes: 32, ..Default::default() });
         }
         if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
@@ -1176,6 +1182,12 @@ impl Renderer {
             #[cfg(target_os = "vita")]
             crate::frame_profile::record_retained_world_pass(stats.batches, static_batches, stats.triangles);
         }
+        crate::light_profile::render_add(phase, RenderMetrics {
+            draws: stats.batches as u64, pipelines: applications[0], depth_states: applications[1],
+            bindings: applications[2], texture_bind_slots: applications[2] * 2,
+            uniform_uploads: applications[3], uniform_bytes: applications[3] * std::mem::size_of::<shader::Uniforms>() as u64,
+            ..Default::default()
+        });
         counts(&[
             ("vita_world_pipeline_applications", applications[0]),
             ("vita_world_depth_applications", applications[1]),
@@ -1214,6 +1226,11 @@ impl Renderer {
             .collect::<Vec<_>>();
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::new());
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id| {
+            let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
+            crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
+                crate::light_profile::RenderMetrics { draws: 1, pipelines: 1, depth_states: 1,
+                    bindings: 1, texture_bind_slots: 2, uniform_uploads: 1,
+                    uniform_bytes: std::mem::size_of::<shader::Uniforms>() as u64, ..Default::default() });
             let mut totals = totals.borrow_mut();
             let p = &self.prepared[id];
             let g = &mut self.groups[p.group];

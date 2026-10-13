@@ -1224,6 +1224,7 @@ impl Steam {
     }
     #[cfg(feature="vita_renderer")]
     pub(crate) fn prepare_quads(&self, camera: Vec3, direction: Option<Vec3>) {
+        let _render_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Fx);
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             self.quads.borrow_mut().prepare(&self.puffs, &self.emitters, camera, direction);
         }

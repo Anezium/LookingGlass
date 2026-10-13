@@ -173,9 +173,12 @@ struct Stats {
     upload_requests: u64, identical_uploads: u64, uniform_requests: u64, identical_uniforms: u64,
     index_skips: u64, uniform_skips: u64,
     pipeline_sets: u64, binding_sets: u64,
+    render: [crate::light_profile::RenderMetrics; 2],
 }
 impl Stats {
     fn report(&self) {
+        crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors, self.render[0]);
+        crate::light_profile::render_add(crate::light_profile::RenderPhase::Fx, self.render[1]);
         crate::frame_profile::route_fx_draws(self.draws);
         crate::frame_profile::route_gpu_states([self.upload_requests, self.identical_uploads, self.uniform_requests, self.identical_uniforms]);
         let values = [
@@ -409,6 +412,10 @@ impl Gpu {
         let plan = UploadPlan::new(c.fx_upload_cache || version.is_some(), c.gpu_index_dedupe || version.is_some(), same_vertex, same_index);
         if plan.full_hit { self.stats.upload_hits += 1; }
         let gl_started = std::time::Instant::now();
+        let metrics = &mut self.stats.render[usize::from(p.effect)];
+        metrics.buffer_updates += u64::from(plan.vertex) + u64::from(plan.index);
+        metrics.buffer_bytes += u64::from(plan.vertex) * (mesh.vertices.len() * 40) as u64
+            + u64::from(plan.index) * (mesh.indices.len() * 2) as u64;
         if plan.vertex {
             ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));
             self.stats.upload_bytes += (mesh.vertices.len() * 40) as u64;
@@ -459,6 +466,7 @@ impl Gpu {
         });
     }
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
+        let started = std::time::Instant::now();
         let key = (p.blend_index, p.depth_equal);
         let pipeline = self
             .pipelines
@@ -496,6 +504,15 @@ impl Gpu {
         ctx.draw(0, p.geometry().indices.len() as i32, 1);
         self.stats.draws += 1;
         self.stats.triangles += p.geometry().indices.len() as u64 / 3;
+        let metrics = &mut self.stats.render[usize::from(p.effect)];
+        metrics.draws += 1;
+        metrics.pipelines += u64::from(apply[0]);
+        metrics.depth_states += u64::from(apply[0]);
+        metrics.bindings += u64::from(apply[1]);
+        metrics.texture_bind_slots += u64::from(apply[1]) * 3;
+        metrics.uniform_uploads += u64::from(!skip);
+        metrics.uniform_bytes += u64::from(!skip) * std::mem::size_of_val(u) as u64;
+        metrics.cpu_ns += started.elapsed().as_nanos() as u64;
     }
 }
 impl Drop for Gpu {
@@ -888,6 +905,8 @@ pub(crate) fn finish_world(
     world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
+    let finish_started = std::time::Instant::now();
+    let mut world_ns = 0u64;
     let _span = crate::frame_profile::span("vita_3d_finish");
     if flush {
         gpu.ring_frame += 1;
@@ -1049,7 +1068,9 @@ pub(crate) fn finish_world(
                     gpu.uniform_cache.interrupt();
                     gpu.submit_cache.interrupt();
                     let start = world_totals.and_then(|t| t.borrow().start());
+                    let world_started = std::time::Instant::now();
                     draw_world(id);
+                    world_ns += world_started.elapsed().as_nanos() as u64;
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
                 },
                 Source::Actor(id) => draw_group(gpu, id),
@@ -1089,6 +1110,10 @@ pub(crate) fn finish_world(
     if c.actor_layer_reuse {
         for group in &mut groups {super::actor_cache::recycle(&mut group.passes);}
     }
+    let submit_ns = gpu.stats.render.iter().map(|m| m.cpu_ns).sum::<u64>();
+    crate::light_profile::render_add(crate::light_profile::RenderPhase::Fx,
+        crate::light_profile::RenderMetrics { cpu_ns: (finish_started.elapsed().as_nanos() as u64)
+            .saturating_sub(world_ns + submit_ns), ..Default::default() });
     gpu.stats.report();
     let list_len = list.len(); list.clear(); gpu.alpha_storage = list;
     recycled.clear(); gpu.recycle_storage = recycled;
