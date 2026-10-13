@@ -18,21 +18,49 @@ thread_local! {
     static FLARE: RefCell<Option<Texture2D>> = const {RefCell::new(None)};
     static CROQUET: RefCell<Vec<Light>> = const {RefCell::new(Vec::new())};
 }
-pub fn select(mut lights: Vec<Light>, eye: Vec3, world: &World) {
+pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
+    #[cfg(target_os = "vita")]
+    let limit = 2;
+    #[cfg(not(target_os = "vita"))]
+    let limit = 8;
+    #[cfg(feature = "vita_renderer")]
+    let early = crate::render::vita_renderer::config().lights_early_out;
+    #[cfg(not(feature = "vita_renderer"))]
+    let early = false;
+    let (lights, candidates, sweeps) = select_visible(lights, eye, limit, early,
+        |l| world.sweep(eye, l.position, Vec3::ZERO).fraction >= 0.995);
+    #[cfg(target_os="vita")]
+    crate::frame_profile::counts(&[("lights_candidates", candidates as u64),
+        ("lights_sweeps", sweeps as u64), ("lights_selected", lights.len() as u64)]);
+    #[cfg(all(not(target_os="vita"),feature="vita_renderer"))]
+    for (name, value) in [("lights_candidates", candidates), ("lights_sweeps", sweeps), ("lights_selected", lights.len())] {
+        crate::render_fx::retained::count(name,value as u64);
+    }
+    #[cfg(all(not(target_os="vita"),not(feature="vita_renderer")))]
+    let _ = (candidates,sweeps);
+    LIGHTS.with(|v| *v.borrow_mut() = lights);
+}
+fn select_visible(mut lights: Vec<Light>, eye: Vec3, limit: usize, early: bool,
+    mut visible: impl FnMut(&Light) -> bool) -> (Vec<Light>, usize, usize) {
     lights.retain(|l| {
         l.position.is_finite() && l.color.is_finite() && l.radius > 0. && l.radius <= 8192.
     });
     lights.sort_by(|a, b| score(*b, eye).total_cmp(&score(*a, eye)));
     lights.truncate(32);
-    // A bounded visibility query rejects lights fully hidden from this room.
-    lights.retain(|l| world.sweep(eye, l.position, Vec3::ZERO).fraction >= 0.995);
-    // vita-so 6a9b8cd: PerformancePreset::Performance.max_dynamic_lights() = 2.
-    #[cfg(target_os = "vita")]
-    lights.truncate(2);
-    #[cfg(not(target_os = "vita"))]
-    lights.truncate(8);
-    LIGHTS.with(|v| *v.borrow_mut() = lights);
+    let candidates = lights.len();
+    let mut sweeps = 0;
+    let mut successes = 0;
+    lights.retain(|l| {
+        if early && successes == limit { return false; }
+        sweeps += 1;
+        let accepted = visible(l);
+        successes += usize::from(accepted);
+        accepted
+    });
+    lights.truncate(limit);
+    (lights, candidates, sweeps)
 }
+
 fn score(light: Light, eye: Vec3) -> f32 {
     light.radius / (light.position.distance(eye) + light.radius)
 }
@@ -242,6 +270,41 @@ pub fn flares(eye: Vec3, direction: Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn early_visibility_preserves_stable_order_boundary_values_and_flares() {
+        let lights: Vec<_> = (0..40).map(|i| Light { position: Vec3::X * i as f32,
+            color: vec3(i as f32, 2., 3.), radius:100., only_models:i%2==0, flare:i%3==0 }).collect();
+        for mask in 0_u32..256 {
+            for limit in [2,8] {
+                let visible = |l: &Light| {
+                    let id = l.position.x as u32;
+                    id < 8 && mask & (1 << id) != 0
+                };
+                let (old, candidates, full) = select_visible(lights.clone(), Vec3::ZERO,limit,false,visible);
+                let (new, _, early) = select_visible(lights.clone(), Vec3::ZERO,limit,true,visible);
+                assert_eq!(candidates,32); assert_eq!(full,32); assert!(early<=full);
+                assert_eq!(format!("{old:?}"),format!("{new:?}"));
+                if new.len()==limit {assert!(early<=8);}
+            }
+        }
+        // Equal scores retain declaration order. The 33rd candidate cannot enter.
+        let tied: Vec<_> = (0..40).map(|i|Light {position:Vec3::ZERO,color:Vec3::splat(i as f32),..lights[0]}).collect();
+        let (selected,_,sweeps)=select_visible(tied,Vec3::ZERO,2,true,|l|l.color.x>=30.);
+        assert_eq!(selected.iter().map(|l|l.color.x).collect::<Vec<_>>(),[30.,31.]);
+        assert_eq!(sweeps,32);
+    }
+    #[test]
+    fn early_visibility_matches_reference_across_moving_blockers() {
+        let lights:Vec<_>=(0..40).map(|i|Light {position:vec3(10.,i as f32-20.,0.),
+            color:Vec3::ONE,radius:100.,only_models:false,flare:true}).collect();
+        for shift in [-30.,-10.,0.,10.,30.] {
+            let world=World::fixture(&[(vec3(5.,shift-4.,-20.),vec3(6.,shift+4.,20.))]);
+            let visible=|l:&Light|world.sweep(Vec3::ZERO,l.position,Vec3::ZERO).fraction>=0.995;
+            let (a,_,_)=select_visible(lights.clone(),Vec3::ZERO,2,false,visible);
+            let (b,_,_)=select_visible(lights.clone(),Vec3::ZERO,2,true,visible);
+            assert_eq!(format!("{a:?}"),format!("{b:?}"));
+        }
+    }
     #[test]
     fn light_selection_is_bounded_and_rejects_nonfinite() {
         let mut lights = (0..100)

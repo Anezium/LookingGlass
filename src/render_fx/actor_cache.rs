@@ -1,6 +1,24 @@
 //! Actor-owned layer recipes. Appearance and skinned vertices remain live inputs.
 use super::*;
 
+// Empty containers only: resource-owning Pass values are destroyed on the game
+// thread before recycling. Bound storage across view/map replacement.
+thread_local! { static PASS_STORAGE: RefCell<Vec<Vec<Pass>>> = RefCell::new(Vec::with_capacity(256)); }
+fn pass_storage(limit: usize) -> Vec<Pass> {
+    let mut passes=PASS_STORAGE.with(|s|s.borrow_mut().pop()).unwrap_or_default();
+    passes.reserve(limit);
+    passes
+}
+pub(super) fn recycle(passes: &mut Vec<Pass>) {
+    if !passes.is_empty() && passes.iter().all(|p|p.model && !p.effect) && passes.capacity()<=64 {
+        passes.clear();
+        PASS_STORAGE.with(|s| {
+            let mut s=s.borrow_mut();
+            if s.len()<256 {s.push(std::mem::take(passes));}
+        });
+    }
+}
+
 #[derive(Clone,Copy)]
 struct LayerState {
     blend:usize, equal:bool, lit:bool, clamp:bool, cutout:f32, reference:f32,
@@ -20,7 +38,7 @@ fn state(s:&Stage,t:f32)->LayerState {
         gain:gain(s,t),fog:fog(s.blend),frame:s.frame(t),vertex_alpha:s.vertex_alpha,
         dynamic:s.rgb.is_some()||s.alpha.is_some()||s.images.len()>1}
 }
-pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance)->Option<Vec<Pass>> {
+pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance,producer:Option<&actor_vertices::Publication<'_>>)->Option<Vec<Pass>> {
     let c=crate::render::vita_renderer::config();
     let limit=c.actor_max_layers.min(surface.layers.len());
     if !surface.layers.iter().take(limit).all(|l|simple(&l.stage)){return None;}
@@ -42,12 +60,16 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
     }
     let mut shared:[Option<Rc<prepared::Geometry>>;2]=[None,None];
     let mut copies=0;
-    let mut passes=Vec::with_capacity(limit);
+    let mut passes=if c.actor_layer_reuse {pass_storage(limit)} else {Vec::with_capacity(limit)};
     for (p,l) in cached.layers.iter().zip(&surface.layers) {
         let variant=usize::from(p.vertex_alpha);
-        let geometry=if c.fx_prepare_cache {
+        let geometry=if c.actor_layer_reuse && shared[variant].is_some() {
+            shared[variant].as_ref().unwrap().clone()
+        } else if c.fx_prepare_cache {
             let previous=cached.geometry[variant].version();
-            let geometry=cached.geometry[variant].observe(mesh, Some(p.vertex_alpha));
+            let geometry=if let Some(producer)=producer.filter(|_|c.actor_layer_reuse) {
+                cached.geometry[variant].publish(mesh,p.vertex_alpha,producer)
+            } else {cached.geometry[variant].observe(mesh, Some(p.vertex_alpha))};
             if previous!=Some(geometry.version) { copies+=1; }
             geometry
         } else if c.actor_shared_geometry {
@@ -65,6 +87,7 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
             for v in &mut m.vertices {v.color[3]=if p.vertex_alpha{(255.*(v.color[3] as f32/255.).clamp(0.,1.)) as u8}else{255};}
             Rc::new(prepared::Geometry::new(m))
         };
+        if c.actor_layer_reuse {shared[variant]=Some(geometry.clone());}
         passes.push(Pass {_game_thread: crate::game_thread::GameThread::default(),geometry:Some(geometry),effect:false,blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")]
             world_static:None,

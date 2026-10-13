@@ -11,6 +11,7 @@ use anyhow::Result;
 pub(crate) mod retained;
 #[cfg(feature="vita_renderer")]
 mod actor_cache;
+pub(crate) mod actor_vertices;
 #[cfg(feature="vita_renderer")]
 pub(crate) mod prepared;
 use macroquad::prelude::*;
@@ -846,6 +847,10 @@ pub(crate) fn skin_requires_preservation(mesh: &Mesh) -> bool {
         .find(|(key, _)| *key == id).and_then(|(_, v)| v.upgrade()));
     surface.is_some_and(|s| s.preserve_skin)
 }
+pub(crate) fn skin_produced(mesh: &Mesh, publication: actor_vertices::Publication<'_>) {
+    crate::game_thread::assert_current();
+    SKIN_OPACITY.with(|a| skin_timed_produced(mesh, None, a.get(), Some(publication)));
+}
 pub fn skin(mesh: &Mesh) {
     crate::game_thread::assert_current();
     SKIN_OPACITY.with(|a| skin_timed(mesh, None, a.get()));
@@ -869,6 +874,12 @@ pub(crate) fn skin_effect(mesh: &Mesh, age: f32, alpha: f32) {
 }
 
 fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
+    skin_timed_produced(mesh, clock, alpha, None);
+}
+fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
+    publication: Option<actor_vertices::Publication<'_>>) {
+    #[cfg(not(feature="vita_renderer"))]
+    let _ = &publication;
     if crate::character::skinning::overlap::gathering() { return; }
     let layers_profile = crate::frame_profile::characters_span("characters_layers");
     if !active() {
@@ -922,7 +933,7 @@ fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
     };
     #[cfg(feature="vita_renderer")]
     if fast && clock.is_none() && alpha==1. && crate::render::vita_renderer::config().actor_layer_cache {
-        if let Some(passes)=actor_cache::prepare(&surface,mesh,time,appearance) {
+        if let Some(passes)=actor_cache::prepare(&surface,mesh,time,appearance,publication.as_ref()) {
             drop(layers_profile);
             let _submit_profile=crate::frame_profile::characters_span("characters_submit");
             submit(passes,surface.transparent);

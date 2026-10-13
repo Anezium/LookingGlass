@@ -2001,7 +2001,7 @@ fn draw_skin_deformed(
         if let Some(visible) = skinning::overlap::handle(skeleton, meshes, params, visible) {
             if !skinning::overlap::gathering() {
                 crate::frame_profile::skinned_draw(!visible);
-                if visible { for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); } }
+                if visible { skinning::overlap::submit(meshes); }
             }
             return visible;
         }
