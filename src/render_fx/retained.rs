@@ -451,6 +451,7 @@ impl Gpu {
         unsafe {
             macroquad::miniquad::gl::glDepthMask(u8::from(depth_write));
         }
+        if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
         ctx.apply_bindings(&self.buffers[slot].bindings);
         // Inspired by NextOs-Ports/Looking-Glass-NextOS 668de14 (felc18-blip).
         // Only consecutive complete payloads of this private program qualify;
@@ -949,6 +950,7 @@ pub(crate) fn finish_world(
         }
     }
     unsafe {
+        crate::render::vita_renderer::finish_depth_sentinel(flush);
         macroquad::miniquad::gl::glDepthMask(1);
         get_internal_gl().quad_context.end_render_pass();
     }

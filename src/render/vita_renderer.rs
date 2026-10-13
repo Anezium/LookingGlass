@@ -1,6 +1,7 @@
 //! Direct, retained world draws. CPU geometry and PVS compilation happen at load time.
 mod shader;
 mod scale;
+mod depth_sentinel;
 mod pvs_cache;
 mod state_cache;
 #[cfg(not(target_os = "vita"))]
@@ -94,6 +95,10 @@ pub struct Config {
     pub gpu_experiment: String,
     pub world_viewport_scale: f32,
     pub render_scale:f32,
+    /// Diagnostic patch across the retained world-to-FX boundary; restart required.
+    pub depth_sentinel: bool,
+    /// Keep the scaled world target bound until direct world FX finish. Experimental.
+    pub scaled_depth_fix: bool,
     pub msaa_samples:i32,
     pub quality:String,
     pub opaque_order:String,
@@ -138,6 +143,7 @@ impl Default for Config {
             pvs_verify: false,
             gpu_experiment: "unchanged".into(),
             world_viewport_scale: 1.,
+            depth_sentinel: false, scaled_depth_fix: false,
             render_scale:1.,msaa_samples:1,quality:"full".into(),opaque_order:"front_to_back".into(),world_alpha:true,
         }
     }
@@ -328,6 +334,16 @@ pub(crate) fn prepare_3d(bg:Color){scale::prepare(bg);}
 pub(crate) fn begin_3d_pass(action:PassAction){scale::begin(action);}
 pub(crate) fn set_3d_camera(camera:&Camera3D){scale::camera(camera);}
 pub(crate) fn present_3d(){scale::present();}
+pub(crate) fn end_world_pass() {
+    depth_sentinel::opaque();
+    if !(config().scaled_depth_fix && config().render_scale < 1. && crate::render_fx::retained_active()) {
+        unsafe { get_internal_gl().quad_context.end_render_pass(); }
+    }
+}
+pub(crate) fn log_world_fx_depth() { depth_sentinel::log_fx_state(); }
+pub(crate) fn finish_depth_sentinel(world_view: bool) {
+    if world_view { depth_sentinel::finish(); }
+}
 static INVENTORY: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 #[derive(Clone, Copy, serde::Serialize)]
 struct View {
@@ -1183,9 +1199,8 @@ impl Renderer {
         unsafe {
             macroquad::miniquad::gl::glDepthMask(1);
         }
-        unsafe {
-            get_internal_gl().quad_context.end_render_pass();
-        }
+        if !alpha { end_world_pass(); }
+        else { unsafe { get_internal_gl().quad_context.end_render_pass(); } }
         // No flush_depth_begin/end: draws have already reached miniquad/vitaGL.
         stats
     }
@@ -1565,6 +1580,16 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scaled_depth_diagnostics_are_opt_in_and_strict() {
+        let c = Config::default();
+        assert!(!c.depth_sentinel && !c.scaled_depth_fix);
+        let c: Config = serde_json::from_str(r#"{"depth_sentinel":true,"scaled_depth_fix":true}"#).unwrap();
+        c.validate().unwrap();
+        assert!(c.depth_sentinel && c.scaled_depth_fix);
+        assert!(serde_json::from_str::<Config>(r#"{"depth_sentinel":1}"#).is_err());
+        assert!(serde_json::from_str::<Config>(r#"{"scaled_depth_fix":"on"}"#).is_err());
+    }
     #[test]
     fn overlap_is_explicit_validated_and_not_the_default() {
         assert!(!Config::default().skin_overlap);
