@@ -1,5 +1,7 @@
 //! Whole actor/effect packets share one alpha order with immutable world groups.
 //! Only dynamic LG meshes stream here; world buffers are never read or uploaded.
+mod state_cache;
+use state_cache::{vertices_equal, UploadPlan, UniformCache};
 use super::{Frame, Pass, FRAME};
 use crate::environment::Atmosphere;
 use anyhow::{ensure, Context, Result};
@@ -152,10 +154,13 @@ struct Stats {
     uploads: u64,
     growths: u64,
     upload_hits: u64,
+    upload_requests: u64, identical_uploads: u64, uniform_requests: u64, identical_uniforms: u64,
+    index_skips: u64, uniform_skips: u64,
 }
 impl Stats {
     fn report(&self) {
         crate::frame_profile::route_fx_draws(self.draws);
+        crate::frame_profile::route_gpu_states([self.upload_requests, self.identical_uploads, self.uniform_requests, self.identical_uniforms]);
         let values = [
             ("vita_fx_gpu_draws", self.draws),
             ("vita_fx_triangles", self.triangles),
@@ -165,6 +170,9 @@ impl Stats {
             ("vita_fx_mesh_uploads", self.uploads),
             ("vita_fx_buffer_growths", self.growths),
             ("vita_fx_upload_cache_hits", self.upload_hits),
+            ("gpu_probe_upload_requests", self.upload_requests), ("gpu_probe_identical_uploads", self.identical_uploads),
+            ("gpu_probe_uniform_requests", self.uniform_requests), ("gpu_probe_identical_uniforms", self.identical_uniforms),
+            ("vita_fx_index_uploads_skipped", self.index_skips), ("vita_fx_uniform_sets_skipped", self.uniform_skips),
         ];
         #[cfg(target_os = "vita")]
         {
@@ -185,12 +193,6 @@ struct Buffers {
     bindings: Bindings,
     previous_vertices: Vec<Vertex>,
     previous_indices: Vec<u16>,
-}
-fn vertices_equal(a: &[Vertex], b: &[Vertex]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(a, b)| {
-            a.position == b.position && a.uv == b.uv && a.color == b.color && a.normal == b.normal
-        })
 }
 fn make_buffers(
     ctx: &mut dyn RenderingBackend,
@@ -263,6 +265,7 @@ pub(crate) struct Gpu {
     ring_frame: usize,
     ring_phase: usize,
     stats: Stats,
+    uniform_cache: UniformCache<UNIFORM_FLOATS>,
     merge_cache: [MergeCache; 4],
     merge_meshes: [BTreeMap<usize, Mesh>; 2],
 }
@@ -295,6 +298,7 @@ impl Gpu {
             ring_frame: 0,
             ring_phase: 0,
             stats: Stats::default(),
+            uniform_cache: UniformCache::default(),
             merge_cache: Default::default(),
             merge_meshes: Default::default(),
         };
@@ -348,25 +352,33 @@ impl Gpu {
         }
         let b = &mut self.buffers[slot];
         b.bindings.images[0] = texture;
-        let cache = crate::render::vita_renderer::config().fx_upload_cache;
-        let unchanged = cache
-            && b.previous_indices == mesh.indices
-            && vertices_equal(&b.previous_vertices, &mesh.vertices);
-        if unchanged {
-            self.stats.upload_hits += 1;
-        } else {
-            // Ring pages use Dynamic/glBufferSubData; Stream retains the orphan option.
-            ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));
-            ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));
-            self.stats.upload_bytes +=
-                (mesh.vertices.len() * 40 + mesh.indices.len() * 2) as u64;
-            self.stats.uploads += 1;
-            if cache {
-                b.previous_vertices.clear();
-                b.previous_vertices.extend_from_slice(&mesh.vertices);
-                b.previous_indices.clone_from(&mesh.indices);
-            }
+        // Adapted from NextOs-Ports/Looking-Glass-NextOS d59b16f (felc18-blip).
+        // LG owns these buffers; capacity growth replaces them with empty history.
+        let c = crate::render::vita_renderer::config();
+        let track_vertex = c.fx_upload_cache || c.gpu_state_probe;
+        let track_index = track_vertex || c.gpu_index_dedupe;
+        let same_vertex = track_vertex && vertices_equal(&b.previous_vertices, &mesh.vertices);
+        let same_index = track_index && b.previous_indices == mesh.indices;
+        if c.gpu_state_probe || c.gpu_index_dedupe {
+            self.stats.upload_requests += 2;
+            self.stats.identical_uploads += u64::from(same_vertex) + u64::from(same_index);
         }
+        let plan = UploadPlan::new(c.fx_upload_cache, c.gpu_index_dedupe, same_vertex, same_index);
+        if plan.full_hit { self.stats.upload_hits += 1; }
+        if plan.vertex {
+            ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));
+            self.stats.upload_bytes += (mesh.vertices.len() * 40) as u64;
+        }
+        if plan.index {
+            ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));
+            self.stats.upload_bytes += (mesh.indices.len() * 2) as u64;
+        } else if !plan.full_hit { self.stats.index_skips += 1; }
+        if plan.vertex || plan.index { self.stats.uploads += 1; }
+        if track_vertex && !same_vertex {
+            b.previous_vertices.clear();
+            b.previous_vertices.extend_from_slice(&mesh.vertices);
+        }
+        if track_index && !same_index { b.previous_indices.clone_from(&mesh.indices); }
         Ok(slot)
     }
     fn prepare_pipeline(&mut self, key: (usize, bool)) {
@@ -411,11 +423,23 @@ impl Gpu {
             macroquad::miniquad::gl::glDepthMask(u8::from(depth_write));
         }
         ctx.apply_bindings(&self.buffers[slot].bindings);
-        ctx.apply_uniforms(UniformsSource::table(u));
+        // Inspired by NextOs-Ports/Looking-Glass-NextOS 668de14 (felc18-blip).
+        // Only consecutive complete payloads of this private program qualify;
+        // world callbacks and each finish/view reset the cache. Bindings always apply.
+        let c = crate::render::vita_renderer::config();
+        let same = (c.gpu_state_probe || c.gpu_uniform_dedupe) && self.uniform_cache.observe(u);
+        if c.gpu_state_probe || c.gpu_uniform_dedupe {
+            self.stats.uniform_requests += 1;
+            self.stats.identical_uniforms += u64::from(same);
+        }
+        if c.gpu_uniform_dedupe && same { self.stats.uniform_skips += 1; }
+        else {
+            ctx.apply_uniforms(UniformsSource::table(u));
+            self.stats.uniform_bytes += std::mem::size_of_val(u) as u64;
+        }
         ctx.draw(0, p.geometry().indices.len() as i32, 1);
         self.stats.draws += 1;
         self.stats.triangles += p.geometry().indices.len() as u64 / 3;
-        self.stats.uniform_bytes += std::mem::size_of_val(u) as u64;
     }
 }
 impl Drop for Gpu {
@@ -711,6 +735,7 @@ pub(crate) fn finish(
         gpu.ring_phase = 1;
     }
     gpu.stats = Stats::default();
+    gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     let (mut groups, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -839,7 +864,7 @@ pub(crate) fn finish(
         let _span = crate::frame_profile::span("vita_joint_alpha_submit");
         for (_, source) in &list {
             match *source {
-                Source::World(id) => draw_world(id),
+                Source::World(id) => { gpu.uniform_cache.interrupt(); draw_world(id); },
                 Source::Actor(id) => draw_group(gpu, id),
             }
         }

@@ -14,11 +14,17 @@ static ROUTE_SKIN_TOTAL: AtomicU32 = AtomicU32::new(0);
 #[cfg(feature="vita_renderer")]
 static ROUTE_SKIN_CULLED: AtomicU32 = AtomicU32::new(0);
 #[cfg(feature="vita_renderer")]
+static ROUTE_GPU_STATES: [AtomicU32; 4] = [const { AtomicU32::new(0) }; 4];
+#[cfg(feature="vita_renderer")]
+pub(crate) fn route_gpu_states(counts: [u64;4]) {
+    for (counter,value) in ROUTE_GPU_STATES.iter().zip(counts) { counter.fetch_add(value.min(u32::MAX as u64) as u32,Ordering::Relaxed); }
+}
+#[cfg(feature="vita_renderer")]
 pub(crate) fn route_live_puffs(n: usize) { ROUTE_PUFFS.store(n.min(u32::MAX as usize) as u32, Ordering::Relaxed); }
 #[cfg(feature="vita_renderer")]
 pub(crate) fn route_fx_draws(n: u64) { ROUTE_FX_DRAWS.fetch_add(n.min(u32::MAX as u64) as u32, Ordering::Relaxed); }
 #[cfg(feature="vita_renderer")]
-pub(crate) fn route_counters() -> [u32;4] { [ROUTE_PUFFS.load(Ordering::Relaxed),ROUTE_FX_DRAWS.load(Ordering::Relaxed),ROUTE_SKIN_TOTAL.load(Ordering::Relaxed),ROUTE_SKIN_CULLED.load(Ordering::Relaxed)] }
+pub(crate) fn route_counters() -> [u32;8] { [ROUTE_PUFFS.load(Ordering::Relaxed),ROUTE_FX_DRAWS.load(Ordering::Relaxed),ROUTE_SKIN_TOTAL.load(Ordering::Relaxed),ROUTE_SKIN_CULLED.load(Ordering::Relaxed),ROUTE_GPU_STATES[0].load(Ordering::Relaxed),ROUTE_GPU_STATES[1].load(Ordering::Relaxed),ROUTE_GPU_STATES[2].load(Ordering::Relaxed),ROUTE_GPU_STATES[3].load(Ordering::Relaxed)] }
 pub(crate) fn skinned_draw(culled: bool) {
     #[cfg(feature="vita_renderer")]
     {
@@ -49,7 +55,7 @@ pub(crate) fn pipeline_creation() {
 pub(crate) fn begin_creation_frame() {
     CREATIONS.with(|c| c.borrow_mut().current=[0;2]);
     #[cfg(feature="vita_renderer")]
-    { ROUTE_PUFFS.store(0,Ordering::Relaxed); ROUTE_FX_DRAWS.store(0,Ordering::Relaxed); ROUTE_SKIN_TOTAL.store(0,Ordering::Relaxed); ROUTE_SKIN_CULLED.store(0,Ordering::Relaxed); }
+    { ROUTE_PUFFS.store(0,Ordering::Relaxed); ROUTE_FX_DRAWS.store(0,Ordering::Relaxed); ROUTE_SKIN_TOTAL.store(0,Ordering::Relaxed); ROUTE_SKIN_CULLED.store(0,Ordering::Relaxed); for c in &ROUTE_GPU_STATES { c.store(0,Ordering::Relaxed); } }
 }
 #[cfg(not(target_os="vita"))]
 pub(crate) fn end_creation_frame() {

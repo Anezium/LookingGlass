@@ -70,3 +70,29 @@ aspect and native HUD presentation. No additional render-scale implementation or
 NextOS resolution is introduced. Restart after changing any configuration file.
 Inspired by NextOs-Ports/Looking-Glass-NextOS 005adaa, 15779e4 and 0c716a9
 (felc18-blip), MIT engine code only; visual gains/quality require console A/B.
+
+`gpu_index_dedupe` and `gpu_uniform_dedupe` (both default **false**) act only on
+LG-owned retained actor/FX buffers and programs. Identical u16 indices can stay
+resident while changing vertices still upload. Capacity growth replaces buffers
+and clears history. Uniforms compare every float's bits, including signed zeros;
+they skip only consecutive identical full payloads of the private actor program.
+Every finish/view and intervening world draw interrupts the uniform cache. Textures,
+bindings, pipeline/depth state and every draw still apply. Existing full FX upload
+caching now also compares vertex bits exactly. No generic Rust object bytes or
+padding are read. No dependency change or fork patch is needed for this local scope.
+
+`gpu_state_probe` (default **false**) records exact repeated upload/uniform candidates
+without enabling skipping. It keeps vertex history and adds overhead; turn it off
+for timing. Route rows add four aligned `gpu_probe_*` request/identical columns.
+Native frame counts add `vita_fx_index_uploads_skipped` and
+`vita_fx_uniform_sets_skipped`; upload/uniform byte totals reflect actual calls.
+Adapted/inspired MIT code: NextOs-Ports/Looking-Glass-NextOS d59b16f and 668de14
+(felc18-blip). The external Miniquad generic stream cache and Macroquad uniform
+batch-breaking change are deliberately not ported: the former requires a fork and
+the latter shares queued material state. This narrower cache has explicit owners.
+
+`route_world_wish` (default **false**) is an input-only replay diagnostic. It
+recovers a tape's world wish from its reference heading while leaving natural
+camera changes intact. It avoids neutral physics ticks introduced by the existing
+bounded camera recentering path. No player pose, scene flag, physics or clock is
+edited. Normal play is unaffected; the morning automated route presets enable it.

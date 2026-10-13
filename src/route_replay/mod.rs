@@ -15,6 +15,11 @@ fn heading_step(yaw:f32,target:f32)->Option<f32> {
     let error=(target-yaw+std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)-std::f32::consts::PI;
     (error.abs()>0.0001).then(||yaw+error.clamp(-2.5*FIXED_DT,2.5*FIXED_DT))
 }
+fn replay_wish(sample: &Sample, yaw: f32, world_wish: bool) -> Vec2 {
+    let heading = if world_wish { sample.reference_yaw.unwrap_or(yaw) } else { yaw };
+    vec2(heading.cos(), heading.sin()) * sample.stick[1]
+        + vec2(heading.sin(), -heading.cos()) * sample.stick[0]
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sample {
@@ -144,10 +149,10 @@ pub struct Session {
     segment: String,
     frame_start: Option<Instant>,
     wall: Vec<(String, f64)>,
-    counters: Vec<[u32;4]>,
+    counters: Vec<[u32;8]>,
     counter_samples: u64,
-    counter_sums: [u64;4],
-    counter_peaks: [u32;4],
+    counter_sums: [u64;8],
+    counter_peaks: [u32;8],
     start: Instant,
     startup_seconds:f64,
     done: bool,
@@ -259,8 +264,8 @@ impl Session {
             wall: Vec::new(),
             counters: Vec::new(),
             counter_samples: 0,
-            counter_sums: [0;4],
-            counter_peaks: [0;4],
+            counter_sums: [0;8],
+            counter_peaks: [0;8],
             start: Instant::now(),startup_seconds:0.,
             done: false,
             heap_start: None,
@@ -314,7 +319,7 @@ impl Session {
             let counters=crate::frame_profile::route_counters();
             self.counters.push(counters);
             self.counter_samples+=1;
-            for i in 0..4 {
+            for i in 0..8 {
                 self.counter_sums[i]+=u64::from(counters[i]);
                 self.counter_peaks[i]=self.counter_peaks[i].max(counters[i]);
             }
@@ -445,7 +450,8 @@ impl Session {
             self.cursor += 1;
         }
         let s = &self.tape.samples[self.cursor];
-        if crate::render::vita_renderer::config().route_heading_lock {
+        let world_wish = crate::render::vita_renderer::config().route_world_wish;
+        if crate::render::vita_renderer::config().route_heading_lock && !world_wish {
             if let Some(target)=s.reference_yaw {
                 if let Some(next)=heading_step(*yaw,target) {
                     if self.heading_ticks==0 {println!("[lg/route] camera alignment begin tick={} yaw={} target={target}",self.tick,*yaw);}
@@ -478,8 +484,7 @@ impl Session {
         }
         *yaw -= s.look[0] * FIXED_DT * 2.5;
         *pitch = (*pitch + s.look[1] * FIXED_DT * 2.).clamp(-1.5, 1.5);
-        let wish =
-            vec2(yaw.cos(), yaw.sin()) * s.stick[1] + vec2(yaw.sin(), -yaw.cos()) * s.stick[0];
+        let wish = replay_wish(s, *yaw, world_wish);
         self.tick += 1;
         if wish.length_squared() > 0.01 {
             self.moving_ticks += 1;
@@ -588,7 +593,7 @@ impl Session {
         if let Some(ms) = save_ms {
             self.wall.push(("save-or-continue".into(), ms));
             // No draw during this interval; excluded from rendered-frame counter means.
-            self.counters.push([0;4]);
+            self.counters.push([0;8]);
             self.total_frames += 1;
             for label in ["save-or-continue", "whole-passage"] {
                 let a = self
@@ -611,7 +616,7 @@ impl Session {
             self.heap_start
         );
         let count_summary=|i:usize| serde_json::json!({"samples":self.counter_samples,"mean":(self.counter_samples>0).then(||self.counter_sums[i] as f64/self.counter_samples as f64),"max":self.counter_peaks[i]});
-        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"counter_raw_path":format!("route-frame-windows/{}/counters-*.json",self.run_id),"counter_columns":["live_puffs","fx_gpu_draws","skinned_draws_total","skinned_draws_culled"],"counter_population":"Rendered frames; final save-only row is all zeros and excluded from means. FX draws count direct dynamic actor/object/effect packets, including first-person.","live_puffs":count_summary(0),"fx_gpu_draws":count_summary(1),"skinned_draws_total":count_summary(2),"skinned_draws_culled":count_summary(3),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.counters.capacity()*std::mem::size_of::<[u32;4]>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"opening_film_played":self.opening_played,"camera_alignment_ticks":self.heading_total,"camera_alignment_seconds":self.heading_total as f64/120.,"input_timeline":"120Hz script excludes scene waits and bounded camera recentering; frame wall includes both","scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
+        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"counter_raw_path":format!("route-frame-windows/{}/counters-*.json",self.run_id),"counter_columns":["live_puffs","fx_gpu_draws","skinned_draws_total","skinned_draws_culled","gpu_probe_upload_requests","gpu_probe_identical_uploads","gpu_probe_uniform_requests","gpu_probe_identical_uniforms"],"counter_population":"Rendered frames; final save-only row is all zeros and excluded from means. FX draws count direct dynamic actor/object/effect packets, including first-person.","live_puffs":count_summary(0),"fx_gpu_draws":count_summary(1),"skinned_draws_total":count_summary(2),"skinned_draws_culled":count_summary(3),"gpu_probe_upload_requests":count_summary(4),"gpu_probe_identical_uploads":count_summary(5),"gpu_probe_uniform_requests":count_summary(6),"gpu_probe_identical_uniforms":count_summary(7),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.counters.capacity()*std::mem::size_of::<[u32;8]>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"opening_film_played":self.opening_played,"camera_alignment_ticks":self.heading_total,"camera_alignment_seconds":self.heading_total as f64/120.,"input_timeline":"120Hz script excludes scene waits and bounded camera recentering; frame wall includes both","scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
         std::fs::write(
             self.root.join(if self.continuing() {
                 "route-continue-report.json"
@@ -627,6 +632,17 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn world_wish_diagnostic_keeps_inputs_independent_of_camera_without_editing_pose_or_time() {
+        let sample = Sample {stick:[0.25,-0.5],reference_yaw:Some(0.),..Default::default()};
+        for yaw in [0., 1.5, -3., 7.] {
+            assert_eq!(replay_wish(&sample,yaw,true),vec2(-0.5,-0.25));
+            let expected=vec2(yaw.cos(),yaw.sin())*-0.5+vec2(yaw.sin(),-yaw.cos())*0.25;
+            assert_eq!(replay_wish(&sample,yaw,false),expected);
+        }
+        let no_reference=Sample {reference_yaw:None,..sample};
+        assert_eq!(replay_wish(&no_reference,1.5,true),replay_wish(&no_reference,1.5,false));
+    }
     #[test]
     fn heading_recenter_uses_shortest_bounded_look_and_restores_recorded_wish() {
         for (from,target) in [(4.712389,3.141593),(6.27,0.01),(-3.13,3.13)] {
