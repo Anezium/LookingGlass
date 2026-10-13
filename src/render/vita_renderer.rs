@@ -39,6 +39,8 @@ pub struct Config {
     pub actor_frustum_cull:bool,
     /// SDK logo thread is disabled by default; the LG opening film is unaffected.
     pub startup_splash:bool,
+    /// Persistent binary pairs; process deduplication remains active when off.
+    pub shader_cache: String,
     pub route_heading_lock:bool,
     pub pvs_cache: bool,
     pub pvs_method: String,
@@ -66,6 +68,7 @@ impl Default for Config {
             fx_batching:"adjacent".into(),fx_streaming:"orphan".into(),fx_merge_cache:true,fx_upload_cache:false,fx_max_layers:2,actor_fast_path:true,
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:false,
             startup_splash:false,
+            shader_cache:"on".into(),
             route_heading_lock:true,
             pvs_cache: false,
             pvs_method: "sources".into(),
@@ -105,6 +108,7 @@ impl Config {
             (1..=2).contains(&self.actor_max_layers),
             "actor_max_layers must be 1 or 2"
         );
+        ensure!(matches!(self.shader_cache.as_str(),"on"|"off"),"shader_cache must be on or off");
         ensure!(matches!(self.fx_batching.as_str(),"none"|"adjacent"|"material"),"invalid fx_batching");
         ensure!(matches!(self.fx_streaming.as_str(),"orphan"|"ring"),"invalid fx_streaming");
         ensure!((1..=2).contains(&self.fx_max_layers),"invalid fx_max_layers");
@@ -610,6 +614,7 @@ impl Renderer {
         let ctx = gl.quad_context;
         crate::frame_profile::shader_creation();
         let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
+        let _shader_name = crate::shader_cache::Name::new("retained-world");
         let shader = ctx
             .new_shader(
                 ShaderSource::Glsl {
@@ -677,6 +682,7 @@ impl Renderer {
         let low_shader=if c.quality=="low" {
             crate::frame_profile::shader_creation();
             let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
+            let _shader_name = crate::shader_cache::Name::new("retained-world-low");
             let low=ctx.new_shader(ShaderSource::Glsl{vertex:shader::VERTEX,fragment:&shader::low_fragment()},shader::meta())?;
             drop(shader_timing);
             for cull in [CullFace::Nothing,CullFace::Back,CullFace::Front] {
@@ -714,6 +720,7 @@ impl Renderer {
         }
         crate::frame_profile::shader_creation();
         let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
+        let _shader_name = crate::shader_cache::Name::new("retained-sky");
         let sky_shader = ctx.new_shader(
             ShaderSource::Glsl {
                 vertex: shader::SKY_VERTEX,

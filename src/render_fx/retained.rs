@@ -273,6 +273,7 @@ impl Gpu {
             crate::lighting::fragment(&crate::environment::fragment(crate::render::FRAGMENT));
         let ctx = unsafe { get_internal_gl() }.quad_context;
         crate::frame_profile::shader_creation();
+        let _shader_name = crate::shader_cache::Name::new("retained-actors-fx");
         let shader = ctx
             .new_shader(
                 ShaderSource::Glsl {

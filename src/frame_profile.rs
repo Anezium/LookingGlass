@@ -49,10 +49,22 @@ pub(crate) fn creation_report() -> serde_json::Value {
 }
 #[cfg(feature="vita_renderer")]
 pub(crate) fn current_creations() -> [u64;2] { CREATIONS.with(|c| c.borrow().current) }
+#[track_caller]
 pub(crate) fn load_material(shader: macroquad::miniquad::ShaderSource<'_>, params: macroquad::material::MaterialParams) -> Result<macroquad::material::Material, macroquad::Error> {
+    let caller = std::panic::Location::caller();
+    let _name = crate::shader_cache::Name::new(caller.file());
+    let started = Instant::now();
+    let source_hash = match &shader {
+        macroquad::miniquad::ShaderSource::Glsl {vertex, fragment} => Some(crate::shader_cache::key("GLSL",b"source",&[vertex.as_bytes(),fragment.as_bytes()])),
+        _ => None,
+    };
     let _timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
     shader_creation(); pipeline_creation();
-    macroquad::material::load_material(shader,params)
+    let result = macroquad::material::load_material(shader,params);
+    if let Some(hash) = source_hash {
+        eprintln!("[lg/shader-request] name={}:{} source_hash={} creation_ms={:.3} ok={}",caller.file(),caller.line(),crate::shader_cache::hex(&hash),started.elapsed().as_secs_f64()*1000.,result.is_ok());
+    }
+    result
 }
 
 #[cfg(any(target_os = "vita", test))]

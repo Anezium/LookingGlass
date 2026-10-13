@@ -1,6 +1,22 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("vita") {
+        // Bind persistent GPU binaries to the exact linked vitaGL archive.
+        let sdk = std::env::var("VITASDK").expect("VITASDK is required for binary cache identity");
+        let archive = std::path::Path::new(&sdk).join("arm-vita-eabi/lib/libvitaGL.a");
+        let header = std::path::Path::new(&sdk).join("arm-vita-eabi/include/vitaGL.h");
+        println!("cargo:rerun-if-env-changed=VITASDK");
+        println!("cargo:rerun-if-changed={}", archive.display());
+        println!("cargo:rerun-if-changed={}", header.display());
+        let identity = [archive, header].iter().map(|path| {
+            let bytes = std::fs::read(path).expect("read vitaGL identity input");
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(bytes))
+        }).collect::<Vec<_>>().join(":");
+        println!("cargo:rustc-env=LG_VITAGL_ID={identity}");
+        for symbol in ["vglGetProcAddress"] {
+            println!("cargo:rustc-link-arg=-Wl,--wrap={symbol}");
+        }
         // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.
         println!("cargo:rustc-link-arg=-Wl,--undefined=sceUserMainThreadStackSize");
         println!("cargo:rustc-link-arg=-Wl,--undefined=_newlib_heap_size_user");

@@ -46,6 +46,7 @@ impl Plane {
         let texture = white.raw_miniquad_id();
         let ctx = unsafe { get_internal_gl() }.quad_context;
         crate::frame_profile::shader_creation();
+        let _shader_name = crate::shader_cache::Name::new("interop-check");
         let shader = ctx.new_shader(
             ShaderSource::Glsl {
                 vertex: shader::VERTEX,

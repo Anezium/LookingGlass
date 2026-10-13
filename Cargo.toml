@@ -28,6 +28,9 @@ serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
 glam = { version = "=0.27.0", features = ["serde"] }
 sha2 = "=0.10.9"
 
+[build-dependencies]
+sha2 = "=0.10.9"
+
 [profile.dev]
 opt-level = 1
 

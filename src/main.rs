@@ -4,6 +4,7 @@ mod animation_events;
 mod ant;
 mod assets;
 mod startup;
+mod shader_cache;
 mod audio;
 mod beyond;
 mod beyond_check;
