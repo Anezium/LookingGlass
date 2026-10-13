@@ -41,6 +41,8 @@ pub struct Config {
     pub bone_palette: bool,
     /// Conservative skin bounds; visual work only, using each pass's projection.
     pub skin_frustum_cull: bool,
+    /// Conservative center/extent clip-plane test and identity bounds shortcut.
+    pub fast_frustum: bool,
     /// SDK logo thread is disabled by default; the LG opening film is unaffected.
     pub startup_splash:bool,
     /// Persistent binary pairs; process deduplication remains active when off.
@@ -75,6 +77,7 @@ impl Default for Config {
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:false,
             bone_palette: false,
             skin_frustum_cull: true,
+            fast_frustum: true,
             startup_splash:false,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
@@ -1110,26 +1113,9 @@ fn model_matrix(recipe: &Recipe, time: f32, transforms: &[(usize, Vec3, Quat)]) 
     )
 }
 fn in_frustum(m: Mat4, min: Vec3, max: Vec3) -> bool {
-    let mut outside = [true; 6];
-    for x in [min.x, max.x] {
-        for y in [min.y, max.y] {
-            for z in [min.z, max.z] {
-                let p = m * vec4(x, y, z, 1.);
-                for (all, out) in outside.iter_mut().zip([
-                    p.x < -p.w,
-                    p.x > p.w,
-                    p.y < -p.w,
-                    p.y > p.w,
-                    p.z < -p.w,
-                    p.z > p.w,
-                ]) {
-                    *all &= out;
-                }
-            }
-        }
-    }
-    !outside.into_iter().any(|v| v)
+    !super::outside_matrix(m, min, max)
 }
+
 fn uv_matrices(stage: &Stage, time: f32) -> (Mat4, Mat4, [f32; 4]) {
     let mut m = Mat4::IDENTITY;
     let mut after = Mat4::IDENTITY;
@@ -1431,7 +1417,7 @@ mod tests {
     fn settings_bound_gpu_passes_and_reject_bad_values() {
         assert!(Config::default().validate().is_ok());
         assert!(!Config::default().bone_palette);
-        assert!(Config::default().skin_frustum_cull);
+        assert!(Config::default().skin_frustum_cull && Config::default().fast_frustum);
         assert!(serde_json::from_str::<Config>(r#"{"bone_palette":"on"}"#).is_err());
         for layers in [0, 3, usize::MAX] {
             assert!(Config {

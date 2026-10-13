@@ -325,6 +325,10 @@ fn transform_bounds(
     transform: Option<&(usize, Vec3, Quat)>,
     offset: Vec3,
 ) -> (Vec3, Vec3) {
+    #[cfg(feature = "vita_renderer")]
+    if vita_renderer::config().fast_frustum && transform.is_none() {
+        return (min.min(max) + offset, min.max(max) + offset);
+    }
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = -lo;
     for x in [min.x, max.x] {
@@ -343,6 +347,14 @@ pub(crate) fn outside_bounds(min: Vec3, max: Vec3) -> bool {
     let Some(m) = crate::render_fx::projection() else {
         return false;
     };
+    outside_matrix(m, min, max)
+}
+pub(crate) fn outside_matrix(m: Mat4, min: Vec3, max: Vec3) -> bool {
+    #[cfg(feature = "vita_renderer")]
+    if vita_renderer::config().fast_frustum { return aabb_outside_matrix(m, min, max); }
+    corner_outside_matrix(m, min, max)
+}
+fn corner_outside_matrix(m: Mat4, min: Vec3, max: Vec3) -> bool {
     let points = [
         vec3(min.x, min.y, min.z),
         vec3(min.x, min.y, max.z),
@@ -355,6 +367,73 @@ pub(crate) fn outside_bounds(min: Vec3, max: Vec3) -> bool {
     ]
     .map(|p| m * p.extend(1.));
     (0..3).any(|a| points.iter().all(|p| p[a] < -p.w) || points.iter().all(|p| p[a] > p.w))
+}
+// Adapted from NextOs-Ports/Looking-Glass-NextOS 668de14 (felc18-blip).
+fn aabb_outside_matrix(m: Mat4, min: Vec3, max: Vec3) -> bool {
+    if !(m.is_finite() && min.is_finite() && max.is_finite()) { return false; }
+    let center = min * 0.5 + max * 0.5;
+    let extent = (max * 0.5 - min * 0.5).abs();
+    let rows = m.transpose();
+    for row in [rows.x_axis, rows.y_axis, rows.z_axis] {
+        for sign in [-1., 1.] {
+            let plane = rows.w_axis + row * sign;
+            let distance = plane.truncate().dot(center) + plane.w;
+            let radius = plane.truncate().abs().dot(extent);
+            // Bound uncancelled corner/plane arithmetic, including oblique views.
+            let magnitude = (rows.w_axis.abs() + row.abs()).truncate().dot(center.abs() + extent)
+                + rows.w_axis.w.abs() + row.w.abs() + 1.;
+            let slack = 32. * f32::EPSILON * magnitude;
+            if distance + radius < -slack { return true; }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod fast_frustum_tests {
+    use super::*;
+    #[test]
+    fn ten_thousand_boxes_never_reject_corner_reference_visibility() {
+        let projection = Mat4::perspective_rh_gl(1.1, 16. / 9., 0.1, 10000.);
+        let view = Mat4::look_at_rh(vec3(100., 200., 300.), Vec3::ZERO, Vec3::Z);
+        let mut seed = 7_u32;
+        for i in 0..10000 {
+            let mut random = || { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); (seed >> 8) as f32 / 16777216. };
+            let center = vec3(random(), random(), random()) * 20000. - Vec3::splat(10000.);
+            let extent = vec3(random(), random(), random()) * 500. + Vec3::ONE;
+            let mut m = projection * view;
+            // Reflected and oblique clip matrices use the same homogeneous planes.
+            if i % 3 == 1 { m = m * Mat4::from_scale(vec3(-1., 1., 1.)); }
+            if i % 3 == 2 { m.z_axis += m.x_axis * 0.37; }
+            let lo = center - extent; let hi = center + extent;
+            assert!(!aabb_outside_matrix(m, lo, hi) || corner_outside_matrix(m, lo, hi), "box {i}");
+            assert_eq!(aabb_outside_matrix(m, lo, hi), aabb_outside_matrix(m, hi, lo));
+        }
+    }
+    #[test]
+    fn near_plane_camera_crossing_behind_camera_and_ambiguous_edges() {
+        let m = Mat4::perspective_rh_gl(1.1, 16. / 9., 0.1, 10000.);
+        for (lo, hi, outside) in [
+            (vec3(-0.01,-0.01,-0.10001),vec3(0.01,0.01,-0.09999),false),
+            (vec3(-1.,-1.,-2.),vec3(1.,1.,2.),false),
+            (vec3(-0.01,-0.01,1.),vec3(0.01,0.01,2.),true),
+            (vec3(-0.001,-0.001,-0.05),vec3(0.001,0.001,-0.01),true),
+            (vec3(-1.,-1.,-100.),vec3(1.,1.,-90.),false),
+        ] {
+            assert_eq!(aabb_outside_matrix(m,lo,hi),outside);
+            assert!(!aabb_outside_matrix(m,lo,hi) || corner_outside_matrix(m,lo,hi));
+        }
+        assert!(!aabb_outside_matrix(Mat4::IDENTITY,Vec3::splat(-1.),Vec3::ONE));
+        assert!(aabb_outside_matrix(Mat4::IDENTITY,Vec3::splat(2.),Vec3::splat(3.)));
+        assert!(!aabb_outside_matrix(m,Vec3::splat(f32::NAN),Vec3::ONE));
+        assert!(!aabb_outside_matrix(m,Vec3::splat(-f32::MAX),Vec3::splat(f32::MAX)));
+    }
+    #[test]
+    fn identity_bounds_shortcut_matches_corner_arithmetic() {
+        let lo = vec3(-17., 12., -3.); let hi = vec3(35., 47., 83.); let offset = vec3(100.,-400.,21.);
+        assert_eq!(transform_bounds(lo,hi,None,offset),(lo+offset,hi+offset));
+        assert_eq!(transform_bounds(hi,lo,None,offset),(lo+offset,hi+offset));
+    }
 }
 fn selected_mesh(mesh: &Mesh, compact: bool) -> Mesh {
     if !compact {

@@ -39,3 +39,11 @@ its visual cache. Route columns add `skinned_draws_total` and `skinned_draws_cul
 with aligned per-frame raw rows and mean/peak summaries; the native frame profiler
 uses the same names. These count model draw invocations, not surface layers.
 Adapted from NextOs-Ports/Looking-Glass-NextOS 51b6224 (felc18-blip).
+
+`fast_frustum` (default **true**) uses center/extent homogeneous clip-plane tests
+and the no-transform bounds shortcut in both legacy and retained world paths.
+The original eight-corner path remains available with false. Uncancelled arithmetic
+magnitudes set numerical slack; ambiguous and nonfinite boxes stay visible.
+Tests cover 10,000 randomized boxes, reflection/oblique matrices, near-plane and
+camera-crossing boxes, wholly behind-camera geometry and identity bounds.
+Adapted from NextOs-Ports/Looking-Glass-NextOS 668de14 (felc18-blip), render code only.
