@@ -1454,6 +1454,7 @@ impl Scene {
                 self.draw(camera, time, fullbright, true, transforms);
                 if !vita_renderer::world_only() {
                     let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
+                    let _render_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Fx);
                     particles.prepare_draw(camera, &self.atmosphere);
                     particles.prepare_quads(camera, Some(direction));
                     for (i, _) in particles.depths(camera, direction) { particles.draw_one(i, camera, direction); }

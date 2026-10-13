@@ -16,7 +16,7 @@ pub(crate) fn host_report() -> serde_json::Value {
 }
 #[cfg(not(target_os = "vita"))]
 pub(crate) fn host_reset() {
-    HOST_COUNTS.with(|c| c.borrow_mut().clear());
+    HOST_COUNTS.with(|c| { for value in c.borrow_mut().values_mut() { *value = 0; } });
 }
 pub(crate) fn count(name: &'static str, value: u64) {
     #[cfg(target_os = "vita")]

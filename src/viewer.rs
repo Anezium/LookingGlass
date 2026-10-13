@@ -4194,7 +4194,9 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright);
         art.draw(&state.interactions, &state.hints, &state.scene.atmosphere, view.position, fullbright);
         skin.dispatch();
+        crate::kernel_alloc::begin();
         state.scene.draw(view.position, time, fullbright, false, &transforms);
+        let world_allocations = crate::kernel_alloc::finish();
         skin.collect();
         {
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
@@ -4212,7 +4214,7 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         crate::render::vita_renderer::present_3d();
         let cpu_ns = started.elapsed().as_nanos() as u64;
         if frame >= 60 {
-            samples.push(serde_json::json!({"frame":frame,"variant":variant,"cpu_ns":cpu_ns,
+            samples.push(serde_json::json!({"frame":frame,"variant":variant,"cpu_ns":cpu_ns,"world_allocations":world_allocations,
                 "phases":crate::light_profile::render_host_report(),
                 "counts":crate::render_fx::retained::host_report()}));
         }
