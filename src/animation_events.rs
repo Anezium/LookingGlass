@@ -103,7 +103,44 @@ impl When {
         }
     }
 }
+/// Emitter assignments compiled once per pickup clip. Preserve authored order
+/// even when absolute f32 event times tie after many loop cycles.
+pub(crate) struct EmitterTimeline {
+    duration: f32,
+    looping: bool,
+    events: BTreeMap<String, Vec<(f32, bool, bool)>>,
+}
+impl EmitterTimeline {
+    pub(crate) fn enabled(&self, name: &str, time: f32, initial: bool) -> bool {
+        if !time.is_finite() || self.duration <= 0. { return initial; }
+        let time = time.max(0.);
+        let cycle = if self.looping { (time / self.duration).floor() as u64 } else { 0 };
+        let cycles = [Some(0), (cycle > 1).then(|| cycle - 1), (cycle > 0).then_some(cycle)];
+        let mut result = initial;
+        let mut latest = f32::NEG_INFINITY;
+        for n in cycles.into_iter().flatten() {
+            for &(local, entry, enabled) in self.events.get(name).into_iter().flatten() {
+                if n > 0 && entry { continue; }
+                let at = n as f32 * self.duration + local;
+                if at <= time && at >= latest { latest = at; result = enabled; }
+            }
+        }
+        result
+    }
+}
 impl Model {
+    pub(crate) fn emitter_timeline(&self, name: &str, duration: f32, frame_time: f32, looping: bool) -> EmitterTimeline {
+        let mut events = BTreeMap::<String, Vec<(f32, bool, bool)>>::new();
+        for e in self.clips.get(name).into_iter().flatten() {
+            if looping && e.when == When::Exit { continue; }
+            let at = e.when.time(duration, frame_time);
+            if at > duration || (at == duration && e.when != When::Exit) { continue; }
+            if let Command::Emitter { name, enabled } = &e.command {
+                events.entry(name.clone()).or_default().push((at, e.when == When::Entry, *enabled));
+            }
+        }
+        EmitterTimeline { duration, looping, events }
+    }
     pub fn load(assets: &mut Assets, path: &str) -> Result<Self> {
         Self::parse(&String::from_utf8_lossy(&assets.read(path)?))
     }
@@ -367,6 +404,18 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn emitter_timeline_matches_visual_at_boundaries_loops_ties_and_rewinds() {
+        let m = Model::parse("animations { act a.tan { client { entry emitteron a 4 emitteroff a 2 emitteron a 2 emitteroff a 0 emitteron b last emitteroff b exit emitteroff a 100 emitteron c } } }").unwrap();
+        for looping in [true, false] {
+            let timeline = m.emitter_timeline("act", 1., 0.1, looping);
+            for at in [f32::NAN, -1., 0., 0.199999, 0.2, 0.200001, 0.4, 0.9, 1., 1.2, 2., 2.4, 100.2, 86400., 0.3] {
+                for name in ["a", "b", "c", "missing"] { for initial in [true, false] {
+                    assert_eq!(timeline.enabled(name, at, initial), m.visual("act", at, 1., 0.1, looping).emitters.get(name).copied().unwrap_or(initial), "{name} at={at} looping={looping}");
+                } }
+            }
+        }
+    }
     #[test]
     fn enter_alias_enables_distinct_emitters_until_exit() {
         let m = Model::parse("animations { spray test.ska { client { enter emitteron jet_a enter emitteron jet_b exit emitteroff jet_a exit emitteroff jet_b } } }").unwrap();

@@ -80,8 +80,12 @@ impl Art {
             materials: [material(false)?, material(true)?],
         })
     }
-    pub fn draw(
+    pub(crate) fn begin_frame(&self) { for e in &self.effects { e.begin_frame(); } }
+    pub(crate) fn end_frame(&self) { for e in &self.effects { e.end_frame(); } }
+    pub(crate) fn clear_effects(&self) { for e in &self.effects { e.clear(); } }
+    pub fn draw_item(
         &mut self,
+        identity: &str,
         grade: Grade,
         origin: Vec3,
         atmosphere: &Atmosphere,
@@ -89,15 +93,22 @@ impl Art {
         clock: f32,
     ) {
         if crate::render_fx::active() {
-            self.draw_inner(grade, origin, atmosphere, eye, clock);
+            self.draw_inner(Some(identity), grade, origin, atmosphere, eye, clock);
         } else {
             crate::render::depth_read_only(|| {
-                self.draw_inner(grade, origin, atmosphere, eye, clock)
+                self.draw_inner(Some(identity), grade, origin, atmosphere, eye, clock)
             });
         }
     }
+    /// Moving scripted rewards have no stable pickup ID; preserve their fresh
+    /// birth reconstruction rather than retaining poses from an earlier origin.
+    pub fn draw(&mut self, grade: Grade, origin: Vec3, atmosphere: &Atmosphere, eye: Vec3, clock: f32) {
+        if crate::render_fx::active() { self.draw_inner(None, grade, origin, atmosphere, eye, clock); }
+        else { crate::render::depth_read_only(|| self.draw_inner(None, grade, origin, atmosphere, eye, clock)); }
+    }
     fn draw_inner(
         &mut self,
+        identity: Option<&str>,
         grade: Grade,
         origin: Vec3,
         atmosphere: &Atmosphere,
@@ -105,9 +116,12 @@ impl Art {
         clock: f32,
     ) {
         let i = GRADES.iter().position(|g| *g == grade).unwrap();
-        for (filter, material) in self.materials.iter().enumerate() {
-            atmosphere.apply(material, eye);
-            material.set_uniform("FogMode", if filter == 1 { 2_f32 } else { 1. });
+        let _mesh_layers = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::MeshLayers);
+        if !(crate::pickup_effects::cached() && crate::render_fx::retained_active()) {
+            for (filter, material) in self.materials.iter().enumerate() {
+                atmosphere.apply(material, eye);
+                material.set_uniform("FogMode", if filter == 1 { 2_f32 } else { 1. });
+            }
         }
         let meshes = self.props[i].meshes_at(
             crate::skeletal::Transform {
@@ -122,7 +136,14 @@ impl Art {
         for mesh in meshes {
             let uv: Vec<_> = mesh.vertices.iter().map(|v| v.uv).collect();
             let mut queued = Vec::new();
-            for layer in &self.layers[i] {
+            #[allow(unused_mut)]
+            let mut limit = self.layers[i].len();
+            #[cfg(feature = "vita_renderer")]
+            if crate::pickup_effects::cached() && crate::render_fx::retained_active() {
+                limit = limit.min(crate::render::vita_renderer::config().actor_max_layers);
+                crate::render_fx::retained::count("vita_fx_dropped_layers", (self.layers[i].len() - limit) as u64);
+            }
+            for layer in &self.layers[i][..limit] {
                 for (v, &base) in mesh.vertices.iter_mut().zip(&uv) {
                     v.uv = layer.spec.view_uv(
                         base,
@@ -153,7 +174,8 @@ impl Art {
             }
         }
         gl_use_default_material();
-        self.effects[i].draw(clock, origin, 0.4, eye, atmosphere);
+        drop(_mesh_layers);
+        self.effects[i].draw(identity, clock, origin, 0.4, eye, atmosphere);
     }
 }
 

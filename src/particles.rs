@@ -1212,19 +1212,25 @@ impl Steam {
     pub fn prepare_draw(&self, camera: Vec3, atmosphere: &Atmosphere) {
         #[cfg(feature="vita_renderer")]
         crate::frame_profile::route_live_puffs(self.puffs.len());
+        if crate::pickup_effects::cached() && crate::render_fx::retained_active() { return; }
         for m in &self.materials {
             atmosphere.apply(m, camera);
         }
     }
     pub fn draw_one(&self, index: usize, camera: Vec3, direction: Vec3) {
-        let right = direction.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
-        let up = right.cross(direction).normalize_or_zero();
-        let p = &self.puffs[index];
-        let e = &self.emitters[p.emitter];
+        let e = &self.emitters[self.puffs[index].emitter];
         #[cfg(feature="vita_renderer")]
         if !crate::render_fx::retained_active(){gl_use_material(&self.materials[usize::from(e.additive)]);}
         #[cfg(not(feature="vita_renderer"))]
         gl_use_material(&self.materials[usize::from(e.additive)]);
+        let mesh = self.puff_mesh(index, camera, direction);
+        crate::render_fx::effect(&mesh, if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
+    }
+    fn puff_mesh(&self, index: usize, camera: Vec3, direction: Vec3) -> Mesh {
+        let right = direction.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
+        let up = right.cross(direction).normalize_or_zero();
+        let p = &self.puffs[index];
+        let e = &self.emitters[p.emitter];
         let radius = p.size * (1. + e.spec.growth * p.age).max(0.);
         let x = (right * p.roll.cos() + up * p.roll.sin()) * radius;
         let y = (-right * p.roll.sin() + up * p.roll.cos()) * radius;
@@ -1248,18 +1254,9 @@ impl Steam {
             normal: Vec4::ZERO,
         })
         .collect();
-        crate::render_fx::effect(
-            &Mesh {
-                vertices,
-                indices: vec![0, 1, 2, 0, 2, 3],
-                texture: Some(e.textures[e.stage.frame(p.age)].clone()),
-            },
-            if e.additive {
-                crate::materials::Blend::Add
-            } else {
-                crate::materials::Blend::Alpha
-            },
-        );
+        Mesh { vertices, indices: vec![0, 1, 2, 0, 2, 3],
+            texture: e.textures.get(e.stage.frame(p.age)).cloned() }
+
     }
 }
 const FRAGMENT: &str = r#"#version 100
@@ -1442,6 +1439,9 @@ pub struct Attached {
     // must not drag smoke already in the air. Rewinds rebuild cosmetic births.
     births: std::collections::BTreeMap<(usize, u32), crate::skeletal::Transform>,
     age: f32,
+    reuse_scratch: bool,
+    order: Vec<(usize, f32)>,
+    live_births: Vec<(usize, u32)>,
 }
 impl Attached {
     /// Item sprites use their image dimensions as the unscaled billboard size.
@@ -1480,6 +1480,9 @@ impl Attached {
         Self {
             births: Default::default(),
             age: 0.,
+            reuse_scratch: false,
+            order: Vec::new(),
+            live_births: Vec::new(),
             steam: Steam {
                 animations: Vec::new(),
                 emitters: self.steam.emitters.clone(),
@@ -1488,6 +1491,11 @@ impl Attached {
                 materials: self.steam.materials.clone(),
             },
         }
+    }
+    pub(crate) fn fork_cached(&self) -> Self {
+        let mut instance = self.fork();
+        instance.reuse_scratch = true;
+        instance
     }
     pub fn load(
         assets: &mut Assets,
@@ -1578,6 +1586,9 @@ impl Attached {
         Ok(Some(Self {
             births: Default::default(),
             age: 0.,
+            reuse_scratch: false,
+            order: Vec::new(),
+            live_births: Vec::new(),
             steam: Steam {
                 animations: Vec::new(),
                 emitters,
@@ -1596,26 +1607,50 @@ impl Attached {
         camera: Vec3,
         atmosphere: &Atmosphere,
     ) {
-        self.sample(age, scale, birth_pose, enabled);
+        {
+            let _sampling = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Sampling);
+            self.sample(age, scale, birth_pose, enabled);
+        }
+        self.draw_sampled(camera, atmosphere);
+    }
+    pub(crate) fn draw_sampled(&mut self, camera: Vec3, atmosphere: &Atmosphere) {
+        let _packets = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Packets);
         self.steam.prepare_draw(camera, atmosphere);
-        let mut order: Vec<_> = self
+        let mut order = if self.reuse_scratch { std::mem::take(&mut self.order) } else { Vec::new() };
+        order.clear();
+        order.extend(self
             .steam
             .puffs
             .iter()
             .enumerate()
             .map(|(i, p)| (i, p.position.distance_squared(camera)))
-            .collect();
+            );
         order.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (i, _) in order {
+        for &(i, _) in &order {
             self.steam.draw_one(
                 i,
                 camera,
                 (self.steam.puffs[i].position - camera).normalize_or_zero(),
             );
         }
+        if self.reuse_scratch { self.order = order; }
         gl_use_default_material();
     }
-    fn sample(
+    #[cfg(test)]
+    pub(crate) fn output_bits(&self, camera: Vec3) -> serde_json::Value {
+        let mut order: Vec<_> = self.steam.puffs.iter().enumerate()
+            .map(|(i, p)| (i, p.position.distance_squared(camera))).collect();
+        order.sort_by(|a, b| b.1.total_cmp(&a.1));
+        serde_json::json!(order.into_iter().map(|(i, _)| {
+            let p = &self.steam.puffs[i];
+            let mesh = self.steam.puff_mesh(i, camera, (p.position - camera).normalize_or_zero());
+            serde_json::json!({"emitter": p.emitter, "blend_add": self.steam.emitters[p.emitter].additive,
+                "birth_age_life_size_roll": ([p.age, p.life, p.size, p.roll].map(f32::to_bits)),
+                "vertices": mesh.vertices.iter().map(|v| (v.position.to_array().map(f32::to_bits), v.uv.to_array().map(f32::to_bits), v.color)).collect::<Vec<_>>(),
+                "indices": mesh.indices})
+        }).collect::<Vec<_>>())
+    }
+    pub(crate) fn sample(
         &mut self,
         age: f32,
         scale: f32,
@@ -1623,15 +1658,18 @@ impl Attached {
         enabled: impl Fn(&str, f32, bool) -> bool,
     ) {
         self.steam.puffs.clear();
-        let mut previous = std::mem::take(&mut self.births);
+        self.live_births.clear();
+        let mut previous = if self.reuse_scratch { Default::default() } else { std::mem::take(&mut self.births) };
         if !age.is_finite() || age < 0. || !scale.is_finite() || scale <= 0. {
+            self.births.clear();
             return;
         }
         if age < self.age {
             previous.clear();
+            self.births.clear();
         }
         self.age = age;
-        for (index, e) in self.steam.emitters.iter().enumerate() {
+        'emitters: for (index, e) in self.steam.emitters.iter().enumerate() {
             if e.spec.burst.is_some_and(|(at, _)| age < at) {
                 continue;
             }
@@ -1646,7 +1684,7 @@ impl Attached {
             };
             for birth in first.max(last.saturating_sub(1024))..=last {
                 if self.steam.puffs.len() >= 4096 {
-                    return;
+                    break 'emitters;
                 }
                 let at = e
                     .spec
@@ -1663,10 +1701,10 @@ impl Attached {
                     continue;
                 }
                 let key = (index, birth);
-                let pose = previous
-                    .remove(&key)
+                let pose = if self.reuse_scratch { self.births.get(&key).copied() } else { previous.remove(&key) }
                     .unwrap_or_else(|| birth_pose(at, e.spec.tag.as_deref()));
                 self.births.insert(key, pose);
+                if self.reuse_scratch { self.live_births.push(key); }
                 let offset = sampled(e.spec.offset, &mut seed)
                     + pose.rotation * sampled(e.spec.axis_offset, &mut seed);
                 let random_velocity = sampled(e.spec.velocity, &mut seed);
@@ -1697,6 +1735,10 @@ impl Attached {
                 });
             }
         }
+        if self.reuse_scratch {
+            self.births.retain(|key, _| self.live_births.binary_search(key).is_ok());
+        }
+
     }
 }
 
@@ -1964,6 +2006,9 @@ pub(crate) mod tests {
         Attached {
             births: Default::default(),
             age: 0.,
+            reuse_scratch: false,
+            order: Vec::new(),
+            live_births: Vec::new(),
             steam: Steam {
                 animations: vec![],
                 emitters: (0..count)
@@ -2000,6 +2045,24 @@ pub(crate) mod tests {
                 materials: vec![],
             },
         }
+    }
+    pub(crate) fn pickup_fixture(burst: bool) -> Attached {
+        let mut a = attached_fixture(if burst { 1 } else { 3 });
+        for (i, e) in a.steam.emitters.iter_mut().enumerate() {
+            e.spec.name = ["idle", "go_up", "burst"][i].into();
+            e.spec.rate = if i == 0 { 50. } else { 100. };
+            e.spec.life = Range { low: 0.1, high: [0.25, 0.7, 0.3][i] };
+            e.spec.start_off = i != 0;
+            e.spec.color = vec3(0.7, 0.2 + i as f32 * 0.1, 0.5);
+            e.spec.fade = true;
+            e.spec.random_roll = true;
+            e.spec.offset = [Range { low: -2., high: 3. }; 3];
+            e.spec.velocity = [Range { low: -5., high: 5. }; 3];
+            e.spec.growth = 0.5;
+            e.additive = i != 1;
+            if burst { e.spec.burst = Some((0.12, 30)); }
+        }
+        a
     }
     #[test]
     fn watch_particle_exceptions_preserve_frozen_births_and_partial_expiry() {

@@ -264,7 +264,10 @@ pub struct Art {
     material: crate::character::SkinMaterial,
     essence: crate::loot_art::Art,
     collection_fx: std::collections::BTreeMap<String, crate::pickup_effects::Effect>,
-    collected: Vec<(String, macroquad::prelude::Vec3, f32)>,
+    collected: Vec<(String, macroquad::prelude::Vec3, f32, u64)>,
+    next_effect: u64,
+    effect_visit: String,
+    effect_clock: f32,
 }
 impl Art {
     pub fn load(assets: &mut crate::assets::Assets) -> Result<Self> {
@@ -294,16 +297,22 @@ impl Art {
                 })
                 .collect::<Result<_>>()?,
             collected: Vec::new(),
+            next_effect: 0,
+            effect_visit: String::new(),
+            effect_clock: 0.,
         })
     }
     pub fn collected(&mut self, item: &crate::inventory::Pickup, clock: f32) {
         if self.collection_fx.contains_key(&item.model) {
             self.collected
-                .push((item.model.clone(), item.origin, clock));
+                .push((item.model.clone(), item.origin, clock, self.next_effect));
+            self.next_effect = self.next_effect.wrapping_add(1);
         }
     }
     pub fn clear_effects(&mut self) {
         self.collected.clear();
+        self.essence.clear_effects();
+        for e in self.collection_fx.values() { e.clear(); }
     }
     pub fn draw(
         &mut self,
@@ -315,6 +324,18 @@ impl Art {
         clock: f32,
     ) {
         use macroquad::prelude::*;
+        let _objects = crate::frame_profile::object_totals();
+        if self.effect_visit != visit || clock < self.effect_clock {
+            self.essence.clear_effects();
+            for e in self.collection_fx.values() { e.clear(); }
+        }
+        if self.effect_visit != visit {
+            self.effect_visit.clear();
+            self.effect_visit.push_str(visit);
+        }
+        self.effect_clock = clock;
+        self.essence.begin_frame();
+        for e in self.collection_fx.values() { e.begin_frame(); }
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         let mut essences = Vec::new();
@@ -346,12 +367,13 @@ impl Art {
                         .iter()
                         .find(|g| g.model() == item.model)
                     {
-                        essences.push((*grade, item.origin));
+                        essences.push((*grade, item.origin, format!("placed:{}", item.id)));
                     }
                     continue;
                 }
                 crate::inventory::PickupKind::Weapon(_) => continue,
             };
+            let _mesh = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::MeshLayers);
             prop.draw_frame(
                 crate::skeletal::Transform {
                     translation: item.origin,
@@ -364,7 +386,7 @@ impl Art {
             );
         }
         if let Some(loot) = stats.loot.get(visit) {
-            essences.extend(loot.drops.iter().map(|d| (d.grade, d.origin)));
+            essences.extend(loot.drops.iter().map(|d| (d.grade, d.origin, format!("drop:{}", d.id))));
         }
         // Placed and dropped translucent items share both the material passes
         // and ordering, including when they overlap in the same view.
@@ -373,18 +395,20 @@ impl Art {
                 .distance_squared(b.1)
                 .total_cmp(&camera.distance_squared(a.1))
         });
-        for (grade, origin) in essences {
-            self.essence.draw(grade, origin, atmosphere, camera, clock);
+        for (grade, origin, identity) in essences {
+            self.essence.draw_item(&identity, grade, origin, atmosphere, camera, clock);
         }
         // These authored bursts live at most 3 seconds. Keep a short tail,
         // bounded even if many items are collected between rendered frames.
         self.collected
-            .retain(|(_, _, start)| (0. ..=4.).contains(&(clock - start)));
+            .retain(|(_, _, start, _)| (0. ..=4.).contains(&(clock - start)));
         crate::render::depth_read_only(|| {
-            for (model, origin, start) in &self.collected {
-                self.collection_fx[model].draw(clock - start, *origin, 0., camera, atmosphere);
+            for (model, origin, start, id) in &self.collected {
+                self.collection_fx[model].draw(Some(&format!("collection:{id}")), clock - start, *origin, 0., camera, atmosphere);
             }
         });
+        self.essence.end_frame();
+        for e in self.collection_fx.values() { e.end_frame(); }
         gl_use_default_material();
     }
 }
