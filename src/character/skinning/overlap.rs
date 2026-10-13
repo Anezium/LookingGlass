@@ -761,6 +761,11 @@ mod tests {
     fn layer_revisions_cover_frozen_changed_and_unconsumed_outputs_and_new_identity() {
         let (s,mut meshes,pose)=fixture();let p=params(&pose);
         let mut store=Store::new(2,false);
+        // Exercise opt-in revision storage independently of the selected default.
+        let zero = Vertex { position: Vec3::ZERO, uv: Vec2::ZERO, normal: Vec4::ZERO, color: [0;4] };
+        store.layers = vec![[zero;2]; VERTICES];
+        store.dirty = vec![[false;2]; SURFACES];
+        store.previous = Vec::with_capacity(SURFACES);
         let run=|store:&mut Store,p| {
             store.reset();store.capture(&s,&meshes,p,true);store.dispatch();assert!(store.drain().is_none());
             unsafe {(&*store.input.get()).surfaces[0].revision}
