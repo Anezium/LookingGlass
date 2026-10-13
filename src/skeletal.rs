@@ -439,6 +439,10 @@ impl Animation {
         time + ((cycles * self.frames.len() as f32 + end_frame) - frame).max(0.) * self.frame_time
     }
     pub fn sample(&self, time: f32, looping: bool) -> Vec<Transform> {
+        crate::character::skinning::prepared::sample(self as *const Self as usize, time, looping,
+            || self.sample_uncached(time, looping))
+    }
+    fn sample_uncached(&self, time: f32, looping: bool) -> Vec<Transform> {
         let frame = if looping {
             time.max(0.).rem_euclid(self.duration()) / self.frame_time
         } else {

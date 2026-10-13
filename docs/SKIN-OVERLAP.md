@@ -27,7 +27,11 @@ skeleton owner or live meshes are dropped. Neither worker receives or dereferenc
 a Mesh, texture, material, skeleton owner or renderer handle. CPU types have
 compile-time Send checks; the frame guard remains non-Send.
 
-Alice and NPC/controller skeletal draws prepare their facial/global pose and bone
+Animation interpolation also reuses exact immutable clip/time/loop keys between
+gather and submission, including the Magma local-pose path. Each caller receives
+an independent mutable local-pose vector; uncaptured late FX samples keep their
+serial evaluation. This cache is bounded to 128 distinct keys and resets each
+frame. Alice and NPC/controller skeletal draws prepare their facial/global pose and bone
 scales once in gather. A bounded game-thread cache retains owning presentation
 handles for each draw occurrence; submission checks skeleton/face identity, local
 pose bits, mouth and bone-scale roots before reusing that result for the skin and
@@ -46,8 +50,8 @@ Startup allocates bounded capacity for 128 draws, 2,048 surface handles, 8,192
 pose/scales/palette entries and 32,768 output vertices. The old 131,072-entry
 weight/index arenas and 32,768-entry source-vertex arena are removed. Reset,
 handle capture, dispatch, worker kernel, collect and copy allocate nothing in
-steady state. Presentation caches retain at most 128 entries each. The existing
-animation sampling still allocates; presentation cache input-key vectors and
+steady state. Presentation caches retain at most 128 entries each. Local animation-pose
+vectors still allocate, while interpolation is reused; cache input-key vectors and
 handles warm up on first use. The allocator test measures the numeric skin
 pipeline, not the full render traversal or layer assembly. Overflow stops further
 capture without growing arenas. No performance win is claimed before console A/B.

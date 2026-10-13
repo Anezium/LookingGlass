@@ -92,13 +92,60 @@ struct Palette {
     scales: Vec<f32>,
     values: Vec<(Mat3, Vec3)>,
 }
+#[derive(Default)]
+struct Sample {
+    key: (usize, u32, bool),
+    values: Vec<Transform>,
+}
+struct Samples {
+    entries: Vec<Sample>,
+    count: usize,
+}
+impl Default for Samples {
+    fn default() -> Self {
+        Self {
+            entries: (0..LIMIT).map(|_| Sample::default()).collect(),
+            count: 0,
+        }
+    }
+}
 thread_local! {
     static POSES: RefCell<Cache<Pose>> = RefCell::default();
     static PALETTES: RefCell<Cache<Palette>> = RefCell::default();
+    static SAMPLES: RefCell<Samples> = RefCell::default();
 }
 pub(super) fn begin() {
     POSES.with(|c| c.borrow_mut().begin());
     PALETTES.with(|c| c.borrow_mut().begin());
+    SAMPLES.with(|c| c.borrow_mut().count = 0);
+}
+/// Interpolation is view-independent. Reuse by immutable clip/time/loop key,
+/// rather than traversal order, because late tag/FX consumers can sample clips
+/// that were absent from gather. Each caller gets its own mutable local pose.
+pub(crate) fn sample(
+    clip: usize,
+    time: f32,
+    looping: bool,
+    prepare: impl FnOnce() -> Vec<Transform>,
+) -> Vec<Transform> {
+    if !overlap::gathering() && !overlap::ready() {
+        return prepare();
+    }
+    SAMPLES.with(|c| {
+        let mut c = c.borrow_mut();
+        let key = (clip, time.to_bits(), looping);
+        if let Some(entry) = c.entries[..c.count].iter().find(|e| e.key == key) {
+            return entry.values.clone();
+        }
+        let values = prepare();
+        if overlap::gathering() && c.count < LIMIT {
+            let index = c.count;
+            c.count += 1;
+            c.entries[index].key = key;
+            c.entries[index].values.clone_from(&values);
+        }
+        values
+    })
 }
 pub(super) fn assert_consumed() {
     POSES.with(|c| c.borrow().assert_consumed());
@@ -229,6 +276,61 @@ mod tests {
         let _frame = overlap::Frame::begin();
         let result = pose((7, 9), &input, 0.1, &[(0, 1.)], || (local(3.), vec![3.]));
         assert_eq!(result.pose[0].translation, Vec3::X * 3.);
+    }
+    #[test]
+    fn animation_interpolation_reuses_exact_keys_and_invalidates_each_frame() {
+        overlap::startup(1, false);
+        let mut frame = overlap::Frame::begin();
+        let mut a = sample(7, 1., true, || local(1.));
+        a[0].translation = Vec3::X * 99.;
+        assert_eq!(
+            sample(7, 1., true, || panic!("duplicate interpolation"))[0].translation,
+            Vec3::X
+        );
+        frame.dispatch();
+        frame.collect();
+        assert_eq!(
+            sample(7, 1., true, || panic!("draw interpolated again"))[0].translation,
+            Vec3::X
+        );
+        assert_eq!(
+            sample(7, 2., true, || local(2.))[0].translation,
+            Vec3::X * 2.
+        );
+        assert_eq!(
+            sample(8, 1., true, || local(3.))[0].translation,
+            Vec3::X * 3.
+        );
+        assert_eq!(
+            sample(7, 1., false, || local(4.))[0].translation,
+            Vec3::X * 4.
+        );
+        drop(frame);
+        let _frame = overlap::Frame::begin();
+        assert_eq!(
+            sample(7, 1., true, || local(5.))[0].translation,
+            Vec3::X * 5.
+        );
+    }
+    #[test]
+    fn interpolation_cache_is_bounded_and_uncaptured_fx_remain_serial() {
+        overlap::startup(1, false);
+        let mut frame = overlap::Frame::begin();
+        for clip in 0..LIMIT + 1 {
+            sample(clip, 1., true, || local(clip as f32));
+        }
+        SAMPLES.with(|c| assert_eq!(c.borrow().count, LIMIT));
+        frame.dispatch();
+        frame.collect();
+        assert_eq!(
+            sample(0, 1., true, || panic!("cached sample recomputed"))[0].translation,
+            Vec3::ZERO
+        );
+        assert_eq!(
+            sample(LIMIT, 1., true, || local(999.))[0].translation,
+            Vec3::X * 999.
+        );
+        frame.assert_consumed();
     }
     #[test]
     fn serial_presentation_does_not_allocate_cache_handles_or_clone_inputs() {
