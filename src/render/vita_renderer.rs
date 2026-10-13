@@ -2,6 +2,7 @@
 mod shader;
 mod scale;
 mod pvs_cache;
+mod state_cache;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -29,6 +30,10 @@ pub struct Config {
     pub clocks: Clocks,
     /// Clean thumbnails during play; diagnostic modes retain their own policy.
     pub save_preview: String,
+    /// auto/on correct Vita's two-readback orientation; off restores J10.
+    pub preview_flip: String,
+    pub world_state_cache: bool,
+    pub mover_far_lazy: bool,
     pub mover_lazy_publish: bool,
     pub pickup_fx_cache: bool,
     #[serde(alias = "renderer_world_only")]
@@ -91,6 +96,9 @@ impl Default for Config {
             renderer: "vita".into(),
             clocks: Clocks::Max,
             save_preview: "throttled".into(),
+            preview_flip: "auto".into(),
+            world_state_cache: true,
+            mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
             world_only: false,
@@ -142,6 +150,7 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
 impl Config {
     fn validate(&self) -> Result<()> {
         ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
+        ensure!(matches!(self.preview_flip.as_str(), "auto" | "on" | "off"), "preview_flip must be auto, on or off");
         ensure!(self.max_texture_dimension.is_none_or(|n| (16..=512).contains(&n)), "max_texture_dimension must be null or 16..512");
         ensure!(self.draw_distance_cap.is_none_or(|n| n.is_finite() && (128. ..=30000.).contains(&n)), "draw_distance_cap must be null or 128..30000");
         ensure!(
@@ -1038,13 +1047,21 @@ impl Renderer {
             count("vita_world_gpu_draws", 1);
             count("vita_world_sky_draws", 1);
         }
-        unsafe {
+        if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
-        }
+        } }
         let mut previous_pipeline = None;
         let mut previous_texture = None;
         let submit_span = crate::frame_profile::span("vita_world_submit");
         let mut totals = crate::frame_profile::Totals::<3>::new();
+        // Lifetime is exactly this owned opaque pass: fresh AFTER sky/interop/
+        // target setup, discarded BEFORE any alpha callbacks, actors or HUD.
+        let cache_enabled = !alpha && config().world_state_cache;
+        let mut cache = state_cache::Cache::new();
+        let (mut low_draws, mut pipeline_changes, mut texture_changes) = (0u64, 0u64, 0u64);
+        #[cfg(target_os = "vita")]
+        let mut static_batches = 0usize;
+        let mut applications = [0u64; 4];
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
@@ -1053,44 +1070,61 @@ impl Renderer {
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
             let low=!alpha && g.recipe.stage.alpha_test==0 && !self.low_pipelines.is_empty();
+            let pipeline = if low {self.low_pipelines[g.recipe.cull]}else{self.pipelines[pi]};
+            let plan = if cache_enabled {
+                // World groups have one immutable VBO, one IBO and two images.
+                debug_assert_eq!(g.bindings.vertex_buffers.len(), 1);
+                debug_assert_eq!(g.bindings.images.len(), 2);
+                cache.observe(pipeline, low, !alpha,
+                    (g.bindings.vertex_buffers[0], g.bindings.index_buffer,
+                     g.bindings.images[0], g.bindings.images[1]), prepared.uniforms.bits())
+            } else {
+                state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
+            };
             let start = totals.start();
-            ctx.apply_pipeline(if low {&self.low_pipelines[g.recipe.cull]}else{&self.pipelines[pi]});
-            unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});}
+            if plan.pipeline { ctx.apply_pipeline(&pipeline); applications[0] += 1; }
+            if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});} applications[1] += 1; }
             scale::log_depth(!alpha);
-            if low {count("vita_world_low_draws",1);}
-            ctx.apply_bindings(&g.bindings);
+            if low { low_draws += 1; if !cache_enabled {count("vita_world_low_draws",1);} }
+            if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
             totals.add(0, start);
             let start = totals.start();
-            ctx.apply_uniforms(UniformsSource::table(&prepared.uniforms));
+            if plan.uniforms { ctx.apply_uniforms(UniformsSource::table(&prepared.uniforms)); applications[3] += 1; }
             totals.add(1, start);
             let start = totals.start();
             ctx.draw(0, g.indices, 1);
             totals.add(2, start);
             if previous_pipeline != Some(pi) {
-                count("vita_world_pipeline_changes", 1);
+                pipeline_changes += 1;
+                if !cache_enabled { count("vita_world_pipeline_changes", 1); }
                 previous_pipeline = Some(pi);
             }
             if previous_texture != Some(texture) {
-                count("vita_world_texture_changes", 1);
+                texture_changes += 1;
+                if !cache_enabled { count("vita_world_texture_changes", 1); }
                 previous_texture = Some(texture);
             }
-            count("vita_world_gpu_draws", 1);
-            count(
-                "vita_world_uniform_bytes",
-                std::mem::size_of::<shader::Uniforms>() as u64,
-            );
-            count(
-                if alpha {
-                    "vita_world_alpha_triangles"
-                } else {
-                    "vita_world_opaque_triangles"
-                },
-                g.indices as u64 / 3,
-            );
+            if !cache_enabled {
+                count("vita_world_gpu_draws", 1);
+                count(
+                    "vita_world_uniform_bytes",
+                    std::mem::size_of::<shader::Uniforms>() as u64,
+                );
+                count(
+                    if alpha {
+                        "vita_world_alpha_triangles"
+                    } else {
+                        "vita_world_opaque_triangles"
+                    },
+                    g.indices as u64 / 3,
+                );
+            }
             stats.batches += 1;
             stats.triangles += g.indices as usize / 3;
             #[cfg(target_os = "vita")]
-            {
+            { static_batches += usize::from(g.recipe.model.is_none() && g.recipe.motion.is_none()); }
+            #[cfg(target_os = "vita")]
+            if !cache_enabled {
                 crate::frame_profile::record_batch(
                     g.recipe.model.is_none() && g.recipe.motion.is_none(),
                     false,
@@ -1104,6 +1138,26 @@ impl Renderer {
                 );
             }
         }
+        if cache_enabled {
+            counts(&[
+                ("vita_world_low_draws", low_draws),
+                ("vita_world_pipeline_changes", pipeline_changes),
+                ("vita_world_texture_changes", texture_changes),
+                ("vita_world_gpu_draws", stats.batches as u64),
+                // Preserve requested payload accounting, including cache hits.
+                ("vita_world_uniform_bytes", stats.batches as u64 * std::mem::size_of::<shader::Uniforms>() as u64),
+                ("vita_world_opaque_triangles", stats.triangles as u64),
+            ]);
+            #[cfg(target_os = "vita")]
+            crate::frame_profile::record_retained_world_pass(stats.batches, static_batches, stats.triangles);
+        }
+        counts(&[
+            ("vita_world_pipeline_applications", applications[0]),
+            ("vita_world_depth_applications", applications[1]),
+            ("vita_world_binding_applications", applications[2]),
+            ("vita_world_uniform_applications", applications[3]),
+            ("vita_world_uniform_applied_bytes", applications[3] * std::mem::size_of::<shader::Uniforms>() as u64),
+        ]);
         totals.publish(if alpha {
             ["vita_world_alpha_state_bindings", "vita_world_alpha_uniforms", "vita_world_alpha_draws"]
         } else {
@@ -1204,6 +1258,20 @@ fn count(name: &'static str, n: u64) {
     crate::frame_profile::counts(&[(name, n)]);
     #[cfg(not(target_os = "vita"))]
     crate::render_fx::retained::count(name,n);
+}
+fn counts<const N: usize>(values: &[(&'static str, u64); N]) {
+    // Per-draw J10 counters never introduced zero-valued entries. Preserve
+    // that published shape too, e.g. no low_draws key in full quality.
+    let mut nonzero = [("", 0); N];
+    let mut len = 0;
+    for &(name, n) in values {
+        if n > 0 { nonzero[len] = (name, n); len += 1; }
+    }
+    let values = &nonzero[..len];
+    #[cfg(target_os = "vita")]
+    crate::frame_profile::counts(values);
+    #[cfg(not(target_os = "vita"))]
+    for &(name, n) in values { crate::render_fx::retained::count(name, n); }
 }
 fn model_matrix(recipe: &Recipe, time: f32, transforms: &[(usize, Vec3, Quat)]) -> Option<Mat4> {
     let rigid = if let Some(id) = recipe.model {
@@ -1482,6 +1550,48 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn j11_switches_default_on_and_strictly_parse_off() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.preview_flip, "auto");
+        assert!(c.world_state_cache && c.mover_far_lazy);
+        for preview in ["auto", "on", "off"] {
+            let c: Config = serde_json::from_value(serde_json::json!({
+                "preview_flip": preview, "world_state_cache": false, "mover_far_lazy": false,
+            })).unwrap();
+            c.validate().unwrap();
+            assert!(!c.world_state_cache && !c.mover_far_lazy);
+        }
+        for value in [serde_json::json!({"preview_flip":true}),
+                      serde_json::json!({"world_state_cache":"on"}),
+                      serde_json::json!({"mover_far_lazy":1}),
+                      serde_json::json!({"unknown_j11":false})] {
+            assert!(serde_json::from_value::<Config>(value).is_err());
+        }
+        assert!(Config { preview_flip: "vertical".into(), ..Default::default() }.validate().is_err());
+    }
+    #[test]
+    fn world_uniform_bits_include_every_metadata_field_in_order() {
+        let stage = Stage::default();
+        let recipe = Recipe {
+            stage, textures: vec![], lit: false, rank: 0, blend: 0, opaque: true,
+            cull: 0, model: None, motion: None, deform: None,
+        };
+        let mut u = uniforms(&recipe,0.,Vec3::ZERO,Mat4::IDENTITY,Mat4::IDENTITY,false,Vec2::ONE);
+        let mut next = 1u32;
+        for field in [
+            u.mvp.as_mut_slice(), u.model.as_mut_slice(), u.uv.as_mut_slice(), u.uv_after.as_mut_slice(),
+            u.eye.as_mut_slice(), u.surface.as_mut_slice(), u.gain.as_mut_slice(), u.alpha.as_mut_slice(),
+            u.dot_alpha.as_mut_slice(), u.vector_s.as_mut_slice(), u.vector_t.as_mut_slice(), u.turb.as_mut_slice(),
+            u.deform.as_mut_slice(), u.wave.as_mut_slice(), u.move_dir.as_mut_slice(), u.atlas.as_mut_slice(),
+            u.fog_eye.as_mut_slice(), u.distance_fog.as_mut_slice(), u.liquid_fog.as_mut_slice(),
+            u.fog_a_min.as_mut_slice(), u.fog_a_max.as_mut_slice(), u.fog_a.as_mut_slice(),
+            u.fog_b_min.as_mut_slice(), u.fog_b_max.as_mut_slice(), u.fog_b.as_mut_slice(),
+        ] {
+            for value in field { *value = f32::from_bits(next); next += 1; }
+        }
+        assert_eq!(u.bits().to_vec(), (1..144).collect::<Vec<u32>>());
+    }
     #[test]
     fn j10_switches_default_on_and_validate_legacy_settings() {
         let defaults: Config = serde_json::from_str("{}").unwrap();

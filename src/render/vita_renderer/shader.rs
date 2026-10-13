@@ -115,6 +115,46 @@ pub struct Uniforms {
     pub fog_b: [f32; 4],
 }
 impl Uniforms {
+    // Field-wise, bit-exact comparison includes signed zero/NaN payloads and
+    // avoids reading padding or depending on a Rust struct reinterpretation.
+    pub fn bits(&self) -> [u32; 143] {
+        let mut bits = [0; 143];
+        let mut offset = 0;
+        for field in [
+            self.mvp.as_slice(),
+            self.model.as_slice(),
+            self.uv.as_slice(),
+            self.uv_after.as_slice(),
+            self.eye.as_slice(),
+            self.surface.as_slice(),
+            self.gain.as_slice(),
+            self.alpha.as_slice(),
+            self.dot_alpha.as_slice(),
+            self.vector_s.as_slice(),
+            self.vector_t.as_slice(),
+            self.turb.as_slice(),
+            self.deform.as_slice(),
+            self.wave.as_slice(),
+            self.move_dir.as_slice(),
+            self.atlas.as_slice(),
+            self.fog_eye.as_slice(),
+            self.distance_fog.as_slice(),
+            self.liquid_fog.as_slice(),
+            self.fog_a_min.as_slice(),
+            self.fog_a_max.as_slice(),
+            self.fog_a.as_slice(),
+            self.fog_b_min.as_slice(),
+            self.fog_b_max.as_slice(),
+            self.fog_b.as_slice(),
+        ] {
+            for value in field {
+                bits[offset] = value.to_bits();
+                offset += 1;
+            }
+        }
+        debug_assert_eq!(offset, bits.len());
+        bits
+    }
     pub fn atmosphere(&mut self, atmosphere: &crate::environment::Atmosphere, eye: Vec3) {
         self.fog_eye = eye.to_array();
         self.distance_fog = atmosphere.distance.to_array();

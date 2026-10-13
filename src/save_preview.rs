@@ -10,11 +10,17 @@ pub struct Preview {
 }
 impl Preview {
     fn encode(frame: Image) -> Result<Self> {
+        #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
+        let flip = flip_readback(true, &crate::render::vita_renderer::config().preview_flip);
+        #[cfg(not(all(target_os = "vita", feature = "vita_renderer")))]
+        let flip = true;
+        Self::encode_oriented(frame, flip)
+    }
+    fn encode_oriented(frame: Image, flip: bool) -> Result<Self> {
         let mut pixels =
             image::RgbaImage::from_raw(frame.width.into(), frame.height.into(), frame.bytes)
                 .context("Invalid preview frame")?;
-        // OpenGL texture readback starts with the bottom row.
-        image::imageops::flip_vertical_in_place(&mut pixels);
+        if flip { image::imageops::flip_vertical_in_place(&mut pixels); }
         let small = image::DynamicImage::ImageRgba8(pixels)
             .resize(320, 240, image::imageops::FilterType::Triangle)
             .to_rgb8();
@@ -57,6 +63,17 @@ impl Preview {
         texture.set_filter(FilterMode::Linear);
         Some(texture)
     }
+}
+
+// grab_screen copies the DEFAULT framebuffer with glCopyTexImage2D (VitaGL
+// glReadPixels + glTexImage2D). get_texture_data reads that copy through an FBO.
+// With the pinned HAVE_UNFLIPPED_FBOS driver these two bottom-up readbacks
+// cancel: the resulting bytes are already top-down. Capture is AFTER present_3d,
+// so the scaled target's shader V correction has already happened. Scale does
+// not enter this decision. Desktop's ordinary GL copy/read convention is kept.
+#[cfg(any(test, all(target_os = "vita", feature = "vita_renderer")))]
+fn flip_readback(vita: bool, setting: &str) -> bool {
+    !vita || setting == "off"
 }
 
 #[derive(Default)]
@@ -264,6 +281,33 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn vita_double_readback_is_upright_at_every_scale_and_off_restores_j10() {
+        for scale in [0.25, 0.5, 0.75, 1.] {
+            for vita in [false, true] {
+                for setting in ["auto", "on", "off"] {
+                    // Upright default framebuffer: red top, blue bottom. GL
+                    // texture readback is bottom-up on desktop; the pinned
+                    // Vita copy/read pair has already canceled its inversions.
+                    let mut source = image::RgbaImage::new(64, 48);
+                    for (x, y, pixel) in source.enumerate_pixels_mut() {
+                        *pixel = image::Rgba(if y < 24 { [255,0,0,255] } else { [0,0,255,255] });
+                        let _ = x;
+                    }
+                    if !vita { image::imageops::flip_vertical_in_place(&mut source); }
+                    let preview = Preview::encode_oriented(Image {
+                        width: 64, height: 48, bytes: source.into_raw(),
+                    }, flip_readback(vita, setting)).unwrap();
+                    let decoded = preview.image().unwrap();
+                    let top = decoded.get_pixel(10, 5);
+                    let bottom = decoded.get_pixel(10, decoded.height()-6);
+                    let legacy_inverted = vita && setting == "off";
+                    assert!(top[if legacy_inverted {2} else {0}] > 240, "scale={scale} vita={vita} setting={setting}");
+                    assert!(bottom[if legacy_inverted {0} else {2}] > 240);
+                }
+            }
+        }
+    }
     #[test]
     fn preview_preserves_aspect_and_corrects_gl_orientation() {
         let mut bytes = Vec::new();

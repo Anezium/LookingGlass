@@ -357,7 +357,7 @@ pub use vita::{
     add_counter, begin_frame, bench_accepted_frames, bench_frames, characters_span, counter_owner,
     counts, end_frame, flush_boundary, mode, simulation_frozen,
     record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_lg_submissions, record_model,
-    record_world_submission, report, set_owner, startup_bench, story_movies_blocked, world_span, Counter, Owner,
+    record_world_submission, record_retained_world_pass, report, set_owner, startup_bench, story_movies_blocked, world_span, Counter, Owner,
 };
 
 #[cfg(target_os = "vita")]
@@ -924,6 +924,19 @@ mod vita {
             if s.recording {
                 s.pending_world.layers_drawn += 1;
             }
+        });
+    }
+    /// Equivalent to the per-draw batch/layer/geometry calls for retained VBOs.
+    pub fn record_retained_world_pass(batches: usize, static_batches: usize, triangles: usize) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.recording { return; }
+            s.pending_world.batches_drawn += batches;
+            s.pending_world.static_batches += static_batches;
+            s.pending_world.dynamic_batches += batches - static_batches;
+            s.pending_world.layers_drawn += batches;
+            s.pending_world.triangles += triangles;
+            // No retransforms or CPU vertices are submitted by this path.
         });
     }
     pub fn record_layer(triangles: usize, vertices: usize, static_batch: bool) {

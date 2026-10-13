@@ -4,7 +4,53 @@ pub mod cinema;
 mod machinery;
 pub mod machinery_render;
 pub fn check(assets: &mut crate::assets::Assets) -> Result<()> {
-    machinery::check(assets)
+    machinery::check(assets)?;
+    #[cfg(all(feature = "vita_renderer", not(target_os = "vita")))]
+    check_far_lazy(assets)?;
+    Ok(())
+}
+/// Asset-backed host parity, independent of the installed renderer switches.
+#[cfg(all(feature = "vita_renderer", not(target_os = "vita")))]
+fn check_far_lazy(assets: &mut crate::assets::Assets) -> Result<()> {
+    use anyhow::ensure;
+    let map = Bsp::parse(&assets.read("maps/gvillage.bsp")?)?;
+    let mut old = Village::load(assets, &map)?;
+    let mut new = Village::load(assets, &map)?;
+    let initial = old.snapshot();
+    let mut wa = World::from_bsp(&map)?;
+    let mut wb = World::from_bsp(&map)?;
+    let mut a = Player::new(Vec3::splat(50000.));
+    let mut b = a.clone();
+    let config = crate::vita_sim::Config { mover_far_every: 4, ..Default::default() };
+    let mut queries = 0;
+    for tick in 0..240 {
+        if tick == 60 || tick == 180 {
+            a = Player::new(old.objects.iter().find(|o| o.name == "cam_piston").context("Missing village piston")?.pose.origin + Vec3::Z*40.);
+            b = a.clone();
+        }
+        if tick == 120 {
+            old.restore(&initial, &map)?; new.restore(&initial, &map)?;
+            a = Player::new(Vec3::splat(50000.)); b = a.clone();
+        }
+        if tick == 10 || tick == 130 { old.event("openthis"); new.event("openthis"); }
+        let dt = [1./120.,0.05,0.002,0.][tick%4];
+        old.advance_mover_config(dt,&map,&mut wa,&mut a,&[],&config,true,false)?;
+        new.advance_mover_config(dt,&map,&mut wb,&mut b,&[],&config,true,true)?;
+        ensure!(serde_json::to_vec(&(&a,old.snapshot()))? == serde_json::to_vec(&(&b,new.snapshot()))?, "Village far-lazy saved state differs at tick {tick}");
+        for o in &old.objects {
+            for half in [Vec3::ZERO, PLAYER_HALF] { for delta in [Vec3::ZERO,Vec3::X*150.,Vec3::Z*150.] {
+                let left = wa.sweep(o.pose.origin+delta,o.pose.origin-delta,half);
+                let right = wb.sweep(o.pose.origin+delta,o.pose.origin-delta,half);
+                ensure!(left.fraction.to_bits() == right.fraction.to_bits()
+                    && left.normal.to_array().map(f32::to_bits) == right.normal.to_array().map(f32::to_bits)
+                    && left.start_solid == right.start_solid && left.all_solid == right.all_solid,
+                    "Village far-lazy collision differs: {} tick {tick}", o.name);
+                queries += 1;
+            } }
+        }
+    }
+    println!("PASS village far-lazy: {} movers, 240 updates, {queries} exact collision pairs, far/near/hatch/restore state parity",old.objects.len());
+    Ok(())
 }
 use crate::{
     bsp::Bsp,
@@ -447,11 +493,22 @@ impl Village {
         let lazy_publish = crate::render::vita_renderer::config().mover_lazy_publish;
         #[cfg(not(feature = "vita_renderer"))]
         let lazy_publish = false;
-        self.advance_publication_config(dt, _map, world, player, fixed, config, lazy_publish)
+        #[cfg(feature = "vita_renderer")]
+        let far_lazy = crate::render::vita_renderer::config().mover_far_lazy;
+        #[cfg(not(feature = "vita_renderer"))]
+        let far_lazy = false;
+        self.advance_mover_config(dt, _map, world, player, fixed, config, lazy_publish, far_lazy)
     }
+    #[cfg(test)]
     fn advance_publication_config(
         &mut self, dt: f32, _map: &Bsp, world: &mut World, player: &mut Player,
         fixed: &[Collider], config: &crate::vita_sim::Config, lazy_publish: bool,
+    ) -> Result<()> {
+        self.advance_mover_config(dt, _map, world, player, fixed, config, lazy_publish, false)
+    }
+    fn advance_mover_config(
+        &mut self, dt: f32, _map: &Bsp, world: &mut World, player: &mut Player,
+        fixed: &[Collider], config: &crate::vita_sim::Config, lazy_publish: bool, far_lazy: bool,
     ) -> Result<()> {
         if dt <= 0. {
             return Ok(());
@@ -531,16 +588,17 @@ impl Village {
                     o.time += step;
                     continue;
                 }
-                if config.mover_far_every > 1 {
+                let rotation = next.rotation();
+                if far_lazy || config.mover_far_every > 1 {
                     // Keep the candidate pose exact even on deferred ticks. A
                     // cold lazy collider owns this pose and builds its exact hull
                     // on ANY later query (particles, projectiles, other riders).
-                    let candidate = o.shape.at(next.origin, next.rotation());
+                    let candidate = o.shape.at(next.origin, rotation);
                     let far = o.collider.far_from_player(player.feet, 256.)
                         && candidate.far_from_player(player.feet, 256.);
                     #[cfg(target_os = "vita")]
                     { in_range += u64::from(!far); }
-                    if far && self.placement_tick.wrapping_add(i as u32) % config.mover_far_every != 0 {
+                    if far && (far_lazy || self.placement_tick.wrapping_add(i as u32) % config.mover_far_every != 0) {
                         // The old 3-unit ground probe and next body contact cannot
                         // reach either AABB across this margin, so no rider or
                         // rejected move is possible. Brush objects cannot be held
@@ -561,7 +619,7 @@ impl Village {
                 let collider = {
                     #[cfg(target_os = "vita")]
                     let _hotspot = crate::frame_profile::span("village_collider_build");
-                    o.shape.at_eager(next.origin, next.rotation())
+                    o.shape.at_eager(next.origin, rotation)
                 };
                 #[cfg(target_os = "vita")]
                 let _ground_profile = crate::frame_profile::span("village_ground_probe");
@@ -611,7 +669,7 @@ impl Village {
                 #[cfg(target_os = "vita")]
                 let _rider_profile = crate::frame_profile::span("village_rider_contact");
                 let mut carried = next.origin
-                    + next.rotation() * o.pose.rotation().inverse() * (player.feet - o.pose.origin);
+                    + rotation * o.pose.rotation().inverse() * (player.feet - o.pose.origin);
                 if solid {
                     if riding {
                         #[cfg(target_os = "vita")]

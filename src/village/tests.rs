@@ -301,3 +301,54 @@ fn lazy_publication_preserves_riders_blocking_interacting_movers_and_final_queri
     } }
     assert!(eliminated > 0 && carried > 0 && blocked > 0);
 }
+
+#[test]
+fn far_lazy_every_substep_preserves_range_entry_riders_restore_and_queries() {
+    let (mut deferred, mut carried, mut blocked) = (0, 0, 0);
+    for every in [1, 4, 120] { for scenario in 0..4 {
+        let (map, mut old) = fixture(); let (_, mut new) = fixture();
+        if scenario == 3 { for v in [&mut old, &mut new] {
+            v.objects[1].solid = true; v.objects[1].base = vec3(0.,0.,150.);
+        } }
+        let initial = old.snapshot();
+        let fixed = if scenario == 1 { vec![Collider::fixture(vec3(-100.,-100.,60.),vec3(100.,100.,80.))] } else { vec![] };
+        let config = crate::vita_sim::Config { mover_far_every: every, ..Default::default() };
+        let mut a = Player::new(Vec3::splat(5000.)); let mut b = a.clone();
+        let mut wa = World::fixture(&[]); let mut wb = World::fixture(&[]);
+        for tick in 0..240 {
+            if tick == 60 || tick == 180 {
+                let feet = if scenario == 2 { vec3(-200.,0.,80.03125) } else { vec3(0.,0.,80.03125) };
+                a = Player::new(feet); b = a.clone();
+            }
+            if tick == 120 {
+                old.restore(&initial, &map).unwrap(); new.restore(&initial, &map).unwrap();
+                a = Player::new(Vec3::splat(5000.)); b = a.clone();
+            }
+            if tick == 10 || tick == 130 { old.event("openthis"); new.event("openthis"); }
+            let dt = [1./120., 0.05, 0.002, 0.][tick%4];
+            let before = a.feet; let before_time = old.objects[0].time;
+            old.advance_mover_config(dt,&map,&mut wa,&mut a,&fixed,&config,true,false).unwrap();
+            new.advance_mover_config(dt,&map,&mut wb,&mut b,&fixed,&config,true,true).unwrap();
+            carried += usize::from(a.feet != before);
+            blocked += usize::from(dt > 0. && old.objects[0].time == before_time && tick >= 60);
+            if dt > 0. && (tick < 60 || (120..180).contains(&tick)) {
+                assert!(new.objects[0].collider.placement_pending(), "every={every} tick={tick}");
+                deferred += 1;
+            }
+            assert_eq!(crate::save::simulation_save_bytes(&a,old.snapshot()),crate::save::simulation_save_bytes(&b,new.snapshot()));
+            // Projectile/particle and body queries force exact CURRENT hulls.
+            for center in [a.feet+PLAYER_CENTER,vec3(0.,300.,100.),vec3(1000.,500.,100.)] {
+                for half in [Vec3::ZERO, PLAYER_HALF] { for delta in [Vec3::ZERO, Vec3::Z*150., Vec3::X*150.] {
+                    assert_eq!(trace_bits(wa.sweep(center+delta,center-delta,half)),trace_bits(wb.sweep(center+delta,center-delta,half)));
+                } }
+            }
+            for (left,right) in old.colliders().zip(new.colliders()) {
+                // Lazy placement uses a conservative transformed template AABB;
+                // eager placement unions exact hull AABBs. Those broad-phase
+                // envelopes may differ. All materialized hulls/planes are exact.
+                assert_eq!(left.geometry_bits()[7..],right.geometry_bits()[7..]);
+            }
+        }
+    } }
+    assert!(deferred > 0 && carried > 0 && blocked > 0);
+}
