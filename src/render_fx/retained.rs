@@ -375,7 +375,8 @@ impl Gpu {
             .map_or(white, Texture2D::raw_miniquad_id);
         let ring = crate::render::vita_renderer::config().fx_streaming == "ring";
         let slot = if ring {
-            slot * 6 + (self.ring_frame % 3) * 2 + self.ring_phase
+            ring_slot(slot, self.ring_frame, self.ring_phase,
+                crate::render::vita_renderer::config().fx_ring_safe)
         } else {
             slot
         };
@@ -520,6 +521,26 @@ impl Gpu {
         metrics.uniform_bytes += traffic.bytes;
         metrics.uniform_gl_calls += traffic.calls;
         if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
+    }
+}
+fn ring_slot(slot: usize, frame: usize, phase: usize, safe: bool) -> usize {
+    let depth = if safe {5} else {3};
+    slot * depth * 2 + (frame % depth) * 2 + phase
+}
+#[cfg(test)]
+#[test]
+fn ring_reuse_exceeds_driver_busy_window_and_separates_finish_phases() {
+    for safe in [false,true] {
+        let depth=if safe {5} else {3};
+        let mut last=std::collections::BTreeMap::new();
+        for frame in 0..30 {
+            for slot in 0..20 {for phase in 0..2 {
+                let id=ring_slot(slot,frame,phase,safe);
+                if let Some(old)=last.insert(id,frame) {assert_eq!(frame-old,depth);}
+                assert_eq!(id/(2*depth),slot);
+                assert_eq!(id%2,phase);
+            }}
+        }
     }
 }
 impl Drop for Gpu {

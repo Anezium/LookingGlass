@@ -71,6 +71,8 @@ pub struct Config {
     pub merge_fx: bool,
     pub fx_batching:String,
     pub fx_streaming:String,
+    /// Five slots exceed the pinned driver four-frame in-flight window.
+    pub fx_ring_safe: bool,
     pub fx_merge_cache:bool,
     pub fx_upload_cache:bool,
     pub fx_max_layers:usize,
@@ -147,6 +149,7 @@ impl Default for Config {
             actor_max_layers: 2,
             merge_fx: true,
             fx_batching:"adjacent".into(),fx_streaming:"orphan".into(),fx_merge_cache:true,fx_upload_cache:false,fx_max_layers:2,actor_fast_path:true,
+            fx_ring_safe: true,
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:false,
             bone_palette: false,
             skin_frustum_cull: true,
