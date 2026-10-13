@@ -505,6 +505,7 @@ impl Gpu {
             traffic = self.field_uniforms.apply(ctx, u, c.uniform_field_cache);
             self.stats.uniform_bytes += traffic.bytes;
         }
+        if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
         ctx.draw(0, p.geometry().indices.len() as i32, 1);
         self.stats.draws += 1;
         self.stats.triangles += p.geometry().indices.len() as u64 / 3;
@@ -1090,6 +1091,7 @@ pub(crate) fn finish_world(
                 ["vita_world_alpha_state_bindings", "vita_world_alpha_uniforms", "vita_world_alpha_draws"]);
         }
     }
+    crate::render::vita_renderer::finish_depth_sentinel(flush);
     unsafe {
         macroquad::miniquad::gl::glDepthMask(1);
         get_internal_gl().quad_context.end_render_pass();

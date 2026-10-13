@@ -22,12 +22,13 @@ struct Plane {
     uniforms: shader::Uniforms,
 }
 impl Plane {
-    fn new(camera: &Camera3D) -> Result<Self> {
+    fn new(camera: &Camera3D) -> Result<Self> { Self::with_opaque(camera, false) }
+    fn with_opaque(camera: &Camera3D, opaque: bool) -> Result<Self> {
         let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
         let recipe = Recipe {
             stage: Stage {
-                blend: Blend::Alpha,
-                constant_rgb: Some(Vec3::Y),
+                blend: if opaque { Blend::Opaque } else { Blend::Alpha },
+                constant_rgb: Some(if opaque { Vec3::X } else { Vec3::Y }),
                 vertex_alpha: true,
                 ..Default::default()
             },
@@ -46,7 +47,7 @@ impl Plane {
                 WorldVertex {
                     position,
                     uv: [0.5; 2],
-                    color: [0, 255, 0, 127],
+                    color: if opaque { [255, 0, 0, 255] } else { [0, 255, 0, 127] },
                     lightmap: [0.; 4],
                     normal: [0., 0., 1.],
                 }
@@ -76,7 +77,7 @@ impl Plane {
                 VertexAttribute::new("normal", VertexFormat::Float3),
             ],
             shader,
-            crate::render::depth_pipeline(crate::render::blend(1)),
+            crate::render::depth_pipeline(crate::render::blend(if opaque { 0 } else { 1 })),
         );
         let bindings = Bindings {
             vertex_buffers: vec![ctx.new_buffer(
@@ -450,11 +451,41 @@ pub async fn check() -> Result<()> {
 
 /// Exercise scaled depth, transparent interop, opaque upscale and native HUD.
 pub async fn scale_check()->Result<()> {
-    ensure!(config().render_scale<1.,"scale fixture requires render_scale below 1");
     let camera=Camera3D{position:Vec3::Z*10.,target:Vec3::ZERO,up:Vec3::Y,projection:Projection::Orthographics,fovy:4.,z_near:0.1,z_far:50.,..Default::default()};
     let mut gpu=render_fx::retained::Gpu::new()?;
     crate::lighting::fixture_lights(vec![]);
     let red=crate::texture::upload_rgba8(1,1,&[255,0,0,255]);
+    let world = Plane::with_opaque(&camera, true)?;
+    if config().depth_sentinel {
+        clear_background(BLACK); prepare_3d(BLACK); set_3d_camera(&camera);
+        render_fx::retained::begin_view(&camera,0.,&Default::default(),true,true);
+        begin_3d_pass(PassAction::Nothing); world.draw(); end_world_pass();
+        // Negative control: deliberately destroy depth after the opaque sentinel.
+        begin_3d_pass(PassAction::Clear { color: None, depth: Some(1.), stencil: None });
+        render_fx::retained::finish(&mut gpu,&[],true,|_|unreachable!());
+        ensure!(depth_sentinel::last_pass() == Some(false), "sentinel missed deliberate depth loss");
+        next_frame().await;
+        println!("PASS colour sentinel detects deliberate depth loss");
+    }
+    for frame in 0..120 {
+        clear_background(BLACK); prepare_3d(BLACK); set_3d_camera(&camera);
+        render_fx::retained::begin_view(&camera,0.,&Default::default(),true,true);
+        begin_3d_pass(PassAction::Nothing);
+        unsafe { macroquad::miniquad::gl::glDepthMask(1); }
+        world.draw();
+        end_world_pass(); // Exactly the production retained world-to-FX exit.
+        render_fx::effect(&quad(-1., BLUE), Blend::Add);
+        render_fx::effect(&quad(1., Color::new(0.,1.,0.,0.5)), Blend::Alpha);
+        render_fx::retained::finish(&mut gpu,&[],true,|_|unreachable!());
+        if config().depth_sentinel {
+            ensure!(depth_sentinel::last_pass() == Some(true), "colour sentinel failed at frame {frame}");
+        }
+        present_3d();
+        check_color(vec3(0.5,0.5,0.), "separate opaque world hides rear additive FX, front alpha survives")?;
+        next_frame().await;
+    }
+    println!("PASS separate retained world-to-FX depth boundary: 120 frames scale={} fix={} sentinel={}",
+        config().render_scale, config().scaled_depth_fix, config().depth_sentinel);
     for frame in 0..120 {
         crate::frame_profile::begin_creation_frame();
         clear_background(BLACK);prepare_3d(BLACK);set_3d_camera(&camera);
