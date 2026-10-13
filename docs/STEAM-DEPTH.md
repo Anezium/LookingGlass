@@ -11,8 +11,11 @@ References to dependencies below use Miniquad `6f89180`, Macroquad 0.4.14 and
 vitaGL `2bdbe89`. The packaged SDK archive/header identities match J15. Driver
 source is inspected locally; it is not copied or linked into this change.
 
-1. Macroquad starts the frame on the native target and clears it. The viewer's
-   `prepare_3d` (`src/viewer.rs:3278`) then clears depth to one on the scaled
+1. Macroquad starts the frame on the native target and clears colour
+   (`macroquad/src/lib.rs:398-406`). The viewer explicitly calls
+   `clear_background` (`src/viewer.rs:3276`), clearing native colour/depth through
+   Macroquad's clear-colour pass action. Both precede opaque world submission.
+   The viewer's `prepare_3d` (`src/viewer.rs:3278`) then clears depth to one on the scaled
    720x408 target at scale 0.75, including colour, or clears just depth on the
    native target at scale 1.0. `scale.rs:129-143` forces the write mask before
    clear. Target allocation is once per size; desktop explicitly attaches
@@ -22,9 +25,9 @@ source is inspected locally; it is not copied or linked into this change.
    (`scale.rs:145-172`). `begin_fx_view` flushes previously queued geometry before
    direct world draws (`render_fx/retained.rs:31-37,54-55`). That is a Macroquad
    batch flush, not GL `glFlush` or `glFinish`. Camera portals are prepared before
-   this boundary (`viewer.rs:3374`); their renders/readbacks precede the world.
+   this boundary (`viewer.rs:3372`); their renders/readbacks precede the world.
 3. Retained world `begin_3d_pass(Nothing)` rebinds the selected target, viewport
-   and scissor, then draws sky and opaque groups (`vita_renderer.rs:1047` onward).
+   and scissor, then draws sky and opaque groups (`vita_renderer.rs:1046` onward).
    Sky disables depth testing; opaque groups apply LEQUAL/test on/mask one.
    Neither Nothing nor a texture/buffer bind clears depth.
 4. The candidate boundary is `vita_renderer.rs:1202` -> `end_world_pass` at
@@ -103,3 +106,16 @@ preservation remain unmeasured. Expected fix cost: approximately 0 ms (one fewer
 FBO/buffer unbind sequence), with no numerical Vita timing claim. Sentinel cost
 is four small transparent draws plus the opaque panel and synchronous readback;
 its GPU stall time is unknown. Console comparisons follow the other sessions.
+
+## Local validation result
+
+822 unit tests passed, 2 existing tests ignored. Six native GPU processes passed:
+scale 0.75 fix off/on with sentinel off/on, and scale 1.0 fix off with sentinel
+off/on. Each checked 120 separate world-to-FX frames plus the existing 120-frame
+actor/upscale/HUD fixture. The three sentinel variants detected deliberate depth
+loss, then passed all 120 ordinary frames with zero read/query errors. The four
+scaled final captures were byte-identical. The marker uses host target dimensions
+(900x510 here); the Vita target remains 720x408. Two GL ownership compile-fail
+checks and changed-source/pin audits passed. The whole-tree source audit's existing
+whitelist rejects `.cargo/config.toml` and `configs/*.json`; none was changed.
+An ambient `docs/RCHESS1.md` difference was left untouched and excluded.
