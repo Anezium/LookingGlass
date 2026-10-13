@@ -88,7 +88,7 @@ pub(crate) fn load_material(shader: macroquad::miniquad::ShaderSource<'_>, param
     result
 }
 
-#[cfg(any(target_os = "vita", test))]
+#[cfg_attr(not(target_os = "vita"), allow(dead_code))]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub enum Mode {
     #[default]
@@ -103,12 +103,12 @@ pub enum Mode {
     Route,
     RouteContinue,
 }
-#[cfg(any(target_os = "vita", test))]
 impl Mode {
     #[cfg(target_os = "vita")]
     fn read() -> Self {
         Self::parse(&std::fs::read_to_string("ux0:data/alice/private/profile_mode").unwrap_or_default())
     }
+    #[cfg(any(target_os = "vita", test))]
     fn parse(value: &str) -> Self {
         match value.trim() {
             "nopreview" => Self::NoPreview,
@@ -123,6 +123,7 @@ impl Mode {
             _ => Self::Full,
         }
     }
+    #[cfg(any(target_os = "vita", test))]
     pub fn name(self) -> &'static str {
         match self {
             Self::Full => "full",
@@ -140,25 +141,26 @@ impl Mode {
     pub fn is_bench(self) -> bool {
         matches!(self, Self::Bench | Self::RenderBench | Self::FullBench)
     }
+    #[cfg(any(target_os = "vita", test))]
     pub fn warmup_frames(self) -> usize {
         if matches!(self, Self::RenderBench | Self::FullBench) { 60 } else { 0 }
     }
     pub fn throttle_preview(self) -> bool {
         self != Self::Full
     }
+    #[cfg(any(target_os = "vita", test))]
     pub fn skip_static_prep(self) -> bool {
         self == Self::NoPrep
     }
+    #[cfg(any(target_os = "vita", test))]
     pub fn no_world(self) -> bool {
         matches!(self, Self::NoWorld | Self::Bench)
     }
 }
 // Advance once per viewer frame, independently of wall-clock duration.
-#[cfg(any(target_os = "vita", test))]
 pub struct PreviewThrottle {
     frames_since_capture: u32,
 }
-#[cfg(any(target_os = "vita", test))]
 impl Default for PreviewThrottle {
     fn default() -> Self {
         Self {
@@ -166,13 +168,18 @@ impl Default for PreviewThrottle {
         }
     }
 }
-#[cfg(any(target_os = "vita", test))]
 impl PreviewThrottle {
     pub fn advance_frame(&mut self) {
         self.frames_since_capture = (self.frames_since_capture + 1).min(120);
     }
+    #[cfg(test)]
     pub fn capture(&mut self, mode: Mode) -> bool {
-        if mode.is_bench() || matches!(mode,Mode::Route|Mode::RouteContinue) || (mode.throttle_preview() && self.frames_since_capture < 120) {
+        self.capture_requested(mode, false, false)
+    }
+    pub fn capture_requested(&mut self, mode: Mode, throttled: bool, required: bool) -> bool {
+        let throttle = mode.throttle_preview() || throttled;
+        let force = mode == Mode::Full && required;
+        if mode.is_bench() || matches!(mode,Mode::Route|Mode::RouteContinue) || (throttle && !force && self.frames_since_capture < 120) {
             return false;
         }
         self.frames_since_capture = 0;
@@ -211,6 +218,71 @@ fn enabled() -> bool {
 pub(crate) fn heap_used_bytes()->Option<u64> {
     #[cfg(target_os="vita")] {Some(vita::heap_used())}
     #[cfg(not(target_os="vita"))] {None}
+}
+
+/// A few accumulated leaf durations, published once under the enclosing span.
+/// Accumulation needs no stack entry, map update or per-draw span.
+#[cfg(feature = "vita_renderer")]
+pub(crate) struct Totals<const N: usize> { values: [f64; N], active: bool }
+#[cfg(feature = "vita_renderer")]
+impl<const N: usize> Totals<N> {
+    pub(crate) fn new() -> Self { Self { values: [0.; N], active: enabled() } }
+    pub(crate) fn start(&self) -> Option<Instant> { self.active.then(Instant::now) }
+    pub(crate) fn add(&mut self, index: usize, start: Option<Instant>) {
+        if let Some(start) = start { self.values[index] += start.elapsed().as_secs_f64() * 1000.; }
+    }
+    pub(crate) fn publish_under(&self, label: &'static str, total: f64, labels: [&'static str; N]) {
+        if !self.active { return; }
+        #[cfg(target_os = "vita")]
+        vita::aggregate_group(label, total, &labels, &self.values);
+        #[cfg(not(target_os = "vita"))]
+        { aggregate_leaves(&[label], &[total]); aggregate_leaves(&labels, &self.values); }
+    }
+    pub(crate) fn elapsed(start: Option<Instant>) -> f64 { start.map_or(0., |s| s.elapsed().as_secs_f64() * 1000.) }
+    pub(crate) fn publish(&self, labels: [&'static str; N]) {
+        if self.active { aggregate_leaves(&labels, &self.values); }
+    }
+}
+fn aggregate_leaves(labels: &[&'static str], values: &[f64]) {
+    #[cfg(target_os = "vita")]
+    vita::aggregate_leaves(labels, values);
+    #[cfg(not(target_os = "vita"))]
+    SAMPLES.with(|s| {
+        let mut s = s.borrow_mut();
+        for (&label, &value) in labels.iter().zip(values) {
+            let v = s.entry(label).or_default();
+            if v.len() < 10000 { v.push(value); }
+        }
+    });
+}
+#[derive(Clone, Copy)]
+pub(crate) enum ObjectWork { MeshLayers, Sampling, EventLookup, Packets }
+thread_local! { static OBJECT_TOTALS: RefCell<Option<[f64; 4]>> = const { RefCell::new(None) }; }
+pub(crate) struct ObjectTotals;
+pub(crate) fn object_totals() -> ObjectTotals {
+    OBJECT_TOTALS.with(|v| *v.borrow_mut() = enabled().then_some([0.; 4]));
+    ObjectTotals
+}
+impl Drop for ObjectTotals {
+    fn drop(&mut self) {
+        if let Some(mut values) = OBJECT_TOTALS.with(|v| v.borrow_mut().take()) {
+            // Event lookup is measured inside sampling; expose disjoint leaves.
+            values[1] = (values[1] - values[2]).max(0.);
+            aggregate_leaves(&["objects_mesh_layers", "objects_effect_sampling", "objects_event_lookup", "objects_particle_packets"], &values);
+        }
+    }
+}
+pub(crate) struct ObjectTimer { work: ObjectWork, start: Option<Instant> }
+pub(crate) fn object_timer(work: ObjectWork) -> ObjectTimer {
+    ObjectTimer { work, start: OBJECT_TOTALS.with(|v| v.borrow().is_some().then(Instant::now)) }
+}
+impl Drop for ObjectTimer {
+    fn drop(&mut self) {
+        if let Some(start) = self.start {
+            let ms = start.elapsed().as_secs_f64() * 1000.;
+            OBJECT_TOTALS.with(|v| { if let Some(values) = v.borrow_mut().as_mut() { values[self.work as usize] += ms; } });
+        }
+    }
 }
 
 pub struct Span {
@@ -734,6 +806,23 @@ mod vita {
             }
         });
     }
+    pub(super) fn aggregate_group(label: &'static str, total: f64, labels: &[&'static str], values: &[f64]) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.recording { return; }
+            if let Some(parent) = s.stack.last_mut() { parent.2 += total; }
+            s.pending.push((label, total, total - values.iter().sum::<f64>()));
+            for (&label, &ms) in labels.iter().zip(values) { s.pending.push((label, ms, ms)); }
+        });
+    }
+    pub(super) fn aggregate_leaves(labels: &[&'static str], values: &[f64]) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.recording { return; }
+            if let Some(parent) = s.stack.last_mut() { parent.2 += values.iter().sum::<f64>(); }
+            for (&label, &ms) in labels.iter().zip(values) { s.pending.push((label, ms, ms)); }
+        });
+    }
     // Call once after local integer loops. No per-plan or per-triplet timing.
     pub fn counts(values: &[(&'static str, u64)]) {
         if !HOT_RECORDING.load(Relaxed) { return; }
@@ -1041,6 +1130,23 @@ mod vita {
 #[cfg(test)]
 mod bench_policy_tests {
     use super::*;
+    #[test]
+    fn normal_preview_throttle_forces_save_and_menu_without_changing_diagnostics() {
+        let mut throttle = PreviewThrottle::default();
+        let mut captures = Vec::new();
+        for frame in 0..361 {
+            throttle.advance_frame();
+            if throttle.capture_requested(Mode::Full, true, matches!(frame, 17 | 35)) { captures.push(frame); }
+        }
+        assert_eq!(captures, [0, 17, 35, 155, 275]);
+        for mode in [Mode::Bench, Mode::RenderBench, Mode::FullBench, Mode::Route, Mode::RouteContinue] {
+            assert!(!PreviewThrottle::default().capture_requested(mode, true, true));
+        }
+        for mode in [Mode::NoPreview, Mode::NoPrep, Mode::NoWorld, Mode::Clk444] {
+            let mut a = PreviewThrottle::default(); let mut b = PreviewThrottle::default();
+            for _ in 0..361 { a.advance_frame(); b.advance_frame(); assert_eq!(a.capture(mode), b.capture_requested(mode, true, true)); }
+        }
+    }
     #[test]
     fn benchmark_modes_parse_and_keep_world_visible() {
         for (name, mode) in [("renderbench", Mode::RenderBench), ("fullbench", Mode::FullBench)] {

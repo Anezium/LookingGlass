@@ -721,11 +721,18 @@ fn merge_adjacent(groups: &mut [super::Group], list: &mut Vec<(f32, Source)>) {
     }
     list.truncate(kept);
 }
+#[cfg(not(target_os = "vita"))]
 pub(crate) fn finish(
     gpu: &mut Gpu,
     world: &[(f32, usize)],
     flush: bool,
     mut draw_world: impl FnMut(usize),
+) -> (usize, usize) {
+    finish_world(gpu, world, flush, &mut draw_world, None)
+}
+pub(crate) fn finish_world(
+    gpu: &mut Gpu, world: &[(f32, usize)], flush: bool, mut draw_world: impl FnMut(usize),
+    world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
 ) -> (usize, usize) {
     let _span = crate::frame_profile::span("vita_3d_finish");
     if flush {
@@ -862,11 +869,21 @@ pub(crate) fn finish(
     }
     {
         let _span = crate::frame_profile::span("vita_joint_alpha_submit");
+        let mut world_ms = 0.;
         for (_, source) in &list {
             match *source {
-                Source::World(id) => { gpu.uniform_cache.interrupt(); draw_world(id); },
+                Source::World(id) => {
+                    gpu.uniform_cache.interrupt();
+                    let start = world_totals.and_then(|t| t.borrow().start());
+                    draw_world(id);
+                    world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
+                },
                 Source::Actor(id) => draw_group(gpu, id),
             }
+        }
+        if let Some(totals) = world_totals {
+            totals.borrow().publish_under("vita_world_alpha_submit", world_ms,
+                ["vita_world_alpha_state_bindings", "vita_world_alpha_uniforms", "vita_world_alpha_draws"]);
         }
     }
     unsafe {

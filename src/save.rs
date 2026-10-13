@@ -467,8 +467,11 @@ impl Store {
         )
     }
     pub fn write_finale_checkpoint(&self, game: &Game) -> Result<()> {
-        self.finale_store().write(Slot::Auto, game)?;
-        self.write(Slot::Auto, game)
+        self.write_finale_checkpoint_with_preview(game, None)
+    }
+    pub fn write_finale_checkpoint_with_preview(&self, game: &Game, preview: Option<&crate::save_preview::Preview>) -> Result<()> {
+        self.finale_store().write_with_preview(Slot::Auto, game, preview)?;
+        self.write_with_preview(Slot::Auto, game, preview)
     }
     pub fn mark_complete(&self) -> Result<()> {
         std::fs::create_dir_all(&self.directory)?;
@@ -879,6 +882,34 @@ mod format12;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn throttled_capture_for_save_persists_the_latest_decodable_menu_thumbnail() {
+        let scratch = format12::Scratch::new("throttled-preview");
+        let store = scratch.store();
+        let game = format12::game(vec![format12::level("gvillage", None, serde_json::Value::Null)]);
+        let mut throttle = crate::frame_profile::PreviewThrottle::default();
+        let mut preview = None;
+        for frame in 0..38 {
+            throttle.advance_frame();
+            let required = frame == 37; // save/menu between periodic captures
+            if throttle.capture_requested(crate::frame_profile::Mode::Full, true, required) {
+                preview = Some(crate::save_preview::Preview::fixture(if required { macroquad::prelude::Color::new(1., 0., 0., 1.) } else { macroquad::prelude::Color::new(0., 0., 1., 1.) }));
+            }
+            if required {
+                store.write_with_preview(Slot::Quick, &game, preview.as_ref()).unwrap();
+                store.write_with_preview(Slot::One, &game, preview.as_ref()).unwrap();
+                store.write_finale_checkpoint_with_preview(&game, preview.as_ref()).unwrap();
+            }
+        }
+        assert!(store.finale_store().read(Slot::Auto).unwrap().preview.is_some());
+        for slot in [Slot::Quick, Slot::One, Slot::Auto] {
+            let loaded = store.read(slot).unwrap();
+            let menu_image = loaded.preview.unwrap().image().unwrap();
+            assert_eq!(menu_image.dimensions(), (320, 240));
+            assert!(menu_image.get_pixel(160, 120)[0] > 240);
+            assert!(menu_image.get_pixel(160, 120)[2] < 10);
+        }
+    }
     #[test]
     fn bench_auto_reads_only_the_reference_without_modifying_it_or_falling_back() {
         let scratch = format12::Scratch::new("bench-auto");

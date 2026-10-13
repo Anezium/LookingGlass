@@ -27,6 +27,10 @@ pub struct Config {
     pub renderer: String,
     /// Vita startup policy; stock preserves the clocks inherited from the system.
     pub clocks: Clocks,
+    /// Clean thumbnails during play; diagnostic modes retain their own policy.
+    pub save_preview: String,
+    pub mover_lazy_publish: bool,
+    pub pickup_fx_cache: bool,
     #[serde(alias = "renderer_world_only")]
     pub world_only: bool,
     pub max_layers: usize,
@@ -86,6 +90,9 @@ impl Default for Config {
         Self {
             renderer: "vita".into(),
             clocks: Clocks::Max,
+            save_preview: "throttled".into(),
+            mover_lazy_publish: true,
+            pickup_fx_cache: true,
             world_only: false,
             max_layers: 2,
             sort_alpha: true,
@@ -134,6 +141,7 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
+        ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
         ensure!(self.max_texture_dimension.is_none_or(|n| (16..=512).contains(&n)), "max_texture_dimension must be null or 16..512");
         ensure!(self.draw_distance_cap.is_none_or(|n| n.is_finite() && (128. ..=30000.).contains(&n)), "draw_distance_cap must be null or 128..30000");
         ensure!(
@@ -1008,6 +1016,7 @@ impl Renderer {
         };
         if !alpha && config().sky {
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
+            let mut totals = crate::frame_profile::Totals::<3>::new();
             let bg = scene.atmosphere.background();
             let sky = [
                 [bg.r, bg.g, bg.b, 1.],
@@ -1015,10 +1024,17 @@ impl Renderer {
             ];
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
+            let start = totals.start();
             ctx.apply_pipeline(&self.sky_pipeline);
             ctx.apply_bindings(&self.sky_bindings);
+            totals.add(0, start);
+            let start = totals.start();
             ctx.apply_uniforms(UniformsSource::table(&sky));
+            totals.add(1, start);
+            let start = totals.start();
             ctx.draw(0, 3, 1);
+            totals.add(2, start);
+            totals.publish(["vita_world_sky_state_bindings", "vita_world_sky_uniforms", "vita_world_sky_draws_time"]);
             count("vita_world_gpu_draws", 1);
             count("vita_world_sky_draws", 1);
         }
@@ -1028,6 +1044,7 @@ impl Renderer {
         let mut previous_pipeline = None;
         let mut previous_texture = None;
         let submit_span = crate::frame_profile::span("vita_world_submit");
+        let mut totals = crate::frame_profile::Totals::<3>::new();
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
@@ -1036,13 +1053,19 @@ impl Renderer {
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
             let low=!alpha && g.recipe.stage.alpha_test==0 && !self.low_pipelines.is_empty();
+            let start = totals.start();
             ctx.apply_pipeline(if low {&self.low_pipelines[g.recipe.cull]}else{&self.pipelines[pi]});
             unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});}
             scale::log_depth(!alpha);
             if low {count("vita_world_low_draws",1);}
             ctx.apply_bindings(&g.bindings);
+            totals.add(0, start);
+            let start = totals.start();
             ctx.apply_uniforms(UniformsSource::table(&prepared.uniforms));
+            totals.add(1, start);
+            let start = totals.start();
             ctx.draw(0, g.indices, 1);
+            totals.add(2, start);
             if previous_pipeline != Some(pi) {
                 count("vita_world_pipeline_changes", 1);
                 previous_pipeline = Some(pi);
@@ -1081,6 +1104,11 @@ impl Renderer {
                 );
             }
         }
+        totals.publish(if alpha {
+            ["vita_world_alpha_state_bindings", "vita_world_alpha_uniforms", "vita_world_alpha_draws"]
+        } else {
+            ["vita_world_state_bindings", "vita_world_uniforms", "vita_world_draws"]
+        });
         drop(submit_span);
         count("vita_world_culled_groups", stats.culled as u64);
         unsafe {
@@ -1105,18 +1133,25 @@ impl Renderer {
             .enumerate()
             .map(|(id, p)| (p.depth, id))
             .collect::<Vec<_>>();
-        let result = crate::render_fx::retained::finish(&mut gpu, &world, interop_flush, |id| {
-            let _span = crate::frame_profile::span("vita_world_alpha_submit");
+        let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::new());
+        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id| {
+            let mut totals = totals.borrow_mut();
             let p = &self.prepared[id];
             let g = &mut self.groups[p.group];
             g.bindings.images[0] = p.texture;
             let ctx = unsafe { get_internal_gl() }.quad_context;
+            let start = totals.start();
             ctx.apply_pipeline(&self.pipelines[g.recipe.blend * 3 + g.recipe.cull]);
             unsafe{macroquad::miniquad::gl::glDepthMask(0);}
             scale::log_depth(false);
             ctx.apply_bindings(&g.bindings);
+            totals.add(0, start);
+            let start = totals.start();
             ctx.apply_uniforms(UniformsSource::table(&p.uniforms));
+            totals.add(1, start);
+            let start = totals.start();
             ctx.draw(0, g.indices, 1);
+            totals.add(2, start);
             count("vita_world_gpu_draws", 1);
             count("vita_world_alpha_triangles", g.indices as u64 / 3);
             count(
@@ -1138,7 +1173,7 @@ impl Renderer {
                     g.recipe.model.is_none(),
                 );
             }
-        });
+        }, Some(&totals));
         self.prepared.clear();
         self.fx_gpu = Some(gpu);
         result
@@ -1447,6 +1482,19 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn j10_switches_default_on_and_validate_legacy_settings() {
+        let defaults: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.save_preview, "throttled");
+        assert!(defaults.mover_lazy_publish && defaults.pickup_fx_cache);
+        let legacy: Config = serde_json::from_str(r#"{"save_preview":"every_frame","mover_lazy_publish":false,"pickup_fx_cache":false}"#).unwrap();
+        assert!(legacy.validate().is_ok());
+        assert!(!legacy.mover_lazy_publish && !legacy.pickup_fx_cache);
+        for json in [r#"{"pickup_fx_cache":"on"}"#, r#"{"mover_lazy_publish":1}"#, r#"{"save_preview":true}"#, r#"{"unexpected_j10_switch":true}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+        assert!(Config { save_preview: "off".into(), ..Default::default() }.validate().is_err());
+    }
     #[test]
     fn affine_and_turbulence_match_original_stage_order() {
         let stage = Stage {

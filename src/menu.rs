@@ -852,6 +852,16 @@ impl Menu {
             self.save_previews[2].is_none() && self.save_previews[3].is_none(),
             "Legacy/damaged image did not fall back"
         );
+        // Exercise the exact thumbnail drawing function with persisted images,
+        // independently of shutters/layout art which could hide a missing image.
+        for index in [0, 1] {
+            clear_background(Color::new(0., 1., 0., 1.));
+            self.save_preview(Canvas::new(screen_width(), screen_height()), index, Rect::new(0., 0., 640., 480.));
+            let image = get_screen_data();
+            let covered = image.bytes.chunks_exact(4).filter(|p| p[0] != 0 || p[1] != 255 || p[2] != 0).count();
+            ensure!(covered > image.width as usize * image.height as usize / 2, "Stored thumbnail was not drawn by the menu");
+            next_frame().await;
+        }
         for index in [0, 1, 2] {
             self.save_selected = index;
             self.selected = index;

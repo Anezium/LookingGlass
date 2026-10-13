@@ -28,6 +28,10 @@ impl Preview {
         ensure!(jpeg.len() <= MAX_BYTES, "Preview is too large");
         Ok(Self { jpeg })
     }
+    #[cfg(test)]
+    pub(crate) fn fixture(color: Color) -> Self {
+        Self::encode(Image::gen_image_color(32, 24, color)).unwrap()
+    }
     pub fn from_value(value: serde_json::Value) -> Option<Self> {
         serde_json::from_value::<Self>(value)
             .ok()
@@ -112,6 +116,7 @@ pub async fn check(assets: &mut crate::assets::Assets) -> Result<()> {
     let fingerprint = assets.fingerprint()?;
     let store = Store::new(root.into(), fingerprint.clone());
     let mut frame = Frame::default();
+    let mut throttle = crate::frame_profile::PreviewThrottle::default();
     let mut previews = Vec::new();
     for (index, turn) in [0_f32, 1.2].into_iter().enumerate() {
         clear_background(BLACK);
@@ -129,6 +134,8 @@ pub async fn check(assets: &mut crate::assets::Assets) -> Result<()> {
         crate::render::depth_read_only(|| {
             scene.draw(player.eye(), 0., false, true, &interactions.transforms())
         });
+        throttle.advance_frame();
+        ensure!(throttle.capture_requested(crate::frame_profile::Mode::Full, true, true), "Save/menu request did not force a preview");
         frame.update();
         let preview = frame.preview().context("No clean frame captured")?;
         set_default_camera();
@@ -143,6 +150,8 @@ pub async fn check(assets: &mut crate::assets::Assets) -> Result<()> {
             .save(format!("private/save-preview-view-{index}.png"))?;
         previews.push(preview);
         next_frame().await;
+        throttle.advance_frame();
+        ensure!(!throttle.capture_requested(crate::frame_profile::Mode::Full, true, false), "Normal play captured again too soon");
     }
     ensure!(
         previews[0].jpeg != previews[1].jpeg,
@@ -206,6 +215,7 @@ pub async fn check(assets: &mut crate::assets::Assets) -> Result<()> {
     Ok(())
 }
 impl Frame {
+    pub fn has_frame(&self) -> bool { self.texture.is_some() }
     pub fn clear(&mut self) {
         self.texture = None;
     }

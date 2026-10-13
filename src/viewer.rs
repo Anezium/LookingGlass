@@ -684,6 +684,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut played = resume.is_none();
     let mut post_game = false;
     let mut save_frame = crate::save_preview::Frame::default();
+    let mut escape_preview_ready = false;
+    let mut pending_menu_save = None;
+    let mut pending_menu_newgame = None;
     let mut scene: Scene;
     let mut level_art: LevelArt;
     let mut skip_scene: crate::cinematic::Skip;
@@ -923,7 +926,6 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         level_art.prepare(&mut assets, &scene, &interactions, true)?;
         campaign = Campaign::default();
     }
-    #[cfg(target_os = "vita")]
     let mut preview_throttle = crate::frame_profile::PreviewThrottle::default();
     #[cfg(target_os = "vita")]
     let mut bench_camera: Option<(Vec3, Vec3, bool)> = None;
@@ -1040,7 +1042,6 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Synthetic companion input does not reset the screen/idle timers.
             unsafe { sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT) };
             crate::frame_profile::begin_frame(&maps[current]);
-            preview_throttle.advance_frame();
             if profile_report_due {
                 // The next begin_frame completes the last measured wall interval.
                 // Exit before simulating or drawing an extra gameplay frame.
@@ -1084,15 +1085,22 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
         input.update(&preferences, window_focused() && !bench && !route_running);
+        preview_throttle.advance_frame();
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
         if input.disconnected {
             paused = true;
             hud.announce("Controller disconnected / reconnect or use keyboard and mouse");
         }
-        if is_quit_requested() {
-            break;
-        }
+        let pause_before_capture = paused;
+        #[cfg(feature = "vita_renderer")]
+        let throttle_normal = crate::render::vita_renderer::config().save_preview == "throttled";
+        #[cfg(not(feature = "vita_renderer"))]
+        let throttle_normal = false;
+        #[cfg(target_os = "vita")]
+        let throttle_normal = throttle_normal && crate::frame_profile::mode() == crate::frame_profile::Mode::Full;
+        let mut quit_after_frame = is_quit_requested();
+        if quit_after_frame && !throttle_normal { break; }
         if window_focused() && !console.open && !bench {
             if (is_key_pressed(KeyCode::Escape) || input.pad_pressed("Start"))
                 && !menu
@@ -1105,7 +1113,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 escape_menu.open(crate::menu::Page::Audio, &preferences, audio.settings);
             }
         }
-        if escape_menu.page.is_some() {
+        // A modal menu owns its own frames. Render one frozen clean world frame
+        // before entering it, so thumbnails never capture the menu or old play.
+        let opening_escape_menu = throttle_normal && escape_menu.page.is_some() && !escape_preview_ready;
+        if opening_escape_menu { paused = true; clock.pause(); }
+        if escape_menu.page.is_some() && (!throttle_normal || escape_preview_ready) {
+            escape_preview_ready = false;
             weapon_buttons.block();
             input.suppress();
             mouse_look.release();
@@ -1122,7 +1135,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 Action::Resume => {
                     paused = false;
                 }
-                Action::Quit => break,
+                Action::Quit => { if throttle_normal { quit_after_frame = true; } else { break; } },
                 Action::Chapters => {
                     match escape_menu
                         .choose_chapter(
@@ -1140,29 +1153,33 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             chapter_requested = Some(choice);
                             escape_menu.close();
                         }
-                        crate::menu::ChapterChoice::Quit => break,
+                        crate::menu::ChapterChoice::Quit => { if throttle_normal { quit_after_frame = true; } else { break; } },
                         crate::menu::ChapterChoice::Back => (),
                     }
                 }
                 Action::Save(slot) => {
-                    escape_menu.message = if !saves_writable {
-                        "Saving is unavailable in a staged preview".into()
-                    } else if !stats.alive() {
-                        "Retry or load a game before saving".into()
+                    if throttle_normal && saves_writable && stats.alive() {
+                        pending_menu_save = Some(slot);
                     } else {
-                        match store.write_with_preview(
-                            slot,
-                            &game_snapshot!(),
-                            save_frame.preview().as_ref(),
-                        ) {
-                            Ok(()) => {
-                                retry.remember(game_snapshot!());
-                                played = true;
-                                format!("Game saved in {}", slot.title())
+                        escape_menu.message = if !saves_writable {
+                            "Saving is unavailable in a staged preview".into()
+                        } else if !stats.alive() {
+                            "Retry or load a game before saving".into()
+                        } else {
+                            match store.write_with_preview(
+                                slot,
+                                &game_snapshot!(),
+                                save_frame.preview().as_ref(),
+                            ) {
+                                Ok(()) => {
+                                    retry.remember(game_snapshot!());
+                                    played = true;
+                                    format!("Game saved in {}", slot.title())
+                                }
+                                Err(e) => format!("Save failed: {e:#}"),
                             }
-                            Err(e) => format!("Save failed: {e:#}"),
-                        }
-                    };
+                        };
+                    }
                 }
                 Action::Load(slot) => {
                     if saves_enabled {
@@ -1182,34 +1199,40 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     }
                 }
                 Action::NewGame(difficulty) => {
-                    // Preserve the current session before a new campaign replaces it.
-                    let saved = if saves_writable && stats.alive() && !post_game {
-                        store.write_with_preview(
-                            Slot::Auto,
-                            &game_snapshot!(),
-                            save_frame.preview().as_ref(),
-                        )
-                    } else {
-                        Ok(())
-                    };
-                    if !saves_enabled {
-                        escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
-                        escape_menu.message = "New Game is unavailable in a staged preview".into();
-                    } else if let Err(e) = saved {
-                        escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
-                        escape_menu.message = format!("Could not preserve the current game: {e:#}");
-                    } else {
-                        post_game = false;
-                        escape_menu.post_game = false;
-                        new_game_requested = Some(difficulty);
+                    if throttle_normal { pending_menu_newgame = Some(difficulty); } else {
+                        // Preserve the current session before a new campaign replaces it.
+                        let saved = if saves_writable && stats.alive() && !post_game {
+                            store.write_with_preview(
+                                Slot::Auto,
+                                &game_snapshot!(),
+                                save_frame.preview().as_ref(),
+                            )
+                        } else {
+                            Ok(())
+                        };
+                        if !saves_enabled {
+                            escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
+                            escape_menu.message = "New Game is unavailable in a staged preview".into();
+                        } else if let Err(e) = saved {
+                            escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
+                            escape_menu.message = format!("Could not preserve the current game: {e:#}");
+                        } else {
+                            post_game = false;
+                            escape_menu.post_game = false;
+                            new_game_requested = Some(difficulty);
+                        }
                     }
                 }
             }
             clock.pause();
             input.suppress();
-            next_frame().await;
-            continue;
+            if pending_menu_save.is_none() && pending_menu_newgame.is_none() && !quit_after_frame {
+                next_frame().await;
+                continue;
+            }
         }
+        let freeze_capture = opening_escape_menu || pending_menu_save.is_some() || pending_menu_newgame.is_some() || quit_after_frame;
+        if freeze_capture { paused = true; clock.pause(); }
         let elapsed = get_frame_time();
         #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
         let elapsed=if let Some(r)=&mut route_session {(elapsed-r.recording_pause_seconds()).max(0.)}else{elapsed};
@@ -1284,6 +1307,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             (focused && !console_input && input.key(&preferences, KeyCode::F9, true))
                 .then_some(Slot::Quick);
         let mut autosave_requested = false;
+        let mut finale_checkpoint_requested = false;
         if toggle_console || (console.open && focused && input.ui(KeyCode::Escape)) {
             console.open = !console.open;
             menu = false;
@@ -1492,7 +1516,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         fullbright = !fullbright;
                         console.print(format!("Fullbright {fullbright}"));
                     }
-                    Ok(Command::Quit) => break,
+                    Ok(Command::Quit) => { if throttle_normal { quit_after_frame = true; } else { break; } },
                 }
             }
         }
@@ -2462,6 +2486,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             pos = player.eye();
         }
         if story_active && saves_writable && interactions.levels.iter().any(|s| s.ctl.checkpoint_requested()) {
+            if throttle_normal { finale_checkpoint_requested = true; } else {
             match store.write_finale_checkpoint(&game_snapshot!()) {
                 Ok(()) => {
                     for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
@@ -2469,6 +2494,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     hud.announce("Checkpoint saved");
                 }
                 Err(e) => { hud.announce(&format!("Checkpoint save failed: {e:#}")); }
+            }
             }
         }
         if story_active && interactions.levels.iter().any(|s| s.ctl.ending_ready()) && !post_game {
@@ -3510,14 +3536,25 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
         if saves_writable {
+            #[cfg(feature = "vita_renderer")]
+            let throttled = crate::render::vita_renderer::config().save_preview == "throttled";
+            #[cfg(not(feature = "vita_renderer"))]
+            let throttled = false;
             #[cfg(target_os = "vita")]
-            if preview_throttle.capture(crate::frame_profile::mode()) {
+            let preview_mode = crate::frame_profile::mode();
+            #[cfg(not(target_os = "vita"))]
+            let preview_mode = crate::frame_profile::Mode::Full;
+            let required = save_requested || autosave_requested || finale_checkpoint_requested
+                || pending_menu_save.is_some() || pending_menu_newgame.is_some() || opening_escape_menu
+                || (!context_before.3 && paused) || (!context_before.0 && menu)
+                || (!context_before.1 && inventory_menu) || quit_after_frame || !save_frame.has_frame();
+            if preview_throttle.capture_requested(preview_mode, throttled, required) {
                 let _profile = crate::frame_profile::span("save_preview");
                 save_frame.update();
             }
-            #[cfg(not(target_os = "vita"))]
-            save_frame.update();
         }
+        if freeze_capture { paused = pause_before_capture; clock.pause(); }
+        if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3843,6 +3880,35 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_save");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        if let Some(slot) = pending_menu_save.take() {
+            escape_menu.message = match store.write_with_preview(slot, &game_snapshot!(), save_frame.preview().as_ref()) {
+                Ok(()) => { retry.remember(game_snapshot!()); played = true; format!("Game saved in {}", slot.title()) }
+                Err(e) => format!("Save failed: {e:#}"),
+            };
+        }
+        if let Some(difficulty) = pending_menu_newgame.take() {
+            let saved = if saves_writable && stats.alive() && !post_game {
+                store.write_with_preview(Slot::Auto, &game_snapshot!(), save_frame.preview().as_ref())
+            } else { Ok(()) };
+            if !saves_enabled {
+                escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
+                escape_menu.message = "New Game is unavailable in a staged preview".into();
+            } else if let Err(e) = saved {
+                escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
+                escape_menu.message = format!("Could not preserve the current game: {e:#}");
+            } else {
+                post_game = false; escape_menu.post_game = false; new_game_requested = Some(difficulty);
+            }
+        }
+        if finale_checkpoint_requested {
+            match store.write_finale_checkpoint_with_preview(&game_snapshot!(), save_frame.preview().as_ref()) {
+                Ok(()) => {
+                    for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
+                    retry.remember(game_snapshot!()); hud.announce("Checkpoint saved");
+                }
+                Err(e) => hud.announce(&format!("Checkpoint save failed: {e:#}")),
+            }
+        }
         if save_requested || autosave_requested {
             if !saves_writable {
                 if save_requested {
@@ -3912,6 +3978,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 maps[current]
             )))?;
         }
+        if quit_after_frame { break; }
         if options.frames.is_some_and(|limit| frame >= limit) {
             #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
             println!("[lg/vita-renderer] host frame report {}",crate::render::vita_renderer::report());
