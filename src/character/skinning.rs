@@ -32,7 +32,6 @@ pub(super) fn with_palette<R>(enabled: bool, pose: &[Transform], scales: &[f32],
         draw(&p)
     })
 }
-#[cfg(test)]
 fn palette(pose: &[Transform], scales: &[f32]) -> Vec<(Mat3, Vec3)> {
     let mut p = Vec::new();
     fill_palette(&mut p, pose, scales);
@@ -72,25 +71,28 @@ pub(super) fn outside_skin_bounds(cull: bool, bounds: &[(Vec3, Vec3)],
 }
 
 /// Rebuild normals before any later shell, environment UV or dot-alpha layer.
-pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
+fn shade_arrays(vertices: &mut [Vertex], indices: &[u16], flat: bool, fullbright: bool, alpha: f32) {
     if flat {
         let light = if fullbright { 255 } else { 217 };
-        for v in &mut mesh.vertices {
+        for v in &mut *vertices {
             v.normal = Vec4::ZERO;
             v.color = [light, light, light, (alpha.clamp(0., 1.) * 255.) as u8];
         }
         return;
     }
-    let normals_profile = crate::frame_profile::characters_span("characters_skinning_normals");
-    for tri in mesh.indices.chunks_exact(3) {
+    normals(vertices, indices);
+    colors(vertices, fullbright, alpha);
+}
+fn normals(vertices: &mut [Vertex], indices: &[u16]) {
+    for tri in indices.chunks_exact(3) {
         let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
-        let n = (mesh.vertices[b].position - mesh.vertices[a].position)
-            .cross(mesh.vertices[c].position - mesh.vertices[a].position);
-        for i in [a, b, c] { mesh.vertices[i].normal += n.extend(0.); }
+        let n = (vertices[b].position - vertices[a].position)
+            .cross(vertices[c].position - vertices[a].position);
+        for i in [a, b, c] { vertices[i].normal += n.extend(0.); }
     }
-    drop(normals_profile);
-    let shading_profile = crate::frame_profile::characters_span("characters_skinning_shading");
-    for v in &mut mesh.vertices {
+}
+fn colors(vertices: &mut [Vertex], fullbright: bool, alpha: f32) {
+    for v in &mut *vertices {
         let n = v.normal.truncate().normalize_or_zero();
         let light = if fullbright { 1. } else {
             0.65 + 0.35 * n.dot(vec3(0.3, -0.5, 1.).normalize()).max(0.)
@@ -98,7 +100,75 @@ pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
         v.color = [(light * 255.) as u8, (light * 255.) as u8,
             (light * 255.) as u8, (alpha.clamp(0., 1.) * 255.) as u8];
     }
-    drop(shading_profile);
+}
+
+/// Only these disjoint CPU arrays cross the scope boundary; never a Mesh/Texture.
+pub(super) struct Job<'a> {
+    pub input: &'a [SkinVertex], pub vertices: &'a mut [Vertex], pub indices: &'a [u16],
+}
+#[derive(Clone, Copy)]
+pub(super) struct Params<'a> {
+    pub pose: &'a [Transform], pub scales: &'a [f32], pub palette: &'a [(Mat3, Vec3)],
+    pub transform: Transform, pub scale: f32, pub flat: bool, pub fullbright: bool, pub alpha: f32,
+}
+pub(super) fn positions(job: &mut Job<'_>, p: Params<'_>) {
+    for (src, dst) in job.input.iter().zip(&mut *job.vertices) {
+        let position = if !p.palette.is_empty() { position(src, p.palette) }
+            else if p.scales.is_empty() { src.position(p.pose) }
+            else { src.weights.iter().map(|w| p.pose[w.bone].point(w.offset * p.scales[w.bone]) * w.amount).sum() };
+        dst.position = if !p.palette.is_empty() { rotation(p.transform.rotation) * (position * p.scale) + p.transform.translation }
+            else { p.transform.point(position * p.scale) };
+        dst.normal = Vec4::ZERO;
+    }
+}
+pub(super) fn kernel(job: &mut Job<'_>, p: Params<'_>) {
+    positions(job, p);
+    shade_arrays(job.vertices, job.indices, p.flat, p.fullbright, p.alpha);
+}
+pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
+    if flat { shade_arrays(&mut mesh.vertices, &mesh.indices, flat, fullbright, alpha); return; }
+    let timer = crate::frame_profile::characters_span("characters_skinning_normals");
+    normals(&mut mesh.vertices, &mesh.indices); drop(timer);
+    let timer = crate::frame_profile::characters_span("characters_skinning_shading");
+    colors(&mut mesh.vertices, fullbright, alpha); drop(timer);
+}
+/// Split coarse surface batches within an actor. Triangle reduction order stays serial.
+/// Joining the scope precedes every layer/GL consumer in the same frame.
+pub(super) fn run(jobs: &mut [Job<'_>], p: Params<'_>, workers: usize) -> [u64; 3] {
+    assert!(workers <= 2);
+    if workers == 0 || jobs.is_empty() {
+        for job in jobs { kernel(job, p); }
+        return [0; 3];
+    }
+    let total = jobs.iter().map(|j| j.vertices.len()).sum::<usize>();
+    let target = total.div_ceil(workers + 1);
+    std::thread::scope(|scope| {
+        let mut remaining = jobs;
+        let mut handles = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            if remaining.is_empty() { break; }
+            let mut n = 0;
+            let mut cost = 0;
+            while n + 1 < remaining.len() && cost < target {
+                cost += remaining[n].vertices.len(); n += 1;
+            }
+            let (batch, rest) = remaining.split_at_mut(n.max(1));
+            remaining = rest;
+            handles.push(std::thread::Builder::new().name(format!("skin-{worker}"))
+                .stack_size(crate::skin_worker::STACK_BYTES).spawn_scoped(scope, move || {
+                    crate::skin_worker::pin(worker, false);
+                    let start = std::time::Instant::now();
+                    for job in batch { kernel(job, p); }
+                    start.elapsed().as_micros() as u64
+                }).expect("start scoped skin worker"));
+        }
+        let start = std::time::Instant::now();
+        for job in remaining { kernel(job, p); }
+        let main_us = start.elapsed().as_micros() as u64;
+        let wait = std::time::Instant::now();
+        let service = handles.into_iter().map(|h| h.join().expect("skin worker panicked")).sum();
+        [main_us, service, wait.elapsed().as_micros() as u64]
+    })
 }
 
 // Adapted from NextOs-Ports/Looking-Glass-NextOS 51b6224 (felc18-blip).
@@ -139,6 +209,47 @@ fn bounds_with(bounds: &[(Vec3, Vec3)], bones: usize,
         hi = hi.max(center + extent + pad);
     }
     (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
+/// Fixed-pose parity using the user-supplied Alice SKB/SKA, without graphics.
+pub(crate) fn workers_check(assets: &mut crate::assets::Assets) -> anyhow::Result<()> {
+    use crate::skeletal::{Animation, Definition, Skeleton};
+    let def=Definition::alice(assets)?;
+    let skeleton=Skeleton::parse(&assets.read(&format!("{}/{}",def.path,def.model))?)?;
+    let clip=Animation::parse(&assets.read(&format!("{}/run_nowep.ska",def.path))?,skeleton.bones.len())?;
+    let mut comparisons=0;
+    for frame in clip.frames.iter().take(16) {
+        let pose=skeleton.global_pose(&frame.pose);
+        for palette_on in [false,true] {for scaled in [false,true] {for flat in [false,true] {for fullbright in [false,true] {
+            let scales=if scaled {(0..pose.len()).map(|i|[0.65,1.4,-0.75][i%3]).collect::<Vec<_>>()} else {vec![]};
+            let pal=if palette_on {palette(&pose,&scales)} else {vec![]};
+            let params=Params {pose:&pose,scales:&scales,palette:&pal,
+                transform:Transform {rotation:Quat::from_rotation_z(0.731),translation:vec3(100.,-200.,30.)},
+                scale:-0.75,flat,fullbright,alpha:0.731};
+            let initial=skeleton.surfaces.iter().map(|s|s.vertices.iter().map(|v|Vertex {
+                position:Vec3::ZERO,uv:v.uv,color:[0;4],normal:Vec4::ZERO }).collect::<Vec<_>>()).collect::<Vec<_>>();
+            let mut reference=initial.clone();
+            let mut jobs=skeleton.surfaces.iter().zip(&mut reference).map(|(s,v)|Job {
+                input:&s.vertices,indices:&s.indices,vertices:v }).collect::<Vec<_>>();
+            run(&mut jobs,params,0); drop(jobs);
+            for workers in [1,2] {
+                let mut outputs=initial.clone();
+                let mut jobs=skeleton.surfaces.iter().zip(&mut outputs).map(|(s,v)|Job {
+                    input:&s.vertices,indices:&s.indices,vertices:v }).collect::<Vec<_>>();
+                run(&mut jobs,params,workers); drop(jobs);
+                for (a,b) in reference.iter().zip(&outputs) {for (a,b) in a.iter().zip(b) {
+                    anyhow::ensure!(a.position.to_array().map(f32::to_bits)==b.position.to_array().map(f32::to_bits)
+                        && a.normal.to_array().map(f32::to_bits)==b.normal.to_array().map(f32::to_bits)
+                        && a.uv.to_array().map(f32::to_bits)==b.uv.to_array().map(f32::to_bits)
+                        && a.color==b.color,"skin worker {workers} mismatch");
+                }}
+                comparisons+=1;
+            }
+        }}}}
+    }
+    println!("PASS fixed-pose skin workers: {comparisons} actor comparisons, {} surfaces, {} bones, {} vertices, workers=1/2, exact position/normal/color/UV bits",
+        skeleton.surfaces.len(),skeleton.bones.len(),skeleton.surfaces.iter().map(|s|s.vertices.len()).sum::<usize>());
+    Ok(())
 }
 
 /// Headless real-data microbench, including palette construction once per draw.
@@ -207,6 +318,67 @@ pub(crate) fn bench(assets: &mut crate::assets::Assets) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::skeletal::Weight;
+    #[test]
+    fn scoped_workers_match_fixed_pose_reference_bit_for_bit() {
+        fn same(a: &[Vertex], b: &[Vertex]) {
+            assert_eq!(a.len(),b.len());
+            for (a,b) in a.iter().zip(b) {
+                assert_eq!(a.position.to_array().map(f32::to_bits),b.position.to_array().map(f32::to_bits));
+                assert_eq!(a.normal.to_array().map(f32::to_bits),b.normal.to_array().map(f32::to_bits));
+                assert_eq!(a.uv.to_array().map(f32::to_bits),b.uv.to_array().map(f32::to_bits));
+                assert_eq!(a.color,b.color);
+            }
+        }
+        // Independent reference retains the pre-extraction operation/reduction order.
+        fn reference(src: &[SkinVertex], dst: &mut [Vertex], indices: &[u16], p: Params<'_>) {
+            let world = rotation(p.transform.rotation);
+            for (src,dst) in src.iter().zip(&mut *dst) {
+                let v = if !p.palette.is_empty() {
+                    src.weights.iter().map(|w| { let (r,t)=p.palette[w.bone]; (r*w.offset+t)*w.amount }).sum()
+                } else if p.scales.is_empty() { src.position(p.pose) }
+                else { src.weights.iter().map(|w| p.pose[w.bone].point(w.offset*p.scales[w.bone])*w.amount).sum() };
+                dst.position = if !p.palette.is_empty() { world*(v*p.scale)+p.transform.translation } else { p.transform.point(v*p.scale) };
+                dst.normal = Vec4::ZERO;
+            }
+            if !p.flat {
+                for tri in indices.chunks_exact(3) {
+                    let (a,b,c)=(tri[0] as usize,tri[1] as usize,tri[2] as usize);
+                    let n=(dst[b].position-dst[a].position).cross(dst[c].position-dst[a].position);
+                    for i in [a,b,c] {dst[i].normal+=n.extend(0.);}
+                }
+            }
+            for v in dst {
+                let light = if p.fullbright {1.} else if p.flat {217. / 255.} else {
+                    0.65+0.35*v.normal.truncate().normalize_or_zero().dot(vec3(0.3,-0.5,1.).normalize()).max(0.)
+                };
+                let color = if p.flat && !p.fullbright {217} else {(light*255.) as u8};
+                v.color=[color,color,color,(p.alpha.clamp(0.,1.)*255.) as u8];
+            }
+        }
+        let indices=[0,1,2,0,2,3];
+        let input=(0..4).map(|v|SkinVertex { uv:vec2(v as f32/3.,-0.),
+            weights:(0..7).map(|b|Weight {bone:b,amount:1. / 7.,offset:vec3(v as f32,(v%2) as f32,b as f32*0.2)}).collect() }).collect::<Vec<_>>();
+        fn send<T: Send>() {} send::<Job<'_>>(); send::<Params<'_>>();
+        for frame in 0..16 {
+            let pose=(0..7).map(|b|Transform {rotation:Quat::from_rotation_z(frame as f32*0.071+b as f32*0.05)*1.005,
+                translation:vec3(b as f32,-2.,frame as f32)}).collect::<Vec<_>>();
+            for palette_on in [false,true] { for scaled in [false,true] { for flat in [false,true] { for fullbright in [false,true] {
+                let scales=if scaled {vec![-0.75,1.4,1.,0.,2.,0.5,1.1]} else {vec![]};
+                let pal=if palette_on {palette(&pose,&scales)} else {vec![]};
+                let params=Params {pose:&pose,scales:&scales,palette:&pal,
+                    transform:Transform {rotation:Quat::from_rotation_y(0.73)*0.99,translation:vec3(1e3,-200.,30.)},
+                    scale:if frame%2==0 {-0.75} else {1.5},flat,fullbright,alpha:frame as f32/12.};
+                let initial=input.iter().map(|v|Vertex {position:Vec3::ZERO,uv:v.uv,normal:Vec4::ONE,color:[11;4]}).collect::<Vec<_>>();
+                let mut expected=initial.clone(); reference(&input,&mut expected,&indices,params);
+                for count in [1,2,5] { for workers in [0,1,2] {
+                    let mut outputs=vec![initial.clone();count];
+                    let mut jobs=outputs.iter_mut().map(|v|Job {input:&input,vertices:v,indices:&indices}).collect::<Vec<_>>();
+                    run(&mut jobs,params,workers); drop(jobs);
+                    for out in outputs {same(&expected,&out);}
+                }}
+            }}}}
+        }
+    }
     #[test]
     fn palette_scratch_reuses_capacity_and_disabled_draws_do_not_borrow_it() {
         let pose = [Transform { rotation: Quat::IDENTITY, translation: Vec3::ONE }; 131];

@@ -206,7 +206,7 @@ pub fn characters_span(label: &'static str) -> Option<Span> {
     CHARACTER_DEPTH.with(|d| (d.get() > 0).then(|| span(label)))
 }
 
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     #[cfg(target_os = "vita")]
     let check = || std::path::Path::new(vita::PROFILE_DIR).exists() && !matches!(Mode::read(),Mode::Route|Mode::RouteContinue);
@@ -967,6 +967,7 @@ mod vita {
             s.frame_start = Some(now);
             let mode_changed = next_mode != s.mode;
             if s.map != map || mode_changed {
+                crate::frame_phases::reset();
                 s.map = map.to_owned();
                 s.mode = next_mode;
                 s.frames = 0;
@@ -1083,11 +1084,15 @@ mod vita {
             s.world.add(&counts); s.window_world.add(&counts);
             s.window_cpu_ms += totals.get("frame_cpu").copied().unwrap_or(0.);
             s.frames += 1;
+            crate::frame_phases::measured(s.frames);
+            crate::frame_phases::mark(4);
             if s.frames % 10 == 0 {
+                crate::frame_phases::mark(5);
                 let window = serde_json::json!({"mode":s.mode.name(), "map":s.map, "gameplay_frames_end":s.frames,
                     "frame_cpu_mean_ms":s.window_cpu_ms/10., "heap_uordblks_bytes":heap_used(), "counts":s.window_world});
                 println!("[lg/profile] window {}", window);
                 s.windows.push(window); s.window_world=WorldCounts::default(); s.window_cpu_ms=0.;
+                crate::frame_phases::mark(6);
             }
             if s.mode.warmup_frames() > 0 { s.frames == 120 } else { s.frames % 60 == 0 }
         })
@@ -1132,6 +1137,7 @@ mod vita {
         });
         #[cfg(feature = "vita_renderer")]
         { value["vita_renderer"] = crate::render::vita_renderer::report(); }
+        value["frame_phases"] = crate::frame_phases::report();
         std::fs::create_dir_all(PROFILE_DIR)?;
         let path = std::path::Path::new(PROFILE_DIR).join(name);
         std::fs::write(&path, serde_json::to_vec_pretty(&value)?)?;

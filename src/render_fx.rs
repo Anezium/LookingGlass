@@ -11,6 +11,8 @@ use anyhow::Result;
 pub(crate) mod retained;
 #[cfg(feature="vita_renderer")]
 mod actor_cache;
+#[cfg(feature="vita_renderer")]
+mod prepared;
 use macroquad::prelude::*;
 use std::{
     cell::RefCell,
@@ -25,8 +27,9 @@ pub struct Appearance {
     pub power: f32,
 }
 pub struct Pass {
+    _game_thread: crate::game_thread::GameThread,
     #[cfg(feature="vita_renderer")]
-    geometry:Option<Rc<Mesh>>,
+    geometry:Option<Rc<prepared::Geometry>>,
     #[cfg(feature="vita_renderer")]
     effect:bool,
     #[cfg(feature = "vita_renderer")]
@@ -51,11 +54,11 @@ pub struct Pass {
 }
 #[cfg(feature="vita_renderer")]
 impl Pass {
-    fn geometry(&self)->&Mesh { self.geometry.as_deref().unwrap_or(&self.mesh) }
+    fn geometry(&self)->&Mesh { self.geometry.as_ref().map_or(&self.mesh, |g| &g.mesh) }
     fn own_geometry(&mut self) {
         if let Some(geometry)=self.geometry.take() {
             let texture=self.mesh.texture.take();
-            self.mesh=Rc::try_unwrap(geometry).unwrap_or_else(|m|copy_mesh(&m));
+            self.mesh=Rc::try_unwrap(geometry).map(|g|g.mesh).unwrap_or_else(|m|copy_mesh(&m));
             self.mesh.texture=texture;
         }
     }
@@ -202,6 +205,7 @@ pub fn begin(camera: Vec3, direction: Vec3, time: f32, atmosphere: &Atmosphere, 
     });
 }
 pub fn begin_view(camera: &Camera3D, time: f32, atmosphere: &Atmosphere, fullbright: bool) {
+    crate::game_thread::assert_current();
     use macroquad::camera::Camera;
     begin(
         camera.position,
@@ -307,6 +311,7 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
     });
 }
 pub fn submit(passes: Vec<Pass>, transparent: bool) {
+    crate::game_thread::assert_current();
     if passes.is_empty() {
         return;
     }
@@ -475,6 +480,7 @@ pub fn finish() -> (usize, usize) {
                 let _submit_profile = crate::frame_profile::span("transparent_submit");
                 draw_pass(
                     &Pass {
+                        _game_thread: crate::game_thread::GameThread::default(),
                         #[cfg(feature="vita_renderer")]
                         geometry:None,
                         #[cfg(feature="vita_renderer")]
@@ -582,6 +588,7 @@ fn pass_at(
             .map_or(1., |w| w.sample(clock))
             .clamp(0., 2.);
     Ok(Pass {
+        _game_thread: crate::game_thread::GameThread::default(),
         #[cfg(feature="vita_renderer")]
         geometry:None,
         #[cfg(feature="vita_renderer")]
@@ -821,6 +828,7 @@ pub(crate) fn skin_requires_preservation(mesh: &Mesh) -> bool {
     surface.is_some_and(|s| s.preserve_skin)
 }
 pub fn skin(mesh: &Mesh) {
+    crate::game_thread::assert_current();
     SKIN_OPACITY.with(|a| skin_timed(mesh, None, a.get()));
 }
 

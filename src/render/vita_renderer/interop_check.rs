@@ -412,6 +412,31 @@ pub async fn check() -> Result<()> {
     }
     crate::lighting::fixture_lights(vec![]);
     println!("PASS retained selected dynamic light and models-only mask");
+    // Reuse every ring page, then mutate vertices, topology, camera and appearance.
+    // Both config arms save all 18 full frames for byte-for-byte PNG comparison.
+    let mut hits=0u64;
+    for frame in 0..18 {
+        let mut camera=Camera3D {position:camera.position,target:camera.target,up:camera.up,
+            projection:Projection::Orthographics,fovy:camera.fovy,z_near:camera.z_near,z_far:camera.z_far,..Default::default()};
+        if frame>=12 { camera.position.x=0.15; camera.target.x=0.15; }
+        clear_background(BLACK); set_camera(&camera);
+        render_fx::retained::begin_view(&camera,frame as f32,&atmosphere,true,true);
+        let ids=if frame>=15 {[1,0]} else {[0,1]};
+        for id in ids {
+            let mut m=quad(0., if id==0 {RED} else {GREEN});
+            for v in &mut m.vertices {v.position.x=v.position.x*0.45+if id==0 {-0.6} else {0.6};}
+            if frame>=6 {m.vertices[0].position.x+=0.1;}
+            if frame>=9 {m.indices=vec![0,1,3,1,2,3];}
+            let appearance=Appearance {dissolve:if frame>=12 {0.1} else {0.},..Default::default()};
+            render_fx::submit(vec![render_fx::pass(m,&Stage::default(),true,false,appearance)?],false);
+        }
+        render_fx::retained::finish(&mut gpu,&[],true,|_|unreachable!());
+        hits+=render_fx::retained::host_report()["vita_fx_prepare_upload_hits"].as_u64().unwrap_or(0);
+        crate::viewer::save_capture(&output.join(format!("prepare-{frame:02}.png")))?;
+        next_frame().await;
+    }
+    if config().fx_prepare_cache {ensure!(hits>0,"versioned ring preparation never hit");}
+    println!("PASS FX preparation ring/mutation parity fixtures: 18 frames, generation_upload_hits={hits}");
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 //! Exact payload decisions for buffers and the uninterrupted LG actor program.
 use macroquad::prelude::Vertex;
 
-pub(super) fn vertices_equal(a: &[Vertex], b: &[Vertex]) -> bool {
+pub(in crate::render_fx) fn vertices_equal(a: &[Vertex], b: &[Vertex]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| {
         a.position.to_array().map(f32::to_bits) == b.position.to_array().map(f32::to_bits)
             && a.uv.to_array().map(f32::to_bits) == b.uv.to_array().map(f32::to_bits)

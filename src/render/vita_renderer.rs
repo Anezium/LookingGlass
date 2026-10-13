@@ -33,6 +33,10 @@ pub struct Config {
     /// auto/on correct Vita's two-readback orientation; off restores J10.
     pub preview_flip: String,
     pub world_state_cache: bool,
+    pub worker_probe: bool,
+    pub skin_workers: usize,
+    pub fx_prepare_cache: bool,
+    pub frame_phase_probe: bool,
     pub mover_far_lazy: bool,
     pub mover_lazy_publish: bool,
     pub pickup_fx_cache: bool,
@@ -98,6 +102,7 @@ impl Default for Config {
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
             world_state_cache: true,
+            worker_probe: false, skin_workers: 1, fx_prepare_cache: true, frame_phase_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
@@ -149,6 +154,7 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
+        ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
         ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
         ensure!(matches!(self.preview_flip.as_str(), "auto" | "on" | "off"), "preview_flip must be auto, on or off");
         ensure!(self.max_texture_dimension.is_none_or(|n| (16..=512).contains(&n)), "max_texture_dimension must be null or 16..512");
@@ -553,6 +559,7 @@ struct Prepared {
     uniforms: shader::Uniforms,
 }
 pub struct Renderer {
+    _game_thread: crate::game_thread::GameThread,
     groups: Vec<Group>,
     pvs: Pvs,
     pipelines: Vec<Pipeline>,
@@ -900,6 +907,7 @@ impl Renderer {
             g.faces = Vec::new();
         }
         Ok(Self {
+            _game_thread: crate::game_thread::GameThread::new(),
             alpha_order: Vec::with_capacity(groups.len()),
             prepared: Vec::with_capacity(groups.len()),
             fx_gpu: None,
@@ -1550,6 +1558,22 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn j12_switches_are_strict_and_have_required_defaults() {
+        let c=Config::default();
+        assert_eq!(c.skin_workers,1); assert!(c.fx_prepare_cache);
+        assert!(!c.worker_probe && !c.frame_phase_probe);
+        for workers in 0..=2 {
+            let c:Config=serde_json::from_value(serde_json::json!({"skin_workers":workers,
+                "worker_probe":true,"fx_prepare_cache":false,"frame_phase_probe":true})).unwrap();
+            assert!(c.validate().is_ok());
+        }
+        for value in [serde_json::json!({"skin_workers":3}),serde_json::json!({"skin_workers":-1}),
+            serde_json::json!({"skin_workers":"1"}),serde_json::json!({"fx_prepare_cache":"on"}),
+            serde_json::json!({"worker_probe":1}),serde_json::json!({"frame_phase_probe":1})] {
+            assert!(serde_json::from_value::<Config>(value).map_or(true,|c|c.validate().is_err()));
+        }
+    }
     #[test]
     fn j11_switches_default_on_and_strictly_parse_off() {
         let c: Config = serde_json::from_str("{}").unwrap();

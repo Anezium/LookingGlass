@@ -1019,6 +1019,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
     loop {
+        crate::frame_phases::begin();
         #[cfg(feature="vita_renderer")]
         let route_running=route_session.is_some();
         #[cfg(not(feature="vita_renderer"))]
@@ -1046,7 +1047,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 // The next begin_frame completes the last measured wall interval.
                 // Exit before simulating or drawing an extra gameplay frame.
                 profile_report_due = false;
+                crate::frame_phases::mark(7);
                 let report = crate::frame_profile::report(&maps[current]);
+                crate::frame_phases::mark(8);
                 let mode = crate::frame_profile::mode();
                 if mode.is_bench() && crate::frame_profile::bench_frames() == Some(120) {
                     if let Err(e) = report {
@@ -1059,6 +1062,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
             }
         }
+        crate::frame_phases::mark(1);
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
         #[cfg(target_os = "vita")]
         let mut viewer_block = crate::frame_profile::span("frame_input");
@@ -3959,8 +3963,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame_profile.cancel();
         }
         drop(frame_profile);
+        crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]
         {
+            crate::frame_phases::mark(3);
             let gameplay = active && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none()
                 && !story.busy() && !interactions.school.as_ref().is_some_and(|s| s.cinematic());
             let report_due = crate::frame_profile::end_frame(&maps[current], gameplay);
@@ -3997,6 +4003,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if context_before != (menu, inventory_menu, console.open, paused) {
             input.suppress();
         }
+        crate::frame_phases::mark(9);
         next_frame().await;
     }
     #[cfg(target_os = "vita")]

@@ -1988,29 +1988,39 @@ fn draw_skin_deformed(
         drop(character_setup_profile);
         drop(setup_profile);
         crate::frame_profile::skinned_draw(false);
-        for (surface, mesh) in skeleton.surfaces.iter().zip(meshes) {
-            let Some(mesh) = mesh else {
-                continue;
-            };
-            let skin_profile = crate::frame_profile::span("skinning");
-            let positions_profile =
-                crate::frame_profile::characters_span("characters_skinning_positions");
-            for (src, dst) in surface.vertices.iter().zip(&mut mesh.vertices) {
-                let position = if use_palette {
-                    skinning::position(src, palette)
-                } else if bone_scales.is_empty() { src.position(pose) } else {
-                    src.weights.iter().map(|w| pose[w.bone].point(w.offset * bone_scales[w.bone]) * w.amount).sum()
-                };
-                dst.position = if use_palette { world_rotation.unwrap() * (position * scale) + transform.translation }
-                    else { transform.point(position * scale) };
-                dst.normal = Vec4::ZERO;
+        let params = skinning::Params { pose, scales: bone_scales, palette, transform,
+            scale, flat, fullbright, alpha };
+        #[cfg(feature = "vita_renderer")]
+        let workers = crate::render::vita_renderer::config().skin_workers;
+        #[cfg(not(feature = "vita_renderer"))]
+        let workers = 0;
+        if workers > 0 {
+            let _batch = crate::frame_profile::span("skin_actor_batch");
+            let mut jobs = skeleton.surfaces.iter().zip(meshes.iter_mut()).filter_map(|(s, m)| {
+                m.as_mut().map(|m| skinning::Job { input: &s.vertices,
+                    vertices: &mut m.vertices, indices: &m.indices })
+            }).collect::<Vec<_>>();
+            let [main, service, wait] = skinning::run(&mut jobs, params, workers);
+            #[cfg(feature = "vita_renderer")]
+            for (name, value) in [("skin_main_service_us", main),
+                ("skin_worker_service_us", service), ("skin_join_wait_us", wait)] {
+                crate::render_fx::retained::count(name, value);
             }
-            drop(positions_profile);
-            // Adapted from NextOs-Ports/Looking-Glass-NextOS 15779e4 (felc18-blip).
-            skinning::shade(mesh, flat, fullbright, alpha);
-            drop(skin_profile);
-            crate::render_fx::skin(mesh);
+            #[cfg(not(feature = "vita_renderer"))]
+            let _ = (main, service, wait);
+            drop(jobs);
+        } else {
+            for (surface, mesh) in skeleton.surfaces.iter().zip(meshes.iter_mut()) {
+                let Some(mesh) = mesh else { continue; };
+                let _skin = crate::frame_profile::span("skinning");
+                let positions = crate::frame_profile::characters_span("characters_skinning_positions");
+                skinning::positions(&mut skinning::Job { input: &surface.vertices,
+                    vertices: &mut mesh.vertices, indices: &mesh.indices }, params);
+                drop(positions);
+                skinning::shade(mesh, flat, fullbright, alpha);
+            }
         }
+        for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
         true
     })
 }

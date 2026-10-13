@@ -6,7 +6,7 @@ struct LayerState {
     blend:usize, equal:bool, lit:bool, clamp:bool, cutout:f32, reference:f32,
     gain:Vec4, fog:f32, frame:usize, vertex_alpha:bool, dynamic:bool,
 }
-pub(super) struct State { layers:Vec<LayerState>, time:u32 }
+pub(super) struct State { layers:Vec<LayerState>, time:u32, geometry:[prepared::Cache;2] }
 fn gain(s:&Stage,t:f32)->Vec4 {
     (s.constant_rgb.unwrap_or(Vec3::ONE)*s.rgb.as_ref().map_or(1.,|w|w.sample(t)).clamp(0.,2.))
         .extend(s.alpha.as_ref().map(|w|w.sample(t)).or(s.constant_alpha).unwrap_or(1.).clamp(0.,1.))
@@ -31,7 +31,7 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
     if actors.len()>=256 && !actors.contains_key(&id){actors.clear();}
     let hit=actors.contains_key(&id);
     let cached=actors.entry(id).or_insert_with(||State {
-        layers:surface.layers.iter().take(limit).map(|l|state(&l.stage,time)).collect(),time:time.to_bits()
+        layers:surface.layers.iter().take(limit).map(|l|state(&l.stage,time)).collect(),time:time.to_bits(),geometry:Default::default()
     });
     let mut refreshed=0;
     if cached.time!=time.to_bits() {
@@ -40,27 +40,32 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
         }
         cached.time=time.to_bits();
     }
-    let mut shared:[Option<Rc<Mesh>>;2]=[None,None];
+    let mut shared:[Option<Rc<prepared::Geometry>>;2]=[None,None];
     let mut copies=0;
     let mut passes=Vec::with_capacity(limit);
     for (p,l) in cached.layers.iter().zip(&surface.layers) {
         let variant=usize::from(p.vertex_alpha);
-        let geometry=if c.actor_shared_geometry {
+        let geometry=if c.fx_prepare_cache {
+            let previous=cached.geometry[variant].version();
+            let geometry=cached.geometry[variant].observe(mesh, Some(p.vertex_alpha));
+            if previous!=Some(geometry.version) { copies+=1; }
+            geometry
+        } else if c.actor_shared_geometry {
             shared[variant].get_or_insert_with(||{
                 copies+=1;
                 let mut m=copy_mesh(mesh);
                 for v in &mut m.vertices {
                     v.color[3]=if p.vertex_alpha{(255.*(v.color[3] as f32/255.).clamp(0.,1.)) as u8}else{255};
                 }
-                Rc::new(m)
+                Rc::new(prepared::Geometry::new(m))
             }).clone()
         } else {
             copies+=1;
             let mut m=copy_mesh(mesh);
             for v in &mut m.vertices {v.color[3]=if p.vertex_alpha{(255.*(v.color[3] as f32/255.).clamp(0.,1.)) as u8}else{255};}
-            Rc::new(m)
+            Rc::new(prepared::Geometry::new(m))
         };
-        passes.push(Pass {geometry:Some(geometry),effect:false,blend_index:p.blend,depth_equal:p.equal,
+        passes.push(Pass {_game_thread: crate::game_thread::GameThread::default(),geometry:Some(geometry),effect:false,blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")]
             world_static:None,
             #[cfg(target_os="vita")]

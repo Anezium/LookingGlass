@@ -112,6 +112,9 @@ mod traversal;
 mod ui;
 mod viewer;
 mod frame_profile;
+mod frame_phases;
+mod game_thread;
+mod skin_worker;
 #[cfg(feature="vita_renderer")]
 mod route_replay;
 mod vita_sim;
@@ -170,6 +173,8 @@ pub static NEWLIB_HEAP_SIZE_USER: u32 = 192 * 1024 * 1024;
 
 #[cfg(target_os = "vita")]
 fn main() {
+    #[cfg(feature="vita_renderer")]
+    if render::vita_renderer::config().worker_probe { skin_worker::inventory("entry", None); }
     // Keep startup on a small main frame; the game gets its own explicit stack.
     // Experiment: both stacks (8 MiB each) plus newlib (192 MiB) request 208 MiB.
     // vitaGL uses the remaining free memory through its existing threshold.
@@ -188,6 +193,12 @@ fn main() {
 
 fn app_main() {
     // Read the renderer policy and apply clocks before run() mounts archives.
+    #[cfg(feature = "vita_renderer")]
+    {
+        let c = render::vita_renderer::config();
+        skin_worker::startup(c.skin_workers, c.worker_probe);
+        frame_phases::initialize();
+    }
     #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
     let _ = render::vita_renderer::config();
     #[cfg(target_os = "vita")]
@@ -393,6 +404,7 @@ fn run() -> Result<()> {
             "--audio-check" => mode = "audio",
             "--character-check" => mode = "character",
             "--skin-bench" => mode = "skin-bench",
+            "--skin-workers-check" => mode = "skin-workers-check",
             "--hud-check" => mode = "hud",
             "--loadout-check" => mode = "loadout",
             "--camera-check" => mode = "camera",
@@ -857,6 +869,7 @@ fn run() -> Result<()> {
     if mode == "character" {
         return skeletal::check(&mut assets);
     }
+    if mode == "skin-workers-check" { return character::skinning::workers_check(&mut assets); }
     if mode == "skin-bench" {
         return character::skinning::bench(&mut assets);
     }
