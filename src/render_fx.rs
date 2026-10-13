@@ -128,6 +128,15 @@ pub(crate) fn group_depth(center: Vec3) -> f32 {
         (center - f.camera).dot(f.direction)
     })
 }
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn depth_view_bits() -> [u32; 6] {
+    FRAME.with(|f| {
+        let f = f.borrow();
+        let [x,y,z] = f.camera.to_array().map(f32::to_bits);
+        let [dx,dy,dz] = f.direction.to_array().map(f32::to_bits);
+        [x,y,z,dx,dy,dz]
+    })
+}
 /// Deferred packets carry depth policy; no GL state change surrounds the closure.
 #[cfg(feature = "vita_renderer")]
 pub(crate) fn retained_depth_scope(draw: impl FnOnce()) {

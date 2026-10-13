@@ -33,6 +33,7 @@ pub struct Config {
     /// auto/on correct Vita's two-readback orientation; off restores J10.
     pub preview_flip: String,
     pub world_state_cache: bool,
+    pub world_view_reuse: bool,
     pub worker_probe: bool,
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
@@ -113,6 +114,7 @@ impl Default for Config {
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
             world_state_cache: true,
+            world_view_reuse: true,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
@@ -589,6 +591,10 @@ pub struct Renderer {
     alpha_order: Vec<(f32, usize)>,
     prepared: Vec<Prepared>,
     fx_gpu: Option<crate::render_fx::retained::Gpu>,
+    visibility_key: Option<[u32; 26]>,
+    visibility_generation: u64,
+    visibility: Vec<(u64, Option<(f32, Mat4)>)>,
+    models: Vec<Option<Mat4>>,
 }
 fn blend_class(blend: Blend) -> usize {
     match blend {
@@ -928,6 +934,9 @@ impl Renderer {
             alpha_order: Vec::with_capacity(groups.len()),
             prepared: Vec::with_capacity(groups.len()),
             fx_gpu: None,
+            visibility_key: None, visibility_generation: 0,
+            visibility: vec![(0, None); groups.len()],
+            models: vec![None; groups.len()],
             groups,
             pvs,
             pipelines,
@@ -960,23 +969,46 @@ impl Renderer {
         let lists = self.pvs.get(cluster);
         let ids = if alpha { &lists.alpha } else { &lists.opaque };
         self.alpha_order.clear();
-        for &id in ids {
-            let g = &self.groups[id];
-            let Some(model) = model_matrix(&g.recipe, time, transforms) else {
-                continue;
-            };
-            if in_frustum(projection * model, g.min, g.max) {
-                self.alpha_order.push((
-                    if crate::render_fx::retained_active() {
-                        crate::render_fx::group_depth(model.transform_point3(g.center))
-                    } else {
-                        (model.transform_point3(g.center) - eye).length_squared()
-                    },
-                    id,
-                ));
+        let reuse = config().world_view_reuse;
+        let mut key = [0u32; 26];
+        key[..16].copy_from_slice(&projection.to_cols_array().map(f32::to_bits));
+        key[16..19].copy_from_slice(&eye.to_array().map(f32::to_bits));
+        key[19..25].copy_from_slice(&crate::render_fx::depth_view_bits());
+        key[25] = u32::from(crate::render_fx::retained_active());
+        if self.visibility_key != Some(key) {
+            self.visibility_key = Some(key);
+            self.visibility_generation = self.visibility_generation.wrapping_add(1);
+            if self.visibility_generation == 0 {
+                self.visibility.fill((0, None));
+                self.visibility_generation = 1;
             }
         }
-        crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: ids.len() as u64, ..Default::default() });
+        let mut tests = 0u64;
+        let mut hits = 0u64;
+        for &id in ids {
+            let g = &self.groups[id];
+            let static_group = g.recipe.model.is_none() && g.recipe.motion.is_none();
+            let result = if reuse && static_group && self.visibility[id].0 == self.visibility_generation {
+                hits += 1;
+                self.visibility[id].1
+            } else {
+                let result = model_matrix(&g.recipe, time, transforms).and_then(|model| {
+                    tests += 1;
+                    in_frustum(projection * model, g.min, g.max).then(|| {
+                        let depth = if crate::render_fx::retained_active() {
+                            crate::render_fx::group_depth(model.transform_point3(g.center))
+                        } else { (model.transform_point3(g.center) - eye).length_squared() };
+                        (depth, model)
+                    })
+                });
+                if reuse && static_group { self.visibility[id] = (self.visibility_generation, result); }
+                result
+            };
+            self.models[id] = result.map(|(_, model)| model);
+            if let Some((depth, _)) = result { self.alpha_order.push((depth, id)); }
+        }
+        crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: tests, ..Default::default() });
+        count("vita_world_visibility_cache_hits", hits);
         drop(visibility_span);
         if alpha && !config().world_alpha {self.alpha_order.clear();}
         if !alpha && config().opaque_order=="front_to_back" {self.alpha_order.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||a.1.cmp(&b.1)));}
@@ -990,7 +1022,8 @@ impl Renderer {
             let _parameters = crate::frame_profile::span("vita_world_parameters");
             for &(depth, id) in &self.alpha_order {
                 let g = &self.groups[id];
-                let model = model_matrix(&g.recipe, time, transforms).unwrap();
+                let model = if reuse { self.models[id].unwrap() }
+                    else { model_matrix(&g.recipe, time, transforms).unwrap() };
                 let mut u = uniforms(
                     &g.recipe,
                     time,
