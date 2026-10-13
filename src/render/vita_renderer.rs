@@ -34,6 +34,7 @@ pub struct Config {
     pub preview_flip: String,
     pub world_state_cache: bool,
     pub world_view_reuse: bool,
+    pub world_parameter_reuse: bool,
     pub worker_probe: bool,
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
@@ -115,6 +116,7 @@ impl Default for Config {
             preview_flip: "auto".into(),
             world_state_cache: true,
             world_view_reuse: true,
+            world_parameter_reuse: true,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
@@ -453,10 +455,12 @@ struct Recipe {
     deform: Option<Deform>,
 }
 struct Pending {
+    parameter: usize,
     geometry: Geometry,
     recipe: Recipe,
 }
 struct Group {
+    parameter: usize,
     bindings: Bindings,
     indices: i32,
     min: Vec3,
@@ -575,11 +579,21 @@ struct Prepared {
     depth: f32,
     group: usize,
     texture: TextureId,
+    uniforms: Option<shader::Uniforms>,
+}
+struct Parameter {
+    recipe: Recipe,
     uniforms: shader::Uniforms,
+    bits: [u32; 143],
+    generation: u64,
+    model: [u32; 16],
 }
 pub struct Renderer {
     _game_thread: crate::game_thread::GameThread,
     groups: Vec<Group>,
+    parameters: Vec<Parameter>,
+    parameter_key: Option<[u32; 51]>,
+    parameter_generation: u64,
     pvs: Pvs,
     pipelines: Vec<Pipeline>,
     shader: ShaderId,
@@ -621,6 +635,8 @@ impl Renderer {
         let started=std::time::Instant::now();
         let c = config();
         let mut pending: Vec<Pending> = Vec::new();
+        let mut parameter_keys = BTreeMap::new();
+        let mut parameter_recipes = Vec::new();
         let mut keys: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut recipes_ms=0.;let mut chunks_ms=0.;let mut source_chunks=0;
         let mut dropped_layers = 0;
@@ -686,6 +702,13 @@ impl Renderer {
                     b.deforms,
                     if b.motion.is_some() { bi + 1 } else { 0 }
                 );
+                // Match the existing immutable geometry merge signature. The
+                // cell/rank split affects ordering and visibility, not uniforms.
+                let parameter = *parameter_keys.entry(signature.clone()).or_insert_with(|| {
+                    let id = parameter_recipes.len();
+                    parameter_recipes.push(recipe.clone());
+                    id
+                });
                 let parts = if b.parts.is_empty() {
                     vec![(None, 0..b.full_indices.len(), b.center)]
                 } else {
@@ -711,6 +734,7 @@ impl Renderer {
                             .unwrap_or_else(|| {
                                 let id = pending.len();
                                 pending.push(Pending {
+                                    parameter,
                                     geometry: Geometry::default(),
                                     recipe: recipe.clone(),
                                 });
@@ -838,6 +862,7 @@ impl Renderer {
                 BufferSource::slice(&p.geometry.indices),
             );
             groups.push(Group {
+                parameter: p.parameter,
                 bindings: Bindings {
                     vertex_buffers: vec![vertex],
                     index_buffer: index,
@@ -929,8 +954,13 @@ impl Renderer {
         for g in &mut groups {
             g.faces = Vec::new();
         }
+        let parameters = parameter_recipes.into_iter().map(|recipe| {
+            let u = uniforms(&recipe, 0., Vec3::ZERO, Mat4::IDENTITY, Mat4::IDENTITY, false, scene.atlas_grid);
+            Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0, model: [0;16] }
+        }).collect();
         Ok(Self {
             _game_thread: crate::game_thread::GameThread::new(),
+            parameters, parameter_key: None, parameter_generation: 0,
             alpha_order: Vec::with_capacity(groups.len()),
             prepared: Vec::with_capacity(groups.len()),
             fx_gpu: None,
@@ -1020,28 +1050,44 @@ impl Renderer {
         self.prepared.clear();
         {
             let _parameters = crate::frame_profile::span("vita_world_parameters");
+            let parameter_reuse = config().world_parameter_reuse;
+            let key = parameter_view_key(projection, eye, fullbright, scene.atlas_grid, time, &scene.atmosphere);
+            if self.parameter_key != Some(key) {
+                self.parameter_key = Some(key);
+                self.parameter_generation = self.parameter_generation.wrapping_add(1);
+                if self.parameter_generation == 0 {
+                    for p in &mut self.parameters { p.generation = 0; }
+                    self.parameter_generation = 1;
+                }
+            }
+            let mut builds = 0;
             for &(depth, id) in &self.alpha_order {
                 let g = &self.groups[id];
                 let model = if reuse { self.models[id].unwrap() }
                     else { model_matrix(&g.recipe, time, transforms).unwrap() };
-                let mut u = uniforms(
-                    &g.recipe,
-                    time,
-                    eye,
-                    model,
-                    projection,
-                    fullbright,
-                    scene.atlas_grid,
-                );
-                u.atmosphere(&scene.atmosphere, eye);
+                let u = if parameter_reuse {
+                    let p = &mut self.parameters[g.parameter];
+                    let model_bits = model.to_cols_array().map(f32::to_bits);
+                    if p.generation != self.parameter_generation || p.model != model_bits {
+                        p.uniforms = uniforms(&p.recipe, time, eye, model, projection, fullbright, scene.atlas_grid);
+                        p.uniforms.atmosphere(&scene.atmosphere, eye);
+                        p.bits = p.uniforms.bits();
+                        p.generation = self.parameter_generation;
+                        p.model = model_bits;
+                        builds += 1;
+                    }
+                    None
+                } else {
+                    let mut u = uniforms(&g.recipe, time, eye, model, projection, fullbright, scene.atlas_grid);
+                    u.atmosphere(&scene.atmosphere, eye);
+                    builds += 1;
+                    Some(u)
+                };
                 let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
-                self.prepared.push(Prepared {
-                    depth,
-                    group: id,
-                    texture,
-                    uniforms: u,
-                });
+                self.prepared.push(Prepared { depth, group: id, texture, uniforms: u });
             }
+            count("vita_world_parameter_builds", builds);
+            count("vita_world_parameter_reuses", self.prepared.len() as u64 - builds);
         }
         if alpha && crate::render_fx::retained_active() {
             // Keep immutable bindings and uniforms until all actor/effect groups are known.
@@ -1129,6 +1175,7 @@ impl Renderer {
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
+            let u = prepared.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
             g.bindings.images[0] = texture;
             let pi = g.recipe.blend * 3 + g.recipe.cull;
             let gl = unsafe { get_internal_gl() };
@@ -1141,7 +1188,8 @@ impl Renderer {
                 debug_assert_eq!(g.bindings.images.len(), 2);
                 cache.observe(pipeline, low, !alpha,
                     (g.bindings.vertex_buffers[0], g.bindings.index_buffer,
-                     g.bindings.images[0], g.bindings.images[1]), prepared.uniforms.bits())
+                     g.bindings.images[0], g.bindings.images[1]),
+                    prepared.uniforms.as_ref().map_or(self.parameters[g.parameter].bits, shader::Uniforms::bits))
             } else {
                 state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
             };
@@ -1153,7 +1201,7 @@ impl Renderer {
             if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
             totals.add(0, start);
             let start = totals.start();
-            if plan.uniforms { ctx.apply_uniforms(UniformsSource::table(&prepared.uniforms)); applications[3] += 1; }
+            if plan.uniforms { ctx.apply_uniforms(UniformsSource::table(u)); applications[3] += 1; }
             totals.add(1, start);
             let start = totals.start();
             ctx.draw(0, g.indices, 1);
@@ -1268,6 +1316,7 @@ impl Renderer {
             let p = &self.prepared[id];
             let g = &mut self.groups[p.group];
             g.bindings.images[0] = p.texture;
+            let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
             let ctx = unsafe { get_internal_gl() }.quad_context;
             let start = totals.start();
             ctx.apply_pipeline(&self.pipelines[g.recipe.blend * 3 + g.recipe.cull]);
@@ -1276,7 +1325,7 @@ impl Renderer {
             ctx.apply_bindings(&g.bindings);
             totals.add(0, start);
             let start = totals.start();
-            ctx.apply_uniforms(UniformsSource::table(&p.uniforms));
+            ctx.apply_uniforms(UniformsSource::table(u));
             totals.add(1, start);
             let start = totals.start();
             ctx.draw(0, g.indices, 1);
@@ -1347,6 +1396,26 @@ fn counts<const N: usize>(values: &[(&'static str, u64); N]) {
     crate::frame_profile::counts(values);
     #[cfg(not(target_os = "vita"))]
     for &(name, n) in values { crate::render_fx::retained::count(name, n); }
+}
+/// Exact values consumed by the shader, including absent volume zeros. No
+/// hashing, pointer identity, tolerance, or hidden dependence on the game clock.
+fn parameter_view_key(projection: Mat4, eye: Vec3, fullbright: bool, atlas: Vec2,
+                      time: f32, atmosphere: &crate::environment::Atmosphere) -> [u32;51] {
+    let mut key = [0;51];
+    key[..16].copy_from_slice(&projection.to_cols_array().map(f32::to_bits));
+    key[16..19].copy_from_slice(&eye.to_array().map(f32::to_bits));
+    key[19..21].copy_from_slice(&atlas.to_array().map(f32::to_bits));
+    key[21] = u32::from(fullbright);
+    key[22] = time.to_bits();
+    key[23..27].copy_from_slice(&atmosphere.distance.to_array().map(f32::to_bits));
+    key[27..31].copy_from_slice(&atmosphere.liquid.to_array().map(f32::to_bits));
+    for (i,v) in atmosphere.volumes.iter().take(2).enumerate() {
+        let offset = 31 + i*10;
+        key[offset..offset+3].copy_from_slice(&v.min.to_array().map(f32::to_bits));
+        key[offset+3..offset+6].copy_from_slice(&v.max.to_array().map(f32::to_bits));
+        key[offset+6..offset+10].copy_from_slice(&v.color.to_array().map(f32::to_bits));
+    }
+    key
 }
 fn model_matrix(recipe: &Recipe, time: f32, transforms: &[(usize, Vec3, Quat)]) -> Option<Mat4> {
     let rigid = if let Some(id) = recipe.model {
@@ -1625,6 +1694,25 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn world_reuse_switches_and_exact_view_inputs() {
+        let c = Config::default();
+        assert!(c.world_view_reuse && c.world_parameter_reuse);
+        for name in ["world_view_reuse", "world_parameter_reuse"] {
+            let mut v = serde_json::to_value(&c).unwrap(); v[name] = serde_json::json!(false);
+            serde_json::from_value::<Config>(v.clone()).unwrap().validate().unwrap();
+            v[name] = serde_json::json!("off"); assert!(serde_json::from_value::<Config>(v).is_err());
+        }
+        let mut fog = crate::environment::Atmosphere::default();
+        let key = |time, bright, fog: &crate::environment::Atmosphere| parameter_view_key(Mat4::IDENTITY, Vec3::ZERO, bright, Vec2::ONE, time, fog);
+        let a = key(0., false, &fog);
+        assert_ne!(a, key(-0., false, &fog));
+        assert_ne!(a, key(0., true, &fog));
+        fog.liquid.x = f32::from_bits(0x7fc00001); let b = key(0., false, &fog);
+        assert_ne!(a,b); fog.liquid.x = f32::from_bits(0x7fc00002); assert_ne!(b,key(0.,false,&fog));
+        fog.volumes.push(crate::environment::Volume { min: Vec3::ZERO, max: Vec3::ONE, color: Vec4::ONE });
+        let b = key(0., false, &fog); fog.volumes[0].min.z = -0.; assert_ne!(b,key(0.,false,&fog));
+    }
     #[test]
     fn particle_assembly_switches_default_on_and_reject_non_booleans() {
         let c=Config::default();assert!(c.particle_producer_reuse && c.fx_merge_in_place && c.fx_worker_prep);
