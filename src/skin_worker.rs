@@ -12,6 +12,8 @@ struct ThreadInfo {
     preempt: u32, release: u32, changes: i32, notify: i32, reserved: i32,
 }
 #[cfg(target_os = "vita")]
+const _: [(); 0x80] = [(); std::mem::size_of::<ThreadInfo>()];
+#[cfg(target_os = "vita")]
 extern "C" {
     fn sceKernelGetThreadId() -> i32;
     fn sceKernelChangeThreadCpuAffinityMask(id: i32, mask: i32) -> i32;
@@ -25,8 +27,11 @@ pub(crate) fn pin(worker: usize, probe: bool) {
         let id = sceKernelGetThreadId();
         let requested = mask(worker);
         let rc = sceKernelChangeThreadCpuAffinityMask(id, requested);
+        if probe {
+            eprintln!("[lg/worker-probe] worker={worker} affinity_rc={rc} requested={requested:#x}");
+            inventory("worker", Some(requested));
+        }
         assert!(rc >= 0, "skin worker affinity failed: {rc:#x}");
-        if probe { inventory("worker", Some(requested)); }
     }
     #[cfg(not(target_os = "vita"))]
     if probe { eprintln!("[lg/worker-probe] worker={worker} requested={:#x} host_affinity=unavailable", mask(worker)); }

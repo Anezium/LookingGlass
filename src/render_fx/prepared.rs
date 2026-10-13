@@ -16,7 +16,11 @@ pub(super) fn valid(mesh: &Mesh) -> bool {
 }
 impl Geometry {
     pub(super) fn merged(mesh: Mesh, previous: Option<Version>, same_topology: bool) -> Self {
-        let mut g=Self::new(mesh);
+        // The merge plan already certified every source index and the u16 limit.
+        // Rebuilding animated vertices must not rescan unchanged merged topology.
+        debug_assert!(valid(&mesh));
+        let mut g=Self {mesh, valid:true, version:Version {
+            identity:generation(), vertices:generation(), topology:generation() }};
         if let Some(old)=previous {
             g.version.identity=old.identity;
             if same_topology {g.version.topology=old.topology;}

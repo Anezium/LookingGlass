@@ -2009,6 +2009,7 @@ fn draw_skin_deformed(
             #[cfg(not(feature = "vita_renderer"))]
             let _ = (main, service, wait);
             drop(jobs);
+            for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
         } else {
             for (surface, mesh) in skeleton.surfaces.iter().zip(meshes.iter_mut()) {
                 let Some(mesh) = mesh else { continue; };
@@ -2018,9 +2019,10 @@ fn draw_skin_deformed(
                     vertices: &mut mesh.vertices, indices: &mesh.indices }, params);
                 drop(positions);
                 skinning::shade(mesh, flat, fullbright, alpha);
+                drop(_skin);
+                crate::render_fx::skin(mesh);
             }
         }
-        for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
         true
     })
 }
