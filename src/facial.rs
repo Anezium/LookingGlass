@@ -463,6 +463,7 @@ mod tests {
     #[test]
     fn authored_default_and_headwatch_are_bounded_pauseable_and_saved() {
         let sk = Skeleton {
+            skin_bounds: vec![],
             surfaces: vec![],
             bones: vec![],
         };
@@ -523,6 +524,7 @@ mod tests {
     fn jaw_layer_preserves_head_and_body_and_moves_its_children() {
         use crate::skeletal::Bone;
         let sk = Skeleton {
+            skin_bounds: vec![],
             surfaces: vec![],
             bones: vec![
                 Bone {

@@ -95,7 +95,8 @@ impl Model {
             }
         }
         material.bind();
-        crate::character::draw_skin_alpha(
+        let _skin_guard = crate::character::skinning::CullGuard::preserve(g.frozen);
+        let skin_visible = crate::character::draw_skin_alpha(
             &self.data.skeleton,
             &mut self.meshes,
             &pose,
@@ -111,6 +112,7 @@ impl Model {
                 1.
             },
         );
+        if !skin_visible { self.visible.fill(false); }
         for (i, tex) in original {
             self.meshes[i].as_mut().unwrap().texture = tex;
         }

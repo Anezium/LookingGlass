@@ -1026,7 +1026,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let village=interactions.village.as_ref().context("route requires village cinema")?;
             route.begin_frame(crate::route_replay::Status{map:maps[current].clone(),entry_done:village.cinema.state.done.contains("entry"),knife_done:village.cinema.state.done.contains("knife_cat"),blade_copies:stats.copies(0) as u32,alive:stats.alive(),flying,feet:player.feet.to_array()})?;
             if route.entry_checkpoint_due(){store.write(save::Slot::parse("slot1")?,&game_snapshot!())?;println!("[lg/route] recorded entry checkpoint");}
-            if route.should_finish() {route.finish(&store,&game_snapshot!(),yaw,pitch)?;break;}
+            if route.should_finish() {
+                route.finish(&store,&game_snapshot!(),yaw,pitch)?;
+                crate::frame_profile::report(&maps[current])?;
+                break;
+            }
             paused=false;
         }
         #[cfg(not(target_os="vita"))]

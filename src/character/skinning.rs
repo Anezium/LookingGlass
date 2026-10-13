@@ -22,6 +22,46 @@ pub(super) fn position(src: &SkinVertex, palette: &[(Mat3, Vec3)]) -> Vec3 {
     }).sum()
 }
 
+thread_local! { static PRESERVE_SKIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// Expanding overlays need current vertices even when the base skin is offscreen.
+pub(crate) struct CullGuard(bool);
+impl CullGuard {
+    pub(crate) fn preserve(required: bool) -> Self {
+        Self(PRESERVE_SKIN.with(|c| c.replace(c.get() || required)))
+    }
+}
+impl Drop for CullGuard {
+    fn drop(&mut self) { PRESERVE_SKIN.with(|c| c.set(self.0)); }
+}
+pub(super) fn culling_allowed() -> bool { PRESERVE_SKIN.with(|c| !c.get()) }
+
+// Adapted from NextOs-Ports/Looking-Glass-NextOS 51b6224 (felc18-blip).
+pub(super) fn world_bounds(bounds: &[(Vec3, Vec3)], palette: &[(Mat3, Vec3)],
+    world: Mat3, origin: Vec3, scale: f32) -> Option<(Vec3, Vec3)> {
+    if bounds.len() != palette.len() || !world.is_finite() || !origin.is_finite() || !scale.is_finite() { return None; }
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for (&(min, max), &(rotation, translation)) in bounds.iter().zip(palette) {
+        if min == Vec3::splat(f32::INFINITY) && max == Vec3::splat(f32::NEG_INFINITY) { continue; }
+        if !min.is_finite() || !max.is_finite() || !rotation.is_finite() || !translation.is_finite() { return None; }
+        let center = world * ((rotation * (min * 0.5 + max * 0.5) + translation) * scale) + origin;
+        let matrix = world * rotation * scale;
+        let half = (max * 0.5 - min * 0.5).abs();
+        let extent = matrix.x_axis.abs() * half.x + matrix.y_axis.abs() * half.y + matrix.z_axis.abs() * half.z;
+        // Cover quaternion/matrix rounding and up to 200 normalized weights.
+        // Uncancelled magnitudes keep slack under large translation cancellation.
+        let magnitude = world.x_axis.abs() + world.y_axis.abs() + world.z_axis.abs();
+        let rotation_max = rotation.to_cols_array().into_iter().map(f32::abs).fold(0_f32, f32::max);
+        let pad = Vec3::splat(0.1) + (center.abs() + extent + origin.abs()
+            + magnitude * (translation.abs().max_element() + 3. * rotation_max
+                * min.abs().max(max.abs()).max_element()) * scale.abs()) * (1024. * f32::EPSILON);
+        if !(center.is_finite() && extent.is_finite() && pad.is_finite()) { return None; }
+        lo = lo.min(center - extent - pad);
+        hi = hi.max(center + extent + pad);
+    }
+    (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
 /// Headless real-data microbench, including palette construction once per draw.
 pub(crate) fn bench(assets: &mut crate::assets::Assets) -> anyhow::Result<()> {
     use crate::skeletal::{Animation, Definition, Skeleton};
@@ -86,6 +126,47 @@ pub(crate) fn bench(assets: &mut crate::assets::Assets) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::skeletal::Weight;
+    #[test]
+    fn bone_bounds_enclose_weighted_reference_vertices() {
+        let bounds = [(vec3(-30., -20., -10.), vec3(60., 50., 40.)),
+            (vec3(-11., -32., -52.), vec3(12., 44., 63.))];
+        for i in 0..1024 {
+            let t = i as f32 * 0.017;
+            let pose = [Transform { rotation: Quat::from_rotation_z(t) * 1.005, translation: vec3(t, 73., 15.) },
+                Transform { rotation: Quat::from_rotation_y(-t), translation: vec3(-31., t, 28.) }];
+            for scales in [[0.65, 1.4], [-1.7, 0.]] {
+                let p = palette(&pose, &scales);
+                let world = Transform { rotation: Quat::from_rotation_x(t) * 0.997, translation: vec3(-1200., 4300., -85.) };
+                for scale in [1.5, -0.75, 0.] {
+                    let (lo, hi) = world_bounds(&bounds, &p, rotation(world.rotation), world.translation, scale).unwrap();
+                    for a in 0..8 {
+                        for b in 0..8 {
+                            let vertex: Vec3 = bounds.iter().enumerate().map(|(bone, &(min, max))| {
+                                let corner = [a, b][bone];
+                                let offset = vec3(if corner & 1 == 0 { min.x } else { max.x },
+                                    if corner & 2 == 0 { min.y } else { max.y }, if corner & 4 == 0 { min.z } else { max.z });
+                                pose[bone].point(offset * scales[bone]) * [0.37, 0.63][bone]
+                            }).sum();
+                            let vertex = world.point(vertex * scale);
+                            assert!(vertex.cmpge(lo).all() && vertex.cmple(hi).all());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn invalid_bounds_fail_open_and_overlay_guards_restore_the_scope() {
+        let p = [(Mat3::IDENTITY, Vec3::ZERO)];
+        assert!(world_bounds(&[], &p, Mat3::IDENTITY, Vec3::ZERO, 1.).is_none());
+        assert!(world_bounds(&[(Vec3::splat(f32::NAN), Vec3::ONE)], &p, Mat3::IDENTITY, Vec3::ZERO, 1.).is_none());
+        assert!(world_bounds(&[(Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY))], &p, Mat3::IDENTITY, Vec3::ZERO, 1.).is_none());
+        assert!(culling_allowed());
+        { let _outer = CullGuard::preserve(true); assert!(!culling_allowed());
+            { let _inner = CullGuard::preserve(false); assert!(!culling_allowed()); }
+            assert!(!culling_allowed()); }
+        assert!(culling_allowed());
+    }
     #[test]
     fn palette_preserves_positions_with_nonunit_rotations_and_signed_scales() {
         for i in 0..1024 {

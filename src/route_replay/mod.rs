@@ -144,10 +144,10 @@ pub struct Session {
     segment: String,
     frame_start: Option<Instant>,
     wall: Vec<(String, f64)>,
-    counters: Vec<[u32;2]>,
+    counters: Vec<[u32;4]>,
     counter_samples: u64,
-    counter_sums: [u64;2],
-    counter_peaks: [u32;2],
+    counter_sums: [u64;4],
+    counter_peaks: [u32;4],
     start: Instant,
     startup_seconds:f64,
     done: bool,
@@ -259,8 +259,8 @@ impl Session {
             wall: Vec::new(),
             counters: Vec::new(),
             counter_samples: 0,
-            counter_sums: [0;2],
-            counter_peaks: [0;2],
+            counter_sums: [0;4],
+            counter_peaks: [0;4],
             start: Instant::now(),startup_seconds:0.,
             done: false,
             heap_start: None,
@@ -314,7 +314,7 @@ impl Session {
             let counters=crate::frame_profile::route_counters();
             self.counters.push(counters);
             self.counter_samples+=1;
-            for i in 0..2 {
+            for i in 0..4 {
                 self.counter_sums[i]+=u64::from(counters[i]);
                 self.counter_peaks[i]=self.counter_peaks[i].max(counters[i]);
             }
@@ -588,7 +588,7 @@ impl Session {
         if let Some(ms) = save_ms {
             self.wall.push(("save-or-continue".into(), ms));
             // No draw during this interval; excluded from rendered-frame counter means.
-            self.counters.push([0;2]);
+            self.counters.push([0;4]);
             self.total_frames += 1;
             for label in ["save-or-continue", "whole-passage"] {
                 let a = self
@@ -611,7 +611,7 @@ impl Session {
             self.heap_start
         );
         let count_summary=|i:usize| serde_json::json!({"samples":self.counter_samples,"mean":(self.counter_samples>0).then(||self.counter_sums[i] as f64/self.counter_samples as f64),"max":self.counter_peaks[i]});
-        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"counter_raw_path":format!("route-frame-windows/{}/counters-*.json",self.run_id),"counter_columns":["live_puffs","fx_gpu_draws"],"counter_population":"Rendered frames; final save-only row is [0,0] and excluded from means. FX draws count direct dynamic actor/object/effect packets, including first-person.","live_puffs":count_summary(0),"fx_gpu_draws":count_summary(1),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.counters.capacity()*std::mem::size_of::<[u32;2]>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"opening_film_played":self.opening_played,"camera_alignment_ticks":self.heading_total,"camera_alignment_seconds":self.heading_total as f64/120.,"input_timeline":"120Hz script excludes scene waits and bounded camera recentering; frame wall includes both","scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
+        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"counter_raw_path":format!("route-frame-windows/{}/counters-*.json",self.run_id),"counter_columns":["live_puffs","fx_gpu_draws","skinned_draws_total","skinned_draws_culled"],"counter_population":"Rendered frames; final save-only row is all zeros and excluded from means. FX draws count direct dynamic actor/object/effect packets, including first-person.","live_puffs":count_summary(0),"fx_gpu_draws":count_summary(1),"skinned_draws_total":count_summary(2),"skinned_draws_culled":count_summary(3),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.counters.capacity()*std::mem::size_of::<[u32;4]>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"opening_film_played":self.opening_played,"camera_alignment_ticks":self.heading_total,"camera_alignment_seconds":self.heading_total as f64/120.,"input_timeline":"120Hz script excludes scene waits and bounded camera recentering; frame wall includes both","scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":"disabled in native route modes"});
         std::fs::write(
             self.root.join(if self.continuing() {
                 "route-continue-report.json"

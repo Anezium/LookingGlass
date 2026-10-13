@@ -25,3 +25,17 @@ scopes. Profile medians are per invocation, not GPU timings.
 
 Adapted MIT engine code: NextOs-Ports/Looking-Glass-NextOS 15779e4 (felc18-blip).
 No NextOS platform bridge, Android implementation or ETC2 code is used.
+
+`skin_frustum_cull` (default **true**) unions bone-local boxes built from positive
+normalized SKL weights after transforming by the current facial/bone pose, bone
+scales and signed model scale. Numerical slack covers weighted sums and both
+quaternion and matrix paths. Invalid or empty boxes fail open. It skips only
+visual skinning/submission. Facial posing, blinking, tags, sounds, footing and
+attachments continue; attachments use their own bounds. Frozen-capable rigs and
+active electrical/Rage overlays preserve current vertices because their shaders
+expand beyond base bounds. Shadows, reflections and portals retain their existing
+updates and use the actual pass projection. A rejected ambient refresh invalidates
+its visual cache. Route columns add `skinned_draws_total` and `skinned_draws_culled`,
+with aligned per-frame raw rows and mean/peak summaries; the native frame profiler
+uses the same names. These count model draw invocations, not surface layers.
+Adapted from NextOs-Ports/Looking-Glass-NextOS 51b6224 (felc18-blip).

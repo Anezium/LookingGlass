@@ -655,6 +655,10 @@ impl Resident {
         } else {
             1.
         };
+        let _skin_guard = crate::character::skinning::CullGuard::preserve(match &self.body {
+            Body::Diamond(b) => b.electric > 0., Body::Boojum(b) => b.electric > 0.,
+            Body::Ladybug(b) => b.electric > 0., _ => false,
+        });
         material.bind();
         crate::render_fx::with_skin_opacity(alpha, || {
             model.draw_pose(

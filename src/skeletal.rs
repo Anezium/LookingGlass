@@ -61,6 +61,8 @@ pub struct Surface {
 pub struct Skeleton {
     pub bones: Vec<Bone>,
     pub surfaces: Vec<Surface>,
+    /// Bone-local boxes of positive offsets; their transformed union encloses skin.
+    pub skin_bounds: Vec<(Vec3, Vec3)>,
 }
 
 impl Skeleton {
@@ -170,7 +172,16 @@ impl Skeleton {
             p += end;
         }
         ensure!(p == data.len(), "Unexpected trailing skeleton data");
-        Ok(Self { bones, surfaces })
+        // Adapted from NextOs-Ports/Looking-Glass-NextOS 51b6224 (felc18-blip).
+        let mut skin_bounds = vec![(Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)); nb];
+        for w in surfaces.iter().flat_map(|s| &s.vertices).flat_map(|v| &v.weights) {
+            if w.amount > 0. {
+                let (lo, hi) = &mut skin_bounds[w.bone];
+                *lo = lo.min(w.offset);
+                *hi = hi.max(w.offset);
+            }
+        }
+        Ok(Self { bones, surfaces, skin_bounds })
     }
     /// Flags bones that are unskinned attachment tags: named `tag_*` and carrying
     /// no skin weight. Only these may store a non-unit packed rotation
@@ -616,6 +627,20 @@ mod tests {
         b
     }
     #[test]
+    fn parsed_bone_bounds_include_positive_weights_and_ignore_zero_weight_tags() {
+        let mut bytes = mesh_fixture();
+        bytes.splice(388..388, [0_u8; 20]);
+        put(&mut bytes, 88, 412);
+        put(&mut bytes, 236 + 88, 172);
+        put(&mut bytes, 236 + 92, 176);
+        put(&mut bytes, 236 + 128, 2);
+        float(&mut bytes, 388 + 8, 9999.); // zero-weight root does not enlarge the box
+        let skeleton = Skeleton::parse(&bytes).unwrap();
+        assert_eq!(skeleton.skin_bounds[0], (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)));
+        assert_eq!(skeleton.skin_bounds[1], (Vec3::ZERO, Vec3::ZERO));
+        assert_eq!(skeleton.surfaces[0].vertices[0].weights.iter().map(|w|w.amount).sum::<f32>(),1.);
+    }
+    #[test]
     fn version_two_float_poses_match_packed_poses_and_remain_checked() {
         let packed = Animation::parse(&anim_fixture(), 2).unwrap();
         let mut b = vec![0; 112 + 2 * (40 + 2 * 28)];
@@ -752,6 +777,7 @@ mod tests {
             offset: Vec3::ZERO,
         };
         let skeleton = Skeleton {
+            skin_bounds: vec![],
             bones: vec![
                 bone("Bone01", None),
                 bone("tag_hand", Some(0)),

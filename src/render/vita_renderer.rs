@@ -39,6 +39,8 @@ pub struct Config {
     pub actor_frustum_cull:bool,
     /// Matrix skinning changes float rounding: opt in after console comparison.
     pub bone_palette: bool,
+    /// Conservative skin bounds; visual work only, using each pass's projection.
+    pub skin_frustum_cull: bool,
     /// SDK logo thread is disabled by default; the LG opening film is unaffected.
     pub startup_splash:bool,
     /// Persistent binary pairs; process deduplication remains active when off.
@@ -72,6 +74,7 @@ impl Default for Config {
             fx_batching:"adjacent".into(),fx_streaming:"orphan".into(),fx_merge_cache:true,fx_upload_cache:false,fx_max_layers:2,actor_fast_path:true,
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:false,
             bone_palette: false,
+            skin_frustum_cull: true,
             startup_splash:false,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
@@ -1428,6 +1431,7 @@ mod tests {
     fn settings_bound_gpu_passes_and_reject_bad_values() {
         assert!(Config::default().validate().is_ok());
         assert!(!Config::default().bone_palette);
+        assert!(Config::default().skin_frustum_cull);
         assert!(serde_json::from_str::<Config>(r#"{"bone_palette":"on"}"#).is_err());
         for layers in [0, 3, usize::MAX] {
             assert!(Config {

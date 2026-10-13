@@ -1131,7 +1131,9 @@ impl Model {
                 removed.push((i, self.meshes[i].take()));
             }
         }
-        crate::character::draw_skin_scaled(
+        // Frozen secondary shaders expand vertices beyond the base skin bounds.
+        let _skin_guard = crate::character::skinning::CullGuard::preserve(self.frozen.is_some());
+        let skin_visible = crate::character::draw_skin_scaled(
             &d.skeleton,
             &mut self.meshes,
             &pose,
@@ -1141,7 +1143,7 @@ impl Model {
             &scales,
         );
         for (visible, mesh) in self.visible.iter_mut().zip(&self.meshes) {
-            *visible = mesh.is_some();
+            *visible = skin_visible && mesh.is_some();
         }
         // Model instances are shared by many actors. Always restore every mesh.
         for (i, mesh) in removed {
@@ -1191,6 +1193,7 @@ impl Model {
         atmosphere: &Atmosphere,
         material: &crate::character::SkinMaterial,
     ) {
+        let _skin_guard = crate::character::skinning::CullGuard::preserve(g.electric > 0.);
         if let Some(state) = &g.burst {
             material.bind();
             if let Some(art) = &mut self.burst {
@@ -3119,6 +3122,7 @@ impl Npcs {
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for (id, actor) in self.actors.iter().enumerate() {
+            let _skin_guard = crate::character::skinning::CullGuard::preserve(actor.electric > 0.);
             if actor.ant.as_ref().is_some_and(|a| !a.enabled) { continue; }
             if actor.guide.as_ref().is_some_and(|g| !g.visible()) {
                 continue;
@@ -4068,6 +4072,7 @@ impl Model {
             clip.frame_time,
             ant.loops(),
         );
+        let _skin_guard = crate::character::skinning::CullGuard::preserve(ant.electric > 0.);
         material.bind();
         self.draw_pose(
             &local,

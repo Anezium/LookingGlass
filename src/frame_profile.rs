@@ -10,11 +10,26 @@ static ROUTE_PUFFS: AtomicU32 = AtomicU32::new(0);
 #[cfg(feature="vita_renderer")]
 static ROUTE_FX_DRAWS: AtomicU32 = AtomicU32::new(0);
 #[cfg(feature="vita_renderer")]
+static ROUTE_SKIN_TOTAL: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature="vita_renderer")]
+static ROUTE_SKIN_CULLED: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature="vita_renderer")]
 pub(crate) fn route_live_puffs(n: usize) { ROUTE_PUFFS.store(n.min(u32::MAX as usize) as u32, Ordering::Relaxed); }
 #[cfg(feature="vita_renderer")]
 pub(crate) fn route_fx_draws(n: u64) { ROUTE_FX_DRAWS.fetch_add(n.min(u32::MAX as u64) as u32, Ordering::Relaxed); }
 #[cfg(feature="vita_renderer")]
-pub(crate) fn route_counters() -> [u32;2] { [ROUTE_PUFFS.load(Ordering::Relaxed),ROUTE_FX_DRAWS.load(Ordering::Relaxed)] }
+pub(crate) fn route_counters() -> [u32;4] { [ROUTE_PUFFS.load(Ordering::Relaxed),ROUTE_FX_DRAWS.load(Ordering::Relaxed),ROUTE_SKIN_TOTAL.load(Ordering::Relaxed),ROUTE_SKIN_CULLED.load(Ordering::Relaxed)] }
+pub(crate) fn skinned_draw(culled: bool) {
+    #[cfg(feature="vita_renderer")]
+    {
+        ROUTE_SKIN_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if culled { ROUTE_SKIN_CULLED.fetch_add(1, Ordering::Relaxed); }
+        crate::render_fx::retained::count("skinned_draws_total", 1);
+        crate::render_fx::retained::count("skinned_draws_culled", u64::from(culled));
+    }
+    #[cfg(not(feature="vita_renderer"))]
+    let _ = culled;
+}
 
 // Count LG-owned creation calls, including Macroquad material compilation.
 // Framework startup shaders are outside the viewer frame window.
@@ -34,7 +49,7 @@ pub(crate) fn pipeline_creation() {
 pub(crate) fn begin_creation_frame() {
     CREATIONS.with(|c| c.borrow_mut().current=[0;2]);
     #[cfg(feature="vita_renderer")]
-    { ROUTE_PUFFS.store(0,Ordering::Relaxed); ROUTE_FX_DRAWS.store(0,Ordering::Relaxed); }
+    { ROUTE_PUFFS.store(0,Ordering::Relaxed); ROUTE_FX_DRAWS.store(0,Ordering::Relaxed); ROUTE_SKIN_TOTAL.store(0,Ordering::Relaxed); ROUTE_SKIN_CULLED.store(0,Ordering::Relaxed); }
 }
 #[cfg(not(target_os="vita"))]
 pub(crate) fn end_creation_frame() {

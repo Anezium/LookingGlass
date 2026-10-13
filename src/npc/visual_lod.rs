@@ -43,6 +43,10 @@ impl Cache {
         self.meshes.clear();
     }
     pub fn capture(&mut self, model: &Model) {
+        if !model.visible.iter().any(|v| *v) {
+            self.invalidate();
+            return;
+        }
         self.meshes.clear();
         self.meshes.extend(model.meshes.iter().zip(&model.visible)
             .filter_map(|(mesh, visible)| visible.then_some(mesh.as_ref()).flatten())

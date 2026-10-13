@@ -222,6 +222,7 @@ mod tests {
     #[test]
     fn leg_solver_preserves_lengths_and_reaches_floor_without_moving_root() {
         let skeleton = Skeleton {
+            skin_bounds: vec![],
             surfaces: vec![],
             bones: vec![
                 crate::skeletal::Bone {

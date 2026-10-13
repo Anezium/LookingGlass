@@ -1130,7 +1130,9 @@ impl Character {
             }
         }
         let rotation = Quat::from_rotation_z(self.facing);
-        draw_skin(
+        let _skin_guard = skinning::CullGuard::preserve(self.visuals.ice_locked()
+            || self.power_pose.state.form == Some(crate::power_pose::Form::Rage));
+        let skin_visible = draw_skin(
             &self.skeleton,
             &mut self.meshes,
             &pose,
@@ -1141,8 +1143,10 @@ impl Character {
             self.scale,
             fullbright,
         );
-        self.visuals.frozen_body(&self.meshes);
-        self.power_art.surface_effects(&self.meshes, &self.power_pose.state);
+        if skin_visible {
+            self.visuals.frozen_body(&self.meshes);
+            self.power_art.surface_effects(&self.meshes, &self.power_pose.state);
+        }
         for (i, mesh) in hidden {
             self.meshes[i] = mesh;
         }
@@ -1924,13 +1928,13 @@ pub(crate) fn draw_skin(
     transform: Transform,
     scale: f32,
     fullbright: bool,
-) {
-    draw_skin_scaled(skeleton, meshes, pose, transform, scale, fullbright, &[]);
+) -> bool {
+    draw_skin_scaled(skeleton, meshes, pose, transform, scale, fullbright, &[])
 }
 pub(crate) fn draw_skin_scaled(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, bone_scales: &[f32],
-) {
+) -> bool {
     draw_skin_deformed(
         skeleton,
         meshes,
@@ -1939,12 +1943,12 @@ pub(crate) fn draw_skin_scaled(
         scale,
         fullbright,
         (bone_scales, 1.),
-    );
+    )
 }
 pub(crate) fn draw_skin_alpha(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, alpha: f32,
-) {
+) -> bool {
     draw_skin_deformed(
         skeleton,
         meshes,
@@ -1953,18 +1957,29 @@ pub(crate) fn draw_skin_alpha(
         scale,
         fullbright,
         (&[], alpha),
-    );
+    )
 }
 fn draw_skin_deformed(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, (bone_scales, alpha): (&[f32], f32),
-) {
+) -> bool {
     #[cfg(feature = "vita_renderer")]
     let use_palette = crate::render::vita_renderer::config().bone_palette;
     #[cfg(not(feature = "vita_renderer"))]
     let use_palette = false;
-    let palette = use_palette.then(|| skinning::palette(pose, bone_scales));
-    let world_rotation = use_palette.then(|| skinning::rotation(transform.rotation));
+    #[cfg(feature = "vita_renderer")]
+    let cull = crate::render::vita_renderer::config().skin_frustum_cull && skinning::culling_allowed();
+    #[cfg(not(feature = "vita_renderer"))]
+    let cull = false;
+    let palette = (use_palette || cull).then(|| skinning::palette(pose, bone_scales));
+    let world_rotation = (use_palette || cull).then(|| skinning::rotation(transform.rotation));
+    if cull && skinning::world_bounds(&skeleton.skin_bounds, palette.as_ref().unwrap(),
+        world_rotation.unwrap(), transform.translation, scale)
+        .is_some_and(|(lo, hi)| crate::render::outside_bounds(lo, hi)) {
+        crate::frame_profile::skinned_draw(true);
+        return false;
+    }
+    crate::frame_profile::skinned_draw(false);
     for (surface, mesh) in skeleton.surfaces.iter().zip(meshes) {
         let Some(mesh) = mesh else {
             continue;
@@ -1973,13 +1988,13 @@ fn draw_skin_deformed(
         let positions_profile =
             crate::frame_profile::characters_span("characters_skinning_positions");
         for (src, dst) in surface.vertices.iter().zip(&mut mesh.vertices) {
-            let position = if let Some(palette) = &palette {
-                skinning::position(src, palette)
+            let position = if use_palette {
+                skinning::position(src, palette.as_ref().unwrap())
             } else if bone_scales.is_empty() { src.position(pose) } else {
                 src.weights.iter().map(|w| pose[w.bone].point(w.offset * bone_scales[w.bone]) * w.amount).sum()
             };
-            dst.position = world_rotation.map_or_else(|| transform.point(position * scale),
-                |world| world * (position * scale) + transform.translation);
+            dst.position = if use_palette { world_rotation.unwrap() * (position * scale) + transform.translation }
+                else { transform.point(position * scale) };
             dst.normal = Vec4::ZERO;
         }
         drop(positions_profile);
@@ -2014,6 +2029,7 @@ fn draw_skin_deformed(
         drop(skin_profile);
         crate::render_fx::skin(mesh);
     }
+    true
 }
 
 /// Sweep a small camera box along the view arm to avoid looking through walls.
