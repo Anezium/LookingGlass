@@ -1,6 +1,6 @@
-# Same-frame skin overlap (milestone 15)
+# Same-frame skin overlap (milestone 17)
 
-`skin_overlap` defaults to false. With `skin_workers=1` or `2`, it enables
+`skin_overlap` defaults to true with `skin_workers=2`. With one or two workers it enables
 an early CPU snapshot of the gameplay character pass. The benchmark switch is
 incompatible with overlap. The existing serial and J13 per-actor persistent
 worker paths remain available with overlap disabled.
@@ -10,7 +10,12 @@ and portal views first. It visits Alice, the placed NPCs and controller-owned
 level art before `scene.draw` and dispatches all accepted skeletal body draws as
 one batch. The game thread submits the opaque world while the workers run,
 then collects immediately before character submission. All material, texture,
-attachment, electric/frozen overlay, FX and GL work stays on the game thread.
+attachment, electric/frozen overlay, resource-owning FX and GL work stays on the game thread.
+With `actor_layer_reuse` (default true), the same worker batch also prepares
+two plain numeric alpha variants and exact position/normal/color revisions.
+The game thread preserves and checks caller-edited UVs, publishes immutable
+layer geometry, and reuses empty bounded pass containers. Untracked or
+camera/normal-dependent layers retain their original preparation path.
 Gather suppresses prop rendering and effect-history advancement. Ambient LOD
 advances once in gather; submission consumes that decision and refreshes the
 cache using completed vertices. World-only frames skip the overlap pipeline.

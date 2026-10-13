@@ -37,6 +37,9 @@ pub struct Config {
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
     pub skin_overlap: bool,
+    pub lights_early_out: bool,
+    pub fx_submit_state_cache: bool,
+    pub actor_layer_reuse: bool,
     /// None selects light in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     pub skin_worker_bench: bool,
@@ -107,7 +110,7 @@ impl Default for Config {
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
             world_state_cache: true,
-            worker_probe: false, skin_workers: 0, skin_overlap: false, profiler: None, skin_worker_bench: false, fx_prepare_cache: true, frame_phase_probe: false,
+            worker_probe: false, skin_workers: 2, skin_overlap: true, lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: true, profiler: None, skin_worker_bench: false, fx_prepare_cache: true, frame_phase_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
@@ -1566,19 +1569,32 @@ pub(crate) async fn visualizer(
 mod tests {
     use super::*;
     #[test]
-    fn overlap_is_explicit_validated_and_not_the_default() {
-        assert!(!Config::default().skin_overlap);
+    fn j17_switches_default_on_and_strictly_parse_each_off() {
+        let default=serde_json::to_value(Config::default()).unwrap();
+        for name in ["lights_early_out","fx_submit_state_cache","actor_layer_reuse"] {
+            assert_eq!(default[name],true);
+            let mut value=default.clone();value[name]=serde_json::json!(false);
+            let config:Config=serde_json::from_value(value).unwrap();config.validate().unwrap();
+            assert_eq!(serde_json::to_value(config).unwrap()[name],false);
+            let mut value=default.clone();value[name]=serde_json::json!("on");
+            assert!(serde_json::from_value::<Config>(value).is_err());
+        }
+    }
+    #[test]
+    fn overlap_defaults_to_two_workers_and_remains_validated() {
+        assert!(Config::default().skin_overlap);
+        assert_eq!(Config::default().skin_workers,2);
         for n in [1,2] {
             serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":true,"skin_workers":n})).unwrap().validate().unwrap();
         }
-        assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":true})).unwrap().validate().is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":true,"skin_workers":0})).unwrap().validate().is_err());
         assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":"true"})).is_err());
         assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_overlap":true,"skin_workers":1,"skin_worker_bench":true})).unwrap().validate().is_err());
     }
     #[test]
     fn profiler_and_worker_bench_configuration_is_strict() {
         for level in ["light","full"] {
-            let c:Config=serde_json::from_value(serde_json::json!({"profiler":level,"skin_worker_bench":true})).unwrap();
+            let c:Config=serde_json::from_value(serde_json::json!({"profiler":level,"skin_worker_bench":true,"skin_overlap":false,"skin_workers":0})).unwrap();
             c.validate().unwrap(); assert!(c.skin_worker_bench); assert_eq!(c.skin_workers,0);
         }
         assert!(serde_json::from_value::<Config>(serde_json::json!({"profiler":"silent"})).is_err());
@@ -1588,10 +1604,10 @@ mod tests {
     #[test]
     fn j12_switches_are_strict_and_have_required_defaults() {
         let c=Config::default();
-        assert_eq!(c.skin_workers,0); assert_eq!(c.profiler,None); assert!(!c.skin_worker_bench); assert!(c.fx_prepare_cache);
+        assert_eq!(c.skin_workers,2); assert_eq!(c.profiler,None); assert!(!c.skin_worker_bench); assert!(c.fx_prepare_cache);
         assert!(!c.worker_probe && !c.frame_phase_probe);
         for workers in 0..=2 {
-            let c:Config=serde_json::from_value(serde_json::json!({"skin_workers":workers,
+            let c:Config=serde_json::from_value(serde_json::json!({"skin_workers":workers,"skin_overlap":workers>0,
                 "worker_probe":true,"fx_prepare_cache":false,"frame_phase_probe":true})).unwrap();
             assert!(c.validate().is_ok());
         }

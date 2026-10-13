@@ -1,6 +1,7 @@
 //! Same-frame CPU skin snapshots. Render handles never enter this storage.
 //! Buffers are bounded and allocated at startup; overflow uses the serial draw.
 use super::{rotation, shade_arrays, Params};
+use crate::render_fx::actor_vertices::{self, Revision};
 use crate::skeletal::{Skeleton, SkinSurface, Transform};
 use macroquad::prelude::*;
 use std::{
@@ -30,10 +31,12 @@ pub(crate) fn gathering() -> bool {
 pub(crate) fn ready() -> bool {
     PHASE.with(|p| p.get() == Phase::Ready)
 }
+#[derive(Clone)]
 struct Surface {
     mesh: usize,
     vertices: Range<usize>,
     cpu: Arc<SkinSurface>,
+    revision: Revision,
 }
 struct Draw {
     key: usize,
@@ -59,6 +62,8 @@ struct Task {
     input: usize,
     output: usize,
     draws: Range<usize>,
+    layers: usize,
+    dirty: usize,
 }
 impl Task {
     unsafe fn run(address: usize) {
@@ -68,7 +73,8 @@ impl Task {
             let pose = &input.pose[draw.pose.clone()];
             let scales = &input.scales[draw.scales.clone()];
             let palette = &input.palette[draw.palette.clone()];
-            for surface in &input.surfaces[draw.surfaces.clone()] {
+            for surface_id in draw.surfaces.clone() {
+                let surface = &input.surfaces[surface_id];
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
                 let output = std::slice::from_raw_parts_mut(
                     (task.output as *mut Vertex).add(surface.vertices.start),
@@ -115,6 +121,19 @@ impl Task {
                     draw.fullbright,
                     draw.alpha,
                 );
+                if task.layers != 0 {
+                    let layers = std::slice::from_raw_parts_mut(
+                        (task.layers as *mut [Vertex; 2]).add(surface.vertices.start), output.len());
+                    let mut dirty = [false; 2];
+                    for (src, dst) in output.iter().zip(layers) {
+                        for variant in 0..2 {
+                            let v = actor_vertices::normalize(*src, variant == 1);
+                            dirty[variant] |= !actor_vertices::equal_written(&v, &dst[variant]);
+                            dst[variant] = v;
+                        }
+                    }
+                    *(task.dirty as *mut [bool; 2]).add(surface_id) = dirty;
+                }
             }
         }
     }
@@ -126,6 +145,9 @@ struct Store {
     input: Box<UnsafeCell<Inputs>>,
     output: Vec<Vertex>,
     output_len: usize,
+    layers: Vec<[Vertex; 2]>,
+    dirty: Vec<[bool; 2]>,
+    previous: Vec<Surface>,
     pending: usize,
     cursor: usize,
     overflow: bool,
@@ -141,6 +163,11 @@ impl Store {
         fn cpu_only<T: Send>() {}
         cpu_only::<Inputs>();
         cpu_only::<Vertex>();
+        #[cfg(feature="vita_renderer")]
+        let reuse = crate::render::vita_renderer::config().actor_layer_reuse;
+        #[cfg(not(feature="vita_renderer"))]
+        let reuse = false;
+        let zero = Vertex { position: Vec3::ZERO, uv: Vec2::ZERO, normal: Vec4::ZERO, color: [0; 4] };
         Box::new(Self {
             workers: (0..workers)
                 .map(|i| crate::skin_worker::Worker::new(i, probe))
@@ -149,7 +176,7 @@ impl Store {
                 UnsafeCell::new(Task {
                     input: 0,
                     output: 0,
-                    draws: 0..0,
+                    draws: 0..0, layers: 0, dirty: 0,
                 })
             }),
             input: Box::new(UnsafeCell::new(Inputs {
@@ -162,6 +189,9 @@ impl Store {
             output: vec![Vertex { position: Vec3::ZERO, uv: Vec2::ZERO,
                 normal: Vec4::ZERO, color: [0; 4] }; VERTICES],
             output_len: 0,
+            layers: if reuse {vec![[zero; 2]; VERTICES]} else {Vec::new()},
+            dirty: if reuse {vec![[false; 2]; SURFACES]} else {Vec::new()},
+            previous: Vec::with_capacity(SURFACES),
             pending: 0,
             cursor: 0,
             overflow: false,
@@ -175,6 +205,8 @@ impl Store {
         assert_eq!(self.pending, 0);
         let i = unsafe { &mut *self.input.get() };
         i.draws.clear();
+        self.previous.clear();
+        self.previous.extend(i.surfaces.iter().cloned());
         i.surfaces.clear();
         i.pose.clear();
         i.scales.clear();
@@ -244,7 +276,11 @@ impl Store {
                 // Capacity is checked above; only reserve output space on the game thread.
                 // Workers initialize every field, including UV, from immutable load data.
                 self.output_len = vertices.end;
-                i.surfaces.push(Surface { mesh, vertices, cpu: surface.cpu() });
+                let cpu = surface.cpu();
+                let revision = self.previous.get(i.surfaces.len())
+                    .filter(|old| old.vertices == vertices && Arc::ptr_eq(&old.cpu, &cpu))
+                    .map_or_else(Revision::new, |old| old.revision);
+                i.surfaces.push(Surface { mesh, vertices, cpu, revision });
             }
         }
         i.draws.push(draw);
@@ -278,6 +314,8 @@ impl Store {
                     input,
                     output,
                     draws: range,
+                    layers: if self.layers.is_empty() {0} else {self.layers.as_mut_ptr() as usize},
+                    dirty: self.dirty.as_mut_ptr() as usize,
                 };
             }
             // Store is boxed before this call, and cannot be moved/reset/read until drain.
@@ -289,6 +327,7 @@ impl Store {
     }
     fn drain(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
         let start = std::time::Instant::now();
+        let completed = self.pending > 0;
         let mut panic = None;
         for worker in &mut self.workers[..self.pending] {
             match worker.wait_result() {
@@ -301,6 +340,15 @@ impl Store {
             }
         }
         self.pending = 0;
+        if completed && !self.layers.is_empty() {
+            let input = unsafe { &mut *self.input.get() };
+            // Advance every completed producer, including unconsumed/mismatched
+            // draws. Otherwise a fallback could hide a changed worker result.
+            for (id, surface) in input.surfaces.iter_mut().enumerate() {
+                if panic.is_none() {surface.revision.changed(self.dirty[id]);}
+                else {surface.revision = Revision::new();}
+            }
+        }
         self.wait_us = start.elapsed().as_micros() as u64;
         panic
     }
@@ -311,7 +359,7 @@ impl Store {
         p: Params<'_>,
     ) -> Option<bool> {
         assert_eq!(self.pending, 0);
-        let i = unsafe { &*self.input.get() };
+        let i = unsafe { &mut *self.input.get() };
         let Some(d) = i.draws.get(self.cursor) else {
             self.fallback += 1;
             return None;
@@ -340,7 +388,8 @@ impl Store {
             self.fallback += 1;
             return None;
         }
-        for surface in &i.surfaces[d.surfaces.clone()] {
+        for surface_id in d.surfaces.clone() {
+            let surface = &mut i.surfaces[surface_id];
             // The serial kernel leaves live UVs untouched (including any caller edits).
             // Only its three written fields return from the worker; no gather-time
             // copy of the live/bind vertices is needed to preserve the fourth field.
@@ -471,6 +520,27 @@ pub(in crate::character) fn handle(
     })
 }
 
+/// Synchronous handoff after consume: no mesh mutation can intervene. The caller
+/// still owns fully updated vertices for overlays, attachments and fallback stages.
+pub(crate) fn submit(meshes: &[Option<Mesh>]) {
+    STORE.with(|store| {
+        let store = store.borrow();
+        let store = store.as_ref().unwrap();
+        assert_eq!(store.pending, 0);
+        if store.layers.is_empty() {
+            for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
+            return;
+        }
+        let input = unsafe { &*store.input.get() };
+        let draw = &input.draws[store.cursor - 1];
+        for surface in &input.surfaces[draw.surfaces.clone()] {
+            crate::render_fx::skin_produced(meshes[surface.mesh].as_ref().unwrap(),
+                actor_vertices::Publication { revision: surface.revision,
+                    vertices: &store.layers[surface.vertices.clone()], indices: &surface.cpu.indices });
+        }
+    });
+}
+
 fn same_vertices(a: &[Vertex], b: &[Vertex]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(a, b)| {
@@ -580,6 +650,20 @@ pub(crate) fn check_skeleton(
                                     "overlap {workers} differs from serial"
                                 );
                             }
+                            if !store.layers.is_empty() {
+                                let input = unsafe { &*store.input.get() };
+                                let draw = &input.draws[store.cursor - 1];
+                                for surface in &input.surfaces[draw.surfaces.clone()] {
+                                    for (source, prepared) in meshes[surface.mesh].as_ref().unwrap().vertices.iter()
+                                        .zip(&store.layers[surface.vertices.clone()]) {
+                                        for variant in 0..2 {
+                                            anyhow::ensure!(actor_vertices::equal_written(
+                                                &actor_vertices::normalize(*source,variant==1),&prepared[variant]),
+                                                "worker layer output differs from serial");
+                                        }
+                                    }
+                                }
+                            }
                             comparisons += 1;
                         }
                     }
@@ -644,6 +728,28 @@ mod tests {
             fullbright: false,
             alpha: 0.731,
         }
+    }
+    #[cfg(feature="vita_renderer")]
+    #[test]
+    fn layer_revisions_cover_frozen_changed_and_unconsumed_outputs_and_new_identity() {
+        let (s,mut meshes,pose)=fixture();let p=params(&pose);
+        let mut store=Store::new(2,false);
+        let run=|store:&mut Store,p| {
+            store.reset();store.capture(&s,&meshes,p,true);store.dispatch();assert!(store.drain().is_none());
+            unsafe {(&*store.input.get()).surfaces[0].revision}
+        };
+        let a=run(&mut store,p);let b=run(&mut store,p);assert_eq!(a,b);
+        // Changed output is not consumed; the following frozen frame still sees
+        // its new revision rather than incorrectly reusing an older publication.
+        let moved=Params {scale:2.,..p};let c=run(&mut store,moved);
+        assert_eq!(c.identity,b.identity);assert_ne!(c.vertices,b.vertices);
+        assert_eq!(run(&mut store,moved),c);
+        assert_eq!(store.consume(&s,&mut meshes,moved),Some(true));
+        let (other,other_meshes,_)=fixture();store.reset();
+        store.capture(&other,&other_meshes,p,true);store.dispatch();assert!(store.drain().is_none());
+        assert_ne!(unsafe {(&*store.input.get()).surfaces[0].revision.identity},a.identity);
+        store.reset();store.capture(&s,&meshes,p,false);store.dispatch();assert!(store.drain().is_none());
+        assert!(unsafe {(&*store.input.get()).surfaces.is_empty()});
     }
     #[test]
     fn owned_overlap_duplicate_shared_actor_poses_match_serial() {

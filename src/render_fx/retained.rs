@@ -1,7 +1,7 @@
 //! Whole actor/effect packets share one alpha order with immutable world groups.
 //! Only dynamic LG meshes stream here; world buffers are never read or uploaded.
 pub(super) mod state_cache;
-use state_cache::{vertices_equal, UploadPlan, UniformCache};
+use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
 use super::{Frame, Pass, FRAME};
 use crate::environment::Atmosphere;
 use anyhow::{ensure, Context, Result};
@@ -166,6 +166,7 @@ struct Stats {
     upload_hits: u64,
     upload_requests: u64, identical_uploads: u64, uniform_requests: u64, identical_uniforms: u64,
     index_skips: u64, uniform_skips: u64,
+    pipeline_sets: u64, binding_sets: u64,
 }
 impl Stats {
     fn report(&self) {
@@ -174,7 +175,10 @@ impl Stats {
         let values = [
             ("vita_fx_gpu_draws", self.draws),
             ("vita_fx_triangles", self.triangles),
-            ("vita_fx_state_applications", self.draws),
+            ("vita_fx_state_applications", self.pipeline_sets),
+            ("vita_fx_pipeline_depth_sets_skipped", self.draws - self.pipeline_sets),
+            ("vita_fx_binding_applications", self.binding_sets),
+            ("vita_fx_binding_sets_skipped", self.draws - self.binding_sets),
             ("vita_fx_uniform_bytes", self.uniform_bytes),
             ("vita_fx_geometry_upload_bytes", self.upload_bytes),
             ("vita_fx_mesh_uploads", self.uploads),
@@ -283,6 +287,7 @@ pub(crate) struct Gpu {
     range_storage: Vec<std::ops::Range<usize>>,
     shared_storage: std::collections::HashMap<usize, usize>,
     uniform_cache: UniformCache<UNIFORM_FLOATS>,
+    submit_cache: SubmitCache<(usize, bool, bool), (BufferId, BufferId, [TextureId; 3]), UNIFORM_FLOATS>,
     merge_cache: [MergeCache; 4],
     merge_meshes: [BTreeMap<usize, super::prepared::Geometry>; 2],
 }
@@ -318,7 +323,7 @@ impl Gpu {
             stats: Stats::default(),
             preparation: Default::default(), packet_storage: Vec::new(),
             range_storage: Vec::new(), shared_storage: Default::default(),
-            uniform_cache: UniformCache::default(),
+            uniform_cache: UniformCache::default(), submit_cache: SubmitCache::default(),
             merge_cache: Default::default(),
             merge_meshes: Default::default(),
         };
@@ -447,21 +452,27 @@ impl Gpu {
         // Texture bindings still belong to the individual layer packet.
         self.buffers[slot].bindings.images[0]=p.mesh.texture.as_ref().map_or_else(||self.white.raw_miniquad_id(),Texture2D::raw_miniquad_id);
         let ctx = unsafe { get_internal_gl() }.quad_context;
-        ctx.apply_pipeline(pipeline);
-        unsafe {
-            macroquad::miniquad::gl::glDepthMask(u8::from(depth_write));
-        }
-        ctx.apply_bindings(&self.buffers[slot].bindings);
-        // Inspired by NextOs-Ports/Looking-Glass-NextOS 668de14 (felc18-blip).
-        // Only consecutive complete payloads of this private program qualify;
-        // world callbacks and each finish/view reset the cache. Bindings always apply.
         let c = crate::render::vita_renderer::config();
+        let b = &self.buffers[slot].bindings;
+        let apply = if c.fx_submit_state_cache {
+            self.submit_cache.observe((key.0, key.1, depth_write),
+                (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
+        } else { [true; 3] };
+        if apply[0] {
+            ctx.apply_pipeline(pipeline);
+            unsafe { macroquad::miniquad::gl::glDepthMask(u8::from(depth_write)); }
+            self.stats.pipeline_sets += 1;
+        }
+        if apply[1] { ctx.apply_bindings(b); self.stats.binding_sets += 1; }
+        // The old uniform-only probe remains independently selectable with the
+        // new cache disabled. Both observe the complete bit-exact payload.
         let same = (c.gpu_state_probe || c.gpu_uniform_dedupe) && self.uniform_cache.observe(u);
         if c.gpu_state_probe || c.gpu_uniform_dedupe {
             self.stats.uniform_requests += 1;
             self.stats.identical_uniforms += u64::from(same);
         }
-        if c.gpu_uniform_dedupe && same { self.stats.uniform_skips += 1; }
+        let skip = if c.fx_submit_state_cache { !apply[2] } else { c.gpu_uniform_dedupe && same };
+        if skip { self.stats.uniform_skips += 1; }
         else {
             ctx.apply_uniforms(UniformsSource::table(u));
             self.stats.uniform_bytes += std::mem::size_of_val(u) as u64;
@@ -792,6 +803,7 @@ pub(crate) fn finish_world(
     }
     gpu.stats = Stats::default();
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
+    gpu.submit_cache.interrupt();
     let (mut groups, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -926,6 +938,7 @@ pub(crate) fn finish_world(
         }
     }
     count("vita_joint_alpha_groups", list.len() as u64);
+    gpu.submit_cache.interrupt(); // External depth-mask change at the alpha boundary.
     unsafe {
         macroquad::miniquad::gl::glDepthMask(0);
     }
@@ -936,6 +949,7 @@ pub(crate) fn finish_world(
             match *source {
                 Source::World(id) => {
                     gpu.uniform_cache.interrupt();
+                    gpu.submit_cache.interrupt();
                     let start = world_totals.and_then(|t| t.borrow().start());
                     draw_world(id);
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
@@ -959,6 +973,8 @@ pub(crate) fn finish_world(
         f.retained.clear();
     });
     gl_use_default_material();
+    gpu.submit_cache.interrupt();
+    gpu.uniform_cache.interrupt();
     packets.clear(); gpu.packet_storage = packets;
     ranges.clear(); gpu.range_storage = ranges;
     for &id in &recycled {
@@ -971,6 +987,9 @@ pub(crate) fn finish_world(
         }
     }
     gpu.merge_meshes[gpu.ring_phase].retain(|id, _| recycled.contains(id));
+    if c.actor_layer_reuse {
+        for group in &mut groups {super::actor_cache::recycle(&mut group.passes);}
+    }
     gpu.stats.report();
     (list.len(), dropped + invalid)
 }
