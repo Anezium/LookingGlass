@@ -710,6 +710,9 @@ fn family(def: &Definition, base: &str) -> Vec<String> {
         .collect()
 }
 struct Model {
+    // Script puppets expose secondary draws in a later pass, after body visibility
+    // is decided. Keep their vertices and normals even without death_frozen.
+    late_skin_overlays: bool,
     bone_scales: Vec<(usize, f32)>,
     frozen: Option<std::rc::Rc<crate::frozen::Art>>,
     electric: Option<std::rc::Rc<crate::electric::Art>>,
@@ -756,13 +759,15 @@ impl Puppet {
         clips: &[&str],
         specs: &BTreeMap<String, texture::MaterialSpec>,
     ) -> Result<Self> {
+        let mut model = Model::load(
+            assets,
+            name,
+            &clips.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            specs,
+        )?;
+        model.late_skin_overlays = true;
         Ok(Self(
-            Model::load(
-                assets,
-                name,
-                &clips.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                specs,
-            )?,
+            model,
             true,
             0.,
             crate::character::skin_material()?,
@@ -1131,8 +1136,10 @@ impl Model {
                 removed.push((i, self.meshes[i].take()));
             }
         }
-        // Frozen secondary shaders expand vertices beyond the base skin bounds.
-        let _skin_guard = crate::character::skinning::CullGuard::preserve(self.frozen.is_some());
+        // Frozen shells and script-owned late overlays need the complete skin.
+        let _skin_guard = crate::character::skinning::CullGuard::preserve(
+            self.frozen.is_some() || self.late_skin_overlays,
+        );
         let skin_visible = crate::character::draw_skin_scaled(
             &d.skeleton,
             &mut self.meshes,
@@ -1525,6 +1532,7 @@ impl Model {
             }
         }
         Ok(Self {
+            late_skin_overlays: false,
             visible: vec![false; meshes.len()],
             bone_scales: Vec::new(),
             electric: Some(crate::electric::Art::load(assets, specs)?),

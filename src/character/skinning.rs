@@ -7,7 +7,7 @@ pub(super) fn rotation(q: Quat) -> Mat3 {
     // Basis expansion preserves Quat * Vec3 even for packed non-unit rotations.
     Mat3::from_cols(q * Vec3::X, q * Vec3::Y, q * Vec3::Z)
 }
-pub(super) fn palette(pose: &[Transform], scales: &[f32]) -> Vec<(Mat3, Vec3)> {
+pub(crate) fn palette(pose: &[Transform], scales: &[f32]) -> Vec<(Mat3, Vec3)> {
     pose.iter().enumerate().map(|(i, bone)| {
         let scale = scales.get(i).copied().unwrap_or(1.);
         (Mat3::from_cols(bone.rotation * (Vec3::X * scale),
@@ -23,7 +23,7 @@ pub(super) fn position(src: &SkinVertex, palette: &[(Mat3, Vec3)]) -> Vec3 {
 }
 
 thread_local! { static PRESERVE_SKIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-/// Expanding overlays need current vertices even when the base skin is offscreen.
+/// Expanding/normal-driven overlays need current vertices and rebuilt normals.
 pub(crate) struct CullGuard(bool);
 impl CullGuard {
     pub(crate) fn preserve(required: bool) -> Self {
@@ -35,8 +35,51 @@ impl Drop for CullGuard {
 }
 pub(super) fn culling_allowed() -> bool { PRESERVE_SKIN.with(|c| !c.get()) }
 
+pub(super) fn visual_options(cull: bool, flat: bool, meshes: &[Option<Mesh>]) -> (bool, bool) {
+    if !cull && !flat { return (false, false); }
+    let allowed = culling_allowed()
+        && !meshes.iter().flatten().any(crate::render_fx::skin_requires_preservation);
+    (cull && allowed, flat && allowed)
+}
+
+pub(super) fn outside_skin_bounds(cull: bool, bounds: &[(Vec3, Vec3)],
+    palette: &[(Mat3, Vec3)], world: Mat3, origin: Vec3, scale: f32) -> bool {
+    cull && world_bounds(bounds, palette, world, origin, scale)
+        .is_some_and(|(lo, hi)| crate::render::outside_bounds(lo, hi))
+}
+
+/// Rebuild normals before any later shell, environment UV or dot-alpha layer.
+pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
+    if flat {
+        let light = if fullbright { 255 } else { 217 };
+        for v in &mut mesh.vertices {
+            v.normal = Vec4::ZERO;
+            v.color = [light, light, light, (alpha.clamp(0., 1.) * 255.) as u8];
+        }
+        return;
+    }
+    let normals_profile = crate::frame_profile::characters_span("characters_skinning_normals");
+    for tri in mesh.indices.chunks_exact(3) {
+        let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+        let n = (mesh.vertices[b].position - mesh.vertices[a].position)
+            .cross(mesh.vertices[c].position - mesh.vertices[a].position);
+        for i in [a, b, c] { mesh.vertices[i].normal += n.extend(0.); }
+    }
+    drop(normals_profile);
+    let shading_profile = crate::frame_profile::characters_span("characters_skinning_shading");
+    for v in &mut mesh.vertices {
+        let n = v.normal.truncate().normalize_or_zero();
+        let light = if fullbright { 1. } else {
+            0.65 + 0.35 * n.dot(vec3(0.3, -0.5, 1.).normalize()).max(0.)
+        };
+        v.color = [(light * 255.) as u8, (light * 255.) as u8,
+            (light * 255.) as u8, (alpha.clamp(0., 1.) * 255.) as u8];
+    }
+    drop(shading_profile);
+}
+
 // Adapted from NextOs-Ports/Looking-Glass-NextOS 51b6224 (felc18-blip).
-pub(super) fn world_bounds(bounds: &[(Vec3, Vec3)], palette: &[(Mat3, Vec3)],
+pub(crate) fn world_bounds(bounds: &[(Vec3, Vec3)], palette: &[(Mat3, Vec3)],
     world: Mat3, origin: Vec3, scale: f32) -> Option<(Vec3, Vec3)> {
     if bounds.len() != palette.len() || !world.is_finite() || !origin.is_finite() || !scale.is_finite() { return None; }
     let mut lo = Vec3::splat(f32::INFINITY);
@@ -126,6 +169,48 @@ pub(crate) fn bench(assets: &mut crate::assets::Assets) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::skeletal::Weight;
+    #[test]
+    fn late_overlay_survives_side_and_perspective_near_plane_rejection() {
+        let p = [(Mat3::IDENTITY, Vec3::ZERO)];
+        let projection = Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_2, 1., 1., 100.);
+        crate::render_fx::set_projection(projection);
+        // Shock can expand eight units along its outward normal plus 0.2 offset.
+        for (center, normal) in [(vec3(6., 0., -5.), -Vec3::X),
+            (vec3(0., 0., -0.4), -Vec3::Z)] {
+            let bounds = [(center - Vec3::splat(0.05), center + Vec3::splat(0.05))];
+            let shell = center + normal * 8.2;
+            assert!(outside_skin_bounds(true, &bounds, &p, Mat3::IDENTITY, Vec3::ZERO, 1.));
+            assert!(!crate::render::outside_matrix(projection, shell, shell));
+            let _overlay = CullGuard::preserve(true);
+            let (cull, flat) = visual_options(true, true, &[]);
+            assert!(!flat);
+            assert!(!outside_skin_bounds(cull, &bounds, &p, Mat3::IDENTITY, Vec3::ZERO, 1.));
+        }
+    }
+    #[test]
+    fn lean_overlay_keeps_reference_normals_and_shell_expansion() {
+        let mesh = || Mesh {
+            vertices: [Vec3::ZERO, Vec3::X, Vec3::Y].map(|position| Vertex {
+                position, uv: Vec2::ZERO, normal: Vec4::ZERO, color: [255; 4],
+            }).to_vec(),
+            indices: vec![0, 1, 2], texture: None,
+        };
+        let mut reference = mesh();
+        shade(&mut reference, false, false, 0.7);
+        let mut lean = mesh();
+        shade(&mut lean, true, false, 0.7);
+        assert!(lean.vertices.iter().all(|v| v.normal == Vec4::ZERO));
+        let _overlay = CullGuard::preserve(true);
+        let mut protected = mesh();
+        let (_, flat) = visual_options(true, true, &[]);
+        shade(&mut protected, flat, false, 0.7);
+        for (expected, actual) in reference.vertices.iter().zip(&protected.vertices) {
+            assert_eq!(actual.normal, expected.normal);
+            assert_eq!(actual.color, expected.color);
+            let shell = actual.position - actual.normal.truncate().normalize_or_zero() * 8.2;
+            assert!((shell - actual.position).length() > 8.);
+        }
+    }
     #[test]
     fn bone_bounds_enclose_weighted_reference_vertices() {
         let bounds = [(vec3(-30., -20., -10.), vec3(60., 50., 40.)),

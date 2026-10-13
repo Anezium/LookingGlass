@@ -39,7 +39,7 @@ pub struct Config {
     pub actor_frustum_cull:bool,
     /// Matrix skinning changes float rounding: opt in after console comparison.
     pub bone_palette: bool,
-    /// Conservative skin bounds; visual work only, using each pass's projection.
+    /// Conservative skin bounds; late overlays and normal-driven layers opt out.
     pub skin_frustum_cull: bool,
     /// Conservative center/extent clip-plane test and identity bounds shortcut.
     pub fast_frustum: bool,

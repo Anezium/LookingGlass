@@ -22,6 +22,7 @@ pub struct Art {
 }
 thread_local! { static CACHE: std::cell::RefCell<std::rc::Weak<Art>> = Default::default(); }
 impl Art {
+    pub(crate) fn deformations(&self) -> &[crate::materials::Deform] { &self.deforms }
     pub fn load(
         assets: &mut Assets,
         specs: &BTreeMap<String, texture::MaterialSpec>,

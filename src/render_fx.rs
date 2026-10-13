@@ -717,6 +717,7 @@ struct Layer {
 pub struct Surface {
     layers: Vec<Layer>,
     transparent: bool,
+    preserve_skin: bool,
     #[cfg(feature="vita_renderer")]
     actors:RefCell<std::collections::HashMap<usize,actor_cache::State>>,
 }
@@ -780,6 +781,7 @@ pub fn register(
         });
     }
     let surface = Rc::new(Surface {
+        preserve_skin: layers.iter().any(|l| skin_stage_needs_normals(&l.stage)),
         layers,
         transparent,
         #[cfg(feature="vita_renderer")]
@@ -793,6 +795,30 @@ pub fn register(
     #[cfg(feature="vita_renderer")]
     SURFACE_LOOKUP.with(|s|{let mut s=s.borrow_mut();s.retain(|_,v|v.strong_count()>0);s.insert(base.raw_miniquad_id(),Rc::downgrade(&surface));});
     Ok(surface)
+}
+fn skin_stage_needs_normals(stage: &Stage) -> bool {
+    stage.environment || stage.dot_alpha.is_some()
+}
+#[cfg(test)]
+mod skin_preservation_tests {
+    use super::*;
+    #[test]
+    fn normal_driven_layers_require_skin_preservation() {
+        assert!(!skin_stage_needs_normals(&Stage::default()));
+        assert!(skin_stage_needs_normals(&Stage { environment: true, ..Default::default() }));
+        assert!(skin_stage_needs_normals(&Stage { dot_alpha: Some(Vec2::ONE), ..Default::default() }));
+    }
+}
+/// The registered layers consume rebuilt normals after the base skin is prepared.
+pub(crate) fn skin_requires_preservation(mesh: &Mesh) -> bool {
+    let Some(texture) = &mesh.texture else { return false };
+    let id = texture.raw_miniquad_id();
+    #[cfg(feature = "vita_renderer")]
+    let surface = SURFACE_LOOKUP.with(|s| s.borrow().get(&id).and_then(Weak::upgrade));
+    #[cfg(not(feature = "vita_renderer"))]
+    let surface = SURFACES.with(|s| s.borrow().iter().rev()
+        .find(|(key, _)| *key == id).and_then(|(_, v)| v.upgrade()));
+    surface.is_some_and(|s| s.preserve_skin)
 }
 pub fn skin(mesh: &Mesh) {
     SKIN_OPACITY.with(|a| skin_timed(mesh, None, a.get()));

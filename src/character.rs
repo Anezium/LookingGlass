@@ -1968,22 +1968,22 @@ fn draw_skin_deformed(
     #[cfg(not(feature = "vita_renderer"))]
     let use_palette = false;
     #[cfg(feature = "vita_renderer")]
-    let cull = crate::render::vita_renderer::config().skin_frustum_cull && skinning::culling_allowed();
+    let cull = crate::render::vita_renderer::config().skin_frustum_cull;
     #[cfg(not(feature = "vita_renderer"))]
     let cull = false;
+    #[cfg(feature = "vita_renderer")]
+    let flat = crate::render::vita_renderer::config().flat_actor_light;
+    #[cfg(not(feature = "vita_renderer"))]
+    let flat = false;
+    let (cull, flat) = skinning::visual_options(cull, flat, meshes);
     let palette = (use_palette || cull).then(|| skinning::palette(pose, bone_scales));
     let world_rotation = (use_palette || cull).then(|| skinning::rotation(transform.rotation));
-    if cull && skinning::world_bounds(&skeleton.skin_bounds, palette.as_ref().unwrap(),
-        world_rotation.unwrap(), transform.translation, scale)
-        .is_some_and(|(lo, hi)| crate::render::outside_bounds(lo, hi)) {
+    if cull && skinning::outside_skin_bounds(cull, &skeleton.skin_bounds, palette.as_ref().unwrap(),
+        world_rotation.unwrap(), transform.translation, scale) {
         crate::frame_profile::skinned_draw(true);
         return false;
     }
     crate::frame_profile::skinned_draw(false);
-    #[cfg(feature = "vita_renderer")]
-    let flat = crate::render::vita_renderer::config().flat_actor_light && skinning::culling_allowed();
-    #[cfg(not(feature = "vita_renderer"))]
-    let flat = false;
     for (surface, mesh) in skeleton.surfaces.iter().zip(meshes) {
         let Some(mesh) = mesh else {
             continue;
@@ -2003,41 +2003,7 @@ fn draw_skin_deformed(
         }
         drop(positions_profile);
         // Adapted from NextOs-Ports/Looking-Glass-NextOS 15779e4 (felc18-blip).
-        if flat {
-            let light = if fullbright { 255 } else { 217 };
-            for v in &mut mesh.vertices { v.color = [light, light, light, (alpha.clamp(0., 1.) * 255.) as u8]; }
-            drop(skin_profile);
-            crate::render_fx::skin(mesh);
-            continue;
-        }
-        let normals_profile =
-            crate::frame_profile::characters_span("characters_skinning_normals");
-        for tri in mesh.indices.chunks_exact(3) {
-            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
-            let n = (mesh.vertices[b].position - mesh.vertices[a].position)
-                .cross(mesh.vertices[c].position - mesh.vertices[a].position);
-            for i in [a, b, c] {
-                mesh.vertices[i].normal += n.extend(0.);
-            }
-        }
-        drop(normals_profile);
-        let shading_profile =
-            crate::frame_profile::characters_span("characters_skinning_shading");
-        for v in &mut mesh.vertices {
-            let n = v.normal.truncate().normalize_or_zero();
-            let light = if fullbright {
-                1.
-            } else {
-                0.65 + 0.35 * n.dot(vec3(0.3, -0.5, 1.).normalize()).max(0.)
-            };
-            v.color = [
-                (light * 255.) as u8,
-                (light * 255.) as u8,
-                (light * 255.) as u8,
-                (alpha.clamp(0., 1.) * 255.) as u8,
-            ];
-        }
-        drop(shading_profile);
+        skinning::shade(mesh, flat, fullbright, alpha);
         drop(skin_profile);
         crate::render_fx::skin(mesh);
     }

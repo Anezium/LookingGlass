@@ -38,6 +38,56 @@ async fn capture(name: &str) -> Result<Image> {
     next_frame().await;
     Ok(image)
 }
+/// Real script rigs without death_frozen: reject the body box at the near plane
+/// while a deformed shock vertex remains inside the perspective frustum.
+async fn late_shell_near_plane(p: &mut Puppet, name: &str, clip: &str) -> Result<()> {
+    ensure!(p.0.frozen.is_none(), "{name}: fixture must not use the frozen fallback");
+    let d = &p.0.data;
+    let pose = d.skeleton.global_pose(&d.clips[clip].sample(0.2, true));
+    let palette = crate::character::skinning::palette(&pose, &[]);
+    let (lo, hi) = crate::character::skinning::world_bounds(&d.skeleton.skin_bounds,
+        &palette, Mat3::IDENTITY, Vec3::ZERO, d.def.scale).context("Fixture skin bounds")?;
+    let art = p.0.electric.as_ref().context("Fixture electrical shell")?;
+    let mut candidate = None;
+    'search: for step in 0..100 {
+        let age = step as f32 * 0.005;
+        for v in p.0.meshes.iter().flatten().flat_map(|m| &m.vertices) {
+            let normal = -v.normal.truncate().normalize_or_zero();
+            let mut shell = v.position + normal * 0.2;
+            for deform in art.deformations() { shell = deform.position(shell, normal, v.uv, age); }
+            let excess = (lo - shell).max(shell - hi);
+            let axis = if excess.x >= excess.y && excess.x >= excess.z { 0 }
+                else if excess.y >= excess.z { 1 } else { 2 };
+            if excess[axis] > 2.2 {
+                let mut direction = Vec3::ZERO;
+                direction[axis] = if shell[axis] > hi[axis] { 1. } else { -1. };
+                let mut eye = shell;
+                eye[axis] = if direction[axis] > 0. { hi[axis] } else { lo[axis] };
+                eye -= direction;
+                candidate = Some((shell, eye, direction, axis, age));
+                break 'search;
+            }
+        }
+    }
+    let (shell, eye, direction, axis, age) = candidate.context("No expanded shell outside body bounds")?;
+    let camera = Camera3D { position: eye, target: eye + direction,
+        up: if axis == 2 { Vec3::Y } else { Vec3::Z },
+        fovy: 1.1, z_near: 2., z_far: 30000., ..Default::default() };
+    clear_background(BLACK);
+    set_camera(&camera);
+    crate::render_fx::begin_view(&camera, 7., &Atmosphere::default(), true);
+    ensure!(crate::render::outside_bounds(lo, hi), "{name}: body box was not rejected");
+    ensure!(!crate::render::outside_bounds(shell, shell), "{name}: shell point was not visible");
+    p.atmosphere(&Atmosphere::default(), eye);
+    p.draw(clip, 0.2, true, Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY }, 1., true);
+    ensure!(p.0.visible.iter().any(|v| *v), "{name}: near-plane skin was lost");
+    ensure!(p.0.meshes.iter().flatten().flat_map(|m| &m.vertices)
+        .any(|v| v.normal.truncate().length_squared() > 0.), "{name}: near-plane normals collapsed");
+    p.draw_electric(crate::electric::LIFE - age);
+    capture(&format!("{name}-late-near-plane")).await?;
+    println!("PASS late electrical near-plane {name}: rejected body bounds, retained visible shell and normals");
+    Ok(())
+}
 pub async fn render(assets: &mut Assets) -> Result<()> {
     std::fs::create_dir_all("private/electric-check")?;
     let specs = texture::read_materials(assets)?;
@@ -56,6 +106,8 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
         "c_armyant",
         "c_boojum",
         "c_ladybug",
+        "c_marchhare",
+        "c_dormouse",
     ] {
         let mut p = Puppet::load(assets, name, &[], &specs)?;
         p.atmosphere(&Atmosphere::default(), view().position);
@@ -75,6 +127,10 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
                 true,
             );
             p.draw_electric(remaining);
+            ensure!(p.0.visible.iter().any(|v| *v), "{name}: late shell lost its base skin");
+            ensure!(p.0.meshes.iter().flatten().flat_map(|m| &m.vertices)
+                .any(|v| v.normal.truncate().length_squared() > 0.),
+                "{name}: lean lighting removed shell normals");
             frames.push(capture(&format!("{name}-{label}")).await?);
         }
         let pixels = changed(&frames[0], &frames[1]);
@@ -103,6 +159,9 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             "{name}: paused shell depends on level clock"
         );
         println!("PASS visible electric {name}: {pixels} changed pixels; stable paused clock");
+        if matches!(name, "c_marchhare" | "c_dormouse") {
+            late_shell_near_plane(&mut p, name, &clip).await?;
+        }
         if name == "cardguard_club" {
             start(7.);
             p.draw(
