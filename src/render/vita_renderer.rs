@@ -35,6 +35,9 @@ pub struct Config {
     pub world_state_cache: bool,
     pub worker_probe: bool,
     pub skin_workers: usize,
+    /// None selects light in normal play and full in diagnostic modes.
+    pub profiler: Option<crate::light_profile::Level>,
+    pub skin_worker_bench: bool,
     pub fx_prepare_cache: bool,
     pub frame_phase_probe: bool,
     pub mover_far_lazy: bool,
@@ -102,7 +105,7 @@ impl Default for Config {
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
             world_state_cache: true,
-            worker_probe: false, skin_workers: 1, fx_prepare_cache: true, frame_phase_probe: false,
+            worker_probe: false, skin_workers: 0, profiler: None, skin_worker_bench: false, fx_prepare_cache: true, frame_phase_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
@@ -154,6 +157,7 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
 }
 impl Config {
     fn validate(&self) -> Result<()> {
+        ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
         ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
         ensure!(matches!(self.preview_flip.as_str(), "auto" | "on" | "off"), "preview_flip must be auto, on or off");
@@ -1559,9 +1563,19 @@ pub(crate) async fn visualizer(
 mod tests {
     use super::*;
     #[test]
+    fn profiler_and_worker_bench_configuration_is_strict() {
+        for level in ["light","full"] {
+            let c:Config=serde_json::from_value(serde_json::json!({"profiler":level,"skin_worker_bench":true})).unwrap();
+            c.validate().unwrap(); assert!(c.skin_worker_bench); assert_eq!(c.skin_workers,0);
+        }
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"profiler":"silent"})).is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_worker_bench":1})).is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"skin_worker_bench":true,"skin_workers":1})).unwrap().validate().is_err());
+    }
+    #[test]
     fn j12_switches_are_strict_and_have_required_defaults() {
         let c=Config::default();
-        assert_eq!(c.skin_workers,1); assert!(c.fx_prepare_cache);
+        assert_eq!(c.skin_workers,0); assert_eq!(c.profiler,None); assert!(!c.skin_worker_bench); assert!(c.fx_prepare_cache);
         assert!(!c.worker_probe && !c.frame_phase_probe);
         for workers in 0..=2 {
             let c:Config=serde_json::from_value(serde_json::json!({"skin_workers":workers,

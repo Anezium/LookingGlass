@@ -105,7 +105,7 @@ pub enum Mode {
 }
 impl Mode {
     #[cfg(target_os = "vita")]
-    fn read() -> Self {
+    pub(crate) fn read() -> Self {
         Self::parse(&std::fs::read_to_string("ux0:data/alice/private/profile_mode").unwrap_or_default())
     }
     #[cfg(any(target_os = "vita", test))]
@@ -207,12 +207,13 @@ pub fn characters_span(label: &'static str) -> Option<Span> {
 }
 
 pub(crate) fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    #[cfg(target_os = "vita")]
-    let check = || std::path::Path::new(vita::PROFILE_DIR).exists() && !matches!(Mode::read(),Mode::Route|Mode::RouteContinue);
-    #[cfg(not(target_os = "vita"))]
-    let check = || std::env::var_os("LOOKING_GLASS_FRAME_PROFILE").is_some();
-    *ON.get_or_init(check)
+    #[cfg(target_os="vita")]
+    { crate::light_profile::full() }
+    #[cfg(not(target_os="vita"))]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_FRAME_PROFILE").is_some()) && crate::light_profile::full()
+    }
 }
 
 pub(crate) fn heap_used_bytes()->Option<u64> {
@@ -302,13 +303,13 @@ pub fn span(label: &'static str) -> Span {
         #[cfg(target_os = "vita")]
         category: None,
         #[cfg(target_os = "vita")]
-        token: vita::enter(label),
+        token: if enabled() { vita::enter(label) } else { None },
     }
 }
 impl Span {
     pub fn cancel(&mut self) {
         #[cfg(target_os = "vita")]
-        vita::cancel(self.token.take());
+        if self.token.is_some() { vita::cancel(self.token.take()); }
         self.start = None;
     }
 }
@@ -719,26 +720,26 @@ mod vita {
     }
     // Startup happens before the viewer's first begin_frame/poll.
     pub fn startup_bench() -> bool {
-        Mode::read().is_bench() && enabled()
+        Mode::read().is_bench()
     }
     /// Read benchmark policy before the first frame, without suppressing New Game films.
     pub fn story_movies_blocked() -> bool { Mode::read().is_bench() }
     pub fn bench_frames() -> Option<usize> {
         STATE.with(|s| {
             let s = s.borrow();
-            (enabled() && s.mode.is_bench()).then_some(s.frames)
+            (s.mode.is_bench()).then_some(s.frames)
         })
     }
     pub fn bench_accepted_frames() -> Option<usize> {
         STATE.with(|s| {
             let s = s.borrow();
-            (enabled() && s.mode.is_bench()).then_some(s.accepted_frames)
+            (s.mode.is_bench()).then_some(s.accepted_frames)
         })
     }
     pub fn simulation_frozen() -> bool {
         STATE.with(|s| {
             let s = s.borrow();
-            enabled() && s.mode == Mode::RenderBench && s.accepted_frames >= s.mode.warmup_frames()
+            s.mode == Mode::RenderBench && s.accepted_frames >= s.mode.warmup_frames()
         })
     }
     pub fn world_span(label: &'static str, static_batch: bool) -> Span {
@@ -946,8 +947,7 @@ mod vita {
     pub fn begin_frame(map: &str) {
         let now = Instant::now();
         super::begin_creation_frame();
-        reset_hot_counts();
-        HOT_RECORDING.store(enabled(), Relaxed);
+
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             let next_mode = if s.poll_frames % 60 == 0 {
@@ -956,6 +956,32 @@ mod vita {
                 s.mode
             };
             s.poll_frames += 1;
+            if next_mode == Mode::Clk444 && next_mode != s.mode {
+                let rc = unsafe {
+                    [
+                        scePowerSetArmClockFrequency(444),
+                        scePowerSetBusClockFrequency(222),
+                        scePowerSetGpuClockFrequency(222),
+                        scePowerSetGpuXbarClockFrequency(166),
+                    ]
+                };
+                s.clocks_raised = true;
+                println!("[lg/profile] clocks_set rc={rc:?} actual={:?}", clocks());
+            }
+            crate::light_profile::set_mode(next_mode);
+            if !crate::light_profile::full() {
+                if s.map != map || s.mode != next_mode {
+                    s.map = map.to_owned(); s.mode = next_mode;
+                    s.frames = 0; s.accepted_frames = 0;
+                    crate::light_profile::reset();
+                }
+                s.recording = false;
+                HOT_RECORDING.store(false, Relaxed);
+                crate::light_profile::begin(map, next_mode);
+                return;
+            }
+            reset_hot_counts();
+            HOT_RECORDING.store(enabled(), Relaxed);
             // Attribute begin-to-begin wall time to the PREVIOUS measured frame.
             // This includes macroquad submission, swap and next_frame, and never
             // substitutes the last warmup frame for the first measured frame.
@@ -983,18 +1009,6 @@ mod vita {
                 s.window_world = WorldCounts::default();
                 s.window_cpu_ms = 0.;
 
-                if next_mode == Mode::Clk444 && mode_changed {
-                    let rc = unsafe {
-                        [
-                            scePowerSetArmClockFrequency(444),
-                            scePowerSetBusClockFrequency(222),
-                            scePowerSetGpuClockFrequency(222),
-                            scePowerSetGpuXbarClockFrequency(166),
-                        ]
-                    };
-                    s.clocks_raised = true;
-                    println!("[lg/profile] clocks_set rc={rc:?} actual={:?}", clocks());
-                }
                 println!(
                     "[lg/profile] mode={} map={} clocks={:?} clocks_raised={}",
                     s.mode.name(),
@@ -1018,6 +1032,13 @@ mod vita {
         HOT_RECORDING.store(false, Relaxed);
         STATE.with(|s| {
             let mut s = s.borrow_mut(); s.recording = false;
+            if !crate::light_profile::full() {
+                if gameplay { s.accepted_frames += 1; }
+                let measured = gameplay && s.accepted_frames > s.mode.warmup_frames();
+                crate::light_profile::end(measured);
+                if measured { s.frames += 1; }
+                return s.mode.is_bench() && s.frames == 120;
+            }
             if !enabled() || s.map != map || !gameplay {
                 s.pending.clear(); s.pending_world = WorldCounts::default();
                 return false;
@@ -1105,6 +1126,7 @@ mod vita {
             "mean_ms": if n>0 {Some(v.iter().sum::<f64>()/n as f64)} else {None}, "total_ms":v.iter().sum::<f64>()})
     }
     pub fn report(map: &str) -> anyhow::Result<()> {
+        if !crate::light_profile::full() { return crate::light_profile::export(map); }
         if !enabled() {
             return Ok(());
         }

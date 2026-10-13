@@ -115,6 +115,8 @@ mod frame_profile;
 mod frame_phases;
 mod game_thread;
 mod skin_worker;
+mod light_profile;
+mod kernel_alloc;
 #[cfg(feature="vita_renderer")]
 mod route_replay;
 mod vita_sim;
@@ -196,7 +198,9 @@ fn app_main() {
     #[cfg(feature = "vita_renderer")]
     {
         let c = render::vita_renderer::config();
-        skin_worker::startup(c.skin_workers, c.worker_probe);
+        #[cfg(target_os="vita")]
+        light_profile::set_mode(frame_profile::Mode::read());
+        character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench);
         frame_phases::initialize();
     }
     #[cfg(all(target_os = "vita", feature = "vita_renderer"))]

@@ -132,43 +132,294 @@ pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
     let timer = crate::frame_profile::characters_span("characters_skinning_shading");
     colors(&mut mesh.vertices, fullbright, alpha); drop(timer);
 }
-/// Split coarse surface batches within an actor. Triangle reduction order stays serial.
-/// Joining the scope precedes every layer/GL consumer in the same frame.
+// A persistent thread borrows only plain CPU arrays. Stack closure lives until wait.
+thread_local! { static WORKERS: std::cell::RefCell<Vec<crate::skin_worker::Worker>> = const { std::cell::RefCell::new(Vec::new()) }; }
+pub(crate) fn startup(workers: usize, probe: bool, bench: bool) {
+    if probe {
+        crate::skin_worker::inventory("game", None);
+    }
+    WORKERS.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        for i in pool.len()..workers {
+            pool.push(crate::skin_worker::Worker::new(i, probe));
+        }
+    });
+    if bench {
+        BENCH.with(|b| *b.borrow_mut() = Some(Bench::new(probe)));
+    }
+}
 pub(super) fn run(jobs: &mut [Job<'_>], p: Params<'_>, workers: usize) -> [u64; 3] {
     assert!(workers <= 2);
     if workers == 0 || jobs.is_empty() {
-        for job in jobs { kernel(job, p); }
+        for job in jobs {
+            kernel(job, p);
+        }
         return [0; 3];
     }
-    let total = jobs.iter().map(|j| j.vertices.len()).sum::<usize>();
-    let target = total.div_ceil(workers + 1);
-    std::thread::scope(|scope| {
-        let mut remaining = jobs;
-        let mut handles = Vec::with_capacity(workers);
-        for worker in 0..workers {
-            if remaining.is_empty() { break; }
-            let mut n = 0;
-            let mut cost = 0;
-            while n + 1 < remaining.len() && cost < target {
-                cost += remaining[n].vertices.len(); n += 1;
-            }
-            let (batch, rest) = remaining.split_at_mut(n.max(1));
-            remaining = rest;
-            handles.push(std::thread::Builder::new().name(format!("skin-{worker}"))
-                .stack_size(crate::skin_worker::STACK_BYTES).spawn_scoped(scope, move || {
-                    crate::skin_worker::pin(worker, false);
-                    let start = std::time::Instant::now();
-                    for job in batch { kernel(job, p); }
-                    start.elapsed().as_micros() as u64
-                }).expect("start scoped skin worker"));
+    // J13 A/B uses one worker; two persistent workers retain the J12 switch.
+    WORKERS.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        for i in pool.len()..workers {
+            pool.push(crate::skin_worker::Worker::new(i, false));
         }
-        let start = std::time::Instant::now();
-        for job in remaining { kernel(job, p); }
-        let main_us = start.elapsed().as_micros() as u64;
         let wait = std::time::Instant::now();
-        let service = handles.into_iter().map(|h| h.join().expect("skin worker panicked")).sum();
-        [main_us, service, wait.elapsed().as_micros() as u64]
+        let mut service = 0;
+        if workers == 1 {
+            service = pool[0]
+                .execute(|| {
+                    for job in jobs {
+                        kernel(job, p);
+                    }
+                })
+                .ns
+                / 1000;
+        } else {
+            let mid = jobs.len().div_ceil(2);
+            let (first, second) = jobs.split_at_mut(mid);
+            let (a, b) = pool.split_at_mut(1);
+            for m in crate::skin_worker::Worker::pair(
+                &mut a[0],
+                &mut b[0],
+                || {
+                    for job in first {
+                        kernel(job, p);
+                    }
+                },
+                || {
+                    for job in second {
+                        kernel(job, p);
+                    }
+                },
+            ) {
+                service += m.ns / 1000;
+            }
+        }
+        [0, service, wait.elapsed().as_micros() as u64]
     })
+}
+/// Game path uses fixed descriptor storage, never a heap list per actor.
+pub(super) fn run_slots(jobs: &mut [Option<Job<'_>>], p: Params<'_>, workers: usize) -> [u64; 3] {
+    WORKERS.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        for i in pool.len()..workers {
+            pool.push(crate::skin_worker::Worker::new(i, false));
+        }
+        let wait = std::time::Instant::now();
+        let mut service = 0;
+        let used = jobs.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
+        let jobs = &mut jobs[..used];
+        if workers == 1 {
+            service = pool[0]
+                .execute(|| {
+                    for job in jobs.iter_mut().flatten() {
+                        kernel(job, p);
+                    }
+                })
+                .ns
+                / 1000;
+        } else {
+            let mid = jobs.len().div_ceil(2);
+            let (first, second) = jobs.split_at_mut(mid);
+            let (a, b) = pool.split_at_mut(1);
+            for m in crate::skin_worker::Worker::pair(
+                &mut a[0],
+                &mut b[0],
+                || {
+                    for job in first.iter_mut().flatten() {
+                        kernel(job, p);
+                    }
+                },
+                || {
+                    for job in second.iter_mut().flatten() {
+                        kernel(job, p);
+                    }
+                },
+            ) {
+                service += m.ns / 1000;
+            }
+        }
+        [0, service, wait.elapsed().as_micros() as u64]
+    })
+}
+
+struct FixedSurface {
+    input: Vec<SkinVertex>,
+    indices: Vec<u16>,
+    output: Vec<Vertex>,
+}
+struct FixedBatch {
+    surfaces: Vec<FixedSurface>,
+    pose: Vec<Transform>,
+    scales: Vec<f32>,
+    palette: Vec<(Mat3, Vec3)>,
+    transform: Transform,
+    scale: f32,
+    flat: bool,
+    fullbright: bool,
+    alpha: f32,
+    vertices: usize,
+}
+impl FixedBatch {
+    fn capture(jobs: &[Option<Job<'_>>], p: Params<'_>) -> Self {
+        Self {
+            surfaces: jobs
+                .iter()
+                .flatten()
+                .map(|j| FixedSurface {
+                    input: j
+                        .input
+                        .iter()
+                        .map(|v| SkinVertex {
+                            uv: v.uv,
+                            weights: v
+                                .weights
+                                .iter()
+                                .map(|w| crate::skeletal::Weight {
+                                    bone: w.bone,
+                                    amount: w.amount,
+                                    offset: w.offset,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    indices: j.indices.to_vec(),
+                    output: j.vertices.to_vec(),
+                })
+                .collect(),
+            pose: p.pose.to_vec(),
+            scales: p.scales.to_vec(),
+            palette: p.palette.to_vec(),
+            transform: p.transform,
+            scale: p.scale,
+            flat: p.flat,
+            fullbright: p.fullbright,
+            alpha: p.alpha,
+            vertices: jobs.iter().flatten().map(|j| j.vertices.len()).sum(),
+        }
+    }
+    fn compute(&mut self) {
+        let p = Params {
+            pose: &self.pose,
+            scales: &self.scales,
+            palette: &self.palette,
+            transform: self.transform,
+            scale: self.scale,
+            flat: self.flat,
+            fullbright: self.fullbright,
+            alpha: self.alpha,
+        };
+        for surface in &mut self.surfaces {
+            kernel(
+                &mut Job {
+                    input: &surface.input,
+                    indices: &surface.indices,
+                    vertices: &mut surface.output,
+                },
+                p,
+            );
+        }
+    }
+    unsafe fn dispatch(address: usize) {
+        (*(address as *mut FixedBatch)).compute();
+    }
+}
+struct Bench {
+    // Drop drains the worker before the pinned Box storage is released.
+    worker: crate::skin_worker::Worker,
+    batch: Option<Box<std::cell::UnsafeCell<FixedBatch>>>,
+    pending: bool,
+    main: crate::skin_worker::Measurement,
+    idle: crate::skin_worker::Measurement,
+    idle_wait_ns: u64,
+    overlap_start: Option<std::time::Instant>,
+    frame: u64,
+}
+impl Bench {
+    fn new(probe: bool) -> Self {
+        Self {
+            worker: crate::skin_worker::Worker::measured(0, probe),
+            batch: None,
+            pending: false,
+            main: Default::default(),
+            idle: Default::default(),
+            idle_wait_ns: 0,
+            overlap_start: None,
+            frame: 0,
+        }
+    }
+    fn begin(&mut self) {
+        let Some(storage) = &self.batch else {
+            return;
+        };
+        assert!(!self.pending);
+        // UnsafeCell keeps normal-frame access to Bench metadata from asserting
+        // exclusive ownership of the output while the worker has it.
+        let batch = unsafe { &mut *storage.get() };
+        let allocations = crate::kernel_alloc::Scope::begin();
+        let start = std::time::Instant::now();
+        batch.compute();
+        self.main = crate::skin_worker::Measurement {
+            ns: start.elapsed().as_nanos() as u64,
+            malloc_calls: allocations.finish(),
+        };
+        let wait = std::time::Instant::now();
+        self.idle = self.worker.execute(|| batch.compute());
+        self.idle_wait_ns = wait.elapsed().as_nanos() as u64;
+        // Stable heap address; no access, mutation, logging or destruction until wait.
+        self.overlap_start = Some(std::time::Instant::now());
+        unsafe {
+            self.worker
+                .start(storage.get() as usize, FixedBatch::dispatch);
+        }
+        self.pending = true;
+    }
+    fn end(&mut self) {
+        if !self.pending {
+            return;
+        }
+        let join = std::time::Instant::now();
+        let overlap = self.worker.wait();
+        let join_ns = join.elapsed().as_nanos() as u64;
+        let elapsed = self.overlap_start.take().unwrap().elapsed().as_nanos() as u64;
+        self.pending = false;
+        self.frame += 1;
+        let vertices = unsafe { &*self.batch.as_ref().unwrap().get() }.vertices;
+        println!("[lg/skin-worker-bench] frame={} vertices={} fixed_pose=1 main_ns_per_vertex={:.3} idle_ns_per_vertex={:.3} overlap_ns_per_vertex={:.3} main_malloc_calls={} idle_malloc_calls={} overlap_malloc_calls={} idle_dispatch_wait_ns={} overlap_dispatch_to_join_ns={} overlap_join_ns={}",
+            self.frame,vertices,self.main.ns as f64/vertices as f64,self.idle.ns as f64/vertices as f64,overlap.ns as f64/vertices as f64,
+            self.main.malloc_calls,self.idle.malloc_calls,overlap.malloc_calls,self.idle_wait_ns,elapsed,join_ns);
+    }
+}
+impl Drop for Bench {
+    fn drop(&mut self) {
+        if self.pending {
+            self.worker.wait();
+            self.pending = false;
+        }
+    }
+}
+thread_local! {static BENCH:std::cell::RefCell<Option<Bench>>=const {std::cell::RefCell::new(None)};}
+pub(super) fn bench_capture(jobs: &[Option<Job<'_>>], p: Params<'_>) {
+    BENCH.with(|b| {let mut b=b.borrow_mut(); if let Some(b)=b.as_mut() {
+        if b.batch.is_none() && jobs.iter().flatten().any(|j|!j.vertices.is_empty()) {
+            b.batch=Some(Box::new(std::cell::UnsafeCell::new(FixedBatch::capture(jobs,p))));
+            println!("[lg/skin-worker-bench] snapshot surfaces={} bones={} vertices={} pose=fixed first_visible_actor kernel=positions_normals_colors",
+                unsafe {&*b.batch.as_ref().unwrap().get()}.surfaces.len(),p.pose.len(),unsafe {&*b.batch.as_ref().unwrap().get()}.vertices);
+        }
+    }});
+}
+pub(crate) fn bench_begin() {
+    BENCH.with(|b| {
+        if let Some(b) = b.borrow_mut().as_mut() {
+            b.begin();
+        }
+    });
+}
+pub(crate) fn bench_end() {
+    BENCH.with(|b| {
+        if let Some(b) = b.borrow_mut().as_mut() {
+            b.end();
+        }
+    });
 }
 
 // Adapted from NextOs-Ports/Looking-Glass-NextOS 51b6224 (felc18-blip).
@@ -319,7 +570,47 @@ mod tests {
     use super::*;
     use crate::skeletal::Weight;
     #[test]
-    fn scoped_workers_match_fixed_pose_reference_bit_for_bit() {
+    fn fixed_bench_kernel_is_allocation_free_on_main_idle_and_overlap_worker() {
+        let pose=[Transform {rotation:Quat::IDENTITY,translation:Vec3::ONE}];
+        let input=[Vec3::ZERO,Vec3::X,Vec3::Y].map(|offset|SkinVertex {uv:Vec2::ZERO,
+            weights:vec![Weight {bone:0,amount:1.,offset}]});
+        let mut vertices=input.iter().map(|v|Vertex {position:Vec3::ZERO,uv:v.uv,normal:Vec4::ZERO,color:[0;4]}).collect::<Vec<_>>();
+        let jobs=[Some(Job {input:&input,vertices:&mut vertices,indices:&[0,1,2]})];
+        let p=Params {pose:&pose,scales:&[],palette:&[],transform:pose[0],scale:1.,flat:false,fullbright:false,alpha:0.7};
+        let mut batch=Box::new(FixedBatch::capture(&jobs,p));
+        let mut worker=crate::skin_worker::Worker::measured(0,false);
+        let capacities=(batch.surfaces.as_ptr(),batch.surfaces[0].output.as_ptr(),batch.pose.as_ptr());
+        for _ in 0..20 {
+            let allocations=crate::kernel_alloc::Scope::begin(); batch.compute(); assert_eq!(allocations.finish(),0);
+            let reference=batch.surfaces[0].output.clone();
+            assert_eq!(worker.execute(||batch.compute()).malloc_calls,0);
+            unsafe {worker.start(&mut *batch as *mut FixedBatch as usize,FixedBatch::dispatch);}
+            let normal_frame_allocation=vec![42u8;8192]; std::hint::black_box(&normal_frame_allocation);
+            assert_eq!(worker.wait().malloc_calls,0);
+            for (a,b) in reference.iter().zip(&batch.surfaces[0].output) {
+                assert_eq!(a.position.to_array().map(f32::to_bits),b.position.to_array().map(f32::to_bits));
+                assert_eq!(a.normal.to_array().map(f32::to_bits),b.normal.to_array().map(f32::to_bits));
+                assert_eq!(a.uv.to_array().map(f32::to_bits),b.uv.to_array().map(f32::to_bits)); assert_eq!(a.color,b.color);
+            }
+            assert_eq!(capacities,(batch.surfaces.as_ptr(),batch.surfaces[0].output.as_ptr(),batch.pose.as_ptr()));
+        }
+    }
+    #[test]
+    fn bench_lifecycle_freezes_pose_and_drains_async_storage() {
+        let pose=[Transform {rotation:Quat::IDENTITY,translation:Vec3::ZERO}];
+        let input=[SkinVertex {uv:Vec2::ZERO,weights:vec![Weight {bone:0,amount:1.,offset:Vec3::X}]}];
+        let mut vertices=[Vertex {position:Vec3::ZERO,uv:Vec2::ZERO,normal:Vec4::ZERO,color:[0;4]}];
+        let jobs=[Some(Job {input:&input,vertices:&mut vertices,indices:&[]})];
+        let p=Params {pose:&pose,scales:&[],palette:&[],transform:pose[0],scale:1.,flat:true,fullbright:false,alpha:1.};
+        let mut b=Bench::new(false); b.batch=Some(Box::new(std::cell::UnsafeCell::new(FixedBatch::capture(&jobs,p))));
+        for frame in 1..=5 {b.begin(); assert!(b.pending); b.end(); assert!(!b.pending); assert_eq!(b.frame,frame);
+            assert_eq!(b.main.malloc_calls,0); assert_eq!(b.idle.malloc_calls,0);
+            assert_eq!(unsafe {&*b.batch.as_ref().unwrap().get()}.surfaces[0].output[0].position,Vec3::X);
+        }
+        b.begin(); drop(b); // Drop waits before releasing the snapshot.
+    }
+    #[test]
+    fn persistent_workers_match_fixed_pose_reference_bit_for_bit() {
         fn same(a: &[Vertex], b: &[Vertex]) {
             assert_eq!(a.len(),b.len());
             for (a,b) in a.iter().zip(b) {

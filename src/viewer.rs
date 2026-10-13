@@ -1055,13 +1055,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     if let Err(e) = report {
                         eprintln!("bench: report failed ({e:#})");
                     } else {
-                        println!("bench: done 120 frames mode={}, report ux0:data/alice/private/frame_profile/{}-{}-120.json", mode.name(), maps[current], mode.name());
+                        if crate::light_profile::full() {
+                            println!("bench: done 120 frames mode={}, report ux0:data/alice/private/frame_profile/{}-{}-120.json", mode.name(), maps[current], mode.name());
+                        } else {println!("bench: done 120 frames mode={} profiler=light", mode.name());}
                     }
                     break;
                 }
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
             }
         }
+        crate::light_profile::cpu_begin();
+        if !(menu || inventory_menu || console.open || paused) {crate::character::skinning_bench_begin();}
         crate::frame_phases::mark(1);
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
         #[cfg(target_os = "vita")]
@@ -3963,6 +3967,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame_profile.cancel();
         }
         drop(frame_profile);
+        crate::character::skinning_bench_end();
+        crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]
         {

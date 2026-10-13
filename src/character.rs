@@ -15,6 +15,8 @@ use macroquad::{
 };
 use std::collections::BTreeMap;
 pub(crate) mod skinning;
+pub(crate) fn skinning_bench_begin() {skinning::bench_begin();}
+pub(crate) fn skinning_bench_end() {skinning::bench_end();}
 
 pub(crate) const CLIPS: [&str; 32] = [
     "idle_base_01",
@@ -1994,13 +1996,20 @@ fn draw_skin_deformed(
         let workers = crate::render::vita_renderer::config().skin_workers;
         #[cfg(not(feature = "vita_renderer"))]
         let workers = 0;
-        if workers > 0 {
+        #[cfg(feature="vita_renderer")]
+        let bench=crate::render::vita_renderer::config().skin_worker_bench;
+        #[cfg(not(feature="vita_renderer"))]
+        let bench=false;
+        if (workers > 0 || bench) && skeleton.surfaces.len() <= 128 {
             let _batch = crate::frame_profile::span("skin_actor_batch");
-            let mut jobs = skeleton.surfaces.iter().zip(meshes.iter_mut()).filter_map(|(s, m)| {
-                m.as_mut().map(|m| skinning::Job { input: &s.vertices,
-                    vertices: &mut m.vertices, indices: &m.indices })
-            }).collect::<Vec<_>>();
-            let [main, service, wait] = skinning::run(&mut jobs, params, workers);
+            let mut source=skeleton.surfaces.iter().zip(meshes.iter_mut());
+            let mut jobs: [Option<skinning::Job<'_>>;128]=std::array::from_fn(|_| {
+                source.next().and_then(|(s,m)|m.as_mut().map(|m|skinning::Job {
+                    input:&s.vertices,vertices:&mut m.vertices,indices:&m.indices }))
+            });
+            if bench { skinning::bench_capture(&jobs,params); }
+            let [main,service,wait]=if workers>0 {skinning::run_slots(&mut jobs,params,workers)}
+                else {for job in jobs.iter_mut().flatten() {skinning::kernel(job,params);} [0;3]};
             #[cfg(feature = "vita_renderer")]
             for (name, value) in [("skin_main_service_us", main),
                 ("skin_worker_service_us", service), ("skin_join_wait_us", wait)] {
@@ -2009,6 +2018,7 @@ fn draw_skin_deformed(
             #[cfg(not(feature = "vita_renderer"))]
             let _ = (main, service, wait);
             drop(jobs);
+            drop(source);
             for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
         } else {
             for (surface, mesh) in skeleton.surfaces.iter().zip(meshes.iter_mut()) {
