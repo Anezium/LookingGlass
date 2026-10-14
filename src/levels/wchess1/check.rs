@@ -139,7 +139,9 @@ fn walk_to(r: &mut crate::route::Route, goal: Vec3) -> Result<()> {
 pub(super) fn route(a: &mut Assets) -> Result<()> {
     route_inner(a, false)
 }
-pub(crate) fn drive(r: &mut crate::route::Route) -> Result<()> {
+pub(crate) fn drive(r: &mut crate::route::Route) -> Result<()> {drive_inner(r,false)}
+pub(super) fn coverage_pre_fight(r:&mut crate::route::Route)->Result<()> {drive_inner(r,true)}
+fn drive_inner(r: &mut crate::route::Route, pre_fight:bool) -> Result<()> {
     let skip = r.skip_cinematics;
     r.tactics = true;
     r.conserve_will = false;
@@ -181,6 +183,7 @@ pub(crate) fn drive(r: &mut crate::route::Route) -> Result<()> {
                 for goal in [vec3(64., -288., 32.), vec3(-192., -192., 32.), Vec3::from_array(*p)] { r.navigate(goal)?; }
             }
         }
+        if pre_fight {return Ok(());}
         close_fight(r, 800.)?;
         walk_to(r, vec3(-1232., 960., 192.))?;
         close_fight(r, 800.)?;

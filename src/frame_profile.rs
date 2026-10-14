@@ -946,6 +946,7 @@ mod vita {
         record_geometry(triangles, vertices, static_batch);
     }
     pub fn begin_frame(map: &str) {
+        if crate::coverage::active() { return; }
         let now = Instant::now();
         super::begin_creation_frame();
 
@@ -1029,6 +1030,7 @@ mod vita {
         });
     }
     pub fn end_frame(map: &str, gameplay: bool) -> bool {
+        if crate::coverage::active() { return false; }
         counts(&[("shader_creations",0),("pipeline_creations",0)]);
         HOT_RECORDING.store(false, Relaxed);
         STATE.with(|s| {

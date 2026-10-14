@@ -23,6 +23,8 @@ pub(crate) fn resolve(explicit: Option<Level>, mode: Mode) -> Level {
 static FULL: AtomicBool = AtomicBool::new(true);
 pub(crate) fn set_mode(mode: Mode) {
     #[cfg(feature = "vita_renderer")]
+    if crate::coverage::active() { FULL.store(false,Ordering::Relaxed);return; }
+    #[cfg(feature = "vita_renderer")]
     FULL.store(
         resolve(crate::render::vita_renderer::config().profiler, mode) == Level::Full,
         Ordering::Relaxed,
@@ -34,7 +36,7 @@ pub(crate) fn full() -> bool {
     FULL.load(Ordering::Relaxed)
 }
 fn active() -> bool {
-    cfg!(target_os = "vita") && !full()
+    crate::coverage::active() || (cfg!(target_os = "vita") && !full())
 }
 const WINDOW: usize = 60;
 #[derive(Clone, Copy, Default, Debug)]
@@ -49,6 +51,7 @@ struct Row {
     skin_overflow: u64,
     fx: [u64; 8],
     render: [RenderMetrics; 6],
+    live: [u64;5], content:[u64;32], age_us:u64, timed:u64, export_frame:u64,
 }
 /// Engine submission calls, counted at their owning phase. Texture binds count
 /// image slots passed to apply_bindings; backend cache hits are not GL calls.
@@ -77,7 +80,7 @@ pub(crate) const PHASE_NAMES: [&str; 6] = ["world_opaque", "world_alpha", "actor
 #[derive(Clone, Copy)]
 pub(crate) enum RenderPhase { WorldOpaque, WorldAlpha, Actors, Fx, Hud, Present }
 pub(crate) fn render_active() -> bool {
-    if cfg!(target_os = "vita") { return active(); }
+    if crate::coverage::active() || cfg!(target_os = "vita") { return active(); }
     static HOST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *HOST.get_or_init(|| std::env::var_os("LOOKING_GLASS_RENDER_METRICS").is_some())
 }
@@ -132,6 +135,7 @@ struct Ring {
     swap_start: Option<Instant>,
     current: Row,
     pending: bool,
+    survey: Option<(std::path::PathBuf,String)>,
 }
 impl Default for Ring {
     fn default() -> Self {
@@ -144,7 +148,7 @@ impl Default for Ring {
             cpu_start: None,
             swap_start: None,
             current: Row::default(),
-            pending: false,
+            pending: false, survey:None,
         }
     }
 }
@@ -168,8 +172,11 @@ impl Ring {
                 write!(out, ",{phase}_{field}")?;
             }
         }
+        if self.survey.is_some() {
+            write!(out,",age_us,timed,export_frame,events_movers_us,ai_combat_us,alice_us,particles_us,audio_us,npc_loaded,guards_alive,guards_active,guards_in_view_cone,guard_attacks,guard_deaths,npc_unique_models,guards_ray_origin_valid,weapon_shots,weapon_impacts,puff_births,puff_drops,puffs_live,skin_worker_service_us,audio_registered_sources,decoded_audio_cache_bytes,world_candidates,world_visible_groups,world_cluster_plus_one,skin_vertices,skin_bones,skin_surfaces,skin_logical_draws,skin_output_arena_vertices,collision_sweeps,collision_dynamic_candidates,guard_ai_ticks,level_alive,level_active,level_species,level_parts,level_effects")?;
+        }
         writeln!(out)?;
-        let first = self.count.saturating_sub(WINDOW);
+        let first = if self.survey.is_some() {self.exported} else {self.count.saturating_sub(WINDOW)};
         for i in first..self.count {
             let r = self.rows[i % WINDOW];
             write!(out, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us,
@@ -180,6 +187,11 @@ impl Ring {
                     p.draws, p.pipelines, p.depth_states, p.bindings, p.uniform_uploads,
                     p.uniform_bytes, p.buffer_updates, p.buffer_bytes, p.texture_bind_slots,
                     p.visibility_tests, p.uniform_gl_calls, p.visibility_cpu_ns / 1000, p.parameter_cpu_ns / 1000, p.deferred_cpu_ns / 1000, p.texture_gl_binds, p.state_gl_calls, p.program_gl_changes)?;
+            }
+            if self.survey.is_some() {
+                write!(out,",{},{},{}",r.age_us,r.timed,r.export_frame)?;
+                for n in r.live {write!(out,",{n}")?;}
+                for n in r.content {write!(out,",{n}")?;}
             }
             writeln!(out)?;
         }
@@ -230,11 +242,15 @@ impl Drop for FxTimer { fn drop(&mut self) { fx_add(self.0, self.1.elapsed().as_
 
 pub(crate) fn cpu_begin() {
     if active() {
+        #[cfg(feature="vita_renderer")]
+        if crate::coverage::active() {crate::render_tail::cpu_boundary(true);}
         RING.with(|r| r.borrow_mut().cpu_start = Some(Instant::now()));
     }
 }
 pub(crate) fn cpu_end() {
     if active() {
+        #[cfg(feature="vita_renderer")]
+        if crate::coverage::active() {crate::render_tail::cpu_boundary(false);}
         RING.with(|r| {
             let mut r = r.borrow_mut();
             r.current.cpu_us = r
@@ -275,6 +291,7 @@ pub(crate) fn export(map: &str) -> anyhow::Result<()> {
     }
 }
 fn export_window(map: &str, mode: Mode) -> anyhow::Result<()> {
+    if crate::coverage::active() {return survey_export(false);}
     RING.with(|r| {
         let mut r = r.borrow_mut();
         if r.count == r.exported || r.count % WINDOW != 0 {
@@ -299,6 +316,31 @@ fn export_window(map: &str, mode: Mode) -> anyhow::Result<()> {
         Ok(())
     })
 }
+pub(crate) fn survey_reset(dir:std::path::PathBuf,prefix:String) {
+    FULL.store(false,Ordering::Relaxed);
+    RING.with(|r| {let mut r=r.borrow_mut();*r=Ring::default();r.survey=Some((dir,prefix));});
+}
+pub(crate) fn survey_metrics(live:[u64;5],content:[u64;32]) {
+    RING.with(|r| {let mut r=r.borrow_mut();r.current.live=live;r.current.content=content;});
+}
+pub(crate) fn survey_label(_frame:u64,age:f64,timed:bool) {
+    RING.with(|r| {let mut r=r.borrow_mut();r.current.age_us=(age*1_000_000.) as u64;r.current.timed=u64::from(timed);});
+}
+fn survey_export(partial:bool)->anyhow::Result<()> {
+    RING.with(|r| {
+        let mut r=r.borrow_mut();
+        if r.count==r.exported || (!partial && r.count%WINDOW!=0) {return Ok(());}
+        let Some((dir,prefix))=&r.survey else {return Ok(());};
+        let path=dir.join(format!("{prefix}-light-{:06}.csv",r.count));
+        let mut out=std::io::BufWriter::new(std::fs::OpenOptions::new().write(true).create_new(true).open(path)?);
+        r.write(&mut out)?;out.flush()?;
+        r.exported=r.count;
+        // The write occurs in the new wall interval, before cpu_begin, as pkg-2.
+        r.current.export_frame=1;
+        Ok(())
+    })
+}
+pub(crate) fn survey_flush()->anyhow::Result<()> {survey_export(true)}
 fn mode_name(mode: Mode) -> &'static str {
     #[cfg(any(target_os = "vita", test))]
     {

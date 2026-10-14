@@ -305,6 +305,8 @@ pub trait LevelController: Any {
     }
 
     /// A scene owns the camera and the controls.
+    /// Cheap owner-local survey counts: alive, active, species, visible parts, live effects.
+    fn coverage_counts(&self)->[u64;5] { [0;5] }
     fn scripted(&self) -> bool {
         false
     }

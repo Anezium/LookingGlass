@@ -9,7 +9,9 @@ pub fn check(assets: &mut Assets) -> Result<()> {
     Ok(())
 }
 /// The village from the falling introduction's hand-off to the authored Pandemonium exit.
-pub fn drive(r: &mut Route) -> Result<()> {
+pub fn drive(r: &mut Route) -> Result<()> { drive_inner(r,false) }
+pub(crate) fn coverage_pre_exit(r:&mut Route)->Result<()> {drive_inner(r,true)}
+fn drive_inner(r: &mut Route, pre_exit:bool) -> Result<()> {
     anyhow::ensure!(r.stats.equipped().is_none(), "Village must start unarmed");
     r.wait(6.)?;
     for goal in [
@@ -60,6 +62,7 @@ pub fn drive(r: &mut Route) -> Result<()> {
     }
     r.navigate(vec3(-2936., 3024., 128.))?;
     r.wait(8.)?;
+    if pre_exit {return Ok(());}
     r.navigate(vec3(-3112., 2584., 40.))?;
     r.walk(vec3(-3312., 2440., 48.), false)?;
     r.wait(8.)?;

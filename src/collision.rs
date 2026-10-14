@@ -733,6 +733,7 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        crate::coverage::add(24,1);
         #[cfg(test)]
         if self.legacy_dynamic_sweeps {
             return self.sweep_geometry_legacy(start, end, half);
@@ -759,6 +760,7 @@ impl World {
         }
         #[cfg(target_os = "vita")]
         let mut rejected = 0;
+        crate::coverage::add(25,self.dynamic.len() as u64);
         for collider in &self.dynamic {
             if collider.bounds.is_none_or(|b| !b.overlaps(query.bounds)) {
                 #[cfg(target_os = "vita")]

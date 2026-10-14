@@ -977,7 +977,6 @@ impl Steam {
             let _hotspot = crate::frame_profile::span("particles_retain");
             self.puffs.retain(|p| p.age < p.life);
         }
-        #[cfg(target_os = "vita")]
         let retained = self.puffs.len() as u32;
         #[cfg(target_os = "vita")]
         let _emit_profile = crate::frame_profile::span("particles_emit");
@@ -1040,8 +1039,10 @@ impl Steam {
         // the oldest live births first; emitter RNG/credit still run normally.
         #[cfg(target_os = "vita")]
         let births = self.puffs.len() as u32 - retained;
+        crate::coverage::add(10,(self.puffs.len() as u32-retained) as u64);
         let dropped = self.puffs.len().saturating_sub(config.puff_cap);
         if dropped > 0 { self.puffs.drain(..dropped); }
+        crate::coverage::add(11,dropped as u64);crate::coverage::add(12,self.puffs.len() as u64);
         #[cfg(target_os = "vita")]
         drop(_emit_profile);
         #[cfg(target_os = "vita")]
@@ -1139,7 +1140,6 @@ impl Steam {
             let _hotspot = crate::frame_profile::span("particles_retain");
             self.puffs.retain(|p| p.age < p.life);
         }
-        #[cfg(target_os = "vita")]
         let retained = self.puffs.len() as u32;
         #[cfg(target_os = "vita")]
         let _emit_profile = crate::frame_profile::span("particles_emit");

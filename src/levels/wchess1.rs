@@ -649,6 +649,18 @@ impl LevelController for Realm {
                 .as_ref()
                 .is_some_and(|b| b.moving.is_some())
     }
+    fn coverage_counts(&self)->[u64;5] {
+        let mut kinds=0u64;let mut alive=0;let mut active=0;
+        for a in &self.saved.cast {
+            if !a.white && a.damageable && a.piece.health>0. {
+                alive+=1;
+                if a.piece.active && !a.piece.script_wait {
+                    active+=1;kinds|=1<<match a.piece.kind{crate::chess::Kind::Pawn=>0,crate::chess::Kind::Rook=>1,crate::chess::Kind::Bishop=>2,crate::chess::Kind::Knight=>3};
+                }
+            }
+        }
+        [alive,active,kinds.count_ones() as u64,0,0]
+    }
     fn scripted(&self) -> bool {
         self.saved.scene.is_some() || self.saved.pending.is_some()
     }
@@ -915,3 +927,5 @@ fn owner(i: &mut Interactions) -> Result<&mut Realm> {
         .find_map(|s| s.ctl.downcast_mut())
         .context("Pale Realm owner missing")
 }
+
+pub(crate) fn coverage_pre_fight(r:&mut crate::route::Route)->Result<()> {check::coverage_pre_fight(r)}

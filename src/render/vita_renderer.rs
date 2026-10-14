@@ -1078,6 +1078,8 @@ impl Renderer {
                 self.visibility_generation = 1;
             }
         }
+        crate::coverage::add(16,ids.len() as u64);
+        crate::coverage::add(18,cluster.map_or(0,|c|c as u64+1));
         let mut tests = 0u64;
         let mut hits = 0u64;
         for &id in ids {
@@ -1102,6 +1104,7 @@ impl Renderer {
             self.models[id] = result.map(|(_, model)| model);
             if let Some((depth, _)) = result { self.alpha_order.push((depth, id)); }
         }
+        crate::coverage::add(17,self.alpha_order.len() as u64);
         crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: tests,
             visibility_cpu_ns: visibility_started.elapsed().as_nanos() as u64, ..Default::default() });
         count("vita_world_visibility_cache_hits", hits);

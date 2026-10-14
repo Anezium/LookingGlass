@@ -116,6 +116,7 @@ mod frame_phases;
 mod game_thread;
 mod skin_worker;
 mod light_profile;
+mod coverage;
 #[cfg(feature="vita_renderer")]
 mod render_tail;
 mod kernel_alloc;
@@ -137,7 +138,10 @@ use assets::Assets;
 use bsp::Bsp;
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub struct Options {
+    pub coverage_survey: Option<PathBuf>,
+    pub coverage_cell: Option<coverage::Cell>,
     pub difficulty: powerups::Difficulty,
     pub save_dir: PathBuf,
     pub load: Option<save::Slot>,
@@ -259,6 +263,7 @@ fn default_data_dir() -> PathBuf {
 
 fn run() -> Result<()> {
     let mut o = Options {
+        coverage_survey: None, coverage_cell: None,
         difficulty: Default::default(),
         save_dir: default_save_dir(),
         load: None,
@@ -289,6 +294,9 @@ fn run() -> Result<()> {
     let mut movie_name = String::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+            "--coverage-prepare-fixtures" => {mode="coverage-prepare";o.save_dir=args.next().context("--coverage-prepare-fixtures requires isolated output")?.into();}
+            "--coverage-survey" => o.coverage_survey=Some(args.next().context("--coverage-survey requires a manifest")?.into()),
             #[cfg(feature = "vita_renderer")]
             "--vita-render-view" => mode = "vita-render-view",
             #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
@@ -609,9 +617,19 @@ fn run() -> Result<()> {
     if o.capture.is_some() && o.frames.is_none() {
         bail!("--capture requires --frames");
     }
+    let coverage=coverage::Manifest::open(o.coverage_survey.as_deref())?;
+    #[cfg(not(feature="vita_renderer"))]
+    anyhow::ensure!(coverage.is_none(),"coverage requires vita_renderer feature");
+    anyhow::ensure!(coverage.is_none() || mode=="view", "coverage requires normal live viewer");
     vita_sim::initialize(&o.save_dir);
     let mut assets = Assets::open(&o.data)?;
     eprintln!("[lg/startup] assets ready mode={mode}");
+    #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+    if mode=="coverage-prepare" {
+        macroquad::Window::from_config(viewer::config(),async move {
+            if let Err(e)=coverage::prepare(&mut assets,&o.save_dir).await {eprintln!("Fixture preparation failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
+    }
     #[cfg(feature = "vita_renderer")]
     if mode == "vita-render-view" {
         macroquad::Window::from_config(viewer::config(), async move {
@@ -1508,6 +1526,11 @@ fn run() -> Result<()> {
         return Ok(());
     }
     macroquad::Window::from_config(viewer::config(), async move {
+        #[cfg(feature="vita_renderer")]
+        if let Some((manifest,path))=coverage {
+            if let Err(e)=coverage::run(assets,o,manifest,path).await { eprintln!("Coverage failed: {e:#}");std::process::exit(1); }
+            return;
+        }
         if let Err(e) = viewer::run(assets, o).await {
             eprintln!("Viewer failed: {e:#}");
             std::process::exit(1);

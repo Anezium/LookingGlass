@@ -493,6 +493,12 @@ impl LevelController for Queen {
     fn colliders(&self) -> Vec<Collider> {
         self.colliders.clone()
     }
+    fn coverage_counts(&self)->[u64;5] {
+        [u64::from(!matches!(self.saved.phase,Phase::Death|Phase::Ending|Phase::Done)),
+         u64::from(matches!(self.saved.phase,Phase::Queen1|Phase::Queen2)),1,
+         self.saved.parts.iter().filter(|h|**h>0.).count() as u64,
+         (self.saved.projectiles.len()+self.saved.impacts.len()+self.saved.debris.len()) as u64]
+    }
     fn scripted(&self) -> bool {
         matches!(
             self.saved.phase,
@@ -792,3 +798,22 @@ pub static REGISTRATION: super::Registration = super::Registration {
 };
 
 pub(crate) use check::drive as drive_route;
+
+/// Bounded survey stages based on the existing Queen render fixtures.
+pub(crate) fn coverage_stage(interactions:&mut crate::interaction::Interactions,world:&World,player:&mut Player,stats:&mut Stats,name:&str)->Result<()> {
+    ensure!(crate::coverage::active(),"Queen staging requires coverage manifest");
+    let q=interactions.levels.iter_mut().find_map(|s|s.ctl.downcast_mut::<Queen>()).context("Queen controller absent")?;
+    let phase=match name { "intro"=>Phase::Intro,"birth"=>Phase::Birth,"death-explosions"=>Phase::Death,"death-burst"=>Phase::Ending,_=>Phase::Queen2 };
+    q.saved.phase=phase;q.saved.time=match name {"intro"=>8.,"birth"=>25.,"death-explosions"=>q.data.rigs["c_q2_body"].duration("death_start")+5.,"death-burst"=>0.25,_=>12.};
+    q.saved.initialized=true;q.saved.collapsed=20.;
+    let anchor=q.data.points[if matches!(phase,Phase::Queen2|Phase::Death|Phase::Ending){"alice_fight_queen"}else{"alice_start_pos1"}];
+    q.saved.alice=anchor;
+    *player=Player::spawn(world,anchor.translation+Vec3::Z*crate::movement::EYE_HEIGHT).context("Queen fixture unsupported anchor")?;
+    player.script_facing=anchor.rotation.to_euler(EulerRot::XYZ).2;
+    q.saved.attack=if name=="queen2-scream"{battle::Attack::Scream}else{battle::Attack::Hatter};
+    q.saved.attack_time=if name=="queen2-scream"{q.data.rigs["c_q2_body"].duration("attack_slit_scream_open")+1.}else{2.};
+    if name=="death-explosions"{q.death_explosions();}
+    if name=="death-burst"{q.final_burst();}
+    Queen::refill(stats);
+    Ok(())
+}

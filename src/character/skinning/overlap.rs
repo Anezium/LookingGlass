@@ -510,6 +510,15 @@ impl Frame {
 impl Drop for Frame {
     fn drop(&mut self) {
         STORE.with(|s| { if let Some(s)=s.borrow_mut().as_mut() { if s.pending>0 { let _=s.drain(); }
+            crate::coverage::add(13,s.service_us);
+            crate::coverage::add(19,s.output_len as u64);
+            crate::coverage::add(23,s.output_len as u64);
+            if crate::coverage::active() {
+                let input=unsafe {&*s.input.get()};
+                crate::coverage::add(20,input.pose.len() as u64);
+                crate::coverage::add(21,input.surfaces.len() as u64);
+                crate::coverage::add(22,input.draws.len() as u64);
+            }
             crate::light_profile::skin_overlap(self.gather_us, s.fallback as u64, s.overflow);
             #[cfg(feature="vita_renderer")]
             { crate::render_fx::retained::count("skin_overlap_fallback_draws",s.fallback as u64);

@@ -458,6 +458,7 @@ impl Guard {
         self.accumulator += dt.min(0.1) as f64;
         while self.accumulator + 1e-9 >= 1. / 120. {
             self.accumulator -= 1. / 120.;
+            crate::coverage::add(26,1);
             self.step(1. / 120., world, eye, timing, &mut out);
         }
         out

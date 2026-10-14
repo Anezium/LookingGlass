@@ -1898,6 +1898,44 @@ pub struct Npcs {
     pub greetings: u64,
 }
 impl Npcs {
+    pub(crate) fn coverage_validate(&mut self,world:&World,eye:Vec3,yaw:f32)->Result<serde_json::Value> {
+        let mut rows=Vec::new();
+        for (id,a) in self.actors.iter_mut().enumerate() {
+            if let Some(g)=&mut a.guard {
+                let before=g.feet;g.place(world);
+                let t=g.target(id);
+                ensure!(before.distance(g.feet)<2. && !world.sweep(t.center,t.center,t.half).start_solid,"guard {id} lacks exact floor support: before={before:?} settled={:?}",g.feet);
+                let delta=t.center-eye;
+                let direction=vec3(yaw.cos(),yaw.sin(),0.);
+                let trace=world.sweep(eye,t.center,Vec3::ZERO);
+                ensure!(delta.length()<768. && delta.normalize_or_zero().dot(direction)>0.65 && !trace.start_solid && trace.fraction>=0.99,"guard {id} outside sight/view");
+                ensure!(!g.notarget && !g.frozen,"guard debug immunity enabled");
+                rows.push(serde_json::json!({"id":id,"name":a.spawn.name,"model_index":a.model,"feet":g.feet,"yaw":g.yaw,"health":g.health}));
+            }
+        }
+        Ok(serde_json::json!(rows))
+    }
+
+    pub(crate) fn coverage_counts(&self, world:&World, camera:Vec3,direction:Vec3)->[u64;8] {
+        let mut n=[self.actors.len() as u64,0,0,0,0,0,self.models.len() as u64,0];
+        for a in &self.actors {
+            if self.registry_owns(a) {continue;}
+            if let Some(g)=&a.guard {
+                n[4]+=u64::from(g.attacks);
+                if g.state==combat::State::Dead {n[5]+=1;continue;}
+                n[1]+=1;
+                if g.state!=combat::State::Idle {n[2]+=1;}
+                let t=g.target(0);
+                let delta=t.center-camera;
+                if delta.dot(direction.normalize_or_zero())>0. && delta.normalize_or_zero().dot(direction.normalize_or_zero())>0.6 {
+                    n[3]+=1;
+                }
+                n[7]+=u64::from({let trace=world.sweep(camera,t.center,Vec3::ZERO);!trace.start_solid && trace.fraction>=0.99});
+            }
+        }
+        n
+    }
+
     pub(crate) fn check_school2_ownership(&self) -> Result<()> {
         let diamonds = self
             .actors
@@ -2274,7 +2312,7 @@ impl Npcs {
         preview: bool,
         combat_preview: bool,
     ) -> Result<Self> {
-        let spawns = if combat_preview && name == "skool1" && entry.is_none() {
+        let mut spawns = if combat_preview && name == "skool1" && entry.is_none() {
             vec![Spawn {
                 resident_spawn: None,
                 clock_spawn: None,
@@ -2292,6 +2330,13 @@ impl Npcs {
         } else {
             placements(map, name, entry, preview)
         };
+        if let Some(positions)=crate::coverage::school_clubs() {
+            ensure!(name=="skool1" && combat_preview && spawns.len()==1,"school fixture route mismatch");
+            let template=spawns[0].clone();
+            spawns=positions.iter().enumerate().map(|(id,p)| {
+                let mut s=template.clone();s.name=format!("coverage-club-{id}");s.origin=Vec3::new(p[0],p[1],p[2]);s.yaw=p[3];s
+            }).collect();
+        }
         let specs = texture::read_materials(assets)?;
         let mut models = Vec::new();
         let mut indices = BTreeMap::new();

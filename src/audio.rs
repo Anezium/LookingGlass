@@ -679,6 +679,10 @@ pub struct Audio {
     landings: u64,
 }
 impl Audio {
+    pub(crate) fn coverage_counts(&self)->(u64,u64) {
+        ((self.effects.len()+self.loops.len()+self.emitters.len()+usize::from(self.voice.is_some())+usize::from(self.music.is_some())) as u64,(self.cache_samples*4) as u64)
+    }
+
     pub fn new(disabled: bool, capture: Option<PathBuf>) -> Self {
         let monitor = Arc::new(MonitorData::default());
         if capture.is_some() {

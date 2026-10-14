@@ -36,6 +36,7 @@ impl Phase {
         Self { scope, start: now, last: now, previous }
     }
     pub fn mark(&mut self, label: &str) {
+        crate::coverage::milestone(self.scope,label);
         let now = Instant::now();
         let counters = STATE.with(|s| s.borrow().1);
         eprintln!("[lg/startup] {} {label} elapsed_ms={:.3} total_ms={:.3}", self.scope,

@@ -558,7 +558,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     escape_menu.backdrop();
     ui.toast("Opening Wonderland...", screen_height() - 70.);
     next_frame().await;
-    let saves_enabled = !(options.npc_preview
+    let coverage_running=options.coverage_cell.is_some();
+    let mut coverage_session=options.coverage_cell.clone().map(crate::coverage::Session::new).transpose()?;
+    let saves_enabled = !coverage_running && !(options.npc_preview
         || options.combat_preview
         || options.larva_preview
         || options.weapon_preview
@@ -582,7 +584,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let maps = assets.maps();
     let mut audio = Audio::new(options.no_audio, options.audio_capture.clone());
     #[cfg(target_os = "vita")]
-    let mut bench_session = crate::frame_profile::startup_bench();
+    let mut bench_session = !coverage_running && crate::frame_profile::startup_bench();
     #[cfg(target_os = "vita")]
     let mut bench_restored = None;
     #[cfg(target_os = "vita")]
@@ -611,7 +613,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         Some(loaded)
     } else if let Some(slot) = options.load {
         anyhow::ensure!(
-            saves_enabled,
+            saves_enabled || coverage_running,
             "Save loading is unavailable in a staged preview"
         );
         Some(store.read(slot)?)
@@ -810,9 +812,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             fresh.weapon_summary()
         );
         #[cfg(target_os = "vita")]
-        let pause_on_load = !bench_session;
+        let pause_on_load = !bench_session && !coverage_running;
         #[cfg(not(target_os = "vita"))]
-        let pause_on_load = true;
+        let pause_on_load = !coverage_running;
         apply_loaded!(prepared.unwrap(), pause_on_load);
         timing.mark("installed");
         resume_applied = true;
@@ -1005,9 +1007,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         hud.announce(if resume.as_ref().is_some_and(|loaded| loaded.backup) {
             "Previous save restored / P or click to resume"
         } else { "Game restored / P or click to resume" });
-    } else if let Some(error) = resume_error {
+    } else if let Some(error) = &resume_error {
         paused = true;
-        notice = error;
+        notice = error.clone();
     } else if saves_enabled
         && !options.new_game
         && store.latest().is_none()
@@ -1015,15 +1017,60 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     {
         hud.announce("A saved game could not be read. F9 retries quick load.");
     }
+    if let Some(cell)=&options.coverage_cell {
+        anyhow::ensure!(resume_error.is_none(), "coverage checkpoint restoration failed");
+        if let Some(v)=&cell.scene.view {
+            player=Player::spawn(&scene.world, Vec3::from_array(v.feet)+Vec3::Z*EYE_HEIGHT).context("coverage feet unsupported")?;
+            anyhow::ensure!(player.feet.distance(Vec3::from_array(v.feet))<2., "coverage feet landed elsewhere");
+            pos=player.eye(); yaw=v.yaw; pitch=v.pitch; third_person=v.third_person;
+            flying=false; fullbright=false; alice.reset(&player,yaw);
+        }
+        if let Some(fixture)=&cell.scene.queen_fixture {
+            crate::levels::qlair::coverage_stage(&mut interactions,&scene.world,&mut player,&mut stats,fixture)?;
+            pos=player.eye(); yaw=player.script_facing; pitch=0.; flying=false;
+            level_art.prepare(&mut assets,&scene,&interactions,true)?;
+        }
+        if !cell.scene.school_clubs.is_empty() {
+            let rows=npcs.coverage_validate(&scene.world,player.eye(),yaw)?;
+            std::fs::write(cell.output.join(format!("{}-guards.json",cell.prefix)),serde_json::to_vec_pretty(&rows)?)?;
+        }
+        paused=false; menu=false; inventory_menu=false; clock.pause();
+        if let Some(s)=&mut coverage_session {
+            s.ready(&maps[current],entry_spawn.as_deref(),player.feet.to_array(),yaw,pitch,flying,resume_applied,&audio.status)?;
+        }
+        crate::coverage::milestone("viewer","npc-art-audio-ready");
+    }
+    let coverage_initial=coverage_running.then(||game_snapshot!());
     retry.remember(game_snapshot!());
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
     loop {
         crate::frame_phases::begin();
+        if let Some(s)=&mut coverage_session {
+            if s.begin()? { break; }
+            if s.take_reset() {
+                let initial=coverage_initial.as_ref().context("survey reset without fixture")?;
+                let level=initial.level()?;
+                interactions.restore(&level.interactions,&scene.map)?;
+                interactions.sync(&mut scene.world);
+                npcs.restore(&level.npcs)?;
+                story.restore(&level.story,&hints)?;
+                stats=initial.stats.clone();player=initial.player.clone();
+                alice.restore(&initial.character)?;
+                pos=initial.view.position;yaw=initial.view.yaw;pitch=initial.view.pitch;
+                environment_clock=level.environment_clock;pickup_clock=level.pickup_clock;
+                steam=crate::particles::Steam::load(&mut assets,&scene.map)?;
+                audio.load(&mut assets,&maps[current],&scene.map);
+                weapon_buttons=crate::weapon_rules::Buttons::default();weapon_buttons.block();
+                clock.pause();follow_camera.reset();camera_handoff.reset();
+                s.reset_complete();
+            }
+            paused=false;
+        }
         #[cfg(feature="vita_renderer")]
-        let route_running=route_session.is_some();
+        let route_running=route_session.is_some() || coverage_running;
         #[cfg(not(feature="vita_renderer"))]
-        let route_running=false;
+        let route_running=coverage_running;
         #[cfg(feature="vita_renderer")]
         if let Some(route)=&mut route_session {
             let village=interactions.village.as_ref().context("route requires village cinema")?;
@@ -1093,6 +1140,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
         input.update(&preferences, window_focused() && !bench && !route_running);
+        if let Some(s)=&coverage_session {let (now,previous)=s.input();input.coverage(now,previous);}
         preview_throttle.advance_frame();
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
@@ -1654,6 +1702,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             &mut yaw,
             &mut pitch,
         );
+        if let Some(s)=&coverage_session { if !scripted_view { s.look(&mut yaw,&mut pitch,dt); } }
         hud.update(dt);
         if focused && !console_input && stats.alive() && !menu && (inventory_menu || !paused) {
             let keys = [
@@ -2125,6 +2174,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     viewer_block = crate::frame_profile::span("frame_interactions");
                     crate::frame_profile::set_owner(crate::frame_profile::Owner::Interactions);
                 }
+                crate::coverage::phase(Some(0));
                 events.merge(interactions.update(
                     world_dt,
                     &scene.map,
@@ -2170,6 +2220,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     clock.pause();
                     spawn_landing = true;
                 }
+                crate::coverage::phase(None);
                 let before_feet = player.feet;
                 let before_water = player.immersion;
                 let before_drowning = player.breath.hits;
@@ -2640,8 +2691,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
         }
+        crate::coverage::phase(None);
         } // simulation: story and transitions
         if simulate {
+        crate::coverage::phase(Some(3));
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -2752,6 +2805,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_combat");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Combat);
         }
+        crate::coverage::phase(Some(1));
         interactions.activate_enemies();
         let scripted_motion = interactions.scripted();
         if let Some(s) = &mut interactions.encounters {
@@ -2865,6 +2919,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if !stats.alive() {
             alice.die();
         }
+        crate::coverage::phase(None);
         } // simulation: combat, encounters and NPC poses
         let death_animation =
             !stats.alive() && focused && !paused && !menu && !inventory_menu && !console_input;
@@ -2900,6 +2955,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         targets.extend(alice.ice_targets());
         if simulate {
+        crate::coverage::phase(Some(2));
         alice.world_time(dt, world_dt);
         alice.notarget(stats.ignores_alice());
         let weapon_sounds = alice.update_funded(
@@ -3038,6 +3094,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 hud.announce(message);
             }
         }
+        crate::coverage::phase(None);
         if stats.active_power().map(|(k, _)| k) != power_before {
             if let Some((kind, _)) = stats.active_power() {
                 audio.world_effect(match kind {
@@ -3053,6 +3110,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_audio");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        crate::coverage::phase(Some(4));
         for sound in weapon_sounds {
             audio.weapon_effect(sound);
         }
@@ -3231,6 +3289,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_audio_mix");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        crate::coverage::phase(Some(4));
         audio.prepare(
             &mut assets,
             &scene.world,
@@ -3247,6 +3306,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             console_input || menu || paused || inventory_menu || !focused,
             !story_active,
         );
+        crate::coverage::phase(None);
         } // simulation: audio listener and clocks
         #[cfg(target_os = "vita")]
         {
@@ -3944,7 +4004,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 post_game = false; escape_menu.post_game = false; new_game_requested = Some(difficulty);
             }
         }
-        if let Some(game) = finale_checkpoint_requested {
+        if let Some(game) = finale_checkpoint_requested.filter(|_|saves_writable) {
             match store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()) {
                 Ok(()) => {
                     for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
@@ -4000,6 +4060,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(frame_profile);
         crate::character::skinning_bench_end();
+        if let Some(s)=&mut coverage_session {
+            let guards=npcs.coverage_counts(&scene.world,camera,target-camera);
+            let (shots,impacts)=alice.visual_counts();
+            let cluster=scene.map.visibility.cluster(camera,&scene.map.planes);
+            let (sources,bytes)=audio.coverage_counts();
+            crate::coverage::add(14,sources);crate::coverage::add(15,bytes);
+            for slot in &interactions.levels {for (i,n) in slot.ctl.coverage_counts().into_iter().enumerate(){crate::coverage::add(27+i,n);}}
+            s.observe(&maps[current],entry_spawn.as_deref(),player.feet.to_array(),stats.alive(),flying,paused||menu||inventory_menu||console.open,scripted_view,guards,shots,impacts,cluster,camera.to_array(),target.to_array(),environment_clock)?;
+        }
         crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]

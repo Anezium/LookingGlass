@@ -304,8 +304,12 @@ pub struct Input {
     pub using_pad: bool,
     pub disconnected: bool,
     focused: bool,
+    survey: Option<(crate::coverage::Sample,crate::coverage::Sample)>,
 }
 impl Input {
+    pub(crate) fn coverage(&mut self, now:crate::coverage::Sample, previous:crate::coverage::Sample) {
+        self.survey=Some((now,previous)); self.focused=true; self.disconnected=false;
+    }
     pub fn update(&mut self, prefs: &Preferences, focused: bool) {
         let mut raw = self.slot.and_then(read_pad);
         if raw.is_none() && get_time() >= self.retry {
@@ -389,6 +393,7 @@ impl Input {
                 })
     }
     pub fn action(&self, prefs: &Preferences, original: &str, edge: bool) -> bool {
+        if let Some((now,previous))=&self.survey { return now.held(original) && (!edge || !previous.held(original)); }
         if !self.focused {
             return false;
         }
@@ -421,6 +426,7 @@ impl Input {
         )
     }
     pub fn movement(&self) -> Vec2 {
+        if let Some((now,_))=&self.survey {return Vec2::from_array(now.movement);}
         self.pad.move_axis
     }
     pub fn look(&self, prefs: &Preferences) -> Vec2 {
