@@ -31,3 +31,22 @@ Host checks: `cargo +stable test --locked --features vita_renderer`,
 Snapshot/ring tests check allocation count, field identity, rollover and source
 reset. Frozen `--renderer-host-check` captures must match the existing host
 reference in both probe modes. No game data belongs in source control.
+
+## Verified host evidence (2026-10-15)
+
+Executable source: `3b850c7c1d064d0df8c080c360c0ac5f64b764cf`.
+The feature suite passes 847 tests, zero failures, with two inherited asset cases
+ignored. The default-feature check and both ownership compile-fail checks pass.
+Both probe flags reproduce all 15 existing Mac J20 final3 reference PNG hashes.
+Both export 180 contiguous light CSV frames with 241 columns. Every one of the
+115 enabled category fields matches the existing host report for the same frame;
+all exclusive sums fit actor_prep_body_ns. The enabled run has 181 distinct
+advancing states, with strictly advancing environment clock. Saves are unchanged.
+Snapshot and ring recording tests report zero allocation calls.
+
+Native binary SHA-256: `4460029ee57a95be9ed727e0af41b84ed0911915996fcb11ce956dd535c26fe7`.
+Evidence: `/Users/anezium/vita-j0/village-retained-world/jalon-23-probe/`, mirrored
+to `/srv/fast/projects/alice/jalons/jalon-23-probe/`. See HOST-VERIFICATION.json and
+HOST-CHECKS.json. Rejected host attempts are preserved; host-only initialization
+and neutral-play setup repairs do not change Vita code paths. These checks make
+no console performance claim. Package verification follows in the same evidence.
