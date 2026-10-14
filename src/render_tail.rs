@@ -13,16 +13,15 @@ struct State {
     outside_start: Option<Instant>,
 }
 impl State {
-    fn complete(&mut self, now:Instant, outside_cpu:bool, corrected:bool) -> Option<(RenderPhase,RenderMetrics)> {
+    fn complete(&mut self, now:Instant) -> Option<(RenderPhase,RenderMetrics)> {
         if !self.tail {return None;}
         let elapsed=self.start.take().map_or(0,|v|now.duration_since(v).as_nanos() as u64);
         let mut m=std::mem::take(&mut self.pending);
         m.draws=1; m.pipelines=1; m.bindings=1;
         m.uniform_uploads=u64::from(m.uniform_gl_calls>0);
         m.cpu_ns=elapsed;
-        m.deferred_cpu_ns=if corrected {
-            self.outside_start.take().map_or(0,|t|now.duration_since(t).as_nanos() as u64)
-        } else if outside_cpu {elapsed} else {0};
+        m.deferred_cpu_ns=self.outside_start.take()
+            .map_or(0,|t|now.duration_since(t).as_nanos() as u64);
         Some((if self.present!=0 && self.program==self.present {RenderPhase::Present} else {RenderPhase::Hud},m))
     }
 }
@@ -52,7 +51,7 @@ fn event(update: impl FnOnce(&mut RenderMetrics)) {
     STATE.with(|s| { let mut s=s.borrow_mut(); if s.tail {
         if s.start.is_none() {
             let now=Instant::now(); s.start=Some(now);
-            if crate::actor_prep_profile::enabled() && !crate::light_profile::cpu_running() {s.outside_start=Some(now);}
+            if !crate::light_profile::cpu_running() {s.outside_start=Some(now);}
         }
         update(&mut s.pending);
     } });
@@ -87,9 +86,9 @@ fn draw() {
         // Direct world/FX draws have no deferred packet. Avoid a clock read for
         // each one unless explicitly measuring the legacy per-draw overhead.
         if !s.tail && !crate::render::vita_renderer::config().render_draw_timing {return None;}
-        s.complete(Instant::now(),!crate::light_profile::cpu_running(),crate::actor_prep_profile::enabled())
+        s.complete(Instant::now())
     });
-    if let Some((phase,m))=packet {crate::light_profile::render_add(phase,m);crate::light_profile::deferred_cpu(if crate::actor_prep_profile::enabled() {m.deferred_cpu_ns} else {m.cpu_ns});}
+    if let Some((phase,m))=packet {crate::light_profile::render_add(phase,m);crate::light_profile::deferred_cpu(m.deferred_cpu_ns);}
 }
 
 #[cfg(any(target_os="vita", target_os="macos"))]
@@ -192,29 +191,30 @@ mod tests {
         let start=Instant::now();
         let mut s=State::default();s.tail=true;s.start=Some(start);
         s.outside_start=Some(start+std::time::Duration::from_micros(6));
-        let (_,m)=s.complete(start+std::time::Duration::from_micros(10),true,true).unwrap();
+        let (_,m)=s.complete(start+std::time::Duration::from_micros(10)).unwrap();
         assert_eq!((m.cpu_ns,m.deferred_cpu_ns),(10000,4000));
         assert!(s.start.is_none() && s.outside_start.is_none());
         s.start=Some(start);
-        let (_,m)=s.complete(start+std::time::Duration::from_micros(10),false,true).unwrap();
+        let (_,m)=s.complete(start+std::time::Duration::from_micros(10)).unwrap();
         assert_eq!(m.deferred_cpu_ns,0);
     }
     #[test]
     fn deferred_packets_drain_at_draw_and_separate_upscale_hud_and_running_cpu() {
         let start=Instant::now();
         let mut s=State::default();s.present=7;s.program=3;s.tail=true;s.start=Some(start);
+        s.outside_start=Some(start);
         s.pending.buffer_updates=2;s.pending.buffer_bytes=172;s.pending.uniform_gl_calls=2;
         s.program=7; // Uploads precede apply_pipeline in the framework.
         let scope=crate::kernel_alloc::Scope::begin();
-        let (phase,m)=s.complete(start+std::time::Duration::from_micros(9),true,false).unwrap();
+        let (phase,m)=s.complete(start+std::time::Duration::from_micros(9)).unwrap();
         assert_eq!(scope.finish(),0);
         assert!(matches!(phase,RenderPhase::Present));
         assert_eq!((m.draws,m.buffer_updates,m.buffer_bytes,m.uniform_uploads),(1,2,172,1));
         assert_eq!((m.cpu_ns,m.deferred_cpu_ns),(9000,9000));
         assert_eq!(s.pending.buffer_bytes,0);assert!(s.start.is_none());
         s.program=3;s.start=Some(start);s.pending.buffer_bytes=24;
-        let (phase,m)=s.complete(start+std::time::Duration::from_micros(7),false,false).unwrap();
+        let (phase,m)=s.complete(start+std::time::Duration::from_micros(7)).unwrap();
         assert!(matches!(phase,RenderPhase::Hud));assert_eq!((m.cpu_ns,m.deferred_cpu_ns,m.buffer_bytes),(7000,0,24));
-        s.tail=false;assert!(s.complete(start,true,false).is_none());
+        s.tail=false;assert!(s.complete(start).is_none());
     }
 }

@@ -1070,13 +1070,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
             }
         }
+        #[cfg(not(target_os="vita"))]
+        crate::light_profile::begin(&maps[current], crate::frame_profile::Mode::Full);
         crate::actor_prep_profile::reset();
         #[cfg(not(target_os="vita"))]
         if crate::actor_prep_profile::enabled() {crate::light_profile::render_host_reset();}
         let probe_started = crate::actor_prep_profile::enabled().then(std::time::Instant::now);
         let probe_allocations = crate::actor_prep_profile::enabled().then(crate::kernel_alloc::Scope::begin);
-        let mut prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Input);
         crate::light_profile::cpu_begin();
+        let mut prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Input);
         if !(menu || inventory_menu || console.open || paused) {crate::character::skinning_bench_begin();}
         crate::frame_phases::mark(1);
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
@@ -4038,6 +4040,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(replay)=&mut actor_replay {
             replay.sample(&game_snapshot!(), active, dt, probe_ns, probe_allocations)?;
         }
+        #[cfg(not(target_os="vita"))]
+        crate::light_profile::end(active);
         crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]
         {

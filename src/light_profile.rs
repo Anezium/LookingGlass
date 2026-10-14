@@ -34,7 +34,15 @@ pub(crate) fn full() -> bool {
     FULL.load(Ordering::Relaxed)
 }
 fn active() -> bool {
-    cfg!(target_os = "vita") && !full()
+    if full() { return false; }
+    #[cfg(target_os = "vita")]
+    { true }
+    #[cfg(not(target_os = "vita"))]
+    {
+        // Explicit host diagnostic runs exercise the console ring and CSV writer.
+        static HOST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *HOST.get_or_init(|| std::env::var_os("LOOKING_GLASS_LIGHT_PROFILE").is_some())
+    }
 }
 const WINDOW: usize = 60;
 #[derive(Clone, Copy, Default, Debug)]
@@ -49,6 +57,9 @@ struct Row {
     skin_overflow: u64,
     fx: [u64; 8],
     render: [RenderMetrics; 6],
+    actor_prep_enabled: bool,
+    actor_prep_body_ns: u64,
+    actor_prep: crate::actor_prep_profile::Snapshot,
 }
 /// Engine submission calls, counted at their owning phase. Texture binds count
 /// image slots passed to apply_bindings; backend cache hits are not GL calls.
@@ -168,6 +179,12 @@ impl Ring {
                 write!(out, ",{phase}_{field}")?;
             }
         }
+        write!(out, ",actor_prep_profile_enabled,actor_prep_body_ns")?;
+        for name in crate::actor_prep_profile::NAMES {
+            for field in ["exclusive_ns", "calls", "copied_bytes", "compared_bytes", "logical_draws"] {
+                write!(out, ",actor_prep_{name}_{field}")?;
+            }
+        }
         writeln!(out)?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
@@ -180,6 +197,11 @@ impl Ring {
                     p.draws, p.pipelines, p.depth_states, p.bindings, p.uniform_uploads,
                     p.uniform_bytes, p.buffer_updates, p.buffer_bytes, p.texture_bind_slots,
                     p.visibility_tests, p.uniform_gl_calls, p.visibility_cpu_ns / 1000, p.parameter_cpu_ns / 1000, p.deferred_cpu_ns / 1000, p.texture_gl_binds, p.state_gl_calls, p.program_gl_changes)?;
+            }
+            write!(out, ",{},{}", u8::from(r.actor_prep_enabled), r.actor_prep_body_ns)?;
+            for i in 0..crate::actor_prep_profile::N {
+                write!(out, ",{},{},{},{},{}", r.actor_prep.ns[i], r.actor_prep.calls[i],
+                    r.actor_prep.counts[i][0], r.actor_prep.counts[i][1], r.actor_prep.counts[i][2])?;
             }
             writeln!(out)?;
         }
@@ -235,14 +257,19 @@ pub(crate) fn cpu_begin() {
 }
 pub(crate) fn cpu_end() {
     if active() || crate::actor_prep_profile::enabled() {
-        // Split a pending deferred packet at the actual CPU boundary.
-        #[cfg(feature="vita_renderer")] if crate::actor_prep_profile::enabled() { crate::render_tail::cpu_boundary(Instant::now()); }
+        // The boundary and deferred suffix are identical with the actor probe on/off.
+        let now = Instant::now();
+        #[cfg(feature="vita_renderer")]
+        crate::render_tail::cpu_boundary(now);
         RING.with(|r| {
             let mut r = r.borrow_mut();
-            r.current.cpu_us = r
-                .cpu_start
-                .take()
-                .map_or(0, |t| t.elapsed().as_micros() as u64);
+            let body_ns = r.cpu_start.take().map_or(0, |t| now.duration_since(t).as_nanos() as u64);
+            r.current.cpu_us = body_ns / 1000;
+            if active() && crate::actor_prep_profile::enabled() {
+                r.current.actor_prep_enabled = true;
+                r.current.actor_prep_body_ns = body_ns;
+                r.current.actor_prep = crate::actor_prep_profile::snapshot();
+            }
         });
     }
 }
@@ -343,6 +370,44 @@ mod tests {
         }
     }
     #[test]
+    fn exclusive_snapshot_stays_with_its_frame_without_allocating() {
+        let mut ring = Ring::default();
+        let origin = Instant::now();
+        ring.begin(origin);
+        let scope = crate::kernel_alloc::Scope::begin();
+        for frame in 1..=120u64 {
+            ring.current.actor_prep_enabled = true;
+            ring.current.actor_prep_body_ns = frame * 10000;
+            for i in 0..crate::actor_prep_profile::N {
+                ring.current.actor_prep.ns[i] = frame * 100 + i as u64;
+                ring.current.actor_prep.calls[i] = frame + i as u64;
+                ring.current.actor_prep.counts[i] = [frame * 2, frame * 3, frame * 4];
+            }
+            ring.pending = true;
+            ring.begin(origin + std::time::Duration::from_micros(frame * 100));
+        }
+        assert_eq!(scope.finish(), 0);
+        let mut csv = Vec::new();
+        ring.write(&mut csv).unwrap();
+        let csv = String::from_utf8(csv).unwrap();
+        let mut lines = csv.lines();
+        let headers: Vec<_> = lines.next().unwrap().split(',').collect();
+        for (frame, line) in (61..=120u64).zip(lines) {
+            let values: Vec<u64> = line.split(',').map(|v| v.parse().unwrap()).collect();
+            assert_eq!(values[0], frame);
+            assert_eq!(values[124], 1);
+            assert_eq!(values[125], frame * 10000);
+            for (i, name) in crate::actor_prep_profile::NAMES.iter().enumerate() {
+                let col = 126 + i * 5;
+                assert_eq!(headers[col], format!("actor_prep_{name}_exclusive_ns"));
+                assert_eq!(&values[col..col+5], &[frame*100+i as u64, frame+i as u64,
+                    frame*2, frame*3, frame*4]);
+            }
+        }
+        assert!(!ring.current.actor_prep_enabled);
+        assert_eq!(ring.current.actor_prep.ns, [0; crate::actor_prep_profile::N]);
+    }
+    #[test]
     fn ring_csv_is_chronological_bounded_and_attributes_previous_wall() {
         let mut r = Ring::default();
         let origin = Instant::now();
@@ -362,10 +427,10 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.lines().count(), 61);
         assert!(s.lines().next().unwrap().contains("world_opaque_draws"));
-        assert_eq!(s.lines().next().unwrap().split(',').count(), 124);
+        assert_eq!(s.lines().next().unwrap().split(',').count(), 241);
         assert!(s.lines().nth(1).unwrap().starts_with("66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0,"));
         assert!(s.lines().last().unwrap().starts_with("125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0,"));
-        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 124));
+        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 241));
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);

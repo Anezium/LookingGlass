@@ -6,13 +6,27 @@ use std::{cell::RefCell, time::Instant};
 pub(crate) enum Phase { Input, Interactions, Movers, Movement, Story, Particles, Combat,
     Alice, Audio, Camera, Scene, Gather, Discovery, Consume, Simple, Modifiers,
     Publication, Collect, Finish, Upload, Submit, Other, Support }
-const N: usize = 23;
-const NAMES: [&str; N] = ["input", "interactions", "movers", "movement", "story", "particles",
+pub(crate) const N: usize = 23;
+pub(crate) const NAMES: [&str; N] = ["input", "interactions", "movers", "movement", "story", "particles",
     "combat", "alice", "audio", "camera", "scene", "gather", "actor_discovery_setup",
     "overlap_consume_validation_copy", "simple_layer_publication", "dynamic_modifiers",
     "packet_publication", "collect_wait", "finish_bookkeeping", "upload", "actual_submission", "other", "actor_shadow_atmosphere"];
 #[derive(Clone, Copy)]
 pub(crate) enum Count { CopiedBytes, ComparedBytes, LogicalDraws }
+/// Fixed-size value copied once after all game-thread spans have closed.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Snapshot {
+    pub ns: [u64; N],
+    pub calls: [u64; N],
+    pub counts: [[u64; 3]; N],
+}
+pub(crate) fn snapshot() -> Snapshot {
+    STATE.with(|s| {
+        let s = s.borrow();
+        debug_assert!(s.current.is_none(), "snapshot requires closed spans");
+        Snapshot { ns: s.ns, calls: s.calls, counts: s.counts }
+    })
+}
 #[derive(Default)]
 struct State { current: Option<Phase>, last: Option<Instant>, ns: [u64; N],
     calls: [u64; N], counts: [[u64; 3]; N] }
@@ -120,6 +134,27 @@ pub(crate) mod replay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_is_allocation_free_and_survives_source_reset() {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            *s = State::default();
+            for i in 0..N {
+                s.ns[i] = 100 + i as u64;
+                s.calls[i] = 200 + i as u64;
+                s.counts[i] = [300 + i as u64, 400 + i as u64, 500 + i as u64];
+            }
+        });
+        let scope = crate::kernel_alloc::Scope::begin();
+        let saved = snapshot();
+        STATE.with(|s| *s.borrow_mut() = State::default());
+        assert_eq!(scope.finish(), 0);
+        for i in 0..N {
+            assert_eq!(saved.ns[i], 100 + i as u64);
+            assert_eq!(saved.calls[i], 200 + i as u64);
+            assert_eq!(saved.counts[i], [300 + i as u64, 400 + i as u64, 500 + i as u64]);
+        }
+    }
     #[test] fn nested_spans_partition_time_without_counting_children_twice() {
         let t=Instant::now();let mut s=State::default();
         s.current=Some(Phase::Discovery);s.last=Some(t);
