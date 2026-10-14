@@ -557,12 +557,19 @@ pub struct Session {
     epoch: u32,
     reset_due: bool,
     destination_seen: bool,
+    destination_start: Option<Instant>,
+    destination_switch_due: bool,
     level_active: u64,
     level_species: u64,
 }
 impl Session {
     pub fn new(cell: Cell) -> Result<Self> {
-        crate::light_profile::survey_reset(cell.output.clone(), cell.prefix.clone());
+        let prefix = if cell.scene.expected.destination.is_some() {
+            format!("{}-source", cell.prefix)
+        } else {
+            cell.prefix.clone()
+        };
+        crate::light_profile::survey_reset(cell.output.clone(), prefix);
         let now = Instant::now();
         Ok(Self {
             cell,
@@ -587,6 +594,8 @@ impl Session {
             epoch: 1,
             reset_due: false,
             destination_seen: false,
+            destination_start: None,
+            destination_switch_due: false,
             level_active: 0,
             level_species: 0,
         })
@@ -640,6 +649,17 @@ impl Session {
     pub fn begin(&mut self) -> Result<bool> {
         // Complete the previous frame before testing duration: final swap/tail is retained.
         crate::light_profile::survey_begin()?;
+        if self.destination_switch_due {
+            crate::light_profile::survey_flush()?;
+            crate::light_profile::survey_reset(
+                self.cell.output.clone(),
+                format!("{}-destination", self.cell.prefix),
+            );
+            milestone("transition", "destination-first-presented");
+            crate::light_profile::survey_begin()?;
+            self.destination_start = Some(Instant::now());
+            self.destination_switch_due = false;
+        }
         if self.pending && self.frames == 1 {
             milestone("viewer", "first-presented");
         }
@@ -652,8 +672,14 @@ impl Session {
             .context("coverage scene not ready")?
             .elapsed()
             .as_secs_f64();
-        if age >= self.cell.scene.warmup_s + self.cell.scene.timed_s / self.cell.scene.epochs as f64
-        {
+        let due = if self.cell.scene.expected.destination.is_some() {
+            self.destination_start
+                .is_some_and(|s| s.elapsed().as_secs_f64() >= self.cell.scene.timed_s)
+        } else {
+            age >= self.cell.scene.warmup_s
+                + self.cell.scene.timed_s / self.cell.scene.epochs as f64
+        };
+        if due {
             crate::light_profile::survey_flush()?;
             let e = &self.cell.scene.expected;
             ensure!(
@@ -798,8 +824,11 @@ impl Session {
                 || expected_map.is_some_and(|d| d == crate::save::visit_key(map, entry)),
             "unexpected map replacement"
         );
-        if expected_map.is_some_and(|d| d == crate::save::visit_key(map, entry)) {
+        if expected_map.is_some_and(|d| d == crate::save::visit_key(map, entry))
+            && !self.destination_seen
+        {
             self.destination_seen = true;
+            self.destination_switch_due = true;
         }
         ensure!(
             alive && !flying && !paused,
@@ -846,7 +875,19 @@ impl Session {
         crate::light_profile::survey_metrics(spans, counts);
         let age = self.ready.unwrap().elapsed().as_secs_f64();
         // Keep warmup frames for the historical V0 61..180 comparison.
-        crate::light_profile::survey_label(self.frames + 1, age, age >= self.cell.scene.warmup_s);
+        let (label_age, timed) = if self.cell.scene.expected.destination.is_some() {
+            if let Some(start) = self.destination_start {
+                (start.elapsed().as_secs_f64(), true)
+            } else {
+                (
+                    age,
+                    !self.destination_seen && age <= self.cell.scene.warmup_s,
+                )
+            }
+        } else {
+            (age, age >= self.cell.scene.warmup_s)
+        };
+        crate::light_profile::survey_label(self.frames + 1, label_age, timed);
         crate::light_profile::end(true);
         self.pending = true;
         self.frames += 1;

@@ -2594,6 +2594,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             pending_transition = interactions.take_story_exit(&mut story);
         }
         if let Some(exit) = pending_transition {
+            crate::coverage::milestone("transition","exit-request");
             options.difficulty = stats.difficulty;
             let (name, target_spawn) = exit.clone();
             let leaving = level_snapshot!();
