@@ -1916,13 +1916,13 @@ impl Npcs {
         Ok(serde_json::json!(rows))
     }
 
-    pub(crate) fn coverage_counts(&self, world:&World, camera:Vec3,direction:Vec3)->[u64;8] {
+    pub(crate) fn coverage_counts(&self, _world:&World, camera:Vec3,direction:Vec3)->[u64;8] {
         let mut n=[self.actors.len() as u64,0,0,0,0,0,self.models.len() as u64,0];
         for a in &self.actors {
             if self.registry_owns(a) {continue;}
             if let Some(g)=&a.guard {
                 n[4]+=u64::from(g.attacks);
-                if g.state==combat::State::Dead {n[5]+=1;continue;}
+                if g.state==combat::State::Dead {n[5]+=1;n[7]+=u64::from(g.dismember.severed || g.burst.is_some());continue;}
                 n[1]+=1;
                 if g.state!=combat::State::Idle {n[2]+=1;}
                 let t=g.target(0);
@@ -1930,7 +1930,7 @@ impl Npcs {
                 if delta.dot(direction.normalize_or_zero())>0. && delta.normalize_or_zero().dot(direction.normalize_or_zero())>0.6 {
                     n[3]+=1;
                 }
-                n[7]+=u64::from({let trace=world.sweep(camera,t.center,Vec3::ZERO);!trace.start_solid && trace.fraction>=0.99});
+
             }
         }
         n

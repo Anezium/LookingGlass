@@ -68,6 +68,8 @@ pub struct Expected {
     #[serde(default)]
     pub min_deaths: u64,
     #[serde(default)]
+    pub min_dismemberment: u64,
+    #[serde(default)]
     pub min_clusters: usize,
     #[serde(default)]
     pub min_level_active: u64,
@@ -548,6 +550,7 @@ pub struct Session {
     shots: u64,
     impacts: u64,
     deaths: u64,
+    dismemberment: u64,
     initial_guards: Option<u64>,
     pending: bool,
     finished: bool,
@@ -577,6 +580,7 @@ impl Session {
             shots: 0,
             impacts: 0,
             deaths: 0,
+            dismemberment: 0,
             initial_guards: None,
             pending: false,
             finished: false,
@@ -686,6 +690,10 @@ impl Session {
                 self.level_active,
                 self.level_species
             );
+            ensure!(
+                self.dismemberment >= e.min_dismemberment,
+                "dismemberment not observed"
+            );
             if self.epoch < self.cell.scene.epochs {
                 append(
                     &self
@@ -703,6 +711,7 @@ impl Session {
                 self.shots = 0;
                 self.impacts = 0;
                 self.deaths = 0;
+                self.dismemberment = 0;
                 self.initial_guards = None;
                 crate::light_profile::survey_reset(
                     self.cell.output.clone(),
@@ -814,6 +823,7 @@ impl Session {
         }
         self.attacks = self.attacks.max(guards[4]);
         self.deaths = self.deaths.max(guards[5]);
+        self.dismemberment = self.dismemberment.max(guards[7]);
         self.shots = self.shots.max(shots);
         self.impacts = self.impacts.max(impacts);
         if let Some(c) = cluster {

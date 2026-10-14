@@ -179,7 +179,7 @@ impl Ring {
             }
         }
         if self.survey.is_some() {
-            write!(out,",age_us,timed,export_frame,events_movers_us,ai_combat_us,alice_us,particles_us,audio_us,npc_loaded,guards_alive,guards_active,guards_in_view_cone,guard_attacks,guard_deaths,npc_unique_models,guards_ray_origin_valid,weapon_shots,weapon_impacts,puff_births,puff_drops,puffs_live,skin_worker_service_us,audio_registered_sources,decoded_audio_cache_bytes,world_candidates,world_visible_groups,world_cluster_plus_one,skin_vertices,skin_bones,skin_surfaces,skin_logical_draws,skin_output_arena_vertices,collision_sweeps,collision_dynamic_candidates,guard_ai_ticks,level_alive,level_active,level_species,level_parts,level_effects")?;
+            write!(out,",age_us,timed,export_frame,events_movers_us,ai_combat_us,alice_us,particles_us,audio_us,npc_loaded,guards_alive,guards_active,guards_in_view_cone,guard_attacks,guard_deaths,npc_unique_models,guards_dismembered,weapon_shots,weapon_impacts,puff_births,puff_drops,puffs_live,skin_worker_service_us,audio_registered_sources,decoded_audio_cache_bytes,world_candidates,world_visible_groups,world_cluster_plus_one,skin_vertices,skin_bones,skin_surfaces,skin_logical_draws,skin_output_arena_vertices,collision_sweeps,collision_dynamic_candidates,guard_ai_ticks,level_alive,level_active,level_species,level_parts,level_effects")?;
         }
         writeln!(out)?;
         let first = if self.survey.is_some() {self.exported} else {self.count.saturating_sub(WINDOW)};
