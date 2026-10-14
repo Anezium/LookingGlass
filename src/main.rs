@@ -410,6 +410,8 @@ fn run() -> Result<()> {
             "--audio-check" => mode = "audio",
             "--character-check" => mode = "character",
             "--skin-bench" => mode = "skin-bench",
+            "--gpu-skin-render-check" => mode = "gpu-skin-render-check",
+            "--gpu-skin-check" => mode = "gpu-skin-check",
             "--skin-workers-check" => mode = "skin-workers-check",
             "--renderer-host-check" => mode = "renderer-host-check",
             "--skin-overlap-render-check" => mode = "skin-overlap-render-check",
@@ -621,6 +623,12 @@ fn run() -> Result<()> {
             }
         });
         return Ok(());
+    }
+    #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
+    if mode == "gpu-skin-render-check" {
+        macroquad::Window::from_config(viewer::config(),async move {
+            if let Err(e)=npc::check_gpu_skin_render(&mut assets).await {eprintln!("GPU skin render check failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
     }
     #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
     if mode == "vita-alpha-check" {
@@ -877,6 +885,8 @@ fn run() -> Result<()> {
     if mode == "character" {
         return skeletal::check(&mut assets);
     }
+    #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+    if mode == "gpu-skin-check" {return render_fx::gpu_skinning::check(&mut assets);}
     if mode == "skin-workers-check" { return character::skinning::workers_check(&mut assets); }
     if mode == "skin-bench" {
         return character::skinning::bench(&mut assets);

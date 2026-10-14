@@ -49,6 +49,7 @@ pub(crate) fn begin_view(
     if flush {
         boundary("flush_vita_3d_begin");
     }
+    super::gpu_skinning::begin_view();
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
         let mut groups = std::mem::take(&mut f.groups);
@@ -68,8 +69,8 @@ pub(crate) fn begin_view(
         }
     });
 }
-const UNIFORM_FLOATS: usize = 147;
-fn meta() -> ShaderMeta {
+pub(super) const UNIFORM_FLOATS: usize = 147;
+pub(super) fn meta() -> ShaderMeta {
     let mut uniforms = vec![
         UniformDesc::new("Model", UniformType::Mat4),
         UniformDesc::new("Projection", UniformType::Mat4),
@@ -353,6 +354,8 @@ impl Gpu {
             "[lg/vita-renderer] actor pipeline objects prewarmed={} programs=1",
             gpu.pipelines.len()
         );
+        super::gpu_skinning::retain_renderer();
+        super::gpu_skinning::init();
         Ok(gpu)
     }
     fn upload(&mut self, slot: usize, p: &Pass) -> Result<usize> {
@@ -522,6 +525,7 @@ impl Gpu {
 }
 impl Drop for Gpu {
     fn drop(&mut self) {
+        super::gpu_skinning::release_renderer();
         let ctx = unsafe { get_internal_gl() }.quad_context;
         for b in &self.buffers {
             ctx.delete_buffer(b.vertex);
@@ -687,7 +691,7 @@ fn merge_cached_mode<'a>(
             if let Source::Actor(id) = source {
                 let g = &groups[id];
                 let p = g.passes.first();
-                let eligible = g.passes.len() == 1 && p.is_some_and(|p| p.geometry.as_ref().map_or_else(|| valid_mesh(p.geometry()), |g| g.valid) && (p.effect || crate::render::vita_renderer::config().actor_batching));
+                let eligible = g.passes.len() == 1 && p.is_some_and(|p| p.gpu_skin.is_none() && p.geometry.as_ref().map_or_else(|| valid_mesh(p.geometry()), |g| g.valid) && (p.effect || crate::render::vita_renderer::config().actor_batching));
                 Signature {
                     source,
                     key: eligible.then(|| packet_key(p.unwrap())),
@@ -952,10 +956,10 @@ pub(crate) fn finish_world(
             groups
                 .iter()
                 .enumerate()
-                .filter(|(_, g)| g.transparent && !g.passes[0].geometry().vertices.is_empty())
+                .filter(|(_, g)| g.transparent && (g.passes[0].gpu_skin.is_some() || !g.passes[0].geometry().vertices.is_empty()))
                 .map(|(id, g)| {
                     (
-                        (center(g.passes[0].geometry()) - camera).dot(direction),
+                        (g.passes[0].gpu_skin.map_or_else(|| center(g.passes[0].geometry()), |(id,_)| super::gpu_skinning::center(id)) - camera).dot(direction),
                         Source::Actor(id),
                     )
                 }),
@@ -969,7 +973,7 @@ pub(crate) fn finish_world(
         let mut index = 0;
         for group in &mut groups { for p in &mut group.passes {
             if storage.len() <= index { storage.push(Default::default()); }
-            if p.geometry.is_none() { p.geometry = Some(storage[index].observe(&p.mesh, None)); }
+            if p.gpu_skin.is_none() && p.geometry.is_none() { p.geometry = Some(storage[index].observe(&p.mesh, None)); }
             index += 1;
         }}
         storage.truncate(index); // Unused producers cannot alias a future occupant.
@@ -1004,6 +1008,12 @@ pub(crate) fn finish_world(
         for (group_id, group) in groups.iter().enumerate() {
             let start = packets.len();
             for (pass_id, p) in group.passes.iter().enumerate() {
+                if p.gpu_skin.is_some() {
+                    let u = if c.fx_prepare_cache {prepared_uniforms(p,&mut uniform_templates)}
+                        else {FRAME.with(|f|uniforms(p,&f.borrow()))};
+                    packets.push((group_id,pass_id,usize::MAX,u));
+                    continue;
+                }
                 if p.geometry().indices.is_empty() {
                     continue;
                 }
@@ -1044,10 +1054,16 @@ pub(crate) fn finish_world(
     count("vita_fx_dropped_groups", dropped as u64);
     count("vita_fx_sorted_triangles", 0);
     count("vita_fx_compacted_vertices", 0);
+    let skin_submit_ns=std::cell::Cell::new(0_u64);
     let draw_group = |gpu: &mut Gpu, id: usize| {
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
-            gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent);
+            let p=&groups[*group].passes[*pass];
+            if let Some((skin,alpha))=p.gpu_skin {
+                gpu.uniform_cache.interrupt();gpu.submit_cache.interrupt();gpu.field_uniforms.interrupt();
+                skin_submit_ns.set(skin_submit_ns.get()+super::gpu_skinning::draw(skin,alpha,p,u,!groups[id].transparent));
+                gpu.uniform_cache.interrupt();gpu.submit_cache.interrupt();gpu.field_uniforms.interrupt();
+            } else {gpu.draw(p,*b,u,!groups[id].transparent);}
         }
     };
     unsafe {
@@ -1116,13 +1132,15 @@ pub(crate) fn finish_world(
         }
     }
     gpu.merge_meshes[gpu.ring_phase].retain(|id, _| recycled.contains(id));
-    if c.actor_layer_reuse {
-        for group in &mut groups {super::actor_cache::recycle(&mut group.passes);}
+    if c.actor_layer_reuse || c.gpu_skinning {
+        for group in &mut groups {
+            if c.actor_layer_reuse || group.passes.first().is_some_and(|p|p.gpu_skin.is_some()) {super::actor_cache::recycle(&mut group.passes);}
+        }
     }
     let submit_ns = gpu.stats.render.iter().map(|m| m.cpu_ns).sum::<u64>();
     crate::light_profile::render_add(crate::light_profile::RenderPhase::Fx,
         crate::light_profile::RenderMetrics { cpu_ns: (finish_started.elapsed().as_nanos() as u64)
-            .saturating_sub(world_ns + submit_ns), ..Default::default() });
+            .saturating_sub(world_ns + submit_ns + skin_submit_ns.get()), ..Default::default() });
     gpu.stats.report();
     let list_len = list.len(); list.clear(); gpu.alpha_storage = list;
     recycled.clear(); gpu.recycle_storage = recycled;
@@ -1349,11 +1367,26 @@ mod tests {
         m.indices = vec![0, 1, 3];
         assert!(!valid_mesh(&m));
     }
+    #[test]
+    fn gpu_packets_are_merge_barriers_between_identical_cpu_packets() {
+        let mut groups=vec![fixture_group(),fixture_group(),fixture_group()];
+        groups[1].passes[0].gpu_skin=Some((0,false));
+        let mut list=vec![(3.,Source::Actor(0)),(2.,Source::Actor(1)),(1.,Source::Actor(2))];
+        let mut cache=MergeCache::default();let mut pool=BTreeMap::new();
+        merge_cached_mode(&mut cache,&mut groups,&mut list,false,false,&mut pool,true);
+        assert_eq!(list.len(),3);
+        assert!(groups.iter().all(|g|g.passes.len()==1));
+        groups[1].passes[0].gpu_skin=None;
+        merge_cached_mode(&mut cache,&mut groups,&mut list,false,false,&mut pool,true);
+        assert_eq!(list.len(),1);
+    }
     fn fixture_group() -> super::super::Group {
         super::super::Group {
             transparent: true,
             passes: vec![Pass {
                 _game_thread: crate::game_thread::GameThread::default(),
+                #[cfg(feature="vita_renderer")]
+                gpu_skin: None,
                 geometry:None,
                 effect: false,
                 blend_index: 1,

@@ -4561,3 +4561,58 @@ pub(crate) fn check_overlap_snapshots(assets: &mut Assets) -> Result<()> {
     println!("PASS real NPC overlap total={total} workers=1/2");
     Ok(())
 }
+
+/// Isolated host witnesses for real actor materials, including authored alpha.
+#[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+pub(crate) async fn check_gpu_skin_render(assets:&mut Assets)->Result<()> {
+    use crate::render_fx::retained;
+    let specs=crate::texture::read_materials(assets)?;
+    let atmosphere=Atmosphere::default();
+    let mut gpu=retained::Gpu::new()?;
+    crate::lighting::fixture_lights(vec![]);
+    std::fs::create_dir_all("private/gpu-skin-render")?;
+    let mut reports=Vec::new();
+    let mut alice=crate::character::Character::load(assets)?;
+    for name in ["alice","c_cheshire","cardguard_club","c_whiterabbit","c_torchgnome3","c_insanechildnew"] {
+        // This fixture draws no script-owned secondary overlay; ordinary model
+        // submission can use the same eligibility as live NPC/controller art.
+        let mut puppet=if name=="alice" {None}else {
+            let mut p=Puppet::load(assets,name,&[],&specs)?;
+            p.0.late_skin_overlays=false;Some(p)
+        };
+        let clip=puppet.as_ref().map(|p|p.idle_clip().to_string()).unwrap_or_default();
+        for distance in [120_f32,420.] {for variant in 0..5 {
+            let camera=Camera3D {position:vec3(distance,-distance*0.3,65.),target:vec3(0.,0.,32.),
+                up:Vec3::Z,fovy:65_f32.to_radians(),z_near:2.,z_far:30000.,..Default::default()};
+            for repetition in 0..4 {
+                clear_background(BLACK);
+                crate::render::vita_renderer::prepare_3d(BLACK);
+                crate::render::vita_renderer::set_3d_camera(&camera);
+                retained::begin_view(&camera,17.,&atmosphere,false,true);
+                let opacity=match variant {1=>0.12,2=>0.75,_=>1.};
+                crate::render_fx::with_skin_opacity(opacity,|| {
+                    if let Some(p)=&mut puppet {
+                        p.atmosphere(&atmosphere,camera.position);
+                        p.draw_dissolving(&clip,0.25,true,Transform {translation:Vec3::ZERO,rotation:Quat::from_rotation_z(0.731)},
+                            1.,false,if variant==4 {0.37}else{0.});
+                    } else {
+                        alice.atmosphere(&atmosphere,camera.position);
+                        alice.draw_ghost(Vec3::ZERO,false,variant==3);
+                    }
+                });
+                retained::finish(&mut gpu,&[],true,|_|{});
+                crate::render::vita_renderer::present_3d();set_default_camera();
+                if repetition==3 {
+                    let path=format!("private/gpu-skin-render/{name}-{distance}-{variant}.png");
+                    crate::viewer::save_capture(std::path::Path::new(&path))?;
+                    reports.push(serde_json::json!({"model":name,"distance":distance,"variant":variant,
+                        "counts":retained::host_report(),"surfaces":crate::render_fx::gpu_skinning::surface_report()}));
+                }
+                next_frame().await;
+            }
+        }}
+    }
+    std::fs::write("private/gpu-skin-render/counts.json",serde_json::to_vec_pretty(&reports)?)?;
+    println!("PASS host actor witnesses: sixty near/far model captures with alpha, ghost and dissolve; supplied game data");
+    Ok(())
+}

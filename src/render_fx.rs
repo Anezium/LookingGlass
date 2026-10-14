@@ -11,6 +11,8 @@ use anyhow::Result;
 pub(crate) mod retained;
 #[cfg(feature="vita_renderer")]
 mod actor_cache;
+#[cfg(feature="vita_renderer")]
+pub(crate) mod gpu_skinning;
 pub(crate) mod actor_vertices;
 #[cfg(feature="vita_renderer")]
 pub(crate) mod prepared;
@@ -29,6 +31,8 @@ pub struct Appearance {
 }
 pub struct Pass {
     _game_thread: crate::game_thread::GameThread,
+    #[cfg(feature="vita_renderer")]
+    gpu_skin: Option<(usize, bool)>,
     #[cfg(feature="vita_renderer")]
     geometry:Option<Rc<prepared::Geometry>>,
     #[cfg(feature="vita_renderer")]
@@ -339,7 +343,7 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
         }
         FRAME.with(|f| {
             let mut f = f.borrow_mut();
-            let count = passes.iter().map(|p| p.geometry().vertices.len()).sum::<usize>();
+            let count = passes.iter().map(|p| p.gpu_skin.map_or_else(||p.geometry().vertices.len(),|(id,_)|gpu_skinning::vertex_count(id))).sum::<usize>();
             if f.vertices.saturating_add(count) > MAX_VERTICES {
                 f.dropped += 1;
                 return;
@@ -495,6 +499,8 @@ pub fn finish() -> (usize, usize) {
                     &Pass {
                         _game_thread: crate::game_thread::GameThread::default(),
                         #[cfg(feature="vita_renderer")]
+                        gpu_skin: None,
+                        #[cfg(feature="vita_renderer")]
                         geometry:None,
                         #[cfg(feature="vita_renderer")]
                         effect:p.effect,
@@ -602,6 +608,8 @@ fn pass_at(
             .clamp(0., 2.);
     Ok(Pass {
         _game_thread: crate::game_thread::GameThread::default(),
+        #[cfg(feature="vita_renderer")]
+        gpu_skin: None,
         #[cfg(feature="vita_renderer")]
         geometry:None,
         #[cfg(feature="vita_renderer")]

@@ -43,6 +43,8 @@ pub struct Config {
     pub lights_early_out: bool,
     pub fx_submit_state_cache: bool,
     pub actor_layer_reuse: bool,
+    /// Conservative single-bone skinning; other surfaces keep the CPU kernel.
+    pub gpu_skinning: bool,
     /// None selects light in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     pub skin_worker_bench: bool,
@@ -121,6 +123,7 @@ impl Default for Config {
             uniform_field_cache: true,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
+            gpu_skinning: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,

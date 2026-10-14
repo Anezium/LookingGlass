@@ -3,7 +3,7 @@ use crate::skeletal::{SkinVertex, Transform};
 use macroquad::prelude::*;
 
 // Adapted from NextOs-Ports/Looking-Glass-NextOS 15779e4 (felc18-blip).
-pub(super) fn rotation(q: Quat) -> Mat3 {
+pub(crate) fn rotation(q: Quat) -> Mat3 {
     // Basis expansion preserves Quat * Vec3 even for packed non-unit rotations.
     Mat3::from_cols(q * Vec3::X, q * Vec3::Y, q * Vec3::Z)
 }
@@ -106,13 +106,32 @@ fn colors(vertices: &mut [Vertex], fullbright: bool, alpha: f32) {
 }
 
 /// Only these disjoint CPU arrays cross the scope boundary; never a Mesh/Texture.
-pub(super) struct Job<'a> {
+pub(crate) struct Job<'a> {
     pub input: &'a [SkinVertex], pub vertices: &'a mut [Vertex], pub indices: &'a [u16],
 }
 #[derive(Clone, Copy)]
-pub(super) struct Params<'a> {
+pub(crate) struct Params<'a> {
     pub pose: &'a [Transform], pub scales: &'a [f32], pub palette: &'a [(Mat3, Vec3)],
     pub transform: Transform, pub scale: f32, pub flat: bool, pub fullbright: bool, pub alpha: f32,
+}
+pub(super) fn gpu_eligible(cpu: &crate::skeletal::SkinSurface, mesh: &Mesh, p: Params<'_>) -> bool {
+    #[cfg(feature = "vita_renderer")]
+    { crate::render_fx::gpu_skinning::eligible(cpu, mesh, p, culling_allowed()) }
+    #[cfg(not(feature = "vita_renderer"))]
+    { let _ = (cpu, mesh, p); false }
+}
+pub(super) fn submit_surface(cpu: std::sync::Arc<crate::skeletal::SkinSurface>, mesh: &mut Mesh, p: Params<'_>, skipped: bool) {
+    #[cfg(feature = "vita_renderer")]
+    if crate::render::vita_renderer::config().gpu_skinning {
+        if gpu_eligible(&cpu, mesh, p) && crate::render_fx::gpu_skinning::submit(cpu.clone(), mesh, p) { return; }
+        crate::render_fx::gpu_skinning::record(&cpu,false);
+        crate::render_fx::retained::count("gpu_skin_cpu_surfaces",1);
+        crate::render_fx::retained::count("gpu_skin_cpu_vertices",cpu.vertices.len() as u64);
+    }
+    if skipped {
+        kernel(&mut Job { input: &cpu.vertices, vertices: &mut mesh.vertices, indices: &cpu.indices }, p);
+    }
+    crate::render_fx::skin(mesh);
 }
 pub(super) fn positions(job: &mut Job<'_>, p: Params<'_>) {
     for (src, dst) in job.input.iter().zip(&mut *job.vertices) {
@@ -124,7 +143,7 @@ pub(super) fn positions(job: &mut Job<'_>, p: Params<'_>) {
         dst.normal = Vec4::ZERO;
     }
 }
-pub(super) fn kernel(job: &mut Job<'_>, p: Params<'_>) {
+pub(crate) fn kernel(job: &mut Job<'_>, p: Params<'_>) {
     positions(job, p);
     shade_arrays(job.vertices, job.indices, p.flat, p.fullbright, p.alpha);
 }

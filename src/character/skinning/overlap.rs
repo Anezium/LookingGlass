@@ -37,6 +37,7 @@ struct Surface {
     vertices: Range<usize>,
     cpu: Arc<SkinSurface>,
     revision: Revision,
+    gpu: bool,
 }
 struct Draw {
     key: usize,
@@ -75,6 +76,7 @@ impl Task {
             let palette = &input.palette[draw.palette.clone()];
             for surface_id in draw.surfaces.clone() {
                 let surface = &input.surfaces[surface_id];
+                if surface.gpu { continue; }
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
                 let output = std::slice::from_raw_parts_mut(
                     (task.output as *mut Vertex).add(surface.vertices.start),
@@ -272,7 +274,13 @@ impl Store {
                     continue;
                 };
                 assert_eq!(surface.vertices.len(), m.vertices.len());
-                let vertices = self.output_len..self.output_len + m.vertices.len();
+                let gpu = {
+                    #[cfg(feature="vita_renderer")]
+                    {crate::render::vita_renderer::config().gpu_skinning && super::gpu_eligible(surface,m,p)}
+                    #[cfg(not(feature="vita_renderer"))]
+                    {false}
+                };
+                let vertices = self.output_len..self.output_len + if gpu { 0 } else { m.vertices.len() };
                 // Capacity is checked above; only reserve output space on the game thread.
                 // Workers initialize every field, including UV, from immutable load data.
                 self.output_len = vertices.end;
@@ -281,7 +289,7 @@ impl Store {
                     else {self.previous.get(i.surfaces.len())
                         .filter(|old| old.vertices == vertices && Arc::ptr_eq(&old.cpu, &cpu))
                         .map_or_else(Revision::new, |old| old.revision)};
-                i.surfaces.push(Surface { mesh, vertices, cpu, revision });
+                i.surfaces.push(Surface { mesh, vertices, cpu, revision, gpu });
             }
         }
         i.draws.push(draw);
@@ -346,6 +354,7 @@ impl Store {
             // Advance every completed producer, including unconsumed/mismatched
             // draws. Otherwise a fallback could hide a changed worker result.
             for (id, surface) in input.surfaces.iter_mut().enumerate() {
+                if surface.gpu { continue; }
                 if panic.is_none() {surface.revision.changed(self.dirty[id]);}
                 else {surface.revision = Revision::new();}
             }
@@ -380,7 +389,8 @@ impl Store {
                 && (meshes.iter().flatten().count() != d.surfaces.len()
                     || i.surfaces[d.surfaces.clone()].iter().any(|s| {
                         meshes.get(s.mesh).and_then(Option::as_ref).is_none_or(|m| {
-                            m.vertices.len() != s.vertices.len()
+                            m.vertices.len() != s.cpu.vertices.len()
+                                || s.gpu && !super::gpu_eligible(&s.cpu, m, p)
                                 || m.indices.as_slice() != s.cpu.indices.as_slice()
                                 || skeleton.surfaces.get(s.mesh).is_none_or(|surface| !surface.shares_cpu(&s.cpu))
                         })
@@ -391,6 +401,7 @@ impl Store {
         }
         for surface_id in d.surfaces.clone() {
             let surface = &mut i.surfaces[surface_id];
+            if surface.gpu { continue; }
             // The serial kernel leaves live UVs untouched (including any caller edits).
             // Only its three written fields return from the worker; no gather-time
             // copy of the live/bind vertices is needed to preserve the fourth field.
@@ -553,18 +564,27 @@ pub(in crate::character) fn handle(
 
 /// Synchronous handoff after consume: no mesh mutation can intervene. The caller
 /// still owns fully updated vertices for overlays, attachments and fallback stages.
-pub(crate) fn submit(meshes: &[Option<Mesh>]) {
+pub(in crate::character) fn submit(meshes: &mut [Option<Mesh>], p: Params<'_>) {
     STORE.with(|store| {
         let store = store.borrow();
         let store = store.as_ref().unwrap();
         assert_eq!(store.pending, 0);
-        if store.layers.is_empty() {
-            for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
-            return;
-        }
         let input = unsafe { &*store.input.get() };
         let draw = &input.draws[store.cursor - 1];
         for surface in &input.surfaces[draw.surfaces.clone()] {
+            #[cfg(feature="vita_renderer")]
+            if crate::render::vita_renderer::config().gpu_skinning {
+                super::submit_surface(surface.cpu.clone(), meshes[surface.mesh].as_mut().unwrap(), p, surface.gpu);
+                continue;
+            }
+            if store.layers.is_empty() {
+                crate::render_fx::skin(meshes[surface.mesh].as_ref().unwrap());
+                continue;
+            }
+            if surface.gpu {
+                super::submit_surface(surface.cpu.clone(), meshes[surface.mesh].as_mut().unwrap(), p, surface.gpu);
+                continue;
+            }
             crate::render_fx::skin_produced(meshes[surface.mesh].as_ref().unwrap(),
                 actor_vertices::Publication { revision: surface.revision,
                     vertices: &store.layers[surface.vertices.clone()], indices: &surface.cpu.indices });

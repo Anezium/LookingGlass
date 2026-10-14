@@ -2004,7 +2004,7 @@ fn draw_skin_deformed(
         if let Some(visible) = skinning::overlap::handle(skeleton, meshes, params, visible) {
             if !skinning::overlap::gathering() {
                 crate::frame_profile::skinned_draw(!visible);
-                if visible { skinning::overlap::submit(meshes); }
+                if visible { skinning::overlap::submit(meshes, params); }
             }
             return visible;
         }
@@ -2019,11 +2019,19 @@ fn draw_skin_deformed(
         let bench=crate::render::vita_renderer::config().skin_worker_bench;
         #[cfg(not(feature="vita_renderer"))]
         let bench=false;
-        if (workers > 0 || bench) && skeleton.surfaces.len() <= 128 {
+        #[cfg(feature="vita_renderer")]
+        let gpu_enabled=crate::render::vita_renderer::config().gpu_skinning;
+        #[cfg(not(feature="vita_renderer"))]
+        let gpu_enabled=false;
+        if (workers > 0 || bench || gpu_enabled) && skeleton.surfaces.len() <= 128 {
+            let mut skipped=[false;128];
+            if gpu_enabled {for (i,(s,m)) in skeleton.surfaces.iter().zip(meshes.iter()).enumerate() {
+                skipped[i]=m.as_ref().is_some_and(|m|skinning::gpu_eligible(s,m,params));
+            }}
             let _batch = crate::frame_profile::span("skin_actor_batch");
             let mut source=skeleton.surfaces.iter().zip(meshes.iter_mut());
-            let mut jobs: [Option<skinning::Job<'_>>;128]=std::array::from_fn(|_| {
-                source.next().and_then(|(s,m)|m.as_mut().map(|m|skinning::Job {
+            let mut jobs: [Option<skinning::Job<'_>>;128]=std::array::from_fn(|i| {
+                source.next().filter(|_|!skipped[i]).and_then(|(s,m)|m.as_mut().map(|m|skinning::Job {
                     input:&s.vertices,vertices:&mut m.vertices,indices:&m.indices }))
             });
             if bench { skinning::bench_capture(&jobs,params); }
@@ -2038,7 +2046,11 @@ fn draw_skin_deformed(
             let _ = (main, service, wait);
             drop(jobs);
             drop(source);
-            for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
+            if gpu_enabled {
+                for (i,(surface,mesh)) in skeleton.surfaces.iter().zip(meshes.iter_mut()).enumerate() {
+                    if let Some(mesh)=mesh {skinning::submit_surface(surface.cpu(),mesh,params,skipped[i]);}
+                }
+            } else {for mesh in meshes.iter().flatten() {crate::render_fx::skin(mesh);}}
         } else {
             for (surface, mesh) in skeleton.surfaces.iter().zip(meshes.iter_mut()) {
                 let Some(mesh) = mesh else { continue; };

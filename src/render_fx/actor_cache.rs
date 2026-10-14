@@ -4,7 +4,7 @@ use super::*;
 // Empty containers only: resource-owning Pass values are destroyed on the game
 // thread before recycling. Bound storage across view/map replacement.
 thread_local! { static PASS_STORAGE: RefCell<Vec<Vec<Pass>>> = RefCell::new(Vec::with_capacity(256)); }
-fn pass_storage(limit: usize) -> Vec<Pass> {
+pub(super) fn pass_storage(limit: usize) -> Vec<Pass> {
     let mut passes=PASS_STORAGE.with(|s|s.borrow_mut().pop()).unwrap_or_default();
     passes.reserve(limit);
     passes
@@ -89,6 +89,8 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
         };
         if c.actor_layer_reuse {shared[variant]=Some(geometry.clone());}
         passes.push(Pass {_game_thread: crate::game_thread::GameThread::default(),geometry:Some(geometry),effect:false,blend_index:p.blend,depth_equal:p.equal,
+        #[cfg(feature="vita_renderer")]
+        gpu_skin: None,
             #[cfg(target_os="vita")]
             world_static:None,
             #[cfg(target_os="vita")]

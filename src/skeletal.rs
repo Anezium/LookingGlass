@@ -62,13 +62,30 @@ pub struct SkinSurface {
     pub vertices: Vec<SkinVertex>,
     pub indices: Vec<u16>,
     pub bind_vertices: Vec<Vertex>,
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) source_name: String,
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) skeleton_bones: usize,
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) rigid: Option<crate::render_fx::gpu_skinning::Rigid>,
 }
 impl Surface {
     pub(crate) fn new(name: String, vertices: Vec<SkinVertex>, indices: Vec<u16>) -> Self {
         let bind_vertices = vertices.iter().map(|v| Vertex {
             position: Vec3::ZERO, uv: v.uv, normal: Vec4::ZERO, color: [255; 4],
         }).collect();
-        Self { name, cpu: std::sync::Arc::new(SkinSurface { vertices, indices, bind_vertices }) }
+        #[cfg(feature = "vita_renderer")]
+        let rigid = crate::render_fx::gpu_skinning::Rigid::new(&vertices, &indices);
+        #[cfg(feature="vita_renderer")]
+        let source_name=name.clone();
+        Self { name, cpu: std::sync::Arc::new(SkinSurface { vertices, indices, bind_vertices,
+            #[cfg(feature = "vita_renderer")]
+            rigid,
+            #[cfg(feature="vita_renderer")]
+            source_name,
+            #[cfg(feature="vita_renderer")]
+            skeleton_bones: 0,
+        }) }
     }
     pub(crate) fn cpu(&self) -> std::sync::Arc<SkinSurface> { self.cpu.clone() }
     pub(crate) fn shares_cpu(&self, cpu: &std::sync::Arc<SkinSurface>) -> bool {
@@ -198,6 +215,8 @@ impl Skeleton {
                 *hi = hi.max(w.offset);
             }
         }
+        #[cfg(feature="vita_renderer")]
+        for surface in &mut surfaces {std::sync::Arc::get_mut(&mut surface.cpu).unwrap().skeleton_bones=nb;}
         Ok(Self { bones, surfaces, skin_bounds })
     }
     /// Flags bones that are unskinned attachment tags: named `tag_*` and carrying

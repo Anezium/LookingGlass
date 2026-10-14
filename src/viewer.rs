@@ -4235,7 +4235,7 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         if frame >= 60 {
             samples.push(serde_json::json!({"frame":frame,"variant":variant,"cpu_ns":cpu_ns + crate::light_profile::render_host_deferred_ns(),"world_allocations":world_allocations,
                 "phases":crate::light_profile::render_host_report(),
-                "counts":crate::render_fx::retained::host_report()}));
+                "counts":crate::render_fx::retained::host_report(),"gpu_surfaces":crate::render_fx::gpu_skinning::surface_report()}));
         }
     }
     // Draw one live, authored steam puff against an empty depth target as a
