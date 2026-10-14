@@ -655,9 +655,9 @@ impl LevelController for Realm {
             if !a.white && a.damageable && a.piece.health>0. {
                 alive+=1;
                 let t=a.piece.target(a.id());let delta=t.center-camera;
-                let trace=world.sweep(camera,t.center,Vec3::ZERO);
-                if a.piece.active && !a.piece.script_wait && a.piece.phase!=crate::chess::Phase::Idle && delta.length()<800. && delta.normalize_or_zero().dot(direction.normalize_or_zero())>0.5 && !trace.start_solid && trace.fraction>=0.99 {
-                    active+=1;kinds|=1<<match a.piece.kind{crate::chess::Kind::Pawn=>0,crate::chess::Kind::Rook=>1,crate::chess::Kind::Bishop=>2,crate::chess::Kind::Knight=>3};
+                if a.piece.active && !a.piece.script_wait && a.piece.phase!=crate::chess::Phase::Idle && delta.length()<800. && delta.normalize_or_zero().dot(direction.normalize_or_zero())>0.5 {
+                    let trace=world.sweep(camera,t.center,Vec3::ZERO);
+                    if !trace.start_solid && trace.fraction>=0.99 {active+=1;kinds|=1<<match a.piece.kind{crate::chess::Kind::Pawn=>0,crate::chess::Kind::Rook=>1,crate::chess::Kind::Bishop=>2,crate::chess::Kind::Knight=>3};}
                 }
             }
         }

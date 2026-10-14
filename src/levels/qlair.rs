@@ -805,7 +805,7 @@ pub(crate) fn coverage_stage(interactions:&mut crate::interaction::Interactions,
     let q=interactions.levels.iter_mut().find_map(|s|s.ctl.downcast_mut::<Queen>()).context("Queen controller absent")?;
     let phase=match name { "intro"=>Phase::Intro,"birth"=>Phase::Birth,"death-explosions"=>Phase::Death,"death-burst"=>Phase::Ending,_=>Phase::Queen2 };
     q.saved.phase=phase;q.saved.time=match name {"intro"=>8.,"birth"=>25.,"death-explosions"=>q.data.rigs["c_q2_body"].duration("death_start")+5.,"death-burst"=>0.25,_=>12.};
-    q.saved.initialized=true;q.saved.collapsed=20.;
+    q.saved.initialized=true;q.saved.collapsed=if phase==Phase::Intro{(q.saved.time-q.data.intro_break()).max(0.)}else{20.};
     let anchor=q.data.points[if matches!(phase,Phase::Queen2|Phase::Death|Phase::Ending){"alice_fight_queen"}else{"alice_start_pos1"}];
     q.saved.alice=anchor;
     q.saved.attack=if name=="queen2-scream"{battle::Attack::Scream}else{battle::Attack::Hatter};
