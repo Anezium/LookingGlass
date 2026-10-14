@@ -50,6 +50,8 @@ pub struct Config {
     pub actor_layer_reuse: bool,
     /// Exclusive live-path preparation probe and corrected tail boundary accounting.
     pub actor_prep_profile: bool,
+    /// Prepare actor packets once and publish owned exact worker output.
+    pub actor_single_prepare: bool,
     /// None selects light in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     pub skin_worker_bench: bool,
@@ -138,7 +140,7 @@ impl Default for Config {
             render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
-            actor_prep_profile: false,
+            actor_prep_profile: false, actor_single_prepare: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
@@ -1843,6 +1845,15 @@ mod tests {
             serde_json::from_value::<Config>(value.clone()).unwrap().validate().unwrap();
             value[key]=serde_json::json!("off");assert!(serde_json::from_value::<Config>(value).is_err());
         }
+    }
+    #[test]
+    fn actor_single_preparation_is_opt_in_and_strictly_boolean() {
+        assert!(!Config::default().actor_single_prepare);
+        for enabled in [true,false] {
+            let c:Config=serde_json::from_value(serde_json::json!({"actor_single_prepare":enabled})).unwrap();
+            assert_eq!(c.actor_single_prepare,enabled);c.validate().unwrap();
+        }
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"actor_single_prepare":"on"})).is_err());
     }
     fn j17_switches_preserve_console_selected_defaults_and_strict_types() {
         let default=serde_json::to_value(Config::default()).unwrap();

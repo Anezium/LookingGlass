@@ -46,6 +46,7 @@ pub(crate) fn begin_view(
     #[cfg(not(target_os = "vita"))]
     if flush {
         host_reset();
+        parity_reset();
     }
     if flush {
         boundary("flush_vita_3d_begin");
@@ -474,6 +475,8 @@ impl Gpu {
         });
     }
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
+        #[cfg(not(target_os="vita"))]
+        parity_draw(p,u,depth_write);
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(std::time::Instant::now);
@@ -1154,7 +1157,7 @@ pub(crate) fn finish_world(
         }
     }
     gpu.merge_meshes[gpu.ring_phase].retain(|id, _| recycled.contains(id));
-    if c.actor_layer_reuse {
+    if c.actor_layer_reuse || c.actor_single_prepare {
         for group in &mut groups {super::actor_cache::recycle(&mut group.passes);}
     }
     let submit_ns = gpu.stats.render.iter().map(|m| m.cpu_ns).sum::<u64>();
@@ -1586,3 +1589,44 @@ mod tests {
         FRAME.with(|f| *f.borrow_mut() = Frame::default());
     }
 }
+
+#[cfg(not(target_os="vita"))]
+thread_local! {static PARITY:std::cell::RefCell<Option<sha2::Sha256>>=const {std::cell::RefCell::new(None)};}
+#[cfg(not(target_os="vita"))]
+fn parity_reset() {
+    use sha2::Digest;
+    PARITY_DETAILS.with(|d|*d.borrow_mut()=if std::env::var_os("LOOKING_GLASS_ACTOR_PARITY_DETAILS").is_some() {Some(Vec::new())} else {None});
+    PARITY.with(|p|*p.borrow_mut()=std::env::var_os("LOOKING_GLASS_ACTOR_PARITY").map(|_|sha2::Sha256::new()));
+}
+#[cfg(not(target_os="vita"))]
+fn parity_draw(p:&Pass,u:&[f32;UNIFORM_FLOATS],depth_write:bool) {
+    use sha2::Digest;
+    PARITY_DETAILS.with(|d| {if let Some(d)=d.borrow_mut().as_mut() {d.push(serde_json::json!({
+        "texture":format!("{:?}",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)),"blend":p.blend_index,
+        "equal":p.depth_equal,"depth_write":depth_write,"effect":p.effect,"uniforms":u.iter().map(|f|f.to_bits()).collect::<Vec<_>>(),
+        "vertices":p.geometry().vertices.iter().map(|v|serde_json::json!({"position":v.position.to_array().map(f32::to_bits),
+            "uv":v.uv.to_array().map(f32::to_bits),"normal":v.normal.to_array().map(f32::to_bits),"color":v.color})).collect::<Vec<_>>(),
+        "indices":p.geometry().indices}));}});
+    PARITY.with(|h| {let mut h=h.borrow_mut();let Some(h)=h.as_mut() else {return;};
+        h.update(format!("{:?}",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)).as_bytes());
+        h.update((p.blend_index as u64).to_le_bytes());h.update([u8::from(p.depth_equal),u8::from(depth_write),u8::from(p.effect)]);
+        for x in u {h.update(x.to_bits().to_le_bytes());}
+        h.update((p.geometry().vertices.len() as u64).to_le_bytes());
+        for v in &p.geometry().vertices {
+            for x in v.position.to_array().into_iter().chain(v.uv.to_array()).chain(v.normal.to_array()) {h.update(x.to_bits().to_le_bytes());}
+            h.update(v.color);
+        }
+        h.update((p.geometry().indices.len() as u64).to_le_bytes());
+        for i in &p.geometry().indices {h.update(i.to_le_bytes());}
+    });
+}
+#[cfg(not(target_os="vita"))]
+pub(crate) fn host_submission_digest()->Option<String> {
+    use sha2::Digest;
+    PARITY.with(|p|p.borrow().as_ref().map(|h|format!("{:x}",h.clone().finalize())))
+}
+
+#[cfg(not(target_os="vita"))]
+thread_local! {static PARITY_DETAILS:std::cell::RefCell<Option<Vec<serde_json::Value>>>=const {std::cell::RefCell::new(None)};}
+#[cfg(not(target_os="vita"))]
+pub(crate) fn host_submission_details()->Option<Vec<serde_json::Value>> {PARITY_DETAILS.with(|d|d.borrow_mut().take())}

@@ -47,16 +47,25 @@ pub(super) fn position(src: &SkinVertex, palette: &[(Mat3, Vec3)]) -> Vec3 {
     }).sum()
 }
 
+thread_local! { static MUTABLE_SKIN:std::cell::Cell<bool>=const {std::cell::Cell::new(false)}; }
+pub(super) fn mutable_required()->bool {MUTABLE_SKIN.with(std::cell::Cell::get)}
 thread_local! { static PRESERVE_SKIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// Expanding/normal-driven overlays need current vertices and rebuilt normals.
-pub(crate) struct CullGuard(bool);
+pub(crate) struct CullGuard(bool,bool);
 impl CullGuard {
     pub(crate) fn preserve(required: bool) -> Self {
-        Self(PRESERVE_SKIN.with(|c| c.replace(c.get() || required)))
+        Self(PRESERVE_SKIN.with(|c| c.replace(c.get() || required)),
+            MUTABLE_SKIN.with(|c|c.replace(c.get() || required)))
+    }
+}
+impl CullGuard {
+    /// Preserve inherited visibility/lighting policy without inventing a mesh consumer.
+    pub(crate) fn visual_preserve(required:bool)->Self {
+        Self(PRESERVE_SKIN.with(|c|c.replace(c.get()||required)),MUTABLE_SKIN.with(std::cell::Cell::get))
     }
 }
 impl Drop for CullGuard {
-    fn drop(&mut self) { PRESERVE_SKIN.with(|c| c.set(self.0)); }
+    fn drop(&mut self) { PRESERVE_SKIN.with(|c| c.set(self.0)); MUTABLE_SKIN.with(|c|c.set(self.1)); }
 }
 pub(super) fn culling_allowed() -> bool { PRESERVE_SKIN.with(|c| !c.get()) }
 
@@ -509,6 +518,8 @@ pub(crate) fn workers_check(assets: &mut crate::assets::Assets) -> anyhow::Resul
     }
     let poses:Vec<_> = clip.frames.iter().take(16).map(|f|skeleton.global_pose(&f.pose)).collect();
     let overlap_comparisons = overlap::check_skeleton(&skeleton,&poses)?;
+    #[cfg(feature="vita_renderer")]
+    println!("PASS {} actual-data direct publication comparisons",overlap::check_direct(&skeleton,&poses)?);
     println!("PASS real Alice early owned overlap snapshots: {overlap_comparisons} exact comparisons, workers=1/2");
     crate::npc::check_overlap_snapshots(assets)?;
     println!("PASS fixed-pose skin workers: {comparisons} actor comparisons, {} surfaces, {} bones, {} vertices, workers=1/2, exact position/normal/color/UV bits",
@@ -798,6 +809,16 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn visibility_policy_and_actual_mutable_consumers_restore_independently() {
+        assert!(culling_allowed());assert!(!mutable_required());
+        {let _policy=CullGuard::visual_preserve(true);
+            assert!(!culling_allowed());assert!(!mutable_required());
+            {let _consumer=CullGuard::preserve(true);assert!(mutable_required());}
+            assert!(!mutable_required());assert!(!culling_allowed());
+        }
+        assert!(culling_allowed());assert!(!mutable_required());
     }
     #[test]
     fn invalid_bounds_fail_open_and_overlay_guards_restore_the_scope() {

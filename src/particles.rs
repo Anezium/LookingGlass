@@ -1644,7 +1644,7 @@ impl Attached {
         camera: Vec3,
         atmosphere: &Atmosphere,
     ) {
-        if crate::character::skinning::overlap::gathering() { return; }
+        if crate::character::skinning::overlap::gather_only() { return; }
         {
             let _sampling = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Sampling);
             self.sample(age, scale, birth_pose, enabled);
@@ -1652,7 +1652,7 @@ impl Attached {
         self.draw_sampled(camera, atmosphere);
     }
     pub(crate) fn draw_sampled(&mut self, camera: Vec3, atmosphere: &Atmosphere) {
-        if crate::character::skinning::overlap::gathering() { return; }
+        if crate::character::skinning::overlap::gather_only() { return; }
         #[cfg(feature="vita_renderer")]
         let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
         let _packets = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Packets);

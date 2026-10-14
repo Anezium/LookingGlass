@@ -1148,7 +1148,7 @@ impl Character {
             self.scale,
             fullbright,
         );
-        if skinning::overlap::gathering() {
+        if skinning::overlap::gather_only() {
             for (i, mesh) in hidden { self.meshes[i] = mesh; }
             return;
         }
@@ -1216,7 +1216,7 @@ impl Character {
             },
             || self.draw_body(feet, fullbright, ghost),
         );
-        if !skinning::overlap::gathering() { gl_use_default_material(); }
+        if !skinning::overlap::gather_only() { gl_use_default_material(); }
     }
     pub fn draw_effects(&mut self, camera: Vec3, fullbright: bool, show_alice: bool) {
         self.visuals
@@ -1390,7 +1390,7 @@ struct Appearance {
 
 impl SkinMaterial {
     pub(crate) fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, eye: Vec3) {
-        if skinning::overlap::gathering() { return; }
+        if skinning::overlap::gather_only() { return; }
         #[cfg(feature="vita_renderer")]
         if crate::render_fx::retained_active()&&crate::render::vita_renderer::config().actor_fast_path{return;}
         atmosphere.apply(&self.0, eye);
@@ -1402,7 +1402,7 @@ impl SkinMaterial {
     }
 
     fn bind_appearance(&self, appearance: Appearance) {
-        if skinning::overlap::gathering() { return; }
+        if skinning::overlap::gather_only() { return; }
         crate::render_fx::appearance(crate::render_fx::Appearance {
             dissolve: appearance.dissolve,
             ghost: appearance.ghost,
@@ -1420,7 +1420,7 @@ impl SkinMaterial {
     fn draw(&self, appearance: Appearance, draw: impl FnOnce()) {
         self.bind_appearance(appearance);
         draw();
-        if skinning::overlap::gathering() { return; }
+        if skinning::overlap::gather_only() { return; }
         if appearance != Appearance::default() && !crate::render_fx::retained_active() {
             // Macroquad writes queued uniforms back into the shared pipeline.
             // Flush before resetting, including when no later actor is drawn.

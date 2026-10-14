@@ -90,6 +90,8 @@ pub(crate) mod replay {
             // Snapshot serialization and report construction are outside the CPU span.
             let state=serde_json::to_vec(&serde_json::to_value(game)?)?;
             self.rows.push(serde_json::json!({"frame":self.frame+1,"dt":dt,
+                "submission_sha256":crate::render_fx::retained::host_submission_digest(),
+                "submission_details":crate::render_fx::retained::host_submission_details(),
                 "simulation_sha256":format!("{:x}",Sha256::digest(&state)),
                 "environment_clock":game.level()?.environment_clock,
                 "feet":game.player.feet.to_array(),"cpu_ns":cpu_ns,"allocations":allocations,
@@ -101,7 +103,7 @@ pub(crate) mod replay {
         pub(crate) fn finish(&self) -> Result<()> {
             std::fs::create_dir_all("private/actor-replay")?;
             std::fs::write("private/actor-replay/samples.json",serde_json::to_vec_pretty(&serde_json::json!({
-                "simulation_frozen":false,"normal_viewer_update":true,"input":"neutral",
+                "simulation_frozen":false,"normal_viewer_update":true,"input":"neutral","camera_aspect":1200_f32/680.,
                 "dt_sequence":[1_f32/30.,0.0366_f32],"warmup_frames":60,"samples":self.rows,
                 "audio_disabled":true,"save_writes":false,"console_access":false}))?)?;
             println!("PASS live actor replay: {} frames, fixed dt, normal simulation",self.rows.len());

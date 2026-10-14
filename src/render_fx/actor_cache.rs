@@ -29,7 +29,7 @@ fn gain(s:&Stage,t:f32)->Vec4 {
     (s.constant_rgb.unwrap_or(Vec3::ONE)*s.rgb.as_ref().map_or(1.,|w|w.sample(t)).clamp(0.,2.))
         .extend(s.alpha.as_ref().map(|w|w.sample(t)).or(s.constant_alpha).unwrap_or(1.).clamp(0.,1.))
 }
-fn simple(s:&Stage)->bool {
+pub(super) fn simple(s:&Stage)->bool {
     !s.environment && s.vector_uv.is_none() && s.dot_alpha.is_none() && s.mods.is_empty()
 }
 fn state(s:&Stage,t:f32)->LayerState {
@@ -127,4 +127,25 @@ mod tests {
         assert!(!simple(&Stage {dot_alpha:Some(Vec2::ONE),..Default::default()}));
         assert!(!simple(&Stage {mods:vec![crate::materials::TcMod::Scroll(Vec2::ONE)],..Default::default()}));
     }
+}
+
+/// Capture game-thread material/texture handles before dispatch. No geometry is read
+/// until collection replaces the empty recipe with its owned immutable publication.
+pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(Vec<Pass>,bool)> {
+    let limit=crate::render::vita_renderer::config().actor_max_layers.min(surface.layers.len());
+    let layers=&surface.layers[..limit];
+    let alpha=layers.first()?.stage.vertex_alpha;
+    if !layers.iter().all(|l|simple(&l.stage)&&l.stage.vertex_alpha==alpha) {return None;}
+    let mut passes=pass_storage(limit);
+    for l in layers {
+        let p=state(&l.stage,time);
+        passes.push(Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,
+            blend_index:p.blend,depth_equal:p.equal,
+            #[cfg(target_os="vita")] world_static:None,
+            #[cfg(target_os="vita")] world_geometry_counted:false,
+            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:Some(l.textures[p.frame].clone())},
+            material:None,lit:p.lit,clamp:p.clamp,cutout:p.cutout,cutout_reference:p.reference,
+            gain:p.gain,fog:p.fog,model:true,appearance,filter_fade:0.});
+    }
+    Some((passes,alpha))
 }
