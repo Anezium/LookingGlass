@@ -457,6 +457,10 @@ pub async fn run(
                 o.load = None;
                 o.fly = false;
                 o.capture = None;
+                o.start_at = s
+                    .view
+                    .as_ref()
+                    .map(|v| macroquad::prelude::Vec3::from_array(v.feet));
                 o.combat_preview = !s.school_clubs.is_empty();
                 o.weapon_preview = o.combat_preview;
                 o.save_dir = root.join(format!("{prefix}-saves"));
@@ -749,9 +753,9 @@ impl Session {
         METRICS.with(|m| *m.borrow_mut() = Metrics::default());
         #[cfg(feature = "vita_renderer")]
         crate::render_tail::end();
+        crate::coverage::milestone("epoch", "reset-complete");
         crate::light_profile::survey_begin()?;
         self.ready = Some(Instant::now());
-        crate::coverage::milestone("epoch", "reset-complete");
         Ok(())
     }
     pub fn input(&self) -> (Sample, Sample) {
