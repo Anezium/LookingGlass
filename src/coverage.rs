@@ -22,6 +22,10 @@ fn identifier(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
+fn destination_matches(expected: &str, map: &str, entry: Option<&str>) -> bool {
+    expected == format!("{map}${}", entry.unwrap_or("first"))
+        || expected == crate::save::visit_key(map, entry)
+}
 fn relative(s: &str) -> bool {
     !s.is_empty()
         && Path::new(s)
@@ -821,10 +825,10 @@ impl Session {
         let expected_map = self.cell.scene.expected.destination.as_deref();
         ensure!(
             map == self.cell.scene.map
-                || expected_map.is_some_and(|d| d == crate::save::visit_key(map, entry)),
+                || expected_map.is_some_and(|d| destination_matches(d, map, entry)),
             "unexpected map replacement"
         );
-        if expected_map.is_some_and(|d| d == crate::save::visit_key(map, entry))
+        if expected_map.is_some_and(|d| destination_matches(d, map, entry))
             && !self.destination_seen
         {
             self.destination_seen = true;

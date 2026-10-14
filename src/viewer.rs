@@ -1041,6 +1041,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         crate::coverage::milestone("viewer","npc-art-audio-ready");
     }
     let coverage_initial=coverage_running.then(||game_snapshot!());
+    if let (Some(cell),Some(initial))=(&options.coverage_cell,&coverage_initial) {
+        std::fs::write(cell.output.join(format!("{}-initial-state.json",cell.prefix)),serde_json::to_vec(initial)?)?;
+    }
     retry.remember(game_snapshot!());
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
@@ -4117,6 +4120,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     if let Some(s)=&coverage_session {
         anyhow::ensure!(s.finished(),"survey exited before completing its window");
+        if let Some(cell)=&options.coverage_cell {
+            std::fs::write(cell.output.join(format!("{}-final-state.json",cell.prefix)),serde_json::to_vec(&game_snapshot!())?)?;
+        }
         #[cfg(not(target_os="vita"))]
         if let Some(cell)=&options.coverage_cell {save_capture(&cell.output.join(format!("{}-verification.png",cell.prefix)))?;}
     }
