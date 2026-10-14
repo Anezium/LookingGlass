@@ -59,3 +59,5 @@ Linux deferred GL hooks remain unavailable, so host HUD/present attribution is i
 
 Use the supplied PROTOCOL and summarize.py. Host rehearsal proves mechanics and fixture predicates;
 console wall timings, playback, peak-fit and visual acceptance remain console-owner work.
+
+The first cold presented frame is preserved in raw CSVs with `timed=0`. Its lazy scene/pipeline construction is startup work. The settle/encounter clock begins only after that presentation has completed. School cells use a separate `-setup` segment and restore their original gameplay snapshot outside the first timed epoch. Subsequent weapon first-use stalls inside epochs remain retained. This prevents a slow cold desktop frame from consuming an entire short encounter before it can begin.

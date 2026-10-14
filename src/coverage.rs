@@ -556,6 +556,7 @@ pub struct Session {
     deaths: u64,
     dismemberment: u64,
     initial_guards: Option<u64>,
+    setup_pending: bool,
     pending: bool,
     finished: bool,
     epoch: u32,
@@ -570,6 +571,8 @@ impl Session {
     pub fn new(cell: Cell) -> Result<Self> {
         let prefix = if cell.scene.expected.destination.is_some() {
             format!("{}-source", cell.prefix)
+        } else if !cell.scene.school_clubs.is_empty() {
+            format!("{}-setup", cell.prefix)
         } else {
             cell.prefix.clone()
         };
@@ -593,6 +596,7 @@ impl Session {
             deaths: 0,
             dismemberment: 0,
             initial_guards: None,
+            setup_pending: true,
             pending: false,
             finished: false,
             epoch: 1,
@@ -664,8 +668,29 @@ impl Session {
             self.destination_start = Some(Instant::now());
             self.destination_switch_due = false;
         }
-        if self.pending && self.frames == 1 {
+        if self.setup_pending && self.pending && self.frames == 1 {
             milestone("viewer", "first-presented");
+            // Lazy scene/pipeline construction belongs to startup, before the
+            // settle/encounter clock. Preserve its raw row separately. School
+            // fixtures restore the original gameplay snapshot outside timing.
+            self.setup_pending = false;
+            self.ready = Some(Instant::now());
+            if !self.cell.scene.school_clubs.is_empty() {
+                crate::light_profile::survey_flush()?;
+                crate::light_profile::survey_reset(
+                    self.cell.output.clone(),
+                    format!("{}-e01", self.cell.prefix),
+                );
+                self.reset_due = true;
+                self.frames = 0;
+                self.attacks = 0;
+                self.shots = 0;
+                self.impacts = 0;
+                self.deaths = 0;
+                self.dismemberment = 0;
+                self.initial_guards = None;
+                return Ok(false);
+            }
         }
         ensure!(
             self.start.elapsed().as_secs() < self.cell.scene.timeout_s,
@@ -891,7 +916,11 @@ impl Session {
         } else {
             (age, age >= self.cell.scene.warmup_s)
         };
-        crate::light_profile::survey_label(self.frames + 1, label_age, timed);
+        crate::light_profile::survey_label(
+            self.frames + 1,
+            label_age,
+            timed && !self.setup_pending,
+        );
         crate::light_profile::end(true);
         self.pending = true;
         self.frames += 1;
