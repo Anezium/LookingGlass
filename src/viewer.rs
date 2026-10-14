@@ -1064,7 +1064,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 audio.load(&mut assets,&maps[current],&scene.map);
                 weapon_buttons=crate::weapon_rules::Buttons::default();weapon_buttons.block();
                 clock.pause();follow_camera.reset();camera_handoff.reset();
-                s.reset_complete();
+                s.reset_complete()?;
             }
             paused=false;
         }

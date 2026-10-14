@@ -743,9 +743,16 @@ impl Session {
     pub fn take_reset(&mut self) -> bool {
         std::mem::take(&mut self.reset_due)
     }
-    pub fn reset_complete(&mut self) {
+    pub fn reset_complete(&mut self) -> Result<()> {
+        self.previous = Sample::default();
+        self.current = self.cell.scene.tape.first().cloned().unwrap_or_default();
+        METRICS.with(|m| *m.borrow_mut() = Metrics::default());
+        #[cfg(feature = "vita_renderer")]
+        crate::render_tail::end();
+        crate::light_profile::survey_begin()?;
         self.ready = Some(Instant::now());
         crate::coverage::milestone("epoch", "reset-complete");
+        Ok(())
     }
     pub fn input(&self) -> (Sample, Sample) {
         (self.current.clone(), self.previous.clone())
