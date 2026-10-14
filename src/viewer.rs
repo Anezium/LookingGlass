@@ -4048,7 +4048,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let probe_allocations = probe_allocations.map_or(0, |s|s.finish());
         #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
         if let Some(replay)=&mut actor_replay {
-            replay.sample(&game_snapshot!(), active, dt, probe_ns, probe_allocations)?;
+            replay.sample(&game_snapshot!(), active, dt, probe_ns, probe_allocations, &store)?;
         }
         crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]

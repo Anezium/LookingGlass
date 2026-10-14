@@ -8,17 +8,21 @@ const SURFACES:usize=2048;
 const VERTICES:usize=65536;
 const INDICES:usize=262144;
 #[derive(Default)]
-struct Bank { slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], alpha:[Option<bool>;2] }
+struct Bank { slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], alpha:[Option<bool>;2], epoch:[u64;2] }
 #[derive(Default)]
 struct State {
     banks:Vec<Bank>, cursor:usize, pending:Vec<(usize,usize,usize)>,
-    held:Vec<Group>, held_puffs:Vec<retained::world_puffs::Puff>, completed:bool, vertex_capacity:usize, index_capacity:usize,
+    held:Vec<Group>, held_puffs:Vec<retained::world_puffs::Puff>, completed:bool, vertex_capacity:usize, index_capacity:usize, epoch:u64,
 }
 impl State {
+    #[cfg(test)]
     fn reserve(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,alpha:bool)->Option<(usize,usize,usize)> {
-        let s=self;let id=s.cursor;
-        if id>=SURFACES {return None;} s.cursor+=1;
-        if s.banks.len()<=id {s.banks.push(Bank::default());}
+        let id=self.cursor;self.cursor+=1;self.reserve_at(mesh,cpu,unchanged,alpha,id)
+    }
+    fn reserve_at(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,alpha:bool,id:usize)->Option<(usize,usize,usize)> {
+        let s=self;
+        if id>=SURFACES {return None;}
+        while s.banks.len()<=id {s.banks.push(Bank::default());}
         let slot=s.banks[id].slots.iter().position(|g|g.as_ref().is_none_or(|g|Rc::strong_count(g)==1))?;
         let old_capacity=s.banks[id].slots[slot].as_ref().map_or((0,0),|g|(g.vertices.capacity(),g.indices.capacity()));
         if s.vertex_capacity-old_capacity.0+old_capacity.0.max(mesh.vertices.len())>VERTICES
@@ -42,8 +46,8 @@ impl State {
             g.mesh.indices.clear();g.mesh.indices.reserve_exact(cpu.indices.len());
             g.mesh.indices.extend_from_slice(&cpu.indices);
         }
-        if !(unchanged && same_cpu && same_uv && bank.alpha[slot]==Some(alpha)) {g.advance_owned(!same_cpu);}
-        bank.alpha[slot]=Some(alpha);
+        if !(unchanged && same_cpu && same_uv && bank.alpha[slot]==Some(alpha) && bank.epoch[slot]==s.epoch.saturating_sub(1)) {g.advance_owned(!same_cpu);}
+        bank.alpha[slot]=Some(alpha);bank.epoch[slot]=s.epoch;
         let output=g.mesh.vertices.as_mut_ptr() as usize;
         let new_capacity=(g.vertices.capacity(),g.indices.capacity());
         bank.cpu[slot]=Some(cpu);
@@ -62,14 +66,14 @@ pub(crate) fn begin() {
     let enabled=c.actor_single_prepare && c.skin_overlap && c.actor_fast_path
         && c.actor_layer_cache && c.fx_prepare_cache && !c.actor_layer_reuse && retained_active();
     ACTIVE.with(|a|a.set(enabled));
-    if enabled { STATE.with(|s| {let mut s=s.borrow_mut();s.cursor=0;s.pending.clear();s.held.clear();s.held_puffs.clear();s.completed=false;}); }
+    if enabled { STATE.with(|s| {let mut s=s.borrow_mut();s.cursor=0;s.epoch=s.epoch.checked_add(1).expect("actor publication epoch overflow");s.pending.clear();s.held.clear();s.held_puffs.clear();s.completed=false;}); }
 }
 pub(crate) fn end() {
     if ACTIVE.with(|a|a.replace(false)) { STATE.with(|s| {let mut s=s.borrow_mut();s.pending.clear();s.held.clear();s.held_puffs.clear();}); }
 }
 /// This address is valid only between prepare and the fully drained collect. Banks
 /// cannot be mutated again while any old packet/view still owns their publication.
-pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool)->Option<(usize,bool)> {
+pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,id:usize)->Option<(usize,bool)> {
     let _span=crate::actor_prep_profile::actor_span(crate::actor_prep_profile::Phase::Simple);
     let texture=mesh.texture.as_ref()?;
     let surface=SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade))?;
@@ -78,7 +82,7 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool)->Option<(u
     let (passes,alpha)=actor_cache::recipe(&surface,time,appearance)?;
     STATE.with(|s| {
         let mut s=s.borrow_mut();
-        let (id,slot,output)=s.reserve(mesh,cpu,unchanged,alpha)?;
+        let (id,slot,output)=s.reserve_at(mesh,cpu,unchanged,alpha,id)?;
         let group=FRAME.with(|f| {
             let mut f=f.borrow_mut();let n=mesh.vertices.len()*passes.len();
             if f.vertices.saturating_add(n)>MAX_VERTICES {f.dropped+=1;return None;}
@@ -140,13 +144,25 @@ mod tests {
         assert_eq!(state.vertex_capacity,6);assert_eq!(state.index_capacity,6);
     }
     #[test]
+    fn reclaimed_old_view_cannot_reuse_a_newer_inputs_revision() {
+        let (mesh,cpu)=fixture();let mut state=State::default();state.epoch=1;
+        state.reserve_at(&mesh,cpu.clone(),false,false,0).unwrap();
+        let old=state.banks[0].slots[0].as_ref().unwrap().clone();let version=old.version;
+        state.epoch=2;state.reserve_at(&mesh,cpu.clone(),false,false,0).unwrap();
+        let second=state.banks[0].slots[1].as_ref().unwrap().clone();
+        drop(old);state.epoch=3;
+        state.reserve_at(&mesh,cpu,true,false,0).unwrap();
+        assert_ne!(state.banks[0].slots[0].as_ref().unwrap().version.vertices,version.vertices);
+        assert_eq!(second.vertices[0].uv,Vec2::ONE);
+    }
+    #[test]
     fn warmed_storage_is_bounded_and_map_replacement_copies_new_topology() {
         let (mesh,cpu)=fixture();let mut state=State::default();
         state.reserve(&mesh,cpu.clone(),false,false).unwrap();
         let scope=crate::kernel_alloc::Scope::begin();
         for _ in 0..128 {state.cursor=0;assert!(state.reserve(&mesh,cpu.clone(),false,false).is_some());}
         assert_eq!(scope.finish(),0);assert_eq!(state.banks.len(),1);
-        state.cursor=0;let version=state.banks[0].slots[0].as_ref().unwrap().version;
+        state.cursor=0;state.epoch=1;let version=state.banks[0].slots[0].as_ref().unwrap().version;
         state.reserve(&mesh,cpu.clone(),true,false).unwrap();
         assert_eq!(state.banks[0].slots[0].as_ref().unwrap().version,version);
         let (_,new_cpu)=fixture();state.cursor=0;

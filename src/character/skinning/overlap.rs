@@ -170,6 +170,8 @@ struct Store {
     input: Box<UnsafeCell<Inputs>>,
     #[cfg(feature="vita_renderer")]
     previous_numeric: Option<Box<Inputs>>,
+    #[cfg(feature="vita_renderer")]
+    direct_cursor: usize,
     output: Vec<Vertex>,
     output_len: usize,
     layers: Vec<[Vertex; 2]>,
@@ -217,6 +219,7 @@ impl Store {
             })),
             #[cfg(feature="vita_renderer")]
             previous_numeric:None,
+            #[cfg(feature="vita_renderer")] direct_cursor:0,
             output: vec![Vertex { position: Vec3::ZERO, uv: Vec2::ZERO,
                 normal: Vec4::ZERO, color: [0; 4] }; VERTICES],
             output_len: 0,
@@ -239,6 +242,7 @@ impl Store {
         let i = unsafe { &mut *self.input.get() };
         #[cfg(feature="vita_renderer")]
         if single_frame() {
+            self.direct_cursor=0;
             let old=self.previous_numeric.get_or_insert_with(||Box::new(Inputs {
                 draws:Vec::with_capacity(DRAWS),surfaces:Vec::with_capacity(SURFACES),pose:Vec::with_capacity(BONES),
                 scales:Vec::with_capacity(BONES),palette:Vec::with_capacity(BONES)}));
@@ -336,9 +340,11 @@ impl Store {
     fn capture_single(&mut self, skeleton: &Skeleton, meshes: &mut [Option<Mesh>], p: Params<'_>, visible: bool) -> bool {
         crate::frame_profile::skinned_draw(!visible);
         crate::actor_prep_profile::count(crate::actor_prep_profile::Count::LogicalDraws, 1);
+        let surface_start=self.direct_cursor;
+        self.direct_cursor=self.direct_cursor.saturating_add(skeleton.surfaces.len());
         if !visible { return false; }
         let i = unsafe { &mut *self.input.get() };
-        let bounded = i.draws.len() < DRAWS && i.surfaces.len() + meshes.iter().flatten().count() <= SURFACES
+        let bounded = self.direct_cursor<=SURFACES && i.draws.len() < DRAWS && i.surfaces.len() + meshes.iter().flatten().count() <= SURFACES
             && self.output_len + meshes.iter().flatten().map(|m|m.vertices.len()).sum::<usize>() <= VERTICES
             && i.pose.len()+p.pose.len() <= BONES && i.scales.len()+p.scales.len() <= BONES
             && i.palette.len()+p.palette.len() <= BONES;
@@ -356,7 +362,7 @@ impl Store {
             // layers and exhausted banks use the original exact serial kernel.
             let direct = if bounded && !super::mutable_required() && surface.vertices.len()==mesh.vertices.len()
                 && surface.indices == mesh.indices {
-                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged)
+                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged, surface_start+mesh_id)
             } else { None };
             if let Some((output, alpha_variant)) = direct {
                 let vertices = self.output_len..self.output_len+mesh.vertices.len();

@@ -84,11 +84,19 @@ pub(crate) mod replay {
         }
         pub(crate) fn dt(&self) -> f32 { dt(self.frame) }
         pub(crate) fn sample(&mut self, game: &crate::save::Game, active: bool, dt: f32,
-            cpu_ns: u64, allocations: u64) -> Result<()> {
+            cpu_ns: u64, allocations: u64, store:&crate::save::Store) -> Result<()> {
             ensure!(active, "live replay left active gameplay at frame {}", self.frame);
             ensure!(dt.to_bits()==self.dt().to_bits(), "replay dt changed");
             // Snapshot serialization and report construction are outside the CPU span.
             let state=serde_json::to_vec(&serde_json::to_value(game)?)?;
+            if self.frame==89 && std::env::var_os("LOOKING_GLASS_ACTOR_REPLAY_SAVE").is_some() {
+                // Functional save/load witness only, outside CPU/allocation timing.
+                // The harness owns this private directory; source Autosave stays untouched.
+                store.write(crate::save::Slot::Four,game)?;
+                let loaded=store.read(crate::save::Slot::Four)?;
+                ensure!(serde_json::to_vec(&serde_json::to_value(&loaded.game)?)?==state,"moving snapshot round-trip differs");
+                println!("PASS moving actor replay snapshot round-trip at frame 90");
+            }
             self.rows.push(serde_json::json!({"frame":self.frame+1,"dt":dt,
                 "submission_sha256":crate::render_fx::retained::host_submission_digest(),
                 "submission_details":crate::render_fx::retained::host_submission_details(),
@@ -105,7 +113,7 @@ pub(crate) mod replay {
             std::fs::write("private/actor-replay/samples.json",serde_json::to_vec_pretty(&serde_json::json!({
                 "simulation_frozen":false,"normal_viewer_update":true,"input":"neutral","camera_aspect":1200_f32/680.,
                 "dt_sequence":[1_f32/30.,0.0366_f32],"warmup_frames":60,"samples":self.rows,
-                "audio_disabled":true,"save_writes":false,"console_access":false}))?)?;
+                "audio_disabled":true,"save_writes":std::env::var_os("LOOKING_GLASS_ACTOR_REPLAY_SAVE").is_some(),"console_access":false}))?)?;
             println!("PASS live actor replay: {} frames, fixed dt, normal simulation",self.rows.len());
             Ok(())
         }
