@@ -593,6 +593,7 @@ impl Session {
         flying: bool,
         restored: bool,
         audio: &str,
+        identity: serde_json::Value,
     ) -> Result<()> {
         ensure!(
             map == self.cell.scene.map && entry == self.cell.scene.entry.as_deref(),
@@ -624,7 +625,7 @@ impl Session {
                 .cell
                 .output
                 .join(format!("{}-validation.jsonl", self.cell.prefix)),
-            &serde_json::json!({"map":map,"entry":entry,"feet":feet,"yaw":yaw,"pitch":pitch,"restored":restored,"audio":audio,"load_s":self.start.elapsed().as_secs_f64()}),
+            &serde_json::json!({"map":map,"entry":entry,"feet":feet,"yaw":yaw,"pitch":pitch,"restored":restored,"audio":audio,"gameplay_identity":identity,"load_s":self.start.elapsed().as_secs_f64()}),
         )?;
         Ok(())
     }

@@ -1036,7 +1036,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         paused=false; menu=false; inventory_menu=false; clock.pause();
         if let Some(s)=&mut coverage_session {
-            s.ready(&maps[current],entry_spawn.as_deref(),player.feet.to_array(),yaw,pitch,flying,resume_applied,&audio.status)?;
+            s.ready(&maps[current],entry_spawn.as_deref(),player.feet.to_array(),yaw,pitch,flying,resume_applied,&audio.status,serde_json::json!({"difficulty":stats.difficulty,"loadout":stats.weapon_summary(),"sanity":stats.sanity(),"will":stats.will(),"grounded":player.grounded,"watch_s":stats.powers.stopped,"ignores_alice":stats.ignores_alice()}))?;
         }
         crate::coverage::milestone("viewer","npc-art-audio-ready");
     }
@@ -1047,6 +1047,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     loop {
         crate::frame_phases::begin();
         if let Some(s)=&mut coverage_session {
+            anyhow::ensure!(!paused && !menu && !inventory_menu && !console.open && !flying && stats.alive(),"survey left live game before frame completion");
             if s.begin()? { break; }
             if s.take_reset() {
                 let initial=coverage_initial.as_ref().context("survey reset without fixture")?;
