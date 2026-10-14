@@ -1899,11 +1899,13 @@ pub struct Npcs {
 }
 impl Npcs {
     pub(crate) fn coverage_validate(&mut self,world:&World,eye:Vec3,yaw:f32)->Result<serde_json::Value> {
-        let mut rows=Vec::new();
+        let mut rows=Vec::new();let mut base=None;
         for (id,a) in self.actors.iter_mut().enumerate() {
             if let Some(g)=&mut a.guard {
                 let before=g.feet;g.place(world);
                 let t=g.target(id);
+                let origin=*base.get_or_insert(t.center);let offset=world.sweep(origin,t.center,t.half);
+                ensure!(!offset.start_solid && offset.fraction>=0.99,"guard {id} offset crosses solid geometry");
                 ensure!(before.distance(g.feet)<2. && !world.sweep(t.center,t.center,t.half).start_solid,"guard {id} lacks exact floor support: before={before:?} settled={:?}",g.feet);
                 let delta=t.center-eye;
                 let direction=vec3(yaw.cos(),yaw.sin(),0.);
