@@ -85,6 +85,8 @@ struct Frame {
     groups: Vec<Group>,
     #[cfg(feature="vita_renderer")]
     group_pool: Vec<Vec<Pass>>,
+    #[cfg(feature="vita_renderer")]
+    world_puffs: Vec<retained::world_puffs::Puff>,
     vertices: usize,
     dropped: usize,
     retained: Vec<(Rc<Material>, Option<Texture2D>)>,
@@ -684,6 +686,25 @@ pub(crate) fn effect_geometry(geometry: Rc<prepared::Geometry>, texture: Option<
         passes.push(p);
         submit(passes, true);
     }
+}
+#[cfg(feature="vita_renderer")]
+pub(crate) fn world_puff_batches_active() -> bool {
+    let c = crate::render::vita_renderer::config();
+    retained_active() && c.world_puff_batches && c.particle_producer_reuse
+        && c.merge_fx && c.fx_batching != "none" && c.fx_max_layers > 0
+}
+/// Registration position preserves ties with packets submitted later in the view.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>, blend: Blend) {
+    if crate::character::skinning::overlap::gathering() { return; }
+    debug_assert!(world_puff_batches_active());
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        if f.vertices.saturating_add(4) > MAX_VERTICES { f.dropped += 1; return; }
+        f.vertices += 4;
+        let before_group = f.groups.len();
+        f.world_puffs.push(retained::world_puffs::Puff { vertices, texture, blend, before_group });
+    });
 }
 pub fn line(a: Vec3, b: Vec3, color: Color) {
     if crate::character::skinning::overlap::gathering() { return; }

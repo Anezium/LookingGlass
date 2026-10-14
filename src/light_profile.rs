@@ -216,6 +216,13 @@ pub(crate) fn skin_overlap(gather_us: u64, fallbacks: u64, overflow: bool) {
 pub(crate) enum FxMetric { Producer, Merge, UploadCpu, UploadGl, UploadBytes, FinishPrepare, WorkerWait, FinishRecycle }
 pub(crate) fn fx_add(metric: FxMetric, value: u64) {
     if active() { RING.with(|r| r.borrow_mut().current.fx[metric as usize] += value); }
+    #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+    crate::render_fx::retained::count(match metric {
+        FxMetric::Producer => "vita_fx_producer_us", FxMetric::Merge => "vita_fx_merge_us",
+        FxMetric::UploadCpu => "vita_fx_upload_cpu_phase_us", FxMetric::UploadGl => "vita_fx_upload_gl_phase_us",
+        FxMetric::UploadBytes => "vita_fx_upload_phase_bytes", FxMetric::FinishPrepare => "vita_fx_finish_prepare_us",
+        FxMetric::WorkerWait => "vita_fx_worker_wait_us", FxMetric::FinishRecycle => "vita_fx_finish_recycle_us",
+    }, value);
 }
 pub(crate) struct FxTimer(FxMetric, Instant);
 pub(crate) fn fx_timer(metric: FxMetric) -> FxTimer { FxTimer(metric, Instant::now()) }

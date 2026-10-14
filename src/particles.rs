@@ -1230,12 +1230,22 @@ impl Steam {
     #[cfg(feature="vita_renderer")]
     pub(crate) fn prepare_quads(&self, camera: Vec3, direction: Option<Vec3>) {
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
+            if let Some(direction) = direction.filter(|_| crate::render_fx::world_puff_batches_active()) {
+                self.quads.borrow_mut().prepare_world(&self.puffs, &self.emitters, camera, direction);
+                return;
+            }
             self.quads.borrow_mut().prepare(&self.puffs, &self.emitters, camera, direction);
         }
     }
     pub fn draw_one(&self, index: usize, camera: Vec3, direction: Vec3) {
         #[cfg(feature="vita_renderer")]
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
+            if let Some(vertices) = self.quads.borrow().raw_quad(index) {
+                let e = &self.emitters[self.puffs[index].emitter];
+                crate::render_fx::world_puff_quad(vertices, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
+                    if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
+                return;
+            }
             if let Some(geometry) = self.quads.borrow().geometry(index) {
                 let e = &self.emitters[self.puffs[index].emitter];
                 crate::render_fx::effect_geometry(geometry, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),

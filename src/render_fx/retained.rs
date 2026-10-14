@@ -1,6 +1,7 @@
 //! Whole actor/effect packets share one alpha order with immutable world groups.
 //! Only dynamic LG meshes stream here; world buffers are never read or uploaded.
 pub(super) mod state_cache;
+pub(super) mod world_puffs;
 use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
 use super::{Frame, Pass, FRAME};
 use crate::environment::Atmosphere;
@@ -54,10 +55,12 @@ pub(crate) fn begin_view(
         let mut groups = std::mem::take(&mut f.groups);
         groups.clear();
         let group_pool = std::mem::take(&mut f.group_pool);
+        let mut world_puffs = std::mem::take(&mut f.world_puffs);
+        world_puffs.clear();
         *f = Frame {
             active: true,
             direct: true,
-            groups, group_pool,
+            groups, group_pool, world_puffs,
             camera: camera.position,
             direction: (camera.target - camera.position).normalize_or_zero(),
             time,
@@ -303,6 +306,7 @@ pub(crate) struct Gpu {
     submit_cache: SubmitCache<(usize, bool, bool), (BufferId, BufferId, [TextureId; 3]), UNIFORM_FLOATS>,
     merge_cache: [MergeCache; 4],
     merge_meshes: [BTreeMap<usize, super::prepared::Geometry>; 2],
+    puff_batches: [world_puffs::Bank; 2],
 }
 impl Gpu {
     pub(crate) fn new() -> Result<Self> {
@@ -341,6 +345,7 @@ impl Gpu {
             field_uniforms: crate::render::uniform_fields::Cache::new(meta()),
             merge_cache: Default::default(),
             merge_meshes: Default::default(),
+            puff_batches: Default::default(),
         };
         // Pipeline objects share the one compiled program. Prewarm every LG blend
         // and depth key so first use of the held Blade does not create one later.
@@ -571,6 +576,7 @@ fn valid_mesh(mesh: &Mesh) -> bool {
 enum Source {
     World(usize),
     Actor(usize),
+    Puff(usize),
 }
 fn order(mut list: Vec<(f32, Source)>, sort: bool) -> Vec<(f32, Source)> {
     // Stable sort keeps authored world layer ties and actor group submission ties.
@@ -580,7 +586,10 @@ fn order(mut list: Vec<(f32, Source)>, sort: bool) -> Vec<(f32, Source)> {
     list
 }
 fn center(mesh: &Mesh) -> Vec3 {
-    let (lo, hi) = mesh.vertices.iter().fold(
+    center_vertices(&mesh.vertices)
+}
+fn center_vertices(vertices: &[Vertex]) -> Vec3 {
+    let (lo, hi) = vertices.iter().fold(
         (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
         |(lo, hi), v| (lo.min(v.position), hi.max(v.position)),
     );
@@ -947,22 +956,16 @@ pub(crate) fn finish_world(
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
     gpu.field_uniforms.interrupt();
-    let (mut groups, camera, direction, dropped) = FRAME.with(|f| {
+    let (mut groups, mut puffs, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
             std::mem::take(&mut f.groups),
+            std::mem::take(&mut f.world_puffs),
             f.camera,
             f.direction,
             f.dropped,
         )
     });
-    count(
-        "vita_fx_particle_input_groups",
-        groups
-            .iter()
-            .filter(|g| g.passes.iter().all(|p| p.effect))
-            .count() as u64,
-    );
     if flush {
         boundary("flush_vita_3d_packets");
     }
@@ -971,20 +974,26 @@ pub(crate) fn finish_world(
         let _span = crate::frame_profile::span("vita_joint_alpha_sort");
         let mut list = std::mem::take(&mut gpu.alpha_storage); list.clear();
         list.extend(world.iter().map(|&(d,id)| (d,Source::World(id))));
-        list.extend(
-            groups
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| g.transparent && !g.passes[0].geometry().vertices.is_empty())
-                .map(|(id, g)| {
-                    (
-                        (center(g.passes[0].geometry()) - camera).dot(direction),
-                        Source::Actor(id),
-                    )
-                }),
-        );
+        let mut next_puff = 0;
+        for id in 0..=groups.len() {
+            while next_puff < puffs.len() && puffs[next_puff].before_group == id {
+                list.push(((center_vertices(&puffs[next_puff].vertices) - camera).dot(direction), Source::Puff(next_puff)));
+                next_puff += 1;
+            }
+            if let Some(g) = groups.get(id).filter(|g| g.transparent &&
+                g.passes.first().is_some_and(|p| !p.geometry().vertices.is_empty())) {
+                list.push(((center(g.passes[0].geometry()) - camera).dot(direction), Source::Actor(id)));
+            }
+        }
+        debug_assert_eq!(next_puff, puffs.len());
         order(list, crate::render::vita_renderer::config().sort_alpha)
     };
+    if !puffs.is_empty() {
+        gpu.puff_batches[gpu.ring_phase].build(&mut groups, &puffs, &mut list,
+            crate::render::vita_renderer::config().fx_batching == "material");
+    }
+    count("vita_fx_particle_input_groups", groups.iter()
+        .filter(|g| !g.passes.is_empty() && g.passes.iter().all(|p| p.effect)).count() as u64);
     let mut recycled = std::mem::take(&mut gpu.recycle_storage); recycled.clear();
     let c = crate::render::vita_renderer::config();
     if c.fx_prepare_cache {
@@ -1106,6 +1115,7 @@ pub(crate) fn finish_world(
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
                 },
                 Source::Actor(id) => draw_group(gpu, id),
+                Source::Puff(_) => unreachable!("unpublished world puff"),
             }
         }
         if let Some(totals) = world_totals {
@@ -1158,6 +1168,7 @@ pub(crate) fn finish_world(
             if f.group_pool.len() < pool_limit { f.group_pool.push(std::mem::take(&mut group.passes)); }
         }
         groups.clear(); f.groups = groups;
+        puffs.clear(); f.world_puffs = puffs;
     });
     (list_len, dropped + invalid)
 }

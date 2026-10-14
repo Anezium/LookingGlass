@@ -53,6 +53,8 @@ pub struct Config {
     pub skin_worker_bench: bool,
     pub fx_prepare_cache: bool,
     pub particle_producer_reuse: bool,
+    /// Publish world puffs once per final joint-alpha material batch.
+    pub world_puff_batches: bool,
     pub fx_merge_in_place: bool,
     pub fx_worker_prep: bool,
     pub frame_phase_probe: bool,
@@ -135,7 +137,7 @@ impl Default for Config {
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
-            particle_producer_reuse: true, fx_merge_in_place: true, fx_worker_prep: true,
+            particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,

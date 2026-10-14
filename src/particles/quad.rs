@@ -35,12 +35,19 @@ fn kernel(recipes: &[Recipe], output: &mut [[Vertex; 4]]) {
 }
 #[derive(Default)]
 pub(super) struct Buffer {
-    recipes: Vec<Recipe>, output: Vec<[Vertex;4]>, publications: Vec<Rc<Geometry>>, live: usize,
+    recipes: Vec<Recipe>, output: Vec<[Vertex;4]>, publications: Vec<Rc<Geometry>>, live: usize, raw_live: usize,
 }
 impl Buffer {
     pub(super) fn prepare(&mut self, puffs: &[Puff], emitters: &[Emitter], camera: Vec3, direction: Option<Vec3>) {
+        self.prepare_mode(puffs, emitters, camera, direction, false);
+    }
+    pub(super) fn prepare_world(&mut self, puffs: &[Puff], emitters: &[Emitter], camera: Vec3, direction: Vec3) {
+        self.prepare_mode(puffs, emitters, camera, Some(direction), true);
+    }
+    fn prepare_mode(&mut self, puffs: &[Puff], emitters: &[Emitter], camera: Vec3, direction: Option<Vec3>, raw: bool) {
         let _span = crate::frame_profile::span("particle_producer");
         self.live = 0;
+        self.raw_live = 0;
         self.recipes.clear();
         let axes = direction.map(basis); // Shared world camera basis, exactly the old arithmetic.
         self.recipes.extend(puffs.iter().map(|p| recipe(p, &emitters[p.emitter], camera,
@@ -52,6 +59,11 @@ impl Buffer {
             let (ra,rb) = self.recipes.split_at(mid);
             crate::character::skinning::overlap::cpu_pair(||kernel(ra,a),||kernel(rb,b));
         } else { kernel(&self.recipes,&mut self.output); }
+        if raw {
+            self.raw_live = puffs.len();
+            crate::render_fx::retained::count("particle_direct_quads", self.raw_live as u64);
+            return;
+        }
         for vertices in &self.output {
             let i = self.live;
             if self.publications.len() <= i {
@@ -70,6 +82,9 @@ impl Buffer {
     }
     pub(super) fn geometry(&self, index: usize) -> Option<Rc<Geometry>> {
         (index < self.live).then(|| self.publications[index].clone())
+    }
+    pub(super) fn raw_quad(&self, index: usize) -> Option<[Vertex; 4]> {
+        (index < self.raw_live).then(|| self.output[index])
     }
 }
 #[cfg(test)]
@@ -134,5 +149,21 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn raw_world_producer_matches_legacy_without_per_quad_publications_or_warm_allocations() {
+        let mut steam=super::super::tests::attached_fixture(2).steam;
+        steam.update(0.2,Vec3::ZERO,&crate::collision::World::fixture(&[]));
+        let camera=vec3(17.,-23.,8.);let mut buffer=Buffer::default();
+        buffer.prepare_world(&steam.puffs,&steam.emitters,camera,Vec3::X);
+        for frame in 0..12 {
+            for p in &mut steam.puffs {p.age=frame as f32*0.03;p.roll=frame as f32*0.7;}
+            let scope=crate::kernel_alloc::Scope::begin();
+            buffer.prepare_world(&steam.puffs,&steam.emitters,camera,Vec3::X);
+            assert_eq!(scope.finish(),0);assert!(buffer.publications.is_empty());
+            for i in 0..steam.puffs.len(){assert!(same(&buffer.raw_quad(i).unwrap(),&steam.puff_mesh(i,camera,Vec3::X).vertices));}
+        }
+        buffer.prepare(&steam.puffs,&steam.emitters,camera,None);
+        assert!(buffer.raw_quad(0).is_none());assert!(buffer.geometry(0).is_some());
     }
 }
