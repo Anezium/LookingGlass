@@ -42,6 +42,7 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
     let c=crate::render::vita_renderer::config();
     let limit=c.actor_max_layers.min(surface.layers.len());
     if !surface.layers.iter().take(limit).all(|l|simple(&l.stage)){return None;}
+    let _prep = crate::actor_prep_profile::actor_span(crate::actor_prep_profile::Phase::Simple);
     if surface.layers.len()>limit {retained::count("vita_fx_dropped_layers",(surface.layers.len()-limit) as u64);}
     let mut actors=surface.actors.borrow_mut();
     let id=mesh as *const Mesh as usize;

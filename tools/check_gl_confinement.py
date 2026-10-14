@@ -3,7 +3,7 @@
 from pathlib import Path
 import os, subprocess, tempfile
 root = Path(__file__).resolve().parent.parent
-rustc = str(Path('/Users/anezium/.cargo/bin/rustc'))
+rustc = os.environ.get('RUSTC', 'rustc')
 with tempfile.TemporaryDirectory(prefix='lg-gl-thread-') as directory:
     for trait in ['Send', 'Sync']:
         code = f'''#[path = "{root / 'src/game_thread.rs'}"] mod game_thread;

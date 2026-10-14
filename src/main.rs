@@ -116,6 +116,7 @@ mod frame_phases;
 mod game_thread;
 mod skin_worker;
 mod light_profile;
+mod actor_prep_profile;
 #[cfg(feature="vita_renderer")]
 mod render_tail;
 mod kernel_alloc;

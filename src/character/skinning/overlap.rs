@@ -64,10 +64,12 @@ struct Task {
     draws: Range<usize>,
     layers: usize,
     dirty: usize,
+    probe_start: Option<std::time::Instant>,
+    probe_finished: Option<std::time::Instant>,
 }
 impl Task {
     unsafe fn run(address: usize) {
-        let task = &*(address as *const Task);
+        let task = &mut *(address as *mut Task);
         let input = &*(task.input as *const Inputs);
         for draw in &input.draws[task.draws.clone()] {
             let pose = &input.pose[draw.pose.clone()];
@@ -136,6 +138,9 @@ impl Task {
                 }
             }
         }
+        if task.probe_start.is_some() {
+            task.probe_finished=Some(std::time::Instant::now());
+        }
     }
 }
 struct Store {
@@ -153,6 +158,8 @@ struct Store {
     overflow: bool,
     wait_us: u64,
     service_us: u64,
+    probe_makespan_ns: u64,
+    probe_max_service_ns: u64,
     fallback: usize,
     frame: u64,
 }
@@ -176,7 +183,7 @@ impl Store {
                 UnsafeCell::new(Task {
                     input: 0,
                     output: 0,
-                    draws: 0..0, layers: 0, dirty: 0,
+                    draws: 0..0, layers: 0, dirty: 0, probe_start:None, probe_finished:None,
                 })
             }),
             input: Box::new(UnsafeCell::new(Inputs {
@@ -197,6 +204,8 @@ impl Store {
             overflow: false,
             wait_us: 0,
             service_us: 0,
+            probe_makespan_ns: 0,
+            probe_max_service_ns: 0,
             fallback: 0,
             frame: 0,
         })
@@ -217,6 +226,8 @@ impl Store {
         self.overflow = false;
         self.wait_us = 0;
         self.service_us = 0;
+        self.probe_makespan_ns = 0;
+        self.probe_max_service_ns = 0;
         self.fallback = 0;
     }
     fn capture(
@@ -284,6 +295,10 @@ impl Store {
                 i.surfaces.push(Surface { mesh, vertices, cpu, revision });
             }
         }
+        crate::actor_prep_profile::count(crate::actor_prep_profile::Count::LogicalDraws,1);
+        crate::actor_prep_profile::count(crate::actor_prep_profile::Count::CopiedBytes,
+            p.pose.len()*std::mem::size_of::<Transform>() + p.scales.len()*4
+            + p.palette.len()*std::mem::size_of::<(Mat3,Vec3)>());
         i.draws.push(draw);
     }
     fn dispatch(&mut self) {
@@ -305,6 +320,7 @@ impl Store {
         };
         let output = self.output.as_mut_ptr() as usize;
         let input = self.input.get() as usize;
+        let probe_start=crate::actor_prep_profile::enabled().then(std::time::Instant::now);
         for (index, range) in [0..mid, mid..draws]
             .into_iter()
             .take(self.workers.len())
@@ -317,6 +333,7 @@ impl Store {
                     draws: range,
                     layers: if self.layers.is_empty() {0} else {self.layers.as_mut_ptr() as usize},
                     dirty: self.dirty.as_mut_ptr() as usize,
+                    probe_start, probe_finished:None,
                 };
             }
             // Store is boxed before this call, and cannot be moved/reset/read until drain.
@@ -330,15 +347,23 @@ impl Store {
         let start = std::time::Instant::now();
         let completed = self.pending > 0;
         let mut panic = None;
+        let mut max_service_ns=0;
         for worker in &mut self.workers[..self.pending] {
             match worker.wait_result() {
-                Ok(m) => self.service_us += m.ns / 1000,
+                Ok(m) => {self.service_us += m.ns / 1000;max_service_ns=max_service_ns.max(m.ns);},
                 Err(p) => {
                     if panic.is_none() {
                         panic = Some(p);
                     }
                 }
             }
+        }
+        if completed && crate::actor_prep_profile::enabled() {
+            let makespan=self.tasks[..self.pending].iter().filter_map(|t|unsafe {
+                let t=&*t.get(); Some(t.probe_finished?.duration_since(t.probe_start?).as_nanos() as u64)
+            }).max().unwrap_or(0);
+            self.probe_makespan_ns=makespan;
+            self.probe_max_service_ns=max_service_ns;
         }
         self.pending = 0;
         if completed && !self.layers.is_empty() {
@@ -359,6 +384,7 @@ impl Store {
         meshes: &mut [Option<Mesh>],
         p: Params<'_>,
     ) -> Option<bool> {
+        let _prep = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Consume);
         assert_eq!(self.pending, 0);
         let i = unsafe { &mut *self.input.get() };
         let Some(d) = i.draws.get(self.cursor) else {
@@ -389,8 +415,16 @@ impl Store {
             self.fallback += 1;
             return None;
         }
+        if crate::actor_prep_profile::enabled() {
+        crate::actor_prep_profile::count(crate::actor_prep_profile::Count::ComparedBytes,
+            d.pose.len()*std::mem::size_of::<Transform>() + d.scales.len()*4
+            + d.palette.len()*std::mem::size_of::<(Mat3,Vec3)>()
+            + i.surfaces[d.surfaces.clone()].iter().map(|s|s.cpu.indices.len()*2).sum::<usize>());
+        }
+        crate::actor_prep_profile::count(crate::actor_prep_profile::Count::LogicalDraws, 1);
         for surface_id in d.surfaces.clone() {
             let surface = &mut i.surfaces[surface_id];
+            crate::actor_prep_profile::count(crate::actor_prep_profile::Count::CopiedBytes, surface.vertices.len() * (12 + 16 + 4));
             // The serial kernel leaves live UVs untouched (including any caller edits).
             // Only its three written fields return from the worker; no gather-time
             // copy of the live/bind vertices is needed to preserve the fourth field.
@@ -496,6 +530,13 @@ impl Frame {
         STORE.with(|s| {
             let s = s.borrow();
             let s = s.as_ref().unwrap();
+            #[cfg(feature="vita_renderer")]
+            if crate::actor_prep_profile::enabled() {
+                // Publish only during an explicit game-thread collect, never
+                // from Store::drop while thread-local counters may be gone.
+                crate::render_fx::retained::count("skin_worker_makespan_ns",s.probe_makespan_ns);
+                crate::render_fx::retained::count("skin_worker_max_service_ns",s.probe_max_service_ns);
+            }
             crate::light_profile::skin_collect_wait(s.wait_us);
             crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
                 crate::light_profile::RenderMetrics { cpu_ns: s.wait_us * 1000, ..Default::default() });

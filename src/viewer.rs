@@ -538,6 +538,12 @@ fn starting_stats(options: &Options, map: &str, entry: Option<&str>) -> Stats {
 mod start;
 
 pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
+    #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+    let mut actor_replay = crate::actor_prep_profile::replay::Session::open(&mut options)?;
+    #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+    let replay_running = actor_replay.is_some();
+    #[cfg(not(all(feature="vita_renderer", not(target_os="vita"))))]
+    let replay_running = false;
     let startup=std::time::Instant::now();
     eprintln!("[lg/startup] viewer begin; UI begin");
     // Release cursor/audio before Miniquad destroys its native request queue.
@@ -812,7 +818,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(target_os = "vita")]
         let pause_on_load = !bench_session;
         #[cfg(not(target_os = "vita"))]
-        let pause_on_load = true;
+        let pause_on_load = !replay_running;
         apply_loaded!(prepared.unwrap(), pause_on_load);
         timing.mark("installed");
         resume_applied = true;
@@ -1064,6 +1070,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
             }
         }
+        crate::actor_prep_profile::reset();
+        #[cfg(not(target_os="vita"))]
+        if crate::actor_prep_profile::enabled() {crate::light_profile::render_host_reset();}
+        let probe_started = crate::actor_prep_profile::enabled().then(std::time::Instant::now);
+        let probe_allocations = crate::actor_prep_profile::enabled().then(crate::kernel_alloc::Scope::begin);
+        let mut prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Input);
         crate::light_profile::cpu_begin();
         if !(menu || inventory_menu || console.open || paused) {crate::character::skinning_bench_begin();}
         crate::frame_phases::mark(1);
@@ -1074,7 +1086,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(target_os = "vita")]
         let bench = crate::frame_profile::mode().is_bench();
         #[cfg(not(target_os = "vita"))]
-        let bench = false;
+        let bench = replay_running;
         #[cfg(target_os = "vita")]
         {
             bench_session |= bench;
@@ -1085,7 +1097,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(target_os = "vita")]
         let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
         #[cfg(not(target_os = "vita"))]
-        let saves_writable = saves_enabled;
+        let saves_writable = saves_enabled && !replay_running;
         #[cfg(target_os = "vita")]
         let simulate = !crate::frame_profile::simulation_frozen();
         #[cfg(not(target_os = "vita"))]
@@ -1242,6 +1254,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let freeze_capture = opening_escape_menu || pending_menu_save.is_some() || pending_menu_newgame.is_some() || quit_after_frame;
         if freeze_capture { paused = true; clock.pause(); }
         let elapsed = get_frame_time();
+        #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+        let elapsed = actor_replay.as_ref().map_or(elapsed, |r|r.dt());
         #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
         let elapsed=if let Some(r)=&mut route_session {(elapsed-r.recording_pause_seconds()).max(0.)}else{elapsed};
         let mut weapon_click;
@@ -1254,7 +1268,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let loot_visit = save::visit_key(&maps[current], entry_spawn.as_deref());
         let mut loot_before = interactions.loot_sources();
         loot_before.extend(npcs.loot_sources());
-        let focused = window_focused() || route_running;
+        let focused = window_focused() || route_running || replay_running;
         if !focused && was_focused {
             paused = true;
             clock.pause();
@@ -2096,6 +2110,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     viewer_block = crate::frame_profile::span("frame_interaction_search");
                     crate::frame_profile::set_owner(crate::frame_profile::Owner::InteractionSearch);
                 }
+                drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Interactions);
                 let talk =
                     interactions.conversation(&scene.world, player.eye(), aim, &npcs, &story);
                 let owner = use_owner(
@@ -2153,6 +2168,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     viewer_block = crate::frame_profile::span("frame_movers");
                     crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
                 }
+                drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Movers);
                 let was_cinematic = interactions.scripted();
                 let mover_dt = if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt };
                 interactions.companions_for_movers(&npcs.companions());
@@ -2164,6 +2180,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     viewer_block = crate::frame_profile::span("frame_movement");
                     crate::frame_profile::set_owner(crate::frame_profile::Owner::Movement);
                 }
+                drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Movement);
                 if was_cinematic && !interactions.scripted() {
                     yaw = player.script_facing;
                     pitch = 0.;
@@ -2374,6 +2391,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_story");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Story);
         hints.sync(&interactions);
         if (summon_cat || (story_active && pressed(KeyCode::C))) && !in_transport {
             let outcome = if !stats.alive() || flying {
@@ -2641,6 +2659,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         } // simulation: story and transitions
+        drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Particles);
         if simulate {
         #[cfg(target_os = "vita")]
         {
@@ -2681,6 +2700,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             steam.update_clocks(dt, world_dt, pos, &scene.world);
         }
         } // simulation: particles
+        drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Combat);
         #[cfg(target_os = "vita")]
         if simulate {
             drop(viewer_block);
@@ -2874,6 +2894,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_alice");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Alice);
         }
+        drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Alice);
         let mut targets = if story.busy() {
             Vec::new()
         } else {
@@ -3053,6 +3074,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_audio");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Audio);
         for sound in weapon_sounds {
             audio.weapon_effect(sound);
         }
@@ -3073,6 +3095,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         alice.power_appearance(&stats);
         alice.water_appearance(&player);
         } // simulation: Alice, weapons and world audio
+        drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Camera);
         let rage_scene = interactions.beyond.as_ref().and_then(|b| b.rage_scene());
         if let Some((time, finished)) = rage_scene.filter(|_| simulate) {
             alice.rage_scene(time, finished, &player);
@@ -3258,6 +3281,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::water::Liquid::from_contents(scene.world.liquid_at(camera)).tint();
         interactions.presentation.apply(&mut scene);
         if let Some(origin) = interactions.levels.iter().find_map(|s| s.ctl.sky_origin()) { scene.set_sky_origin(origin); }
+        drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Scene);
         let (mut mirror_extra, mut mirror_hide) = (Vec::new(), Vec::new());
         for slot in &interactions.levels { let (extra, hide) = slot.ctl.reflection(); mirror_extra.extend(extra); mirror_hide.extend(hide); }
         scene.set_reflection(mirror_extra, mirror_hide);
@@ -3390,6 +3414,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 viewer_block = crate::frame_profile::span("skin_gather");
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
             }
+            let _prep_gather = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Gather);
             level_art.story_pose(&story);
             let mut frame = crate::character::skinning::overlap::Frame::begin();
             if show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic()) {
@@ -3406,9 +3431,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_world");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        drop(prep_block); prep_block = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Other);
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
         #[cfg(feature="vita_renderer")]
         if let Some(frame) = &mut skin_frame {
+            let _prep_collect = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Collect);
             let _collect = crate::frame_profile::span("skin_collect");
             frame.collect();
         }
@@ -3420,9 +3447,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(not(target_os = "vita"))]
         let host_characters_profile = crate::frame_profile::span("frame_characters");
+        let prep_actors = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Discovery);
         let actors_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
         if !world_only {
         {
+            let _prep_support = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Support);
             let _characters_profile = crate::frame_profile::span("characters_setup");
             if draw_world && show_alice && stats.invisible <= 0. {
                 crate::lighting::shadow(&scene.world, player.feet, 22.);
@@ -3458,6 +3487,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
         drop(actors_timer);
+        drop(prep_actors);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -4000,7 +4030,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(frame_profile);
         crate::character::skinning_bench_end();
+        drop(prep_block);
         crate::light_profile::cpu_end();
+        let probe_ns = probe_started.map_or(0, |t|t.elapsed().as_nanos() as u64);
+        let probe_allocations = probe_allocations.map_or(0, |s|s.finish());
+        #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+        if let Some(replay)=&mut actor_replay {
+            replay.sample(&game_snapshot!(), active, dt, probe_ns, probe_allocations)?;
+        }
         crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]
         {
@@ -4028,6 +4065,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if quit_after_frame { break; }
         if options.frames.is_some_and(|limit| frame >= limit) {
+            #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+            if let Some(replay)=&actor_replay {replay.finish()?;}
             #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
             println!("[lg/vita-renderer] host frame report {}",crate::render::vita_renderer::report());
             #[cfg(not(target_os="vita"))]

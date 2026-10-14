@@ -101,6 +101,7 @@ thread_local! {
 }
 const MAX_VERTICES: usize = 1_000_000;
 pub fn copy_mesh(m: &Mesh) -> Mesh {
+    crate::actor_prep_profile::count(crate::actor_prep_profile::Count::CopiedBytes, m.vertices.len()*std::mem::size_of::<Vertex>()+m.indices.len()*2);
     Mesh {
         vertices: m.vertices.clone(),
         indices: m.indices.clone(),
@@ -325,6 +326,7 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
     });
 }
 pub fn submit(passes: Vec<Pass>, transparent: bool) {
+    let _prep = crate::actor_prep_profile::actor_span(crate::actor_prep_profile::Phase::Publication);
     if crate::character::skinning::overlap::gathering() { return; }
     crate::game_thread::assert_current();
     if passes.is_empty() {
@@ -970,6 +972,7 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
             return;
         }
     }
+    let _prep = crate::actor_prep_profile::actor_span(crate::actor_prep_profile::Phase::Modifiers);
     let mut passes = Vec::new();
     #[cfg(feature = "vita_renderer")]
     let limit = if retained_active() {

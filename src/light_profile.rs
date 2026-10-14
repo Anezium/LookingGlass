@@ -229,12 +229,14 @@ pub(crate) fn fx_timer(metric: FxMetric) -> FxTimer { FxTimer(metric, Instant::n
 impl Drop for FxTimer { fn drop(&mut self) { fx_add(self.0, self.1.elapsed().as_micros() as u64); } }
 
 pub(crate) fn cpu_begin() {
-    if active() {
+    if active() || crate::actor_prep_profile::enabled() {
         RING.with(|r| r.borrow_mut().cpu_start = Some(Instant::now()));
     }
 }
 pub(crate) fn cpu_end() {
-    if active() {
+    if active() || crate::actor_prep_profile::enabled() {
+        // Split a pending deferred packet at the actual CPU boundary.
+        #[cfg(feature="vita_renderer")] if crate::actor_prep_profile::enabled() { crate::render_tail::cpu_boundary(Instant::now()); }
         RING.with(|r| {
             let mut r = r.borrow_mut();
             r.current.cpu_us = r

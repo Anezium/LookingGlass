@@ -90,14 +90,28 @@ impl Cache {
             if let Some(alpha) = alpha_variant { c[3] = if alpha { (255. * (c[3] as f32 / 255.).clamp(0., 1.)) as u8 } else { 255 }; }
             c
         };
+        let probe = crate::actor_prep_profile::enabled();
+        let mut compared = 0usize;
         let old = self.current.as_ref();
         let same_vertices = old.is_some_and(|g| {
-            if alpha_variant.is_none() { vertices_equal(&g.vertices, &mesh.vertices) }
+            if alpha_variant.is_none() {
+                if !probe {vertices_equal(&g.vertices,&mesh.vertices)} else {
+                    g.vertices.len()==mesh.vertices.len() && g.vertices.iter().zip(&mesh.vertices).all(|(a,b)|{
+                        compared+=std::mem::size_of::<Vertex>();
+                        vertices_equal(std::slice::from_ref(a),std::slice::from_ref(b))
+                    })
+                }
+            }
             else { g.vertices.len() == mesh.vertices.len() && g.vertices.iter().zip(&mesh.vertices).all(|(a,b)| {
+                if probe {compared += std::mem::size_of::<Vertex>();}
                 let mut b = *b; b.color = color(&b); vertices_equal(std::slice::from_ref(a), std::slice::from_ref(&b))
             }) }
         });
-        let same_topology = old.is_some_and(|g| g.vertices.len() == mesh.vertices.len() && g.indices == mesh.indices);
+        let same_topology = old.is_some_and(|g| g.vertices.len() == mesh.vertices.len() && if !probe {g.indices == mesh.indices} else {
+            if g.indices.len()!=mesh.indices.len() {return false;}
+            g.indices.iter().zip(&mesh.indices).all(|(a,b)|{compared+=2;a==b})
+        });
+        crate::actor_prep_profile::count(crate::actor_prep_profile::Count::ComparedBytes, compared);
         if same_vertices && same_topology { return old.unwrap().clone(); }
         let mut version = old.map(|g|g.version).unwrap_or(Version {
             identity: generation(), vertices: generation(), topology: generation() });
@@ -111,10 +125,13 @@ impl Cache {
         }
         let g = Rc::get_mut(slot).unwrap();
         if !same_vertices || g.vertices.len() != mesh.vertices.len() {
+            crate::actor_prep_profile::count(crate::actor_prep_profile::Count::CopiedBytes, mesh.vertices.len()*std::mem::size_of::<Vertex>());
             g.mesh.vertices.clear(); g.mesh.vertices.extend(mesh.vertices.iter().map(|v| { let mut v=*v; v.color=color(&v); v }));
         }
         // A replaced Rc needs both arrays even when only one generation changed.
-        if !same_topology || g.indices != mesh.indices { g.mesh.indices.clone_from(&mesh.indices); }
+        if !same_topology || g.indices != mesh.indices {
+            crate::actor_prep_profile::count(crate::actor_prep_profile::Count::CopiedBytes, mesh.indices.len()*2);
+            g.mesh.indices.clone_from(&mesh.indices); }
         g.version = version;
         g.valid = cached_valid.unwrap_or_else(|| valid(&g.mesh));
         slot.clone()

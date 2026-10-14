@@ -943,6 +943,7 @@ pub(crate) fn finish_world(
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
     let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::Fx);
+    let _prep = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Finish);
     let finish_started = std::time::Instant::now();
     let mut world_ns = 0u64;
     let _span = crate::frame_profile::span("vita_3d_finish");
@@ -1029,6 +1030,7 @@ pub(crate) fn finish_world(
     let mut ranges = std::mem::take(&mut gpu.range_storage); ranges.clear();
     let mut invalid = 0;
     {
+        let _prep = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Upload);
         let upload_started = std::time::Instant::now();
         let _span = crate::frame_profile::span("vita_fx_upload");
         let mut uniform_templates=[None;4];
@@ -1077,6 +1079,7 @@ pub(crate) fn finish_world(
     count("vita_fx_sorted_triangles", 0);
     count("vita_fx_compacted_vertices", 0);
     let draw_group = |gpu: &mut Gpu, id: usize| {
+        let _prep = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Submit);
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent);
@@ -1110,6 +1113,7 @@ pub(crate) fn finish_world(
                     gpu.field_uniforms.interrupt();
                     let start = world_totals.and_then(|t| t.borrow().start());
                     let world_started = std::time::Instant::now();
+                    let _prep = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::Submit);
                     draw_world(id);
                     world_ns += world_started.elapsed().as_nanos() as u64;
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
