@@ -1079,7 +1079,7 @@ impl Renderer {
             }
         }
         crate::coverage::add(16,ids.len() as u64);
-        crate::coverage::add(18,cluster.map_or(0,|c|c as u64+1));
+        crate::coverage::set(18,cluster.map_or(0,|c|c as u64+1));
         let mut tests = 0u64;
         let mut hits = 0u64;
         for &id in ids {

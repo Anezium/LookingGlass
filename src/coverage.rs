@@ -175,6 +175,11 @@ pub fn phase(next: Option<usize>) {
         m.phase = next.map(|p| (p, now));
     });
 }
+pub fn set(index: usize, n: u64) {
+    if active() {
+        METRICS.with(|m| m.borrow_mut().counters[index] = n);
+    }
+}
 pub fn add(index: usize, n: u64) {
     if active() {
         METRICS.with(|m| m.borrow_mut().counters[index] += n);
@@ -270,6 +275,19 @@ impl Manifest {
         );
         let mut names = std::collections::BTreeSet::new();
         for s in &self.scenes {
+            ensure!(
+                matches!(
+                    s.family.as_str(),
+                    "V0" | "C1" | "C4" | "F4" | "W" | "E" | "B" | "T"
+                ),
+                "unknown scene family"
+            );
+            ensure!(
+                s.uncovered
+                    .as_ref()
+                    .is_none_or(|r| !r.trim().is_empty() && r.len() <= 2048),
+                "uncovered scene needs a bounded reason"
+            );
             ensure!(
                 (1..=30).contains(&s.epochs)
                     && (s.epochs == 1 || (!s.school_clubs.is_empty() && s.checkpoint.is_none())),
@@ -383,7 +401,8 @@ pub async fn run(
         .unwrap_or(Path::new("."))
         .join("coverage-results")
         .join(format!("{}-{stamp}", manifest.run_id));
-    std::fs::create_dir_all(&root)?;
+    std::fs::create_dir_all(root.parent().context("survey output parent")?)?;
+    std::fs::create_dir(&root)?;
     std::fs::write(
         root.join("effective-manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
@@ -611,7 +630,10 @@ impl Session {
     }
     pub fn begin(&mut self) -> Result<bool> {
         // Complete the previous frame before testing duration: final swap/tail is retained.
-        crate::light_profile::begin(&self.cell.scene.map, crate::frame_profile::Mode::Full);
+        crate::light_profile::survey_begin()?;
+        if self.pending && self.frames == 1 {
+            milestone("viewer", "first-presented");
+        }
         ensure!(
             self.start.elapsed().as_secs() < self.cell.scene.timeout_s,
             "cell progress watchdog"
@@ -713,6 +735,9 @@ impl Session {
             self.last_memory = Instant::now();
         }
         Ok(false)
+    }
+    pub fn finished(&self) -> bool {
+        self.finished
     }
     pub fn take_reset(&mut self) -> bool {
         std::mem::take(&mut self.reset_due)

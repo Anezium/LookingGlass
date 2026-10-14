@@ -1026,8 +1026,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             flying=false; fullbright=false; alice.reset(&player,yaw);
         }
         if let Some(fixture)=&cell.scene.queen_fixture {
-            crate::levels::qlair::coverage_stage(&mut interactions,&scene.world,&mut player,&mut stats,fixture)?;
-            pos=player.eye(); yaw=player.script_facing; pitch=0.; flying=false;
+            let view=crate::levels::qlair::coverage_stage(&mut interactions,&scene.map,&mut scene.world,&mut player,&mut stats,fixture)?;
+            pos=player.eye(); yaw=view.0; pitch=view.1; flying=false;
             level_art.prepare(&mut assets,&scene,&interactions,true)?;
         }
         if !cell.scene.school_clubs.is_empty() {
@@ -4066,7 +4066,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let cluster=scene.map.visibility.cluster(camera,&scene.map.planes);
             let (sources,bytes)=audio.coverage_counts();
             crate::coverage::add(14,sources);crate::coverage::add(15,bytes);
-            for slot in &interactions.levels {for (i,n) in slot.ctl.coverage_counts().into_iter().enumerate(){crate::coverage::add(27+i,n);}}
+            for slot in &interactions.levels {for (i,n) in slot.ctl.coverage_counts(&scene.world,camera,target-camera).into_iter().enumerate(){crate::coverage::add(27+i,n);}}
             s.observe(&maps[current],entry_spawn.as_deref(),player.feet.to_array(),stats.alive(),flying,paused||menu||inventory_menu||console.open,scripted_view,guards,shots,impacts,cluster,camera.to_array(),target.to_array(),environment_clock)?;
         }
         crate::light_profile::cpu_end();
@@ -4112,6 +4112,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         crate::frame_phases::mark(9);
         next_frame().await;
+    }
+    if let Some(s)=&coverage_session {
+        anyhow::ensure!(s.finished(),"survey exited before completing its window");
+        #[cfg(not(target_os="vita"))]
+        if let Some(cell)=&options.coverage_cell {save_capture(&cell.output.join(format!("{}-verification.png",cell.prefix)))?;}
     }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);

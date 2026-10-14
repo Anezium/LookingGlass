@@ -44,6 +44,7 @@ struct Row {
     frame: u64,
     wall_us: u64,
     cpu_us: u64,
+    outside_cpu_us:u64,
     swap_us: u64,
     skin_collect_wait_us: u64,
     skin_gather_us: u64,
@@ -97,7 +98,7 @@ pub(crate) fn render_add(phase: RenderPhase, value: RenderMetrics) {
     });
 }
 pub(crate) fn deferred_cpu(ns:u64) {
-    if active() {RING.with(|r| {let mut r=r.borrow_mut();if r.cpu_start.is_none() {r.current.cpu_us += ns / 1000;} });}
+    if active() {RING.with(|r| {let mut r=r.borrow_mut();r.add_deferred(ns,crate::coverage::active()); });}
 }
 pub(crate) fn cpu_running() -> bool {RING.with(|r|r.borrow().cpu_start.is_some())}
 #[cfg(not(target_os="vita"))]
@@ -164,6 +165,11 @@ impl Ring {
         self.pending = false;
         self.start = Some(now);
         self.current = Row::default();
+    }
+    fn add_deferred(&mut self,ns:u64,repaired:bool) {
+        let us=ns/1000;
+        if repaired {self.current.outside_cpu_us+=us;}
+        if self.cpu_start.is_none(){self.current.cpu_us+=us;}
     }
     fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
         write!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us")?;
@@ -256,7 +262,7 @@ pub(crate) fn cpu_end() {
             r.current.cpu_us = r
                 .cpu_start
                 .take()
-                .map_or(0, |t| t.elapsed().as_micros() as u64);
+                .map_or(0, |t| t.elapsed().as_micros() as u64) + r.current.outside_cpu_us;
         });
     }
 }
@@ -316,6 +322,10 @@ fn export_window(map: &str, mode: Mode) -> anyhow::Result<()> {
         Ok(())
     })
 }
+pub(crate) fn survey_begin()->anyhow::Result<()> {
+    RING.with(|r|r.borrow_mut().begin(Instant::now()));
+    survey_export(false)
+}
 pub(crate) fn survey_reset(dir:std::path::PathBuf,prefix:String) {
     FULL.store(false,Ordering::Relaxed);
     RING.with(|r| {let mut r=r.borrow_mut();*r=Ring::default();r.survey=Some((dir,prefix));});
@@ -330,6 +340,7 @@ fn survey_export(partial:bool)->anyhow::Result<()> {
     RING.with(|r| {
         let mut r=r.borrow_mut();
         if r.count==r.exported || (!partial && r.count%WINDOW!=0) {return Ok(());}
+        anyhow::ensure!(r.count-r.exported<=WINDOW,"coverage output lost an unexported window");
         let Some((dir,prefix))=&r.survey else {return Ok(());};
         let path=dir.join(format!("{prefix}-light-{:06}.csv",r.count));
         let mut out=std::io::BufWriter::new(std::fs::OpenOptions::new().write(true).create_new(true).open(path)?);
@@ -355,6 +366,29 @@ fn mode_name(mode: Mode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn survey_partial_windows_do_not_duplicate_completed_exports() {
+        let mut r=Ring::default();
+        r.survey=Some((std::path::PathBuf::from("unused"),"scene-r1".into()));
+        let start=Instant::now();r.begin(start);
+        for frame in 1..=125 {r.pending=true;r.begin(start+std::time::Duration::from_micros(frame*10));}
+        r.exported=120;
+        let mut out=Vec::new();r.write(&mut out).unwrap();
+        let s=String::from_utf8(out).unwrap();
+        assert_eq!(s.lines().count(),6);
+        assert!(s.lines().nth(1).unwrap().starts_with("121,10,"));
+        assert!(s.lines().last().unwrap().starts_with("125,10,"));
+        assert!(s.lines().all(|l|l.split(',').count()==164));
+    }
+    #[test]
+    fn repaired_deferred_cpu_survives_completion_inside_a_running_cpu_span() {
+        let mut r=Ring::default();r.cpu_start=Some(Instant::now());
+        r.add_deferred(3_000,true);assert_eq!(r.current.outside_cpu_us,3);assert_eq!(r.current.cpu_us,0);
+        r.current.cpu_us=40+r.current.outside_cpu_us;r.cpu_start=None;
+        r.add_deferred(7_000,true);assert_eq!(r.current.cpu_us,50);
+        let mut legacy=Ring::default();legacy.cpu_start=Some(Instant::now());legacy.add_deferred(3_000,false);
+        assert_eq!(legacy.current.outside_cpu_us,0);assert_eq!(legacy.current.cpu_us,0);
+    }
     #[test]
     fn defaults_and_explicit_levels_cover_every_mode() {
         for mode in [
