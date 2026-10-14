@@ -18,7 +18,9 @@ This tail rule applies identically with the actor probe enabled or disabled.
 
 On Vita use profiler=light with actor_prep_profile=true/false. Defaults stay off.
 For host export verification only, set `LOOKING_GLASS_LIGHT_PROFILE=1` and use the
-same light config; run at least 181 advancing viewer frames to export rows 1-180.
+same light config. This opt-in uses the existing neutral-input, unpaused restore
+and save-write suppression gates; no replay JSON or fixed dt is required.
+Run at least 181 advancing viewer frames to export rows 1-180.
 The host opt-in uses the same bounded ring and CSV serializer; it is not console
 performance evidence. Validate ordered windows with
 `python3 tools/check_actor_prep_csv.py --probe on <window-60.csv> <window-120.csv> <window-180.csv>`.

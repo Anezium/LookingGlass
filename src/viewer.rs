@@ -541,7 +541,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
     let mut actor_replay = crate::actor_prep_profile::replay::Session::open(&mut options)?;
     #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
-    let replay_running = actor_replay.is_some();
+    let replay_running = actor_replay.is_some()
+        || std::env::var_os("LOOKING_GLASS_LIGHT_PROFILE").is_some();
     #[cfg(not(all(feature="vita_renderer", not(target_os="vita"))))]
     let replay_running = false;
     let startup=std::time::Instant::now();
