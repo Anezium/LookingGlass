@@ -203,6 +203,10 @@ fn app_main() {
         let c = render::vita_renderer::config();
         #[cfg(target_os="vita")]
         light_profile::set_mode(frame_profile::Mode::read());
+        #[cfg(not(target_os="vita"))]
+        if std::env::var_os("LOOKING_GLASS_LIGHT_PROFILE").is_some() {
+            light_profile::set_mode(frame_profile::Mode::Full);
+        }
         character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench, c.skin_overlap);
         frame_phases::initialize();
     }
