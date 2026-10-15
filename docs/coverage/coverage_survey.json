@@ -773,7 +773,7 @@
         "min_shots": 1,
         "min_impacts": 1
       },
-      "uncovered": null
+      "uncovered": "Full three-repeat Mac rehearsal: normal Staff release passed repeats 1 and 2, but repeat 3 failed its final unchanged four-second epoch with shots=1, impacts=0, attacks=0, deaths=0. The min_impacts predicate failed. This release/impact workload is not reproducible across all required repeats and remains uncovered; no tape correction or lowered predicate is used."
     },
     {
       "id": "F4-blunderbuss",
