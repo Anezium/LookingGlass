@@ -49,3 +49,33 @@ and driver copies. They are not total RAM peaks or console OOM bounds.
 an archived native pkg-2 binary with unchanged installed PL-def configuration,
 frozen environment clock and a copied checkpoint. It verifies PNG bytes and
 RGBA pixels. All game data, saves, captures and package evidence stay outside Git.
+
+## Mac handoff, 2026-10-16
+
+Runtime/package source is `0dde4146fcca4279e5a5f81f54b7795233d4721b` on
+`vita-allmaps`, based directly on pkg-2 `86792fe`. The feature suite passed
+843 tests (zero failures, two inherited ignores); default compilation passed.
+All 36 maps constructed retained worlds for the 39 chapter visits. The host
+campaign produced 156 paired entry PNGs and per-visit pixel statistics. The
+separate village regression matches native pkg-2 for all fifteen PNGs and RGBA
+pixels with the installed PL-def config unchanged.
+
+Evidence is in `~/vita-j0/atoz/allmaps/`: `INVENTORY.json`, `INVENTORY.md`,
+`IMAGE-DIFFERENCES.json`, `IMAGE-REVIEW.md`, `FALLBACK.json`, `parity/PARITY.json`,
+`A-allmaps/VERIFICATION.json`, `PROTOCOL.md`, `CONSOLE-VISITS.json` and `SHA256SUMS`.
+Hedge3 is largest: 8,362,944 geometry bytes and 34,232,578 bytes at the tracked
+Mac buffer overlap peak. The peak excludes PVS compiler scratch/intern/source
+arrays as well as the other resources listed above; it is not a full retained
+load high-water measurement. Every map remains subject to console memory checks.
+
+`tools/allmaps/check-layout.py` extracts the exact source struct declarations
+and compiles a small object against the native package's dependencies, then
+reads the Vita layout constants from ELF. Prepared staging is 592 bytes on Vita
+(608 on Mac); Vertex is 40 bytes on Vita. `summarize.py` attaches these ABI
+projections and the explicit human entry-image review. Village geometry, Vita
+PVS, staging and drop/freeze counts match the pkg-2 coverage census.
+
+The native Mac package has ELF metadata margin 1,604,132 bytes (minimum 3,348).
+Pinned imports, regenerated VELF equality, ZIP CRC and packaged SELF/SFO identity
+passed. ELF values confirm the 192 MiB heap and 8 MiB main stack; the game thread
+keeps the unchanged explicit 8 MiB stack. No console result is claimed.
