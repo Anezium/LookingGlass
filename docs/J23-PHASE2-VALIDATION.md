@@ -64,3 +64,36 @@ The preceding upload finding is resolved; its raw evidence remains preserved.
 Publication-bank capacity is still constant at 168686 bytes and 51 slots.
 This counter excludes shared load-time CPU metadata and allocator overhead.
 There is still no accepted timing pair at this functional checkpoint.
+
+## Load-qualified host gate
+
+Three alternating pairs completed on the Mac under the shared timing lock.
+Each launch advances 180 ordinary-update frames with prescribed dt and neutral
+input, discards exactly 60 warmup frames and retains all 120 remaining frames.
+Accepted pair attempts are 1, 1 and 2; pair 3 attempt 1 was rejected in full for
+load and preserved. Every observed 1/5/15-minute load average in accepted pairs
+is at most 3. No accepted stall is trimmed or replaced.
+
+Preparation and body values below are median/p95 in Mac milliseconds. Preparation
+adds exclusive gather, discovery, consume, simple publication, modifiers, packet
+publication, shadow/atmosphere and collection per frame before taking quantiles.
+
+- Pair 1: preparation 0.221251/0.372709 off -> 0.106728/0.339458 on,
+  reduction 51.761%; body 1.443750/1.924667 -> 1.396187/1.888292. PASS.
+- Pair 2: preparation 0.217021/0.377584 -> 0.113000/0.405792,
+  reduction 47.931%; body 1.409625/1.790250 -> 1.393542/2.144667. FAIL.
+- Pair 3: preparation 0.225230/0.393750 -> 0.101354/0.237625,
+  reduction 55.000%; body 1.435813/1.766291 -> 1.346355/1.750416. PASS.
+
+Phase 2 **fails its full gate** because pair 2 worsens preparation and body p95.
+The positive paired finish/upload delta is charged conservatively (0, 0 and
+0.007912 ms); all three charged median reductions still exceed 30%. Simulation
+hashes match 120/120 in every accepted pair. Worker service is not added to
+game-thread elapsed. Body excludes the deferred framework/GPU tail; it is not a
+Vita wall measurement. Raw timing, load qualification, rejected attempts and all
+exclusive distributions are in `timed5/` in the external evidence directory.
+
+The gather tail increases in the rejected gate; collection remains microseconds.
+This is unrelated to puff fusion, so independent phase 3 is permitted by the
+brief. The actor switch remains default off. No phase-2 console acceptance or
+package readiness is claimed.
