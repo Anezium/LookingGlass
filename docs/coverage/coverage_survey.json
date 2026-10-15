@@ -704,7 +704,7 @@
         "min_shots": 1,
         "min_impacts": 1
       },
-      "uncovered": null
+      "uncovered": "Second full three-repeat Mac rehearsal: Jackbomb passed repeats 1 and 3, but repeat 2 failed its final unchanged four-second epoch with shots=0, impacts=0, attacks=0, deaths=0. The normal input tape did not reproducibly establish the required live firing/impact workload across all repeats. Jackbomb remains uncovered; no tape correction or lowered predicate is used."
     },
     {
       "id": "F4-staff-release",

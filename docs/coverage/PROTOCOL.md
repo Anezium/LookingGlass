@@ -2,7 +2,7 @@
 
 This is an opt-in named-scene survey derived from installed J20 pkg-2 (`86792fe186736125219de139ee1ddec44dc356fb`). Runtime/package source is `615c1253322462284c180aa212bc0cf7b3616ae4`. The A-stock package was built on the Mac with pinned native Vita SDK, nightly-2026-10-11 and four build jobs. No console was accessed during this work. The console owner performs installation and the run in a separate slot.
 
-The frozen manifest SHA-256 is `94794b6aa6904f5d6184e9e95a5f0f0bf612d78d52ce7c977fa53b2d236c580d`. It contains 23 ordered segments, each repeated three times: 16 active, seven explicitly uncovered. Expected authoritative results: 48 complete, 21 uncovered, zero failed. Read FINAL-REPORT.md for the completed host rehearsal disposition before use. This survey does not establish campaign completion or a 30-fps floor.
+The frozen manifest SHA-256 is `31f46b02599815fe5ea087a6ede3c5a167b86e10697704af404d5026351c17c8`. It contains 23 ordered segments, each repeated three times: 15 active, eight explicitly uncovered. Expected authoritative results: 45 complete, 24 uncovered, zero failed. Read FINAL-REPORT.md for the completed host rehearsal disposition before use. This survey does not establish campaign completion or a 30-fps floor.
 
 ## Files and preservation
 
@@ -28,7 +28,7 @@ The loop is scene-outer, repeats-inner: V0 r1/r2/r3, C1-acquire r1/r2/r3, and so
 | C4-cards | skool1 | 24s / 6 epoch(s) | active |
 | F4-ice-primary | skool1 | 12s / 3 epoch(s) | active |
 | F4-ice-alternate | skool1 | 12s / 3 epoch(s) | uncovered; skip |
-| F4-jackbomb | skool1 | 12s / 3 epoch(s) | active |
+| F4-jackbomb | skool1 | 12s / 3 epoch(s) | uncovered; skip |
 | F4-staff-release | skool1 | 12s / 3 epoch(s) | uncovered; skip |
 | F4-blunderbuss | skool1 | 12s / 3 epoch(s) | active |
 | F4-dismember | skool1 | 12s / 3 epoch(s) | active |
@@ -45,7 +45,7 @@ The loop is scene-outer, repeats-inner: V0 r1/r2/r3, C1-acquire r1/r2/r3, and so
 
 School C1/C4/F4 uses one/four distinct normal-health guards sharing the supported rig, normal AI and funded weapons. Coordinates/view are frozen in the manifest. These are synthetic diagnostic fixtures, not natural campaign checkpoints. Each school epoch restores the complete initial gameplay snapshot, particles/audio/clocks outside timing; there is no resurrection or immunity inside a timed epoch. Alice is not god/notarget and Watch is not stopping the world. Guard support, initial active/in-view counts and actual contacts/shots/impacts/deaths are checked. Attempted swings or requested fire alone are insufficient. C4 Blade stays uncovered because the unchanged four-second predicate observed no successful club contact.
 
-F4 uses normal Ice primary, Jackbomb with normal retreat and Blunderbuss. Staff release is excluded because repeat 3 failed its final unchanged impact predicate despite a normal shot. The dismemberment diagnostic uses normal Cards damage then one normal Knife throw, with ordinary funding and cooldowns. Alternate Ice creates a wall but lacks required impact/activity proof, so it is excluded. No predicates, epoch counts or durations were lowered to promote a fixture.
+F4 retains normal Ice primary and Blunderbuss. Jackbomb is excluded after its second repeat produced no required shot/impact in the final unchanged epoch. Staff release is excluded because repeat 3 failed its final unchanged impact predicate despite a normal shot. The dismemberment diagnostic uses normal Cards damage then one normal Knife throw, with ordinary funding and cooldowns. Alternate Ice creates a wall but lacks required impact/activity proof, so it is excluded. No predicates, epoch counts or durations were lowered to promote a fixture.
 
 Queen Intro/Birth and two death-FX stages are module-local authored setups whose state advances normally. They are not Queen combat coverage. Hatter/Scream are excluded for losing live supported/alive state; W/E are excluded for missing reproducible 60-second moving-world/mixed-enemy proof. Other maps, water, mirror, other bosses and films are not covered.
 
@@ -75,7 +75,7 @@ Memory is sampled at load milestones and about once per second. Report newlib us
 
 ## Slot duration and restoration
 
-Planning estimate, not a measured console prediction: 16 active segments × 3 repeats = 48 fresh scene loads, plus three T destination loads = 51. Applying the historical village restore median 49.672s to every load is an explicit assumption: 42.22 minutes. Warmup plus retained windows add 414s per pass × 3 = 20.7 minutes; T approach traversal, epoch resets, startup and other-map differences add time. Reserve **75–105 minutes unattended console occupancy**; the hard two-hour watchdog is unchanged. If an individual map exceeds five minutes it fails rather than consuming an endless slot.
+Planning estimate, not a measured console prediction: 15 active segments × 3 repeats = 45 fresh scene loads, plus three T destination loads = 48. Applying the historical village restore median 49.672s to every load is an explicit assumption: 39.74 minutes. Warmup plus retained windows add 402s per pass × 3 = 20.1 minutes; T approach traversal, epoch resets, startup and other-map differences add time. Reserve **70–100 minutes unattended console occupancy**; the hard two-hour watchdog is unchanged. If an individual map exceeds five minutes it fails rather than consuming an endless slot.
 
 After app closure retrieve evidence. Remove the staged startup manifest, restore any previous manifest, eboot, renderer/simulation settings and profile_mode, and compare all preserved hashes/inventories including player saves. Keep new run directories as evidence. Record restoration and failures in the console owner's report.
 
