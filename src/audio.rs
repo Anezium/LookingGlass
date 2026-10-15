@@ -823,17 +823,15 @@ impl Audio {
         let mut cache_samples = 0;
         let mut alice_sounds = events::Model::load(assets, "models/alice.tik")?;
         alice_sounds.retain(&crate::character::CLIPS.map(crate::character::sound_alias));
+        // Preload authored emitters and core player cues. Global enemy/weapon
+        // libraries belong to unrelated levels too; prepare() resolves those on
+        // actual requests, retaining them only while the same 24 MiB budget fits.
         for path in spec
             .speakers
             .iter()
             .map(|s| s.path.as_str())
             .chain(EFFECTS)
             .chain(alice_sounds.paths())
-            .chain(EXTRA_EFFECTS.iter().copied())
-            .chain(WORLD_EFFECTS.iter().copied())
-            .chain(crate::dice::SOUNDS)
-            .chain(crate::beyond::SOUNDS)
-            .chain(crate::ladybug::SOUNDS)
             .chain(
                 map.entities
                     .iter()

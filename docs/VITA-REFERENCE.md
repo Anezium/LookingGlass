@@ -5,8 +5,9 @@ R2 review fixes are documented in `VITA-CONTROLS.md` and the local
 and pins except for CPAL: BGM at 44.1 kHz, 512 frames (11.610 ms), priority 128
 on CPU1 (0x20000), 1 MiB callback stack, explicit stereo volume and kernel policy
 readback. Software deadline estimates log nonzero windows once per second.
-The retained mono PCM cache is capped at 24 MiB (6,291,456 samples); music and
-voices remain compressed streams. Heap/cache logs cover every growth and level
+The retained mono PCM cache is capped at 24 MiB (6,291,456 samples). Level
+emitters and core player sounds preload; other effects resolve on demand through
+the existing bounded request path. Music and voices remain compressed streams. Heap/cache logs cover every growth and level
 load. Console audio, heap and latency measurements remain pending.
 
 The sections below record the original r1 build; their hashes/test counts apply
