@@ -49,4 +49,26 @@ Evidence: `/Users/anezium/vita-j0/village-retained-world/jalon-23-probe/`, mirro
 to `/srv/fast/projects/alice/jalons/jalon-23-probe/`. See HOST-VERIFICATION.json and
 HOST-CHECKS.json. Rejected host attempts are preserved; host-only initialization
 and neutral-play setup repairs do not change Vita code paths. These checks make
-no console performance claim. Package verification follows in the same evidence.
+no console performance claim. Package verification is recorded below and in the same evidence.
+
+## Verified Vita package (2026-10-15)
+
+A-stock executable source remains `3b850c7c1d064d0df8c080c360c0ac5f64b764cf`. Built on BLS12 in
+`/srv/fast/projects/alice/worktrees/lg-j23-probe` with CARGO_BUILD_JOBS=2, using
+the J20 pkg-2 pipeline via Track A and its exact pinned vitaGL archive
+`6842d410b2571fe4a31d4fe933dd76c5679330a28e80a5c27b1539a534d91b3b`. Cargo.lock is unchanged.
+The linked ELF margin is **1,554,484 bytes**, above the 3,348-byte
+minimum. Imports, regenerated VELF equality, ZIP CRC, and embedded SELF/SFO
+identity checks pass.
+
+- VPK SHA-256: `19ae838260da5f581796069a0d1b5d6fb9664d44dc2f987d3bcff210685f38a2`
+- SELF SHA-256: `d2094ef14c8f46050b16840b5a44cfeefac937a158acd97b0736e492ac42ecd2`
+
+Configs are PL-def (probe on, light), PL-def-noprobe (only the probe flag differs),
+and vita-sim-all. The updated console protocol names every added CSV column:
+`/Users/anezium/vita-j0/village-retained-world/jalon-23-probe/PROTOCOL.md`, mirrored
+at `/srv/fast/projects/alice/jalons/jalon-23-probe/PROTOCOL.md`. FINAL-REPORT.md,
+FINAL-VERIFICATION.json and SHA256SUMS cover the evidence. Initial build artifacts
+and rejected host attempts remain preserved. No console was accessed; console
+measurements and the three alternating normal-play pairs remain for the owner.
+Documentation-only handoff commits do not change this executable source.
