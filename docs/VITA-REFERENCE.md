@@ -1,6 +1,7 @@
 # Vita playable reference assembly
 
-R2 review fixes are documented in `VITA-CONTROLS.md` and the local
+R2 validation is in `VITA-REFERENCE-R2.md`; controls are in `VITA-CONTROLS.md`.
+The console handoff is the local
 `~/vita-j0/atoz/reference-build-r2/PROTOCOL.md`. R2 retains the pkg-2 renderer
 and pins except for CPAL: BGM at 44.1 kHz, 512 frames (11.610 ms), priority 128
 on CPU1 (0x20000), 1 MiB callback stack, explicit stereo volume and kernel policy
