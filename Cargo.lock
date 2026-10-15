@@ -215,7 +215,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.15.3"
-source = "git+https://github.com/Anezium/cpal?rev=66bd87675f2f289f57db7ec5309b636e44618037#66bd87675f2f289f57db7ec5309b636e44618037"
+source = "git+https://github.com/Anezium/cpal?rev=ca89c9b2055e9bd48a77914362f4859c8f774c89#ca89c9b2055e9bd48a77914362f4859c8f774c89"
 dependencies = [
  "alsa",
  "core-foundation-sys",

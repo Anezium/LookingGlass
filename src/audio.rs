@@ -128,6 +128,28 @@ const EXTRA_EFFECTS: &[&str] = &[
 fn settings_path() -> PathBuf {
     crate::preferences::path("audio-settings.txt")
 }
+// Decoded mono effects only. Music and dialogue keep their compressed sources
+// and decode incrementally through rodio; never predecode those into this cache.
+const CACHE_SAMPLES: usize = 24 * 1024 * 1024 / std::mem::size_of::<f32>();
+fn audio_memory(event: &str, cache_samples: usize) {
+    let time_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_millis();
+    #[cfg(target_os = "vita")]
+    {
+        // VitaSDK newlib malloc.h: ten 32-bit size_t fields.
+        #[repr(C)]
+        struct MallInfo { arena: usize, ordblks: usize, smblks: usize, hblks: usize,
+            hblkhd: usize, usmblks: usize, fsmblks: usize, uordblks: usize,
+            fordblks: usize, keepcost: usize }
+        extern "C" { fn mallinfo() -> MallInfo; }
+        let heap = unsafe { mallinfo() };
+        eprintln!("[lg/audio-memory] time_ms={time_ms} event={event} cache_samples={cache_samples} cache_bytes={} cap_bytes={} heap_used={} heap_free_arena={} heap_arena={}",
+            cache_samples * 4, CACHE_SAMPLES * 4, heap.uordblks, heap.fordblks, heap.arena);
+    }
+    #[cfg(not(target_os = "vita"))]
+    eprintln!("[lg/audio-memory] time_ms={time_ms} event={event} cache_samples={cache_samples} cache_bytes={} cap_bytes={} heap_used=unavailable heap_free_arena=unavailable",
+        cache_samples * 4, CACHE_SAMPLES * 4);
+}
 const MAX_PCM: usize = 8_000_000; // 32 MB per decoded effect, with a separate level cache budget.
 
 #[derive(Clone, Copy, Debug)]
@@ -779,13 +801,17 @@ impl Audio {
         self.stride = 0.;
         self.fade_elapsed = 0.;
         self.swim_clock = 0.;
+        let started = std::time::Instant::now();
         if self.playback.is_none() {
+            audio_memory(&format!("level:{name}:disabled"), self.cache_samples);
             return;
         }
         if let Err(e) = self.load_inner(assets, name, map) {
             eprintln!("Audio level error in {name}: {e:#}");
             self.status = "Some level audio could not be loaded".into();
         }
+        audio_memory(&format!("level:{name}"), self.cache_samples);
+        eprintln!("[lg/audio-load] level={name} elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.);
     }
     fn load_inner(&mut self, assets: &mut Assets, name: &str, map: &Bsp) -> Result<()> {
         let spec = level_spec(assets, name, map)?;
@@ -819,10 +845,11 @@ impl Audio {
             }
             let result = assets.read(path).and_then(decode_clip).and_then(|clip| {
                 ensure!(
-                    cache_samples + clip.samples.len() <= 32_000_000,
+                    cache_samples + clip.samples.len() <= CACHE_SAMPLES,
                     "Level audio cache limit reached"
                 );
                 cache_samples += clip.samples.len();
+                audio_memory(&format!("preload:{path}"), cache_samples);
                 Ok(clip)
             });
             match result {
@@ -1110,12 +1137,13 @@ impl Audio {
             {
                 match assets.read(&request.path).and_then(decode_clip) {
                     Ok(clip) => {
-                        if self.cache_samples + clip.samples.len() > 32_000_000 {
+                        if self.cache_samples + clip.samples.len() > CACHE_SAMPLES {
                             self.resolved += u64::from(self.play_clip(clip, &request));
                             continue;
                         }
                         self.cache_samples += clip.samples.len();
                         self.world_clips.insert(request.path.clone(), clip);
+                        audio_memory(&format!("runtime:{}", request.path), self.cache_samples);
                     }
                     Err(error) => {
                         eprintln!("Requested audio unavailable: {}: {error:#}", request.path);
