@@ -348,13 +348,10 @@ impl Store {
             && self.output_len + meshes.iter().flatten().map(|m|m.vertices.len()).sum::<usize>() <= VERTICES
             && i.pose.len()+p.pose.len() <= BONES && i.scales.len()+p.scales.len() <= BONES
             && i.palette.len()+p.palette.len() <= BONES;
-        let unchanged=self.previous_numeric.as_ref().is_some_and(|old|old.draws.get(i.draws.len()).is_some_and(|d|
+        let previous=self.previous_numeric.as_ref().and_then(|old|old.draws.get(i.draws.len()).filter(|d|
             d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
                 && d.scale.to_bits()==p.scale.to_bits() && d.flat==p.flat && d.fullbright==p.fullbright
-                && d.alpha.to_bits()==p.alpha.to_bits() && same_pose(&old.pose[d.pose.clone()],p.pose)
-                && same_floats(&old.scales[d.scales.clone()],p.scales) && old.palette[d.palette.clone()]==*p.palette));
-        crate::actor_prep_profile::count(crate::actor_prep_profile::Count::ComparedBytes,
-            p.pose.len()*std::mem::size_of::<Transform>()+p.scales.len()*4+p.palette.len()*std::mem::size_of::<(Mat3,Vec3)>());
+                && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
         let start = i.surfaces.len();
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };
@@ -362,6 +359,10 @@ impl Store {
             // layers and exhausted banks use the original exact serial kernel.
             let direct = if bounded && !super::mutable_required() && surface.vertices.len()==mesh.vertices.len()
                 && surface.indices == mesh.indices {
+                // A draw can animate unrelated bones while this surface is unchanged.
+                // Compare its exact numeric dependencies on the game thread; never
+                // add J17's dual normalized-output comparison loop to the workers.
+                let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
                 crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged, surface_start+mesh_id)
             } else { None };
             if let Some((output, alpha_variant)) = direct {
@@ -539,6 +540,24 @@ pub(super) fn same_pose(a: &[Transform], b: &[Transform]) -> bool {
 }
 pub(super) fn same_floats(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
+}
+
+#[cfg(feature="vita_renderer")]
+fn same_surface_inputs(surface:&SkinSurface, old:&Inputs, draw:&Draw, p:Params<'_>)->bool {
+    let palette=&old.palette[draw.palette.clone()];
+    let scales=&old.scales[draw.scales.clone()];
+    if palette.is_empty()!=p.palette.is_empty() || (palette.is_empty() && scales.is_empty()!=p.scales.is_empty()) {return false;}
+    surface.used_bones.iter().all(|&bone| {
+        if !palette.is_empty() {
+            crate::actor_prep_profile::count(crate::actor_prep_profile::Count::ComparedBytes,std::mem::size_of::<(Mat3,Vec3)>());
+            palette.get(bone).zip(p.palette.get(bone)).is_some_and(|((ar,at),(br,bt))|
+                same_floats(&ar.to_cols_array(),&br.to_cols_array()) && same_floats(&at.to_array(),&bt.to_array()))
+        } else {
+            crate::actor_prep_profile::count(crate::actor_prep_profile::Count::ComparedBytes,std::mem::size_of::<Transform>()+if scales.is_empty(){0}else{4});
+            old.pose[draw.pose.clone()].get(bone).zip(p.pose.get(bone)).is_some_and(|(&a,&b)|same_transform(a,b))
+                && (scales.is_empty() || scales.get(bone).zip(p.scales.get(bone)).is_some_and(|(a,b)|a.to_bits()==b.to_bits()))
+        }
+    })
 }
 
 pub(crate) fn startup(workers: usize, probe: bool) {
@@ -926,6 +945,45 @@ mod tests {
             fullbright: false,
             alpha: 0.731,
         }
+    }
+    #[cfg(feature="vita_renderer")]
+    #[test]
+    fn surface_revisions_track_exact_dependencies_without_unrelated_bones_or_allocations() {
+        let (s,meshes,mut pose)=fixture();pose.push(pose[0]);
+        for palette_on in [false,true] {for scaled in [false,true] {
+            let scales=if scaled {vec![1.,2.]} else {vec![]};
+            let palette=if palette_on {super::super::palette(&pose,&scales)} else {vec![]};
+            let p=Params {scales:&scales,palette:&palette,..params(&pose)};
+            let mut store=Store::new(1,false);store.capture(&s,&meshes,p,true);
+            let old=unsafe {&*store.input.get()};let d=&old.draws[0];
+            let mut other_pose=pose.clone();other_pose[1].translation.x+=10.;
+            let other_palette=if palette_on {super::super::palette(&other_pose,&scales)} else {vec![]};
+            let other=Params {pose:&other_pose,palette:&other_palette,..p};
+            let scope=crate::kernel_alloc::Scope::begin();
+            for _ in 0..128 {assert!(same_surface_inputs(&s.surfaces[0],old,d,other));}
+            assert_eq!(scope.finish(),0);
+            other_pose[0].translation.x+=1.;
+            let changed_palette=if palette_on {super::super::palette(&other_pose,&scales)} else {vec![]};
+            assert!(!same_surface_inputs(&s.surfaces[0],old,d,Params {pose:&other_pose,palette:&changed_palette,..p}));
+            if scaled {
+                let changed=[2.,2.];
+                let changed_palette=if palette_on {super::super::palette(&pose,&changed)} else {vec![]};
+                assert!(!same_surface_inputs(&s.surfaces[0],old,d,Params {scales:&changed,palette:&changed_palette,..p}));
+            }
+        }}
+        let surface=crate::skeletal::Surface::new("zero-weight".into(),vec![crate::skeletal::SkinVertex {
+            uv:Vec2::ZERO,weights:vec![Weight {bone:0,amount:1.,offset:Vec3::ZERO},
+                Weight {bone:1,amount:0.,offset:Vec3::ZERO}]}],vec![0,0,0]);
+        assert_eq!(surface.used_bones,[0,1]);
+        let palette=vec![(Mat3::IDENTITY,Vec3::ZERO);2];
+        let p=Params {palette:&palette,..params(&pose)};
+        let mut store=Store::new(1,false);store.capture(&s,&meshes,p,true);
+        let old=unsafe {&*store.input.get()};let d=&old.draws[0];
+        let mut signed=palette.clone();signed[0].1.x=-0.;
+        assert!(!same_surface_inputs(&s.surfaces[0],old,d,Params {palette:&signed,..p}));
+        signed=palette.clone();signed[1].1.x=-0.;
+        assert!(same_surface_inputs(&s.surfaces[0],old,d,Params {palette:&signed,..p}));
+        assert!(!same_surface_inputs(&surface,old,d,Params {palette:&signed,..p}));
     }
     #[cfg(feature="vita_renderer")]
     #[test]

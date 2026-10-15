@@ -40,3 +40,27 @@ validation and publication at 6.599/6.895 ms median/p95, above the 1.5 ms
 prioritization threshold. This permits a later phase-2 console A/B only after
 its host gate and parity pass; it establishes no optimization gain. This track
 has not accessed the console. Phase 3 and packaging have not started.
+
+## Surface dependency follow-up
+
+Whole-skeleton changes unnecessarily dirtied two static surfaces. Each CPU surface
+now caches the bones actually evaluated by the exact skin kernel, including
+zero-weight entries. Single preparation compares only those numeric dependencies
+on the game thread, bit-exactly for palette, pose and scale inputs. The worker
+kernel is unchanged; no dual-variant output comparison is enabled. Existing UV,
+topology, alpha, epoch and held-publication guards still apply.
+
+The new dependency regression covers unrelated/relevant bones, palette and scaled
+pose paths, signed zero, zero-weight entries and zero warmed comparison allocations.
+The complete feature suite passes 852 tests, with the same two inherited ignored
+cases. Final default-feature check and source audit pass.
+
+Pinned follow-up host binary SHA-256:
+`32f3bc3a22842b07c500ca744b1704b2834540b8dc22ccb73474806b4a679b60`.
+Fresh `functional5` repeats all live, Slot 4, reload, image and actual-data worker
+checks above successfully. Upload bytes now match in every one of the 120
+retained frames, alongside draws, uniforms, stream capacity and buffer growths.
+The preceding upload finding is resolved; its raw evidence remains preserved.
+Publication-bank capacity is still constant at 168686 bytes and 51 slots.
+This counter excludes shared load-time CPU metadata and allocator overhead.
+There is still no accepted timing pair at this functional checkpoint.
