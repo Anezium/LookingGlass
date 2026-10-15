@@ -381,6 +381,8 @@ impl Input {
         };
         self.focused
             && (is_key_pressed(key)
+                || (key == KeyCode::Escape && Preferences::vita_emulation()
+                    && is_key_pressed(KeyCode::Backspace))
                 || self.pad.nav_pressed & mask != 0
                 || match key {
                     KeyCode::Enter => self.pad_pressed("A"),
@@ -389,6 +391,10 @@ impl Input {
                 })
     }
     pub fn action(&self, prefs: &Preferences, original: &str, edge: bool) -> bool {
+        self.action_with(prefs, original, edge, physical)
+    }
+    fn action_with(&self, prefs: &Preferences, original: &str, edge: bool,
+        physical: impl Fn(&str, bool) -> bool) -> bool {
         if !self.focused {
             return false;
         }
@@ -502,5 +508,50 @@ mod tests {
         p.update(Some(raw), true, 0.24, 0.2);
         assert_eq!(p.nav_pressed, 1);
         assert_eq!(p.pressed, 0);
+    }
+}
+
+#[cfg(test)]
+mod vita_preset_tests {
+    use super::*;
+    #[test]
+    fn handheld_events_dispatch_only_the_expected_actions_and_respect_suppression() {
+        let mut prefs = Preferences::default();
+        prefs.apply_vita_preset();
+        let mut input = Input { focused: true, ..Default::default() };
+        let cases = [("Ctrl", "Mouse 1"), ("Shift", "Mouse 2"),
+            ("Left", "Wheel Up"), ("Right", "Wheel Down"),
+            ("Space", "Space"), ("E", "E"), ("Backspace", "Ctrl"),
+            ("Up", "C"), ("Down", "I"), ("Tab", "Tab"), ("Enter", "Enter")];
+        for (event, expected) in cases {
+            for (_, original) in crate::preferences::BINDINGS {
+                for edge in [true, false] {
+                    assert_eq!(input.action_with(&prefs, original, edge, |key, _| key == event),
+                        *original == expected, "event={event} action={original} edge={edge}");
+                }
+            }
+            input.blocked.insert(event.into());
+            assert!(!input.action_with(&prefs, expected, true, |key, _| key == event));
+            input.blocked.clear();
+        }
+        // Cross also emits left click. Neither retry nor menu confirm fires a toy.
+        for original in ["Mouse 1", "Mouse 2"] {
+            assert!(!input.action_with(&prefs, original, true,
+                |key, _| key == "Enter" || key == "Mouse 1"));
+        }
+        let mut stats = crate::inventory::Stats::weapon_preview();
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            visited.insert(stats.selected());
+            assert!(input.action_with(&prefs, "Wheel Down", true, |key, _| key == "Right"));
+            stats.cycle(1);
+        }
+        assert_eq!(visited.len(), 10);
+        for _ in 0..10 {
+            assert!(input.action_with(&prefs, "Wheel Up", true, |key, _| key == "Left"));
+            stats.cycle(-1);
+        }
+        input.focused = false;
+        assert!(!input.action_with(&prefs, "Mouse 1", true, |_, _| true));
     }
 }

@@ -113,7 +113,7 @@ pub struct Preferences {
 }
 impl Default for Preferences {
     fn default() -> Self {
-        Self {
+        let mut preferences = Self {
             resolution: 2,
             fullscreen: false,
             sensitivity: 1.,
@@ -126,10 +126,31 @@ impl Default for Preferences {
             pad_sensitivity: 1.,
             pad_deadzone: 0.24,
             invert_pad: false,
-        }
+        };
+        if cfg!(target_os = "vita") { preferences.apply_vita_preset(); }
+        preferences
     }
 }
 impl Preferences {
+    /// Physical handheld keys emitted by the pinned miniquad Vita backend.
+    /// Also available on the host for functional emulation of the same layout.
+    pub fn apply_vita_preset(&mut self) {
+        self.bindings = BINDINGS.iter().map(|(_, original)| match *original {
+            "W" | "S" | "A" | "D" | "Space" | "E" | "Enter" | "Tab" => *original,
+            "Mouse 1" => "Ctrl",
+            "Mouse 2" => "Shift",
+            "Wheel Up" => "Left",
+            "Wheel Down" => "Right",
+            "Ctrl" => "Backspace",
+            "C" => "Up",
+            "I" => "Down",
+            _ => "None",
+        }.to_owned()).collect();
+        self.always_run = true;
+    }
+    pub fn vita_emulation() -> bool {
+        cfg!(target_os = "vita") || std::env::var_os("LOOKING_GLASS_VITA_CONTROLS").is_some()
+    }
     fn validate(&self) -> Result<()> {
         ensure!(self.resolution < SIZES.len(), "Invalid display size");
         ensure!(
@@ -170,10 +191,17 @@ impl Preferences {
         Ok(())
     }
     pub fn load() -> Self {
-        std::fs::read(path("preferences.json"))
+        let mut preferences = std::fs::read(path("preferences.json"))
             .ok()
             .and_then(|b| Self::parse(&b).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Migrate the untouched desktop defaults used by older Vita builds.
+        // Explicit custom layouts survive; the host opt-in always emulates Vita.
+        let desktop_defaults: Vec<String> = BINDINGS.iter().map(|(_, key)| (*key).into()).collect();
+        if (cfg!(target_os = "vita") && preferences.bindings == desktop_defaults)
+            || (!cfg!(target_os = "vita") && Self::vita_emulation())
+        { preferences.apply_vita_preset(); }
+        preferences
     }
     fn parse(b: &[u8]) -> Result<Self> {
         let mut p: Self = serde_json::from_slice(b)?;
@@ -255,6 +283,21 @@ impl Preferences {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn handheld_preset_is_complete_unique_and_roundtrips() {
+        let mut p = Preferences::default();
+        p.apply_vita_preset();
+        p.validate().unwrap();
+        for (action, physical) in [("Mouse 1", "Ctrl"), ("Mouse 2", "Shift"),
+            ("Wheel Up", "Left"), ("Wheel Down", "Right"), ("Space", "Space"),
+            ("E", "E"), ("Ctrl", "Backspace"), ("Enter", "Enter"),
+            ("C", "Up"), ("I", "Down"), ("Tab", "Tab")] {
+            let row = BINDINGS.iter().position(|(_, key)| *key == action).unwrap();
+            assert_eq!(p.bindings[row], physical);
+        }
+        assert!(p.run(false));
+        assert_eq!(Preferences::parse(&serde_json::to_vec(&p).unwrap()).unwrap(), p);
+    }
     #[test]
     fn preferences_roundtrip_and_reject_invalid_values() {
         let p = Preferences {
