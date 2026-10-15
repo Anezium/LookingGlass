@@ -1,5 +1,7 @@
 # J23 track B final report — 15 October 2026
 
+> Historical campaign report. The 2026-10-15 night decision superseded its package-eligibility restriction for a default-off console A/B. The four review fixes, fresh checks, failed short timing rerun and verified revised package are documented in [J23-PHASE2-REVIEW-FIXES.md](J23-PHASE2-REVIEW-FIXES.md).
+
 **Result: both complete host gates fail. Both switches remain default off. Phase 4 is ineligible; no package or new console A/B is authorized by these results.**
 
 All work ran on the Mac in `/Users/anezium/vita-work/lookingglass-j23`, branch `vita-night-j23`. The Mac-only amendment at planning commit 0d1f1f0 supersedes the earlier remote packaging instructions. No remote build host or console was accessed. The coverage clone/target, pilot, console ports and keepalive were untouched.
