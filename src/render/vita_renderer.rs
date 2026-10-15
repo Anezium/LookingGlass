@@ -198,7 +198,13 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
     }
 }
 impl Config {
+    pub(crate) fn actor_single_prepare_active(&self)->bool {
+        self.actor_single_prepare && self.skin_overlap && self.actor_fast_path && self.actor_layer_cache
+            && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
+    }
     fn validate(&self) -> Result<()> {
+        ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
+            "actor_single_prepare requires renderer=vita, skin_overlap=true, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
         ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
@@ -268,6 +274,7 @@ pub fn config() -> &'static Config {
             "[lg/vita-renderer] config {}",
             serde_json::to_string(&c).unwrap()
         );
+        println!("[lg/vita-renderer] actor_single_prepare active={}",c.actor_single_prepare_active());
         #[cfg(target_os = "vita")]
         apply_startup_clocks(c.clocks);
         apply_gpu_experiment(&c);
@@ -1859,6 +1866,20 @@ mod tests {
         }
         assert!(serde_json::from_value::<Config>(serde_json::json!({(name):"on"})).is_err());
         }
+    }
+    #[test]
+    fn actor_single_preparation_rejects_each_missing_prerequisite() {
+        let valid=Config {actor_single_prepare:true,..Default::default()};
+        valid.validate().unwrap();assert!(valid.actor_single_prepare_active());
+        for (key,value) in [("skin_overlap",serde_json::json!(false)),("actor_fast_path",serde_json::json!(false)),
+            ("actor_layer_cache",serde_json::json!(false)),("fx_prepare_cache",serde_json::json!(false)),
+            ("actor_layer_reuse",serde_json::json!(true)),("renderer",serde_json::json!("legacy"))] {
+            let mut config=serde_json::to_value(&valid).unwrap();config[key]=value;
+            let invalid:Config=serde_json::from_value(config).unwrap();
+            assert!(!invalid.actor_single_prepare_active());
+            assert!(invalid.validate().unwrap_err().to_string().contains("actor_single_prepare"),"{key}");
+        }
+        assert!(!Config::default().actor_single_prepare_active());
     }
     fn j17_switches_preserve_console_selected_defaults_and_strict_types() {
         let default=serde_json::to_value(Config::default()).unwrap();

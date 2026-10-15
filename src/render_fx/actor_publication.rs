@@ -115,8 +115,7 @@ pub(crate) fn reset() {
 
 pub(crate) fn begin() {
     let c=crate::render::vita_renderer::config();
-    let enabled=c.actor_single_prepare && c.skin_overlap && c.actor_fast_path
-        && c.actor_layer_cache && c.fx_prepare_cache && !c.actor_layer_reuse && retained_active();
+    let enabled=c.actor_single_prepare_active() && retained_active();
     ACTIVE.with(|a|a.set(enabled));
     if enabled { STATE.with(|s| {let mut s=s.borrow_mut();s.next_frame();}); }
 }
