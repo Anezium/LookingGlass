@@ -27,6 +27,10 @@ pub enum Clocks {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub renderer: String,
+    /// Exact campaign names, or "*" for every map. Absent preserves pkg-2.
+    pub retained_maps: Vec<String>,
+    /// Explicit legacy exceptions take precedence over retained_maps.
+    pub legacy_maps: Vec<String>,
     /// Vita startup policy; stock preserves the clocks inherited from the system.
     pub clocks: Clocks,
     /// Clean thumbnails during play; diagnostic modes retain their own policy.
@@ -125,6 +129,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             renderer: "vita".into(),
+            retained_maps: vec!["gvillage".into()],
+            legacy_maps: Vec::new(),
             clocks: Clocks::Max,
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
@@ -191,7 +197,18 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
     }
 }
 impl Config {
+    pub(super) fn selection(&self, name: &str) -> (bool, &'static str) {
+        if self.renderer != "vita" { return (false, "configuration"); }
+        if self.legacy_maps.iter().any(|m| m == "*" || m == name) {
+            return (false, "legacy_maps");
+        }
+        (self.retained_maps.iter().any(|m| m == "*" || m == name), "retained_maps")
+    }
     fn validate(&self) -> Result<()> {
+        for maps in [&self.retained_maps, &self.legacy_maps] {
+            ensure!(maps.iter().all(|m| m == "*" || (!m.is_empty() && m.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))),
+                "map lists require lowercase campaign names or *");
+        }
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
         ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
@@ -371,6 +388,14 @@ pub(crate) fn log_world_fx_depth() { depth_sentinel::log_fx_state(); }
 pub(crate) fn finish_depth_sentinel(world_view: bool) {
     if world_view { depth_sentinel::finish(); }
 }
+static CONSTRUCTION_FAILURES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub(super) fn construction_failed(name: &str, error: &anyhow::Error) {
+    let count = CONSTRUCTION_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    *INVENTORY.lock().unwrap() = None;
+    eprintln!("[lg/vita-renderer] retained construction failed map={name} error={error:#}; fallback=legacy construction_failures={count}");
+}
+#[cfg(not(target_os = "vita"))]
+pub(crate) mod allmaps;
 static INVENTORY: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 #[derive(Clone, Copy, serde::Serialize)]
 struct View {
@@ -400,7 +425,7 @@ pub(crate) fn record_view(camera: &Camera3D) {
 }
 pub fn report() -> serde_json::Value {
     let result=serde_json::json!({"feature":true, "configuration":config(), "config_path":CONFIG_PATH,
-        "world_only_active":world_only(), "inventory":*INVENTORY.lock().unwrap(),"view":*VIEW.lock().unwrap()});
+        "construction_failures":CONSTRUCTION_FAILURES.load(std::sync::atomic::Ordering::Relaxed), "world_only_active":world_only(), "inventory":*INVENTORY.lock().unwrap(),"view":*VIEW.lock().unwrap()});
     #[cfg(not(target_os="vita"))]
     { let mut result=result; result["host_frame_counts"]=crate::render_fx::retained::host_report(); return result; }
     #[cfg(target_os="vita")]
@@ -684,6 +709,24 @@ fn deform_extent(deform: &Option<Deform>) -> Vec3 {
         _ => Vec3::ZERO,
     }
 }
+// Own every direct GPU allocation until construction commits to Renderer.
+// A shader/PVS error must not leak partial retained resources into legacy fallback.
+#[derive(Default)]
+struct ConstructionResources {
+    shaders: Vec<ShaderId>,
+    pipelines: Vec<Pipeline>,
+    buffers: Vec<BufferId>,
+    committed: bool,
+}
+impl Drop for ConstructionResources {
+    fn drop(&mut self) {
+        if self.committed { return; }
+        let ctx = unsafe { get_internal_gl() }.quad_context;
+        for id in self.buffers.drain(..) { ctx.delete_buffer(id); }
+        for id in self.pipelines.drain(..) { ctx.delete_pipeline(id); }
+        for id in self.shaders.drain(..) { ctx.delete_shader(id); }
+    }
+}
 impl Renderer {
     pub(super) fn new(scene: &Scene, corpus: &str) -> Result<Self> {
         crate::render_tail::install();
@@ -806,6 +849,19 @@ impl Renderer {
             !pending.is_empty(),
             "retained world has no drawable geometry"
         );
+        // Buffer payload accounting, not allocator/driver/process high-water RAM.
+        let old_scene_geometry_capacity_bytes: usize = scene.batches.iter().chain(&scene.sky_props).map(|b| {
+            (b.base.capacity() + b.mesh.vertices.capacity()) * std::mem::size_of::<Vertex>()
+            + (b.full_indices.capacity() + b.mesh.indices.capacity()) * 2
+            + b.normals.capacity() * std::mem::size_of::<Vec3>()
+            + b.detail.iter().map(|d| d.indices.capacity() * 2).sum::<usize>()
+            + b.animation.as_ref().map_or(0, |a| a.positions.iter().map(|f| f.capacity() * std::mem::size_of::<Vec3>()).sum::<usize>())
+        }).sum();
+        let mut pending_geometry_capacity_bytes: usize = pending.iter().map(|p|
+            p.geometry.vertices.capacity() * 52 + p.geometry.indices.capacity() * 2).sum();
+        let pending_geometry_initial_capacity_bytes = pending_geometry_capacity_bytes;
+        let mut uploaded_geometry_bytes = 0;
+        let mut construction_geometry_peak_bytes = old_scene_geometry_capacity_bytes + pending_geometry_capacity_bytes;
         let atlas = scene.atlas.raw_miniquad_id();
         let bytes: usize = pending
             .iter()
@@ -827,6 +883,7 @@ impl Renderer {
         crate::frame_profile::shader_creation();
         let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
         let _shader_name = crate::shader_cache::Name::new("retained-world");
+        let mut resources = ConstructionResources::default();
         let shader = ctx
             .new_shader(
                 ShaderSource::Glsl {
@@ -836,6 +893,7 @@ impl Renderer {
                 shader::meta(),
             )
             .context("retained world shader")?;
+        resources.shaders.push(shader);
         drop(shader_timing);
         let attributes = [
             VertexAttribute::new("position", VertexFormat::Float3),
@@ -890,12 +948,14 @@ impl Renderer {
                 ));
             }
         }
+        resources.pipelines.extend(pipelines.iter().copied());
         let mut low_pipelines=Vec::new();
         let low_shader=if c.quality=="low" {
             crate::frame_profile::shader_creation();
             let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
             let _shader_name = crate::shader_cache::Name::new("retained-world-low");
             let low=ctx.new_shader(ShaderSource::Glsl{vertex:shader::VERTEX,fragment:&shader::low_fragment()},shader::meta())?;
+            resources.shaders.push(low);
             drop(shader_timing);
             for cull in [CullFace::Nothing,CullFace::Back,CullFace::Front] {
                 crate::frame_profile::pipeline_creation();
@@ -903,6 +963,7 @@ impl Renderer {
             }
             Some(low)
         }else{None};
+        resources.pipelines.extend(low_pipelines.iter().copied());
         let mut groups = Vec::new();
         for (p, texture) in pending.into_iter().zip(first_textures) {
             let extent = deform_extent(&p.recipe.deform);
@@ -916,6 +977,11 @@ impl Renderer {
                 BufferUsage::Immutable,
                 BufferSource::slice(&p.geometry.indices),
             );
+            resources.buffers.extend([vertex, index]);
+            uploaded_geometry_bytes += p.geometry.vertices.len() * 52 + p.geometry.indices.len() * 2;
+            construction_geometry_peak_bytes = construction_geometry_peak_bytes.max(
+                old_scene_geometry_capacity_bytes + pending_geometry_capacity_bytes + uploaded_geometry_bytes);
+            pending_geometry_capacity_bytes -= p.geometry.vertices.capacity() * 52 + p.geometry.indices.capacity() * 2;
             groups.push(Group {
                 parameter: p.parameter,
                 bindings: Bindings {
@@ -949,6 +1015,7 @@ impl Renderer {
                 },
             },
         )?;
+        resources.shaders.push(sky_shader);
         drop(shader_timing);
         crate::frame_profile::pipeline_creation();
         let sky_pipeline = ctx.new_pipeline(
@@ -957,6 +1024,7 @@ impl Renderer {
             sky_shader,
             PipelineParams::default(),
         );
+        resources.pipelines.push(sky_pipeline);
         let sky_bindings = Bindings {
             vertex_buffers: vec![ctx.new_buffer(
                 BufferType::VertexBuffer,
@@ -970,6 +1038,10 @@ impl Renderer {
             ),
             images: vec![],
         };
+        resources.buffers.extend(sky_bindings.vertex_buffers.iter().copied());
+        resources.buffers.push(sky_bindings.index_buffer);
+        #[cfg(not(target_os = "vita"))]
+        ensure!(std::env::var("LOOKING_GLASS_RETAINED_FAIL").as_deref() != Ok("after-upload"), "host diagnostic construction failure after upload");
         let upload_ms=upload_start.elapsed().as_secs_f64()*1000.;
         println!("[lg/vita-renderer] load pipelines/uploads {:.3} ms payload_bytes={bytes}",upload_ms);
         startup_timing.mark("shaders_pipelines_buffers");
@@ -1000,7 +1072,25 @@ impl Renderer {
             })
             .values()
             .sum();
+        let pvs_with_unknown_bytes: usize = pvs.clusters.iter().chain(std::iter::once(&pvs.unknown))
+            .fold(BTreeMap::new(), |mut m, a| {
+                m.entry(Arc::as_ptr(a) as usize).or_insert((a.opaque.capacity() + a.alpha.capacity()) * std::mem::size_of::<usize>());
+                m
+            }).values().sum();
+        let staging_bytes = groups.len() * std::mem::size_of::<Prepared>();
+        let construction_buffer_peak_bytes = construction_geometry_peak_bytes.max(
+            old_scene_geometry_capacity_bytes + bytes + pvs_with_unknown_bytes + staging_bytes);
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
+            "old_scene_geometry_capacity_bytes":old_scene_geometry_capacity_bytes,
+            "pending_geometry_initial_capacity_bytes":pending_geometry_initial_capacity_bytes,
+            "construction_geometry_peak_bytes":construction_geometry_peak_bytes,
+            "construction_buffer_peak_bytes":construction_buffer_peak_bytes,
+            "construction_peak_scope":"old scene geometry arrays + retained pending geometry capacity + uploaded geometry payload; final phase includes unique PVS lists and uniform staging. Excludes allocator metadata, textures, BSP/collision, remap trees, recipes and driver copies; not process RAM or a Vita OOM bound",
+            "host_pointer_bytes":std::mem::size_of::<usize>(),
+            "cpu_cluster_list_payload_including_unknown_bytes":pvs_with_unknown_bytes,
+            "vita_cluster_list_payload_including_unknown_bytes":pvs_with_unknown_bytes / std::mem::size_of::<usize>() * 4,
+            "skipped_sky_batches":scene.batches.iter().filter(|b| b.sky).count() + scene.sky_props.len(),
+            "portals_disabled":true,"frozen_ropes":scene.rope_shapes.len(),
             "parameter_recipes": parameter_recipes.len(),
             "world_cache_fixed_payload_bytes": groups.len() * (std::mem::size_of::<(u64,Option<(f32,Mat4)>)>() + std::mem::size_of::<Option<Mat4>>()) + parameter_recipes.len() * std::mem::size_of::<Parameter>(),
             "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16+low_pipelines.len(),"uniform_staging_capacity_bytes":groups.len()*std::mem::size_of::<Prepared>(),"dropped_layers":dropped_layers,
@@ -1019,6 +1109,7 @@ impl Renderer {
             Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0, model: [0;16],
                 time: 0_f32.to_bits(), time_uv, time_gain }
         }).collect();
+        resources.committed = true;
         Ok(Self {
             _game_thread: crate::game_thread::GameThread::new(),
             parameters, parameter_key: None, parameter_generation: 0,
@@ -1778,6 +1869,25 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn map_selection_defaults_and_precedence() {
+        let mut c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.selection("gvillage"), (true, "retained_maps"));
+        assert_eq!(c.selection("skool2"), (false, "retained_maps"));
+        c.retained_maps = vec!["*".into()];
+        assert_eq!(c.selection("skool2"), (true, "retained_maps"));
+        c.legacy_maps = vec!["skool2".into()];
+        assert_eq!(c.selection("skool2"), (false, "legacy_maps"));
+        assert_eq!(c.selection("gvillage"), (true, "retained_maps"));
+        c.renderer = "legacy".into();
+        assert_eq!(c.selection("gvillage"), (false, "configuration"));
+        c.renderer = "vita".into(); c.retained_maps.clear();
+        assert_eq!(c.selection("gvillage"), (false, "retained_maps"));
+        c.legacy_maps = vec!["*".into()];
+        assert_eq!(c.selection("gvillage"), (false, "legacy_maps"));
+        c.validate().unwrap();
+        c.retained_maps = vec!["../base".into()]; assert!(c.validate().is_err());
+    }
     #[test]
     fn scaled_depth_fix_defaults_on_and_sentinel_is_opt_in() {
         let c=Config::default(); assert!(c.scaled_depth_fix && !c.depth_sentinel);

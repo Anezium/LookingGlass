@@ -1556,6 +1556,11 @@ impl Scene {
     /// already built (with the difficulty applied) so that the viewer and a headless route share
     /// one copy of them.
     pub fn from_parts(assets: &mut Assets, name: &str, map: Bsp, world: World) -> Result<Self> {
+        Self::from_parts_selected(assets, name, map, world, true)
+    }
+    fn from_parts_selected(assets: &mut Assets, name: &str, map: Bsp, world: World, allow_retained: bool) -> Result<Self> {
+        #[cfg(not(feature = "vita_renderer"))]
+        let _ = allow_retained;
         let mut timing = crate::startup::Phase::new("scene_build");
         crate::lighting::load_art(assets)?;
         let specs = texture::read_materials(assets)?;
@@ -1619,13 +1624,15 @@ impl Scene {
         let mut missing = Vec::new();
         let mut batches = Vec::<Batch>::new();
         #[cfg(feature = "vita_renderer")]
-        let retained_world = name == "gvillage" && vita_renderer::config().renderer == "vita";
+        let (retained_world, selection_rule) = if allow_retained {
+            vita_renderer::config().selection(name)
+        } else { (false, "construction-fallback") };
         #[cfg(not(feature = "vita_renderer"))]
         let retained_world = false;
         #[cfg(feature = "vita_renderer")]
         println!("[lg/vita-renderer] selected map={name} renderer={} reason={}",
             if retained_world { "vita" } else { "legacy" },
-            if name != "gvillage" { "unsupported-map" } else { "configuration" });
+            selection_rule);
         let camera_portals = if retained_world { Vec::new() } else { camera_portal::load(assets, name, &map, &world, &specs)? };
         let mut groups = BTreeMap::<(usize, usize), usize>::new();
         let sky_origin = crate::sky::origin(assets, name, &map)?;
@@ -2024,8 +2031,17 @@ impl Scene {
         };
         #[cfg(feature = "vita_renderer")]
         if retained_world {
-            let corpus=assets.fingerprint()?;
-            scene.retained = Some(vita_renderer::Renderer::new(&scene, &corpus)?);
+            let retained = assets.fingerprint().and_then(|corpus| vita_renderer::Renderer::new(&scene, &corpus));
+            match retained {
+                Ok(renderer) => scene.retained = Some(renderer),
+                Err(error) => {
+                    vita_renderer::construction_failed(name, &error);
+                    // Rebuild with portals enabled and their aperture surfaces excluded.
+                    // Consuming the failed scene drops its old art before legacy rebuild.
+                    let (map, world) = scene.into_map_world();
+                    return Self::from_parts_selected(assets, name, map, world, false);
+                }
+            }
             // The retained path owns its immutable buffers and material recipes.
             // Release the old CPU geometry and unused Macroquad world materials.
             scene.batches.clear();
@@ -2035,6 +2051,10 @@ impl Scene {
         }
         timing.mark("retained_renderer");
         Ok(scene)
+    }
+    #[cfg(feature = "vita_renderer")]
+    fn into_map_world(self) -> (Bsp, World) {
+        (self.map, self.world)
     }
     pub fn update_ropes(
         &mut self,
