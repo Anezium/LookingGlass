@@ -1,19 +1,18 @@
-# Coverage fixture checkpoint, 2026-10-15
-Explicitly resumed on the Mac under the 2026-10-15 amendment. Runtime remains 67af7c7; no console was accessed. No final manifest is approved yet. The optimized Mac host build uses four Cargo jobs and its own target directory. The shared `~/vita-j0/mac-timing.lock` coordinates host campaigns. `tools/coverage/run-mac.py` records lock ownership, raw host load, native OpenGL, isolated stock private configs and authoritative cell results. Host timings remain outside console acceptance.
+# Coverage fixture checkpoint — Mac,2026-10-15
 
-| Family | Current evidence and remaining validation |
-| --- | --- |
-| V0 | Exact pkg-2 checkpoint, SHA verified; prior live neutral run completed. Corrected-runner rehearsal pending. |
-| C1 | Floor height corrected from measured placement (-511.96875). One normal, active, visible guard observed. Encounter/input validation pending; old cold startup consumed short epochs. |
-| C4 | Four distinct IDs, shared model, supported/swept positions, all four active and in view observed. Encounter/input validation pending. |
-| F4 | Funded normal weapon tapes prepared. Shots, impacts, deaths and actual dismemberment must be observed before coverage claims. |
-| W | Natural garden3 watched cinematic handoff checkpoint prepared and reloaded. Twelve-second traversal candidate unvalidated; full60-second coverage absent. |
-| E | Natural wchess1 pre-fight checkpoint prepared and reloaded. Two nearby red bishops exist; mixed species are unproved. Ten-second candidate unvalidated; full60-second coverage absent. |
-| B | Bounded authored Queen stages implemented; live activity/view validation pending. |
-| T | Naturally progressed village pre-exit checkpoint prepared and reloaded. Input traversal and named destination presentation unvalidated. |
+Native runtime615c125 is committed/pushed. Optimized host build,846 feature tests (two existing ignores), default-feature check, fresh109-image native Mac absent-manifest parity and fresh Mac A-stock ELF/import/ZIP/hash checks pass. The package's ELF gap is1,471,544 bytes. No console was accessed. A final three-repeat manifest is still pending fixture promotion and rehearsal.
 
-Renewed no-manifest parity at runtime 67af7c7 passed all 109 pkg-2 captures byte for byte (15 reference, 22 alpha, 72 actor scenes). The copied image hashes were reverified on the Mac. A-stock package hashes, ZIP CRC and packaged eboot/SFO were also reverified; its ELF gap is 1,572,612 bytes. Historical parity at runtime829bf37 also passed all109 captures. Runtime67af7c7 changes only manifest-enabled startup boundaries; renewed parity passed. Its cold first scene frame is preserved untimed, then school gameplay is restored outside the first encounter epoch. The old partial calibration remains evidence, not an accepted survey.
+Current evidence and scope:
 
-The desktop uses software GL; school frames in the old run remained several seconds long even after startup. The normal game clamps simulation delta to50ms, so short wall-time tapes can advance too little gameplay on this host. If corrected calibration still lacks activity, verify host rendering speed before classifying the scene unreproducible. A smaller host-only window requested before scene readiness may be needed; that wrapper has not been implemented. Keep console settings and parity settings stock, record any host-only deviation, and never treat host timing as acceptance.
+- V0: exact reference checkpoint; both80-second controls mechanically completed on615c125 with nonblank post-window images and fixed960/544 projection. Final three-repeat rehearsal pending.
+- C1: acquisition and normal Blade/Cards exchanges completed across all required epochs at the prior school view. A closer common C1/C4/F4 view is queued for revalidation; no final promotion yet.
+- C4: four distinct normal supported guards are active/in view. Cards completed, but acquisition/Blade had no successful contact inside their original4-second epochs. A closer view is queued; minima/epoch counts/durations stay unchanged.
+- F4: primary Ice, normal Staff release and Blunderbuss completed with real shots/impacts. Alternate Ice is explicitly uncovered because its wall path does not increment the required impact counter. Normal Jackbomb survival and actual dismemberment remain pending one bounded input correction pass; no immunity, guard-health edits or cooldown overrides.
+- W: uncovered. The natural garden3 chase candidate lost supported/alive state after8.52 seconds; no reproducible60-second moving-world window.
+- E: uncovered. The natural wchess1 candidate observed active=0/species=0; nearby prepared cast is two bishops and no60-second mixed encounter is proven.
+- B: four authored Intro/Birth/death-FX stages completed; Queen2 Hatter/Scream remain uncovered after losing supported/alive state at16.40/3.85 seconds. No boss combat coverage claimed.
+- T: two straight-tape attempts fell off the narrow approach. The ordinary untimed village route passed; a curved input tape derived from its observed path is queued for live map/entry validation. Headless preparation is not coverage.
 
-Authoritative recovery instructions, fixture hashes and logs are in `~/vita-j0/village-retained-world/jalon-coverage/RESUME.md`. Historical remote commands there are superseded by the Mac resume section. No remote jobs are authorized for this resume. Three-repeat full-manifest rehearsal, final fixture promotion/exclusions, console protocol and final report remain outstanding. Never put checkpoint contents or game data in Git.
+Native corrections count actual club contacts without changing the saved ranged-shot/death-FX seed, read host verification from the retained3D target after timing flush, and fix host survey projection independently of Cocoa resize. Actual window dimensions are recorded; the OS can still resize the requested host window. Host timings are not console acceptance. Rejected attempts and all raw data remain preserved.
+
+Authoritative current state, temporary application-restoration obligation, candidate tapes and logs: `~/vita-j0/village-retained-world/jalon-coverage/RESUME.md`. Only evidence manifests/tapes are changing now. All failures must become explicit exclusions unless a live correction passes unchanged predicates. Never commit checkpoint contents, game assets or the clone's docs/RCHESS1.md CRLF artifact.
