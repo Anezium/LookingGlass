@@ -40,14 +40,20 @@ impl Chapters {
         // Miniquad exposes raw Windows WHEEL_DELTA units, not notches.
         let wheel_unit = if cfg!(target_os = "windows") { 120. } else { 1. };
         self.scroll(mouse_wheel().1 / wheel_unit, count);
-        let hit = if is_mouse_button_pressed(MouseButton::Left) {
-            let canvas = ui::Canvas::new(screen_width(), screen_height());
-            self.click(canvas.pointer(Vec2::from(mouse_position())), get_time(), count)
-        } else { None };
+        let pointer_allowed = crate::menu::pointer_input_allowed(
+            crate::preferences::Preferences::vita_emulation(),
+            is_key_down(KeyCode::Enter), is_key_released(KeyCode::Enter));
+        let hit = self.pointer_click(pointer_allowed, is_mouse_button_pressed(MouseButton::Left),
+            ui::Canvas::new(screen_width(), screen_height()).pointer(Vec2::from(mouse_position())),
+            get_time(), count);
         if is_key_pressed(KeyCode::D) || input.pad_pressed("Y") || hit == Some(Hit::Difficulty) {
             *difficulty = Difficulty::ALL[(*difficulty as usize + 1) % 4];
         }
         hit
+    }
+
+    fn pointer_click(&mut self, allowed: bool, pressed: bool, pointer: Vec2, now: f64, count: usize) -> Option<Hit> {
+        if allowed && pressed { self.click(pointer, now, count) } else { None }
     }
 
     pub fn open(&mut self, selected: usize, count: usize) {
@@ -148,7 +154,7 @@ impl Chapters {
                 "{} - {} visits   ({} to change)",
                 difficulty.name(),
                 choices.len(),
-                if pad { "Y" } else { "D / click" }
+                if crate::preferences::Preferences::vita_emulation() { "touch" } else if pad { "Y" } else { "D / click" }
             ),
             DIFFICULTY,
             20.,
@@ -185,7 +191,9 @@ impl Chapters {
         }
         ui.font.draw(
             canvas,
-            if pad {
+            if crate::preferences::Preferences::vita_emulation() {
+                "D-pad: browse   Cross: begin   Circle: return"
+            } else if pad {
                 "D-pad / left stick: browse   A: begin   B: return"
             } else {
                 "Click: select   Double-click: begin   Wheel / arrows: browse"
@@ -198,12 +206,14 @@ impl Chapters {
             (
                 BEGIN,
                 Hit::Begin,
-                if pad { "Begin / A" } else { "Begin / Enter" },
+                if crate::preferences::Preferences::vita_emulation() { "Begin / Cross" } else if pad { "Begin / A" } else { "Begin / Enter" },
             ),
             (
                 BACK,
                 Hit::Back,
-                if pad {
+                if crate::preferences::Preferences::vita_emulation() {
+                    "Return / Circle"
+                } else if pad {
                     "Return / B"
                 } else {
                     "Return / Tab / Esc"
@@ -231,6 +241,21 @@ impl Chapters {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cross_pointer_edges_cannot_overwrite_chapter_selection() {
+        let mut chooser = super::Chapters::default();
+        chooser.open(7, 36);
+        let stale_cursor = macroquad::prelude::vec2(super::LIST.x + 5., super::LIST.y + 5.);
+        for (down, released) in [(true, false), (false, true)] {
+            let allowed = crate::menu::pointer_input_allowed(true, down, released);
+            assert_eq!(chooser.pointer_click(allowed, true, stale_cursor, 1., 36), None);
+            assert_eq!(chooser.selected, 7);
+        }
+        let allowed = crate::menu::pointer_input_allowed(true, false, false);
+        chooser.pointer_click(allowed, true, stale_cursor, 2., 36);
+        assert_ne!(chooser.selected, 7); // Touch still selects.
+    }
+
     use super::*;
 
     #[test]

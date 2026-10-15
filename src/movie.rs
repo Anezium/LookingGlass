@@ -372,7 +372,8 @@ pub async fn play(
             movie_log.note(elapsed);
             return Ok(false);
         }
-        if focused && (input.ui(KeyCode::P) || input.pad_pressed("Start")) {
+        if focused && (input.ui(KeyCode::P) || input.pad_pressed("Start")
+            || (crate::preferences::Preferences::vita_emulation() && is_key_pressed(KeyCode::Escape))) {
             paused = !paused;
         }
         let active = focused && !paused;
@@ -427,9 +428,9 @@ pub async fn play(
                 ..Default::default()
             },
         );
-        skip.draw(ui, if input.using_pad { "A" } else { "Enter" });
+        skip.draw(ui, &if input.desktop_pad() { "A".into() } else { input.label(preferences, "Enter") });
         if !active {
-            ui.paused(if input.using_pad {
+            ui.paused(if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
                 "Start to resume film"
             } else {
                 "P to resume film"

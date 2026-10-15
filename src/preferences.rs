@@ -136,7 +136,10 @@ impl Preferences {
     /// Also available on the host for functional emulation of the same layout.
     pub fn apply_vita_preset(&mut self) {
         self.bindings = BINDINGS.iter().map(|(_, original)| match *original {
-            "W" | "S" | "A" | "D" | "Space" | "E" | "Enter" | "Tab" => *original,
+            "W" | "S" | "A" | "D" | "Tab" => *original,
+            "Space" => "Enter", // Cross: jump, plus fixed menu confirm.
+            "E" => "Space", // Square: use.
+            "Enter" => "E", // Triangle: retry / skip.
             "Mouse 1" => "Ctrl",
             "Mouse 2" => "Shift",
             "Wheel Up" => "Left",
@@ -146,7 +149,7 @@ impl Preferences {
             "I" => "Down",
             _ => "None",
         }.to_owned()).collect();
-        self.always_run = true;
+        self.always_run = false;
     }
     pub fn vita_emulation() -> bool {
         cfg!(target_os = "vita") || std::env::var_os("LOOKING_GLASS_VITA_CONTROLS").is_some()
@@ -289,13 +292,13 @@ mod tests {
         p.apply_vita_preset();
         p.validate().unwrap();
         for (action, physical) in [("Mouse 1", "Ctrl"), ("Mouse 2", "Shift"),
-            ("Wheel Up", "Left"), ("Wheel Down", "Right"), ("Space", "Space"),
-            ("E", "E"), ("Ctrl", "Backspace"), ("Enter", "Enter"),
+            ("Wheel Up", "Left"), ("Wheel Down", "Right"), ("Space", "Enter"),
+            ("E", "Space"), ("Ctrl", "Backspace"), ("Enter", "E"),
             ("C", "Up"), ("I", "Down"), ("Tab", "Tab")] {
             let row = BINDINGS.iter().position(|(_, key)| *key == action).unwrap();
             assert_eq!(p.bindings[row], physical);
         }
-        assert!(p.run(false));
+        assert!(!p.run(false));
         assert_eq!(Preferences::parse(&serde_json::to_vec(&p).unwrap()).unwrap(), p);
     }
     #[test]

@@ -227,6 +227,43 @@ fn stick(x: i16, y: i16, deadzone: f32) -> Vec2 {
     }
 }
 
+// Read the analog magnitude without changing the pinned miniquad backend.
+// Backend W/A/S/D still serves menus/host emulation, but not Vita gameplay movement.
+#[cfg(target_os = "vita")]
+fn vita_movement(deadzone: f32) -> Vec2 {
+    // VitaSDK psp2common/ctrl.h SceCtrlData (0x20 bytes).
+    #[repr(C)]
+    struct CtrlData { timestamp: u64, buttons: u32, lx: u8, ly: u8, rx: u8, ry: u8, rest: [u8; 16] }
+    const _: [(); 0x20] = [(); std::mem::size_of::<CtrlData>()];
+    #[link(name = "SceCtrl_stub")]
+    extern "C" { fn sceCtrlPeekBufferPositive(port: i32, data: *mut CtrlData, count: i32) -> i32; }
+    let mut data: CtrlData = unsafe { std::mem::zeroed() };
+    let rc = unsafe { sceCtrlPeekBufferPositive(0, &mut data, 1) };
+    if rc <= 0 || data.buttons & 0x10000 != 0 { return Vec2::ZERO; }
+    let axis = |v: u8| (((v as f32 - 128.) / 127.).clamp(-1., 1.) * 32767.) as i16;
+    stick(axis(data.lx), -axis(data.ly), deadzone)
+}
+
+#[cfg(any(target_os = "vita", test))]
+fn resumed_axis(movement: Vec2, needs_neutral: &mut bool) -> Vec2 {
+    if movement == Vec2::ZERO { *needs_neutral = false; }
+    if *needs_neutral { Vec2::ZERO } else { movement }
+}
+
+// Threshold is on the radial magnitude after deadzone remapping.
+const RUN_THRESHOLD: f32 = 0.65;
+fn analog_run(movement: Vec2) -> bool { movement.length() >= RUN_THRESHOLD }
+pub(crate) fn vita_label(key: &str) -> &str {
+    match key {
+        "Enter" => "Cross", "Space" => "Square", "E" => "Triangle",
+        "Backspace" => "Circle", "Shift" => "L", "Ctrl" => "R",
+        "Escape" => "Start", "Tab" => "Select", "Up" => "D-pad Up",
+        "Down" => "D-pad Down", "Left" => "D-pad Left", "Right" => "D-pad Right",
+        "W" | "S" | "A" | "D" => "Left stick",
+        _ => key,
+    }
+}
+
 #[derive(Default)]
 struct Pad {
     connected: bool,
@@ -304,6 +341,8 @@ pub struct Input {
     pub using_pad: bool,
     pub disconnected: bool,
     focused: bool,
+    #[cfg(target_os = "vita")]
+    vita_neutral: bool,
 }
 impl Input {
     pub fn update(&mut self, prefs: &Preferences, focused: bool) {
@@ -322,6 +361,12 @@ impl Input {
         self.disconnected = self.pad.connected && raw.is_none() && self.using_pad;
         self.pad
             .update(raw, focused, prefs.pad_deadzone, get_frame_time().min(0.1));
+        #[cfg(target_os = "vita")]
+        {
+            if !self.focused { self.vita_neutral = true; }
+            let movement = if focused { vita_movement(prefs.pad_deadzone) } else { Vec2::ZERO };
+            self.pad.move_axis = resumed_axis(movement, &mut self.vita_neutral);
+        }
         if !focused {
             self.suppress();
         }
@@ -347,6 +392,8 @@ impl Input {
     }
     /// On menus/load/focus boundaries, held inputs must be released before reuse.
     pub fn suppress(&mut self) {
+        #[cfg(target_os = "vita")]
+        { self.vita_neutral = true; }
         self.pad.suppress();
         for &(s, _) in KEYS {
             if physical(s, false) {
@@ -402,6 +449,8 @@ impl Input {
             .iter()
             .position(|(_, key)| *key == original);
         let name = row.map_or(original, |i| prefs.bindings[i].as_str());
+        // The backend quantizes the Vita stick to W/A/S/D; use its analog read instead.
+        if cfg!(target_os = "vita") && matches!(name, "W" | "S" | "A" | "D") { return false; }
         (!self.blocked.contains(name) && physical(name, edge))
             || row.is_some_and(|i| {
                 let mask = pad_mask(&prefs.pad_bindings[i]);
@@ -426,6 +475,14 @@ impl Input {
             |name| self.action(prefs, name, edge),
         )
     }
+    pub fn running(&self, prefs: &Preferences, shift: bool) -> bool {
+        self.running_with(prefs, shift, Preferences::vita_emulation())
+    }
+    fn running_with(&self, prefs: &Preferences, shift: bool, handheld: bool) -> bool {
+        if handheld && (cfg!(target_os = "vita") || self.pad.move_axis != Vec2::ZERO) {
+            analog_run(self.pad.move_axis)
+        } else { prefs.run(shift) }
+    }
     pub fn movement(&self) -> Vec2 {
         self.pad.move_axis
     }
@@ -434,20 +491,27 @@ impl Input {
             * vec2(1., if prefs.invert_pad { -1. } else { 1. })
             * prefs.pad_sensitivity
     }
+    pub fn desktop_pad(&self) -> bool {
+        self.using_pad && !Preferences::vita_emulation()
+    }
     pub fn label(&self, prefs: &Preferences, original: &str) -> String {
-        crate::preferences::BINDINGS
+        self.label_with(prefs, original, Preferences::vita_emulation())
+    }
+    fn label_with(&self, prefs: &Preferences, original: &str, handheld: bool) -> String {
+        let label = crate::preferences::BINDINGS
             .iter()
             .position(|(_, key)| *key == original)
             .map_or_else(
                 || original.to_owned(),
                 |i| {
-                    if self.using_pad && prefs.pad_bindings[i] != "None" {
+                    if self.using_pad && !handheld && prefs.pad_bindings[i] != "None" {
                         prefs.pad_bindings[i].clone()
                     } else {
                         prefs.bindings[i].clone()
                     }
                 },
-            )
+            );
+        if handheld { vita_label(&label).to_owned() } else { label }
     }
 }
 
@@ -515,14 +579,45 @@ mod tests {
 mod vita_preset_tests {
     use super::*;
     #[test]
+    fn analog_walk_run_threshold_and_physical_prompt_names() {
+        let mut needs_neutral = true;
+        assert_eq!(resumed_axis(vec2(0., 1.), &mut needs_neutral), Vec2::ZERO);
+        assert_eq!(resumed_axis(Vec2::ZERO, &mut needs_neutral), Vec2::ZERO);
+        assert_eq!(resumed_axis(vec2(0.3, 0.), &mut needs_neutral), vec2(0.3, 0.));
+        assert!(!analog_run(Vec2::ZERO));
+        assert!(!analog_run(vec2(0.64, 0.)));
+        assert!(analog_run(vec2(0.65, 0.)));
+        assert!(analog_run(vec2(0.5, 0.5)));
+        let p = Preferences::default();
+        let mut input = Input::default();
+        input.pad.move_axis = vec2(0.35, 0.);
+        assert!(!input.running_with(&p, false, true));
+        input.pad.move_axis = vec2(0., 1.);
+        assert!(input.running_with(&p, false, true));
+        assert!(!input.running_with(&p, false, false)); // Desktop preference behavior survives.
+        let mut p = p;
+        p.apply_vita_preset();
+        input.using_pad = true; // Analog use must not switch prompts to XInput labels.
+        for (action, label) in [("Space", "Cross"), ("E", "Square"), ("Enter", "Triangle"),
+            ("Ctrl", "Circle"), ("Mouse 1", "R"), ("Mouse 2", "L"),
+            ("Escape", "Start"), ("Tab", "Select"), ("I", "D-pad Down")] {
+            assert_eq!(input.label_with(&p, action, true), label);
+        }
+        for (key, label) in [("Enter", "Cross"), ("Space", "Square"), ("E", "Triangle"),
+            ("Backspace", "Circle"), ("Shift", "L"), ("Ctrl", "R"),
+            ("Escape", "Start"), ("Tab", "Select"), ("Down", "D-pad Down")] {
+            assert_eq!(vita_label(key), label);
+        }
+    }
+    #[test]
     fn handheld_events_dispatch_only_the_expected_actions_and_respect_suppression() {
         let mut prefs = Preferences::default();
         prefs.apply_vita_preset();
         let mut input = Input { focused: true, ..Default::default() };
         let cases = [("Ctrl", "Mouse 1"), ("Shift", "Mouse 2"),
             ("Left", "Wheel Up"), ("Right", "Wheel Down"),
-            ("Space", "Space"), ("E", "E"), ("Backspace", "Ctrl"),
-            ("Up", "C"), ("Down", "I"), ("Tab", "Tab"), ("Enter", "Enter")];
+            ("Enter", "Space"), ("Space", "E"), ("Backspace", "Ctrl"),
+            ("Up", "C"), ("Down", "I"), ("Tab", "Tab"), ("E", "Enter")];
         for (event, expected) in cases {
             for (_, original) in crate::preferences::BINDINGS {
                 for edge in [true, false] {
@@ -534,7 +629,7 @@ mod vita_preset_tests {
             assert!(!input.action_with(&prefs, expected, true, |key, _| key == event));
             input.blocked.clear();
         }
-        // Cross also emits left click. Neither retry nor menu confirm fires a toy.
+        // Cross also emits left click; jumping/confirming must not fire a toy.
         for original in ["Mouse 1", "Mouse 2"] {
             assert!(!input.action_with(&prefs, original, true,
                 |key, _| key == "Enter" || key == "Mouse 1"));

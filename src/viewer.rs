@@ -1576,8 +1576,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 level_choices.len(),
             );
         }
-        if pressed(KeyCode::I) && focused {
-            inventory_menu = !inventory_menu;
+        let inventory_opened = inventory_toggle(pressed(KeyCode::I) && focused, menu, &mut inventory_menu);
+        if inventory_opened || (!menu && pressed(KeyCode::I) && focused) {
             menu = false;
             help_until = 0.;
             clock.pause();
@@ -1682,10 +1682,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     hud.announce(format!("Not yet available: {}", inventory::WEAPONS[i].1));
                 }
             }
-            let previous = input.action(&preferences, "Wheel Up", true)
-                || (inventory_menu && (input.ui(KeyCode::Up) || input.ui(KeyCode::Left)));
-            let next = input.action(&preferences, "Wheel Down", true)
-                || (inventory_menu && (input.ui(KeyCode::Down) || input.ui(KeyCode::Right)));
+            let (previous, next) = inventory_cycle(inventory_opened,
+                input.action(&preferences, "Wheel Up", true)
+                    || (inventory_menu && (input.ui(KeyCode::Up) || input.ui(KeyCode::Left))),
+                input.action(&preferences, "Wheel Down", true)
+                    || (inventory_menu && (input.ui(KeyCode::Down) || input.ui(KeyCode::Right))));
             if previous || next {
                 stats.cycle(if next { 1 } else { -1 });
                 hud.selected(&stats);
@@ -2207,7 +2208,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     swim: movement.clamp_length_max(1.),
                     rise: f32::from(held(KeyCode::Space)) - f32::from(held(KeyCode::LeftControl)),
                     jump: !overlay_before && pressed(KeyCode::Space),
-                    run: preferences.run(held(KeyCode::LeftShift)),
+                    run: input.running(&preferences, held(KeyCode::LeftShift)),
                 };
                 #[cfg(target_os = "vita")]
                 if bench {
@@ -2249,7 +2250,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     player.grounded
                         && before_grounded
                         && player.immersion.level == 0
-                        && !preferences.run(held(KeyCode::LeftShift)),
+                        && !input.running(&preferences, held(KeyCode::LeftShift)),
                     player.jumps > before_jumps,
                     player.landings > before_landings && before_fall < -90.,
                 );
@@ -2909,7 +2910,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 0.
             },
             &player,
-            preferences.run(held(KeyCode::LeftShift)),
+            input.running(&preferences, held(KeyCode::LeftShift)),
             character::WeaponInput {
                 dice: stats.copies(6),
                 first_person: !third_person && !flying,
@@ -3686,7 +3687,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 .or_else(|| help.then(|| story.objective().map(str::to_owned)).flatten());
             let show_details = help || menu;
             if paused && !menu && !inventory_menu && !console_input && !help {
-                ui.paused(&if input.using_pad {
+                ui.paused(&if crate::preferences::Preferences::vita_emulation() {
+                    "Cross or Start to resume".into()
+                } else if input.desktop_pad() {
                     "A or Start to resume".into()
                 } else {
                     format!("{} or click to resume", input.label(&preferences, "P"))
@@ -3714,7 +3717,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         );
                     }
                 }
-                let movement = if input.using_pad {
+                let movement = if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
                     format!(
                         "Left stick: move   {}: jump / rise   {}: dive",
                         input.label(&preferences, "Space"),
@@ -3735,7 +3738,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     movement,
                     format!(
                         "{}: look   {}: change view",
-                        if input.using_pad {
+                        if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
                             "Right stick"
                         } else {
                             "Mouse / look keys"
@@ -3764,7 +3767,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     ),
                     format!(
                         "{}: menus   {}: chapters   {}: help",
-                        if input.using_pad { "Start" } else { "Esc" },
+                        if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() { "Start" } else { "Esc" },
                         input.label(&preferences, "Tab"),
                         input.label(&preferences, "H")
                     ),
@@ -3786,7 +3789,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     &maps,
                     options.difficulty,
                     focused && !console_input,
-                    input.using_pad,
+                    input.desktop_pad(),
                 );
             }
             if (!show_details || inventory_menu) && !interactions.scripted() {
@@ -3897,7 +3900,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 {
                     skip_scene.draw(
                         &ui,
-                        &if input.using_pad {
+                        &if input.desktop_pad() {
                             "A".into()
                         } else {
                             input.label(&preferences, "Enter")
@@ -4276,4 +4279,37 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         "particle_settle_frames":600,"warmup_frames":60,"steam_visible_pixels_proven":true}))?)?;
     println!("PASS renderer host reference: 120 frozen timing frames, 60 invalidation frames, fifteen captures including HUD and visible steam");
     Ok(())
+}
+
+// The chapter chooser owns Down while open; the inventory-opening edge cannot cycle.
+fn inventory_toggle(pressed: bool, menu: bool, inventory: &mut bool) -> bool {
+    if pressed && !menu { *inventory = !*inventory; return *inventory; }
+    false
+}
+fn inventory_cycle(opened: bool, previous: bool, next: bool) -> (bool, bool) {
+    (!opened && previous, !opened && next)
+}
+#[cfg(test)]
+mod reference_input_tests {
+    use super::*;
+    #[test]
+    fn inventory_down_opens_without_cycling_then_navigates() {
+        let mut inventory = false;
+        let opened = inventory_toggle(true, false, &mut inventory);
+        assert!(inventory && opened);
+        assert_eq!(inventory_cycle(opened, false, true), (false, false));
+        assert_eq!(inventory_cycle(false, false, true), (false, true));
+        assert!(!inventory_toggle(true, false, &mut inventory));
+        assert!(!inventory);
+    }
+    #[test]
+    fn chapter_down_does_not_toggle_inventory() {
+        let mut inventory = false;
+        assert!(!inventory_toggle(true, true, &mut inventory));
+        assert!(!inventory);
+        let mut chapters = crate::chapters::Chapters::default();
+        chapters.open(0, 36);
+        chapters.select(chapters.selected + 1, 36);
+        assert_eq!(chapters.selected, 1);
+    }
 }

@@ -277,7 +277,7 @@ impl Hud {
             self.ui.center(
                 &format!(
                     "{} - retry",
-                    if input.using_pad {
+                    if input.desktop_pad() {
                         "A".into()
                     } else {
                         input.label(prefs, "Enter")
@@ -288,7 +288,7 @@ impl Hud {
                 crate::ui::INK,
             );
             self.ui.center(
-                if input.using_pad {
+                if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
                     "Start - load a game or change options"
                 } else {
                     "Esc - load a game or change options"
@@ -337,7 +337,9 @@ impl Hud {
             ink,
         );
         self.ui.center(
-            &if input.using_pad {
+            &if crate::preferences::Preferences::vita_emulation() {
+                "D-pad: select    Cross: equip    Circle: return".into()
+            } else if input.desktop_pad() {
                 "D-pad: select    A: equip    B: return".into()
             } else {
                 format!(
@@ -368,7 +370,7 @@ impl Hud {
                 },
             );
             self.ui.font.left(
-                &if input.using_pad {
+                &if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
                     String::new()
                 } else {
                     input.label(prefs, &format!("{}", (i + 1) % 10))

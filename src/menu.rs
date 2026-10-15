@@ -94,7 +94,7 @@ struct Button {
 }
 // Cross produces Enter and a pointer event in the Vita backend. Suppress both
 // edges of that pointer event so it cannot steal the D-pad's selection.
-fn pointer_input_allowed(vita: bool, enter_down: bool, enter_released: bool) -> bool {
+pub(crate) fn pointer_input_allowed(vita: bool, enter_down: bool, enter_released: bool) -> bool {
     !vita || !(enter_down || enter_released)
 }
 fn activation_index(pointer: bool, pressed: bool, hit: Option<usize>, confirm: bool, selected: usize) -> Option<usize> {
@@ -1155,6 +1155,8 @@ impl Menu {
                             canvas,
                             if self.controls_pad {
                                 &self.draft.pad_bindings[row]
+                            } else if Preferences::vita_emulation() {
+                                crate::input::vita_label(&self.draft.bindings[row])
                             } else {
                                 &self.draft.bindings[row]
                             },
@@ -1223,7 +1225,10 @@ impl Menu {
         if page.settings() {
             self.ui.font.draw(
                 canvas,
-                if self.binding.is_some() {
+                if Preferences::vita_emulation() {
+                    if self.binding.is_some() { "Press a Vita button   Start cancels" }
+                    else { "D-pad: browse / adjust   Cross: select   Circle: back" }
+                } else if self.binding.is_some() {
                     if self.controls_pad {
                         "Press a button   Start / Esc cancel   Delete clear"
                     } else {
@@ -1255,7 +1260,10 @@ impl Menu {
         if page == Page::Main && !buttons.is_empty() {
             self.ui.font.draw(
                 canvas,
-                if self.frontend || self.post_game {
+                if Preferences::vita_emulation() {
+                    if self.frontend || self.post_game { "Select: chapters" }
+                    else { "Select: chapters   Start / Circle: back to game" }
+                } else if self.frontend || self.post_game {
                     "Tab: chapters"
                 } else if self.using_pad {
                     "Tab: chapters   Start / B: back to game"
@@ -1296,7 +1304,7 @@ impl Menu {
             let mut action = None;
             let focused = crate::look::window_focused();
             input.update(prefs, focused);
-            self.using_pad = input.using_pad;
+            self.using_pad = input.desktop_pad();
             self.save_film.update_audio(audio.settings, focused);
             let previous_selected = self.selected;
             let buttons = self.buttons(page);
@@ -1305,11 +1313,11 @@ impl Menu {
             let canvas = Canvas::new(screen_width(), screen_height());
             let mouse = Vec2::from(mouse_position());
             // Vita Cross emits both Enter and a left click. Keep Cross as an
-            // attack/resume button in gameplay, but let menu confirmation use
+            // jump/resume button in gameplay, but let menu confirmation use
             // the D-pad-selected widget rather than the virtual cursor's hit.
             // Ignore its release-position event too; touch alone stays usable.
             let pointer_input = pointer_input_allowed(
-                cfg!(target_os = "vita"), is_key_down(KeyCode::Enter), is_key_released(KeyCode::Enter),
+                Preferences::vita_emulation(), is_key_down(KeyCode::Enter), is_key_released(KeyCode::Enter),
             );
             let hit = buttons
                 .iter()
