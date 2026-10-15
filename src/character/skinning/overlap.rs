@@ -558,6 +558,20 @@ fn same_surface_inputs(surface:&SkinSurface, old:&Inputs, draw:&Draw, p:Params<'
     })
 }
 
+/// Map replacement and same-map restore invalidate previous numeric dependencies
+/// as well as owned publications; the preallocated worker arena stays warm.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn reset_publications() {
+    assert!(PHASE.with(|p|p.get()==Phase::Idle),"scene load before skin workers drained");
+    STORE.with(|s| {if let Some(store)=s.borrow_mut().as_mut() {
+        assert_eq!(store.pending,0);
+        store.previous_numeric=None;store.previous.clear();
+        let i=unsafe {&mut *store.input.get()};
+        i.draws.clear();i.surfaces.clear();i.pose.clear();i.scales.clear();i.palette.clear();
+        store.output_len=0;
+    }});
+    crate::render_fx::actor_publication::reset();
+}
 pub(crate) fn startup(workers: usize, probe: bool) {
     // J13's game thread was sampled on CPU2: reserve CPU0, never contend with worker2.
     crate::skin_worker::pin_game(probe);

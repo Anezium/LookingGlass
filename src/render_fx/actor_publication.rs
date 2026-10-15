@@ -21,6 +21,7 @@ struct State {
     held:Vec<Group>, held_puffs:Vec<retained::world_puffs::Puff>, completed:bool, vertex_capacity:usize, index_capacity:usize, epoch:u64,
 }
 impl State {
+    fn clear(&mut self) { *self=Self::default(); }
     fn evict(&mut self,id:usize) {
         let bank=&mut self.banks[id];
         if let Some(key)=bank.key.take() { self.lookup.remove(&key); }
@@ -105,6 +106,13 @@ thread_local! {
     static STATE:RefCell<State>=RefCell::default();
 }
 pub(crate) fn active()->bool { ACTIVE.with(Cell::get) }
+/// Scene::from_parts covers every map load, including same-map save restoration.
+/// The overlap owner checks Idle first: no worker can retain a destination here.
+pub(crate) fn reset() {
+    assert!(!active(),"actor publication reset during a frame");
+    STATE.with(|s|s.borrow_mut().clear());
+}
+
 pub(crate) fn begin() {
     let c=crate::render::vita_renderer::config();
     let enabled=c.actor_single_prepare && c.skin_overlap && c.actor_fast_path
@@ -214,6 +222,27 @@ mod tests {
         state.next_frame();state.next_frame();
         assert!(state.reserve_key(&mesh,cpu,false,false,Key {actor:ActorId::default(),surface:0}).is_some());
         assert_eq!(state.lookup.len(),SURFACES);assert_eq!(state.banks.len(),SURFACES);
+    }
+    #[test]
+    fn map_changes_and_same_map_reload_release_skins_and_restore_the_warm_budget() {
+        let mut state=State::default();let mut old_cpu:Option<std::sync::Weak<SkinSurface>>=None;
+        let mut held=None;let mut warm=None;
+        for _map_or_reload in 0..12 {
+            state.clear();
+            assert_eq!((state.vertex_capacity,state.index_capacity,state.lookup.len(),state.banks.len()),(0,0,0,0));
+            if let Some(old)=old_cpu.take() {assert!(old.upgrade().is_none(),"old map skin pinned");}
+            // Previously submitted immutable geometry may outlive the scene reset.
+            if let Some(old)=held.take() {let old:Rc<prepared::Geometry>=old;assert_eq!(old.indices,[0,1,2]);}
+            let source=crate::skeletal::Surface::new("body".into(),(0..4096).map(|_|crate::skeletal::SkinVertex {
+                uv:Vec2::ONE,weights:vec![crate::skeletal::Weight {bone:0,amount:1.,offset:Vec3::ZERO}]}).collect(),vec![0,1,2]);
+            let cpu=source.cpu();let mesh=Mesh {vertices:cpu.bind_vertices.clone(),indices:cpu.indices.clone(),texture:None};
+            state.next_frame();
+            for _ in 0..5 {assert!(state.reserve_key(&mesh,cpu.clone(),false,false,key(ActorId::default(),&cpu)).is_some(),"unexpected serial fallback after map/reload");}
+            let capacity=(state.vertex_capacity,state.index_capacity,state.lookup.len());
+            if let Some(warm)=warm {assert_eq!(capacity,warm);} else {warm=Some(capacity);}
+            held=state.banks[0].slots[0].clone();old_cpu=Some(Arc::downgrade(&cpu));
+        }
+        state.clear();assert!(old_cpu.unwrap().upgrade().is_none());
     }
     #[test]
     fn held_views_exhaust_two_banks_and_never_overwrite_old_vertices() {
