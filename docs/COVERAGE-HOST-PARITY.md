@@ -5,6 +5,15 @@ All 109 captures matched the pkg-2 baseline byte for byte: reference 15, alpha 2
 
 Evidence is in `/srv/fast/projects/alice/jalons/jalon-coverage/runs/final-no-manifest-{reference,alpha,scenes}/RESULT.json`, the associated raw logs and images, and `logs/parity-final.log`. The tested runtime revision is 829bf370b624be1e3a6f6afb9557205a790f4948; subsequent documentation/tool changes do not change runtime source. Host compilation disabled LTO and optimization for this parity binary. The optimized host rehearsal binary and the standard Vita release package are separate artifacts.
 
+The renewed suite at runtime **67af7c7** also passed all 109 captures byte for byte:
+`runs/v2-no-manifest-{reference,alpha,scenes}/RESULT.json`, `logs/parity-v2.log`, exit 0.
+These existing results and images were copied to
+`~/vita-j0/village-retained-world/jalon-coverage/`; the Mac resume rechecked every
+capture's SHA-256 and each result's byte-identical verdict in
+`mac-copy-verification.json`. This is the authoritative parity proof for the
+unchanged runtime and reused A-stock package. It does not claim cross-platform
+pixel equality between native Mac OpenGL and the prior software renderer.
+
 Pinned input SHA-256s:
 
 - Cargo.lock: d18dd40246bf2eaca095b2ff364a2eca20d7c95fabd0c76231ff1072205775ee
