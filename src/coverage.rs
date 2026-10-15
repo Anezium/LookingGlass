@@ -10,6 +10,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+pub const HOST_SURVEY_ASPECT: f32 = 960. / 544.;
 pub fn active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }
@@ -418,6 +419,7 @@ pub async fn run(
         serde_json::to_vec_pretty(&serde_json::json!({
             "manifest_sha256":hash(&std::fs::read(&path)?),"renderer":cfg,"simulation":crate::vita_sim::effective(),
             "host_timings_are_acceptance":false,"clock_policy":"see startup effective clock log","resolution":[macroquad::prelude::screen_width(),macroquad::prelude::screen_height()],
+            "host_projection_aspect":cfg!(not(target_os="vita")).then_some(HOST_SURVEY_ASPECT),
             "seed_policy":manifest.seed_policy,"checkpoints_are_read_only":true
         }))?,
     )?;
@@ -939,7 +941,9 @@ impl Session {
                     .cell
                     .output
                     .join(format!("{}-validation.jsonl", self.cell.prefix)),
-                &serde_json::json!({"frame":self.frames,"age_s":age,"map":map,"entry":entry,"feet":feet,"camera":camera,"target":target,"environment_clock":clock,"npc":guards,"shots":shots,"impacts":impacts,"input_tick":self.current.tick,"scripted":scripted}),
+                &serde_json::json!({"frame":self.frames,"age_s":age,"map":map,"entry":entry,"feet":feet,"camera":camera,"target":target,"environment_clock":clock,"npc":guards,"shots":shots,"impacts":impacts,"input_tick":self.current.tick,"scripted":scripted,
+                    "window_size":[macroquad::prelude::screen_width(),macroquad::prelude::screen_height()],
+                    "projection_aspect":if cfg!(not(target_os="vita")){HOST_SURVEY_ASPECT}else{macroquad::prelude::screen_width()/macroquad::prelude::screen_height()}}),
             )?;
             println!(
                 "[lg/coverage] progress scene={} frame={} age_s={:.3} map={map}",

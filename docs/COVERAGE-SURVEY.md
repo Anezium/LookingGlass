@@ -61,3 +61,12 @@ Use the supplied PROTOCOL and summarize.py. Host rehearsal proves mechanics and 
 console wall timings, playback, peak-fit and visual acceptance remain console-owner work.
 
 The first cold presented frame is preserved in raw CSVs with `timed=0`. Its lazy scene/pipeline construction is startup work. The settle/encounter clock begins only after that presentation has completed. School cells use a separate `-setup` segment and restore their original gameplay snapshot outside the first timed epoch. Subsequent weapon first-use stalls inside epochs remain retained. This prevents a slow cold desktop frame from consuming an entire short encounter before it can begin.
+
+## Native Mac validation
+Manifest-enabled hosts request a non-resizable 960×544 window. Their world camera and cinematic FOV conversion use the fixed 960/544 console aspect, independently of asynchronous window resize events. Actual window dimensions and projection aspect are recorded. Without a manifest the ordinary host window and camera policy remain unchanged; Vita keeps its normal fixed-screen aspect.
+
+Host verification reads the last retained scaled 3D target after the final presented row has been completed and flushed. These images exclude HUD, advance no simulation and add no readback inside a retained window. Reading the default framebuffer after the loop would instead capture the next frame's clear. The host image audit rejects uniform/blank evidence. This diagnostic requires the retained scaled target used by the supplied stock configuration.
+
+Guard activity combines saved ranged-shot counts with observed successful club contacts. Club contacts use ephemeral feedback and per-epoch survey accumulation; they never increment the saved ranged-shot counter, which also seeds death FX. A contact counts only when normal range, facing, height and line-of-sight tests permit the ordinary strike. Requested inputs and attempted swings are insufficient.
+
+`tools/coverage/run-mac.py` coordinates campaigns through the shared timing lock, preserves load samples and rejects unqualified timing evidence. `audit-fixtures.py` checks raw epochs, states, guard identities and nonblank images. `parity-mac.py` compares the existing 109 frozen fixtures against a separately built pkg-2 baseline, without claiming timings. `build-mac-package.py` applies the pinned pkg-2 SDK, release flags and ELF/import/ZIP/hash checks on the Mac. Fixture approval still requires the final manifest's full rehearsal; the tools alone do not establish coverage or console acceptance.

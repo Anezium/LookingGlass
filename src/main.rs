@@ -1525,7 +1525,16 @@ fn run() -> Result<()> {
         println!("Map: {}\nFormat: FAKK 42\nArchives: {}\nVertices: {}\nSurfaces: {} (world: {})\nEntities: {}\nLightmaps: {}\nSpawn: {:?}",o.map,assets.pack_count(),map.vertices.len(),map.surfaces.len(),map.world_surfaces.len(),map.entities.len(),map.lightmaps.len()/49152,map.spawn());
         return Ok(());
     }
-    macroquad::Window::from_config(viewer::config(), async move {
+    let mut window_config = viewer::config();
+    #[cfg(not(target_os="vita"))]
+    if coverage.is_some() {
+        // Fit the Mac work area before the first event-loop resize, and keep
+        // the survey's physical target consistent with the console geometry.
+        window_config.miniquad_conf.window_width = 960;
+        window_config.miniquad_conf.window_height = 544;
+        window_config.miniquad_conf.window_resizable = false;
+    }
+    macroquad::Window::from_config(window_config, async move {
         #[cfg(feature="vita_renderer")]
         if let Some((manifest,path))=coverage {
             if let Err(e)=coverage::run(assets,o,manifest,path).await { eprintln!("Coverage failed: {e:#}");std::process::exit(1); }

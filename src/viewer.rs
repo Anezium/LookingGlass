@@ -3343,21 +3343,25 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         clear_background(scene.atmosphere.background());
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::prepare_3d(scene.atmosphere.background());
+        let survey_aspect = (cfg!(not(target_os="vita")) && coverage_running)
+            .then_some(crate::coverage::HOST_SURVEY_ASPECT);
+        let scene_aspect = survey_aspect.unwrap_or_else(|| screen_width() / screen_height());
         let world_camera = Camera3D {
             #[cfg(feature="vita_renderer")]
             viewport: crate::render::vita_renderer::world_viewport(),
             position: camera,
             target,
             up: pand_camera.map_or(Vec3::Z, |c| c.up),
+            aspect: survey_aspect,
             fovy: interactions
                 .beyond
                 .as_ref()
-                .and_then(|b| b.scene_fovy(screen_width() / screen_height()))
+                .and_then(|b| b.scene_fovy(scene_aspect))
                 .or_else(|| {
                     interactions
                         .levels
                         .iter()
-                        .find_map(|s| s.ctl.scene_fovy(screen_width() / screen_height()))
+                        .find_map(|s| s.ctl.scene_fovy(scene_aspect))
                 })
                 .unwrap_or(75.0f32.to_radians()),
             z_near: 2.,

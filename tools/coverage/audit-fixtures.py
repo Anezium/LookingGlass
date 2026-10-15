@@ -19,6 +19,7 @@ def main():
     root = args.root
     manifest = json.loads((root / "effective-manifest.json").read_text())
     results = json.loads((root / "results.json").read_text())
+    identity = json.loads((root / "identity.json").read_text())
     columns = ("guards_alive guards_active guards_in_view_cone guard_attacks guard_deaths "
                "guards_dismembered weapon_shots weapon_impacts level_alive level_active "
                "level_species level_parts level_effects skin_fallbacks skin_overflow "
@@ -48,7 +49,9 @@ def main():
                 level = state["campaign"]["levels"][state["current"]]
                 cell["states"][which] = dict(sha256=sha(path), current=state["current"],
                                                feet=state["player"]["feet"], view=state["view"],
-                                               environment_clock=level["environment_clock"])
+                                               environment_clock=level["environment_clock"],
+                                               stats={key: state["stats"][key] for key in
+                                                      ("difficulty", "sanity", "will", "selected", "god", "notarget", "scripted_immunity", "powers")})
                 if which == "initial" and scene["school_clubs"]:
                     actors = [a for a in level["npcs"]["actors"] if a.get("guard")]
                     guards = [dict(id=a["spawn"]["name"], model=a["spawn"]["model"],
@@ -64,6 +67,11 @@ def main():
         if validation.exists():
             records = [json.loads(line) for line in validation.read_text().splitlines()]
             cell["validation"] = dict(identity=records[0], last=records[-1])
+            cell["observed_window_sizes"] = sorted({tuple(row["window_size"]) for row in records if "window_size" in row})
+            cell["projection_aspects"] = sorted({row["projection_aspect"] for row in records if "projection_aspect" in row})
+            if identity.get("host_projection_aspect") is not None and result["status"] == "complete":
+                assert cell["projection_aspects"] and all(abs(value - identity["host_projection_aspect"]) < 1e-6
+                                                          for value in cell["projection_aspects"]), prefix + " varying/wrong projection"
         png = root / (prefix + "-verification.png")
         if png.exists():
             cell["verification_png_sha256"] = sha(png)
@@ -80,6 +88,11 @@ def main():
             assert "verification_png_sha256" in cell, prefix + " missing host verification image"
             assert cell["verification_nonuniform"], prefix + " uniform/blank verification image"
             assert len(cell["completed_intermediate_epochs"]) == scene["epochs"] - 1, prefix + " incomplete epochs"
+            if scene["school_clubs"]:
+                for state in cell["states"].values():
+                    stats = state["stats"]
+                    assert not stats["god"] and not stats["notarget"] and stats["scripted_immunity"] == 0
+                    assert stats["powers"]["stopped"] == 0
         audit["cells"].append(cell)
     (root / "fixture-audit.json").write_text(json.dumps(audit, indent=2) + "\n")
     for cell in audit["cells"]:
