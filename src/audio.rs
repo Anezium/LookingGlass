@@ -8,6 +8,7 @@ use crate::{assets::Assets, bsp::Bsp, collision::World};
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::{vec3, Vec3};
 use rodio::{dynamic_mixer, Decoder, OutputStream, Sink, Source};
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
@@ -582,7 +583,30 @@ struct Playback {
 }
 impl Playback {
     fn open(data: Arc<MonitorData>, record: bool) -> Result<Self> {
-        let (stream, handle) = OutputStream::try_default()?;
+        let host = rodio::cpal::default_host();
+        let default = host.default_output_device().context("No default audio output device")?;
+        // Keep the default-first fallback, but record the configuration that
+        // actually opened, rather than a guessed mixer or device sample rate.
+        let mut devices = vec![default];
+        if let Ok(others) = host.output_devices() { devices.extend(others); }
+        let mut opened = None;
+        let mut failure = String::new();
+        for device in devices {
+            let result = device.default_output_config().map_err(anyhow::Error::from)
+                .and_then(|config| {
+                    let rate = config.sample_rate().0;
+                    let channels = config.channels();
+                    let stream = OutputStream::try_from_device_config(&device, config)?;
+                    println!("Audio device opened: {} / {} Hz / {} channels",
+                        device.name().unwrap_or_else(|_| "unnamed".into()), rate, channels);
+                    Ok(stream)
+                });
+            match result {
+                Ok(stream) => { opened = Some(stream); break; }
+                Err(error) => failure = format!("{error:#}"),
+            }
+        }
+        let (stream, handle) = opened.with_context(|| format!("No usable audio output: {failure}"))?;
         let (mixer, source) = dynamic_mixer::mixer(2, 44100);
         handle.play_raw(Monitor {
             source,
