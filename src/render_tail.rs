@@ -70,16 +70,20 @@ fn program(id:u32) {
     }
 }
 fn texture() {
+    crate::actor_prep_profile::raw_count(crate::actor_prep_profile::RawCount::GlBind);
     if !crate::light_profile::render_active() {return;}
     let owner=STATE.with(|s| {let s=s.borrow(); (!s.tail).then_some(s.owner).flatten()});
     if let Some(p)=owner {crate::light_profile::render_add(p,RenderMetrics {texture_gl_binds:1,..Default::default()});}
     event(|m|m.texture_gl_binds+=1);
 }
-fn uniform(count:i32, width:u64) { event(|m| {m.uniform_gl_calls+=1;m.uniform_bytes+=count.max(0) as u64*width*4;}); }
+fn uniform(count:i32, width:u64) {
+    crate::actor_prep_profile::raw_count(crate::actor_prep_profile::RawCount::GlUniform);
+    event(|m| {m.uniform_gl_calls+=1;m.uniform_bytes+=count.max(0) as u64*width*4;}); }
 fn buffer(size:isize, data:*const std::ffi::c_void) {
     if !data.is_null() {event(|m|{m.buffer_updates+=1;m.buffer_bytes+=size.max(0) as u64;});}
 }
 fn draw() {
+    crate::actor_prep_profile::raw_count(crate::actor_prep_profile::RawCount::GlDraw);
     if !crate::light_profile::render_active() { return; }
     let packet=STATE.with(|s| {
         let mut s=s.borrow_mut();
@@ -118,7 +122,7 @@ mod hooks {
         }
     }
     api! {
-        glUseProgram(p:u32); glBindTexture(t:u32,p:u32); glDepthMask(v:u8);
+        glUseProgram(p:u32); glBindTexture(t:u32,p:u32); glBindBuffer(t:u32,p:u32); glDepthMask(v:u8);
         glEnable(v:u32); glDisable(v:u32); glDepthFunc(v:u32); glCullFace(v:u32); glFrontFace(v:u32);
         glBlendFuncSeparate(a:u32,b:u32,c:u32,d:u32); glBlendEquationSeparate(a:u32,b:u32);
         glViewport(x:i32,y:i32,w:i32,h:i32); glScissor(x:i32,y:i32,w:i32,h:i32);
@@ -140,7 +144,8 @@ mod hooks {
         depth_func => glDepthFunc(v:u32) {raster();}; cull_face => glCullFace(v:u32) {raster();}; front_face => glFrontFace(v:u32) {raster();};
         blend_func => glBlendFuncSeparate(a:u32,b:u32,c:u32,d:u32) {raster();}; blend_equation => glBlendEquationSeparate(a:u32,b:u32) {raster();};
         viewport => glViewport(x:i32,y:i32,w:i32,h:i32) {raster();}; scissor => glScissor(x:i32,y:i32,w:i32,h:i32) {raster();};
-        uniform_i => glUniform1i(l:i32,v:i32) {event(|m|m.texture_bind_slots+=1);};
+        bind_buffer => glBindBuffer(t:u32,p:u32) {crate::actor_prep_profile::raw_count(crate::actor_prep_profile::RawCount::GlBind);};
+        uniform_i => glUniform1i(l:i32,v:i32) {crate::actor_prep_profile::raw_count(crate::actor_prep_profile::RawCount::GlUniform);event(|m|m.texture_bind_slots+=1);};
         uniform1 => glUniform1fv(l:i32,n:i32,p:*const f32) {uniform(n,1);}; uniform2 => glUniform2fv(l:i32,n:i32,p:*const f32) {uniform(n,2);};
         uniform3 => glUniform3fv(l:i32,n:i32,p:*const f32) {uniform(n,3);}; uniform4 => glUniform4fv(l:i32,n:i32,p:*const f32) {uniform(n,4);};
         uniform_matrix => glUniformMatrix4fv(l:i32,n:i32,t:u8,p:*const f32) {uniform(n,16);};
@@ -154,6 +159,7 @@ mod hooks {
     unsafe extern "C" fn delete(p:u32) {unregister(p);api::glDeleteProgram(p);}
     pub(crate) fn lookup(name:&[u8])->Option<*mut c_void> {
         Some(match name {
+            b"glBindBuffer"=>bind_buffer as *const () as _,
             b"glUseProgram"=>use_program as *const () as _, b"glBindTexture"=>bind_texture as *const () as _,
             b"glDepthMask"=>depth_mask as *const () as _, b"glEnable"=>enable as *const () as _, b"glDisable"=>disable as *const () as _,
             b"glDepthFunc"=>depth_func as *const () as _, b"glCullFace"=>cull_face as *const () as _, b"glFrontFace"=>front_face as *const () as _,

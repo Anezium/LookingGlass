@@ -185,6 +185,9 @@ impl Ring {
                 write!(out, ",actor_prep_{name}_{field}")?;
             }
         }
+        for name in crate::actor_prep_profile::RAW_NAMES {
+            write!(out, ",actor_prep_{name}")?;
+        }
         writeln!(out)?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
@@ -203,6 +206,7 @@ impl Ring {
                 write!(out, ",{},{},{},{},{}", r.actor_prep.ns[i], r.actor_prep.calls[i],
                     r.actor_prep.counts[i][0], r.actor_prep.counts[i][1], r.actor_prep.counts[i][2])?;
             }
+            for value in r.actor_prep.raw_counts { write!(out, ",{value}")?; }
             writeln!(out)?;
         }
         Ok(())
@@ -383,6 +387,7 @@ mod tests {
                 ring.current.actor_prep.calls[i] = frame + i as u64;
                 ring.current.actor_prep.counts[i] = [frame * 2, frame * 3, frame * 4];
             }
+            ring.current.actor_prep.raw_counts = [frame*5, frame*6, frame*7, frame*8];
             ring.pending = true;
             ring.begin(origin + std::time::Duration::from_micros(frame * 100));
         }
@@ -397,6 +402,7 @@ mod tests {
             assert_eq!(values[0], frame);
             assert_eq!(values[124], 1);
             assert_eq!(values[125], frame * 10000);
+            assert_eq!(&values[276..], &[frame*5, frame*6, frame*7, frame*8]);
             for (i, name) in crate::actor_prep_profile::NAMES.iter().enumerate() {
                 let col = 126 + i * 5;
                 assert_eq!(headers[col], format!("actor_prep_{name}_exclusive_ns"));
@@ -427,10 +433,10 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.lines().count(), 61);
         assert!(s.lines().next().unwrap().contains("world_opaque_draws"));
-        assert_eq!(s.lines().next().unwrap().split(',').count(), 241);
+        assert_eq!(s.lines().next().unwrap().split(',').count(), 280);
         assert!(s.lines().nth(1).unwrap().starts_with("66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0,"));
         assert!(s.lines().last().unwrap().starts_with("125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0,"));
-        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 241));
+        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 280));
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);

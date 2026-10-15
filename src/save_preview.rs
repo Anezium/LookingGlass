@@ -267,6 +267,7 @@ impl Frame {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("save_grab_screen");
             self.texture.as_ref().unwrap().grab_screen();
+            crate::actor_prep_profile::raw_count(crate::actor_prep_profile::RawCount::PreviewCapture);
         }
     }
     pub fn preview(&self) -> Option<Preview> {

@@ -1050,6 +1050,9 @@ impl Renderer {
         alpha: bool,
         transforms: &[(usize, Vec3, Quat)],
     ) -> super::DrawStats {
+        // Alpha preparation retains its caller's WorldParticlesAlpha ownership.
+        let opaque_prepare = (!alpha).then(|| crate::actor_prep_profile::span(
+            crate::actor_prep_profile::Phase::WorldOpaquePrepare));
         use crate::light_profile::{RenderMetrics, RenderPhase};
         let phase = if alpha { RenderPhase::WorldAlpha } else { RenderPhase::WorldOpaque };
         crate::render_tail::end();
@@ -1241,6 +1244,9 @@ impl Renderer {
         if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
         } }
+        drop(opaque_prepare);
+        let _opaque_submit = (!alpha).then(|| crate::actor_prep_profile::span(
+            crate::actor_prep_profile::Phase::WorldOpaqueSubmit));
         let mut previous_pipeline = None;
         let mut previous_texture = None;
         let submit_span = crate::frame_profile::span("vita_world_submit");

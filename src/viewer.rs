@@ -3497,6 +3497,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_objects");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        let prep_power = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::PowerArt);
         if draw_world && !world_only {
             power_art.draw(
                 &pickups,
@@ -3513,6 +3514,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_world_particles");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        drop(prep_power);
+        let prep_effects;
+        let prep_particles = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::WorldParticlesAlpha);
         {
             scene.draw_with_particles(
                 camera,
@@ -3522,6 +3526,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 &transforms,
                 &steam,
             );
+            drop(prep_particles);
+            prep_effects = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::EffectsFirstPerson);
             #[cfg(target_os = "vita")]
             {
                 drop(viewer_block);
@@ -3608,6 +3614,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_capture");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        drop(prep_effects);
+        let prep_present = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::PresentPreview);
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
         if saves_writable {
@@ -3636,6 +3644,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_hud");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
+        drop(prep_present);
+        let prep_hud = crate::actor_prep_profile::span(crate::actor_prep_profile::Phase::HudTail);
         set_default_camera();
         let hud_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Hud);
         if !world_only {
@@ -4033,6 +4043,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(frame_profile);
         crate::character::skinning_bench_end();
+        drop(prep_hud);
         drop(prep_block);
         crate::light_profile::cpu_end();
         let probe_ns = probe_started.map_or(0, |t|t.elapsed().as_nanos() as u64);

@@ -5,31 +5,41 @@ use std::{cell::RefCell, time::Instant};
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Phase { Input, Interactions, Movers, Movement, Story, Particles, Combat,
     Alice, Audio, Camera, Scene, Gather, Discovery, Consume, Simple, Modifiers,
-    Publication, Collect, Finish, Upload, Submit, Other, Support }
-pub(crate) const N: usize = 23;
+    Publication, Collect, Finish, Upload, Submit, Other, Support, WorldOpaquePrepare, WorldOpaqueSubmit, PowerArt,
+    WorldParticlesAlpha, EffectsFirstPerson, PresentPreview, HudTail }
+pub(crate) const N: usize = 30;
 pub(crate) const NAMES: [&str; N] = ["input", "interactions", "movers", "movement", "story", "particles",
     "combat", "alice", "audio", "camera", "scene", "gather", "actor_discovery_setup",
     "overlap_consume_validation_copy", "simple_layer_publication", "dynamic_modifiers",
-    "packet_publication", "collect_wait", "finish_bookkeeping", "upload", "actual_submission", "other", "actor_shadow_atmosphere"];
+    "packet_publication", "collect_wait", "finish_bookkeeping", "upload", "actual_submission", "other", "actor_shadow_atmosphere",
+    "world_opaque_prepare", "world_opaque_submit", "power_art", "world_particles_alpha",
+    "effects_first_person", "present_preview", "hud_tail"];
 #[derive(Clone, Copy)]
 pub(crate) enum Count { CopiedBytes, ComparedBytes, LogicalDraws }
+/// Raw driver entry counts, restricted to the owned opaque loop, and actual preview copies.
+#[derive(Clone, Copy)]
+pub(crate) enum RawCount { GlDraw, GlUniform, GlBind, PreviewCapture }
+pub(crate) const RAW_NAMES: [&str; 4] = ["world_opaque_submit_gl_draw_calls",
+    "world_opaque_submit_gl_uniform_calls", "world_opaque_submit_gl_bind_calls",
+    "present_preview_captures"];
 /// Fixed-size value copied once after all game-thread spans have closed.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Snapshot {
     pub ns: [u64; N],
     pub calls: [u64; N],
     pub counts: [[u64; 3]; N],
+    pub raw_counts: [u64; 4],
 }
 pub(crate) fn snapshot() -> Snapshot {
     STATE.with(|s| {
         let s = s.borrow();
         debug_assert!(s.current.is_none(), "snapshot requires closed spans");
-        Snapshot { ns: s.ns, calls: s.calls, counts: s.counts }
+        Snapshot { ns: s.ns, calls: s.calls, counts: s.counts, raw_counts: s.raw_counts }
     })
 }
 #[derive(Default)]
 struct State { current: Option<Phase>, last: Option<Instant>, ns: [u64; N],
-    calls: [u64; N], counts: [[u64; 3]; N] }
+    calls: [u64; N], counts: [[u64; 3]; N], raw_counts: [u64; 4] }
 impl State {
     fn checkpoint(&mut self, now: Instant) {
         if let (Some(p), Some(start)) = (self.current, self.last) {
@@ -72,6 +82,24 @@ pub(crate) fn count(kind: Count, value: usize) {
     if enabled() { let _=STATE.try_with(|s| { let mut s=s.borrow_mut();
         if let Some(p)=s.current {s.counts[p as usize][kind as usize] += value as u64;} }); }
 }
+pub(crate) fn raw_count(kind: RawCount) {
+    if enabled() { let _ = STATE.try_with(|s| s.borrow_mut().raw_count(kind)); }
+}
+impl State {
+    fn raw_count(&mut self, kind: RawCount) {
+        let owned = match kind {
+            RawCount::PreviewCapture => matches!(self.current, Some(Phase::PresentPreview)),
+            _ => matches!(self.current, Some(Phase::WorldOpaqueSubmit)),
+        };
+        if owned { self.raw_counts[kind as usize] += 1; }
+    }
+}
+#[cfg(not(target_os="vita"))]
+pub(crate) fn raw_report() -> serde_json::Value {
+    let saved = snapshot();
+    serde_json::Value::Object(RAW_NAMES.iter().zip(saved.raw_counts).map(|(name, value)|
+        ((*name).to_owned(), value.into())).collect())
+}
 pub(crate) fn reset() { if enabled() { STATE.with(|s| *s.borrow_mut()=State::default()); } }
 #[cfg(not(target_os="vita"))]
 pub(crate) fn report() -> serde_json::Value {
@@ -107,7 +135,7 @@ pub(crate) mod replay {
                 "simulation_sha256":format!("{:x}",Sha256::digest(&state)),
                 "environment_clock":game.level()?.environment_clock,
                 "feet":game.player.feet.to_array(),"cpu_ns":cpu_ns,"allocations":allocations,
-                "exclusive":super::report(),"render":crate::light_profile::render_host_report(),
+                "exclusive":super::report(),"exclusive_raw":super::raw_report(),"render":crate::light_profile::render_host_report(),
                 "counts":crate::render_fx::retained::host_report()}));
             self.frame+=1;
             Ok(())
@@ -144,16 +172,43 @@ mod tests {
                 s.calls[i] = 200 + i as u64;
                 s.counts[i] = [300 + i as u64, 400 + i as u64, 500 + i as u64];
             }
+            s.raw_counts = [11, 12, 13, 14];
         });
         let scope = crate::kernel_alloc::Scope::begin();
         let saved = snapshot();
         STATE.with(|s| *s.borrow_mut() = State::default());
         assert_eq!(scope.finish(), 0);
+        assert_eq!(saved.raw_counts, [11, 12, 13, 14]);
         for i in 0..N {
             assert_eq!(saved.ns[i], 100 + i as u64);
             assert_eq!(saved.calls[i], 200 + i as u64);
             assert_eq!(saved.counts[i], [300 + i as u64, 400 + i as u64, 500 + i as u64]);
         }
+    }
+    #[test]
+    fn raw_driver_counts_are_restricted_to_the_opaque_loop_and_actual_capture() {
+        let mut s = State::default();
+        for phase in [Phase::Other, Phase::WorldOpaquePrepare, Phase::WorldOpaqueSubmit,
+                      Phase::Submit, Phase::PresentPreview, Phase::HudTail] {
+            s.current = Some(phase);
+            for kind in [RawCount::GlDraw, RawCount::GlUniform, RawCount::GlBind, RawCount::PreviewCapture] {
+                s.raw_count(kind);
+            }
+        }
+        assert_eq!(s.raw_counts, [1, 1, 1, 1]);
+        let t = Instant::now();
+        s.current = Some(Phase::Other); s.last = Some(t);
+        s.checkpoint(t + std::time::Duration::from_micros(2));
+        s.current = Some(Phase::EffectsFirstPerson);
+        s.checkpoint(t + std::time::Duration::from_micros(5));
+        s.current = Some(Phase::Finish);
+        s.checkpoint(t + std::time::Duration::from_micros(12));
+        s.current = Some(Phase::EffectsFirstPerson);
+        s.checkpoint(t + std::time::Duration::from_micros(13));
+        assert_eq!(s.ns[Phase::Other as usize], 2000);
+        assert_eq!(s.ns[Phase::EffectsFirstPerson as usize], 4000);
+        assert_eq!(s.ns[Phase::Finish as usize], 7000);
+        assert_eq!(s.ns.iter().sum::<u64>(), 13000);
     }
     #[test] fn nested_spans_partition_time_without_counting_children_twice() {
         let t=Instant::now();let mut s=State::default();
