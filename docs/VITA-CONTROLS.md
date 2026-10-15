@@ -46,6 +46,8 @@ Vita action prompts use physical button names, including D-pad directions.
 
 D-pad Down opens inventory without changing the selected toy on that frame.
 Inside the chapter chooser Down scrolls; it cannot open inventory. Cross confirms
-the highlighted chapter and ignores its duplicate pointer event. Touch still works.
+the highlighted chapter and ignores its duplicate pointer event. Inventory
+confirmation uses the same guard, so Cross cannot select the stale cursor toy.
+Touch still works.
 The original preset is replaced only by resetting preferences or installing the
 supplied r2 preset after backing up custom preferences.

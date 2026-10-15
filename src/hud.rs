@@ -300,7 +300,11 @@ impl Hud {
         }
     }
     pub fn inventory_hit(&self) -> Option<usize> {
-        if !is_mouse_button_pressed(MouseButton::Left) {
+        if !is_mouse_button_pressed(MouseButton::Left)
+            || !crate::menu::pointer_input_allowed(
+                crate::preferences::Preferences::vita_emulation(),
+                is_key_down(KeyCode::Enter), is_key_released(KeyCode::Enter))
+        {
             return None;
         }
         let p = Vec2::from(mouse_position());
