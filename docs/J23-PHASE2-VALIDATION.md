@@ -97,3 +97,7 @@ The gather tail increases in the rejected gate; collection remains microseconds.
 This is unrelated to puff fusion, so independent phase 3 is permitted by the
 brief. The actor switch remains default off. No phase-2 console acceptance or
 package readiness is claimed.
+
+Independent phase 3 also fails its consistent-three-pair CPU gate; see
+`J23-PUFF-FUSION.md` and `J23-FINAL-REPORT.md`. Neither full gate passes, so phase 4
+is not entered. Both new switches remain default off; no package exists.

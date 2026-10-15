@@ -56,3 +56,33 @@ production, full joint sorting and world-puff batch planning/packing/publication
 shared ordering/barrier work is conservatively charged in full in both arms.
 Upload/submission and total body are reported separately. No per-vertex clocks,
 save witness or parity digest runs in timing. No package exists yet.
+
+## Completed host gate: FAIL
+
+Three load-qualified AB/BA/AB pairs completed on the Mac at runtime source
+`1a988c09055d3759c2b9c7f1597f7872ab582c91`. Accepted attempts are 1, 2 and 1;
+pair 2 attempt 1 was rejected in full for load and preserved. Every accepted
+observation of all three load averages is at most 3. All 120 retained frames in
+every arm are used, including stalls. The shared timing lock was released.
+
+Per-frame summed pipeline median/p95 in Mac milliseconds, off -> on:
+
+- Pair 1: 0.053334/0.080833 -> 0.053729/0.081375; -0.742% reduction. FAIL.
+- Pair 2: 0.056999/0.085875 -> 0.034584/0.047625; 39.326% reduction. PASS.
+- Pair 3: 0.055480/0.091084 -> 0.054646/0.079376; 1.501% reduction. FAIL.
+
+All three pairs match 120/120 simulation hashes and every compared draw, uniform,
+upload, capacity, growth and final-write counter. Intermediate puff Vertex
+records remain absent in the candidate. Targeted warmed-kernel allocation tests
+pass, but removing representations does not produce a consistent 20% CPU saving.
+No accepted sample is rerun, trimmed or replaced based on its performance.
+
+Body median/p95 off -> on is 1.373687/2.141916 -> 1.423771/2.205583,
+1.360417/1.785625 -> 1.126396/1.626250, and
+1.396834/1.776416 -> 1.383937/1.773750 ms respectively. These are host-body
+observations excluding the deferred framework/GPU tail, not Vita wall timings.
+Raw distributions, rejected attempts and uptime are in `timed6-puffs/`.
+
+Both phase-2 and phase-3 full gates fail. Both switches remain default off.
+Phase 4 is ineligible, so no VPK, native cross-build, ELF-margin result or package
+hash is produced. No console or remote build host was accessed by this track.
