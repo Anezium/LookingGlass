@@ -332,10 +332,12 @@ fn finish_entered(
 }
 
 pub(crate) fn save_capture(path: &std::path::Path) -> Result<()> {
+    save_capture_frame(path, get_screen_data())
+}
+fn save_capture_frame(path: &std::path::Path, frame: Image) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    let frame = get_screen_data();
     // OpenGL reads rows from the bottom; PNG stores rows from the top.
     let mut pixels = frame.bytes;
     let stride = frame.width as usize * 4;
@@ -4123,8 +4125,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(cell)=&options.coverage_cell {
             std::fs::write(cell.output.join(format!("{}-final-state.json",cell.prefix)),serde_json::to_vec(&game_snapshot!())?)?;
         }
-        #[cfg(not(target_os="vita"))]
-        if let Some(cell)=&options.coverage_cell {save_capture(&cell.output.join(format!("{}-verification.png",cell.prefix)))?;}
+        #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+        if let Some(cell)=&options.coverage_cell {
+            // begin() has already completed/flushed the final presented row.
+            // The default framebuffer is now cleared; read the retained 3D
+            // target instead. This diagnostic excludes HUD and never advances
+            // simulation, redraws, or captures inside a retained window.
+            let image=crate::render::vita_renderer::verification_image()
+                .context("host survey verification requires a retained scaled 3D target")?;
+            save_capture_frame(&cell.output.join(format!("{}-verification.png",cell.prefix)),image)?;
+        }
     }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);

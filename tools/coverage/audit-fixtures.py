@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+from PIL import Image
 
 
 def sha(path):
@@ -66,6 +67,10 @@ def main():
         png = root / (prefix + "-verification.png")
         if png.exists():
             cell["verification_png_sha256"] = sha(png)
+            with Image.open(png) as image:
+                cell["verification_size"] = list(image.size)
+                cell["verification_rgb_extrema"] = image.convert("RGB").getextrema()
+                cell["verification_nonuniform"] = any(lo != hi for lo, hi in cell["verification_rgb_extrema"])
         epochs = root / (prefix + "-epochs.jsonl")
         cell["completed_intermediate_epochs"] = (
             [json.loads(line) for line in epochs.read_text().splitlines()] if epochs.exists() else [])
@@ -73,6 +78,7 @@ def main():
             assert cell["timed_frames"] > 0, prefix + " missing timed rows"
             assert set(cell["states"]) == {"initial", "final"}, prefix + " missing state proof"
             assert "verification_png_sha256" in cell, prefix + " missing host verification image"
+            assert cell["verification_nonuniform"], prefix + " uniform/blank verification image"
             assert len(cell["completed_intermediate_epochs"]) == scene["epochs"] - 1, prefix + " incomplete epochs"
         audit["cells"].append(cell)
     (root / "fixture-audit.json").write_text(json.dumps(audit, indent=2) + "\n")

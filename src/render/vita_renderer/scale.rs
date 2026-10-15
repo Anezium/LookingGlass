@@ -31,6 +31,12 @@ pub(super) fn pass() -> Option<macroquad::miniquad::RenderPass> {
             .map(|t| t.rt.render_pass.raw_miniquad_id())
     })
 }
+/// The completed 3D image survives the default framebuffer's next-frame clear.
+/// Readback is requested only after a host survey has flushed its timed rows.
+#[cfg(not(target_os = "vita"))]
+pub(super) fn verification_image() -> Option<Image> {
+    TARGET.with(|t| t.borrow().as_ref().map(|t| t.rt.texture.get_texture_data()))
+}
 pub(super) fn prepare(bg: Color) {
     crate::render_tail::end();
     log_framebuffer();

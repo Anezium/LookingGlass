@@ -183,6 +183,8 @@ pub struct Timing {
 }
 #[derive(Default)]
 pub struct Feedback {
+    /// Successful club contacts, separate from the saved ranged-shot/FX seed.
+    pub melee_strikes: u64,
     pub will_drain: f32,
     pub cue_sounds: Vec<(String, Vec3)>,
     pub damage: f32,
@@ -461,6 +463,9 @@ impl Guard {
             crate::coverage::add(26,1);
             self.step(1. / 120., world, eye, timing, &mut out);
         }
+        if out.melee_strikes != 0 {
+            crate::coverage::add(4, out.melee_strikes);
+        }
         out
     }
     /// Settle newly spawned/restored editor placements before their first draw,
@@ -617,6 +622,7 @@ impl Guard {
                             .dot(vec2(self.yaw.cos(), self.yaw.sin()))
                             > 0.5
                     {
+                        out.melee_strikes += 1;
                         out.strike(victim, 12., Vec3::ZERO, DamageKind::Other);
                     }
                 }
@@ -889,12 +895,16 @@ mod tests {
         let mut g = Guard::new(Vec3::ZERO, 0., 1.);
         g.set_state(State::Attack);
         let mut damage = 0.;
+        let mut contacts = 0;
         for _ in 0..70 {
-            damage += g
-                .advance(1. / 120., &floor(), vec3(50., 0., 48.), timing())
-                .damage;
+            let feedback = g.advance(1. / 120., &floor(), vec3(50., 0., 48.), timing());
+            damage += feedback.damage;
+            contacts += feedback.melee_strikes;
         }
         assert_eq!(damage, 12.);
+        assert_eq!(contacts, 1);
+        // This saved value also seeds death FX. Instrumentation must not change it.
+        assert_eq!(g.attacks, 0);
         for eye in [
             vec3(-50., 0., 48.),
             vec3(150., 0., 48.),
@@ -904,7 +914,9 @@ mod tests {
             g.set_state(State::Attack);
             let mut damage = 0.;
             for _ in 0..70 {
-                damage += g.advance(1. / 120., &floor(), eye, timing()).damage;
+                let feedback = g.advance(1. / 120., &floor(), eye, timing());
+                damage += feedback.damage;
+                assert_eq!(feedback.melee_strikes, 0);
             }
             assert_eq!(damage, 0.);
         }
@@ -912,11 +924,9 @@ mod tests {
         let mut g = Guard::new(Vec3::ZERO, 0., 1.);
         g.set_state(State::Attack);
         for _ in 0..70 {
-            assert_eq!(
-                g.advance(1. / 120., &wall, vec3(50., 0., 48.), timing())
-                    .damage,
-                0.
-            );
+            let feedback = g.advance(1. / 120., &wall, vec3(50., 0., 48.), timing());
+            assert_eq!(feedback.damage, 0.);
+            assert_eq!(feedback.melee_strikes, 0);
         }
     }
     #[test]

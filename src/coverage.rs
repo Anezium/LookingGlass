@@ -551,6 +551,7 @@ pub struct Session {
     origin: [f32; 3],
     max_motion: f32,
     attacks: u64,
+    melee_attacks: u64,
     shots: u64,
     impacts: u64,
     deaths: u64,
@@ -591,6 +592,7 @@ impl Session {
             origin: [0.; 3],
             max_motion: 0.,
             attacks: 0,
+            melee_attacks: 0,
             shots: 0,
             impacts: 0,
             deaths: 0,
@@ -684,6 +686,7 @@ impl Session {
                 self.reset_due = true;
                 self.frames = 0;
                 self.attacks = 0;
+                self.melee_attacks = 0;
                 self.shots = 0;
                 self.impacts = 0;
                 self.deaths = 0;
@@ -763,6 +766,7 @@ impl Session {
                 self.previous = Sample::default();
                 self.current = Sample::default();
                 self.attacks = 0;
+                self.melee_attacks = 0;
                 self.shots = 0;
                 self.impacts = 0;
                 self.deaths = 0;
@@ -879,6 +883,16 @@ impl Session {
                 );
             }
         }
+        phase(None);
+        let (spans, mut counts) = METRICS.with(|m| {
+            let m = m.borrow();
+            (m.spans, m.counters)
+        });
+        // Guard::attacks is a persisted ranged-shot counter and death-FX seed.
+        // Accumulate actual club contacts without changing that gameplay state.
+        self.melee_attacks += counts[4];
+        let mut guards = guards;
+        guards[4] += self.melee_attacks;
         self.attacks = self.attacks.max(guards[4]);
         self.deaths = self.deaths.max(guards[5]);
         self.dismemberment = self.dismemberment.max(guards[7]);
@@ -891,11 +905,6 @@ impl Session {
             macroquad::prelude::Vec3::from_array(feet)
                 .distance(macroquad::prelude::Vec3::from_array(self.origin)),
         );
-        phase(None);
-        let (spans, mut counts) = METRICS.with(|m| {
-            let m = m.borrow();
-            (m.spans, m.counters)
-        });
         self.level_active = self.level_active.max(counts[28]);
         self.level_species = self.level_species.max(counts[29]);
         counts[..8].copy_from_slice(&guards);
