@@ -147,6 +147,7 @@ pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
 // A persistent thread borrows only plain CPU arrays. Stack closure lives until wait.
 thread_local! { static WORKERS: std::cell::RefCell<Vec<crate::skin_worker::Worker>> = const { std::cell::RefCell::new(Vec::new()) }; }
 pub(crate) mod overlap;
+pub(crate) mod identity;
 pub(crate) mod prepared;
 pub(crate) fn startup(workers: usize, probe: bool, bench: bool, overlap: bool) {
     if overlap {

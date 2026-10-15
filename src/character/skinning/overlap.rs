@@ -55,6 +55,7 @@ struct Surface {
     alpha_variant: bool,
 }
 struct Draw {
+    actor: Option<super::identity::ActorId>,
     key: usize,
     pose: Range<usize>,
     scales: Range<usize>,
@@ -170,8 +171,6 @@ struct Store {
     input: Box<UnsafeCell<Inputs>>,
     #[cfg(feature="vita_renderer")]
     previous_numeric: Option<Box<Inputs>>,
-    #[cfg(feature="vita_renderer")]
-    direct_cursor: usize,
     output: Vec<Vertex>,
     output_len: usize,
     layers: Vec<[Vertex; 2]>,
@@ -219,7 +218,6 @@ impl Store {
             })),
             #[cfg(feature="vita_renderer")]
             previous_numeric:None,
-            #[cfg(feature="vita_renderer")] direct_cursor:0,
             output: vec![Vertex { position: Vec3::ZERO, uv: Vec2::ZERO,
                 normal: Vec4::ZERO, color: [0; 4] }; VERTICES],
             output_len: 0,
@@ -242,7 +240,6 @@ impl Store {
         let i = unsafe { &mut *self.input.get() };
         #[cfg(feature="vita_renderer")]
         if single_frame() {
-            self.direct_cursor=0;
             let old=self.previous_numeric.get_or_insert_with(||Box::new(Inputs {
                 draws:Vec::with_capacity(DRAWS),surfaces:Vec::with_capacity(SURFACES),pose:Vec::with_capacity(BONES),
                 scales:Vec::with_capacity(BONES),palette:Vec::with_capacity(BONES)}));
@@ -297,6 +294,7 @@ impl Store {
             return;
         }
         let draw = Draw {
+            actor: None,
             key: skeleton as *const Skeleton as usize,
             pose: i.pose.len()..i.pose.len() + p.pose.len(),
             scales: i.scales.len()..i.scales.len() + p.scales.len(),
@@ -340,16 +338,15 @@ impl Store {
     fn capture_single(&mut self, skeleton: &Skeleton, meshes: &mut [Option<Mesh>], p: Params<'_>, visible: bool) -> bool {
         crate::frame_profile::skinned_draw(!visible);
         crate::actor_prep_profile::count(crate::actor_prep_profile::Count::LogicalDraws, 1);
-        let surface_start=self.direct_cursor;
-        self.direct_cursor=self.direct_cursor.saturating_add(skeleton.surfaces.len());
+        let actor=super::identity::current();
         if !visible { return false; }
         let i = unsafe { &mut *self.input.get() };
-        let bounded = self.direct_cursor<=SURFACES && i.draws.len() < DRAWS && i.surfaces.len() + meshes.iter().flatten().count() <= SURFACES
+        let bounded = actor.is_some() && i.draws.len() < DRAWS && i.surfaces.len() + meshes.iter().flatten().count() <= SURFACES
             && self.output_len + meshes.iter().flatten().map(|m|m.vertices.len()).sum::<usize>() <= VERTICES
             && i.pose.len()+p.pose.len() <= BONES && i.scales.len()+p.scales.len() <= BONES
             && i.palette.len()+p.palette.len() <= BONES;
-        let previous=self.previous_numeric.as_ref().and_then(|old|old.draws.get(i.draws.len()).filter(|d|
-            d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
+        let previous=self.previous_numeric.as_ref().and_then(|old|old.draws.iter().find(|d|
+            d.actor==actor && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
                 && d.scale.to_bits()==p.scale.to_bits() && d.flat==p.flat && d.fullbright==p.fullbright
                 && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
         let start = i.surfaces.len();
@@ -363,7 +360,8 @@ impl Store {
                 // Compare its exact numeric dependencies on the game thread; never
                 // add J17's dual normalized-output comparison loop to the workers.
                 let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
-                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged, surface_start+mesh_id)
+                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged,
+                    crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize})
             } else { None };
             if let Some((output, alpha_variant)) = direct {
                 let vertices = self.output_len..self.output_len+mesh.vertices.len();
@@ -378,7 +376,7 @@ impl Store {
             }
         }
         if i.surfaces.len() > start {
-            let d = Draw { key:skeleton as *const Skeleton as usize,
+            let d = Draw { actor, key:skeleton as *const Skeleton as usize,
                 pose:i.pose.len()..i.pose.len()+p.pose.len(), scales:i.scales.len()..i.scales.len()+p.scales.len(),
                 palette:i.palette.len()..i.palette.len()+p.palette.len(), surfaces:start..i.surfaces.len(),
                 transform:p.transform,scale:p.scale,flat:p.flat,fullbright:p.fullbright,alpha:p.alpha,visible };

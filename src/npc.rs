@@ -710,6 +710,7 @@ fn family(def: &Definition, base: &str) -> Vec<String> {
         .collect()
 }
 struct Model {
+    skin_identity: crate::character::skinning::identity::ActorId,
     // Script puppets expose secondary draws in a later pass, after body visibility
     // is decided. Keep their vertices and normals even without death_frozen.
     late_skin_overlays: bool,
@@ -1105,6 +1106,7 @@ impl Model {
         visual: &crate::animation_events::VisualState,
         piece: Option<(&str, &str, bool)>,
     ) {
+        let _identity = self.skin_identity.scope_unless_set();
         self.visible.fill(false);
         self.electric_attachments.clear();
         self.electric_props.clear();
@@ -1546,6 +1548,7 @@ impl Model {
             }
         }
         Ok(Self {
+            skin_identity: Default::default(),
             late_skin_overlays: false,
             visible: vec![false; meshes.len()],
             bone_scales: Vec::new(),
@@ -1578,6 +1581,8 @@ impl Model {
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Actor {
+    #[serde(skip)]
+    skin_identity: crate::character::skinning::identity::ActorId,
     #[serde(default, skip_serializing_if = "crate::electric::inactive")]
     electric: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2343,6 +2348,7 @@ impl Npcs {
             .enumerate()
             .filter_map(|(i, s)| {
                 indices.get(&s.model).map(|&model| Actor {
+                    skin_identity: Default::default(),
                     resident: residents.remove(&i),
                     walk: None,
                     guide: if preview {
@@ -3144,6 +3150,7 @@ impl Npcs {
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for (id, actor) in self.actors.iter().enumerate() {
+            let _identity = actor.skin_identity.scope();
             let _skin_guard = crate::character::skinning::CullGuard::preserve(actor.electric > 0.);
             if actor.ant.as_ref().is_some_and(|a| !a.enabled) { continue; }
             if actor.guide.as_ref().is_some_and(|g| !g.visible()) {
@@ -4195,6 +4202,7 @@ mod tests {
     }
     pub(super) fn actor() -> Actor {
         Actor {
+            skin_identity: Default::default(),
             electric: 0.,
             walk: None,
             guide: None,

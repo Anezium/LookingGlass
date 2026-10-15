@@ -520,6 +520,7 @@ impl Animator {
 }
 
 pub struct Character {
+    skin_identity: skinning::identity::ActorId,
     pub weapon_notice: Option<&'static str>,
     _material_layers: Vec<std::rc::Rc<crate::render_fx::Surface>>,
     foot_rig: crate::footing::Rig,
@@ -690,6 +691,7 @@ impl Character {
         let actions = Actions::load(assets, skeleton.bones.len(), &animator.pose)?;
         let visuals = Visuals::load(assets)?;
         Ok(Self {
+            skin_identity: Default::default(),
             weapon_notice: None,
             foot_rig,
             _material_layers: material_layers,
@@ -1112,6 +1114,7 @@ impl Character {
         self.draw_ghost(feet, fullbright, false);
     }
     fn draw_body(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
+        let _identity = self.skin_identity.scope();
         let feet = feet + Vec3::Z * self.animator.offset;
         let prepared = skinning::prepared::pose(
             (&self.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
