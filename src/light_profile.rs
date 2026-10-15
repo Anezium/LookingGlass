@@ -48,6 +48,7 @@ struct Row {
     skin_fallbacks: u64,
     skin_overflow: u64,
     fx: [u64; 8],
+    actor_publication: [u64; 4],
     render: [RenderMetrics; 6],
 }
 /// Engine submission calls, counted at their owning phase. Texture binds count
@@ -168,7 +169,7 @@ impl Ring {
                 write!(out, ",{phase}_{field}")?;
             }
         }
-        writeln!(out)?;
+        writeln!(out,",actor_direct_surfaces,actor_mutable_consumer_surfaces,actor_publication_banks,actor_publication_capacity_bytes")?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
             let r = self.rows[i % WINDOW];
@@ -181,7 +182,7 @@ impl Ring {
                     p.uniform_bytes, p.buffer_updates, p.buffer_bytes, p.texture_bind_slots,
                     p.visibility_tests, p.uniform_gl_calls, p.visibility_cpu_ns / 1000, p.parameter_cpu_ns / 1000, p.deferred_cpu_ns / 1000, p.texture_gl_binds, p.state_gl_calls, p.program_gl_changes)?;
             }
-            writeln!(out)?;
+            writeln!(out,",{},{},{},{}",r.actor_publication[0],r.actor_publication[1],r.actor_publication[2],r.actor_publication[3])?;
         }
         Ok(())
     }
@@ -198,6 +199,19 @@ pub(crate) fn begin(map: &str, mode: Mode) {
     if let Err(e) = export_window(map, mode) {
         eprintln!("[lg/light] export failed: {e}");
     }
+}
+// Surface activity accumulates across views; bank/capacity values are gauges.
+fn record_actor_count(row:&mut Row,name:&str,value:u64) {
+    match name {
+        "actor_direct_surfaces" => row.actor_publication[0]+=value,
+        "actor_mutable_consumer_surfaces" => row.actor_publication[1]+=value,
+        "actor_publication_banks" => row.actor_publication[2]=value,
+        "actor_publication_capacity_bytes" => row.actor_publication[3]=value,
+        _ => {}
+    }
+}
+pub(crate) fn actor_count(name:&str,value:u64) {
+    if active() {RING.with(|r|record_actor_count(&mut r.borrow_mut().current,name,value));}
 }
 pub(crate) fn skin_collect_wait(us: u64) {
     if active() { RING.with(|r| r.borrow_mut().current.skin_collect_wait_us += us); }
@@ -354,6 +368,12 @@ mod tests {
             r.current.skin_gather_us = i * 3;
             r.current.skin_fallbacks = i % 3;
             r.current.skin_overflow = i % 2;
+            record_actor_count(&mut r.current,"actor_direct_surfaces",2);
+            record_actor_count(&mut r.current,"actor_direct_surfaces",3);
+            record_actor_count(&mut r.current,"actor_mutable_consumer_surfaces",1);
+            record_actor_count(&mut r.current,"actor_publication_banks",99);
+            record_actor_count(&mut r.current,"actor_publication_banks",7);
+            record_actor_count(&mut r.current,"actor_publication_capacity_bytes",4096);
             r.pending = true;
             r.begin(origin + std::time::Duration::from_micros(i * 10));
         }
@@ -362,10 +382,12 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.lines().count(), 61);
         assert!(s.lines().next().unwrap().contains("world_opaque_draws"));
-        assert_eq!(s.lines().next().unwrap().split(',').count(), 124);
+        assert_eq!(s.lines().next().unwrap().split(',').count(), 128);
         assert!(s.lines().nth(1).unwrap().starts_with("66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0,"));
         assert!(s.lines().last().unwrap().starts_with("125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0,"));
-        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 124));
+        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 128));
+        assert!(s.lines().skip(1).all(|line|line.ends_with(",5,1,7,4096")));
+        assert_eq!(r.current.actor_publication,[0;4]);
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);

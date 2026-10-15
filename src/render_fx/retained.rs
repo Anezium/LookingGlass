@@ -21,7 +21,10 @@ pub(crate) fn host_reset() {
 }
 pub(crate) fn count(name: &'static str, value: u64) {
     #[cfg(target_os = "vita")]
-    crate::frame_profile::counts(&[(name, value)]);
+    {
+        crate::light_profile::actor_count(name,value);
+        crate::frame_profile::counts(&[(name, value)]);
+    }
     #[cfg(not(target_os = "vita"))]
     HOST_COUNTS.with(|c| *c.borrow_mut().entry(name).or_default() += value);
 }
