@@ -1,22 +1,20 @@
-# Coverage fixture checkpoint — Mac, 2026-10-15
+# Coverage fixture status — Mac, 16 October 2026
 
-Runtime `615c1253322462284c180aa212bc0cf7b3616ae4` is committed and pushed. Optimized Mac host build, 846 feature tests (two existing ignores), default-feature check, fresh 109-image native Mac absent-manifest parity and fresh Mac A-stock package checks pass. ELF gap: 1,471,544 bytes. No console was accessed.
+Final entire three-repeat host rehearsal: **45 complete, 24 explicitly uncovered, zero failed**. Manifest SHA-256: `31f46b02599815fe5ea087a6ede3c5a167b86e10697704af404d5026351c17c8`. Runtime/package source: `615c1253322462284c180aa212bc0cf7b3616ae4`.
 
-The frozen [manifest](coverage/coverage_survey.json) has 23 segments, three repeats, 15 active segments and eight explicit exclusions. SHA-256: `31f46b02599815fe5ea087a6ede3c5a167b86e10697704af404d5026351c17c8`. The first full rehearsal had 50 complete, 18 uncovered and one failed Staff cell. The second full rehearsal had 47 complete, 21 uncovered and one failed Jackbomb cell. The third full host rehearsal is pending; expected result is 45 complete, 24 uncovered, zero failed cells.
+| Family | Fixture status | Complete / uncovered / failed | Scope or gap |
+| --- | --- | --- | --- |
+| V0 | Validated: opening and closing exact-reference controls | 6 / 0 / 0 | 20s settle + 60s live each; six complete cells. |
+| C1 | Validated: acquisition, Blade and Cards | 9 / 0 / 0 | Normal one-guard fixture; every required epoch, nine complete cells. |
+| C4 | Partial: acquisition and Cards | 6 / 3 / 0 | Blade excluded: no successful guard contact within its unchanged four-second epoch. |
+| F4 | Partial: primary Ice, Blunderbuss, actual dismemberment | 9 / 9 / 0 | Alternate Ice wall lacks impact proof; Staff r3 lacked impact; Jackbomb r2 lacked a shot. |
+| W | Uncovered | 0 / 3 / 0 | garden3 chase lost supported/alive state at 8.52s; no 60s moving-world proof. |
+| E | Uncovered | 0 / 3 / 0 | wchess1 active/species 0/0; two nearby bishops do not prove a mixed encounter. |
+| B | Partial: Intro, Birth and two death-FX stages | 12 / 6 / 0 | Queen2 Hatter/Scream lost live state at 16.40/3.85s; no boss-combat coverage. |
+| T | Validated: real gvillage → pandemonium$player_start | 3 / 0 / 0 | Three fresh source checkpoints, normal input, 20s source and 60s destination each. |
 
-| Family | Proven calibration scope | Remaining gap |
-| --- | --- | --- |
-| V0 | Exact reference checkpoint, opening and closing 20-second settle plus 60-second controls | None within this fixture |
-| C1 | One normal guard: acquisition, Blade and Cards exchanges, every required epoch | None within this fixture |
-| C4 | Four distinct supported active guards: acquisition and Cards | Blade exchange has no successful guard contact in the unchanged four-second epoch |
-| F4 | Primary Ice, Blunderbuss, actual dismemberment | Alternate Ice wall lacks the required impact proof; Staff release failed its third repeat with no impact; Jackbomb failed its second repeat with no shot |
-| W | Uncovered | Natural garden3 chase lost supported/alive state at 8.52 seconds; no 60-second proof |
-| E | Uncovered | Natural wchess1 has active/species 0/0; nearby prepared cast is two bishops, not a mixed encounter |
-| B | Authored Intro, Birth and two death-FX stages | Queen2 Hatter/Scream lose live state; no boss combat coverage claimed |
-| T | Real village source window, normal curved input tape, actual `pandemonium$player_start` map replacement, 60-second destination | None within this transition fixture |
+All retained predicates, epochs, durations, normal guard health and input tapes are unchanged. Staff and Jackbomb are excluded after required-repeat failures; their successful calibration/other repeats are preserved but do not establish full coverage. Strict state/epoch/nonblank-image checks, all 45 image reviews and isolated-save/input-hash audits pass. Host timings are rejected for sampled load and never establish console acceptance.
 
-School and Queen fixtures are diagnostic authored setups. Guard health, placements, activity minima, epoch counts and durations remain unchanged. Dismemberment uses normal funded Cards damage followed by one normal Knife throw; Jackbomb survival uses normal backpedalling. No immunity, cooldown override or fabricated activity is used.
+846 feature tests pass with two existing ignores; default check and fresh 109-image native Mac no-manifest parity pass. Current A-stock-mac-v5 package passes pinned SDK/Cargo.lock/ELF/import/ZIP/hash checks; gap 1,471,544 bytes. No console or SSH job was used. `docs/RCHESS1.md` remains the uncommitted CRLF artifact.
 
-All promoted calibration images are nonblank and visually reviewed; raw states, epochs, counters and rejection reasons are retained locally. Host verification reads the retained 3D target after timing flush and excludes the HUD. Projection stays 960/544 independently of recorded Cocoa window resizing. Host timing is not console acceptance. All eight excluded segments remain uncovered.
-
-Local authoritative evidence: `~/vita-j0/village-retained-world/jalon-coverage/RESUME.md`. Checkpoints, game data, images and saves stay outside Git. The clone's `docs/RCHESS1.md` CRLF artifact is excluded from commits.
+See [final report](coverage/FINAL-REPORT.md), [console protocol](coverage/PROTOCOL.md) and [frozen manifest](coverage/coverage_survey.json). Authoritative local raw evidence and resume: `~/vita-j0/village-retained-world/jalon-coverage/`. Console reservation: 70–100 minutes, hard 2h, a planning assumption.
