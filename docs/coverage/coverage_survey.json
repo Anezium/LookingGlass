@@ -1,0 +1,1337 @@
+{
+  "version": 1,
+  "run_id": "coverage-baseline",
+  "repeats": 3,
+  "overall_timeout_s": 7200,
+  "seed_policy": "restore-checkpoint-or-authored-load",
+  "debug_fixtures": true,
+  "scenes": [
+    {
+      "id": "V0",
+      "family": "V0",
+      "map": "gvillage",
+      "entry": null,
+      "checkpoint": {
+        "path": "fixtures/v0-reference.json",
+        "sha256": "4e5dab48ede6b88f30ac80fce6fb117c3bf4bacf6e76aabd5aeec260bb188714"
+      },
+      "view": null,
+      "warmup_s": 20,
+      "timed_s": 60,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {},
+      "uncovered": null
+    },
+    {
+      "id": "C1-acquire",
+      "family": "C1",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 12,
+      "timeout_s": 300,
+      "epochs": 2,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {
+        "guards": 1,
+        "min_attacks": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "C1-blade",
+      "family": "C1",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 24,
+      "timeout_s": 300,
+      "epochs": 4,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 0
+        },
+        {
+          "tick": 552,
+          "select": 0,
+          "primary": true
+        },
+        {
+          "tick": 594,
+          "select": 0
+        },
+        {
+          "tick": 672,
+          "select": 0,
+          "primary": true
+        },
+        {
+          "tick": 714,
+          "select": 0
+        }
+      ],
+      "expected": {
+        "guards": 1,
+        "min_attacks": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "C1-cards",
+      "family": "C1",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 24,
+      "timeout_s": 300,
+      "epochs": 4,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 1
+        },
+        {
+          "tick": 240,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 282,
+          "select": 1
+        },
+        {
+          "tick": 360,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 402,
+          "select": 1
+        },
+        {
+          "tick": 480,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 522,
+          "select": 1
+        },
+        {
+          "tick": 600,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 642,
+          "select": 1
+        }
+      ],
+      "expected": {
+        "guards": 1,
+        "min_shots": 1,
+        "min_impacts": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "C4-acquire",
+      "family": "C4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 12,
+      "timeout_s": 300,
+      "epochs": 3,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_attacks": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "C4-blade",
+      "family": "C4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 24,
+      "timeout_s": 300,
+      "epochs": 6,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 0
+        },
+        {
+          "tick": 180,
+          "select": 0,
+          "primary": true
+        },
+        {
+          "tick": 222,
+          "select": 0
+        },
+        {
+          "tick": 300,
+          "select": 0,
+          "primary": true
+        },
+        {
+          "tick": 342,
+          "select": 0
+        },
+        {
+          "tick": 420,
+          "select": 0,
+          "primary": true
+        },
+        {
+          "tick": 462,
+          "select": 0
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_attacks": 1
+      },
+      "uncovered": "Mac V6 normal Blade crowd tape retained four supported active/in-view guards and produced three shots/four impacts, but no successful club contact in the first unchanged four-second epoch. The min_attacks=1 predicate failed. Player hits alone are not promoted as the required exchange; the full Blade crowd subsegment remains uncovered."
+    },
+    {
+      "id": "C4-cards",
+      "family": "C4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 24,
+      "timeout_s": 300,
+      "epochs": 6,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 1
+        },
+        {
+          "tick": 120,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 162,
+          "select": 1
+        },
+        {
+          "tick": 240,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 282,
+          "select": 1
+        },
+        {
+          "tick": 360,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 402,
+          "select": 1
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_shots": 1,
+        "min_impacts": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "F4-ice-primary",
+      "family": "F4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 12,
+      "timeout_s": 300,
+      "epochs": 3,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 4
+        },
+        {
+          "tick": 90,
+          "select": 4,
+          "primary": true
+        },
+        {
+          "tick": 168,
+          "select": 4
+        },
+        {
+          "tick": 210,
+          "select": 4,
+          "primary": true
+        },
+        {
+          "tick": 288,
+          "select": 4
+        },
+        {
+          "tick": 330,
+          "select": 4,
+          "primary": true
+        },
+        {
+          "tick": 408,
+          "select": 4
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_shots": 1,
+        "min_impacts": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "F4-ice-alternate",
+      "family": "F4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 12,
+      "timeout_s": 300,
+      "epochs": 3,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 4
+        },
+        {
+          "tick": 90,
+          "select": 4,
+          "alternate": true
+        },
+        {
+          "tick": 168,
+          "select": 4
+        },
+        {
+          "tick": 210,
+          "select": 4,
+          "alternate": true
+        },
+        {
+          "tick": 288,
+          "select": 4
+        },
+        {
+          "tick": 330,
+          "select": 4,
+          "alternate": true
+        },
+        {
+          "tick": 408,
+          "select": 4
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_shots": 1,
+        "min_impacts": 1
+      },
+      "uncovered": "Mac v2 fired normally but observed no impacts. Source weapons.rs places a temporary wall for alternate Ice Wand; that path does not increment weapon_impacts. The unchanged min_impacts predicate cannot validate this workload; wall-specific visual/activity proof is missing."
+    },
+    {
+      "id": "F4-jackbomb",
+      "family": "F4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 12,
+      "timeout_s": 300,
+      "epochs": 3,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 3,
+          "look": [
+            -0.29,
+            0
+          ]
+        },
+        {
+          "tick": 12,
+          "select": 3,
+          "primary": true,
+          "look": [
+            -0.29,
+            0
+          ]
+        },
+        {
+          "tick": 48,
+          "select": 3,
+          "primary": true
+        },
+        {
+          "tick": 54,
+          "select": 3
+        },
+        {
+          "tick": 120,
+          "select": 3,
+          "movement": [
+            0,
+            -1
+          ]
+        },
+        {
+          "tick": 324,
+          "select": 3
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_shots": 1,
+        "min_impacts": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "F4-staff-release",
+      "family": "F4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 12,
+      "timeout_s": 300,
+      "epochs": 3,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 7
+        },
+        {
+          "tick": 12,
+          "select": 7,
+          "primary": true
+        },
+        {
+          "tick": 336,
+          "select": 7
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_shots": 1,
+        "min_impacts": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "F4-blunderbuss",
+      "family": "F4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 12,
+      "timeout_s": 300,
+      "epochs": 3,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 8
+        },
+        {
+          "tick": 90,
+          "select": 8,
+          "primary": true
+        },
+        {
+          "tick": 168,
+          "select": 8
+        },
+        {
+          "tick": 210,
+          "select": 8,
+          "primary": true
+        },
+        {
+          "tick": 288,
+          "select": 8
+        },
+        {
+          "tick": 330,
+          "select": 8,
+          "primary": true
+        },
+        {
+          "tick": 408,
+          "select": 8
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_shots": 1,
+        "min_impacts": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "F4-dismember",
+      "family": "F4",
+      "map": "skool1",
+      "entry": null,
+      "checkpoint": null,
+      "view": {
+        "feet": [
+          -1888,
+          1928,
+          -511.96875
+        ],
+        "yaw": 1.5707963268,
+        "pitch": 0,
+        "third_person": true
+      },
+      "warmup_s": 0,
+      "timed_s": 12,
+      "timeout_s": 300,
+      "epochs": 3,
+      "school_clubs": [
+        [
+          -1888,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1968,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1808,
+          2040,
+          -511.96875,
+          -1.5707963268
+        ],
+        [
+          -1888,
+          2130,
+          -511.96875,
+          -1.5707963268
+        ]
+      ],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 1
+        },
+        {
+          "tick": 12,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 90,
+          "select": 0
+        },
+        {
+          "tick": 144,
+          "select": 0,
+          "alternate": true
+        },
+        {
+          "tick": 198,
+          "select": 0
+        }
+      ],
+      "expected": {
+        "guards": 4,
+        "min_deaths": 1,
+        "min_dismemberment": 1
+      },
+      "uncovered": null
+    },
+    {
+      "id": "W",
+      "family": "W",
+      "map": "garden3",
+      "entry": "garden3_start1",
+      "checkpoint": {
+        "path": "fixtures/W/slot1.json",
+        "sha256": "6c4134316f1e6cb96d8dc9332b91f5094c8b0680b9966a0cbad8f032229c7f94"
+      },
+      "view": null,
+      "warmup_s": 20,
+      "timed_s": 60,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "movement": [
+            0,
+            1
+          ],
+          "run": true
+        },
+        {
+          "tick": 360,
+          "movement": [
+            0.5,
+            1
+          ],
+          "run": true
+        },
+        {
+          "tick": 720,
+          "movement": [
+            0,
+            1
+          ],
+          "look": [
+            0.2,
+            0
+          ],
+          "run": true
+        }
+      ],
+      "expected": {
+        "min_clusters": 2,
+        "min_motion": 150
+      },
+      "uncovered": "Natural garden3 checkpoint restored correctly, but the live Mac chase tape lost supported/alive state after 8.52s (v2), with the last observed position near (-929,2158,-530). The 12s acquisition probe failed; no reproducible 60s moving-world chase has been established."
+    },
+    {
+      "id": "E",
+      "family": "E",
+      "map": "wchess1",
+      "entry": "wchess1_start1",
+      "checkpoint": {
+        "path": "fixtures/E/slot1.json",
+        "sha256": "bc5ebe9b7184d189d9b7989efbce345759343e3329d737a5a9fa9ae06d68ed51"
+      },
+      "view": null,
+      "warmup_s": 20,
+      "timed_s": 60,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0,
+          "select": 1
+        },
+        {
+          "tick": 120,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 162,
+          "select": 1
+        },
+        {
+          "tick": 240,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 282,
+          "select": 1
+        },
+        {
+          "tick": 360,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 402,
+          "select": 1
+        },
+        {
+          "tick": 480,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 522,
+          "select": 1
+        },
+        {
+          "tick": 600,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 642,
+          "select": 1
+        },
+        {
+          "tick": 720,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 762,
+          "select": 1
+        },
+        {
+          "tick": 840,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 882,
+          "select": 1
+        },
+        {
+          "tick": 960,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 1002,
+          "select": 1
+        },
+        {
+          "tick": 1080,
+          "select": 1,
+          "primary": true
+        },
+        {
+          "tick": 1122,
+          "select": 1
+        }
+      ],
+      "expected": {
+        "min_level_active": 2,
+        "min_level_species": 2
+      },
+      "uncovered": "Natural wchess1 checkpoint restored, but Mac v2 observed active=0 species=0, failing unchanged minima 2/2. The nearby prepared cast contains two red bishops, not proven mixed species. Neither the 10s acquisition probe nor a 60s mixed encounter is validated."
+    },
+    {
+      "id": "B-queen2-hatter",
+      "family": "B",
+      "map": "qlair",
+      "entry": null,
+      "checkpoint": null,
+      "view": null,
+      "warmup_s": 0,
+      "timed_s": 20,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": "queen2-hatter",
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {
+        "min_level_active": 1
+      },
+      "uncovered": "Authored queen2-hatter stage lost live supported/alive state on the Mac after 16.40s. The static arena anchor/normal attack does not sustain the required 20s window. No immunity, frozen attack time or reduced predicate was introduced."
+    },
+    {
+      "id": "B-queen2-scream",
+      "family": "B",
+      "map": "qlair",
+      "entry": null,
+      "checkpoint": null,
+      "view": null,
+      "warmup_s": 0,
+      "timed_s": 10,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": "queen2-scream",
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {
+        "min_level_active": 1
+      },
+      "uncovered": "Authored queen2-scream stage lost live supported/alive state on the Mac after 3.85s. The static arena anchor/normal attack does not sustain the required 10s window. No immunity, frozen attack time or reduced predicate was introduced."
+    },
+    {
+      "id": "B-intro",
+      "family": "B",
+      "map": "qlair",
+      "entry": null,
+      "checkpoint": null,
+      "view": null,
+      "warmup_s": 0,
+      "timed_s": 10,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": "intro",
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {},
+      "uncovered": null
+    },
+    {
+      "id": "B-birth",
+      "family": "B",
+      "map": "qlair",
+      "entry": null,
+      "checkpoint": null,
+      "view": null,
+      "warmup_s": 0,
+      "timed_s": 10,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": "birth",
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {},
+      "uncovered": null
+    },
+    {
+      "id": "B-death-explosions",
+      "family": "B",
+      "map": "qlair",
+      "entry": null,
+      "checkpoint": null,
+      "view": null,
+      "warmup_s": 0,
+      "timed_s": 5,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": "death-explosions",
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {},
+      "uncovered": null
+    },
+    {
+      "id": "B-death-burst",
+      "family": "B",
+      "map": "qlair",
+      "entry": null,
+      "checkpoint": null,
+      "view": null,
+      "warmup_s": 0,
+      "timed_s": 5,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": "death-burst",
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {},
+      "uncovered": null
+    },
+    {
+      "id": "T",
+      "family": "T",
+      "map": "gvillage",
+      "entry": null,
+      "checkpoint": {
+        "path": "fixtures/T/slot1.json",
+        "sha256": "b95e643e6630c6b4b8995f63efe81f9771e4206e552c72d84196efd16f1b4015"
+      },
+      "view": null,
+      "warmup_s": 20,
+      "timed_s": 60,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0
+        },
+        {
+          "tick": 2400,
+          "movement": [
+            0.39391935034231235,
+            0.9191450078338512
+          ],
+          "run": true
+        },
+        {
+          "tick": 2424,
+          "movement": [
+            -0.37139062406543016,
+            0.928476711800727
+          ],
+          "run": true
+        },
+        {
+          "tick": 2472,
+          "movement": [
+            0.39391935034231235,
+            0.9191450078338512
+          ],
+          "run": true
+        },
+        {
+          "tick": 2520,
+          "movement": [
+            -0.37139062406543016,
+            0.928476711800727
+          ],
+          "run": true
+        },
+        {
+          "tick": 2592
+        },
+        {
+          "tick": 2616,
+          "look": [
+            -0.46,
+            0
+          ]
+        },
+        {
+          "tick": 2676,
+          "movement": [
+            0,
+            1
+          ]
+        },
+        {
+          "tick": 2988
+        }
+      ],
+      "expected": {
+        "destination": "pandemonium$player_start"
+      },
+      "uncovered": null
+    },
+    {
+      "id": "V0-final",
+      "family": "V0",
+      "map": "gvillage",
+      "entry": null,
+      "checkpoint": {
+        "path": "fixtures/v0-reference.json",
+        "sha256": "4e5dab48ede6b88f30ac80fce6fb117c3bf4bacf6e76aabd5aeec260bb188714"
+      },
+      "view": null,
+      "warmup_s": 20,
+      "timed_s": 60,
+      "timeout_s": 300,
+      "epochs": 1,
+      "school_clubs": [],
+      "queen_fixture": null,
+      "tape": [
+        {
+          "tick": 0
+        }
+      ],
+      "expected": {},
+      "uncovered": null
+    }
+  ]
+}
