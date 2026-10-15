@@ -3589,7 +3589,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let required = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
                 || pending_menu_save.is_some() || pending_menu_newgame.is_some() || opening_escape_menu
                 || (!context_before.3 && paused) || (!context_before.0 && menu)
-                || (!context_before.1 && inventory_menu) || quit_after_frame || !save_frame.has_frame();
+                || (!context_before.1 && inventory_menu) || quit_after_frame;
             if preview_throttle.capture_requested(preview_mode, throttled, required) {
                 let _profile = crate::frame_profile::span("save_preview");
                 save_frame.update();

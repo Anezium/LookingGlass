@@ -177,6 +177,13 @@ impl PreviewThrottle {
         self.capture_requested(mode, false, false)
     }
     pub fn capture_requested(&mut self, mode: Mode, throttled: bool, required: bool) -> bool {
+        // The normal Vita preset pays for a clean thumbnail only at a save
+        // boundary (including preparation for a modal save menu or exit).
+        // Diagnostic modes and the explicit every_frame override stay intact.
+        if mode == Mode::Full && throttled {
+            if required { self.frames_since_capture = 0; }
+            return required;
+        }
         let throttle = mode.throttle_preview() || throttled;
         let force = mode == Mode::Full && required;
         if mode.is_bench() || matches!(mode,Mode::Route|Mode::RouteContinue) || (throttle && !force && self.frames_since_capture < 120) {
@@ -1173,14 +1180,14 @@ mod vita {
 mod bench_policy_tests {
     use super::*;
     #[test]
-    fn normal_preview_throttle_forces_save_and_menu_without_changing_diagnostics() {
+    fn normal_preview_captures_only_requested_save_boundaries_without_changing_diagnostics() {
         let mut throttle = PreviewThrottle::default();
         let mut captures = Vec::new();
         for frame in 0..361 {
             throttle.advance_frame();
             if throttle.capture_requested(Mode::Full, true, matches!(frame, 17 | 35)) { captures.push(frame); }
         }
-        assert_eq!(captures, [0, 17, 35, 155, 275]);
+        assert_eq!(captures, [17, 35]);
         for mode in [Mode::Bench, Mode::RenderBench, Mode::FullBench, Mode::Route, Mode::RouteContinue] {
             assert!(!PreviewThrottle::default().capture_requested(mode, true, true));
         }
