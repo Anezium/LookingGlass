@@ -700,6 +700,16 @@ pub(crate) fn world_puff_batches_active() -> bool {
 /// Registration position preserves ties with packets submitted later in the view.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>, blend: Blend) {
+    retained::count("puff_intermediate_vertex_bytes",(4*std::mem::size_of::<Vertex>()) as u64);
+    world_puff(retained::world_puffs::PuffVertices::Legacy(vertices),texture,blend);
+}
+#[cfg(feature="vita_renderer")]
+pub(crate) fn world_puff_numeric(numeric:crate::particles::quad::NumericQuad,texture:Option<Texture2D>,blend:Blend) {
+    retained::count("puff_numeric_descriptor_bytes",std::mem::size_of::<crate::particles::quad::NumericQuad>() as u64);
+    world_puff(retained::world_puffs::PuffVertices::Fused(numeric),texture,blend);
+}
+#[cfg(feature="vita_renderer")]
+fn world_puff(vertices:retained::world_puffs::PuffVertices,texture:Option<Texture2D>,blend:Blend) {
     if crate::character::skinning::overlap::gather_only() { return; }
     debug_assert!(world_puff_batches_active());
     FRAME.with(|f| {

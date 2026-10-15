@@ -1455,11 +1455,13 @@ impl Scene {
             if self.retained.is_some() {
                 self.draw(camera, time, fullbright, true, transforms);
                 if !vita_renderer::world_only() {
+                    let puff_started=crate::actor_prep_profile::enabled().then(std::time::Instant::now);
                     let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
                     let _render_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Fx);
                     particles.prepare_draw(camera, &self.atmosphere);
                     particles.prepare_quads(camera, Some(direction));
                     for (i, _) in particles.depths(camera, direction) { particles.draw_one(i, camera, direction); }
+                    if let Some(started)=puff_started {crate::render_fx::retained::count("puff_producer_ns",started.elapsed().as_nanos() as u64);}
                 }
                 return;
             }

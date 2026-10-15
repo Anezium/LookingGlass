@@ -974,6 +974,7 @@ pub(crate) fn finish_world(
         boundary("flush_vita_3d_packets");
     }
     let preparation_started = std::time::Instant::now();
+    let puff_sort_started=(!puffs.is_empty() && crate::actor_prep_profile::enabled()).then(std::time::Instant::now);
     let mut list = {
         let _span = crate::frame_profile::span("vita_joint_alpha_sort");
         let mut list = std::mem::take(&mut gpu.alpha_storage); list.clear();
@@ -981,7 +982,7 @@ pub(crate) fn finish_world(
         let mut next_puff = 0;
         for id in 0..=groups.len() {
             while next_puff < puffs.len() && puffs[next_puff].before_group == id {
-                list.push(((center_vertices(&puffs[next_puff].vertices) - camera).dot(direction), Source::Puff(next_puff)));
+                list.push(((puffs[next_puff].vertices.center() - camera).dot(direction), Source::Puff(next_puff)));
                 next_puff += 1;
             }
             if let Some(g) = groups.get(id).filter(|g| g.transparent &&
@@ -993,8 +994,11 @@ pub(crate) fn finish_world(
         order(list, crate::render::vita_renderer::config().sort_alpha)
     };
     if !puffs.is_empty() {
+        if let Some(started)=puff_sort_started {count("puff_joint_sort_ns",started.elapsed().as_nanos() as u64);}
+        let puff_batch_started=crate::actor_prep_profile::enabled().then(std::time::Instant::now);
         gpu.puff_batches[gpu.ring_phase].build(&mut groups, &puffs, &mut list,
             crate::render::vita_renderer::config().fx_batching == "material");
+        if let Some(started)=puff_batch_started {count("puff_prepare_merge_ns",started.elapsed().as_nanos() as u64);}
     }
     count("vita_fx_particle_input_groups", groups.iter()
         .filter(|g| !g.passes.is_empty() && g.passes.iter().all(|p| p.effect)).count() as u64);

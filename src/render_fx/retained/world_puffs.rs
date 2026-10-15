@@ -4,8 +4,16 @@ use super::*;
 use crate::materials::{Blend, Stage};
 use std::rc::Rc;
 
+pub(crate) enum PuffVertices {Legacy([Vertex;4]),Fused(crate::particles::quad::NumericQuad)}
+impl PuffVertices {
+    pub(crate) fn center(&self)->Vec3 {match self {Self::Legacy(v)=>center_vertices(v),Self::Fused(n)=>n.center()}}
+    #[cfg(test)]
+    fn array(&self)->[Vertex;4] {match self {Self::Legacy(v)=>*v,Self::Fused(n)=>std::array::from_fn(|i|n.vertex(i))}}
+    #[cfg(test)]
+    fn legacy_mut(&mut self)->&mut [Vertex;4] {match self {Self::Legacy(v)=>v,_=>panic!("legacy test fixture")}}
+}
 pub(crate) struct Puff {
-    pub vertices: [Vertex; 4],
+    pub vertices: PuffVertices,
     pub texture: Option<Texture2D>,
     pub blend: Blend,
     pub before_group: usize,
@@ -33,10 +41,16 @@ fn meta(source: Source, groups: &[super::super::Group], puffs: &[Puff]) -> Optio
         Source::World(_) => None,
     }
 }
-fn vertices<'a>(source: Source, groups: &'a [super::super::Group], puffs: &'a [Puff]) -> &'a [Vertex] {
+enum Vertices<'a> {Slice(&'a [Vertex]),Fused(&'a crate::particles::quad::NumericQuad)}
+impl Vertices<'_> {
+    fn len(&self)->usize {match self {Self::Slice(v)=>v.len(),Self::Fused(_)=>4}}
+    fn same(&self,old:&[Vertex])->bool {match self {Self::Slice(v)=>vertices_equal(old,v),Self::Fused(n)=>n.same(old)}}
+    fn append(&self,target:&mut Vec<Vertex>) {match self {Self::Slice(v)=>target.extend_from_slice(v),Self::Fused(n)=>n.append(target)}}
+}
+fn vertices<'a>(source: Source, groups: &'a [super::super::Group], puffs: &'a [Puff]) -> Vertices<'a> {
     match source {
-        Source::Actor(id) => &groups[id].passes[0].geometry().vertices,
-        Source::Puff(id) => &puffs[id].vertices,
+        Source::Actor(id) => Vertices::Slice(&groups[id].passes[0].geometry().vertices),
+        Source::Puff(id) => match &puffs[id].vertices {PuffVertices::Legacy(v)=>Vertices::Slice(v),PuffVertices::Fused(n)=>Vertices::Fused(n)},
         Source::World(_) => unreachable!(),
     }
 }
@@ -101,7 +115,7 @@ impl Bank {
         let mut same_vertices = true; let mut same_indices = true;
         for &source in &batch.members {
             let v = vertices(source, groups, puffs); let i = indices(source, groups);
-            same_vertices &= g.vertices.get(vb..vb+v.len()).is_some_and(|old| vertices_equal(old, v));
+            same_vertices &= g.vertices.get(vb..vb+v.len()).is_some_and(|old| v.same(old));
             same_indices &= g.indices.get(ib..ib+i.len()).is_some_and(|old|
                 old.iter().zip(i).all(|(&a,&b)| a as usize == b as usize + vb));
             vb += v.len(); ib += i.len();
@@ -114,7 +128,10 @@ impl Bank {
         let mut base = 0;
         for &source in &batch.members {
             let v = vertices(source, groups, puffs);
-            if !same_vertices { g.mesh.vertices.extend_from_slice(v); }
+            if !same_vertices {
+                v.append(&mut g.mesh.vertices);
+                if matches!(source,Source::Puff(_)) {count("puff_final_vertex_write_bytes",(4*std::mem::size_of::<Vertex>()) as u64);}
+            }
             if !same_indices { g.mesh.indices.extend(indices(source, groups).iter().map(|&i| i + base as u16)); }
             base += v.len();
         }
@@ -175,7 +192,7 @@ impl Bank {
 mod tests {
     use super::*;
     fn puff(tag: usize, blend: Blend) -> Puff {
-        Puff { vertices: std::array::from_fn(|i| Vertex::new(tag as f32, i as f32, 0., i as f32, 0., WHITE)),
+        Puff { vertices: PuffVertices::Legacy(std::array::from_fn(|i| Vertex::new(tag as f32, i as f32, 0., i as f32, 0., WHITE))),
             texture: None, blend, before_group: 0 }
     }
     struct Restore(super::super::super::Frame);
@@ -187,7 +204,7 @@ mod tests {
             active: true, direct: true, ..Default::default() })))
     }
     fn pass_for(p: &Puff, effect: bool, equal: bool) -> super::super::super::Pass {
-        let mut pass = super::super::super::pass(Mesh { vertices: p.vertices.to_vec(),
+        let mut pass = super::super::super::pass(Mesh { vertices: p.vertices.array().to_vec(),
             indices: vec![0,1,2,0,2,3], texture: None },
             &Stage { blend: normalized(p.blend), depth_equal: equal, ..Default::default() },
             true, false, Default::default()).unwrap();
@@ -252,6 +269,58 @@ mod tests {
         }}
     }
     #[test]
+    fn fused_final_storage_matches_legacy_for_changing_membership_ties_barriers_and_held_views() {
+        let _frame=frame();
+        for material in [false,true] {for large in [false,true] {
+            let mut old_bank=Bank::default();let mut new_bank=Bank::default();
+            let mut held:Option<(Rc<super::super::super::prepared::Geometry>,Vec<Vertex>)>=None;
+            for step in 0..8 {
+                let n=if step%3==0 {7}else{5};
+                let numeric=(0..n).map(|i|crate::particles::quad::NumericQuad {
+                    positions:std::array::from_fn(|v|vec3(i as f32+step as f32*0.13,v as f32,if v==0 {-0.}else{0.})),
+                    color:[step as u8,255,127,if i%2==0 {128}else{255}]}).collect::<Vec<_>>();
+                let legacy=numeric.iter().enumerate().map(|(i,n)|Puff {vertices:PuffVertices::Legacy(std::array::from_fn(|v|n.vertex(v))),
+                    texture:None,blend:if (i+step)%2==0 {Blend::Alpha}else{Blend::Add},before_group:0}).collect::<Vec<_>>();
+                let fused=numeric.iter().enumerate().map(|(i,&n)|Puff {vertices:PuffVertices::Fused(n),
+                    texture:None,blend:if (i+step)%2==0 {Blend::Alpha}else{Blend::Add},before_group:0}).collect::<Vec<_>>();
+                let mut old_groups=groups(large);let mut new_groups=groups(large);
+                if large && step%2==1 {
+                    // One more quad exceeds the index bound before the vertex bound.
+                    old_groups[0].passes[0].mesh.indices=[0,1,2].repeat(59999);
+                    new_groups[0].passes[0].mesh.indices=[0,1,2].repeat(59999);
+                }
+                let mut list=vec![(5.,Source::World(7)),(5.,Source::Actor(0)),(4.,Source::Actor(1)),
+                    (3.,Source::Actor(2)),(2.,Source::Actor(3)),(1.,Source::World(8))];
+                list.extend((0..n).map(|i|(if i%2==0 {5.}else{-0.},Source::Puff(i))));
+                let mut old_list=order(list.clone(),true);let mut new_list=order(list,true);
+                old_bank.build(&mut old_groups,&legacy,&mut old_list,material);
+                new_bank.build(&mut new_groups,&fused,&mut new_list,material);
+                assert_eq!(snapshot(&old_groups,&old_list),snapshot(&new_groups,&new_list));
+                if let Some((view,bytes))=&held {assert!(vertices_equal(&view.vertices,bytes));}
+                if step==0 {let view=new_bank.batches[0].geometry.clone();held=Some((view.clone(),view.vertices.clone()));}
+                recycle(&mut old_groups);recycle(&mut new_groups);
+            }
+        }}
+    }
+    #[test]
+    fn fused_final_pack_is_allocation_free_after_warmup_and_keeps_unchanged_revisions() {
+        let _frame=frame();let mut bank=Bank::default();let mut groups=Vec::new();
+        let mut puffs=(0..128).map(|i|Puff {vertices:PuffVertices::Fused(crate::particles::quad::NumericQuad {
+            positions:[Vec3::splat(i as f32);4],color:[255;4]}),texture:None,blend:Blend::Alpha,before_group:0}).collect::<Vec<_>>();
+        let original=(0..128).map(|i|(i as f32,Source::Puff(i))).collect::<Vec<_>>();let mut list=original.clone();
+        bank.build(&mut groups,&puffs,&mut list,true);recycle(&mut groups);
+        let version=bank.batches[0].geometry.version;
+        for step in 0..10 {
+            list.clone_from(&original);let scope=crate::kernel_alloc::Scope::begin();
+            bank.build(&mut groups,&puffs,&mut list,true);recycle(&mut groups);assert_eq!(scope.finish(),0);
+            assert_eq!(bank.batches[0].geometry.version,version);
+            if step==9 {if let PuffVertices::Fused(n)=&mut puffs[0].vertices {n.color[0]=0;}}
+        }
+        list.clone_from(&original);let scope=crate::kernel_alloc::Scope::begin();
+        bank.build(&mut groups,&puffs,&mut list,true);recycle(&mut groups);assert_eq!(scope.finish(),0);
+        assert_ne!(bank.batches[0].geometry.version.vertices,version.vertices);
+    }
+    #[test]
     fn direct_puff_key_matches_existing_pass_metadata() {
         let _frame=frame();
         for blend in [Blend::Alpha,Blend::Add] {
@@ -272,14 +341,14 @@ mod tests {
         let mut list=original.clone();bank.build(&mut groups,&puffs,&mut list,true);recycle(&mut groups);
         let pointers=(bank.batches[0].geometry.vertices.as_ptr(),bank.batches[0].geometry.indices.as_ptr());
         for step in 0..10 {
-            puffs[0].vertices[0].color[0]=step;list.clone_from(&original);
+            puffs[0].vertices.legacy_mut()[0].color[0]=step;list.clone_from(&original);
             let scope=crate::kernel_alloc::Scope::begin();
             bank.build(&mut groups,&puffs,&mut list,true);recycle(&mut groups);
             assert_eq!(scope.finish(),0);
             assert_eq!(pointers,(bank.batches[0].geometry.vertices.as_ptr(),bank.batches[0].geometry.indices.as_ptr()));
         }
         let held=bank.batches[0].geometry.clone();let before=held.vertices.clone();
-        puffs[0].vertices[0].position.x+=1.;list.clone_from(&original);
+        puffs[0].vertices.legacy_mut()[0].position.x+=1.;list.clone_from(&original);
         bank.build(&mut groups,&puffs,&mut list,true);
         assert!(vertices_equal(&held.vertices,&before));
         assert!(!Rc::ptr_eq(&held,&bank.batches[0].geometry));

@@ -512,7 +512,7 @@ struct Puff {
     emitter: usize,
 }
 #[cfg(feature="vita_renderer")]
-mod quad;
+pub(crate) mod quad;
 pub struct Steam {
     #[cfg(feature="vita_renderer")]
     quads: std::cell::RefCell<quad::Buffer>,
@@ -1231,7 +1231,9 @@ impl Steam {
     pub(crate) fn prepare_quads(&self, camera: Vec3, direction: Option<Vec3>) {
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             if let Some(direction) = direction.filter(|_| crate::render_fx::world_puff_batches_active()) {
-                self.quads.borrow_mut().prepare_world(&self.puffs, &self.emitters, camera, direction);
+                if crate::render::vita_renderer::config().world_puff_fusion {
+                    self.quads.borrow_mut().prepare_world_fused(&self.puffs,&self.emitters,camera,direction);
+                } else {self.quads.borrow_mut().prepare_world(&self.puffs, &self.emitters, camera, direction);}
                 return;
             }
             self.quads.borrow_mut().prepare(&self.puffs, &self.emitters, camera, direction);
@@ -1240,6 +1242,12 @@ impl Steam {
     pub fn draw_one(&self, index: usize, camera: Vec3, direction: Vec3) {
         #[cfg(feature="vita_renderer")]
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
+            if let Some(numeric) = self.quads.borrow().numeric_quad(index) {
+                let e=&self.emitters[self.puffs[index].emitter];
+                crate::render_fx::world_puff_numeric(numeric,e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
+                    if e.additive {crate::materials::Blend::Add} else {crate::materials::Blend::Alpha});
+                return;
+            }
             if let Some(vertices) = self.quads.borrow().raw_quad(index) {
                 let e = &self.emitters[self.puffs[index].emitter];
                 crate::render_fx::world_puff_quad(vertices, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),

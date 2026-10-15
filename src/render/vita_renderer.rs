@@ -59,6 +59,8 @@ pub struct Config {
     pub particle_producer_reuse: bool,
     /// Publish world puffs once per final joint-alpha material batch.
     pub world_puff_batches: bool,
+    /// Construct puff Vertex records only in final joint-order batch storage.
+    pub world_puff_fusion: bool,
     pub fx_merge_in_place: bool,
     pub fx_worker_prep: bool,
     pub frame_phase_probe: bool,
@@ -142,7 +144,7 @@ impl Default for Config {
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
             actor_prep_profile: false, actor_single_prepare: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
-            particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
+            particle_producer_reuse: true, world_puff_batches: true, world_puff_fusion: false, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
@@ -1849,11 +1851,14 @@ mod tests {
     #[test]
     fn actor_single_preparation_is_opt_in_and_strictly_boolean() {
         assert!(!Config::default().actor_single_prepare);
+        assert!(!Config::default().world_puff_fusion);
+        for name in ["actor_single_prepare","world_puff_fusion"] {
         for enabled in [true,false] {
-            let c:Config=serde_json::from_value(serde_json::json!({"actor_single_prepare":enabled})).unwrap();
-            assert_eq!(c.actor_single_prepare,enabled);c.validate().unwrap();
+            let c:Config=serde_json::from_value(serde_json::json!({(name):enabled})).unwrap();
+            assert_eq!(serde_json::to_value(&c).unwrap()[name],enabled);c.validate().unwrap();
         }
-        assert!(serde_json::from_value::<Config>(serde_json::json!({"actor_single_prepare":"on"})).is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({(name):"on"})).is_err());
+        }
     }
     fn j17_switches_preserve_console_selected_defaults_and_strict_types() {
         let default=serde_json::to_value(Config::default()).unwrap();
