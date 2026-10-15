@@ -953,7 +953,7 @@ impl Puppet {
             animation.frame_time,
             looping,
         );
-        let _consumer = crate::character::skinning::CullGuard::preserve(clip == "death_frozen");
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(clip == "death_frozen");
         let material = self.3.clone();
         material.draw_dissolving(dissolve, || {
             self.0.draw_pose(
@@ -1214,7 +1214,7 @@ impl Model {
         atmosphere: &Atmosphere,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::preserve(g.frozen || g.electric > 0.);
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(g.frozen || g.electric > 0.);
         let _skin_guard = crate::character::skinning::CullGuard::preserve(g.electric > 0.);
         if let Some(state) = &g.burst {
             material.bind();
@@ -3965,7 +3965,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::preserve(piece.frozen);
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
         let Some(transform) = piece.visual(&self.data) else {
             return;
         };
@@ -4007,7 +4007,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::preserve(piece.frozen);
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
         let scale = piece.visual_scale(&self.data);
         if scale <= 0. {
             return;
@@ -4052,7 +4052,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::preserve(piece.frozen);
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
         let scale = piece.visual_scale(&self.data);
         if scale <= 0. {
             return;
@@ -4097,7 +4097,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::preserve(ant.frozen || ant.electric > 0.);
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(ant.frozen || ant.electric > 0.);
         let scale = ant.visual_scale(&self.data);
         if scale <= 0. {
             return;

@@ -59,6 +59,11 @@ impl CullGuard {
     }
 }
 impl CullGuard {
+    /// These extra mutable consumers belong only to single preparation. Preserve
+    /// the inherited culling/lighting policy in the disabled and legacy arms.
+    pub(crate) fn publication_consumer(required:bool)->Self {
+        Self::preserve(required && overlap::single_frame())
+    }
     /// Preserve inherited visibility/lighting policy without inventing a mesh consumer.
     pub(crate) fn visual_preserve(required:bool)->Self {
         Self(PRESERVE_SKIN.with(|c|c.replace(c.get()||required)),MUTABLE_SKIN.with(std::cell::Cell::get))
@@ -853,5 +858,21 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod publication_consumer_tests {
+    use super::*;
+    #[test]
+    fn disabled_publication_consumers_preserve_the_inherited_cull_and_mutable_policy() {
+        assert!(!overlap::single_frame());
+        assert!(culling_allowed());assert!(!mutable_required());
+        { let _consumer=CullGuard::publication_consumer(true);
+          assert!(culling_allowed());assert!(!mutable_required()); }
+        { let _original=CullGuard::preserve(true);
+          {let _consumer=CullGuard::publication_consumer(true);assert!(!culling_allowed());assert!(mutable_required());}
+          assert!(!culling_allowed());assert!(mutable_required()); }
+        assert!(culling_allowed());assert!(!mutable_required());
     }
 }
