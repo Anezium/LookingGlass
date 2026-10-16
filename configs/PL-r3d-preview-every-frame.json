@@ -82,5 +82,6 @@
   "quality": "low",
   "opaque_order": "front_to_back",
   "world_alpha": true,
-  "story_film_bypass": false
+  "story_film_bypass": false,
+  "audio_pcm_worker": true
 }

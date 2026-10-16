@@ -1,5 +1,8 @@
 //! Audio from the user's archives. No original DLL, executable, or script execution.
 mod acoustics;
+mod queue;
+pub mod sink;
+mod output;
 pub mod events;
 mod reaction;
 pub mod regression;
@@ -7,7 +10,8 @@ pub mod world;
 use crate::{assets::Assets, bsp::Bsp, collision::World};
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::{vec3, Vec3};
-use rodio::{dynamic_mixer, Decoder, OutputStream, Sink, Source};
+use rodio::{Decoder, OutputStream, Source};
+use sink::Sink;
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -19,6 +23,23 @@ use std::{
     },
     time::Duration,
 };
+
+static GAME_STAGE: AtomicU32 = AtomicU32::new(0);
+static GAME_STAGE_AT: AtomicU32 = AtomicU32::new(0);
+static GAME_ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+pub fn game_stage(stage:u32) {
+    let origin=GAME_ORIGIN.get_or_init(std::time::Instant::now);
+    GAME_STAGE_AT.store(origin.elapsed().as_millis() as u32,Ordering::Relaxed);
+    GAME_STAGE.store(stage,Ordering::Release);
+}
+fn game_stage_snapshot()->(u32,u32) {
+    let stage=GAME_STAGE.load(Ordering::Acquire);
+    let at=GAME_STAGE_AT.load(Ordering::Relaxed);
+    let age=if stage==0 {0} else {(GAME_ORIGIN.get_or_init(std::time::Instant::now).elapsed().as_millis() as u32).wrapping_sub(at)};
+    (stage,age)
+}
+struct UpdateStage;
+impl Drop for UpdateStage {fn drop(&mut self){game_stage(0);}}
 
 const EFFECTS: [&str; 22] = [
     "sound/character/alice/footstep1.wav",
@@ -601,7 +622,8 @@ impl<S> Drop for Monitor<S> {
 }
 struct Playback {
     _stream: Option<OutputStream>,
-    mixer: Arc<dynamic_mixer::DynamicMixerController<f32>>,
+    mixer: output::Control,
+    _worker: Option<output::Worker>,
 }
 impl Playback {
     fn open(data: Arc<MonitorData>, record: bool) -> Result<Self> {
@@ -629,22 +651,25 @@ impl Playback {
             }
         }
         let (stream, handle) = opened.with_context(|| format!("No usable audio output: {failure}"))?;
-        let (mixer, source) = dynamic_mixer::mixer(2, 44100);
-        handle.play_raw(Monitor {
-            source,
-            data,
-            block: Vec::with_capacity(1024),
-            record,
-        })?;
-        Ok(Self {
-            _stream: Some(stream),
-            mixer,
-        })
+        let (mixer, source) = output::mixer();
+        let monitor = Monitor { source, data, block: Vec::with_capacity(1024), record };
+        #[cfg(feature = "vita_renderer")]
+        let buffered = crate::render::vita_renderer::config().audio_pcm_worker;
+        #[cfg(not(feature = "vita_renderer"))]
+        let buffered = false;
+        let worker = if buffered {
+            let (worker, callback) = output::buffered(monitor, mixer.metrics.clone())?;
+            handle.play_raw(callback)?;
+            Some(worker)
+        } else {
+            handle.play_raw(monitor)?;
+            None
+        };
+        eprintln!("[lg/audio-output] buffered={buffered} callback_shared_game_locks=0 game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0");
+        Ok(Self { _stream: Some(stream), mixer, _worker: worker })
     }
     fn sink(&self) -> Sink {
-        let (sink, queue) = Sink::new_idle();
-        self.mixer.add(queue);
-        sink
+        self.mixer.sink()
     }
 }
 struct Emitter {
@@ -783,6 +808,8 @@ impl Audio {
         }
     }
     pub fn load(&mut self, assets: &mut Assets, name: &str, map: &Bsp) {
+        game_stage(5);
+        let _stage=UpdateStage;
         self.stop_voice();
         self.retire_music();
         self.scene_presented = false;
@@ -936,6 +963,8 @@ impl Audio {
         paused: bool,
         voice_paused: bool,
     ) {
+        game_stage(1);
+        let _stage=UpdateStage;
         let paused = paused || !self.scene_presented;
         let dt = if paused { 0. } else { dt.clamp(0., 0.25) };
         let world_dt = world_dt.clamp(0., dt);
@@ -1137,6 +1166,8 @@ impl Audio {
         submerged: bool,
         dt: f32,
     ) {
+        game_stage(4);
+        let _stage=UpdateStage;
         if self.playback.is_none() {
             self.pending.clear();
             return;
@@ -1394,6 +1425,14 @@ impl Audio {
             sink.stop();
         }
     }
+    pub fn flush_movie(&self) {
+        if let Some(p)=&self.playback { p.mixer.flush(); }
+    }
+    pub fn movie_position(&self, sink: &Sink) -> Duration {
+        let queued = self.playback.as_ref().filter(|p| p._worker.is_some())
+            .map_or(0, |p| p.mixer.metrics.queued_samples.load(Ordering::Relaxed));
+        sink.get_pos().saturating_sub(Duration::from_secs_f64(queued as f64 / 88200.))
+    }
     pub fn movie_sound(&self, assets: &mut Assets, path: &str) -> Result<Option<Sink>> {
         let Some(playback) = &self.playback else {
             return Ok(None);
@@ -1513,7 +1552,7 @@ impl Audio {
         self.playback = None;
         let count = self.monitor.count.load(Ordering::Relaxed);
         let peak = f32::from_bits(self.monitor.peak.load(Ordering::Relaxed));
-        println!("Audio output: {} stereo frames consumed, peak {:.4}; {} footsteps, {} jumps, {} landings",count/2,peak,self.steps,self.jumps,self.landings);
+        println!("Audio output: {} stereo frames mixed, peak {:.4}; {} footsteps, {} jumps, {} landings",count/2,peak,self.steps,self.jumps,self.landings);
         if let Some(path) = &self.capture {
             let samples = self.monitor.samples.lock().unwrap();
             ensure!(
@@ -1883,8 +1922,8 @@ mod tests {
         let map = Bsp::parse(&assets.read("maps/gvillage.bsp")?)?;
         for phase in ["new-game", "load-save", "chapters-village"] {
             let mut audio = Audio::new(true, None);
-            let (mixer, source) = dynamic_mixer::mixer(2, 44100);
-            audio.playback = Some(Playback { _stream: None, mixer });
+            let (mixer, source) = output::mixer();
+            audio.playback = Some(Playback { _stream: None, mixer, _worker: None });
             let mut monitor = Monitor { source, data: audio.monitor.clone(),
                 block: Vec::with_capacity(1024), record: false };
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1921,6 +1960,61 @@ mod tests {
             audio.update(0.1, Vec3::ZERO, 0., false, false);
             assert!(!audio.music.as_ref().unwrap().0.is_paused());
         }
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA and an idle timing host"]
+    fn realtime_village_model() -> Result<()> {
+        use std::time::Instant;
+        let root=std::path::PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let mut assets=Assets::open(&root)?;
+        let map=Bsp::parse(&assets.read("maps/gvillage.bsp")?)?;
+        let world=World::from_bsp(&map)?;
+        let mut audio=Audio::new(true,None);
+        let (mixer,source)=output::mixer();
+        let metrics=mixer.metrics.clone();
+        let monitor=Monitor{source,data:audio.monitor.clone(),block:Vec::with_capacity(1024),record:false};
+        let (producer,mut callback)=output::buffered(monitor,metrics.clone())?;
+        audio.playback=Some(Playback{_stream:None,mixer,_worker:Some(producer)});
+        let stop=Arc::new(std::sync::atomic::AtomicBool::new(false));let end=stop.clone();
+        let phase=Arc::new(AtomicU32::new(0));let label=phase.clone();
+        let reader=std::thread::spawn(move||{
+            let block=Duration::from_secs_f64(512./44100.);
+            let mut deadline=Instant::now();let mut rows=Vec::new();
+            while !end.load(Ordering::Acquire) {
+                let phase=label.load(Ordering::Acquire);let start=Instant::now();
+                for _ in 0..1024 {let sample=callback.next().unwrap();std::hint::black_box(if sample.is_finite(){(sample.clamp(-1.,1.)*32768.) as i16}else{0});}
+                rows.push((phase,start.elapsed().as_secs_f64()*1000.));
+                deadline+=block;if let Some(wait)=deadline.checked_duration_since(Instant::now()){std::thread::sleep(wait);}
+            }
+            rows
+        });
+        audio.load(&mut assets,"gvillage",&map);
+        assert_eq!(audio.emitters.len(),20);
+        std::thread::sleep(Duration::from_millis(1100));
+        audio.scene_presented();let eye=vec3(-4144.,6120.,280.);
+        let mut frame_times=Vec::new();
+        for (id,paused) in [(1,false),(2,true),(3,false)] {
+            phase.store(id,Ordering::Release);
+            for frame in 0..90 {
+                let start=Instant::now();
+                audio.prepare(&mut assets,&world,eye,false,1./30.);
+                audio.update_clocks(1./30.,1./30.,eye,0.,paused,false);
+                if !paused && frame%15==0 {audio.movement(8.,true,false,false);}
+                frame_times.push(start.elapsed().as_secs_f64()*1000.);
+                std::thread::sleep(Duration::from_secs_f64(1./30.));
+            }
+        }
+        stop.store(true,Ordering::Release);let rows=reader.join().unwrap();
+        for (id,name) in [(0,"loading"),(1,"resume"),(2,"pause"),(3,"resume-again")] {
+            let mut times:Vec<_>=rows.iter().filter(|(phase,_)|*phase==id).map(|(_,ms)|*ms).collect();
+            times.sort_by(f64::total_cmp);let n=times.len();assert!(n>=80);
+            println!("AUDIO_REALTIME_MODEL phase={name} n={n} callback_p50_ms={:.6} callback_p95_ms={:.6} callback_max_ms={:.6} game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0",times[n/2],times[(n-1)*95/100],times[n-1]);
+            assert!(times[n-1]<11.610);
+        }
+        frame_times.sort_by(f64::total_cmp);
+        println!("AUDIO_REALTIME_MODEL game_audio_update_p50_ms={:.6} game_audio_update_p95_ms={:.6} game_audio_update_max_ms={:.6} emitters=20 player_effect_cache=22",frame_times[frame_times.len()/2],frame_times[(frame_times.len()-1)*95/100],frame_times[frame_times.len()-1]);
+        audio.finish()?;
         Ok(())
     }
     #[test]

@@ -70,7 +70,7 @@ pub struct Filter<S> {
     controls: Arc<Controls>,
     low: [f32; 2],
     delays: [Vec<f32>; 2],
-    cursor: usize,
+    cursors: [usize; 2],
     channel: usize,
     tail: usize,
     rate: u32,
@@ -90,7 +90,7 @@ impl<S: Source<Item = f32>> Filter<S> {
                 vec![0.; (rate as f32 * 0.047) as usize],
                 vec![0.; (rate as f32 * 0.071) as usize],
             ],
-            cursor: 0,
+            cursors: [0; 2],
             channel: 0,
             tail: 0,
             rate, cutoff, alpha,
@@ -119,14 +119,13 @@ impl<S: Source<Item = f32>> Iterator for Filter<S> {
         self.low[ch] += self.alpha * (dry - self.low[ch]);
         let wet = f32::from_bits(self.controls.wet.load(Ordering::Relaxed));
         let buffer = &mut self.delays[ch];
-        let index = self.cursor % buffer.len();
+        let index = self.cursors[ch];
+        self.cursors[ch] += 1;
+        if self.cursors[ch] == buffer.len() { self.cursors[ch] = 0; }
         let reflection = buffer[index];
         buffer[index] = self.low[ch] + reflection * 0.32;
         let sample = self.low[ch] + reflection * wet;
         self.channel ^= 1;
-        if self.channel == 0 {
-            self.cursor += 1;
-        }
         Some(sample)
     }
 }

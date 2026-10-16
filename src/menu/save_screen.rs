@@ -52,7 +52,7 @@ pub(super) struct Film {
     grain: Vec<Texture2D>,
     shutter: Shutter,
     sounds: [std::sync::Arc<[u8]>; 3],
-    playing: Vec<rodio::Sink>,
+    playing: Vec<crate::audio::sink::Sink>,
 }
 impl Film {
     pub fn load(assets: &mut Assets) -> Result<Self> {

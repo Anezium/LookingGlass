@@ -113,6 +113,8 @@ pub struct Config {
     pub startup_splash:bool,
     /// Human fallback only; preserves normal game/renderer policy when off.
     pub story_film_bypass: bool,
+    /// Explicit console candidate: move DSP/decoding off the device callback.
+    pub audio_pcm_worker: bool,
     /// Persistent binary pairs; process deduplication remains active when off.
     pub shader_cache: String,
     /// Optional cache of exact device-compressed immutable pixels.
@@ -215,6 +217,7 @@ impl Default for Config {
             gpu_index_dedupe: false, gpu_uniform_dedupe: false,
             startup_splash:false,
             story_film_bypass: false,
+            audio_pcm_worker: false,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
             route_heading_lock:true,

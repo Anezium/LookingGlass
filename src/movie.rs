@@ -415,6 +415,7 @@ pub async fn play(
             if let Some(s) = &soundtrack {
                 s.stop();
             }
+            audio.flush_movie();
             movie_log.played = elapsed;
             movie_log.reason = "quit";
             skip.event("decoder_exit reason=quit soundtrack_stop=true");
@@ -449,7 +450,7 @@ pub async fn play(
         if active {
             if !backpressure { elapsed += wall_dt; }
             if let Some(s) = soundtrack.as_ref().filter(|s| !s.empty()) {
-                elapsed = s.get_pos().as_secs_f64();
+                elapsed = audio.movie_position(s).as_secs_f64();
             }
             let wanted = (elapsed * video.fps as f64) as usize + 1;
             movie_log.played = elapsed;
@@ -504,7 +505,8 @@ pub async fn play(
     }
     skip.event(&format!("decoder_exit reason={} decoded={}", movie_log.reason, video.decoded));
     if let Some(s) = &soundtrack { s.stop(); }
-    skip.event("soundtrack_stop=true");
+    audio.flush_movie();
+    skip.event("soundtrack_stop=true pcm_prefetch_flushed=true");
     skip.handoff(movie_log.reason);
     input.suppress();
     next_frame().await;

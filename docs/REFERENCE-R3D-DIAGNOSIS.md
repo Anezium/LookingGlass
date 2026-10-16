@@ -43,3 +43,53 @@ Each arm changes exactly its named field. Capture the displayed output and retai
 all stage markers; the last completed stage localizes any remaining first-frame
 stall. The exact menu interaction, Vita GL state and priority behavior require
 console observation. A host successful restore cannot certify the console image.
+
+## Resume collapse takes precedence over film hypotheses
+
+The threading step-0 report and rejected village log establish a visible paused
+Autosave restore, then a 4361.08 ms/frame block after resume (update 1.307 ms,
+draw/application coroutine 4359.479 ms, swap 0.233 ms), followed by no further
+frame window for 100 seconds. Audio warning windows cluster around 70/70 late /
+over-budget estimates per second. This is normal village audio/play, independent
+of RoQ and the front-end path. The CPU run-clock deltas that exceed their wall
+windows cannot be used as a valid CPU utilization estimate. The old pkg-2 timing
+predates enabled Vita audio and is not an audio-on performance baseline.
+
+Inspection finds short pending-source and sink-control mutex sections in rodio;
+the dynamic mixer does not hold its pending-source mutex while calling source
+next/DSP. The host lock probe instruments both thread roles. A decoder blocked
+inside next still permits game volume/pause/position calls to finish. This refutes
+a callback-wide mixer-lock explanation for that host case; it does not locate
+the Vita main thread. CPU1 callback saturation at priority 128 starving skin
+worker zero (CPU1, priority 159), followed by the main thread waiting in worker
+collection, remains the strongest scheduling explanation. Console stage readback
+is needed to distinguish it from another main-thread wait.
+
+r3d removes both hazards from its explicit buffered candidate. Game sink controls
+are atomics and bounded single-producer queues: no volume/position/append mutex,
+blocking source queue, synchronous seek or sleep-until-end is exposed. Mixing,
+resampling, cached ambient DSP and MP3 decoding run on one persistent producer
+(priority 161, CPU2, 1 MiB stack; policy read back and logged). The high-priority
+CPAL callback consumes fixed PCM blocks, does at most four stale-block drops,
+and substitutes silence if no block is ready. It never calls a decoder, filter,
+game control, source destructor or capture mutex. Two ready blocks plus the
+current device block bound normal software prefetch to about 34.83 ms. Film time
+subtracts queued prefetch; a skip invalidates prefetched film blocks atomically.
+
+`audio_pcm_worker` remains false in implicit/canonical defaults. All packaged
+r3d candidate presets explicitly enable it. `PL-r3d-audio-direct.json` is a separate
+single-field control arm; it retains the lock-free controls and cached DSP but
+executes the mixer directly. This separates callback isolation from the other
+fixes and provides an explicit rollback without changing simulation policy.
+
+Per-second `[cpal/vita]` p50/p95/max measure callback+format conversion.
+`[lg/audio-realtime]` reports producer mix percentiles, PCM starvation, rejected
+queues, intentional film flushes, live-sink peak and game API wall-time max.
+`game_audio_lock_attempts=0` / `game_audio_lock_wait_max_us=0` are structural zeros
+because the new control path takes no locks, not a fabricated pthread timing.
+The old-host probe separately measures real lock hold/wait maxima on both sides.
+Game-stage IDs are 1=audio update, 2=skin collect, 3=skin gather/dispatch,
+4=audio clip preparation, 5=level audio load; age is wall time in that stage.
+A callback under budget does not certify clean sound: steady PCM starvation must
+also be zero. Cortex-A9 producer throughput, actual listening, visible resumed
+play and the precise original Vita wait site remain console gates.

@@ -3445,6 +3445,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
             }
             level_art.story_pose(&story);
+            crate::audio::game_stage(3);
             let mut frame = crate::character::skinning::overlap::Frame::begin();
             if crate::character::skinning::overlap::single_frame() {
                 if draw_world && show_alice && stats.invisible <= 0. { crate::lighting::shadow(&scene.world, player.feet, 22.); }
@@ -3456,6 +3457,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
             level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
             frame.dispatch();
+            crate::audio::game_stage(0);
             Some(frame)
         } else { None };
         #[cfg(target_os = "vita")]
@@ -3475,7 +3477,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature="vita_renderer")]
         if let Some(frame) = &mut skin_frame {
             let _collect = crate::frame_profile::span("skin_collect");
+            crate::audio::game_stage(2);
             frame.collect();
+            crate::audio::game_stage(0);
         }
         #[cfg(target_os = "vita")]
         {

@@ -24,7 +24,7 @@ CONFIG_FILES = {
     ".cargo/config.toml", "configs/PL-def-r3.json", "configs/vita_renderer.lean.json",
     "configs/PL-r3d-baseline.json", "configs/PL-r3d-actor-prepare-off.json",
     "configs/PL-r3d-native-scale.json", "configs/PL-r3d-preview-every-frame.json",
-    "configs/PL-r3d-film-bypass.json",
+    "configs/PL-r3d-film-bypass.json", "configs/PL-r3d-audio-direct.json",
     "configs/vita-sim/vita-sim-defaults.json", "configs/vita-sim/vita-sim-all.json",
     "configs/vita-sim/vita-sim-puff-cap.json", "configs/vita-sim/vita-sim-puff-collide.json",
     "configs/vita-sim/vita-sim-puff-collide-none.json", "configs/vita-sim/vita-sim-puff-sweep-every.json",

@@ -7,6 +7,21 @@ No console MKD command. Install only by the established package/config procedure
 Keep SELF and renderer config paired for rollback. The normal r3d config has
 `story_film_bypass=false`; do not enable benchmark/profile modes.
 
+0. Priority gate: reproduce the step-0 sequence, with audio enabled and all four
+   sim switches true. Cold Load Save the reference Autosave, capture a visible
+   paused village, then resume for at least 100 seconds of normal movement/look.
+   The r3d candidate must read back `audio_pcm_worker=true`; the implicit default
+   is false. Preserve producer policy readback (priority 161, CPU2), CPAL callback
+   p50/p95/max, game audio lock attempts/wait max, game API max, producer cost,
+   live-sink count, PCM starvation/rejections and game-stage/age. Require ongoing
+   frames/input, callback max well below 11.610 ms, no steady PCM starvation or
+   rejected source queues, and clean listening. Lock attempts/wait are structural
+   zeros for the new control path; API wall max is separately measured. If still
+   stalled, stage 1/2/3/4/5 distinguishes audio update/skin collect/skin gather/
+   audio preparation/audio load. Do not infer CPU usage from invalid run-clock
+   deltas. After the candidate, the optional `audio-direct.json` arm changes only
+   callback isolation; keep every other field/save/input identical. Do not use
+   pre-audio pkg-2 fps as an audio-on performance baseline.
 1. Cold launch r3c with its original config/preferences and reference Autosave.
    Main menu -> Load Save -> select Autosave. Capture visible output before and
    after resume, with timestamps and the entire log. Repeat cold with r3d and

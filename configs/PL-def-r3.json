@@ -67,6 +67,7 @@
   "gpu_uniform_dedupe": false,
   "startup_splash": false,
   "story_film_bypass": false,
+  "audio_pcm_worker": false,
   "shader_cache": "on",
   "texture_cache": "off",
   "route_heading_lock": true,
