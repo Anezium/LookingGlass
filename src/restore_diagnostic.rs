@@ -40,7 +40,7 @@ impl Probe {
         eprintln!("[lg/load-diagnostic] reason={} stage={stage} framebuffer_binding={framebuffer} viewport={viewport:?} framebuffer_status={status:#x} gl_error_before={error_before:#x} gl_error_after={error_after:#x} scale_target={:?} render_scale={}",
             self.reason, crate::render::vita_renderer::diagnostic_target(), crate::render::vita_renderer::config().render_scale);
     }
-    pub fn finish(self, map: &str, hud_submitted: bool) {
+    pub fn finish(&self, map: &str, hud_submitted: bool) {
         self.gl("hud-queued");
         eprintln!("[lg/load-diagnostic] reason={} map={map} end=frame-queued retained={} world_draws={} triangles={} world_submitted={} hud_submitted={hud_submitted} flush_forced=false wall_ms={:.3}",
             self.reason, self.retained, self.world_draws, self.triangles, self.world_draws > 0, self.start.elapsed().as_secs_f64()*1000.);

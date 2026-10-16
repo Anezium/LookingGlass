@@ -32,7 +32,8 @@ gather, world submission, worker collection, actor work, upscale and HUD queuing
 They report current framebuffer binding/completeness, viewport, existing/new GL
 errors, allocated scale target dimensions, camera pose, actual world draw/triangle
 counts and whether HUD draw calls were queued. Queries do not flush, read pixels,
-bind targets or repair state; a queued frame is not proof of visible pixels.
+bind targets or repair state. A final `frame-presented` sample follows the actual
+frame yield; neither queued draws nor swap completion prove visible pixels.
 `entry_after_story` and `entered_resources` split the formerly uninstrumented
 resource phase. `[lg/audio-load] scene_presented=true` follows the real frame yield.
 

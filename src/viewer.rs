@@ -4100,7 +4100,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }));
         }
         #[cfg(feature = "vita_renderer")]
-        if let Some(p) = load_probe.take() { p.finish(&maps[current], hud_submitted); }
+        let presented_probe = load_probe.take();
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = &presented_probe { p.finish(&maps[current], hud_submitted); }
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(
@@ -4125,6 +4127,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         crate::frame_phases::mark(9);
         next_frame().await;
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }
         audio.scene_presented();
     }
     #[cfg(target_os = "vita")]
