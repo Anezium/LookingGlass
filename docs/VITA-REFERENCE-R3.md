@@ -1,5 +1,8 @@
 # Reference r3 validation and console handoff
 
+Historical r3 report. Superseded by [the r3b fix round](VITA-REFERENCE-R3B.md)
+and its [console protocol](REFERENCE-R3B-PROTOCOL.md); the original r3 evidence remains archived unchanged.
+
 Runtime `7bfd6611cf2e7ad456f059d009770eb3b24047d7` on `vita-reference-r3`, from `vita-reference` `0e245cc`.
 The base reference branch is untouched. Merge commits preserve, in order,
 allmaps `342d8b3`, actor single preparation **v1** `64b49e3` and sim maps r2
