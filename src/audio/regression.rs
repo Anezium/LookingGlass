@@ -122,6 +122,7 @@ pub fn output(assets: &mut Assets) -> Result<()> {
         }
         if tick == 230 {
             audio.load(assets, "gvillage", &map);
+            audio.scene_presented();
             ensure!(
                 audio.reaction.is_none(),
                 "Map load retained an old reaction"

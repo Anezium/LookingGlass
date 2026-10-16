@@ -600,7 +600,7 @@ impl<S> Drop for Monitor<S> {
     }
 }
 struct Playback {
-    _stream: OutputStream,
+    _stream: Option<OutputStream>,
     mixer: Arc<dynamic_mixer::DynamicMixerController<f32>>,
 }
 impl Playback {
@@ -637,7 +637,7 @@ impl Playback {
             record,
         })?;
         Ok(Self {
-            _stream: stream,
+            _stream: Some(stream),
             mixer,
         })
     }
@@ -690,6 +690,7 @@ struct FadingMusic {
 
 pub struct Audio {
     playback: Option<Playback>,
+    scene_presented: bool,
     voice: Option<Sink>,
     music: Option<(Sink, Music)>,
     emitters: Vec<Emitter>,
@@ -743,6 +744,7 @@ impl Audio {
         };
         Self {
             playback,
+            scene_presented: true,
             voice: None,
             music: None,
             emitters: Vec::new(),
@@ -783,6 +785,8 @@ impl Audio {
     pub fn load(&mut self, assets: &mut Assets, name: &str, map: &Bsp) {
         self.stop_voice();
         self.retire_music();
+        self.scene_presented = false;
+        for old in &self.retiring { old.sink.pause(); }
         self.world_sounds = world::State::default();
         self.pending.clear();
         self.missing.clear();
@@ -869,6 +873,7 @@ impl Audio {
         for speaker in spec.speakers {
             if let Some(clip) = cache.get(&speaker.path).and_then(Clone::clone) {
                 let sink = playback.sink();
+                sink.pause();
                 sink.set_volume(0.);
                 let pan = Pan::new();
                 let acoustics = acoustics::Controls::new();
@@ -912,6 +917,13 @@ impl Audio {
         );
         Ok(())
     }
+    /// Called only after the viewer has yielded a complete world/HUD frame.
+    pub fn scene_presented(&mut self) {
+        if !self.scene_presented {
+            self.scene_presented = true;
+            eprintln!("[lg/audio-load] scene_presented=true level_sinks_ready=true");
+        }
+    }
     pub fn update(&mut self, dt: f32, listener: Vec3, yaw: f32, paused: bool, voice_paused: bool) {
         self.update_clocks(dt, dt, listener, yaw, paused, voice_paused);
     }
@@ -924,6 +936,7 @@ impl Audio {
         paused: bool,
         voice_paused: bool,
     ) {
+        let paused = paused || !self.scene_presented;
         let dt = if paused { 0. } else { dt.clamp(0., 0.25) };
         let world_dt = world_dt.clamp(0., dt);
         self.fade_elapsed += dt;
@@ -1360,6 +1373,7 @@ impl Audio {
         };
         let bytes = assets.read(&cue.path)?;
         let sink = playback.sink();
+        sink.pause();
         sink.set_volume(0.);
         if cue.looping {
             sink.append(Decoder::new_looped(Cursor::new(bytes))?);
@@ -1631,6 +1645,7 @@ pub fn test_output(assets: &mut Assets, name: &str) -> Result<()> {
     );
     audio.settings = Settings::default(); // Does not save/alter the user's preferences.
     audio.load(assets, name, &map);
+    audio.scene_presented();
     let (eye, yaw) = map.spawn();
     let world = World::from_bsp(&map)?;
     let model = events::Model::load(assets, "models/alice.tik")?;
@@ -1790,6 +1805,7 @@ pub fn test_output(assets: &mut Assets, name: &str) -> Result<()> {
         if tick == 160 && name == "skool1" {
             let next = Bsp::parse(&assets.read("maps/skool2.bsp")?)?;
             audio.load(assets, "skool2", &next);
+            audio.scene_presented();
         }
         audio.prepare(assets, &world, eye, (200..240).contains(&tick), 0.05);
         audio.update(0.05, eye, yaw, (120..140).contains(&tick), false);
@@ -1856,6 +1872,72 @@ pub fn test_output(assets: &mut Assets, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Exercise production level sinks/mixer with the Vita-sized callback, without
+    /// a hardware device. Wall-clock scheduling and Vita CPU cost remain unmodeled.
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA and an idle timing host"]
+    fn loading_callback_model() -> Result<()> {
+        use std::time::Instant;
+        let root = std::path::PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let mut assets = Assets::open(&root)?;
+        let map = Bsp::parse(&assets.read("maps/gvillage.bsp")?)?;
+        for phase in ["new-game", "load-save", "chapters-village"] {
+            let mut audio = Audio::new(true, None);
+            let (mixer, source) = dynamic_mixer::mixer(2, 44100);
+            audio.playback = Some(Playback { _stream: None, mixer });
+            let mut monitor = Monitor { source, data: audio.monitor.clone(),
+                block: Vec::with_capacity(1024), record: false };
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let gate = stop.clone();
+            let worker = std::thread::spawn(move || {
+                let mut durations = Vec::new();
+                while !gate.load(Ordering::Relaxed) {
+                    let start = Instant::now();
+                    for _ in 0..1024 {
+                        let sample = monitor.next().unwrap();
+                        std::hint::black_box((sample.clamp(-1., 1.) * 32767.).round() as i16);
+                    }
+                    durations.push(start.elapsed().as_secs_f64() * 1000.);
+                    std::thread::sleep(Duration::from_micros(11610));
+                }
+                durations
+            });
+            audio.load(&mut assets, "gvillage", &map);
+            audio.update(0.1, Vec3::ZERO, 0., false, false);
+            assert!(!audio.scene_presented);
+            assert!(audio.music.as_ref().unwrap().0.is_paused());
+            assert!(audio.emitters.iter().all(|e| e.sink.is_paused()));
+            // Capture at least a second of the paused loading mixer after setup.
+            std::thread::sleep(Duration::from_millis(1100));
+            stop.store(true, Ordering::Relaxed);
+            let mut times = worker.join().unwrap();
+            times.sort_by(f64::total_cmp);
+            let n = times.len();
+            let max = times[n-1];
+            println!("AUDIO_LOAD_MODEL phase={phase} samples={n} p50_ms={:.6} p95_ms={:.6} max_ms={max:.6} budget_ms=11.610 console_estimate=false",
+                times[n/2], times[(n-1)*95/100]);
+            assert!(max < 11.610, "host loading callback exceeded the Vita-sized block");
+            audio.scene_presented();
+            audio.update(0.1, Vec3::ZERO, 0., false, false);
+            assert!(!audio.music.as_ref().unwrap().0.is_paused());
+        }
+        Ok(())
+    }
+    #[test]
+    fn level_music_stays_paused_until_presentation_even_if_update_runs() {
+        let mut audio = Audio::new(true, None);
+        let (sink, _queue) = Sink::new_idle();
+        sink.pause();
+        audio.music = Some((sink, Music { path: "fixture.mp3".into(), volume: 1., fade: 0., looping: true }));
+        audio.scene_presented = false;
+        audio.update(0.1, Vec3::ZERO, 0., false, false);
+        assert!(audio.music.as_ref().unwrap().0.is_paused());
+        assert_eq!(audio.fade_elapsed, 0.);
+        audio.scene_presented();
+        audio.update(0.1, Vec3::ZERO, 0., false, false);
+        assert!(!audio.music.as_ref().unwrap().0.is_paused());
+        assert_eq!(audio.fade_elapsed, 0.1);
+    }
     #[test]
     fn watch_keeps_pcm_playing_but_defers_random_speaker_events() {
         let mut audio = Audio::new(true, None);

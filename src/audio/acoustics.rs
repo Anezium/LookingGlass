@@ -74,10 +74,14 @@ pub struct Filter<S> {
     channel: usize,
     tail: usize,
     rate: u32,
+    cutoff: u32,
+    alpha: f32,
 }
 impl<S: Source<Item = f32>> Filter<S> {
     pub fn new(source: S, controls: Arc<Controls>) -> Self {
         let rate = source.sample_rate();
+        let cutoff = controls.cutoff.load(Ordering::Relaxed);
+        let alpha = 1. - (-std::f32::consts::TAU * f32::from_bits(cutoff) / rate as f32).exp();
         Self {
             source,
             controls,
@@ -89,7 +93,7 @@ impl<S: Source<Item = f32>> Filter<S> {
             cursor: 0,
             channel: 0,
             tail: 0,
-            rate,
+            rate, cutoff, alpha,
         }
     }
 }
@@ -107,9 +111,12 @@ impl<S: Source<Item = f32>> Iterator for Filter<S> {
             }
         };
         let ch = self.channel;
-        let cutoff = f32::from_bits(self.controls.cutoff.load(Ordering::Relaxed));
-        let alpha = 1. - (-std::f32::consts::TAU * cutoff / self.rate as f32).exp();
-        self.low[ch] += alpha * (dry - self.low[ch]);
+        let cutoff = self.controls.cutoff.load(Ordering::Relaxed);
+        if cutoff != self.cutoff {
+            self.cutoff = cutoff;
+            self.alpha = 1. - (-std::f32::consts::TAU * f32::from_bits(cutoff) / self.rate as f32).exp();
+        }
+        self.low[ch] += self.alpha * (dry - self.low[ch]);
         let wet = f32::from_bits(self.controls.wet.load(Ordering::Relaxed));
         let buffer = &mut self.delays[ch];
         let index = self.cursor % buffer.len();
