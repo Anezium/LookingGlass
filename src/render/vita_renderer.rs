@@ -26,6 +26,10 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(remote = "Self", default, deny_unknown_fields)]
 pub struct Config {
+    /// Exact round-two candidates; console acceptance is still pending.
+    pub fx_merge_local_reuse: bool,
+    pub sim_triangle_candidates: bool,
+    pub sim_fan_candidates: bool,
     pub sim_school_mesh: bool,
     pub sim_tower_templates: bool,
     pub sim_npc_queries: bool,
@@ -169,6 +173,9 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 impl Default for Config {
     fn default() -> Self {
         Self {
+            fx_merge_local_reuse: false,
+            sim_triangle_candidates: false,
+            sim_fan_candidates: false,
             sim_school_mesh: true,
             sim_tower_templates: true,
             sim_npc_queries: true,
@@ -1935,6 +1942,17 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn round_two_switches_default_off_and_validate() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.sim_triangle_candidates && !c.sim_fan_candidates && !c.fx_merge_local_reuse);
+        }
+        let c: Config = serde_json::from_str(r#"{"sim_triangle_candidates":true,"sim_fan_candidates":true}"#).unwrap();
+        c.validate().unwrap(); assert!(c.sim_triangle_candidates && c.sim_fan_candidates);
+        for json in [r#"{"sim_triangle_candidates":1}"#, r#"{"sim_fan_candidates":"on"}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+    }
     #[test]
     fn simulation_switches_default_on_after_console_acceptance() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {

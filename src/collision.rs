@@ -393,12 +393,18 @@ impl Collider {
     pub fn trace(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         self.trace_query(start, end, half, &SweepBounds::new(start, end, half))
     }
+    fn visit_query(&self, query: &SweepBounds, mut visit: impl FnMut(&Hull)) {
+        if crate::sim_maps::triangle_candidates() {
+            if let Some(p) = &self.lazy { p.visit_query(query, visit); return; }
+        }
+        for h in self.hulls() { visit(h); }
+    }
     fn trace_query(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> Trace {
         #[cfg(target_os = "vita")]
         let (mut tested, mut clipped) = (0u32, 0u32);
         let mut out = Trace::default();
         if self.bounds.is_some_and(|b| query.overlaps(b)) {
-            for h in self.hulls().iter() {
+            self.visit_query(query, |h| {
                 #[cfg(target_os = "vita")]
                 {
                     tested += 1;
@@ -410,7 +416,7 @@ impl Collider {
                     }
                     clip_hull(h, start, end, half, &mut out);
                 }
-            }
+            });
         }
         #[cfg(target_os = "vita")]
         {

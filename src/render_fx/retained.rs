@@ -660,6 +660,9 @@ struct MergeCache {
     kept: Vec<Source>,
     destinations: Vec<(usize, Vec<usize>)>,
     versions: BTreeMap<usize, Vec<super::prepared::Version>>,
+    // A local certificate is valid only for this exact recycled output, even
+    // when a target crosses between transparent and opaque merge banks.
+    outputs: BTreeMap<usize, super::prepared::Version>,
     version_scratch: BTreeMap<usize, Vec<super::prepared::Version>>,
     destination_ids: Vec<usize>,
     candidates: Vec<(usize, usize, usize, PacketKey, bool)>,
@@ -712,6 +715,9 @@ fn merge_cached_mode<'a>(
 ) -> &'a [usize] {
     // Only packet topology/state is cached. Animated vertices always stream anew.
     // A world packet or actor is a barrier for particle material regrouping.
+    let local_reuse = crate::sim_maps::merge_local_reuse();
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    let signature_span = crate::frame_profile::span("fx_merge_signature");
     let mut signature = std::mem::take(&mut cache.signature);
     signature.clear();
     signature.extend(list
@@ -739,6 +745,10 @@ fn merge_cached_mode<'a>(
             }
         })
         );
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    drop(signature_span);
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    let plan_span = crate::frame_profile::span("fx_merge_plan");
     // Keep the prior signature in separate reusable storage for exact plan matching.
     let hit = reuse && cache.previous_signature == signature;
     if hit {
@@ -767,6 +777,7 @@ fn merge_cached_mode<'a>(
                 }
             }
             let found = candidates.iter().position(|c| {
+                crate::sim_maps::count("fx_merge_candidate_comparisons", 1);
                 c.3 == *key && c.1 + item.vertices <= 60000 && c.2 + item.indices <= 180000
             });
             if let Some(i) = found {
@@ -786,14 +797,22 @@ fn merge_cached_mode<'a>(
         cache.previous_signature.clone_from(&signature);
         cache.destinations.clear();
         for &(target, source) in &cache.steps {
-            if let Some((_, sources)) = cache.destinations.iter_mut().find(|(t,_)| *t == target) { sources.push(source); }
+            if let Some((_, sources)) = cache.destinations.iter_mut().find(|(t,_)| { crate::sim_maps::count("fx_merge_destination_comparisons", 1); *t == target }) { sources.push(source); }
             else { cache.destinations.push((target, vec![source])); }
         }
-        cache.versions.clear();
+        if !local_reuse { cache.versions.clear(); cache.outputs.clear(); }
+        else {
+            cache.versions.retain(|id,_| cache.destinations.iter().any(|(target,_)| target == id));
+            cache.outputs.retain(|id,_| cache.destinations.iter().any(|(target,_)| target == id));
+        }
         cache.destination_ids.clear();
         cache.destination_ids.extend(cache.destinations.iter().map(|(id,_)| *id));
     }
     cache.signature = signature;
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    drop(plan_span);
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    let _copy_span = crate::frame_profile::span("fx_merge_copy");
     for (target, sources) in &cache.destinations {
         let target = *target;
         let mut version_storage = std::mem::take(cache.version_scratch.entry(target).or_default());
@@ -804,12 +823,14 @@ fn merge_cached_mode<'a>(
             });
         let versions = certified.then_some(&version_storage);
         let old_version = pool.get(&target).map(|g|g.version);
-        let same_topology = hit && versions.as_ref().zip(cache.versions.get(&target)).is_some_and(|(a,b)|
+        let local_hit = local_reuse && old_version.is_some_and(|old| cache.outputs.get(&target) == Some(&old));
+        let same_topology = (hit || local_hit) && versions.as_ref().zip(cache.versions.get(&target)).is_some_and(|(a,b)|
             a.len()==b.len() && a.iter().zip(b).all(|(a,b)|a.identity==b.identity && a.topology==b.topology));
         let mut cached = pool.remove(&target);
         if let Some(previous) = cached.as_ref() {
-            let version_hit = hit && versions.is_some_and(|v| cache.versions.get(&target) == Some(v));
-            if hit && (version_hit || versions.is_none() && unchanged_merged(previous, groups, target, sources)) {
+            let version_hit = (hit || local_hit) && versions.is_some_and(|v| cache.versions.get(&target) == Some(v));
+            if version_hit || hit && versions.is_none() && unchanged_merged(previous, groups, target, sources) {
+                if !hit && local_hit { count("fx_merge_local_vertex_hits", 1); }
                 let cached = cached.take().unwrap();
                 if versions.is_some() { groups[target].passes[0].geometry=Some(std::rc::Rc::new(cached)); }
                 else { groups[target].passes[0].geometry=None; groups[target].passes[0].mesh=cached.mesh; }
@@ -821,6 +842,7 @@ fn merge_cached_mode<'a>(
                 continue;
             }
         }
+        if !hit && local_hit && same_topology { count("fx_merge_local_topology_hits", 1); }
         if in_place {
             let mut dest = cached.map(|g|g.mesh).unwrap_or_else(|| Mesh {vertices:Vec::new(),indices:Vec::new(),texture:None});
             dest.texture = groups[target].passes[0].mesh.texture.clone();
@@ -874,8 +896,10 @@ fn merge_cached_mode<'a>(
             cache.version_scratch.insert(target, previous);
             let texture = groups[target].passes[0].mesh.texture.clone();
             let mesh = std::mem::replace(&mut groups[target].passes[0].mesh, Mesh { vertices: Vec::new(), indices: Vec::new(), texture });
-            groups[target].passes[0].geometry = Some(std::rc::Rc::new(super::prepared::Geometry::merged(mesh, if hit {old_version} else {None}, same_topology)));
-        } else { cache.version_scratch.insert(target, version_storage); }
+            let geometry = super::prepared::Geometry::merged(mesh, if hit || local_hit {old_version} else {None}, same_topology);
+            if local_reuse { cache.outputs.insert(target, geometry.version); }
+            groups[target].passes[0].geometry = Some(std::rc::Rc::new(geometry));
+        } else { cache.version_scratch.insert(target, version_storage); cache.outputs.remove(&target); }
     }
     count("vita_fx_merged_meshes", cache.steps.len() as u64);
     list.clear();
@@ -1336,6 +1360,58 @@ mod tests {
                 let p=&mut changed[id].passes[0]; let g=p.geometry.take().unwrap();
                 pool.insert(id,std::rc::Rc::try_unwrap(g).ok().unwrap());
             }
+        }
+    }
+    #[test]
+    fn local_merge_certificates_survive_unrelated_plan_misses_and_reject_other_banks() {
+        for local in [false, true] {
+            crate::sim_maps::with_r2_switches([false, false, local], || {
+                let mut caches = [MergeCache::default(), MergeCache::default()];
+                let mut pool = BTreeMap::new();
+                let mut publications = (0..4).map(|_| super::super::prepared::Cache::default()).collect::<Vec<_>>();
+                let mut previous = None;
+                let mut preserved = 0;
+                for frame in 0..20 {
+                    let mut baseline = (0..4).map(|_| fixture_group()).collect::<Vec<_>>();
+                    for id in 2..4 { baseline[id].passes[0].gain = Vec4::splat(0.1 + frame as f32 * 0.01); }
+                    baseline[0].passes[0].mesh.vertices[0].position.x = (frame / 4) as f32;
+                    if frame >= 6 { baseline[3].passes[0].mesh.indices.swap(0,1); }
+                    if frame == 7 { publications[0] = Default::default(); }
+                    let mut changed = baseline.iter().map(|g| {
+                        let mut copy = fixture_group();
+                        copy.passes[0].mesh = super::super::copy_mesh(&g.passes[0].mesh);
+                        copy.passes[0].gain = g.passes[0].gain; copy
+                    }).collect::<Vec<_>>();
+                    for (g,c) in changed.iter_mut().zip(&mut publications) {
+                        g.passes[0].geometry = Some(c.observe(&g.passes[0].mesh, None));
+                    }
+                    let mut order = if frame == 9 { vec![(4.,Source::Actor(1)),(3.,Source::Actor(0))] }
+                        else { vec![(4.,Source::Actor(0)),(3.,Source::Actor(1))] };
+                    order.extend([(2.,Source::Actor(2)),(1.,Source::Actor(3)),(0.,Source::World(frame))]);
+                    let mut expected = order.clone();
+                    merge_adjacent(&mut baseline, &mut expected);
+                    let cache = &mut caches[if frame < 10 {0} else {frame % 2}];
+                    let ids = merge_cached_mode(cache, &mut changed, &mut order, false, true, &mut pool, true).to_vec();
+                    assert_eq!(order.iter().map(|x|x.1).collect::<Vec<_>>(), expected.iter().map(|x|x.1).collect::<Vec<_>>());
+                    for (a,b) in baseline.iter().zip(&changed) {
+                        assert_eq!(a.passes.len(), b.passes.len());
+                        for (a,b) in a.passes.iter().zip(&b.passes) {
+                            assert!(vertices_equal(&a.geometry().vertices, &b.geometry().vertices));
+                            assert_eq!(a.geometry().indices, b.geometry().indices);
+                        }
+                    }
+                    if frame < 3 {
+                        let current = changed[0].passes[0].geometry.as_ref().unwrap().version;
+                        if previous == Some(current) { preserved += 1; }
+                        previous = Some(current);
+                    }
+                    for id in ids {
+                        let g = changed[id].passes[0].geometry.take().unwrap();
+                        pool.insert(id, std::rc::Rc::try_unwrap(g).ok().unwrap());
+                    }
+                }
+                assert_eq!(preserved, if local {2} else {0});
+            });
         }
     }
     #[test]

@@ -1,4 +1,7 @@
 {
+  "sim_triangle_candidates": false,
+  "sim_fan_candidates": false,
+  "fx_merge_local_reuse": false,
   "sim_school_mesh": true,
   "sim_tower_templates": true,
   "sim_npc_queries": true,

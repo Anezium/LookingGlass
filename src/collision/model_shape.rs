@@ -191,10 +191,56 @@ pub(super) struct Placed {
     origin: Vec3,
     rotation: Quat,
     hulls: std::sync::OnceLock<Vec<Hull>>,
+    candidates: std::sync::OnceLock<Candidates>,
+}
+/// Immutable transformed vertices and exact prism bounds, with bevel planes
+/// materialized only for intersecting queries. Order is the original primitive order.
+#[derive(Debug)]
+struct Candidates {
+    brushes: Vec<Hull>,
+    triangles: Vec<([Vec3; 3], Bounds, std::sync::OnceLock<Option<Hull>>)>,
+}
+fn prism_bounds([a, b, c]: [Vec3; 3]) -> Option<Bounds> {
+    let cross = (b - a).cross(c - a);
+    if cross.length_squared() < 1e-6 { return None; }
+    let n = cross.normalize();
+    let points = [a + n * 0.125, b + n * 0.125, c + n * 0.125,
+        a - n * 0.125, b - n * 0.125, c - n * 0.125];
+    Some(Bounds { min: points.into_iter().reduce(Vec3::min).unwrap(),
+        max: points.into_iter().reduce(Vec3::max).unwrap() })
 }
 impl Placed {
+    pub(super) fn visit_query(&self, query: &SweepBounds, mut visit: impl FnMut(&Hull)) {
+        // Other consumers may already have requested the complete collider.
+        if let Some(hulls) = self.hulls.get() { for h in hulls { visit(h); } return; }
+        let candidates = self.candidates.get_or_init(|| {
+            crate::sim_maps::count("triangle_candidate_placements", 1);
+            let brushes = self.geometry.brushes.iter().map(|s| s.at(self.origin, self.rotation)).collect();
+            let triangles = if let Some(mesh) = &self.geometry.mesh {
+                let points: Vec<_> = mesh.vertices.iter().map(|v| self.origin + self.rotation * *v).collect();
+                mesh.triangles.iter().map(|t| t.map(|i| points[i])).collect::<Vec<_>>()
+            } else {
+                self.geometry.patches.iter().map(|t| t.map(|v| self.origin + self.rotation * v)).collect()
+            };
+            let triangles = triangles.into_iter().filter_map(|t| {
+                crate::sim_maps::count("triangle_candidate_bounds", 1);
+                prism_bounds(t).map(|b| (t, b, std::sync::OnceLock::new()))
+            }).collect();
+            Candidates { brushes, triangles }
+        });
+        for h in &candidates.brushes { visit(h); }
+        for (triangle, bounds, hull) in &candidates.triangles {
+            // Non-finite data cannot certify a broad-phase rejection.
+            if bounds.min.is_finite() && bounds.max.is_finite() && !query.overlaps(*bounds) {
+                crate::sim_maps::count("triangle_candidate_rejections", 1);
+                continue;
+            }
+            if let Some(h) = hull.get_or_init(|| triangle_hull(triangle[0], triangle[1], triangle[2])) { visit(h); }
+        }
+    }
+
     #[cfg(test)]
-    pub(super) fn pending(&self) -> bool { self.hulls.get().is_none() }
+    pub(super) fn pending(&self) -> bool { self.hulls.get().is_none() && self.candidates.get().is_none() }
     pub(super) fn hulls(&self) -> &[Hull] {
         self.hulls
             .get_or_init(|| {
@@ -435,6 +481,7 @@ impl Template {
                 origin,
                 rotation,
                 hulls: std::sync::OnceLock::new(),
+                candidates: std::sync::OnceLock::new(),
             })),
         }
     }
@@ -446,6 +493,47 @@ impl Template {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn triangle_candidates_preserve_exact_bounds_order_and_sweeps() {
+        let mut triangles = (0..32).map(|i| {
+            let a = vec3(i as f32 * 64., (i % 3) as f32 * 7., 0.);
+            [a, a + vec3(40., 0., 1.), a + vec3(0., 40., -1.)]
+        }).collect::<Vec<_>>();
+        triangles.push([Vec3::ZERO; 3]);
+        let shape = Template::triangles(&triangles);
+        for step in 0..50 {
+            let rotation = Quat::from_euler(glam::EulerRot::ZYX,
+                step as f32 * 0.071, step as f32 * -0.037, step as f32 * 0.013);
+            let origin = vec3(-4188. + step as f32 * 0.03125, 6004., -512.);
+            let reference = shape.at(origin, rotation);
+            let candidate = shape.at(origin, rotation);
+            for &triangle in &triangles[..32] {
+                let t = triangle.map(|v| origin + rotation * v);
+                let h = triangle_hull(t[0], t[1], t[2]).unwrap();
+                let b = prism_bounds(t).unwrap();
+                assert_eq!(b.min.to_array().map(f32::to_bits), h.bounds.min.to_array().map(f32::to_bits));
+                assert_eq!(b.max.to_array().map(f32::to_bits), h.bounds.max.to_array().map(f32::to_bits));
+                let center = (t[0] + t[1] + t[2]) / 3.;
+                for delta in [Vec3::ZERO, Vec3::Z * 100., vec3(120., -90., 100.)] {
+                    for half in [Vec3::ZERO, Vec3::ONE, PLAYER_HALF] {
+                        let a = crate::sim_maps::with_r2_switches([false; 3], || reference.trace(center + delta, center - delta, half));
+                        let b = crate::sim_maps::with_r2_switches([true; 3], || candidate.trace(center + delta, center - delta, half));
+                        assert_eq!(trace_bits(a), trace_bits(b), "pose {step}");
+                    }
+                }
+            }
+            assert_eq!(reference.geometry_bits(), candidate.geometry_bits());
+        }
+        let candidate = shape.at(Vec3::ZERO, Quat::IDENTITY);
+        crate::sim_maps::with_r2_switches([true; 3], || {
+            candidate.trace(vec3(8., 8., 50.), vec3(8., 8., -50.), Vec3::ZERO);
+        });
+        let placed = candidate.lazy.as_ref().unwrap();
+        assert!(placed.hulls.get().is_none());
+        let c = placed.candidates.get().unwrap();
+        assert_eq!(c.triangles.len(), 32);
+        assert_eq!(c.triangles.iter().filter(|(_,_,h)| h.get().is_some()).count(), 1);
+    }
     #[test]
     fn randomized_lazy_bounds_enclose_translated_triangle_hulls() {
         let mut seed = 0x93a7_514du32;
@@ -806,6 +894,14 @@ mod tests {
                 let origin = base + offset;
                 let old = Collider::model(map, model, origin, rotation, true).unwrap();
                 let expected = old.geometry_bits();
+                let lazy = shape.at(origin, rotation);
+                for offset in [Vec3::ZERO, Vec3::X * 10., Vec3::Y * 50., Vec3::Z * 200., Vec3::splat(500.)] {
+                    let center = origin + offset;
+                    for delta in [Vec3::ZERO, Vec3::Z * 80., vec3(120., -90., 100.)] {
+                        assert_eq!(trace_bits(old.trace(center + delta, center - delta, PLAYER_HALF)),
+                            trace_bits(lazy.trace(center + delta, center - delta, PLAYER_HALF)));
+                    }
+                }
                 assert_eq!(expected, shape.at_eager(origin, rotation).geometry_bits(), "model {model}, {degrees}, {origin:?}");
                 assert_eq!(expected, shape.at_eager(origin, rotation).geometry_bits());
             }

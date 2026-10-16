@@ -160,7 +160,11 @@ impl Tower {
                     let angle = (before.fans[i] + SPEED[i] * world_dt * k as f32 / steps as f32)
                         .rem_euclid(360.);
                     let rotation = Quat::from_axis_angle(axis(i), angle.to_radians());
-                    let c = if crate::sim_maps::tower_templates() {
+                    let c = if crate::sim_maps::fan_candidates() {
+                        crate::sim_maps::count("fan_lazy_candidates", 1);
+                        o.shape.at(o.base, rotation)
+                    } else if crate::sim_maps::tower_templates() {
+                        crate::sim_maps::count("fan_eager_candidates", 1);
                         o.shape.at_eager(o.base, rotation)
                     } else {
                         Collider::model(map, o.model, o.base, rotation, true)?
