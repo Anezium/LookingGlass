@@ -15,7 +15,10 @@ pub fn elapsed(actual: f32) -> f32 {
     *DT.get_or_init(|| std::env::var("LOOKING_GLASS_SIM_MAPS_DT").unwrap_or_else(|_| "0.05".into()).parse::<f32>().ok().filter(|t| t.is_finite() && *t > 0. && *t < 1.).expect("finite probe timestep"))
 }
 pub fn count(name: &'static str, n: u64) {
-    if enabled() { COUNTS.with(|c| *c.borrow_mut().entry(name).or_default() += n); }
+    static COUNTS_ON: OnceLock<bool> = OnceLock::new();
+    if enabled() && *COUNTS_ON.get_or_init(|| std::env::var("LOOKING_GLASS_SIM_MAPS_COUNTERS").as_deref() != Ok("0")) {
+        COUNTS.with(|c| *c.borrow_mut().entry(name).or_default() += n);
+    }
 }
 pub fn begin() {
     if enabled() {
@@ -25,7 +28,8 @@ pub fn begin() {
 }
 pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     if !enabled() { return; }
-    // Capture elapsed CPU before hashing/serialization. This is host ranking only.
+    // Includes snapshot Value construction; excludes byte encoding, hashing and output.
+    // Workload counters can be disabled independently for host ranking.
     let cpu_ms = START.with(|s| s.borrow().unwrap().elapsed().as_secs_f64() * 1000.);
     let bytes = serde_json::to_vec(state).expect("serializable simulation state");
     let hash = format!("{:x}", Sha256::digest(&bytes));
