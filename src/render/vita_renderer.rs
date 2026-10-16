@@ -124,6 +124,9 @@ pub struct Config {
     pub audio_producer_priority: i32,
     pub audio_producer_affinity: i32,
     pub audio_cushion_blocks: usize,
+    /// The producer never prints: per-second windows go through a lock-free
+    /// queue to a lowest-priority reporter thread.
+    pub audio_log_thread: bool,
     /// Persistent binary pairs; process deduplication remains active when off.
     pub shader_cache: String,
     /// Optional cache of exact device-compressed immutable pixels.
@@ -235,6 +238,7 @@ impl Default for Config {
             audio_producer_priority: 161,
             audio_producer_affinity: 0x40000,
             audio_cushion_blocks: 2,
+            audio_log_thread: false,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
             route_heading_lock:true,

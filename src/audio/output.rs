@@ -14,6 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 pub const SAMPLES: usize = 1024;
+/// Ready-block ring slots: the largest configurable cushion.
+const READY_SLOTS: usize = 4;
 /// A voice outside the ambience cap must be this much louder than the quietest
 /// held voice (about 2 dB) before they swap.
 const HYSTERESIS: f32 = 1.25;
@@ -209,7 +211,7 @@ impl Iterator for Callback {
             let mut found = false;
             // The queue has only four slots; stale prefetch is discarded in
             // bounded work without changing either endpoint's ownership.
-            for _ in 0..4 {
+            for _ in 0..READY_SLOTS {
                 let Some(block) = self.ready.pop() else {
                     break;
                 };
@@ -249,80 +251,50 @@ impl Source for Callback {
 pub struct Worker {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    reporter: Option<JoinHandle<()>>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
+        for handle in [self.handle.take(), self.reporter.take()].into_iter().flatten() {
             let _ = handle.join();
         }
     }
 }
-pub fn buffered<S: Source<Item = f32> + Send + 'static>(
-    mut source: S,
-    metrics: Arc<Metrics>,
-) -> std::io::Result<(Worker, Callback)> {
-    let (tx, rx) = queue::channel(4);
-    let config = block::settings();
-    let ready_blocks = config.cushion;
-    for _ in 0..ready_blocks {
-        assert!(tx
-            .push(Block {
-                epoch: 0,
-                samples: [0.; SAMPLES]
-            })
-            .is_ok());
-        metrics.queued_samples.fetch_add(SAMPLES, Ordering::Relaxed);
-    }
-    let stop = Arc::new(AtomicBool::new(false));
-    let done = stop.clone();
-    let stats = metrics.clone();
-    let handle=thread::Builder::new().name("audio-producer".into()).stack_size(1024*1024).spawn(move||{
-        if !policy(config) { return; }
-        let mut report=Instant::now();let mut timings=Vec::with_capacity(128);
-        let mut stages:[Vec<f64>;7]=std::array::from_fn(|_|Vec::with_capacity(128));
-        while !done.load(Ordering::Acquire) {
-            if tx.len()>=ready_blocks {thread::sleep(Duration::from_millis(1));}
-            else {
-                let epoch=stats.epoch.load(Ordering::Acquire);
-                let start=Instant::now();let mut block=[0.;SAMPLES];
-                for v in &mut block {*v=source.next().unwrap_or(0.);}
-                let total=start.elapsed().as_secs_f64()*1000.;timings.push(total);
-                if config.mix {let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
-                stats.queued_samples.fetch_add(SAMPLES,Ordering::Relaxed);
-                if tx.push(Block{epoch,samples:block}).is_err(){stats.queued_samples.fetch_sub(SAMPLES,Ordering::Relaxed);}
-            }
-            if report.elapsed()>=Duration::from_secs(1){
-                timings.sort_by(f64::total_cmp);let n=timings.len();
-                let (p50,p95,max)=if n>0 {(timings[n/2],timings[(n-1)*95/100],timings[n-1])}else{(0.,0.,0.)};
-                eprintln!("[lg/audio-realtime] window_ms={} producer_blocks={n} producer_mix_p50_ms={p50:.3} producer_mix_p95_ms={p95:.3} producer_mix_max_ms={max:.3} pcm_starved_blocks={} rejected_sinks={} intentional_pcm_flushes={} queued_samples={} game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0 producer_game_control_lock_attempts=0 producer_lock_wait_max_us=0 game_audio_api_max_us={} live_sink_peak={} game_stage={} game_stage_age_ms={} callback_source=bounded-pcm",
-                    report.elapsed().as_millis(),stats.starved.swap(0,Ordering::Relaxed),stats.rejected.swap(0,Ordering::Relaxed),stats.flushes.swap(0,Ordering::Relaxed),stats.queued_samples.load(Ordering::Relaxed),super::sink::API_MAX_US.swap(0,Ordering::Relaxed),stats.active_peak.swap(0,Ordering::Relaxed),super::game_stage_snapshot().0,super::game_stage_snapshot().1);
-                if config.mix {
-                    for (name,values) in block::STAGES.iter().zip(stages.iter_mut()){
-                        values.sort_by(f64::total_cmp);let n=values.len();
-                        if n>0{eprintln!("[lg/audio-stage] stage={name} blocks={n} p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",values[n/2],values[(n-1)*95/100],values[n-1]);}values.clear();
-                    }
-                    eprintln!("[lg/audio-voices] audible_ambient={} virtual_ambient={} cap={} cull_gain={}",stats.audible_ambient.load(Ordering::Relaxed),stats.virtual_ambient.load(Ordering::Relaxed),config.voices,config.gain);
-                }
-                timings.clear();report=Instant::now();
-            }
-        }
-    })?;
-    Ok((
-        Worker {
-            stop,
-            handle: Some(handle),
-        },
-        Callback {
-            ready: rx,
-            block: [0.; SAMPLES],
-            at: SAMPLES,
-            epoch: 0,
-            metrics,
-        },
-    ))
+/// Thread placement readback, recorded by the thread it describes.
+#[derive(Clone, Copy, Default)]
+pub struct ThreadPolicy {
+    host: bool,
+    id: i32,
+    priority_requested: i32,
+    priority_rc: i32,
+    affinity_requested: i32,
+    affinity_rc: i32,
+    info_rc: i32,
+    priority: i32,
+    affinity: i32,
+    stack: i32,
 }
-fn policy(config: block::Settings) -> bool {
+impl ThreadPolicy {
+    fn applied(&self) -> bool {
+        self.host
+            || (self.priority_rc >= 0
+                && self.affinity_rc >= 0
+                && self.info_rc >= 0
+                && self.priority == self.priority_requested
+                && self.affinity == self.affinity_requested)
+    }
+    pub fn describe(&self) -> String {
+        if self.host {
+            format!("host policy=normal stack_bytes={}", self.stack)
+        } else {
+            format!("id={} priority_requested={} priority_rc={} affinity_requested={:#x} affinity_rc={} info_rc={} effective_priority={} effective_affinity={:#x} stack_bytes={}",
+                self.id, self.priority_requested, self.priority_rc, self.affinity_requested, self.affinity_rc, self.info_rc, self.priority, self.affinity, self.stack)
+        }
+    }
+}
+/// Applies priority and, when given, CPU affinity to the calling thread.
+pub fn thread_policy(priority: i32, affinity: i32) -> ThreadPolicy {
     #[cfg(target_os = "vita")]
     unsafe {
         #[repr(C)]
@@ -360,23 +332,204 @@ fn policy(config: block::Settings) -> bool {
             fn sceKernelGetThreadInfo(id: i32, info: *mut Info) -> i32;
         }
         let id = sceKernelGetThreadId();
-        let priority = sceKernelChangeThreadPriority(id, config.priority);
-        let affinity = sceKernelChangeThreadCpuAffinityMask(id, config.affinity);
+        let priority_rc = sceKernelChangeThreadPriority(id, priority);
+        let affinity_rc = if affinity != 0 { sceKernelChangeThreadCpuAffinityMask(id, affinity) } else { 0 };
         let mut info: Info = std::mem::zeroed();
         info.size = std::mem::size_of::<Info>() as u32;
-        let readback = sceKernelGetThreadInfo(id, &mut info);
-        eprintln!("[lg/audio-producer] id={id} priority_requested={} priority_rc={priority} affinity_requested={:#x} affinity_rc={affinity} info_rc={readback} effective_priority={} effective_affinity={:#x} stack_bytes={} ready_blocks={} cushion_ms={:.3}", config.priority,config.affinity,info.priority,info.affinity,info.stack_size,config.cushion,config.cushion as f64*512./44.1);
-        return priority >= 0
-            && affinity >= 0
-            && readback >= 0
-            && info.priority == config.priority
-            && info.affinity == config.affinity;
+        let info_rc = sceKernelGetThreadInfo(id, &mut info);
+        ThreadPolicy {
+            host: false,
+            id,
+            priority_requested: priority,
+            priority_rc,
+            affinity_requested: if affinity != 0 { affinity } else { info.affinity },
+            affinity_rc,
+            info_rc,
+            priority: info.priority,
+            affinity: info.affinity,
+            stack: info.stack_size,
+        }
     }
     #[cfg(not(target_os = "vita"))]
     {
-        eprintln!("[lg/audio-producer] host policy=normal stack_bytes=1048576 ready_blocks={} cushion_ms={:.3}",config.cushion,config.cushion as f64*512./44.1);
-        true
+        let _ = (priority, affinity);
+        ThreadPolicy { host: true, stack: 1024 * 1024, ..Default::default() }
     }
+}
+/// One second of producer statistics, built without allocating so the
+/// producer can hand it to the reporter thread instead of printing.
+#[derive(Clone, Copy, Default)]
+struct Window {
+    window_ms: u128,
+    blocks: usize,
+    mix: [f64; 3],
+    starved: usize,
+    rejected: usize,
+    flushes: usize,
+    queued: usize,
+    api_max_us: u32,
+    live_peak: usize,
+    game_stage: (u32, u32),
+    stages: Option<([[f64; 3]; 7], usize)>,
+    voices: (usize, usize),
+    /// Longest interval between producer loop wakeups, its 1 ms sleep
+    /// overshoot, and wakeups more than one block apart.
+    gap_max_ms: f64,
+    sleep_over_ms: f64,
+    gaps_over_block: u32,
+    /// Time the producer spent printing the previous window (direct mode).
+    log_ms: f64,
+    dropped_reports: u32,
+}
+#[derive(Clone, Copy)]
+enum Report {
+    Policy(ThreadPolicy, block::Settings),
+    Window(Window),
+}
+fn percentiles(values: &mut [f64]) -> [f64; 3] {
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    if n == 0 {
+        return [0.; 3];
+    }
+    [values[n / 2], values[(n - 1) * 95 / 100], values[n - 1]]
+}
+fn print(report: &Report, config: block::Settings) {
+    match report {
+        Report::Policy(p, c) => eprintln!("[lg/audio-producer] {} ready_blocks={} cushion_ms={:.3} log_path={}",
+            p.describe(), c.cushion, c.cushion as f64 * 512. / 44.1, if c.log_thread { "reporter" } else { "producer" }),
+        Report::Window(w) => {
+            let [p50, p95, max] = w.mix;
+            eprintln!("[lg/audio-realtime] window_ms={} producer_blocks={} producer_mix_p50_ms={p50:.3} producer_mix_p95_ms={p95:.3} producer_mix_max_ms={max:.3} pcm_starved_blocks={} rejected_sinks={} intentional_pcm_flushes={} queued_samples={} game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0 producer_game_control_lock_attempts=0 producer_lock_wait_max_us=0 game_audio_api_max_us={} live_sink_peak={} game_stage={} game_stage_age_ms={} callback_source=bounded-pcm producer_gap_max_ms={:.3} producer_sleep_overshoot_max_ms={:.3} producer_gaps_over_block={} producer_log_ms={:.3} log_path={} dropped_reports={}",
+                w.window_ms, w.blocks, w.starved, w.rejected, w.flushes, w.queued, w.api_max_us, w.live_peak, w.game_stage.0, w.game_stage.1,
+                w.gap_max_ms, w.sleep_over_ms, w.gaps_over_block, w.log_ms, if config.log_thread { "reporter" } else { "producer" }, w.dropped_reports);
+            if let Some((stages, n)) = w.stages {
+                for (name, [p50, p95, max]) in block::STAGES.iter().zip(stages) {
+                    eprintln!("[lg/audio-stage] stage={name} blocks={n} p50_ms={p50:.3} p95_ms={p95:.3} max_ms={max:.3}");
+                }
+                eprintln!("[lg/audio-voices] audible_ambient={} virtual_ambient={} cap={} cull_gain={}", w.voices.0, w.voices.1, config.voices, config.gain);
+            }
+        }
+    }
+}
+pub fn buffered<S: Source<Item = f32> + Send + 'static>(
+    source: S,
+    metrics: Arc<Metrics>,
+) -> std::io::Result<(Worker, Callback)> {
+    buffered_with(source, metrics, block::settings())
+}
+fn buffered_with<S: Source<Item = f32> + Send + 'static>(
+    mut source: S,
+    metrics: Arc<Metrics>,
+    config: block::Settings,
+) -> std::io::Result<(Worker, Callback)> {
+    let (tx, rx) = queue::channel(READY_SLOTS);
+    let ready_blocks = config.cushion;
+    for _ in 0..ready_blocks {
+        assert!(tx
+            .push(Block {
+                epoch: 0,
+                samples: [0.; SAMPLES]
+            })
+            .is_ok());
+        metrics.queued_samples.fetch_add(SAMPLES, Ordering::Relaxed);
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let done = stop.clone();
+    let stats = metrics.clone();
+    let (reports, inbox) = queue::channel::<Report>(8);
+    let reporter = if config.log_thread {
+        let done = stop.clone();
+        Some(thread::Builder::new().name("audio-report".into()).stack_size(256 * 1024).spawn(move || {
+            // Lowest application priority on any core: it may run late, never early.
+            let _ = thread_policy(191, 0);
+            loop {
+                let stopping = done.load(Ordering::Acquire);
+                while let Some(report) = inbox.pop() {
+                    print(&report, config);
+                }
+                if stopping {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        })?)
+    } else {
+        None
+    };
+    let handle=thread::Builder::new().name("audio-producer".into()).stack_size(1024*1024).spawn(move||{
+        let policy = thread_policy(config.priority, config.affinity);
+        let dropped = std::cell::Cell::new(0);
+        let emit = |report: Report| -> f64 {
+            if config.log_thread {
+                if reports.push(report).is_err() { dropped.set(dropped.get() + 1); }
+                0.
+            } else {
+                let start = Instant::now();
+                print(&report, config);
+                start.elapsed().as_secs_f64() * 1000.
+            }
+        };
+        emit(Report::Policy(policy, config));
+        if !policy.applied() { return; }
+        let block_ms = SAMPLES as f64 / 2. / 44.1;
+        let mut report=Instant::now();let mut timings=Vec::with_capacity(128);
+        let mut stages:[Vec<f64>;7]=std::array::from_fn(|_|Vec::with_capacity(128));
+        let mut wake = Instant::now();
+        let (mut gap_max, mut sleep_over, mut gaps, mut log_ms) = (0f64, 0f64, 0u32, 0f64);
+        while !done.load(Ordering::Acquire) {
+            let now = Instant::now();
+            let gap = (now - wake).as_secs_f64() * 1000.;
+            wake = now;
+            gap_max = gap_max.max(gap);
+            if gap > block_ms { gaps += 1; }
+            if tx.len()>=ready_blocks {
+                thread::sleep(Duration::from_millis(1));
+                sleep_over = sleep_over.max(wake.elapsed().as_secs_f64() * 1000. - 1.);
+            }
+            else {
+                let epoch=stats.epoch.load(Ordering::Acquire);
+                let start=Instant::now();let mut block=[0.;SAMPLES];
+                for v in &mut block {*v=source.next().unwrap_or(0.);}
+                let total=start.elapsed().as_secs_f64()*1000.;timings.push(total);
+                if config.mix {let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
+                stats.queued_samples.fetch_add(SAMPLES,Ordering::Relaxed);
+                if tx.push(Block{epoch,samples:block}).is_err(){stats.queued_samples.fetch_sub(SAMPLES,Ordering::Relaxed);}
+            }
+            if report.elapsed()>=Duration::from_secs(1){
+                let n = timings.len();
+                let window = Window {
+                    window_ms: report.elapsed().as_millis(), blocks: n, mix: percentiles(&mut timings),
+                    starved: stats.starved.swap(0,Ordering::Relaxed), rejected: stats.rejected.swap(0,Ordering::Relaxed),
+                    flushes: stats.flushes.swap(0,Ordering::Relaxed), queued: stats.queued_samples.load(Ordering::Relaxed),
+                    api_max_us: super::sink::API_MAX_US.swap(0,Ordering::Relaxed), live_peak: stats.active_peak.swap(0,Ordering::Relaxed),
+                    game_stage: super::game_stage_snapshot(),
+                    stages: config.mix.then(|| (std::array::from_fn(|i| percentiles(&mut stages[i])), stages[0].len())),
+                    voices: (stats.audible_ambient.load(Ordering::Relaxed), stats.virtual_ambient.load(Ordering::Relaxed)),
+                    gap_max_ms: gap_max, sleep_over_ms: sleep_over.max(0.), gaps_over_block: gaps, log_ms,
+                    dropped_reports: dropped.get(),
+                };
+                log_ms = emit(Report::Window(window));
+                for values in &mut stages { values.clear(); }
+                (gap_max, sleep_over, gaps) = (0., 0., 0);
+                timings.clear();report=Instant::now();
+            }
+        }
+    })?;
+    Ok((
+        Worker {
+            stop,
+            handle: Some(handle),
+            reporter,
+        },
+        Callback {
+            ready: rx,
+            block: [0.; SAMPLES],
+            at: SAMPLES,
+            epoch: 0,
+            metrics,
+        },
+    ))
 }
 #[cfg(test)]
 mod tests {

@@ -12,6 +12,7 @@ pub struct Settings {
     pub priority: i32,
     pub affinity: i32,
     pub cushion: usize,
+    pub log_thread: bool,
 }
 pub fn settings() -> Settings {
     #[cfg(feature = "vita_renderer")]
@@ -41,6 +42,7 @@ pub fn settings() -> Settings {
                 _ => 0x40000,
             },
             cushion: c.audio_cushion_blocks.clamp(1, 4),
+            log_thread: c.audio_log_thread,
         }
     }
     #[cfg(not(feature = "vita_renderer"))]
@@ -54,6 +56,7 @@ pub fn settings() -> Settings {
             priority: 161,
             affinity: 0x40000,
             cushion: 2,
+            log_thread: false,
         }
     }
 }
