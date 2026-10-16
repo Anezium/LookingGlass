@@ -185,7 +185,10 @@ impl Drop for Sink {
 impl Output {
     pub fn rank(&self) -> Option<f32> {
         if self.controls.ambient.load(Ordering::Relaxed) {
-            Some(if self.controls.pause.load(Ordering::Relaxed) {
+            Some(if self.controls.pause.load(Ordering::Relaxed)
+                || !self.controls.alive.load(Ordering::Acquire)
+                || self.controls.count.load(Ordering::Relaxed) == 0
+            {
                 0.
             } else {
                 f32::from_bits(self.controls.volume.load(Ordering::Relaxed)).abs()

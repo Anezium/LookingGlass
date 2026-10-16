@@ -378,6 +378,7 @@ mod tests {
         mixer.config.mix=true;mixer.config.voices=1;mixer.config.gain=0.01;
         let a=control.sink();a.set_ambient();a.set_volume(0.5);
         let b=control.sink();b.set_ambient();b.set_volume(0.25);
+        let idle=control.sink();idle.set_ambient();idle.set_volume(1.);
         let player=control.sink();
         for sink in [&a,&b,&player]{sink.append(rodio::buffer::SamplesBuffer::new(2,44100,vec![0.1;4096]));}
         for _ in 0..SAMPLES{assert!((mixer.next().unwrap()-0.15).abs()<1e-6);}
@@ -385,7 +386,7 @@ mod tests {
         a.set_volume(0.05);b.set_volume(0.7);
         for _ in 0..SAMPLES{assert!((mixer.next().unwrap()-0.17).abs()<1e-6);}
         assert_eq!(control.metrics.audible_ambient.load(Ordering::Relaxed),1);
-        assert_eq!(control.metrics.virtual_ambient.load(Ordering::Relaxed),1);
+        assert_eq!(control.metrics.virtual_ambient.load(Ordering::Relaxed),2);
     }
     #[test]
     fn film_stop_flush_rejects_already_prefetched_samples() {
