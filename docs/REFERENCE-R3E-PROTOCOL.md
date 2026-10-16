@@ -12,6 +12,10 @@ keepalive processes untouched. Console counters do not establish audible quality
 listening is a separate human check. On failure restore the exact starting SELF,
 renderer/simulation configs, settings and saves, and close Alice.
 
+For inherited steps 1–7 below, use the r3e SELF and this package's matching
+configs wherever the procedure says r3d; keep the original r3c comparator.
+The steps' transactions and observations remain unchanged.
+
 0. Cold Load Save -> reference Autosave -> visible paused village -> resume for
    **105 seconds** of the same movement/look per arm. Start with
    `configs/PL-r3e-baseline.json` (package `configs/baseline.json`), then

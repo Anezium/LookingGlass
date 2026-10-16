@@ -34,7 +34,7 @@ decoded at load and cannot benefit from replacing the music decoder.
 
 Plan one 48-kHz system with a 512-sample grain, a 32-voice PCM rack (20 village
 emitters plus protected music/speech/player slots), and a stereo master/mixer
-rack. Allocate system/rack storage using size-query APIs, route voices with
+rack; reserve at least 33 system voices (40 leaves headroom). Allocate system/rack storage using size-query APIs, route voices with
 patches and gain matrices, and publish pitch/filter parameters per grain. Stream
 music/speech through double/triple buffers whose lifetime lasts until the DSP
 has consumed them. Bridge output into the existing bounded callback path.
