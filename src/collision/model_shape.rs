@@ -902,6 +902,24 @@ mod tests {
                             trace_bits(lazy.trace(center + delta, center - delta, PLAYER_HALF)));
                     }
                 }
+                // Template::at uses Convex::at, whereas the legacy collider uses
+                // Hull::transformed. Trace equality alone cannot prove identical
+                // bevel planes or hull bounds. Compare their ordered bits too;
+                // only the lazy collider's outer broadphase box is conservative.
+                let hull_bits = |collider: &Collider| {
+                    collider.hulls().iter().map(|hull| {
+                        let mut bits = hull.bounds.min.to_array().map(f32::to_bits).to_vec();
+                        bits.extend(hull.bounds.max.to_array().map(f32::to_bits));
+                        bits.push(hull.planes.len() as u32);
+                        for plane in &hull.planes {
+                            bits.extend(plane.normal.to_array().map(f32::to_bits));
+                            bits.push(plane.distance.to_bits());
+                        }
+                        bits
+                    }).collect::<Vec<_>>()
+                };
+                assert_eq!(hull_bits(&lazy), hull_bits(&old),
+                    "lazy hull bits: model {model}, axis {axis:?}, {degrees}, {origin:?}");
                 assert_eq!(expected, shape.at_eager(origin, rotation).geometry_bits(), "model {model}, {degrees}, {origin:?}");
                 assert_eq!(expected, shape.at_eager(origin, rotation).geometry_bits());
             }
