@@ -62,6 +62,10 @@ pub struct Output {
     channel: bool,
     paused: bool,
     gain: f32,
+    /// Gain applied at the end of the last block; None before the first one.
+    level: Option<f32>,
+    /// Held by the mixer's ambience cap for the next ranking (hysteresis).
+    pub(super) selected: bool,
 }
 impl Sink {
     pub fn new_idle() -> (Self, Output) {
@@ -91,6 +95,8 @@ impl Sink {
                 channel: false,
                 paused: false,
                 gain: 1.,
+                level: None,
+                selected: false,
             },
         )
     }
@@ -197,7 +203,10 @@ impl Output {
             None
         }
     }
-    /// Poll controls once per block; no game-owned lock is taken.
+    /// Poll controls once per block; no game-owned lock is taken. The applied
+    /// gain moves linearly from the previous block's value to this one's, so a
+    /// voice dropped by the ambience cap fades out over one block and a
+    /// returning voice fades in from silence.
     pub fn render(&mut self, out: &mut [f32], audible: bool) -> bool {
         out.fill(0.);
         if !self.controls.alive.load(Ordering::Acquire) {
@@ -216,6 +225,10 @@ impl Output {
             return true;
         }
         let gain = f32::from_bits(self.controls.volume.load(Ordering::Relaxed));
+        let target = if audible { gain } else { 0. };
+        let from = self.level.unwrap_or(target);
+        // A culled voice keeps rendering for the block that fades it out.
+        let live = audible || from != 0.;
         let mut at = 0;
         while at < out.len() {
             if self.current.is_none() {
@@ -244,7 +257,7 @@ impl Output {
                 break;
             };
             let n = match source {
-                Current::Effect(e) => e.render(&mut out[at..], audible),
+                Current::Effect(e) => e.render(&mut out[at..], live),
                 Current::Stream(s) => {
                     s.render(&mut out[at..], self.controls.music.load(Ordering::Relaxed))
                 }
@@ -273,9 +286,19 @@ impl Output {
             .position
             .store(self.position, Ordering::Relaxed);
         let start = std::time::Instant::now();
-        for v in out {
-            *v *= if audible { gain } else { 0. };
+        if from == target {
+            for v in out.iter_mut() {
+                *v *= target;
+            }
+        } else {
+            let step = (target - from) / (out.len() / 2) as f32;
+            for (i, frame) in out.chunks_exact_mut(2).enumerate() {
+                let g = from + step * (i + 1) as f32;
+                frame[0] *= g;
+                frame[1] *= g;
+            }
         }
+        self.level = Some(target);
         block::charge(3, start);
         true
     }

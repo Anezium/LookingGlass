@@ -14,6 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 pub const SAMPLES: usize = 1024;
+/// A voice outside the ambience cap must be this much louder than the quietest
+/// held voice (about 2 dB) before they swap.
+const HYSTERESIS: f32 = 1.25;
 #[derive(Default)]
 pub struct Metrics {
     pub rejected: AtomicUsize,
@@ -89,7 +92,7 @@ impl Mixer {
         for (i, s) in self.sources.iter().enumerate() {
             if let Some(gain) = s.rank() {
                 if gain > config.gain {
-                    self.ranks.push((i, gain));
+                    self.ranks.push((i, if s.selected { gain * HYSTERESIS } else { gain }));
                 }
             }
         }
@@ -97,6 +100,12 @@ impl Mixer {
             .sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         if config.voices > 0 {
             self.ranks.truncate(config.voices);
+        }
+        for s in &mut self.sources {
+            s.selected = false;
+        }
+        for &(i, _) in &self.ranks {
+            self.sources[i].selected = true;
         }
         self.metrics
             .audible_ambient
@@ -110,7 +119,7 @@ impl Mixer {
         let mut scratch = [0.; SAMPLES];
         let mut dead = Vec::new();
         for (i, s) in self.sources.iter_mut().enumerate() {
-            let audible = s.rank().is_none() || self.ranks.iter().any(|(j, _)| *j == i);
+            let audible = s.selected || s.rank().is_none();
             if !s.render(&mut scratch, audible) {
                 dead.push(i);
                 continue;
@@ -384,9 +393,53 @@ mod tests {
         for _ in 0..SAMPLES{assert!((mixer.next().unwrap()-0.15).abs()<1e-6);}
         assert_eq!(a.get_pos(),b.get_pos());assert!(a.get_pos()>Duration::ZERO);
         a.set_volume(0.05);b.set_volume(0.7);
+        // One block crossfades a out and b in; the next is steady.
+        let mut last=0.15;
+        for _ in 0..SAMPLES{let v=mixer.next().unwrap();assert!(v>=last-1e-6&&v<=0.17+1e-6);last=v;}
+        assert!((last-0.17).abs()<1e-6);
         for _ in 0..SAMPLES{assert!((mixer.next().unwrap()-0.17).abs()<1e-6);}
         assert_eq!(control.metrics.audible_ambient.load(Ordering::Relaxed),1);
         assert_eq!(control.metrics.virtual_ambient.load(Ordering::Relaxed),2);
+    }
+    /// Largest sample-to-sample step and lowest sample of the mixed output over
+    /// `blocks` blocks, calling `before` ahead of each block.
+    fn max_step(mixer:&mut Mixer,blocks:usize,mut before:impl FnMut(usize))->(f32,f32){
+        let mut prev=None;let mut worst=0f32;let mut low=f32::MAX;
+        for block in 0..blocks{
+            before(block);
+            for _ in 0..SAMPLES/2{
+                let frame=[mixer.next().unwrap(),mixer.next().unwrap()];
+                if let Some(p)=prev{let p:[f32;2]=p;worst=worst.max((frame[0]-p[0]).abs()).max((frame[1]-p[1]).abs());}
+                low=low.min(frame[0]);prev=Some(frame);
+            }
+        }
+        (worst,low)
+    }
+    #[test]
+    fn ambience_near_the_cap_boundary_fades_without_discontinuities() {
+        let (control,mut mixer)=mixer();
+        mixer.config.mix=true;mixer.config.voices=8;mixer.config.gain=0.001;
+        let dc=|v:f32|rodio::buffer::SamplesBuffer::new(2,44100,vec![v;2*44100]);
+        let held:Vec<_>=(0..7).map(|_|{let s=control.sink();s.set_ambient();s.set_volume(0.5);s.append(dc(0.1));s}).collect();
+        // Opposite DC makes any hard swap between the two contenders a large step.
+        let a=control.sink();a.set_ambient();a.set_volume(0.30);a.append(dc(0.5));
+        let b=control.sink();b.set_ambient();b.set_volume(0.29);b.append(dc(-0.5));
+        for _ in 0..SAMPLES{mixer.next();}
+        // Near-equal gains trading 8th place every block.
+        let (near,low)=max_step(&mut mixer,40,|block|{
+            let (x,y)=if block%2==0{(0.29,0.30)}else{(0.30,0.29)};
+            a.set_volume(x);b.set_volume(y);
+        });
+        assert!(near<0.001,"near-equal swap step {near}");
+        // The incumbent (positive DC) holds 8th place throughout.
+        assert!(low>7.*0.05+0.5*0.29-1e-5,"contender swapped in: {low}");
+        // A real overtake crossfades over one block, then holds.
+        let (overtake,_)=max_step(&mut mixer,4,|_|{a.set_volume(0.30);b.set_volume(0.6);});
+        assert!(overtake<0.001,"overtake step {overtake}");
+        let steady=mixer.next().unwrap();
+        assert!((steady-(7.*0.05-0.5*0.6)).abs()<1e-5,"{steady}");
+        // Without the fade the same overtake would step by about 0.45.
+        drop(held);
     }
     #[test]
     fn film_stop_flush_rejects_already_prefetched_samples() {
