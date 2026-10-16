@@ -540,6 +540,10 @@ fn starting_stats(options: &Options, map: &str, entry: Option<&str>) -> Stats {
 mod start;
 
 pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let physical_input = !crate::sim_maps::probe::enabled();
+    #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+    let physical_input = true;
     let startup=std::time::Instant::now();
     eprintln!("[lg/startup] viewer begin; UI begin");
     // Release cursor/audio before Miniquad destroys its native request queue.
@@ -1096,7 +1100,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let simulate = true;
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
-        input.update(&preferences, window_focused() && !bench && !route_running);
+        input.update(&preferences, physical_input && window_focused() && !bench && !route_running);
         preview_throttle.advance_frame();
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
@@ -1275,7 +1279,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // order when typing/pasting delivers several characters in one frame.
         let mut chars = std::iter::from_fn(get_char_pressed).collect::<Vec<_>>();
         chars.reverse();
-        let toggle_console = focused && !bench
+        let toggle_console = physical_input && focused && !bench
             && (is_key_pressed(KeyCode::GraveAccent)
                 || chars.iter().any(|c| matches!(c, '`' | '~' | '\u{00ac}')));
         let console_input = console.open || toggle_console;
@@ -1650,7 +1654,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             player.script_facing = yaw;
         }
         mouse_look.update(
-            focused
+            physical_input && focused
                 && !paused
                 && !menu
                 && !inventory_menu
@@ -4037,7 +4041,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }));
         }
         frame += 1;
-        if !bench && is_key_pressed(KeyCode::F12) {
+        if physical_input && !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(
                 "private/screenshots/{}-{frame}.png",
                 maps[current]
