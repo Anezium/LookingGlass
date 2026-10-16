@@ -73,3 +73,35 @@ impl MechanismKey {
     pub fn f(&mut self, value: f32) { self.u(value.to_bits()); }
     pub fn option(&mut self, value: Option<f32>) { self.u(value.map_or(u32::MAX, f32::to_bits)); }
 }
+
+// Round-two switches are independent of the accepted first-round defaults.
+macro_rules! round_two_switch {
+    ($name:ident, $field:ident, $index:expr) => {
+        pub fn $name() -> bool {
+            #[cfg(test)] { r2_test_switches()[$index] }
+            #[cfg(all(not(test), feature="vita_renderer"))]
+            { crate::render::vita_renderer::config().$field }
+            #[cfg(all(not(test), not(feature="vita_renderer")))] { false }
+        }
+    };
+}
+round_two_switch!(triangle_candidates, sim_triangle_candidates, 0);
+round_two_switch!(fan_candidates, sim_fan_candidates, 1);
+round_two_switch!(merge_local_reuse, fx_merge_local_reuse, 2);
+#[cfg(test)]
+thread_local! { static R2_TEST: std::cell::Cell<Option<[bool; 3]>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+fn r2_test_switches() -> [bool; 3] {
+    R2_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_SIM_R2").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => [false; 3],
+        Ok("on") => [true; 3],
+        _ => panic!("LOOKING_GLASS_TEST_SIM_R2 must be off or on"),
+    })
+}
+#[cfg(test)]
+pub(crate) fn with_r2_switches<T>(switches: [bool; 3], run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<[bool; 3]>);
+    impl Drop for Reset { fn drop(&mut self) { R2_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(R2_TEST.with(|s| s.replace(Some(switches))));
+    run()
+}

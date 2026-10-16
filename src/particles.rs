@@ -1699,6 +1699,7 @@ impl Attached {
         birth_pose: impl Fn(f32, Option<&str>) -> crate::skeletal::Transform,
         enabled: impl Fn(&str, f32, bool) -> bool,
     ) {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _profile = crate::frame_profile::span("attached_sample");
         self.steam.puffs.clear();
         self.live_births.clear();
