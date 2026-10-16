@@ -1833,7 +1833,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if speaking {
                     audio.stop_voice();
                 }
-                skip_scene.event("soundtrack_stop=not-applicable voice_stop=true");
+                skip_scene.event(&format!("soundtrack_stop=not-applicable voice_stop={speaking}"));
                 skip_scene.handoff("skipped");
                 clock.pause();
                 pos = player.eye();
