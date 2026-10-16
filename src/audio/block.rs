@@ -41,7 +41,7 @@ pub fn settings() -> Settings {
                 0x10000 | 0x20000 | 0x40000 => c.audio_producer_affinity,
                 _ => 0x40000,
             },
-            cushion: c.audio_cushion_blocks.clamp(1, 4),
+            cushion: c.audio_cushion_blocks.clamp(1, 8),
             log_thread: c.audio_log_thread,
         }
     }

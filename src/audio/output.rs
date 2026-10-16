@@ -15,7 +15,7 @@ use std::{
 };
 pub const SAMPLES: usize = 1024;
 /// Ready-block ring slots: the largest configurable cushion.
-const READY_SLOTS: usize = 4;
+const READY_SLOTS: usize = 8;
 /// A voice outside the ambience cap must be this much louder than the quietest
 /// held voice (about 2 dB) before they swap.
 const HYSTERESIS: f32 = 1.25;
@@ -209,7 +209,7 @@ impl Iterator for Callback {
             self.epoch = epoch;
             self.block = [0.; SAMPLES];
             let mut found = false;
-            // The queue has only four slots; stale prefetch is discarded in
+            // The queue has at most eight slots; stale prefetch is discarded in
             // bounded work without changing either endpoint's ownership.
             for _ in 0..READY_SLOTS {
                 let Some(block) = self.ready.pop() else {
@@ -593,6 +593,19 @@ mod tests {
         assert!((steady-(7.*0.05-0.5*0.6)).abs()<1e-5,"{steady}");
         // Without the fade the same overtake would step by about 0.45.
         drop(held);
+    }
+    #[test]
+    fn eight_block_cushion_with_reporter_thread_delivers_in_order() {
+        let mut config=block::settings();config.cushion=8;config.log_thread=true;
+        let metrics=Arc::new(Metrics::default());
+        let (worker,mut callback)=buffered_with(rodio::buffer::SamplesBuffer::new(2,44100,vec![0.5;2*44100]),metrics.clone(),config).unwrap();
+        assert_eq!(metrics.queued_samples.load(Ordering::Relaxed),8*SAMPLES);
+        // Eight silent prefill blocks (92.88 ms), then producer output.
+        assert!(callback.by_ref().take(8*SAMPLES).all(|v|v==0.));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(callback.by_ref().take(4*SAMPLES).all(|v|v==0.5));
+        assert_eq!(metrics.starved.load(Ordering::Relaxed),0);
+        drop(worker);
     }
     #[test]
     fn film_stop_flush_rejects_already_prefetched_samples() {
