@@ -79,6 +79,13 @@ class SourcePackageTests(unittest.TestCase):
         for path in ["private/note.md", "src/data.pk3", "src/../private/a.rs", "/src/main.rs"]:
             self.assertFalse(allowed(path), path)
 
+    def test_named_runtime_presets_do_not_allow_arbitrary_game_data(self):
+        for path in [".cargo/config.toml", "configs/PL-def-r3.json", "configs/vita-sim/vita-sim-all.json"]:
+            self.assertTrue(allowed(path), path)
+        for path in ["configs/auto.json", "configs/map.bsp", "configs/data.pk3", ".cargo/credentials.toml"]:
+            self.assertFalse(allowed(path), path)
+        self.assertTrue(audit_data("configs/PL-def-r3.json", b"invalid json"))
+
     def test_curated_media_requires_exact_path_and_content(self):
         name = "docs/media/gameplay/dry-landing.mp4"
         sample = b"synthetic\0recording"

@@ -84,7 +84,7 @@ struct Task {
 }
 impl Task {
     unsafe fn run(address: usize) {
-        let task = &mut *(address as *mut Task);
+        let task = &*(address as *const Task);
         let input = &*(task.input as *const Inputs);
         for draw in &input.draws[task.draws.clone()] {
             let pose = &input.pose[draw.pose.clone()];
@@ -319,7 +319,6 @@ impl Store {
             }
         }
 
-
         i.draws.push(draw);
     }
     #[cfg(feature="vita_renderer")]
@@ -480,7 +479,6 @@ impl Store {
             self.fallback += 1;
             return None;
         }
-
 
         for surface_id in d.surfaces.clone() {
             let surface = &mut i.surfaces[surface_id];

@@ -47,6 +47,8 @@ def run_cell(v, quality, renderer, failure=False):
     private = cell/'private'
     private.mkdir(parents=True, exist_ok=True)
     config = dict(cfg, renderer=renderer, retained_maps=['*'], legacy_maps=[])
+    # Single preparation requires the retained actor bridge; legacy is its control.
+    config['actor_single_prepare'] = renderer == 'vita' and cfg.get('actor_single_prepare', True)
     if quality == 'full': config.update(quality='full', render_scale=1.0)
     previous = previous_cells.get((name, quality, renderer)) if not failure else None
     if previous is not None:

@@ -31,9 +31,11 @@ pub struct Config {
     pub sim_npc_queries: bool,
     pub sim_mechanism_state: bool,
     pub renderer: String,
-    /// Exact campaign names, or "*" for every map. Absent preserves pkg-2.
+    /// Exact campaign names, or "*" for every map (the default).
+    #[serde(deserialize_with = "deserialize_maps")]
     pub retained_maps: Vec<String>,
     /// Explicit legacy exceptions take precedence over retained_maps.
+    #[serde(deserialize_with = "deserialize_maps")]
     pub legacy_maps: Vec<String>,
     /// Vita startup policy; stock preserves the clocks inherited from the system.
     pub clocks: Clocks,
@@ -131,6 +133,16 @@ pub struct Config {
     pub opaque_order:String,
     pub world_alpha:bool,
 }
+// A malformed name is local to its entry; serde still rejects unknown keys/types.
+fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Vec<String>, D::Error> {
+    let mut maps = <Vec<String> as serde::Deserialize>::deserialize(deserializer)?;
+    maps.retain(|name| {
+        let valid = name == "*" || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'));
+        if !valid { eprintln!("[lg/vita-renderer] warning invalid map name {name:?}; dropping entry only"); }
+        valid
+    });
+    Ok(maps)
+}
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -139,7 +151,7 @@ impl Default for Config {
             sim_npc_queries: false,
             sim_mechanism_state: false,
             renderer: "vita".into(),
-            retained_maps: vec!["gvillage".into()],
+            retained_maps: vec!["*".into()],
             legacy_maps: Vec::new(),
             clocks: Clocks::Max,
             save_preview: "throttled".into(),
@@ -151,7 +163,7 @@ impl Default for Config {
             uniform_field_cache: true,
             render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
-            lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: false,
+            lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
@@ -210,19 +222,27 @@ impl Config {
     pub(super) fn selection(&self, name: &str) -> (bool, &'static str) {
         if self.renderer != "vita" { return (false, "configuration"); }
         if self.legacy_maps.iter().any(|m| m == "*" || m == name) {
-            return (false, "legacy_maps");
+            return (false, "excluded");
         }
-        (self.retained_maps.iter().any(|m| m == "*" || m == name), "retained_maps")
+        if self.retained_maps.iter().any(|m| m == "*" || m == name) {
+            (true, "listed")
+        } else { (false, "unlisted") }
+    }
+    fn unknown_maps<'a>(&'a self, exists: impl Fn(&str) -> bool) -> Vec<(&'static str, &'a str)> {
+        [("retained_maps", &self.retained_maps), ("legacy_maps", &self.legacy_maps)].into_iter()
+            .flat_map(|(field, maps)| maps.iter().map(move |name| (field, name.as_str())))
+            .filter(|(_, name)| *name != "*" && !exists(name)).collect()
+    }
+    pub(crate) fn warn_unknown_maps(&self, assets: &crate::assets::Assets) {
+        for (field, name) in self.unknown_maps(|name| assets.contains(&format!("maps/{name}.bsp"))) {
+            eprintln!("[lg/vita-renderer] warning {field} map {name:?} matches no map in mounted game data");
+        }
     }
     pub(crate) fn actor_single_prepare_active(&self)->bool {
         self.actor_single_prepare && self.skin_overlap && self.actor_fast_path && self.actor_layer_cache
             && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
     }
     fn validate(&self) -> Result<()> {
-        for maps in [&self.retained_maps, &self.legacy_maps] {
-            ensure!(maps.iter().all(|m| m == "*" || (!m.is_empty() && m.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))),
-                "map lists require lowercase campaign names or *");
-        }
         ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
             "actor_single_prepare requires renderer=vita, skin_overlap=true, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
@@ -1905,21 +1925,46 @@ mod tests {
     #[test]
     fn map_selection_defaults_and_precedence() {
         let mut c: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(c.selection("gvillage"), (true, "retained_maps"));
-        assert_eq!(c.selection("skool2"), (false, "retained_maps"));
+        assert_eq!(c.selection("gvillage"), (true, "listed"));
+        assert_eq!(c.selection("skool2"), (true, "listed"));
         c.retained_maps = vec!["*".into()];
-        assert_eq!(c.selection("skool2"), (true, "retained_maps"));
+        assert_eq!(c.selection("skool2"), (true, "listed"));
         c.legacy_maps = vec!["skool2".into()];
-        assert_eq!(c.selection("skool2"), (false, "legacy_maps"));
-        assert_eq!(c.selection("gvillage"), (true, "retained_maps"));
+        assert_eq!(c.selection("skool2"), (false, "excluded"));
+        assert_eq!(c.selection("gvillage"), (true, "listed"));
         c.renderer = "legacy".into();
         assert_eq!(c.selection("gvillage"), (false, "configuration"));
         c.renderer = "vita".into(); c.retained_maps.clear();
-        assert_eq!(c.selection("gvillage"), (false, "retained_maps"));
+        assert_eq!(c.selection("gvillage"), (false, "unlisted"));
         c.legacy_maps = vec!["*".into()];
-        assert_eq!(c.selection("gvillage"), (false, "legacy_maps"));
+        assert_eq!(c.selection("gvillage"), (false, "excluded"));
         c.validate().unwrap();
-        c.retained_maps = vec!["../base".into()]; assert!(c.validate().is_err());
+    }
+    #[test]
+    fn invalid_map_entries_preserve_other_entries_and_settings() {
+        let c: Config = serde_json::from_str(r#"{"retained_maps":["gvillage","../base","skool2","","Upper"],"legacy_maps":["tower2","bad-name"],"render_scale":0.75,"quality":"low"}"#).unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.retained_maps, ["gvillage", "skool2"]);
+        assert_eq!(c.legacy_maps, ["tower2"]);
+        assert_eq!(c.render_scale, 0.75);
+        assert_eq!(c.quality, "low");
+        assert_eq!(c.selection("tower2"), (false, "excluded"));
+        assert_eq!(c.selection("hatter1"), (false, "unlisted"));
+        assert!(serde_json::from_str::<Config>(r#"{"retained_maps":["bad-name"],"typo":true}"#).is_err());
+        assert!(serde_json::from_str::<Config>(r#"{"retained_maps":[3]}"#).is_err());
+    }
+    #[test]
+    fn unknown_map_names_check_the_mounted_inventory_and_skip_wildcards() {
+        let c: Config = serde_json::from_str(r#"{"retained_maps":["*","gvillage","typo"],"legacy_maps":["skool2","missing"]}"#).unwrap();
+        assert_eq!(c.unknown_maps(|name| ["gvillage", "skool2"].contains(&name)),
+            [("retained_maps", "typo"), ("legacy_maps", "missing")]);
+    }
+    #[test]
+    fn packaged_r3_config_contains_exactly_all_runtime_defaults() {
+        let bytes = include_bytes!("../../configs/PL-def-r3.json");
+        let c: Config = serde_json::from_slice(bytes).unwrap();
+        c.validate().unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(bytes).unwrap(), serde_json::to_value(Config::default()).unwrap());
     }
     #[test]
     fn scaled_depth_fix_defaults_on_and_sentinel_is_opt_in() {
@@ -1985,8 +2030,8 @@ mod tests {
         }
     }
     #[test]
-    fn actor_single_preparation_is_opt_in_and_strictly_boolean() {
-        assert!(!Config::default().actor_single_prepare);
+    fn actor_single_preparation_defaults_on_and_is_strictly_boolean() {
+        assert!(Config::default().actor_single_prepare);
         for name in ["actor_single_prepare"] {
         for enabled in [true,false] {
             let c:Config=serde_json::from_value(serde_json::json!({(name):enabled})).unwrap();
@@ -2007,7 +2052,7 @@ mod tests {
             assert!(!invalid.actor_single_prepare_active());
             assert!(invalid.validate().unwrap_err().to_string().contains("actor_single_prepare"),"{key}");
         }
-        assert!(!Config::default().actor_single_prepare_active());
+        assert!(Config::default().actor_single_prepare_active());
     }
     fn j17_switches_preserve_console_selected_defaults_and_strict_types() {
         let default=serde_json::to_value(Config::default()).unwrap();
@@ -2035,7 +2080,7 @@ mod tests {
     #[test]
     fn profiler_and_worker_bench_configuration_is_strict() {
         for level in ["light","full"] {
-            let c:Config=serde_json::from_value(serde_json::json!({"profiler":level,"skin_worker_bench":true,"skin_overlap":false,"skin_workers":0})).unwrap();
+            let c:Config=serde_json::from_value(serde_json::json!({"profiler":level,"skin_worker_bench":true,"skin_overlap":false,"skin_workers":0,"actor_single_prepare":false})).unwrap();
             c.validate().unwrap(); assert!(c.skin_worker_bench); assert_eq!(c.skin_workers,0);
         }
         assert!(serde_json::from_value::<Config>(serde_json::json!({"profiler":"silent"})).is_err());
@@ -2049,7 +2094,7 @@ mod tests {
         assert!(!c.worker_probe && !c.frame_phase_probe);
         for workers in 0..=2 {
             let c:Config=serde_json::from_value(serde_json::json!({"skin_workers":workers,"skin_overlap":workers>0,
-                "worker_probe":true,"fx_prepare_cache":false,"frame_phase_probe":true})).unwrap();
+                "worker_probe":true,"fx_prepare_cache":false,"frame_phase_probe":true,"actor_single_prepare":false})).unwrap();
             assert!(c.validate().is_ok());
         }
         for value in [serde_json::json!({"skin_workers":3}),serde_json::json!({"skin_workers":-1}),

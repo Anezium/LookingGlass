@@ -1,11 +1,16 @@
 # Retained renderer map eligibility
 
 The `vita_renderer` feature reads `private/vita_renderer.json` on host and
-`ux0:data/alice/private/vita_renderer.json` on Vita. Without new fields, pkg-2
-selection remains village-only. `renderer: "legacy"` always selects legacy
+`ux0:data/alice/private/vita_renderer.json` on Vita. Without a config file, r3 selects every map for retained construction.
+`renderer: "legacy"` (with `actor_single_prepare: false`) selects legacy
 (`reason=configuration`). Otherwise `legacy_maps` takes precedence
-(`reason=legacy_maps`), and `retained_maps` decides eligibility
-(`reason=retained_maps`). Lists contain exact lowercase map names or `"*"`.
+(`reason=excluded`), and `retained_maps` decides eligibility
+(`reason=listed` or `reason=unlisted`). Lists contain exact lowercase map names
+or `"*"`. Invalid names warn and drop only that entry; syntactically valid names
+absent from the mounted game data warn at startup. Unknown config keys still fail
+strict parsing. `configs/PL-def-r3.json` contains every runtime default, including
+actor single preparation on and the four simulation caches off. SELF and config
+must always roll back together; older builds reject newer keys.
 
 ```json
 {"renderer":"vita","retained_maps":["*"],"legacy_maps":["hatter1"]}

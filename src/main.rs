@@ -614,6 +614,8 @@ fn run() -> Result<()> {
     }
     vita_sim::initialize(&o.save_dir);
     let mut assets = Assets::open(&o.data)?;
+    #[cfg(feature = "vita_renderer")]
+    render::vita_renderer::config().warn_unknown_maps(&assets);
     eprintln!("[lg/startup] assets ready mode={mode}");
     #[cfg(feature = "vita_renderer")]
     if mode == "vita-render-view" {

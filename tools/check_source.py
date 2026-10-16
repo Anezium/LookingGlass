@@ -19,6 +19,15 @@ SITE_FILES = {
     "docs/site/index.html", "docs/site/styles.css", "docs/site/favicon.svg",
     "docs/site/sitemap.xml",
 }
+# Authored build configuration and named presets, never a general data allowance.
+CONFIG_FILES = {
+    ".cargo/config.toml", "configs/PL-def-r3.json", "configs/vita_renderer.lean.json",
+    "configs/vita-sim/vita-sim-defaults.json", "configs/vita-sim/vita-sim-all.json",
+    "configs/vita-sim/vita-sim-puff-cap.json", "configs/vita-sim/vita-sim-puff-collide.json",
+    "configs/vita-sim/vita-sim-puff-collide-none.json", "configs/vita-sim/vita-sim-puff-sweep-every.json",
+    "configs/vita-sim/vita-sim-anim-cull.json", "configs/vita-sim/vita-sim-anim-far-distance.json",
+    "configs/vita-sim/vita-sim-anim-far-every.json", "configs/vita-sim/vita-sim-mover-far-every.json",
+}
 # User-requested README footage. Exact files/content only, never a general
 # allowance for original game assets or raw research captures.
 GAMEPLAY_MEDIA = {
@@ -41,7 +50,7 @@ def allowed(path):
     p = PurePosixPath(path)
     if p.is_absolute() or ".." in p.parts or "\\" in path:
         return False
-    if path in GAMEPLAY_MEDIA or path in SITE_FILES:
+    if path in GAMEPLAY_MEDIA or path in SITE_FILES or path in CONFIG_FILES:
         return True
     if len(p.parts) == 1:
         return path in ROOT_FILES or (path.startswith("Launch") and p.suffix == ".cmd")
