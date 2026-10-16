@@ -115,7 +115,7 @@ impl Art {
         eye: Vec3,
         clock: f32,
     ) {
-        if crate::character::skinning::overlap::gathering() { return; }
+        if crate::character::skinning::overlap::gather_only() { return; }
         let i = GRADES.iter().position(|g| *g == grade).unwrap();
         let _mesh_layers = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::MeshLayers);
         if !(crate::pickup_effects::cached() && crate::render_fx::retained_active()) {

@@ -155,7 +155,7 @@ impl Art {
         Ok(Self { props })
     }
     pub fn draw(&mut self, state: &State, fullbright: bool) {
-        if crate::character::skinning::overlap::gathering() { return; }
+        if crate::character::skinning::overlap::gather_only() { return; }
         for piece in &state.pieces {
             let transform = Transform {
                 translation: piece.position,

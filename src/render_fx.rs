@@ -11,6 +11,8 @@ use anyhow::Result;
 pub(crate) mod retained;
 #[cfg(feature="vita_renderer")]
 mod actor_cache;
+#[cfg(feature="vita_renderer")]
+pub(crate) mod actor_publication;
 pub(crate) mod actor_vertices;
 #[cfg(feature="vita_renderer")]
 pub(crate) mod prepared;
@@ -325,7 +327,7 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
     });
 }
 pub fn submit(passes: Vec<Pass>, transparent: bool) {
-    if crate::character::skinning::overlap::gathering() { return; }
+    if crate::character::skinning::overlap::gather_only() { return; }
     crate::game_thread::assert_current();
     if passes.is_empty() {
         return;
@@ -645,7 +647,7 @@ fn pass_at(
     })
 }
 pub fn effect(mesh: &Mesh, blend: Blend) {
-    if crate::character::skinning::overlap::gathering() { return; }
+    if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {
         #[cfg(target_os = "vita")]
         crate::frame_profile::record_lg_submission();
@@ -696,7 +698,7 @@ pub(crate) fn world_puff_batches_active() -> bool {
 /// Registration position preserves ties with packets submitted later in the view.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>, blend: Blend) {
-    if crate::character::skinning::overlap::gathering() { return; }
+    if crate::character::skinning::overlap::gather_only() { return; }
     debug_assert!(world_puff_batches_active());
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
@@ -707,7 +709,7 @@ pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>,
     });
 }
 pub fn line(a: Vec3, b: Vec3, color: Color) {
-    if crate::character::skinning::overlap::gathering() { return; }
+    if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {
         draw_line_3d(a, b, color);
         return;
@@ -733,7 +735,7 @@ pub fn line(a: Vec3, b: Vec3, color: Color) {
     );
 }
 pub fn sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Color) {
-    if crate::character::skinning::overlap::gathering() { return; }
+    if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {
         draw_sphere(center, radius, texture, color);
         return;
@@ -910,7 +912,7 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
     publication: Option<actor_vertices::Publication<'_>>) {
     #[cfg(not(feature="vita_renderer"))]
     let _ = &publication;
-    if crate::character::skinning::overlap::gathering() { return; }
+    if crate::character::skinning::overlap::gather_only() { return; }
     let layers_profile = crate::frame_profile::characters_span("characters_layers");
     if !active() {
         drop(layers_profile);

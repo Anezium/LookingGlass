@@ -52,6 +52,8 @@ pub struct Config {
     pub lights_early_out: bool,
     pub fx_submit_state_cache: bool,
     pub actor_layer_reuse: bool,
+    /// Prepare actor packets once using bounded owned publication banks.
+    pub actor_single_prepare: bool,
     /// None selects light in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     pub skin_worker_bench: bool,
@@ -141,7 +143,7 @@ impl Default for Config {
             uniform_field_cache: true,
             render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
-            lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false,
+            lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: false,
             profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
@@ -204,11 +206,17 @@ impl Config {
         }
         (self.retained_maps.iter().any(|m| m == "*" || m == name), "retained_maps")
     }
+    pub(crate) fn actor_single_prepare_active(&self)->bool {
+        self.actor_single_prepare && self.skin_overlap && self.actor_fast_path && self.actor_layer_cache
+            && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
+    }
     fn validate(&self) -> Result<()> {
         for maps in [&self.retained_maps, &self.legacy_maps] {
             ensure!(maps.iter().all(|m| m == "*" || (!m.is_empty() && m.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))),
                 "map lists require lowercase campaign names or *");
         }
+        ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
+            "actor_single_prepare requires renderer=vita, skin_overlap=true, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
         ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
@@ -278,6 +286,7 @@ pub fn config() -> &'static Config {
             "[lg/vita-renderer] config {}",
             serde_json::to_string(&c).unwrap()
         );
+        println!("[lg/vita-renderer] actor_single_prepare active={}", c.actor_single_prepare_active());
         #[cfg(target_os = "vita")]
         apply_startup_clocks(c.clocks);
         apply_gpu_experiment(&c);
@@ -1950,6 +1959,31 @@ mod tests {
             serde_json::from_value::<Config>(value.clone()).unwrap().validate().unwrap();
             value[key]=serde_json::json!("off");assert!(serde_json::from_value::<Config>(value).is_err());
         }
+    }
+    #[test]
+    fn actor_single_preparation_is_opt_in_and_strictly_boolean() {
+        assert!(!Config::default().actor_single_prepare);
+        for name in ["actor_single_prepare"] {
+        for enabled in [true,false] {
+            let c:Config=serde_json::from_value(serde_json::json!({(name):enabled})).unwrap();
+            assert_eq!(serde_json::to_value(&c).unwrap()[name],enabled);c.validate().unwrap();
+        }
+        assert!(serde_json::from_value::<Config>(serde_json::json!({(name):"on"})).is_err());
+        }
+    }
+    #[test]
+    fn actor_single_preparation_rejects_each_missing_prerequisite() {
+        let valid=Config {actor_single_prepare:true,..Default::default()};
+        valid.validate().unwrap();assert!(valid.actor_single_prepare_active());
+        for (key,value) in [("skin_overlap",serde_json::json!(false)),("actor_fast_path",serde_json::json!(false)),
+            ("actor_layer_cache",serde_json::json!(false)),("fx_prepare_cache",serde_json::json!(false)),
+            ("actor_layer_reuse",serde_json::json!(true)),("renderer",serde_json::json!("legacy"))] {
+            let mut config=serde_json::to_value(&valid).unwrap();config[key]=value;
+            let invalid:Config=serde_json::from_value(config).unwrap();
+            assert!(!invalid.actor_single_prepare_active());
+            assert!(invalid.validate().unwrap_err().to_string().contains("actor_single_prepare"),"{key}");
+        }
+        assert!(!Config::default().actor_single_prepare_active());
     }
     fn j17_switches_preserve_console_selected_defaults_and_strict_types() {
         let default=serde_json::to_value(Config::default()).unwrap();

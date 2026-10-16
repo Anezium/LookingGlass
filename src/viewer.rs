@@ -3393,6 +3393,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             level_art.story_pose(&story);
             let mut frame = crate::character::skinning::overlap::Frame::begin();
+            if crate::character::skinning::overlap::single_frame() {
+                if draw_world && show_alice && stats.invisible <= 0. { crate::lighting::shadow(&scene.world, player.feet, 22.); }
+                alice.atmosphere(&scene.atmosphere, camera);
+            }
             if show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic()) {
                 alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
             }
@@ -3422,7 +3426,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         let host_characters_profile = crate::frame_profile::span("frame_characters");
         let actors_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
-        if !world_only {
+        if !world_only && !crate::character::skinning::overlap::single_frame() {
         {
             let _characters_profile = crate::frame_profile::span("characters_setup");
             if draw_world && show_alice && stats.invisible <= 0. {
@@ -4121,10 +4125,12 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
                     } else {None};
                     active.scene.draw(camera,time,false,false,&transforms);
                     if let Some(f)=&mut skin_frame {f.collect();}
+                    if !crate::character::skinning::overlap::single_frame() {
                     alice.atmosphere(&active.scene.atmosphere,camera);
                     alice.draw_ghost(player.feet,false,frame==2);
                     active.npcs.draw(camera,(target-camera).normalize_or_zero(),&active.scene.atmosphere,false);
                     active.art.draw(&active.interactions,&active.hints,&active.scene.atmosphere,camera,false);
+                    }
                     if let Some(f)=&skin_frame {f.assert_consumed();}
                     drop(skin_frame);
                     active.scene.draw_with_particles(camera,(target-camera).normalize_or_zero(),time,false,&transforms,&active.steam);
@@ -4144,7 +4150,49 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
             }
         }
     }
-    println!("PASS native early overlap: {comparisons} byte-identical frames across six real maps, worker1/2, Alice ghost, NPC/level art, zero fallback/unconsumed draws");
+    // Additional publication consumers and shared instances use the actual assets.
+    // Fresh map resources in each arm exercise replacement; captures are outside timing.
+    let specs=crate::texture::read_materials(assets)?;
+    for workers in [1,2] {
+        let mut reference=Vec::new();
+        for overlapped in [false,true] {
+            let mut active=enter_level(assets,"gvillage",None,None,options,true)?;
+            let mut puppet=crate::npc::Puppet::load(assets,"c_torchgnome3",&["idle","death_frozen"],&specs)?;
+            let mut alice=Character::load(assets)?;
+            let player=Player::new(Vec3::ZERO);alice.reset(&player,0.);
+            if overlapped {crate::character::skinning::overlap::startup(workers,false);}
+            for case in 0..12 {
+                let bright=case==6;let time=case as f32*0.137;
+                let offset=if case==9 {Vec3::Y*32.} else {Vec3::ZERO};
+                let view=Camera3D {position:vec3(150.,-190.,85.)+offset,target:Vec3::Z*38.+offset,
+                    up:Vec3::Z,fovy:75_f32.to_radians(),z_near:2.,z_far:30000.,..Default::default()};
+                clear_background(BLACK);set_camera(&view);
+                active.scene.begin_fx_view(&view,time,bright,true);
+                puppet.surface_visible("material1",case!=4);
+                let draw=|puppet:&mut crate::npc::Puppet,alice:&mut Character| {
+                    if case==8 {alice.draw_first_person(bright);} else {alice.draw_ghost(Vec3::ZERO,bright,case==7);}
+                    for (n,at) in [vec3(-28.,0.,0.),vec3(28.,0.,0.)].into_iter().enumerate() {
+                        puppet.draw(if case==3 {"death_frozen"} else {"idle"},time+n as f32*0.19,true,
+                            crate::skeletal::Transform {translation:at,rotation:Quat::from_rotation_z(time+n as f32)},1.,bright);
+                    }
+                };
+                let mut frame=if overlapped {
+                    let f=crate::character::skinning::overlap::Frame::begin();
+                    draw(&mut puppet,&mut alice);Some(f)
+                } else {None};
+                if let Some(f)=&mut frame {f.dispatch();f.collect();}
+                if !crate::character::skinning::overlap::single_frame() {draw(&mut puppet,&mut alice);}
+                if let Some(f)=&frame {f.assert_consumed();}drop(frame);
+                active.scene.finish_fx(true);set_default_camera();
+                let image=get_screen_data();
+                save_capture(std::path::Path::new(&format!("private/skin-overlap/consumers-w{workers}-{}-{case}.png",if overlapped {"overlap"} else {"serial"})))?;
+                if overlapped {anyhow::ensure!(reference[case]==image.bytes,"publication consumer case {case} worker {workers} differs");comparisons+=1;}
+                else {reference.push(image.bytes);}
+                next_frame().await;
+            }
+        }
+    }
+    println!("PASS native early overlap: {comparisons} byte-identical frames across six real maps and consumer witnesses, worker1/2, changing poses, duplicate gnomes, blink/live UV, frozen shells, hidden/reappearing surfaces, attachments, fullbright, first-person/second view, clean resource replacement");
     Ok(())
 }
 #[cfg(not(feature="vita_renderer"))]
@@ -4210,10 +4258,12 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         skin.collect();
         {
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
+            if !crate::character::skinning::overlap::single_frame() {
             state.alice.atmosphere(&state.scene.atmosphere, view.position);
             state.alice.draw_ghost(state.game.player.feet, fullbright, false);
             state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright);
             art.draw(&state.interactions, &state.hints, &state.scene.atmosphere, view.position, fullbright);
+            }
             skin.assert_consumed();
         }
         drop(skin);

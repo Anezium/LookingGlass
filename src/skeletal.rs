@@ -62,13 +62,22 @@ pub struct SkinSurface {
     pub vertices: Vec<SkinVertex>,
     pub indices: Vec<u16>,
     pub bind_vertices: Vec<Vertex>,
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) used_bones: Vec<usize>,
 }
 impl Surface {
     pub(crate) fn new(name: String, vertices: Vec<SkinVertex>, indices: Vec<u16>) -> Self {
+        #[cfg(feature = "vita_renderer")]
+        let used_bones = {
+            // Include zero-weight entries too: the exact kernel still evaluates them.
+            let mut bones = vertices.iter().flat_map(|v| v.weights.iter().map(|w| w.bone)).collect::<Vec<_>>();
+            bones.sort_unstable(); bones.dedup(); bones
+        };
         let bind_vertices = vertices.iter().map(|v| Vertex {
             position: Vec3::ZERO, uv: v.uv, normal: Vec4::ZERO, color: [255; 4],
         }).collect();
-        Self { name, cpu: std::sync::Arc::new(SkinSurface { vertices, indices, bind_vertices }) }
+        Self { name, cpu: std::sync::Arc::new(SkinSurface { vertices, indices, bind_vertices,
+            #[cfg(feature = "vita_renderer")] used_bones }) }
     }
     pub(crate) fn cpu(&self) -> std::sync::Arc<SkinSurface> { self.cpu.clone() }
     pub(crate) fn shares_cpu(&self, cpu: &std::sync::Arc<SkinSurface>) -> bool {

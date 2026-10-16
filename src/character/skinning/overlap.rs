@@ -28,6 +28,20 @@ thread_local! {
 pub(crate) fn gathering() -> bool {
     PHASE.with(|p| p.get() == Phase::Gather)
 }
+/// The old traversal suppresses consumers; the single preparation executes them.
+pub(crate) fn gather_only() -> bool { gathering() && !single_preparing() }
+pub(crate) fn single_preparing() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { gathering() && crate::render_fx::actor_publication::active() }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
+pub(crate) fn single_frame() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { crate::render_fx::actor_publication::active() }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
 pub(crate) fn ready() -> bool {
     PHASE.with(|p| p.get() == Phase::Ready)
 }
@@ -37,8 +51,11 @@ struct Surface {
     vertices: Range<usize>,
     cpu: Arc<SkinSurface>,
     revision: Revision,
+    output: usize,
+    alpha_variant: bool,
 }
 struct Draw {
+    actor: Option<super::identity::ActorId>,
     key: usize,
     pose: Range<usize>,
     scales: Range<usize>,
@@ -67,7 +84,7 @@ struct Task {
 }
 impl Task {
     unsafe fn run(address: usize) {
-        let task = &*(address as *const Task);
+        let task = &mut *(address as *mut Task);
         let input = &*(task.input as *const Inputs);
         for draw in &input.draws[task.draws.clone()] {
             let pose = &input.pose[draw.pose.clone()];
@@ -77,7 +94,8 @@ impl Task {
                 let surface = &input.surfaces[surface_id];
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
                 let output = std::slice::from_raw_parts_mut(
-                    (task.output as *mut Vertex).add(surface.vertices.start),
+                    if surface.output == 0 { (task.output as *mut Vertex).add(surface.vertices.start) }
+                    else { surface.output as *mut Vertex },
                     surface.vertices.len(),
                 );
                 for ((src, bind), dst) in surface.cpu.vertices
@@ -86,7 +104,7 @@ impl Task {
                 {
                     let weights = &src.weights;
                     // Initialize untouched fields on the worker from load-time data.
-                    *dst = *bind;
+                    if surface.output == 0 { *dst = *bind; }
                     let position: Vec3 = if !palette.is_empty() {
                         weights
                             .iter()
@@ -121,6 +139,9 @@ impl Task {
                     draw.fullbright,
                     draw.alpha,
                 );
+                if surface.output != 0 {
+                    for vertex in &mut *output { *vertex = actor_vertices::normalize(*vertex, surface.alpha_variant); }
+                }
                 if task.layers != 0 {
                     let layers = std::slice::from_raw_parts_mut(
                         (task.layers as *mut [Vertex; 2]).add(surface.vertices.start), output.len());
@@ -136,6 +157,7 @@ impl Task {
                 }
             }
         }
+
     }
 }
 struct Store {
@@ -143,6 +165,8 @@ struct Store {
     workers: Vec<crate::skin_worker::Worker>,
     tasks: [UnsafeCell<Task>; 2],
     input: Box<UnsafeCell<Inputs>>,
+    #[cfg(feature="vita_renderer")]
+    previous_numeric: Option<Box<Inputs>>,
     output: Vec<Vertex>,
     output_len: usize,
     layers: Vec<[Vertex; 2]>,
@@ -186,6 +210,8 @@ impl Store {
                 scales: Vec::with_capacity(BONES),
                 palette: Vec::with_capacity(BONES),
             })),
+            #[cfg(feature="vita_renderer")]
+            previous_numeric:None,
             output: vec![Vertex { position: Vec3::ZERO, uv: Vec2::ZERO,
                 normal: Vec4::ZERO, color: [0; 4] }; VERTICES],
             output_len: 0,
@@ -204,6 +230,13 @@ impl Store {
     fn reset(&mut self) {
         assert_eq!(self.pending, 0);
         let i = unsafe { &mut *self.input.get() };
+        #[cfg(feature="vita_renderer")]
+        if single_frame() {
+            let old=self.previous_numeric.get_or_insert_with(||Box::new(Inputs {
+                draws:Vec::with_capacity(DRAWS),surfaces:Vec::with_capacity(SURFACES),pose:Vec::with_capacity(BONES),
+                scales:Vec::with_capacity(BONES),palette:Vec::with_capacity(BONES)}));
+            std::mem::swap(i,&mut **old);
+        }
         i.draws.clear();
         self.previous.clear();
         if !self.layers.is_empty() {self.previous.extend(i.surfaces.iter().cloned());}
@@ -251,6 +284,7 @@ impl Store {
             return;
         }
         let draw = Draw {
+            actor: None,
             key: skeleton as *const Skeleton as usize,
             pose: i.pose.len()..i.pose.len() + p.pose.len(),
             scales: i.scales.len()..i.scales.len() + p.scales.len(),
@@ -281,10 +315,66 @@ impl Store {
                     else {self.previous.get(i.surfaces.len())
                         .filter(|old| old.vertices == vertices && Arc::ptr_eq(&old.cpu, &cpu))
                         .map_or_else(Revision::new, |old| old.revision)};
-                i.surfaces.push(Surface { mesh, vertices, cpu, revision });
+                i.surfaces.push(Surface { mesh, vertices, cpu, revision, output: 0, alpha_variant: false });
             }
         }
+
+
         i.draws.push(draw);
+    }
+    #[cfg(feature="vita_renderer")]
+    fn capture_single(&mut self, skeleton: &Skeleton, meshes: &mut [Option<Mesh>], p: Params<'_>, visible: bool) -> bool {
+        crate::frame_profile::skinned_draw(!visible);
+
+        let actor=super::identity::current();
+        if !visible { return false; }
+        let i = unsafe { &mut *self.input.get() };
+        let bounded = actor.is_some() && i.draws.len() < DRAWS && i.surfaces.len() + meshes.iter().flatten().count() <= SURFACES
+            && self.output_len + meshes.iter().flatten().map(|m|m.vertices.len()).sum::<usize>() <= VERTICES
+            && i.pose.len()+p.pose.len() <= BONES && i.scales.len()+p.scales.len() <= BONES
+            && i.palette.len()+p.palette.len() <= BONES;
+        let previous=self.previous_numeric.as_ref().and_then(|old|old.draws.iter().find(|d|
+            d.actor==actor && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
+                && d.scale.to_bits()==p.scale.to_bits() && d.flat==p.flat && d.fullbright==p.fullbright
+                && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
+        let start = i.surfaces.len();
+        for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
+            let Some(mesh) = mesh else { continue; };
+            // Explicit consumers require live mutable fields now. Untracked topology,
+            // layers and exhausted banks use the original exact serial kernel.
+            let direct = if bounded && !super::mutable_required() && surface.vertices.len()==mesh.vertices.len()
+                && surface.indices == mesh.indices {
+                // A draw can animate unrelated bones while this surface is unchanged.
+                // Compare its exact numeric dependencies on the game thread; never
+                // add J17's dual normalized-output comparison loop to the workers.
+                let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
+                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged,
+                    crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize})
+            } else { None };
+            if let Some((output, alpha_variant)) = direct {
+                let vertices = self.output_len..self.output_len+mesh.vertices.len();
+                self.output_len = vertices.end;
+                i.surfaces.push(Surface { mesh:mesh_id, vertices, cpu:surface.cpu(),
+                    revision:Revision {identity:0,vertices:[0;2]}, output, alpha_variant });
+                #[cfg(feature="actor_diagnostics")]
+                crate::render_fx::retained::count("actor_direct_surfaces",1);
+            } else {
+                super::kernel(&mut super::Job { input:&surface.vertices, vertices:&mut mesh.vertices, indices:&mesh.indices },p);
+                crate::render_fx::skin(mesh);
+                #[cfg(feature="actor_diagnostics")]
+                crate::render_fx::retained::count("actor_mutable_consumer_surfaces",1);
+            }
+        }
+        if i.surfaces.len() > start {
+            let d = Draw { actor, key:skeleton as *const Skeleton as usize,
+                pose:i.pose.len()..i.pose.len()+p.pose.len(), scales:i.scales.len()..i.scales.len()+p.scales.len(),
+                palette:i.palette.len()..i.palette.len()+p.palette.len(), surfaces:start..i.surfaces.len(),
+                transform:p.transform,scale:p.scale,flat:p.flat,fullbright:p.fullbright,alpha:p.alpha,visible };
+            i.pose.extend_from_slice(p.pose); i.scales.extend_from_slice(p.scales); i.palette.extend_from_slice(p.palette);
+
+            i.draws.push(d);
+        }
+        true
     }
     fn dispatch(&mut self) {
         assert_eq!(self.pending, 0);
@@ -340,6 +430,7 @@ impl Store {
                 }
             }
         }
+
         self.pending = 0;
         if completed && !self.layers.is_empty() {
             let input = unsafe { &mut *self.input.get() };
@@ -389,8 +480,11 @@ impl Store {
             self.fallback += 1;
             return None;
         }
+
+
         for surface_id in d.surfaces.clone() {
             let surface = &mut i.surfaces[surface_id];
+
             // The serial kernel leaves live UVs untouched (including any caller edits).
             // Only its three written fields return from the worker; no gather-time
             // copy of the live/bind vertices is needed to preserve the fourth field.
@@ -420,6 +514,38 @@ pub(super) fn same_floats(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
 }
 
+#[cfg(feature="vita_renderer")]
+fn same_surface_inputs(surface:&SkinSurface, old:&Inputs, draw:&Draw, p:Params<'_>)->bool {
+    let palette=&old.palette[draw.palette.clone()];
+    let scales=&old.scales[draw.scales.clone()];
+    if palette.is_empty()!=p.palette.is_empty() || (palette.is_empty() && scales.is_empty()!=p.scales.is_empty()) {return false;}
+    surface.used_bones.iter().all(|&bone| {
+        if !palette.is_empty() {
+
+            palette.get(bone).zip(p.palette.get(bone)).is_some_and(|((ar,at),(br,bt))|
+                same_floats(&ar.to_cols_array(),&br.to_cols_array()) && same_floats(&at.to_array(),&bt.to_array()))
+        } else {
+
+            old.pose[draw.pose.clone()].get(bone).zip(p.pose.get(bone)).is_some_and(|(&a,&b)|same_transform(a,b))
+                && (scales.is_empty() || scales.get(bone).zip(p.scales.get(bone)).is_some_and(|(a,b)|a.to_bits()==b.to_bits()))
+        }
+    })
+}
+
+/// Map replacement and same-map restore invalidate previous numeric dependencies
+/// as well as owned publications; the preallocated worker arena stays warm.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn reset_publications() {
+    assert!(PHASE.with(|p|p.get()==Phase::Idle),"scene load before skin workers drained");
+    STORE.with(|s| {if let Some(store)=s.borrow_mut().as_mut() {
+        assert_eq!(store.pending,0);
+        store.previous_numeric=None;store.previous.clear();
+        let i=unsafe {&mut *store.input.get()};
+        i.draws.clear();i.surfaces.clear();i.pose.clear();i.scales.clear();i.palette.clear();
+        store.output_len=0;
+    }});
+    crate::render_fx::actor_publication::reset();
+}
 pub(crate) fn startup(workers: usize, probe: bool) {
     // J13's game thread was sampled on CPU2: reserve CPU0, never contend with worker2.
     crate::skin_worker::pin_game(probe);
@@ -460,6 +586,8 @@ pub(crate) struct Frame {
 impl Frame {
     pub(crate) fn begin() -> Self {
         let gather_start = std::time::Instant::now();
+        #[cfg(feature="vita_renderer")]
+        crate::render_fx::actor_publication::begin();
         assert!(PHASE.with(|p| p.get() == Phase::Idle));
         STORE.with(|s| s.borrow_mut().as_mut().expect("overlap startup").reset());
         super::prepared::begin();
@@ -471,6 +599,7 @@ impl Frame {
         }
     }
     pub(crate) fn assert_consumed(&self) {
+        if single_frame() { return; }
         STORE.with(|s| {
             let s = s.borrow();
             let s = s.as_ref().unwrap();
@@ -483,6 +612,8 @@ impl Frame {
     }
     pub(crate) fn dispatch(&mut self) {
         assert!(gathering());
+        #[cfg(feature="vita_renderer")]
+        if single_frame() { crate::render_fx::actor_publication::hold(); }
         self.gather_us = self.gather_start.elapsed().as_micros() as u64;
         STORE.with(|s| s.borrow_mut().as_mut().unwrap().dispatch());
         crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
@@ -502,6 +633,8 @@ impl Frame {
             #[cfg(feature = "vita_renderer")]
             crate::render_fx::retained::count("skin_collect_wait_us", s.wait_us);
         });
+        #[cfg(feature="vita_renderer")]
+        if panic.is_none() && single_frame() { crate::render_fx::actor_publication::complete(); }
         if let Some(p) = panic {
             std::panic::resume_unwind(p);
         }
@@ -520,6 +653,8 @@ impl Drop for Frame {
                 eprintln!("[lg/skin-overlap] frame={} gather_us={} collect_wait_us={} worker_service_us={} fallback_draws={} overflow={}",s.frame,self.gather_us,s.wait_us,s.service_us,s.fallback,s.overflow);
             }
         }});
+        #[cfg(feature="vita_renderer")]
+        crate::render_fx::actor_publication::end();
         PHASE.with(|p| p.set(Phase::Idle));
     }
 }
@@ -532,6 +667,8 @@ pub(in crate::character) fn handle(
 ) -> Option<bool> {
     PHASE.with(|phase| match phase.get() {
         Phase::Gather => {
+            #[cfg(feature="vita_renderer")]
+            if single_frame() { return STORE.with(|s| Some(s.borrow_mut().as_mut().unwrap().capture_single(skeleton,meshes,p,visible))); }
             STORE.with(|s| {
                 s.borrow_mut()
                     .as_mut()
@@ -705,6 +842,34 @@ pub(crate) fn check_skeleton(
     Ok(comparisons)
 }
 
+/// Actual-data direct destinations preserve exact legacy fields without a mesh copyback.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn check_direct(skeleton:&Skeleton,poses:&[Vec<Transform>])->anyhow::Result<usize> {
+    let mut count=0;
+    for workers in [1,2] {for pose in poses {for vertex_alpha in [false,true] {for fullbright in [false,true] {
+        let mut meshes:Vec<_>=skeleton.surfaces.iter().map(|s|Some(Mesh {
+            vertices:s.cpu().bind_vertices.clone(),indices:s.indices.clone(),texture:None})).collect();
+        for mesh in meshes.iter_mut().flatten() {if let Some(v)=mesh.vertices.first_mut() {v.uv=Vec2::new(-0.,7.);}}
+        let mut expected:Vec<_>=meshes.iter().flatten().map(crate::render_fx::copy_mesh).collect();
+        let palette=super::palette(pose,&[]);
+        let p=Params {pose,scales:&[],palette:&palette,transform:Transform {
+            translation:vec3(10.,20.,30.),rotation:Quat::from_rotation_z(0.731)},scale:-0.75,flat:false,fullbright,alpha:0.731};
+        for (surface,mesh) in skeleton.surfaces.iter().zip(&mut expected) {
+            super::kernel(&mut super::Job {input:&surface.vertices,vertices:&mut mesh.vertices,indices:&mesh.indices},p);
+            for v in &mut mesh.vertices {*v=actor_vertices::normalize(*v,vertex_alpha);}
+        }
+        let mut store=Store::new(workers,false);store.capture(skeleton,&meshes,p,true);
+        anyhow::ensure!(!store.overflow,"direct actual data exceeds bounds");
+        unsafe {let i=&mut *store.input.get();for (surface,mesh) in i.surfaces.iter_mut().zip(meshes.iter_mut().flatten()) {
+            surface.output=mesh.vertices.as_mut_ptr() as usize;surface.alpha_variant=vertex_alpha;
+        }}
+        store.dispatch();anyhow::ensure!(store.drain().is_none(),"direct numeric worker panic");
+        for (a,b) in expected.iter().zip(meshes.iter().flatten()) {anyhow::ensure!(same_vertices(&a.vertices,&b.vertices)&&a.indices==b.indices,"direct actual-data output differs");}
+        count+=1;
+    }}}}
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +927,45 @@ mod tests {
     }
     #[cfg(feature="vita_renderer")]
     #[test]
+    fn surface_revisions_track_exact_dependencies_without_unrelated_bones_or_allocations() {
+        let (s,meshes,mut pose)=fixture();pose.push(pose[0]);
+        for palette_on in [false,true] {for scaled in [false,true] {
+            let scales=if scaled {vec![1.,2.]} else {vec![]};
+            let palette=if palette_on {super::super::palette(&pose,&scales)} else {vec![]};
+            let p=Params {scales:&scales,palette:&palette,..params(&pose)};
+            let mut store=Store::new(1,false);store.capture(&s,&meshes,p,true);
+            let old=unsafe {&*store.input.get()};let d=&old.draws[0];
+            let mut other_pose=pose.clone();other_pose[1].translation.x+=10.;
+            let other_palette=if palette_on {super::super::palette(&other_pose,&scales)} else {vec![]};
+            let other=Params {pose:&other_pose,palette:&other_palette,..p};
+            let scope=crate::kernel_alloc::Scope::begin();
+            for _ in 0..128 {assert!(same_surface_inputs(&s.surfaces[0],old,d,other));}
+            assert_eq!(scope.finish(),0);
+            other_pose[0].translation.x+=1.;
+            let changed_palette=if palette_on {super::super::palette(&other_pose,&scales)} else {vec![]};
+            assert!(!same_surface_inputs(&s.surfaces[0],old,d,Params {pose:&other_pose,palette:&changed_palette,..p}));
+            if scaled {
+                let changed=[2.,2.];
+                let changed_palette=if palette_on {super::super::palette(&pose,&changed)} else {vec![]};
+                assert!(!same_surface_inputs(&s.surfaces[0],old,d,Params {scales:&changed,palette:&changed_palette,..p}));
+            }
+        }}
+        let surface=crate::skeletal::Surface::new("zero-weight".into(),vec![crate::skeletal::SkinVertex {
+            uv:Vec2::ZERO,weights:vec![Weight {bone:0,amount:1.,offset:Vec3::ZERO},
+                Weight {bone:1,amount:0.,offset:Vec3::ZERO}]}],vec![0,0,0]);
+        assert_eq!(surface.used_bones,[0,1]);
+        let palette=vec![(Mat3::IDENTITY,Vec3::ZERO);2];
+        let p=Params {palette:&palette,..params(&pose)};
+        let mut store=Store::new(1,false);store.capture(&s,&meshes,p,true);
+        let old=unsafe {&*store.input.get()};let d=&old.draws[0];
+        let mut signed=palette.clone();signed[0].1.x=-0.;
+        assert!(!same_surface_inputs(&s.surfaces[0],old,d,Params {palette:&signed,..p}));
+        signed=palette.clone();signed[1].1.x=-0.;
+        assert!(same_surface_inputs(&s.surfaces[0],old,d,Params {palette:&signed,..p}));
+        assert!(!same_surface_inputs(&surface,old,d,Params {palette:&signed,..p}));
+    }
+    #[cfg(feature="vita_renderer")]
+    #[test]
     fn layer_revisions_cover_frozen_changed_and_unconsumed_outputs_and_new_identity() {
         let (s,mut meshes,pose)=fixture();let p=params(&pose);
         let mut store=Store::new(2,false);
@@ -786,6 +990,25 @@ mod tests {
         assert_ne!(unsafe {(&*store.input.get()).surfaces[0].revision.identity},a.identity);
         store.reset();store.capture(&s,&meshes,p,false);store.dispatch();assert!(store.drain().is_none());
         assert!(unsafe {(&*store.input.get()).surfaces.is_empty()});
+    }
+    #[cfg(feature="vita_renderer")]
+    #[test]
+    fn exact_workers_write_owned_publication_without_mutating_live_mesh() {
+        let (s,meshes,pose)=fixture();
+        for workers in [1,2] {for alpha in [false,true] {for bright in [false,true] {
+            let p=Params {fullbright:bright,..params(&pose)};
+            let mut store=Store::new(workers,false);
+            let mut owned=crate::render_fx::copy_mesh(meshes[0].as_ref().unwrap());
+            owned.vertices[0].uv=Vec2::new(-0.,7.);
+            let mut reference=owned.vertices.clone();
+            super::super::kernel(&mut super::super::Job {input:&s.surfaces[0].vertices,vertices:&mut reference,indices:&s.surfaces[0].indices},p);
+            for v in &mut reference {*v=actor_vertices::normalize(*v,alpha);}
+            store.capture(&s,&meshes,p,true);
+            unsafe {let input=&mut *store.input.get();input.surfaces[0].output=owned.vertices.as_mut_ptr() as usize;input.surfaces[0].alpha_variant=alpha;}
+            store.dispatch();assert!(store.drain().is_none());
+            assert!(same_vertices(&reference,&owned.vertices));
+            assert_eq!(meshes[0].as_ref().unwrap().vertices[0].position,Vec3::ZERO);
+        }}}
     }
     #[test]
     fn owned_overlap_duplicate_shared_actor_poses_match_serial() {

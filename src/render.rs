@@ -1561,6 +1561,8 @@ impl Scene {
     fn from_parts_selected(assets: &mut Assets, name: &str, map: Bsp, world: World, allow_retained: bool) -> Result<Self> {
         #[cfg(not(feature = "vita_renderer"))]
         let _ = allow_retained;
+        #[cfg(feature="vita_renderer")]
+        crate::character::skinning::overlap::reset_publications();
         let mut timing = crate::startup::Phase::new("scene_build");
         crate::lighting::load_art(assets)?;
         let specs = texture::read_materials(assets)?;

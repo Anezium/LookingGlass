@@ -398,6 +398,7 @@ fn route_clear(world: &World, from: Vec3, to: Vec3, half: Vec3) -> bool {
 
 fn fixture(spawn: Spawn, map: &str) -> Actor {
     Actor {
+        skin_identity: Default::default(),
         guide: State::new(map, &spawn),
         walk: None,
         watch: Default::default(),
