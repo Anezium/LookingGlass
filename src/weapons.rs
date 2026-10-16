@@ -935,6 +935,7 @@ impl Prop {
     ) {
         if crate::character::skinning::overlap::gather_only() { return; }
         for mesh in self.meshes_at(attachment, scale, fullbright, time, looping) {
+            let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::PropPublishResource);
             crate::render_fx::skin(mesh);
         }
     }
@@ -948,6 +949,7 @@ impl Prop {
         time: f32,
         looping: bool,
     ) -> &mut [Mesh] {
+        let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::PropNumeric);
         if scale <= 0. || crate::character::skinning::overlap::gather_only() {
             return &mut self.meshes[..0];
         }

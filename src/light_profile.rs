@@ -37,7 +37,7 @@ fn active() -> bool {
     cfg!(target_os = "vita") && !full()
 }
 const WINDOW: usize = 60;
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Row {
     frame: u64,
     wall_us: u64,
@@ -49,6 +49,13 @@ struct Row {
     skin_overflow: u64,
     fx: [u64; 8],
     render: [RenderMetrics; 6],
+    probe_ns: [u64; PROBE_COUNT],
+    sim_ns: u64,
+}
+impl Default for Row {
+    fn default() -> Self { Self { frame: 0, wall_us: 0, cpu_us: 0, swap_us: 0,
+        skin_collect_wait_us: 0, skin_gather_us: 0, skin_fallbacks: 0, skin_overflow: 0,
+        fx: [0; 8], render: [RenderMetrics::default(); 6], probe_ns: [0; PROBE_COUNT], sim_ns: 0 } }
 }
 /// Engine submission calls, counted at their owning phase. Texture binds count
 /// image slots passed to apply_bindings; backend cache hits are not GL calls.
@@ -168,6 +175,8 @@ impl Ring {
                 write!(out, ",{phase}_{field}")?;
             }
         }
+        for name in PROBE_NAMES { write!(out, ",{name}_us")?; }
+        write!(out, ",sim_blocks_us")?;
         writeln!(out)?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
@@ -181,6 +190,8 @@ impl Ring {
                     p.uniform_bytes, p.buffer_updates, p.buffer_bytes, p.texture_bind_slots,
                     p.visibility_tests, p.uniform_gl_calls, p.visibility_cpu_ns / 1000, p.parameter_cpu_ns / 1000, p.deferred_cpu_ns / 1000, p.texture_gl_binds, p.state_gl_calls, p.program_gl_changes)?;
             }
+            for ns in r.probe_ns { write!(out, ",{}", ns / 1000)?; }
+            write!(out, ",{}", r.sim_ns / 1000)?;
             writeln!(out)?;
         }
         Ok(())
@@ -229,6 +240,9 @@ pub(crate) fn fx_timer(metric: FxMetric) -> FxTimer { FxTimer(metric, Instant::n
 impl Drop for FxTimer { fn drop(&mut self) { fx_add(self.0, self.1.elapsed().as_micros() as u64); } }
 
 pub(crate) fn cpu_begin() {
+    #[cfg(not(target_os = "vita"))]
+    if probe_active() { RING.with(|r| { let mut r = r.borrow_mut(); r.current.probe_ns.fill(0); r.current.sim_ns = 0; }); }
+
     if active() {
         RING.with(|r| r.borrow_mut().cpu_start = Some(Instant::now()));
     }
@@ -360,14 +374,137 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.lines().count(), 61);
         assert!(s.lines().next().unwrap().contains("world_opaque_draws"));
-        assert_eq!(s.lines().next().unwrap().split(',').count(), 124);
+        assert_eq!(s.lines().next().unwrap().split(',').count(), 124 + PROBE_COUNT + 1);
         assert!(s.lines().nth(1).unwrap().starts_with("66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0,"));
         assert!(s.lines().last().unwrap().starts_with("125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0,"));
-        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 124));
+        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 124 + PROBE_COUNT + 1));
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);
         r.begin(origin + std::time::Duration::from_micros(2000));
         assert_eq!(r.count, 125);
+    }
+}
+
+// Step-0 attribution has fixed storage and no clocks/TLS mutations in the off arm.
+// Each scope publishes exclusive nanoseconds, subtracting all nested probe scopes.
+// Worker service is a separate axis and is never added to game-thread attribution.
+#[derive(Clone, Copy, Debug)]
+#[repr(usize)]
+pub(crate) enum Probe {
+    Input, InteractionSearch, Interactions, Movers, Movement, Story, Particles,
+    Combat, Alice, Audio, Camera, Listener, Scene, HudQueries, HudOther,
+    Other, WorldVisibility, WorldParameters, WorldTexture, WorldPassResource,
+    FxSort, FxBatch, FxObserve, FxMerge, FxKeyResource, FxBatchResource, FxUploadCpu, FxUploadResource,
+    FxUploadGl, FxUploadCompare, FxUploadCopy, FxRecycle, FxRecycleResource, PickupOther,
+    PropNumeric, PropLayerNumeric, PickupSelect, PropPublishResource, PickupResource, AttachedSample,
+    SkinWorker0, SkinWorker1,
+}
+const PROBE_COUNT: usize = Probe::SkinWorker1 as usize + 1;
+const PROBE_NAMES: [&str; PROBE_COUNT] = [
+    "input", "interaction_search", "interactions", "movers", "movement", "story",
+    "particles", "combat", "alice", "audio", "camera", "listener", "scene_post_sim",
+    "hud_queries", "hud_other", "other", "world_opaque_visibility_numeric",
+    "world_opaque_parameter_numeric", "world_opaque_texture_resource", "world_opaque_pass_resource",
+    "fx_sort_cpu", "fx_batch_cpu", "fx_observe_cpu", "fx_merge_cpu", "fx_key_resource", "fx_batch_resource", "fx_upload_cpu",
+    "fx_upload_resource", "fx_upload_gl", "fx_upload_compare_cpu", "fx_upload_copy_cpu",
+    "fx_recycle_cpu", "fx_recycle_resource", "pickup_other_mixed", "prop_numeric", "prop_layer_numeric", "pickup_select_cpu", "prop_publish_resource",
+    "pickup_resource", "attached_sample_cpu", "skin_worker0_service", "skin_worker1_service",
+];
+pub(crate) fn probe_active() -> bool {
+    #[cfg(feature = "vita_renderer")]
+    { render_active() && crate::render::vita_renderer::config().sim_span_probe }
+    #[cfg(not(feature = "vita_renderer"))]
+    { false }
+}
+#[derive(Clone, Copy, Default)]
+struct ProbeEntry { child_ns: u64 }
+#[derive(Default)]
+struct ProbeStack { entries: [ProbeEntry; 32], depth: usize }
+impl ProbeStack {
+    fn close(&mut self, depth: usize, ns: u64) -> u64 {
+        assert_eq!(self.depth, depth + 1, "probe scopes must close in order");
+        self.depth -= 1;
+        let child = self.entries[depth].child_ns;
+        if depth > 0 { self.entries[depth - 1].child_ns += ns; }
+        ns.saturating_sub(child)
+    }
+}
+thread_local! { static PROBE_STACK: RefCell<ProbeStack> = RefCell::default(); }
+pub(crate) struct ProbeTimer { metric: Probe, start: Option<Instant>, depth: usize }
+pub(crate) fn probe_timer(metric: Probe) -> ProbeTimer { probe_timer_when(metric, true) }
+pub(crate) fn probe_timer_when(metric: Probe, enabled: bool) -> ProbeTimer {
+    let mut timer = ProbeTimer { metric, start: None, depth: 0 };
+    if enabled && probe_active() {
+        timer.depth = PROBE_STACK.with(|s| {
+            let mut s = s.borrow_mut();
+            let depth = s.depth;
+            assert!(depth < s.entries.len(), "probe nesting overflow");
+            s.entries[depth] = ProbeEntry::default();
+            s.depth += 1;
+            depth
+        });
+        timer.start = Some(Instant::now());
+    }
+    timer
+}
+impl ProbeTimer {
+    fn finish(&mut self) {
+        if let Some(start) = self.start.take() {
+            let ns = start.elapsed().as_nanos() as u64;
+            let exclusive = PROBE_STACK.with(|s| {
+                let mut s = s.borrow_mut();
+                s.close(self.depth, ns)
+            });
+            RING.with(|r| {
+                let mut r = r.borrow_mut();
+                r.current.probe_ns[self.metric as usize] += exclusive;
+                if self.depth == 0 && self.metric as usize <= Probe::Listener as usize { r.current.sim_ns += ns; }
+            });
+        }
+    }
+    pub(crate) fn switch(&mut self, metric: Probe) { self.switch_when(metric, true); }
+    pub(crate) fn switch_when(&mut self, metric: Probe, enabled: bool) { self.finish(); *self = probe_timer_when(metric, enabled); }
+}
+impl Drop for ProbeTimer { fn drop(&mut self) { self.finish(); } }
+pub(crate) fn probe_skin_service(worker: usize, ns: u64) {
+    if probe_active() {
+        RING.with(|r| r.borrow_mut().current.probe_ns[Probe::SkinWorker0 as usize + worker] += ns);
+    }
+}
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+pub(crate) fn probe_host_report() -> serde_json::Value {
+    RING.with(|r| { let r = r.borrow(); serde_json::json!({
+        "enabled": probe_active(), "exclusive_ns": r.current.probe_ns.to_vec(),
+        "sim_blocks_ns": r.current.sim_ns,
+    }) })
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[test]
+    fn exclusive_children_partition_the_parent_and_service_is_separate() {
+        let mut stack = ProbeStack::default();
+        stack.depth = 3;
+        let leaf = stack.close(2, 30);
+        let child = stack.close(1, 70);
+        let parent = stack.close(0, 100);
+        assert_eq!((leaf, child, parent), (30, 40, 30));
+        assert_eq!(leaf + child + parent, 100);
+        assert_eq!(stack.depth, 0);
+        assert_eq!(PROBE_NAMES.len(), Probe::SkinWorker1 as usize + 1);
+        let mut names = std::collections::BTreeSet::new();
+        assert!(PROBE_NAMES.iter().all(|name| names.insert(name)));
+        let mut row = Row::default();
+        row.sim_ns = 123_456;
+        row.probe_ns[Probe::SkinWorker0 as usize] = 987_000;
+        let mut ring = Ring::default(); ring.rows[0] = row; ring.count = 1;
+        let mut bytes = Vec::new(); ring.write(&mut bytes).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let header: Vec<_> = text.lines().next().unwrap().split(',').collect();
+        let values: Vec<_> = text.lines().nth(1).unwrap().split(',').collect();
+        assert_eq!(values[header.iter().position(|&s| s == "sim_blocks_us").unwrap()], "123");
+        assert_eq!(values[header.iter().position(|&s| s == "skin_worker0_service_us").unwrap()], "987");
     }
 }

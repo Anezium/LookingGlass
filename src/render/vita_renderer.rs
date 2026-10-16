@@ -52,6 +52,8 @@ pub struct Config {
     /// Diagnostic per-draw clocks; normal play keeps only phase/tail timings.
     pub render_draw_timing: bool,
     pub worker_probe: bool,
+    /// Additional light-profiler attribution; false preserves the r3b probe-off arm.
+    pub sim_span_probe: bool,
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
     pub skin_overlap: bool,
@@ -205,7 +207,7 @@ impl Default for Config {
             world_parameter_time_split: true,
             uniform_field_cache: true,
             render_draw_timing: false,
-            worker_probe: false, skin_workers: 2, skin_overlap: true,
+            worker_probe: false, sim_span_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             profiler: Some(crate::light_profile::Level::Light), skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -1253,6 +1255,7 @@ impl Renderer {
         count("vita_world_retransformed_vertices", 0);
         count("vita_world_rebuilt_indices", 0);
         count("vita_world_sorted_triangles", 0);
+        let mut step0_world = crate::light_profile::probe_timer_when(crate::light_profile::Probe::WorldVisibility, !alpha);
         let visibility_started = std::time::Instant::now();
         let visibility_span = crate::frame_profile::span("vita_cluster_frustum");
         let projection = crate::render_fx::projection().expect("world camera projection");
@@ -1309,6 +1312,7 @@ impl Renderer {
             self.alpha_order
                 .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         }
+        step0_world.switch_when(crate::light_profile::Probe::WorldParameters, !alpha);
         self.prepared.clear();
         {
             let parameters_started = std::time::Instant::now();
@@ -1353,7 +1357,10 @@ impl Renderer {
                     builds += 1;
                     Some(u)
                 };
-                let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
+                let texture = {
+                    let _probe = crate::light_profile::probe_timer_when(crate::light_profile::Probe::WorldTexture, !alpha);
+                    g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id()
+                };
                 self.prepared.push(Prepared { depth, group: id, texture, uniforms: u });
             }
             crate::light_profile::render_add(phase, RenderMetrics {
@@ -1362,6 +1369,7 @@ impl Renderer {
             count("vita_world_parameter_time_updates", time_updates);
             count("vita_world_parameter_reuses", self.prepared.len() as u64 - builds);
         }
+        drop(step0_world);
         for cache in &mut self.field_uniforms { cache.interrupt(); }
         if alpha && crate::render_fx::retained_active() {
             // Keep immutable bindings and uniforms until all actor/effect groups are known.
@@ -1383,6 +1391,7 @@ impl Renderer {
             count("vita_world_culled_groups", stats.culled as u64);
             return stats;
         }
+        let step0_pass = crate::light_profile::probe_timer_when(crate::light_profile::Probe::WorldPassResource, !alpha);
         // Direct actor packets never queue Macroquad geometry.
         if !world_only() && !crate::render_fx::retained_active() {
             let _flush = crate::frame_profile::span("gl_flush");
@@ -1431,6 +1440,7 @@ impl Renderer {
             crate::light_profile::render_add(phase, RenderMetrics { draws: 1, pipelines: 1,
                 bindings: 1, uniform_uploads: 1, uniform_bytes: 32, uniform_gl_calls: 2, ..Default::default() });
         }
+        drop(step0_pass);
         if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
         } }
@@ -2172,7 +2182,10 @@ mod tests {
     fn j12_switches_are_strict_and_have_required_defaults() {
         let c=Config::default();
         assert_eq!(c.skin_workers,2); assert_eq!(c.profiler,Some(crate::light_profile::Level::Light)); assert!(!c.skin_worker_bench); assert!(c.fx_prepare_cache);
-        assert!(!c.worker_probe && !c.frame_phase_probe);
+        assert!(!c.worker_probe && !c.frame_phase_probe && !c.sim_span_probe);
+        let probe: Config = serde_json::from_value(serde_json::json!({"sim_span_probe":true})).unwrap();
+        assert!(probe.sim_span_probe);
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"sim_span_probe":1})).is_err());
         for workers in 0..=2 {
             let c:Config=serde_json::from_value(serde_json::json!({"skin_workers":workers,"skin_overlap":workers>0,
                 "worker_probe":true,"fx_prepare_cache":false,"frame_phase_probe":true})).unwrap();

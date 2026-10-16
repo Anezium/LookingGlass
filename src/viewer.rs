@@ -1101,6 +1101,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         crate::sim_maps::probe::begin();
         crate::light_profile::cpu_begin();
+        let mut step0_block = crate::light_profile::probe_timer(crate::light_profile::Probe::Input);
         if !(menu || inventory_menu || console.open || paused) {crate::character::skinning_bench_begin();}
         crate::frame_phases::mark(1);
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
@@ -2137,6 +2138,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .pandemonium
                     .as_ref()
                     .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
+                step0_block.switch(crate::light_profile::Probe::InteractionSearch);
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2166,6 +2168,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         }
                     }
                 }
+                step0_block.switch(crate::light_profile::Probe::Interactions);
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2194,6 +2197,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Some(sound) = events.sound {
                     audio.world_effect(&sound);
                 }
+                step0_block.switch(crate::light_profile::Probe::Movers);
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2205,6 +2209,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 interactions.companions_for_movers(&npcs.companions());
                 interactions.actors_for_movers(&npcs.targets());
                 interactions.advance_school(mover_dt, &scene.map, &mut scene.world, &mut player)?;
+                step0_block.switch(crate::light_profile::Probe::Movement);
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2415,6 +2420,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && !flying
             && stats.alive();
         if simulate {
+        step0_block.switch(crate::light_profile::Probe::Story);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -2689,6 +2695,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         } // simulation: story and transitions
         if simulate {
+        step0_block.switch(crate::light_profile::Probe::Particles);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -2728,6 +2735,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             steam.update_clocks(dt, world_dt, pos, &scene.world);
         }
         } // simulation: particles
+        if simulate { step0_block.switch(crate::light_profile::Probe::Combat); }
         #[cfg(target_os = "vita")]
         if simulate {
             drop(viewer_block);
@@ -2793,6 +2801,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if interactions.levels.iter().any(|s| s.ctl.dismiss_summons()) {
             alice.dismiss_summon();
         }
+        step0_block.switch(crate::light_profile::Probe::Combat);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -2915,6 +2924,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         } // simulation: combat, encounters and NPC poses
         let death_animation =
             !stats.alive() && focused && !paused && !menu && !inventory_menu && !console_input;
+        if simulate { step0_block.switch(crate::light_profile::Probe::Alice); }
         #[cfg(target_os = "vita")]
         if simulate {
             drop(viewer_block);
@@ -3094,6 +3104,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 });
             }
         }
+        step0_block.switch(crate::light_profile::Probe::Audio);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3124,6 +3135,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some((time, finished)) = rage_scene.filter(|_| simulate) {
             alice.rage_scene(time, finished, &player);
         }
+        step0_block.switch(crate::light_profile::Probe::Camera);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3272,6 +3284,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 gameplay_alice && camera.distance(player.feet + Vec3::Z * 32.) > 30.
             };
         if simulate {
+        step0_block.switch(crate::light_profile::Probe::Listener);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3295,6 +3308,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             !story_active,
         );
         } // simulation: audio listener and clocks
+        step0_block.switch(crate::light_profile::Probe::Scene);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3438,7 +3452,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(feature="vita_renderer")]
         let mut skin_frame = if crate::render::vita_renderer::config().skin_overlap && !world_only {
-            #[cfg(target_os="vita")]
+            step0_block.switch(crate::light_profile::Probe::Other);
+            #[cfg(target_os = "vita")]
             {
                 drop(viewer_block);
                 viewer_block = crate::frame_profile::span("skin_gather");
@@ -3460,6 +3475,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::audio::game_stage(0);
             Some(frame)
         } else { None };
+        step0_block.switch(crate::light_profile::Probe::Other);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3481,6 +3497,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame.collect();
             crate::audio::game_stage(0);
         }
+        step0_block.switch(crate::light_profile::Probe::Other);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3529,6 +3546,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
         drop(actors_timer);
+        step0_block.switch(crate::light_profile::Probe::Other);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3545,6 +3563,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 pickup_clock,
             );
         }
+        step0_block.switch(crate::light_profile::Probe::Other);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3560,6 +3579,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 &transforms,
                 &steam,
             );
+            step0_block.switch(crate::light_profile::Probe::Other);
             #[cfg(target_os = "vita")]
             {
                 drop(viewer_block);
@@ -3616,6 +3636,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         let direct_fx = crate::render_fx::retained_active();
         if !world_only || !scene.retained_active() { scene.finish_fx(true); }
+        step0_block.switch(crate::light_profile::Probe::Other);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3640,6 +3661,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 alice.draw_first_person(fullbright);
             }
         }
+        step0_block.switch(crate::light_profile::Probe::Other);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3670,6 +3692,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if freeze_capture { paused = pause_before_capture; clock.pause(); }
         if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
+        step0_block.switch(crate::light_profile::Probe::HudOther);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3686,6 +3709,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let _search_profile = crate::frame_profile::span("interaction_search_after");
 
                 use crate::interaction::friendly::{use_owner, UseOwner};
+                let step0_queries = crate::light_profile::probe_timer(crate::light_profile::Probe::HudQueries);
                 let rope = player.rope_prompt(&scene.world);
                 let world_rope = interactions
                     .pandemonium
@@ -3708,6 +3732,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     UseOwner::World => world.map(str::to_owned),
                     _ => None,
                 };
+                drop(step0_queries);
                 if let Some(prompt) = prompt {
                     let prompt = prompt
                         .replace("E  ", &format!("{}  ", input.label(&preferences, "E")))
@@ -3992,6 +4017,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             console.draw(&ui);
         }
+        step0_block.switch(crate::light_profile::Probe::Other);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -4075,6 +4101,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(frame_profile);
         crate::character::skinning_bench_end();
+        drop(step0_block);
         crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]

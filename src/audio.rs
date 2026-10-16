@@ -5,6 +5,8 @@ pub mod sink;
 mod output;
 mod block;
 mod music;
+#[cfg(target_os = "vita")]
+mod probe;
 pub mod events;
 mod reaction;
 pub mod regression;
@@ -595,6 +597,8 @@ struct Monitor<S> {
     data: Arc<MonitorData>,
     block: Vec<f32>,
     record: bool,
+    #[cfg(target_os = "vita")]
+    probe: probe::Probe,
 }
 impl<S> Monitor<S> {
     fn flush(&mut self) {
@@ -617,10 +621,14 @@ impl<S> Monitor<S> {
 impl<S: Source<Item = f32>> Iterator for Monitor<S> {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
+        #[cfg(target_os = "vita")]
+        if self.block.is_empty() { self.probe.begin(); }
         let sample = acoustics::limit(self.source.next().unwrap_or(0.));
         self.block.push(sample);
         if self.block.len() == 1024 {
             self.flush();
+            #[cfg(target_os = "vita")]
+            self.probe.end();
         }
         Some(sample)
     }
@@ -676,7 +684,14 @@ impl Playback {
         }
         let (stream, handle) = opened.with_context(|| format!("No usable audio output: {failure}"))?;
         let (mixer, source) = output::mixer();
-        let monitor = Monitor { source, data, block: Vec::with_capacity(1024), record };
+        let monitor = Monitor {
+            source,
+            data,
+            block: Vec::with_capacity(1024),
+            record,
+            #[cfg(target_os = "vita")]
+            probe: Default::default(),
+        };
         #[cfg(feature = "vita_renderer")]
         let buffered = crate::render::vita_renderer::config().audio_pcm_worker;
         #[cfg(not(feature = "vita_renderer"))]
@@ -1953,7 +1968,9 @@ mod tests {
             let (mixer, source) = output::mixer();
             audio.playback = Some(Playback { _stream: None, mixer, _worker: None });
             let mut monitor = Monitor { source, data: audio.monitor.clone(),
-                block: Vec::with_capacity(1024), record: false };
+                block: Vec::with_capacity(1024), record: false,
+                #[cfg(target_os = "vita")]
+                probe: Default::default() };
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let gate = stop.clone();
             let worker = std::thread::spawn(move || {
@@ -2421,6 +2438,8 @@ mod tests {
                 data: data.clone(),
                 block: Vec::new(),
                 record: true,
+                #[cfg(target_os = "vita")]
+                probe: Default::default(),
             };
             assert_eq!(
                 m.by_ref().take(4).collect::<Vec<_>>(),
