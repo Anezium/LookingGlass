@@ -224,14 +224,9 @@ impl Effect {
         }
         // Effects are already decoded and resampled at load; this is PCM fetch/spatial.
         charge(3, start);
-        if audible {
-            let start = Instant::now();
-            self.filter.process(&mut out[..n], self.parameters);
-            charge(3, start);
-        } else {
-            out.fill(0.);
-            self.filter.clear();
-        }
+        let start = Instant::now();
+        self.filter.process(&mut out[..n], self.parameters);
+        charge(3, start);
         n
     }
 }
