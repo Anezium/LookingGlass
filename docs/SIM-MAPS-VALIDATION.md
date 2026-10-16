@@ -1,18 +1,19 @@
-Simulation caches: runtime 302d071ecf9a7c40bc5bdc2379914d47ccd82a68, vita-sim-maps; Mac-only delivery, no console access.
-275495f skool2: triangle hull construction 4476 -> 0/frame; indexed immutable mesh topology, exact queried world hulls.
-cac72f9 tower2: Collider::model 45 -> 0 and brush topology rebuilds 321 -> 0/frame; 270 exact template placements remain, fan samples unchanged.
-77f7d43 hedge3/funhouse: settled tests 19107/45644.725 -> 2/3; executed static sweeps 579/466.7625 -> 229/216.7625 per frame.
-c58b1f2 funhouse/hatter1: mechanism objects 282/254 -> 17/21 and rebuild passes 2 -> 1/frame; required scene/rollback publications remain exact.
-Per-fix gates pass; combined 10-map gate compares 3900 frame hashes per arm, all identical. Full suite:846 pass,0 fail,2 inherited ignores; default check passes.
-36 registered save fixtures pass separate-process write/restart and continued-state checks; relevant functional, rider and state/restore checks pass.
-School-two, tower2 watched/skip, hedge3 and funhouse full routes pass; Hatter traversal passes. Inherited school-return/Hatter native-route failures reproduce exactly on archived allmaps.
-Broad saves pass188 fixtures then fail garden2-cat-talk; archived allmaps reproduces the exact Cat-trigger failure. These three inherited failures are not passes (HOST-VALIDATION.json).
-Host ranking only, workload counting disabled, three alternating accepted pairs/map, all sampled1/5/15 loads<=3: skool2 4.790->2.519 ms (-47.4%); tower2 3.289->2.282 ms (-30.6%); funhouse 2.924->2.114 ms (-27.7%); hedge3 4.566->3.974 ms (-13.0%); hatter1 2.823->2.511 ms (-11.1%).
-Native pkg-2 pipeline:nightly-2026-10-11,~/vitasdk,pinned vitaGL6842d410…/5da33f7b…,-neon,4 cargo jobs,192MiB heap,two8MiB stacks; ELF margin 1424380 bytes >=3348.
-ELF imports/regenerated VELF/ZIP CRC/SELF-SFO equality and probe exclusion pass; game archive and Cargo.lock hashes unchanged.
-VPK SHA-256: 09165d697045e43e0087af1d9717b57a9f3681423663d85f19f4c71b537a2a8d
-SELF SHA-256: f74343b00c372c458bb93e5ce5c0dad19da77faa4075a97ce6c460106db8c00c
-Package:A-simmaps/looking-glass.vpk; configs:PL-def-allmaps(all on),PL-def-allmaps-simoff(all off),vita-sim-all; same SELF in both arms.
-Console owner protocol:PROTOCOL.md (22 off/on visit pairs,including Garden3 movement); evidence integrity:SHA256SUMS. Console performance/memory/fidelity acceptance remains pending.
+Simulation maps review fixes: runtime/package source 099005681e899252c6fb7ff003ed3c32b2715bd1; branch vita-sim-maps, Mac only.
+7f41d37: all four sim_* renderer defaults false; explicit switches retained; console acceptance remains pending.
+784cbf7: world-order/outward-rounded conservative lazy bounds and 200,000 randomized placement regression; synthetic and actual fan bit-equality tests (49 poses/model).
+b2839b3: NPC query scratch clears entries and retains capacity; scope, nesting, invalidation and 4096-entry cap preserved; unwind regression included.
+763c51e + 50aa2c2: cwd-independent unit config, explicit off/on suite arms, nested override regression and corrected test fixture literal; 0990056 documents fixes/rollback.
+Full suite, off AND on from opposite-config working directories: 851 passed, 0 failed, 3 ignored per arm; two ignores inherited, real-archive fan test executed separately and passed both arms.
+Actual Tower2 fans: 245 geometry-bit comparisons per arm against Collider::model, including bounds and ordered planes; synthetic fixture also exact. Default cargo check passes.
+Ten-map replay: 3900 frame hashes per arm all identical; every map/arm workload counter and window hash is unchanged from final-neutral r1.
+36 registered and 17 native mechanism Store fixtures per arm pass separate writer/restart checks; off/on save payloads and future bytes match. Legacy saves pass both arms.
+Broad save writers each pass 188 fixtures then hit the exact inherited Garden2 Cat-trigger failure. School-return and Hatter native-route failures remain inherited; no claim they pass.
+Optional host timing not rerun (recent five-minute load >3); r1 rankings remain historical, not fresh r2 timing or console acceptance.
+Native pkg-2 pins, nightly-2026-10-11, -neon, 192MiB heap, two 8MiB stacks, imports/VELF/ZIP/SELF-SFO/probe checks pass; ELF margin 1431284 bytes >=3348.
+SELF SHA-256: 7a422b687d10ded4b867714a4e887830c9b60f9c5ce1dd8bd9b86289c0a537a3
+VPK SHA-256: 684416ba90f6b3585a3a525e2cf1040f6cd899b569781beb30092d1bc11b6564
+A-simmaps-r2/ contains the new package and explicit off/on configs; A-simmaps/ is file-for-file unchanged. Archives and Cargo.lock unchanged.
+PROTOCOL.md selects r2 and requires SELF+matching renderer JSON rollback together: older pkg-2/reference r2 deny_unknown_fields rejects sim_* keys and falls back to all defaults.
+Evidence: R2-VALIDATION.json, R2-CHECKS.json, GATE-r2.json, R2-COUNTER-COMPARISON.json and SHA256SUMS. Console acceptance pending; no console/bls12 access.
 
-Private evidence: `/Users/anezium/vita-j0/atoz/sim-maps/`; read `RESUME.md`, `HOST-VALIDATION.json`, `HOST-RANKING.json`, package `VERIFICATION.json` and `PROTOCOL.md`.
+Private evidence: `/Users/anezium/vita-j0/atoz/sim-maps/`. Original validation/ranking remains in `HOST-VALIDATION.json`, `HOST-RANKING.json` and `FINAL-REPORT-r1.md`; current review-fix evidence is `R2-VALIDATION.json`.
