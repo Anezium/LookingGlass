@@ -199,6 +199,7 @@ pub struct Skip {
     binding: String,
     film: bool,
     transaction: Option<FilmTransaction>,
+    input_sample: Option<(bool, bool, bool)>,
 }
 impl Skip {
     pub fn film(name: &str, binding: String) -> Self {
@@ -208,6 +209,13 @@ impl Skip {
     pub fn binding(&mut self, binding: String) { self.binding = binding; }
     pub fn event(&self, event: &str) {
         if let Some(t) = &self.transaction { t.event(event); }
+    }
+    pub fn note_input(&mut self, down: bool, cross: bool, triangle: bool) {
+        let sample = (down, cross, triangle);
+        if self.input_sample != Some(sample) {
+            self.event(&format!("input effective_down={down} raw_cross_enter={cross} raw_triangle_e={triangle}"));
+            self.input_sample = Some(sample);
+        }
     }
     pub fn handoff(&mut self, outcome: &'static str) {
         if let Some(t) = &mut self.transaction {

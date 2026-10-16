@@ -1819,6 +1819,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && stats.alive(),
             input.film_skip(&preferences),
         );
+        skip_scene.note_input(input.film_skip(&preferences), is_key_down(KeyCode::Enter), is_key_down(KeyCode::E));
         #[cfg(target_os = "vita")]
         // Use the same scene owner/end-state path as a held Cross skip.
         let skip_requested = skip_requested

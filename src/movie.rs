@@ -401,6 +401,7 @@ pub async fn play(
     let mut paused = false;
     let mut clock_at = Instant::now();
     let mut backpressure = false;
+    let mut clock_active = false;
     input.suppress();
     // Clear the menu confirmation press before arming the movie's skip control.
     next_frame().await;
@@ -433,8 +434,10 @@ pub async fn play(
             }
         }
         let now = Instant::now();
-        let wall_dt = now.duration_since(clock_at).as_secs_f64();
+        let wall_dt = if clock_active { now.duration_since(clock_at).as_secs_f64() } else { 0. };
         clock_at = now;
+        clock_active = active && !backpressure;
+        skip.note_input(input.film_skip(preferences), is_key_down(KeyCode::Enter), is_key_down(KeyCode::E));
         if skip.update(
             Some("story-movie"),
             active,

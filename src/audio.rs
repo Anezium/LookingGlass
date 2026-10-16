@@ -1895,7 +1895,7 @@ mod tests {
                     let start = Instant::now();
                     for _ in 0..1024 {
                         let sample = monitor.next().unwrap();
-                        std::hint::black_box((sample.clamp(-1., 1.) * 32767.).round() as i16);
+                        std::hint::black_box(if sample.is_finite() { (sample.clamp(-1., 1.) * 32768.) as i16 } else { 0 });
                     }
                     durations.push(start.elapsed().as_secs_f64() * 1000.);
                     std::thread::sleep(Duration::from_micros(11610));
