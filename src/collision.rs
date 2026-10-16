@@ -551,7 +551,8 @@ impl Default for Trace {
 }
 #[derive(Debug)]
 pub struct World {
-    query_cache: std::cell::RefCell<Option<std::collections::HashMap<[u32; 9], Trace>>>,
+    query_cache: std::cell::RefCell<std::collections::HashMap<[u32; 9], Trace>>,
+    query_cache_active: std::cell::Cell<bool>,
     pub traversal: crate::traversal::Traversal,
     dynamic: Vec<Collider>,
     dynamic_bounds: Option<Bounds>,
@@ -574,16 +575,19 @@ pub struct World {
 
 impl World {
     /// Scope exact static/settled query reuse to one immutable NPC update. Dynamic
-    /// colliders are still swept on every request. No cache survives a publication.
+    /// colliders are still swept on every request. Entries never survive a publication; scratch capacity is reused.
     pub fn with_npc_queries<T>(&self, run: impl FnOnce() -> T) -> T {
         if !crate::sim_maps::npc_queries() { return run(); }
         struct Reset<'a>(&'a World);
         impl Drop for Reset<'_> {
-            fn drop(&mut self) { *self.0.query_cache.borrow_mut() = None; }
+            fn drop(&mut self) {
+                self.0.query_cache.borrow_mut().clear();
+                self.0.query_cache_active.set(false);
+            }
         }
         // Nested users share the outer scope rather than discarding its entries.
-        if self.query_cache.borrow().is_some() { return run(); }
-        *self.query_cache.borrow_mut() = Some(std::collections::HashMap::new());
+        if self.query_cache_active.replace(true) { return run(); }
+        debug_assert!(self.query_cache.borrow().is_empty());
         let _reset = Reset(self);
         run()
     }
@@ -677,6 +681,7 @@ impl World {
         Ok(Self {
             traversal: crate::traversal::Traversal::load(map)?,
             query_cache: std::cell::RefCell::default(),
+            query_cache_active: std::cell::Cell::new(false),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             #[cfg(test)]
@@ -825,7 +830,7 @@ impl World {
     /// Static support probes for hanging; moving/rotating entities are excluded.
     pub fn ledge_trace(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         let key = Self::query_key(start, end, half);
-        if let Some(hit) = self.query_cache.borrow().as_ref().and_then(|c| c.get(&key)).copied() {
+        if let Some(hit) = self.query_cache.borrow().get(&key).copied() {
             crate::sim_maps::count("static_query_hits", 1);
             return hit;
         }
@@ -874,7 +879,8 @@ impl World {
             add_counter(Counter::StaticHullsClipped, clipped);
             add_counter(Counter::SettledHullsClipped, support_hulls);
         }
-        if let Some(cache) = &mut *self.query_cache.borrow_mut() {
+        if self.query_cache_active.get() {
+            let mut cache = self.query_cache.borrow_mut();
             // Bound scratch memory even when a large cast issues unique queries.
             if cache.len() < 4096 { cache.insert(key, result); }
         }
@@ -1037,6 +1043,7 @@ impl World {
         };
         Self {
             query_cache: std::cell::RefCell::default(),
+            query_cache_active: std::cell::Cell::new(false),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             #[cfg(test)]
@@ -1422,13 +1429,44 @@ mod sim_query_tests {
                     assert_eq!(bits(world.ledge_trace(a,b,h)), expected);
                     assert_eq!(bits(world.ledge_trace(a,b,h)), expected);
                 }
-                assert_eq!(world.query_cache.borrow().as_ref().unwrap().len(), probes.len());
+                assert_eq!(world.query_cache.borrow().len(), probes.len());
             });
-            assert!(world.query_cache.borrow().is_none());
+            assert!(world.query_cache.borrow().is_empty());
+            assert!(!world.query_cache_active.get());
             let high = vec3(20.,0.,100.); let low = vec3(20.,0.,10.);
             assert!(world.with_npc_queries(|| world.ledge_trace(high,low,Vec3::ZERO)).fraction < 1.);
             world.set_settled_supports(Vec::new());
             assert_eq!(world.with_npc_queries(|| world.ledge_trace(high,low,Vec3::ZERO)).fraction, 1.);
+        });
+    }
+    #[test]
+    fn scoped_query_scratch_retains_capacity_and_clears_on_unwind() {
+        crate::sim_maps::with_test_switches([false, false, true, false], || {
+            let world = World::fixture(&[]);
+            world.with_npc_queries(|| {
+                for i in 0..5000 {
+                    world.ledge_trace(Vec3::X * i as f32, Vec3::ZERO, Vec3::ZERO);
+                }
+                assert_eq!(world.query_cache.borrow().len(), 4096);
+                world.with_npc_queries(|| assert_eq!(world.query_cache.borrow().len(), 4096));
+            });
+            let capacity = world.query_cache.borrow().capacity();
+            assert!(capacity >= 4096);
+            for _ in 0..3 {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    world.with_npc_queries(|| {
+                        assert!(world.query_cache.borrow().is_empty());
+                        world.ledge_trace(Vec3::ZERO, Vec3::Z, Vec3::ZERO);
+                        panic!("exercise scope cleanup");
+                    });
+                }));
+                assert!(result.is_err());
+                assert!(!world.query_cache_active.get());
+                assert!(world.query_cache.borrow().is_empty());
+                assert_eq!(world.query_cache.borrow().capacity(), capacity);
+            }
+            world.ledge_trace(Vec3::ZERO, Vec3::Z, Vec3::ZERO);
+            assert!(world.query_cache.borrow().is_empty());
         });
     }
     #[test]
