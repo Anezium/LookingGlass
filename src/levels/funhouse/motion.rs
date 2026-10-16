@@ -58,7 +58,7 @@ pub fn load(map: &Bsp) -> Result<Vec<Object>> {
                 name: e.get("targetname").cloned().unwrap_or_default(),
                 base,
                 pose: base,
-                collider: shape.at(base.translation, base.rotation),
+                collider: shape.at_for_npcs(base.translation, base.rotation),
                 shape,
                 draw: true,
                 solid: true,
@@ -307,7 +307,7 @@ impl Funhouse {
                 }
             }
             if old.translation != o.pose.translation || old.rotation != o.pose.rotation {
-                o.collider = o.shape.at(o.pose.translation, o.pose.rotation);
+                o.collider = o.shape.at_for_npcs(o.pose.translation, o.pose.rotation);
             }
         }
         Ok(())

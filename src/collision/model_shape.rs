@@ -287,6 +287,10 @@ impl Template {
         template
     }
     /// Reuse only identical transform bits; published/lazy hulls remain immutable.
+    pub fn at_for_npcs(&self, origin: Vec3, rotation: Quat) -> Collider {
+        if crate::sim_maps::npc_queries() { self.at_reused(origin, rotation) }
+        else { self.at(origin, rotation) }
+    }
     pub fn at_reused(&self, origin: Vec3, rotation: Quat) -> Collider {
         let mut key = [0; 7];
         key[..3].copy_from_slice(&origin.to_array().map(f32::to_bits));
