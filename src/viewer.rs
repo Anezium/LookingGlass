@@ -1081,6 +1081,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         crate::sim_maps::probe::begin();
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let mut host_block = crate::frame_profile::span("frame_input");
         crate::light_profile::cpu_begin();
         if !(menu || inventory_menu || console.open || paused) {crate::character::skinning_bench_begin();}
         crate::frame_phases::mark(1);
@@ -2112,6 +2114,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .pandemonium
                     .as_ref()
                     .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                { drop(host_block); host_block = crate::frame_profile::span("frame_interaction_search"); }
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2141,6 +2145,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         }
                     }
                 }
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                { drop(host_block); host_block = crate::frame_profile::span("frame_interactions"); }
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2169,6 +2175,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Some(sound) = events.sound {
                     audio.world_effect(&sound);
                 }
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                { drop(host_block); host_block = crate::frame_profile::span("frame_movers"); }
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2180,6 +2188,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 interactions.companions_for_movers(&npcs.companions());
                 interactions.actors_for_movers(&npcs.targets());
                 interactions.advance_school(mover_dt, &scene.map, &mut scene.world, &mut player)?;
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                { drop(host_block); host_block = crate::frame_profile::span("frame_movement"); }
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2390,6 +2400,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && !flying
             && stats.alive();
         if simulate {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_story"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -2664,6 +2676,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         } // simulation: story and transitions
         if simulate {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_particles"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -2768,6 +2782,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if interactions.levels.iter().any(|s| s.ctl.dismiss_summons()) {
             alice.dismiss_summon();
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_combat"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3069,6 +3085,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 });
             }
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_audio"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3099,6 +3117,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some((time, finished)) = rage_scene.filter(|_| simulate) {
             alice.rage_scene(time, finished, &player);
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_camera"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3247,6 +3267,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 gameplay_alice && camera.distance(player.feet + Vec3::Z * 32.) > 30.
             };
         if simulate {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_audio_mix"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3270,6 +3292,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             !story_active,
         );
         } // simulation: audio listener and clocks
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_scene"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3426,6 +3450,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame.dispatch();
             Some(frame)
         } else { None };
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_world"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3438,6 +3464,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let _collect = crate::frame_profile::span("skin_collect");
             frame.collect();
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_characters"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3484,6 +3512,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
         drop(actors_timer);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_objects"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3500,6 +3530,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 pickup_clock,
             );
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_world_particles"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3515,6 +3547,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 &transforms,
                 &steam,
             );
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            { drop(host_block); host_block = crate::frame_profile::span("frame_effects"); }
             #[cfg(target_os = "vita")]
             {
                 drop(viewer_block);
@@ -3571,6 +3605,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         let direct_fx = crate::render_fx::retained_active();
         if !world_only || !scene.retained_active() { scene.finish_fx(true); }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_first_person"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3595,6 +3631,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 alice.draw_first_person(fullbright);
             }
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_capture"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3623,6 +3661,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if freeze_capture { paused = pause_before_capture; clock.pause(); }
         if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_hud"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3945,6 +3985,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             console.draw(&ui);
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        { drop(host_block); host_block = crate::frame_profile::span("frame_save"); }
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -4049,6 +4091,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if !route_running {crate::frame_profile::end_creation_frame();}
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         if crate::sim_maps::probe::enabled() {
+            drop(host_block);
             crate::sim_maps::probe::end(frame, &maps[current], active, &serde_json::json!({
                 "player": player, "stats": stats, "interactions": interactions.snapshot(),
                 "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),

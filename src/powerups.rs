@@ -324,6 +324,7 @@ impl Art {
         clock: f32,
     ) {
         use macroquad::prelude::*;
+        let _profile = crate::frame_profile::span("pickup_prepare");
         let _objects = crate::frame_profile::object_totals();
         if self.effect_visit != visit || clock < self.effect_clock {
             self.essence.clear_effects();
