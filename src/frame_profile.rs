@@ -270,6 +270,8 @@ fn aggregate_leaves(labels: &[&'static str], values: &[f64]) {
     SAMPLES.with(|s| {
         let mut s = s.borrow_mut();
         for (&label, &value) in labels.iter().zip(values) {
+            #[cfg(feature="sim_maps_probe")]
+            crate::sim_maps::probe::span(label, value);
             let v = s.entry(label).or_default();
             if v.len() < 10000 { v.push(value); }
         }
@@ -339,6 +341,8 @@ impl Drop for Span {
         if transition_frame() { self.cancel(); return; }
         if let Some(start) = self.start {
             let ms = start.elapsed().as_secs_f64() * 1000.;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::span(self.label, ms);
             #[cfg(target_os = "vita")]
             vita::record(self.label, self.category, self.token, ms);
             #[cfg(not(target_os = "vita"))]

@@ -3,6 +3,7 @@ use std::{cell::RefCell, collections::BTreeMap, sync::OnceLock, time::Instant};
 use sha2::{Digest, Sha256};
 thread_local! {
     static COUNTS: RefCell<BTreeMap<&'static str, u64>> = RefCell::default();
+    static SPANS: RefCell<BTreeMap<&'static str, f64>> = RefCell::default();
     static START: RefCell<Option<Instant>> = const { RefCell::new(None) };
 }
 pub fn enabled() -> bool {
@@ -23,6 +24,8 @@ pub fn count(name: &'static str, n: u64) {
 pub fn begin() {
     if enabled() {
         COUNTS.with(|c| c.borrow_mut().clear());
+        SPANS.with(|c| c.borrow_mut().clear());
+        crate::light_profile::render_host_reset();
         START.with(|s| *s.borrow_mut() = Some(Instant::now()));
     }
 }
@@ -35,9 +38,15 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     let hash = format!("{:x}", Sha256::digest(&bytes));
     COUNTS.with(|c| println!("SIM_MAPS_FRAME {}", serde_json::json!({
         "frame": frame, "map": map, "active": active,
-        "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow()
+        "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow(),
+        "spans_ms": SPANS.with(|s| s.borrow().clone()),
+        "render": crate::light_profile::render_host_report()
     })));
     if std::env::var_os("LOOKING_GLASS_SIM_MAPS_STATE").is_some() {
         std::fs::write(format!("state-{frame:05}.json"), bytes).unwrap();
     }
+}
+
+pub fn span(label: &'static str, ms: f64) {
+    if enabled() { SPANS.with(|s| *s.borrow_mut().entry(label).or_default() += ms); }
 }

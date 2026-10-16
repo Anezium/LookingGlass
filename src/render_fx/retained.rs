@@ -20,6 +20,7 @@ pub(crate) fn host_reset() {
     HOST_COUNTS.with(|c| { for value in c.borrow_mut().values_mut() { *value = 0; } });
 }
 pub(crate) fn count(name: &'static str, value: u64) {
+    crate::sim_maps::count(name, value);
     #[cfg(target_os = "vita")]
     crate::frame_profile::counts(&[(name, value)]);
     #[cfg(not(target_os = "vita"))]
