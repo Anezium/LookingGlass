@@ -373,6 +373,21 @@ fn policy(config: block::Settings) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn ambience_cap_reselects_gain_and_preserves_player_and_voice_time() {
+        let (control,mut mixer)=mixer();
+        mixer.config.mix=true;mixer.config.voices=1;mixer.config.gain=0.01;
+        let a=control.sink();a.set_ambient();a.set_volume(0.5);
+        let b=control.sink();b.set_ambient();b.set_volume(0.25);
+        let player=control.sink();
+        for sink in [&a,&b,&player]{sink.append(rodio::buffer::SamplesBuffer::new(2,44100,vec![0.1;4096]));}
+        for _ in 0..SAMPLES{assert!((mixer.next().unwrap()-0.15).abs()<1e-6);}
+        assert_eq!(a.get_pos(),b.get_pos());assert!(a.get_pos()>Duration::ZERO);
+        a.set_volume(0.05);b.set_volume(0.7);
+        for _ in 0..SAMPLES{assert!((mixer.next().unwrap()-0.17).abs()<1e-6);}
+        assert_eq!(control.metrics.audible_ambient.load(Ordering::Relaxed),1);
+        assert_eq!(control.metrics.virtual_ambient.load(Ordering::Relaxed),1);
+    }
+    #[test]
     fn film_stop_flush_rejects_already_prefetched_samples() {
         let (tx, rx) = queue::channel(4);
         let metrics = Arc::new(Metrics::default());
