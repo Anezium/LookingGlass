@@ -70,6 +70,7 @@ impl Model {
         if scale <= 0. {
             return;
         }
+        let _identity = self.skin_identity.scope_unless_set();
         let time = g.sample_time(&self.data);
         let pose = self.data.clips[g.clip()].sample(time, g.loops());
         let skins = self.magma_skins.as_ref().unwrap();

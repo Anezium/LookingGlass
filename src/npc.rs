@@ -710,6 +710,7 @@ fn family(def: &Definition, base: &str) -> Vec<String> {
         .collect()
 }
 struct Model {
+    skin_identity: crate::character::skinning::identity::ActorId,
     // Script puppets expose secondary draws in a later pass, after body visibility
     // is decided. Keep their vertices and normals even without death_frozen.
     late_skin_overlays: bool,
@@ -867,7 +868,7 @@ impl Puppet {
         transform: Transform,
         alpha: f32,
     ) {
-        if crate::character::skinning::overlap::gathering() { return; }
+        if crate::character::skinning::overlap::gather_only() { return; }
         let d = &self.0.data;
         let Some(animation) = d.clips.get(clip) else {
             return;
@@ -952,6 +953,7 @@ impl Puppet {
             animation.frame_time,
             looping,
         );
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(clip == "death_frozen");
         let material = self.3.clone();
         material.draw_dissolving(dissolve, || {
             self.0.draw_pose(
@@ -1058,7 +1060,7 @@ pub fn guard_timing(assets: &mut Assets) -> Result<Timing> {
 }
 impl Model {
     fn draw_electric(&self, remaining: f32) {
-        if crate::character::skinning::overlap::gathering() { return; }
+        if crate::character::skinning::overlap::gather_only() { return; }
         if remaining <= 0. {
             return;
         }
@@ -1079,7 +1081,7 @@ impl Model {
         }
     }
     fn draw_frozen(&self) {
-        if crate::character::skinning::overlap::gathering() { return; }
+        if crate::character::skinning::overlap::gather_only() { return; }
         if let Some(art) = &self.frozen {
             for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
                 if *visible {
@@ -1104,6 +1106,7 @@ impl Model {
         visual: &crate::animation_events::VisualState,
         piece: Option<(&str, &str, bool)>,
     ) {
+        let _identity = self.skin_identity.scope_unless_set();
         self.visible.fill(false);
         self.electric_attachments.clear();
         self.electric_props.clear();
@@ -1149,9 +1152,8 @@ impl Model {
             }
         }
         // Frozen shells and script-owned late overlays need the complete skin.
-        let _skin_guard = crate::character::skinning::CullGuard::preserve(
-            self.frozen.is_some() || self.late_skin_overlays,
-        );
+        let _visibility = crate::character::skinning::CullGuard::visual_preserve(self.frozen.is_some());
+        let _skin_guard = crate::character::skinning::CullGuard::preserve(self.late_skin_overlays);
         let skin_visible = crate::character::draw_skin_scaled(
             &d.skeleton,
             &mut self.meshes,
@@ -1168,7 +1170,7 @@ impl Model {
         for (i, mesh) in removed {
             self.meshes[i] = mesh;
         }
-        if !attachments || crate::character::skinning::overlap::gathering() {
+        if !attachments || crate::character::skinning::overlap::gather_only() {
             return;
         }
         let tag_pose = |bone: usize| Transform {
@@ -1212,6 +1214,7 @@ impl Model {
         atmosphere: &Atmosphere,
         material: &crate::character::SkinMaterial,
     ) {
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(g.frozen || g.electric > 0.);
         let _skin_guard = crate::character::skinning::CullGuard::preserve(g.electric > 0.);
         if let Some(state) = &g.burst {
             material.bind();
@@ -1340,7 +1343,7 @@ impl Model {
         camera: Vec3,
         atmosphere: &Atmosphere,
     ) {
-        if crate::character::skinning::overlap::gathering() { return; }
+        if crate::character::skinning::overlap::gather_only() { return; }
         let d = &self.data;
         let Some(animation) = d.clips.get(clip) else {
             return;
@@ -1545,6 +1548,7 @@ impl Model {
             }
         }
         Ok(Self {
+            skin_identity: Default::default(),
             late_skin_overlays: false,
             visible: vec![false; meshes.len()],
             bone_scales: Vec::new(),
@@ -1577,6 +1581,8 @@ impl Model {
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Actor {
+    #[serde(skip)]
+    skin_identity: crate::character::skinning::identity::ActorId,
     #[serde(default, skip_serializing_if = "crate::electric::inactive")]
     electric: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2342,6 +2348,7 @@ impl Npcs {
             .enumerate()
             .filter_map(|(i, s)| {
                 indices.get(&s.model).map(|&model| Actor {
+                    skin_identity: Default::default(),
                     resident: residents.remove(&i),
                     walk: None,
                     guide: if preview {
@@ -3143,6 +3150,7 @@ impl Npcs {
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for (id, actor) in self.actors.iter().enumerate() {
+            let _identity = actor.skin_identity.scope();
             let _skin_guard = crate::character::skinning::CullGuard::preserve(actor.electric > 0.);
             if actor.ant.as_ref().is_some_and(|a| !a.enabled) { continue; }
             if actor.guide.as_ref().is_some_and(|g| !g.visible()) {
@@ -3181,7 +3189,7 @@ impl Npcs {
             {
                 continue;
             }
-            if !crate::character::skinning::overlap::gathering() {
+            if !crate::character::skinning::overlap::gather_only() {
             if let Some(p) = &actor.resident {
                 if let resident::Body::Card(g) = &p.body {
                     if p.active {
@@ -3321,14 +3329,14 @@ impl Npcs {
             let model = &mut self.models[actor.model];
             if let Some(p) = &actor.resident {
                 p.draw(model, fullbright, &self.material);
-                if p.active && !crate::character::skinning::overlap::gathering() {
+                if p.active && !crate::character::skinning::overlap::gather_only() {
                     if let resident::Body::Snark(g) = &p.body {
                         if let Some(art) = self.snark_art.get_mut(&id) {
                             art.smoke(g, &model.data, camera, atmosphere);
                         }
                     }
                 }
-                if p.active && !crate::character::skinning::overlap::gathering() {
+                if p.active && !crate::character::skinning::overlap::gather_only() {
                     if let resident::Body::Card(g) = &p.body {
                         if let Some(art) = self.card_art.get_mut(&id) {
                             art.charge(g, &model.data, camera, atmosphere);
@@ -3340,7 +3348,7 @@ impl Npcs {
             }
             if let Some(p) = &actor.clock {
                 model.draw_clock(p, fullbright, &self.material);
-                if !crate::character::skinning::overlap::gathering() {
+                if !crate::character::skinning::overlap::gather_only() {
                 if let Some(art) = self.clock_art.get_mut(&id) {
                     art.steam(p, &model.data, camera, atmosphere);
                 }
@@ -3383,7 +3391,7 @@ impl Npcs {
                 self.visual_lod.entry(id).or_default().decide(config, safe, outside,
                     offset.length_squared(), transform, actor.spawn.scale, fullbright)
             } else { visual_lod::Decision::Exact };
-            if crate::character::skinning::overlap::gathering() {
+            if crate::character::skinning::overlap::gather_only() {
                 self.visual_lod.entry(id).or_default().prepared = decision;
             }
             #[cfg(target_os = "vita")]
@@ -3432,6 +3440,8 @@ impl Npcs {
                 translation: actor.position(),
                 rotation: Quat::from_rotation_z(actor.yaw),
             };
+            let _consumer = crate::character::skinning::CullGuard::preserve(
+                crate::character::skinning::overlap::single_preparing() && decision == visual_lod::Decision::Refresh);
             model.draw_pose(
                 &local,
                 actor.mouth,
@@ -3444,7 +3454,7 @@ impl Npcs {
                 &visual,
                 None,
             );
-            if decision == visual_lod::Decision::Refresh && !crate::character::skinning::overlap::gathering() {
+            if decision == visual_lod::Decision::Refresh && !crate::character::skinning::overlap::gather_only() {
                 self.visual_lod.get_mut(&id).expect("ambient cache").capture(model);
             }
             model.draw_effects(
@@ -3469,7 +3479,7 @@ impl Npcs {
             ("vita_actor_frustum_skipped",lod_counts[1]),
             ("characters_lod_protected",lod_counts[4]),
         ]);
-        if !crate::character::skinning::overlap::gathering() { gl_use_default_material(); }
+        if !crate::character::skinning::overlap::gather_only() { gl_use_default_material(); }
     }
 }
 
@@ -3955,6 +3965,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
         let Some(transform) = piece.visual(&self.data) else {
             return;
         };
@@ -3996,6 +4007,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
         let scale = piece.visual_scale(&self.data);
         if scale <= 0. {
             return;
@@ -4040,6 +4052,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
         let scale = piece.visual_scale(&self.data);
         if scale <= 0. {
             return;
@@ -4084,6 +4097,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
+        let _consumer = crate::character::skinning::CullGuard::publication_consumer(ant.frozen || ant.electric > 0.);
         let scale = ant.visual_scale(&self.data);
         if scale <= 0. {
             return;
@@ -4188,6 +4202,7 @@ mod tests {
     }
     pub(super) fn actor() -> Actor {
         Actor {
+            skin_identity: Default::default(),
             electric: 0.,
             walk: None,
             guide: None,

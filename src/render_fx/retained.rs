@@ -1150,7 +1150,7 @@ pub(crate) fn finish_world(
         }
     }
     gpu.merge_meshes[gpu.ring_phase].retain(|id, _| recycled.contains(id));
-    if c.actor_layer_reuse {
+    if c.actor_layer_reuse || c.actor_single_prepare {
         for group in &mut groups {super::actor_cache::recycle(&mut group.passes);}
     }
     let submit_ns = gpu.stats.render.iter().map(|m| m.cpu_ns).sum::<u64>();

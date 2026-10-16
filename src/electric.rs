@@ -45,7 +45,7 @@ impl Art {
         Ok(art)
     }
     pub fn draw(&self, mesh: &Mesh, remaining: f32) {
-    if crate::character::skinning::overlap::gathering() { return; }
+    if crate::character::skinning::overlap::gather_only() { return; }
         if remaining <= 0. {
             return;
         }

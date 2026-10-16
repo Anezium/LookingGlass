@@ -9,6 +9,8 @@ description = "Local Rust compatibility research for user-supplied Alice game da
 [features]
 default = []
 vita_renderer = []
+# Optional actor publication counters; no calls or argument work in regular builds.
+actor_diagnostics = ["vita_renderer"]
 
 [dependencies]
 anyhow = "1.0"

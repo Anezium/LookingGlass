@@ -1556,6 +1556,8 @@ impl Scene {
     /// already built (with the difficulty applied) so that the viewer and a headless route share
     /// one copy of them.
     pub fn from_parts(assets: &mut Assets, name: &str, map: Bsp, world: World) -> Result<Self> {
+        #[cfg(feature="vita_renderer")]
+        crate::character::skinning::overlap::reset_publications();
         let mut timing = crate::startup::Phase::new("scene_build");
         crate::lighting::load_art(assets)?;
         let specs = texture::read_materials(assets)?;

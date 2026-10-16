@@ -27,6 +27,10 @@ impl Geometry {
         }
         g
     }
+    pub(super) fn advance_owned(&mut self, topology:bool) {
+        self.version.vertices=generation();
+        if topology {self.version.topology=generation();self.valid=valid(&self.mesh);}
+    }
     pub(crate) fn update_quad(&mut self, vertices: &[Vertex; 4]) {
         if vertices_equal(&self.mesh.vertices, vertices) { return; }
         self.mesh.vertices.clear(); self.mesh.vertices.extend_from_slice(vertices);
