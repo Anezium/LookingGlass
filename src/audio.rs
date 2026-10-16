@@ -500,6 +500,11 @@ fn decode_clip(data: Vec<u8>) -> Result<Clip> {
     } else {(mono,rate)};
     Ok(Clip { samples: mono.into(), rate })
 }
+/// Character voices placed as map speakers (idle chatter such as the Queen's
+/// `q2_idle.wav`) are speech, never ambience the voice cap may cull.
+fn speech(path: &str) -> bool {
+    path.starts_with("sound/character/")
+}
 /// Linear interpolation of a decoded mono clip to 44.1 kHz.
 fn resample_linear(mono: &[f32], rate: u32) -> Vec<f32> {
     let n = ((mono.len() as u64 * 44100 / rate as u64) as usize).max(1);
@@ -872,7 +877,6 @@ impl Audio {
         let mut failures = 0;
         self.cues = spec.music;
         self.mood(assets, "normal")?;
-        let playback = self.playback.as_ref().unwrap();
         let mut cache: BTreeMap<String, Option<Clip>> = BTreeMap::new();
         let mut cache_samples = 0;
         let mut alice_sounds = events::Model::load(assets, "models/alice.tik")?;
@@ -923,10 +927,32 @@ impl Audio {
             .iter()
             .filter_map(|(path, clip)| clip.clone().map(|c| (path.clone(), c)))
             .collect();
-        for speaker in spec.speakers {
+        self.add_speakers(spec.speakers, &cache);
+        self.clips = EFFECTS
+            .iter()
+            .map(|p| cache.get(*p).and_then(Clone::clone))
+            .collect();
+        self.status = if failures == 0 {
+            "Sound ready".into()
+        } else {
+            format!("{failures} sound files unavailable")
+        };
+        println!(
+            "Audio {name}: {} ambient emitters, {} player effects, {failures} unavailable files",
+            self.emitters.len(),
+            self.clips.iter().flatten().count()
+        );
+        Ok(())
+    }
+    /// One paused sink per map speaker; character speech is never ambience.
+    fn add_speakers(&mut self, speakers: Vec<Speaker>, cache: &BTreeMap<String, Option<Clip>>) {
+        for speaker in speakers {
             if let Some(clip) = cache.get(&speaker.path).and_then(Clone::clone) {
+                let Some(playback) = self.playback.as_ref() else { return };
                 let sink = playback.sink();
-                sink.set_ambient();
+                if !speech(&speaker.path) {
+                    sink.set_ambient();
+                }
                 sink.pause();
                 sink.set_volume(0.);
                 let pan = Pan::new();
@@ -952,21 +978,6 @@ impl Audio {
                 });
             }
         }
-        self.clips = EFFECTS
-            .iter()
-            .map(|p| cache.get(*p).and_then(Clone::clone))
-            .collect();
-        self.status = if failures == 0 {
-            "Sound ready".into()
-        } else {
-            format!("{failures} sound files unavailable")
-        };
-        println!(
-            "Audio {name}: {} ambient emitters, {} player effects, {failures} unavailable files",
-            self.emitters.len(),
-            self.clips.iter().flatten().count()
-        );
-        Ok(())
     }
     /// Called only after the viewer has yielded a complete world/HUD frame.
     pub fn scene_presented(&mut self) {
@@ -2107,13 +2118,31 @@ mod tests {
             let (mixer, _source) = output::mixer();
             audio.playback = Some(Playback { _stream: None, mixer, _worker: None });
             audio.load(&mut assets, name, &map);
-            println!("AUDIO_PRELOAD map={name} preresample={} cache_bytes={} cap_bytes={} limit_rejects={} unavailable_status=\"{}\" emitters={}",
+            let speech = audio.emitters.iter().filter(|e| speech(&e.spec.path)).count();
+            println!("AUDIO_PRELOAD map={name} preresample={} cache_bytes={} cap_bytes={} limit_rejects={} unavailable_status=\"{}\" emitters={} speech_emitters={speech}",
                 config.preresample, audio.cache_samples * 4, CACHE_SAMPLES * 4, audio.limit_rejects, audio.status, audio.emitters.len());
             overflow += audio.limit_rejects;
         }
         println!("AUDIO_PRELOAD_SUMMARY maps={} limit_rejects={overflow}", maps.len());
         ensure!(overflow == 0, "level preload exceeded the audio cache");
         Ok(())
+    }
+    #[test]
+    fn speaker_speech_is_never_ranked_as_ambience() {
+        assert!(speech("sound/character/queen/q2_idle.wav"));
+        assert!(!speech("sound/ambience/background/bubbles1.wav"));
+        assert!(!speech("sound/world/machine/steamloop1.wav"));
+        let spec = |path: &str| Speaker { path: path.into(), origin: Vec3::ZERO, volume: 1., radius: 256., random: true, delay: (1., 2.), chance: 1. };
+        let mut audio = Audio::new(true, None);
+        let (mixer, _source) = output::mixer();
+        audio.playback = Some(Playback { _stream: None, mixer, _worker: None });
+        let clip = Clip { samples: vec![0.1; 64].into(), rate: 22050 };
+        audio.add_speakers(vec![spec("sound/character/queen/q2_idle.wav"), spec("sound/ambience/special/thermals.wav")], &BTreeMap::from([
+            ("sound/character/queen/q2_idle.wav".to_string(), Some(clip.clone())),
+            ("sound/ambience/special/thermals.wav".to_string(), Some(clip)),
+        ]));
+        let ambient: Vec<_> = audio.emitters.iter().map(|e| e.sink.is_ambient()).collect();
+        assert_eq!(ambient, [false, true]);
     }
     #[test]
     fn level_music_stays_paused_until_presentation_even_if_update_runs() {

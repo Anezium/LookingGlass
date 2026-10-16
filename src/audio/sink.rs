@@ -124,6 +124,9 @@ impl Sink {
     pub fn set_ambient(&self) {
         self.controls.ambient.store(true, Ordering::Relaxed);
     }
+    pub fn is_ambient(&self) -> bool {
+        self.controls.ambient.load(Ordering::Relaxed)
+    }
     pub fn set_music(&self) {
         self.controls.music.store(true, Ordering::Relaxed);
     }
