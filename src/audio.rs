@@ -3,6 +3,7 @@ mod acoustics;
 mod queue;
 pub mod sink;
 mod output;
+mod block;
 pub mod events;
 mod reaction;
 pub mod regression;
@@ -490,10 +491,20 @@ fn decode_clip(data: Vec<u8>) -> Result<Clip> {
         .chunks_exact(channels)
         .map(|s| s.iter().sum::<f32>() / channels as f32)
         .collect::<Vec<_>>();
-    Ok(Clip {
-        samples: mono.into(),
-        rate,
-    })
+    let (mono, rate) = if block::settings().preresample && rate != 44100 {
+        let n = ((mono.len() as u64 * 44100 / rate as u64) as usize).max(1);
+        ensure!(n <= MAX_PCM, "Resampled sound too large");
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let pos=i as u64*rate as u64;
+            let j=(pos/44100) as usize;
+            let f=(pos%44100) as f32/44100.;
+            let a=mono[j]; let b=mono[(j+1).min(mono.len()-1)];
+            out.push(a+(b-a)*f);
+        }
+        (out,44100)
+    } else {(mono,rate)};
+    Ok(Clip { samples: mono.into(), rate })
 }
 struct Pan {
     left: AtomicU32,
@@ -665,6 +676,8 @@ impl Playback {
             handle.play_raw(monitor)?;
             None
         };
+        let config=block::settings();
+        eprintln!("[lg/audio-policy] block_mix={} preresample={} block_parameters={} ambient_cap={} cull_gain={} producer_priority={} producer_affinity={:#x} cushion_blocks={} cushion_ms={:.3}",config.mix,config.preresample,config.parameters,config.voices,config.gain,config.priority,config.affinity,config.cushion,config.cushion as f64*512./44.1);
         eprintln!("[lg/audio-output] buffered={buffered} callback_shared_game_locks=0 game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0");
         Ok(Self { _stream: Some(stream), mixer, _worker: worker })
     }
@@ -900,20 +913,18 @@ impl Audio {
         for speaker in spec.speakers {
             if let Some(clip) = cache.get(&speaker.path).and_then(Clone::clone) {
                 let sink = playback.sink();
+                sink.set_ambient();
                 sink.pause();
                 sink.set_volume(0.);
                 let pan = Pan::new();
                 let acoustics = acoustics::Controls::new();
                 if !speaker.random {
-                    sink.append(acoustics::Filter::new(
-                        Pcm {
+                    sink.append_effect(Pcm {
                             clip: clip.clone(),
                             index: 0,
                             looping: true,
                             pan: pan.clone(),
-                        },
-                        acoustics.clone(),
-                    ));
+                        }, acoustics.clone());
                 }
                 let remaining =
                     speaker.delay.0 + random(&mut self.rng) * (speaker.delay.1 - speaker.delay.0);
@@ -1033,15 +1044,12 @@ impl Audio {
                         && e.sink.empty()
                         && attenuation > 0.001
                     {
-                        e.sink.append(acoustics::Filter::new(
-                            Pcm {
+                        e.sink.append_effect(Pcm {
                                 clip: e.clip.clone(),
                                 index: 0,
                                 looping: false,
                                 pan: e.pan.clone(),
-                            },
-                            e.acoustics.clone(),
-                        ));
+                            }, e.acoustics.clone());
                     }
                 }
             }
@@ -1293,15 +1301,12 @@ impl Audio {
                 sink.set_volume(0.);
                 let pan = Pan::new();
                 let acoustics = acoustics::Controls::new();
-                sink.append(acoustics::Filter::new(
-                    Pcm {
+                sink.append_effect(Pcm {
                         clip,
                         index,
                         looping: true,
                         pan: pan.clone(),
-                    },
-                    acoustics.clone(),
-                ));
+                    }, acoustics.clone());
                 self.loops.insert(
                     cue.id,
                     Loop {
@@ -1404,6 +1409,7 @@ impl Audio {
         };
         let bytes = assets.read(&cue.path)?;
         let sink = playback.sink();
+        sink.set_music();
         sink.pause();
         sink.set_volume(0.);
         if cue.looping {
@@ -1516,15 +1522,12 @@ impl Audio {
         let pan = Pan::new();
         let acoustics = acoustics::Controls::new();
         acoustics.set(0., self.submerged, self.room);
-        sink.append(acoustics::Filter::new(
-            Pcm {
+        sink.append_effect(Pcm {
                 clip,
                 index: 0,
                 looping: false,
                 pan: pan.clone(),
-            },
-            acoustics.clone(),
-        ));
+            }, acoustics.clone());
         let effect = Effect {
             sink,
             pan,
@@ -2036,6 +2039,7 @@ mod tests {
         audio.scene_presented();
         let eye=vec3(-4144.,6120.,280.);
         let mut times=Vec::new();
+        let mut stages:[Vec<f64>;7]=std::array::from_fn(|_|Vec::new());
         for block in 0..1800 {
             if block%3==0 {
                 audio.prepare(&mut assets,&world,eye,false,512.*3./44100.);
@@ -2044,10 +2048,11 @@ mod tests {
             }
             let start=Instant::now();
             for _ in 0..1024 { std::hint::black_box(monitor.next()); }
-            if block>=90 {times.push(start.elapsed().as_secs_f64()*1000.);}
+            if block>=90 {let total=start.elapsed().as_secs_f64()*1000.;times.push(total);let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
         }
         times.sort_by(f64::total_cmp);let n=times.len();
         println!("MIX_PROFILE n={n} p50_ms={:.6} p95_ms={:.6} max_ms={:.6} emitters=20 simulated_seconds={:.3}",times[n/2],times[(n-1)*95/100],times[n-1],1800.*512./44100.);
+        for (name,values) in block::STAGES.iter().zip(stages.iter_mut()){values.sort_by(f64::total_cmp);let n=values.len();println!("MIX_EXCLUSIVE stage={name} p50_ms={:.6} p95_ms={:.6} max_ms={:.6}",values[n/2],values[(n-1)*95/100],values[n-1]);}
         // Differential, batched source stages: same village clips, no per-sample clocks.
         for stage in 0..3 {
             let mut sum=0.;

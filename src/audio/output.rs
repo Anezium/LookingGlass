@@ -1,7 +1,7 @@
 //! The game publishes source handles without locks. Optional PCM buffering keeps
 //! every source/DSP/decoder call off the high-priority device callback.
 use super::{
-    queue,
+    block, queue,
     sink::{Output, Sink},
 };
 use rodio::Source;
@@ -14,13 +14,15 @@ use std::{
     time::{Duration, Instant},
 };
 pub const SAMPLES: usize = 1024;
-const READY_BLOCKS: usize = 2;
+const READY_BLOCKS:usize=2;
 #[derive(Default)]
 pub struct Metrics {
     pub rejected: AtomicUsize,
     pub starved: AtomicUsize,
     pub queued_samples: AtomicUsize,
     pub active_peak: AtomicUsize,
+    pub audible_ambient: AtomicUsize,
+    pub virtual_ambient: AtomicUsize,
     epoch: AtomicU32,
     flushes: AtomicUsize,
 }
@@ -33,6 +35,10 @@ pub struct Mixer {
     sources: Vec<Output>,
     metrics: Arc<Metrics>,
     sample: usize,
+    block: [f32; SAMPLES],
+    at: usize,
+    ranks: Vec<(usize, f32)>,
+    config: block::Settings,
 }
 pub fn mixer() -> (Control, Mixer) {
     let (tx, rx) = queue::channel(128);
@@ -47,6 +53,10 @@ pub fn mixer() -> (Control, Mixer) {
             sources: Vec::with_capacity(128),
             metrics,
             sample: 0,
+            block: [0.; SAMPLES],
+            at: SAMPLES,
+            ranks: Vec::with_capacity(128),
+            config: block::settings(),
         },
     )
 }
@@ -65,9 +75,70 @@ impl Control {
         sink
     }
 }
+impl Mixer {
+    fn render(&mut self) {
+        block::reset();
+        let start = Instant::now();
+        while let Some(s) = self.pending.pop() {
+            self.sources.push(s);
+        }
+        self.metrics
+            .active_peak
+            .fetch_max(self.sources.len(), Ordering::Relaxed);
+        let config = self.config;
+        self.ranks.clear();
+        for (i, s) in self.sources.iter().enumerate() {
+            if let Some(gain) = s.rank() {
+                if gain > config.gain {
+                    self.ranks.push((i, gain));
+                }
+            }
+        }
+        self.ranks
+            .sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        if config.voices > 0 {
+            self.ranks.truncate(config.voices);
+        }
+        self.metrics
+            .audible_ambient
+            .store(self.ranks.len(), Ordering::Relaxed);
+        self.metrics.virtual_ambient.store(
+            self.sources.iter().filter(|s| s.rank().is_some()).count() - self.ranks.len(),
+            Ordering::Relaxed,
+        );
+        block::charge(6, start);
+        self.block.fill(0.);
+        let mut scratch = [0.; SAMPLES];
+        let mut dead = Vec::new();
+        for (i, s) in self.sources.iter_mut().enumerate() {
+            let audible = s.rank().is_none() || self.ranks.iter().any(|(j, _)| *j == i);
+            if !s.render(&mut scratch, audible) {
+                dead.push(i);
+                continue;
+            }
+            let start = Instant::now();
+            for (dst, src) in self.block.iter_mut().zip(scratch.iter()) {
+                *dst += *src;
+            }
+            block::charge(4, start);
+        }
+        for i in dead.into_iter().rev() {
+            self.sources.remove(i);
+        }
+        self.at = 0;
+    }
+}
 impl Iterator for Mixer {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
+        if self.config.mix {
+            if self.at == SAMPLES {
+                self.render();
+            }
+            let v = self.block[self.at];
+            self.at += 1;
+            return Some(v);
+        }
         // Moving pending owned sources cannot run a decoder. Each Output
         // normalizes its source only when the consumer first asks for samples.
         let mut added = false;
@@ -184,7 +255,9 @@ pub fn buffered<S: Source<Item = f32> + Send + 'static>(
     metrics: Arc<Metrics>,
 ) -> std::io::Result<(Worker, Callback)> {
     let (tx, rx) = queue::channel(4);
-    for _ in 0..READY_BLOCKS {
+    let config = block::settings();
+    let ready_blocks = 2;
+    for _ in 0..ready_blocks {
         assert!(tx
             .push(Block {
                 epoch: 0,
@@ -199,13 +272,15 @@ pub fn buffered<S: Source<Item = f32> + Send + 'static>(
     let handle=thread::Builder::new().name("audio-producer".into()).stack_size(1024*1024).spawn(move||{
         if !policy() { return; }
         let mut report=Instant::now();let mut timings=Vec::with_capacity(128);
+        let mut stages:[Vec<f64>;7]=std::array::from_fn(|_|Vec::with_capacity(128));
         while !done.load(Ordering::Acquire) {
-            if tx.len()>=READY_BLOCKS {thread::sleep(Duration::from_millis(1));}
+            if tx.len()>=ready_blocks {thread::sleep(Duration::from_millis(1));}
             else {
                 let epoch=stats.epoch.load(Ordering::Acquire);
                 let start=Instant::now();let mut block=[0.;SAMPLES];
                 for v in &mut block {*v=source.next().unwrap_or(0.);}
-                timings.push(start.elapsed().as_secs_f64()*1000.);
+                let total=start.elapsed().as_secs_f64()*1000.;timings.push(total);
+                if config.mix {let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
                 stats.queued_samples.fetch_add(SAMPLES,Ordering::Relaxed);
                 if tx.push(Block{epoch,samples:block}).is_err(){stats.queued_samples.fetch_sub(SAMPLES,Ordering::Relaxed);}
             }
@@ -214,6 +289,13 @@ pub fn buffered<S: Source<Item = f32> + Send + 'static>(
                 let (p50,p95,max)=if n>0 {(timings[n/2],timings[(n-1)*95/100],timings[n-1])}else{(0.,0.,0.)};
                 eprintln!("[lg/audio-realtime] window_ms={} producer_blocks={n} producer_mix_p50_ms={p50:.3} producer_mix_p95_ms={p95:.3} producer_mix_max_ms={max:.3} pcm_starved_blocks={} rejected_sinks={} intentional_pcm_flushes={} queued_samples={} game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0 producer_game_control_lock_attempts=0 producer_lock_wait_max_us=0 game_audio_api_max_us={} live_sink_peak={} game_stage={} game_stage_age_ms={} callback_source=bounded-pcm",
                     report.elapsed().as_millis(),stats.starved.swap(0,Ordering::Relaxed),stats.rejected.swap(0,Ordering::Relaxed),stats.flushes.swap(0,Ordering::Relaxed),stats.queued_samples.load(Ordering::Relaxed),super::sink::API_MAX_US.swap(0,Ordering::Relaxed),stats.active_peak.swap(0,Ordering::Relaxed),super::game_stage_snapshot().0,super::game_stage_snapshot().1);
+                if config.mix {
+                    for (name,values) in block::STAGES.iter().zip(stages.iter_mut()){
+                        values.sort_by(f64::total_cmp);let n=values.len();
+                        if n>0{eprintln!("[lg/audio-stage] stage={name} blocks={n} p50_ms={:.3} p95_ms={:.3} max_ms={:.3}",values[n/2],values[(n-1)*95/100],values[n-1]);}values.clear();
+                    }
+                    eprintln!("[lg/audio-voices] audible_ambient={} virtual_ambient={} cap={} cull_gain={}",stats.audible_ambient.load(Ordering::Relaxed),stats.virtual_ambient.load(Ordering::Relaxed),config.voices,config.gain);
+                }
                 timings.clear();report=Instant::now();
             }
         }
@@ -365,7 +447,7 @@ mod tests {
         .unwrap();
         callback
             .by_ref()
-            .take(READY_BLOCKS * SAMPLES)
+            .take(block::settings().cushion * SAMPLES)
             .for_each(drop);
         seen.recv_timeout(Duration::from_secs(1)).unwrap();
         let start = Instant::now();

@@ -65,6 +65,27 @@ pub fn room(world: &World, ear: Vec3) -> f32 {
         .sum::<f32>()
         / 6.
 }
+/// Shared DSP recurrence for the block path. Coefficients and wet gain can be
+/// snapshotted once per 512-frame block (11.61 ms maximum control granularity).
+pub struct FilterState {
+    controls: Arc<Controls>, low:[f32;2], delays:[Vec<f32>;2], cursors:[usize;2], rate:u32, cutoff:u32, alpha:f32, wet:f32,
+}
+impl FilterState {
+    pub fn new(rate:u32,controls:Arc<Controls>)->Self {let cutoff=controls.cutoff.load(Ordering::Relaxed);let alpha=1.-(-std::f32::consts::TAU*f32::from_bits(cutoff)/rate as f32).exp();Self{controls,cutoff,alpha,wet:0.,low:[0.;2],delays:[vec![0.;(rate as f32*0.047) as usize],vec![0.;(rate as f32*0.071) as usize]],cursors:[0;2],rate}}
+    fn refresh(&mut self){let cutoff=self.controls.cutoff.load(Ordering::Relaxed);if cutoff!=self.cutoff{self.cutoff=cutoff;self.alpha=1.-(-std::f32::consts::TAU*f32::from_bits(cutoff)/self.rate as f32).exp();}self.wet=f32::from_bits(self.controls.wet.load(Ordering::Relaxed));}
+    pub fn clear(&mut self){self.low=[0.;2];for d in &mut self.delays{d.fill(0.);}}
+    pub fn process(&mut self, samples:&mut[f32],block:bool){
+        self.refresh();
+        for (i,v) in samples.iter_mut().enumerate(){
+            if !block {self.refresh();}
+            let ch=i&1;self.low[ch]+=self.alpha*(*v-self.low[ch]);
+            let j=self.cursors[ch];let reflection=self.delays[ch][j];
+            self.delays[ch][j]=self.low[ch]+reflection*0.32;
+            self.cursors[ch]+=1;if self.cursors[ch]==self.delays[ch].len(){self.cursors[ch]=0;}
+            *v=self.low[ch]+reflection*self.wet;
+        }
+    }
+}
 pub struct Filter<S> {
     source: S,
     controls: Arc<Controls>,

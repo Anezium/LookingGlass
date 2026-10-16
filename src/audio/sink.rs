@@ -1,6 +1,6 @@
 //! Game controls are atomics; source ownership crosses a bounded SPSC queue.
 //! No callback/renderer mutex, sleep-until-end, or synchronous seek is exposed.
-use super::queue;
+use super::{block, queue};
 use rodio::{source::UniformSourceIterator, Source};
 use std::{
     sync::{
@@ -26,8 +26,17 @@ impl Drop for ApiTimer {
 }
 type SourceBox = Box<dyn Source<Item = f32> + Send>;
 struct Packet {
-    source: SourceBox,
+    source: Queued,
     generation: u32,
+}
+enum Queued {
+    Source(SourceBox),
+    Effect(block::Effect),
+}
+enum Current {
+    Legacy(UniformSourceIterator<SourceBox, f32>),
+    Stream(block::Stream),
+    Effect(block::Effect),
 }
 struct Controls {
     pause: AtomicBool,
@@ -37,6 +46,8 @@ struct Controls {
     count: AtomicUsize,
     position: AtomicU32,
     rejected: AtomicU32,
+    ambient: AtomicBool,
+    music: AtomicBool,
 }
 pub struct Sink {
     controls: Arc<Controls>,
@@ -45,7 +56,7 @@ pub struct Sink {
 pub struct Output {
     controls: Arc<Controls>,
     pending: queue::Receiver<Packet>,
-    current: Option<UniformSourceIterator<SourceBox, f32>>,
+    current: Option<Current>,
     generation: u32,
     position: u32,
     channel: bool,
@@ -62,6 +73,8 @@ impl Sink {
             count: AtomicUsize::new(0),
             position: AtomicU32::new(0),
             rejected: AtomicU32::new(0),
+            ambient: AtomicBool::new(false),
+            music: AtomicBool::new(false),
         });
         let (tx, rx) = queue::channel(8);
         (
@@ -92,7 +105,7 @@ impl Sink {
             return;
         }
         let packet = Packet {
-            source: Box::new(source.convert_samples::<f32>()),
+            source: Queued::Source(Box::new(source.convert_samples::<f32>())),
             generation: self.controls.generation.load(Ordering::Relaxed),
         };
         self.controls.count.fetch_add(1, Ordering::Relaxed);
@@ -100,6 +113,29 @@ impl Sink {
             self.controls.count.fetch_sub(1, Ordering::Relaxed);
             self.controls.rejected.fetch_add(1, Ordering::Relaxed);
             eprintln!("[lg/audio-control] source_queue_full dropped=1 wait_us=0");
+        }
+    }
+    pub fn set_ambient(&self) {
+        self.controls.ambient.store(true, Ordering::Relaxed);
+    }
+    pub fn set_music(&self) {
+        self.controls.music.store(true, Ordering::Relaxed);
+    }
+    pub(super) fn append_effect(&self, pcm: super::Pcm, controls: Arc<super::acoustics::Controls>) {
+        let config = block::settings();
+        if !config.mix || !config.preresample || pcm.clip.rate != 44100 {
+            self.append(super::acoustics::Filter::new(pcm, controls));
+            return;
+        }
+        let _api = ApiTimer::new();
+        let packet = Packet {
+            source: Queued::Effect(block::Effect::new(pcm, controls)),
+            generation: self.controls.generation.load(Ordering::Relaxed),
+        };
+        self.controls.count.fetch_add(1, Ordering::Relaxed);
+        if self.pending.push(packet).is_err() {
+            self.controls.count.fetch_sub(1, Ordering::Relaxed);
+            self.controls.rejected.fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn pause(&self) {
@@ -147,6 +183,99 @@ impl Drop for Sink {
     }
 }
 impl Output {
+    pub fn rank(&self) -> Option<f32> {
+        if self.controls.ambient.load(Ordering::Relaxed) {
+            Some(if self.controls.pause.load(Ordering::Relaxed) {
+                0.
+            } else {
+                f32::from_bits(self.controls.volume.load(Ordering::Relaxed)).abs()
+            })
+        } else {
+            None
+        }
+    }
+    /// Poll controls once per block; no game-owned lock is taken.
+    pub fn render(&mut self, out: &mut [f32], audible: bool) -> bool {
+        out.fill(0.);
+        if !self.controls.alive.load(Ordering::Acquire) {
+            self.discard_current();
+            while self.pending.pop().is_some() {
+                self.controls.count.fetch_sub(1, Ordering::Relaxed);
+            }
+            return false;
+        }
+        let generation = self.controls.generation.load(Ordering::Acquire);
+        if generation != self.generation {
+            self.discard_current();
+            self.generation = generation;
+        }
+        if self.controls.pause.load(Ordering::Relaxed) {
+            return true;
+        }
+        let gain = f32::from_bits(self.controls.volume.load(Ordering::Relaxed));
+        let mut at = 0;
+        while at < out.len() {
+            if self.current.is_none() {
+                while let Some(packet) = self.pending.pop() {
+                    if packet.generation != generation {
+                        self.controls.count.fetch_sub(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    self.current = Some(match packet.source {
+                        Queued::Effect(e) => Current::Effect(e),
+                        Queued::Source(source) => {
+                            if (8000..=96000).contains(&source.sample_rate())
+                                && (1..=2).contains(&source.channels())
+                            {
+                                Current::Stream(block::Stream::new(source).unwrap())
+                            } else {
+                                Current::Legacy(UniformSourceIterator::new(source, 2, 44100))
+                            }
+                        }
+                    });
+                    self.position = 0;
+                    break;
+                }
+            }
+            let Some(source) = self.current.as_mut() else {
+                break;
+            };
+            let n = match source {
+                Current::Effect(e) => e.render(&mut out[at..], audible),
+                Current::Stream(s) => {
+                    s.render(&mut out[at..], self.controls.music.load(Ordering::Relaxed))
+                }
+                Current::Legacy(s) => {
+                    let start = std::time::Instant::now();
+                    let mut n = 0;
+                    for v in &mut out[at..] {
+                        if let Some(x) = s.next() {
+                            *v = x;
+                            n += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    block::charge(1, start);
+                    n
+                }
+            };
+            self.position = self.position.wrapping_add(n as u32);
+            at += n;
+            if at < out.len() {
+                self.discard_current();
+            }
+        }
+        self.controls
+            .position
+            .store(self.position, Ordering::Relaxed);
+        let start = std::time::Instant::now();
+        for v in out {
+            *v *= if audible { gain } else { 0. };
+        }
+        block::charge(3, start);
+        true
+    }
     fn discard_current(&mut self) {
         if self.current.take().is_some() {
             self.controls.count.fetch_sub(1, Ordering::Relaxed);
@@ -177,7 +306,12 @@ impl Iterator for Output {
                         continue;
                     }
                     self.generation = latest;
-                    self.current = Some(UniformSourceIterator::new(packet.source, 2, 44100));
+                    self.current = Some(match packet.source {
+                        Queued::Source(source) => {
+                            Current::Legacy(UniformSourceIterator::new(source, 2, 44100))
+                        }
+                        Queued::Effect(effect) => Current::Effect(effect),
+                    });
                     self.position = 0;
                     self.controls.position.store(0, Ordering::Relaxed);
                     break;
@@ -198,7 +332,10 @@ impl Iterator for Output {
                 return Some(0.);
             }
             if let Some(source) = &mut self.current {
-                if let Some(value) = source.next() {
+                if let Some(value) = match source {
+                    Current::Legacy(s) => s.next(),
+                    _ => None,
+                } {
                     self.position = self.position.wrapping_add(1);
                     if self.position & 127 == 0 {
                         self.controls
@@ -241,6 +378,32 @@ impl Drop for Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn block_pause_stop_replacement_and_end_accounting() {
+        let (sink, mut out) = Sink::new_idle();
+        sink.append(rodio::buffer::SamplesBuffer::new(
+            2,
+            44100,
+            vec![0.25; 2048],
+        ));
+        let mut block = [0.; 1024];
+        sink.pause();
+        out.render(&mut block, true);
+        assert!(block.iter().all(|v| *v == 0.));
+        assert_eq!(sink.get_pos(), Duration::ZERO);
+        sink.play();
+        out.render(&mut block, true);
+        assert!(block.iter().all(|v| *v == 0.25));
+        sink.stop();
+        sink.append(rodio::buffer::SamplesBuffer::new(1, 22050, vec![0.5; 256]));
+        out.render(&mut block, true);
+        assert!(block.iter().all(|v| *v == 0.5));
+        out.render(&mut block, true);
+        assert!(block.iter().all(|v| *v == 0.));
+        assert_eq!(sink.len(), 0);
+        drop(sink);
+        assert!(!out.render(&mut block, true));
+    }
     #[test]
     fn controls_do_not_wait_for_a_source_blocked_on_another_thread() {
         use std::sync::mpsc;

@@ -115,6 +115,15 @@ pub struct Config {
     pub story_film_bypass: bool,
     /// Explicit console candidate: move DSP/decoding off the device callback.
     pub audio_pcm_worker: bool,
+    pub audio_block_mix: bool,
+    pub audio_preresample: bool,
+    pub audio_block_parameters: bool,
+    /// Only ambience is capped; music, speech, player and gameplay effects survive.
+    pub audio_ambient_voices: usize,
+    pub audio_cull_gain: f32,
+    pub audio_producer_priority: i32,
+    pub audio_producer_affinity: i32,
+    pub audio_cushion_blocks: usize,
     /// Persistent binary pairs; process deduplication remains active when off.
     pub shader_cache: String,
     /// Optional cache of exact device-compressed immutable pixels.
@@ -218,6 +227,14 @@ impl Default for Config {
             startup_splash:false,
             story_film_bypass: false,
             audio_pcm_worker: false,
+            audio_block_mix: false,
+            audio_preresample: false,
+            audio_block_parameters: false,
+            audio_ambient_voices: 0,
+            audio_cull_gain: 0.,
+            audio_producer_priority: 161,
+            audio_producer_affinity: 0x40000,
+            audio_cushion_blocks: 2,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
             route_heading_lock:true,
@@ -272,6 +289,10 @@ impl Config {
             && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
     }
     fn validate(&self) -> Result<()> {
+        ensure!((160..=191).contains(&self.audio_producer_priority), "audio_producer_priority must be 160..191 (below skin workers)");
+        ensure!(matches!(self.audio_producer_affinity,0x10000|0x20000|0x40000), "audio_producer_affinity must select CPU0, CPU1 or CPU2");
+        ensure!((1..=4).contains(&self.audio_cushion_blocks), "audio_cushion_blocks must be 1..4");
+        ensure!(self.audio_ambient_voices<=128 && self.audio_cull_gain.is_finite() && (0. ..=0.1).contains(&self.audio_cull_gain), "invalid audio voice budget");
         ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
             "actor_single_prepare requires renderer=vita, skin_overlap=true, skin_workers>0, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
