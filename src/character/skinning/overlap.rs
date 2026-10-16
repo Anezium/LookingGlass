@@ -20,30 +20,25 @@ enum Phase {
     Gather,
     Running,
     Ready,
+    SingleGather,
+    SingleRunning,
+    SingleReady,
 }
 thread_local! {
     static PHASE: Cell<Phase> = const { Cell::new(Phase::Idle) };
     static STORE: RefCell<Option<Box<Store>>> = const { RefCell::new(None) };
 }
 pub(crate) fn gathering() -> bool {
-    PHASE.with(|p| p.get() == Phase::Gather)
+    PHASE.with(|p| matches!(p.get(), Phase::Gather | Phase::SingleGather))
 }
 /// The old traversal suppresses consumers; the single preparation executes them.
-pub(crate) fn gather_only() -> bool { gathering() && !single_preparing() }
-pub(crate) fn single_preparing() -> bool {
-    #[cfg(feature="vita_renderer")]
-    { gathering() && crate::render_fx::actor_publication::active() }
-    #[cfg(not(feature="vita_renderer"))]
-    { false }
-}
+pub(crate) fn gather_only() -> bool { PHASE.with(|p| p.get() == Phase::Gather) }
+pub(crate) fn single_preparing() -> bool { PHASE.with(|p| p.get() == Phase::SingleGather) }
 pub(crate) fn single_frame() -> bool {
-    #[cfg(feature="vita_renderer")]
-    { crate::render_fx::actor_publication::active() }
-    #[cfg(not(feature="vita_renderer"))]
-    { false }
+    PHASE.with(|p| matches!(p.get(), Phase::SingleGather | Phase::SingleRunning | Phase::SingleReady))
 }
 pub(crate) fn ready() -> bool {
-    PHASE.with(|p| p.get() == Phase::Ready)
+    PHASE.with(|p| matches!(p.get(), Phase::Ready | Phase::SingleReady))
 }
 #[derive(Clone)]
 struct Surface {
@@ -51,11 +46,8 @@ struct Surface {
     vertices: Range<usize>,
     cpu: Arc<SkinSurface>,
     revision: Revision,
-    output: usize,
-    alpha_variant: bool,
 }
 struct Draw {
-    actor: Option<super::identity::ActorId>,
     key: usize,
     pose: Range<usize>,
     scales: Range<usize>,
@@ -84,7 +76,7 @@ struct Task {
 }
 impl Task {
     unsafe fn run(address: usize) {
-        let task = &mut *(address as *mut Task);
+        let task = &*(address as *const Task);
         let input = &*(task.input as *const Inputs);
         for draw in &input.draws[task.draws.clone()] {
             let pose = &input.pose[draw.pose.clone()];
@@ -94,8 +86,7 @@ impl Task {
                 let surface = &input.surfaces[surface_id];
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
                 let output = std::slice::from_raw_parts_mut(
-                    if surface.output == 0 { (task.output as *mut Vertex).add(surface.vertices.start) }
-                    else { surface.output as *mut Vertex },
+                    (task.output as *mut Vertex).add(surface.vertices.start),
                     surface.vertices.len(),
                 );
                 for ((src, bind), dst) in surface.cpu.vertices
@@ -104,7 +95,7 @@ impl Task {
                 {
                     let weights = &src.weights;
                     // Initialize untouched fields on the worker from load-time data.
-                    if surface.output == 0 { *dst = *bind; }
+                    *dst = *bind;
                     let position: Vec3 = if !palette.is_empty() {
                         weights
                             .iter()
@@ -139,9 +130,6 @@ impl Task {
                     draw.fullbright,
                     draw.alpha,
                 );
-                if surface.output != 0 {
-                    for vertex in &mut *output { *vertex = actor_vertices::normalize(*vertex, surface.alpha_variant); }
-                }
                 if task.layers != 0 {
                     let layers = std::slice::from_raw_parts_mut(
                         (task.layers as *mut [Vertex; 2]).add(surface.vertices.start), output.len());
@@ -157,7 +145,97 @@ impl Task {
                 }
             }
         }
-
+    }
+}
+#[cfg(feature="vita_renderer")]
+impl Task {
+    unsafe fn run_single(address: usize) {
+        let task = &*(address as *const Task);
+        let input = &*(task.input as *const Inputs);
+        for draw in &input.draws[task.draws.clone()] {
+            let pose = &input.pose[draw.pose.clone()];
+            let scales = &input.scales[draw.scales.clone()];
+            let palette = &input.palette[draw.palette.clone()];
+            for surface_id in draw.surfaces.clone() {
+                let surface = &input.surfaces[surface_id];
+                let destination = &*((task.output as *const Destination).add(surface_id));
+                // Each surface owns a disjoint range; tasks split at draw boundaries.
+                let output = std::slice::from_raw_parts_mut(
+                    destination.output as *mut Vertex,
+                    surface.vertices.len(),
+                );
+                for (src, dst) in surface.cpu.vertices.iter().zip(&mut *output)
+                {
+                    let weights = &src.weights;
+                    // Direct banks already own the live bind/UV fields.
+                    let position: Vec3 = if !palette.is_empty() {
+                        weights
+                            .iter()
+                            .map(|w| {
+                                let (r, t) = palette[w.bone];
+                                (r * w.offset + t) * w.amount
+                            })
+                            .sum()
+                    } else if scales.is_empty() {
+                        weights
+                            .iter()
+                            .map(|w| pose[w.bone].point(w.offset) * w.amount)
+                            .sum()
+                    } else {
+                        weights
+                            .iter()
+                            .map(|w| pose[w.bone].point(w.offset * scales[w.bone]) * w.amount)
+                            .sum()
+                    };
+                    dst.position = if !palette.is_empty() {
+                        rotation(draw.transform.rotation) * (position * draw.scale)
+                            + draw.transform.translation
+                    } else {
+                        draw.transform.point(position * draw.scale)
+                    };
+                    dst.normal = Vec4::ZERO;
+                }
+                shade_arrays(
+                    output,
+                    &surface.cpu.indices,
+                    draw.flat,
+                    draw.fullbright,
+                    draw.alpha,
+                );
+                for vertex in &mut *output {
+                    *vertex = actor_vertices::normalize(*vertex, destination.alpha_variant);
+                }
+            }
+        }
+    }
+}
+// The legacy records above retain pkg-2's exact layout. Only the on path
+// allocates/fills these parallel tables; workers receive disjoint destinations.
+#[cfg(feature="vita_renderer")]
+struct Destination {
+    output: usize,
+    alpha_variant: bool,
+}
+#[cfg(feature="vita_renderer")]
+struct Single {
+    destinations: Vec<Destination>,
+    actors: Vec<Option<super::identity::ActorId>>,
+    previous_actors: Vec<Option<super::identity::ActorId>>,
+    previous_numeric: Box<Inputs>,
+}
+#[cfg(feature="vita_renderer")]
+impl Single {
+    fn new() -> Self {
+        Self {
+            destinations: Vec::with_capacity(SURFACES),
+            actors: Vec::with_capacity(DRAWS),
+            previous_actors: Vec::with_capacity(DRAWS),
+            previous_numeric: Box::new(Inputs {
+                draws: Vec::with_capacity(DRAWS), surfaces: Vec::with_capacity(SURFACES),
+                pose: Vec::with_capacity(BONES), scales: Vec::with_capacity(BONES),
+                palette: Vec::with_capacity(BONES),
+            }),
+        }
     }
 }
 struct Store {
@@ -166,7 +244,7 @@ struct Store {
     tasks: [UnsafeCell<Task>; 2],
     input: Box<UnsafeCell<Inputs>>,
     #[cfg(feature="vita_renderer")]
-    previous_numeric: Option<Box<Inputs>>,
+    single: Option<Single>,
     output: Vec<Vertex>,
     output_len: usize,
     layers: Vec<[Vertex; 2]>,
@@ -211,7 +289,7 @@ impl Store {
                 palette: Vec::with_capacity(BONES),
             })),
             #[cfg(feature="vita_renderer")]
-            previous_numeric:None,
+            single: None,
             output: vec![Vertex { position: Vec3::ZERO, uv: Vec2::ZERO,
                 normal: Vec4::ZERO, color: [0; 4] }; VERTICES],
             output_len: 0,
@@ -232,10 +310,11 @@ impl Store {
         let i = unsafe { &mut *self.input.get() };
         #[cfg(feature="vita_renderer")]
         if single_frame() {
-            let old=self.previous_numeric.get_or_insert_with(||Box::new(Inputs {
-                draws:Vec::with_capacity(DRAWS),surfaces:Vec::with_capacity(SURFACES),pose:Vec::with_capacity(BONES),
-                scales:Vec::with_capacity(BONES),palette:Vec::with_capacity(BONES)}));
-            std::mem::swap(i,&mut **old);
+            let single = self.single.get_or_insert_with(Single::new);
+            std::mem::swap(i, &mut *single.previous_numeric);
+            std::mem::swap(&mut single.actors, &mut single.previous_actors);
+            single.actors.clear();
+            single.destinations.clear();
         }
         i.draws.clear();
         self.previous.clear();
@@ -284,7 +363,6 @@ impl Store {
             return;
         }
         let draw = Draw {
-            actor: None,
             key: skeleton as *const Skeleton as usize,
             pose: i.pose.len()..i.pose.len() + p.pose.len(),
             scales: i.scales.len()..i.scales.len() + p.scales.len(),
@@ -315,28 +393,28 @@ impl Store {
                     else {self.previous.get(i.surfaces.len())
                         .filter(|old| old.vertices == vertices && Arc::ptr_eq(&old.cpu, &cpu))
                         .map_or_else(Revision::new, |old| old.revision)};
-                i.surfaces.push(Surface { mesh, vertices, cpu, revision, output: 0, alpha_variant: false });
+                i.surfaces.push(Surface { mesh, vertices, cpu, revision });
             }
         }
-
 
         i.draws.push(draw);
     }
     #[cfg(feature="vita_renderer")]
-    fn capture_single(&mut self, skeleton: &Skeleton, meshes: &mut [Option<Mesh>], p: Params<'_>, visible: bool) -> bool {
+    fn capture_single(&mut self, skeleton: &Skeleton, meshes: &mut [Option<Mesh>], p: Params<'_>, visible: bool, actor: Option<super::identity::ActorId>) -> bool {
         crate::frame_profile::skinned_draw(!visible);
 
-        let actor=super::identity::current();
         if !visible { return false; }
         let i = unsafe { &mut *self.input.get() };
         let bounded = actor.is_some() && i.draws.len() < DRAWS && i.surfaces.len() + meshes.iter().flatten().count() <= SURFACES
             && self.output_len + meshes.iter().flatten().map(|m|m.vertices.len()).sum::<usize>() <= VERTICES
             && i.pose.len()+p.pose.len() <= BONES && i.scales.len()+p.scales.len() <= BONES
             && i.palette.len()+p.palette.len() <= BONES;
-        let previous=self.previous_numeric.as_ref().and_then(|old|old.draws.iter().find(|d|
-            d.actor==actor && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
+        let single = self.single.as_mut().expect("single frame initialized");
+        let old = &*single.previous_numeric;
+        let previous=old.draws.iter().zip(&single.previous_actors).find(|(d,id)|
+            **id==actor && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
                 && d.scale.to_bits()==p.scale.to_bits() && d.flat==p.flat && d.fullbright==p.fullbright
-                && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
+                && d.alpha.to_bits()==p.alpha.to_bits()).map(|(d,_)|(old,d));
         let start = i.surfaces.len();
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };
@@ -355,7 +433,8 @@ impl Store {
                 let vertices = self.output_len..self.output_len+mesh.vertices.len();
                 self.output_len = vertices.end;
                 i.surfaces.push(Surface { mesh:mesh_id, vertices, cpu:surface.cpu(),
-                    revision:Revision {identity:0,vertices:[0;2]}, output, alpha_variant });
+                    revision:Revision {identity:0,vertices:[0;2]} });
+                single.destinations.push(Destination { output, alpha_variant });
                 #[cfg(feature="actor_diagnostics")]
                 crate::render_fx::retained::count("actor_direct_surfaces",1);
             } else {
@@ -366,17 +445,23 @@ impl Store {
             }
         }
         if i.surfaces.len() > start {
-            let d = Draw { actor, key:skeleton as *const Skeleton as usize,
+            let d = Draw { key:skeleton as *const Skeleton as usize,
                 pose:i.pose.len()..i.pose.len()+p.pose.len(), scales:i.scales.len()..i.scales.len()+p.scales.len(),
                 palette:i.palette.len()..i.palette.len()+p.palette.len(), surfaces:start..i.surfaces.len(),
                 transform:p.transform,scale:p.scale,flat:p.flat,fullbright:p.fullbright,alpha:p.alpha,visible };
             i.pose.extend_from_slice(p.pose); i.scales.extend_from_slice(p.scales); i.palette.extend_from_slice(p.palette);
 
             i.draws.push(d);
+            single.actors.push(actor);
         }
         true
     }
-    fn dispatch(&mut self) {
+    fn dispatch(&mut self) { self.dispatch_mode(single_frame()); }
+    #[cfg(feature="vita_renderer")]
+    fn dispatch_single_for_check(&mut self) { self.dispatch_mode(true); }
+    fn dispatch_mode(&mut self, single: bool) {
+        #[cfg(not(feature="vita_renderer"))]
+        let _ = single;
         assert_eq!(self.pending, 0);
         let i = unsafe { &*self.input.get() };
         let draws = i.draws.len();
@@ -394,6 +479,11 @@ impl Store {
                 .map_or(draws, |i| i + 1)
         };
         let output = self.output.as_mut_ptr() as usize;
+        let run = Task::run as unsafe fn(usize);
+        #[cfg(feature="vita_renderer")]
+        let (output, run) = if single {
+            (self.single.as_ref().unwrap().destinations.as_ptr() as usize, Task::run_single as unsafe fn(usize))
+        } else { (output, run) };
         let input = self.input.get() as usize;
         for (index, range) in [0..mid, mid..draws]
             .into_iter()
@@ -411,7 +501,7 @@ impl Store {
             }
             // Store is boxed before this call, and cannot be moved/reset/read until drain.
             unsafe {
-                self.workers[index].start(self.tasks[index].get() as usize, Task::run);
+                self.workers[index].start(self.tasks[index].get() as usize, run);
             }
             self.pending += 1;
         }
@@ -430,7 +520,6 @@ impl Store {
                 }
             }
         }
-
         self.pending = 0;
         if completed && !self.layers.is_empty() {
             let input = unsafe { &mut *self.input.get() };
@@ -481,10 +570,8 @@ impl Store {
             return None;
         }
 
-
         for surface_id in d.surfaces.clone() {
             let surface = &mut i.surfaces[surface_id];
-
             // The serial kernel leaves live UVs untouched (including any caller edits).
             // Only its three written fields return from the worker; no gather-time
             // copy of the live/bind vertices is needed to preserve the fourth field.
@@ -521,7 +608,6 @@ fn same_surface_inputs(surface:&SkinSurface, old:&Inputs, draw:&Draw, p:Params<'
     if palette.is_empty()!=p.palette.is_empty() || (palette.is_empty() && scales.is_empty()!=p.scales.is_empty()) {return false;}
     surface.used_bones.iter().all(|&bone| {
         if !palette.is_empty() {
-
             palette.get(bone).zip(p.palette.get(bone)).is_some_and(|((ar,at),(br,bt))|
                 same_floats(&ar.to_cols_array(),&br.to_cols_array()) && same_floats(&at.to_array(),&bt.to_array()))
         } else {
@@ -539,7 +625,7 @@ pub(crate) fn reset_publications() {
     assert!(PHASE.with(|p|p.get()==Phase::Idle),"scene load before skin workers drained");
     STORE.with(|s| {if let Some(store)=s.borrow_mut().as_mut() {
         assert_eq!(store.pending,0);
-        store.previous_numeric=None;store.previous.clear();
+        store.single=None;store.previous.clear();
         let i=unsafe {&mut *store.input.get()};
         i.draws.clear();i.surfaces.clear();i.pose.clear();i.scales.clear();i.palette.clear();
         store.output_len=0;
@@ -582,24 +668,29 @@ pub(crate) struct Frame {
     _game: crate::game_thread::GameThread,
     gather_start: std::time::Instant,
     gather_us: u64,
+    single: bool,
 }
 impl Frame {
     pub(crate) fn begin() -> Self {
         let gather_start = std::time::Instant::now();
         #[cfg(feature="vita_renderer")]
-        crate::render_fx::actor_publication::begin();
+        let single = crate::render_fx::actor_publication::begin();
+        #[cfg(not(feature="vita_renderer"))]
+        let single = false;
         assert!(PHASE.with(|p| p.get() == Phase::Idle));
+        PHASE.with(|p| p.set(if single { Phase::SingleGather } else { Phase::Gather }));
         STORE.with(|s| s.borrow_mut().as_mut().expect("overlap startup").reset());
         super::prepared::begin();
-        PHASE.with(|p| p.set(Phase::Gather));
         Self {
             _game: crate::game_thread::GameThread::default(),
             gather_start,
             gather_us: 0,
+            single,
         }
     }
+    pub(crate) fn single(&self) -> bool { self.single }
     pub(crate) fn assert_consumed(&self) {
-        if single_frame() { return; }
+        if self.single { return; }
         STORE.with(|s| {
             let s = s.borrow();
             let s = s.as_ref().unwrap();
@@ -613,17 +704,17 @@ impl Frame {
     pub(crate) fn dispatch(&mut self) {
         assert!(gathering());
         #[cfg(feature="vita_renderer")]
-        if single_frame() { crate::render_fx::actor_publication::hold(); }
+        if self.single { crate::render_fx::actor_publication::hold(); }
         self.gather_us = self.gather_start.elapsed().as_micros() as u64;
         STORE.with(|s| s.borrow_mut().as_mut().unwrap().dispatch());
         crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
             crate::light_profile::RenderMetrics { cpu_ns: self.gather_start.elapsed().as_nanos() as u64, ..Default::default() });
-        PHASE.with(|p| p.set(Phase::Running));
+        PHASE.with(|p| p.set(if p.get() == Phase::SingleGather { Phase::SingleRunning } else { Phase::Running }));
     }
     pub(crate) fn collect(&mut self) {
-        assert!(PHASE.with(|p| p.get() == Phase::Running));
+        assert!(PHASE.with(|p| matches!(p.get(), Phase::Running | Phase::SingleRunning)));
         let panic = STORE.with(|s| s.borrow_mut().as_mut().unwrap().drain());
-        PHASE.with(|p| p.set(Phase::Ready));
+        PHASE.with(|p| p.set(if p.get() == Phase::SingleRunning { Phase::SingleReady } else { Phase::Ready }));
         STORE.with(|s| {
             let s = s.borrow();
             let s = s.as_ref().unwrap();
@@ -634,7 +725,7 @@ impl Frame {
             crate::render_fx::retained::count("skin_collect_wait_us", s.wait_us);
         });
         #[cfg(feature="vita_renderer")]
-        if panic.is_none() && single_frame() { crate::render_fx::actor_publication::complete(); }
+        if panic.is_none() && self.single { crate::render_fx::actor_publication::complete(); }
         if let Some(p) = panic {
             std::panic::resume_unwind(p);
         }
@@ -654,7 +745,7 @@ impl Drop for Frame {
             }
         }});
         #[cfg(feature="vita_renderer")]
-        crate::render_fx::actor_publication::end();
+        if self.single { crate::render_fx::actor_publication::end(); }
         PHASE.with(|p| p.set(Phase::Idle));
     }
 }
@@ -664,11 +755,10 @@ pub(in crate::character) fn handle(
     meshes: &mut [Option<Mesh>],
     p: Params<'_>,
     visible: bool,
+    identity: impl FnOnce() -> Option<super::identity::ActorId>,
 ) -> Option<bool> {
     PHASE.with(|phase| match phase.get() {
         Phase::Gather => {
-            #[cfg(feature="vita_renderer")]
-            if single_frame() { return STORE.with(|s| Some(s.borrow_mut().as_mut().unwrap().capture_single(skeleton,meshes,p,visible))); }
             STORE.with(|s| {
                 s.borrow_mut()
                     .as_mut()
@@ -677,14 +767,20 @@ pub(in crate::character) fn handle(
             });
             Some(visible)
         }
-        Phase::Ready => STORE.with(|s| {
+        Phase::SingleGather => {
+            #[cfg(feature="vita_renderer")]
+            { STORE.with(|s| Some(s.borrow_mut().as_mut().unwrap().capture_single(skeleton,meshes,p,visible,identity()))) }
+            #[cfg(not(feature="vita_renderer"))]
+            { let _ = identity; unreachable!("single preparation requires vita_renderer") }
+        }
+        Phase::Ready | Phase::SingleReady => STORE.with(|s| {
             s.borrow_mut()
                 .as_mut()
                 .unwrap()
                 .consume(skeleton, meshes, p)
         }),
         Phase::Idle => None,
-        Phase::Running => panic!("skin submitted before overlap collect"),
+        Phase::Running | Phase::SingleRunning => panic!("skin submitted before overlap collect"),
     })
 }
 
@@ -860,10 +956,11 @@ pub(crate) fn check_direct(skeleton:&Skeleton,poses:&[Vec<Transform>])->anyhow::
         }
         let mut store=Store::new(workers,false);store.capture(skeleton,&meshes,p,true);
         anyhow::ensure!(!store.overflow,"direct actual data exceeds bounds");
-        unsafe {let i=&mut *store.input.get();for (surface,mesh) in i.surfaces.iter_mut().zip(meshes.iter_mut().flatten()) {
-            surface.output=mesh.vertices.as_mut_ptr() as usize;surface.alpha_variant=vertex_alpha;
-        }}
-        store.dispatch();anyhow::ensure!(store.drain().is_none(),"direct numeric worker panic");
+        store.single = Some(Single::new());
+        for mesh in meshes.iter_mut().flatten() {
+            store.single.as_mut().unwrap().destinations.push(Destination { output: mesh.vertices.as_mut_ptr() as usize, alpha_variant: vertex_alpha });
+        }
+        store.dispatch_single_for_check();anyhow::ensure!(store.drain().is_none(),"direct numeric worker panic");
         for (a,b) in expected.iter().zip(meshes.iter().flatten()) {anyhow::ensure!(same_vertices(&a.vertices,&b.vertices)&&a.indices==b.indices,"direct actual-data output differs");}
         count+=1;
     }}}}
@@ -1004,8 +1101,9 @@ mod tests {
             super::super::kernel(&mut super::super::Job {input:&s.surfaces[0].vertices,vertices:&mut reference,indices:&s.surfaces[0].indices},p);
             for v in &mut reference {*v=actor_vertices::normalize(*v,alpha);}
             store.capture(&s,&meshes,p,true);
-            unsafe {let input=&mut *store.input.get();input.surfaces[0].output=owned.vertices.as_mut_ptr() as usize;input.surfaces[0].alpha_variant=alpha;}
-            store.dispatch();assert!(store.drain().is_none());
+            store.single = Some(Single::new());
+            store.single.as_mut().unwrap().destinations.push(Destination { output: owned.vertices.as_mut_ptr() as usize, alpha_variant: alpha });
+            store.dispatch_single_for_check();assert!(store.drain().is_none());
             assert!(same_vertices(&reference,&owned.vertices));
             assert_eq!(meshes[0].as_ref().unwrap().vertices[0].position,Vec3::ZERO);
         }}}
@@ -1144,13 +1242,35 @@ mod tests {
         assert!(store.drain().is_none());
         assert_eq!(store.consume(&s, &mut meshes, params(&pose)), Some(true));
     }
+    #[cfg(feature="vita_renderer")]
+    #[test]
+    fn off_capture_keeps_on_tables_absent_and_does_not_touch_prior_direct_destinations() {
+        let (s, meshes, pose) = fixture();
+        let mut store = Store::new(1, false);
+        store.capture(&s, &meshes, params(&pose), true);
+        assert!(store.single.is_none());
+        store.dispatch(); assert!(store.drain().is_none());
+        // A previous on frame may have left table storage allocated. The off
+        // dispatcher must still use the arena, never these stale destinations.
+        store.single = Some(Single::new());
+        let mut untouched = meshes[0].as_ref().unwrap().vertices.clone();
+        store.single.as_mut().unwrap().destinations.push(Destination {
+            output: untouched.as_mut_ptr() as usize, alpha_variant: true,
+        });
+        store.reset(); store.capture(&s, &meshes, params(&pose), true);
+        store.dispatch(); assert!(store.drain().is_none());
+        assert_eq!(untouched[0].position, Vec3::ZERO);
+        assert_eq!(untouched[0].color, [42; 4]);
+        assert_ne!(store.output[0].position, Vec3::ZERO);
+        assert!(store.single.as_ref().unwrap().actors.is_empty());
+    }
     #[test]
     fn frame_unwind_drains_and_next_frame_reuses_storage() {
         startup(2, false);
         let (s, mut meshes, pose) = fixture();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut frame = Frame::begin();
-            assert_eq!(handle(&s, &mut meshes, params(&pose), true), Some(true));
+            assert_eq!(handle(&s, &mut meshes, params(&pose), true, || panic!("legacy identity evaluated")), Some(true));
             frame.dispatch();
             panic!("game work failed");
         }));
@@ -1158,10 +1278,10 @@ mod tests {
         assert!(!gathering());
         assert!(!ready());
         let mut frame = Frame::begin();
-        handle(&s, &mut meshes, params(&pose), true);
+        handle(&s, &mut meshes, params(&pose), true, || panic!("legacy identity evaluated"));
         frame.dispatch();
         frame.collect();
-        assert_eq!(handle(&s, &mut meshes, params(&pose), true), Some(true));
+        assert_eq!(handle(&s, &mut meshes, params(&pose), true, || panic!("legacy identity evaluated")), Some(true));
         drop(frame);
     }
 }

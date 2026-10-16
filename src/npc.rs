@@ -1106,7 +1106,6 @@ impl Model {
         visual: &crate::animation_events::VisualState,
         piece: Option<(&str, &str, bool)>,
     ) {
-        let _identity = self.skin_identity.scope_unless_set();
         self.visible.fill(false);
         self.electric_attachments.clear();
         self.electric_props.clear();
@@ -1154,6 +1153,7 @@ impl Model {
         // Frozen shells and script-owned late overlays need the complete skin.
         let _visibility = crate::character::skinning::CullGuard::visual_preserve(self.frozen.is_some());
         let _skin_guard = crate::character::skinning::CullGuard::preserve(self.late_skin_overlays);
+        let identity = self.skin_identity;
         let skin_visible = crate::character::draw_skin_scaled(
             &d.skeleton,
             &mut self.meshes,
@@ -1162,6 +1162,7 @@ impl Model {
             d.def.scale * scale,
             fullbright,
             &scales,
+            || crate::character::skinning::identity::current().or(Some(identity)),
         );
         for (visible, mesh) in self.visible.iter_mut().zip(&self.meshes) {
             *visible = skin_visible && mesh.is_some();
@@ -3132,11 +3133,18 @@ impl Npcs {
         }
     }
     pub fn draw(
-        &mut self,
-        camera: Vec3,
-        direction: Vec3,
-        atmosphere: &Atmosphere,
-        fullbright: bool,
+        &mut self, camera: Vec3, direction: Vec3, atmosphere: &Atmosphere, fullbright: bool,
+    ) {
+        // Frame::begin has already selected the mode. One traversal dispatch,
+        // outside the actor loop; each legacy actor has no identity scope/check.
+        if crate::character::skinning::overlap::single_preparing() {
+            self.draw_mode::<true>(camera, direction, atmosphere, fullbright);
+        } else {
+            self.draw_mode::<false>(camera, direction, atmosphere, fullbright);
+        }
+    }
+    pub(crate) fn draw_mode<const SINGLE: bool>(
+        &mut self, camera: Vec3, direction: Vec3, atmosphere: &Atmosphere, fullbright: bool,
     ) {
         #[cfg(feature="vita_renderer")]
         let render_config={let mut c=crate::vita_sim::effective().clone();c.anim_cull|=crate::render_fx::retained_active()&&crate::render::vita_renderer::config().actor_frustum_cull;c};
@@ -3150,7 +3158,7 @@ impl Npcs {
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for (id, actor) in self.actors.iter().enumerate() {
-            let _identity = actor.skin_identity.scope();
+            let _identity = if SINGLE { Some(actor.skin_identity.scope()) } else { None };
             let _skin_guard = crate::character::skinning::CullGuard::preserve(actor.electric > 0.);
             if actor.ant.as_ref().is_some_and(|a| !a.enabled) { continue; }
             if actor.guide.as_ref().is_some_and(|g| !g.visible()) {
@@ -3441,7 +3449,7 @@ impl Npcs {
                 rotation: Quat::from_rotation_z(actor.yaw),
             };
             let _consumer = crate::character::skinning::CullGuard::preserve(
-                crate::character::skinning::overlap::single_preparing() && decision == visual_lod::Decision::Refresh);
+                SINGLE && decision == visual_lod::Decision::Refresh);
             model.draw_pose(
                 &local,
                 actor.mouth,

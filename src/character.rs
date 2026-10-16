@@ -1114,7 +1114,6 @@ impl Character {
         self.draw_ghost(feet, fullbright, false);
     }
     fn draw_body(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
-        let _identity = self.skin_identity.scope();
         let feet = feet + Vec3::Z * self.animator.offset;
         let prepared = skinning::prepared::pose(
             (&self.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
@@ -1140,6 +1139,7 @@ impl Character {
         let rotation = Quat::from_rotation_z(self.facing);
         let _skin_guard = skinning::CullGuard::preserve(self.visuals.ice_locked()
             || self.power_pose.state.form == Some(crate::power_pose::Form::Rage));
+        let identity = self.skin_identity;
         let skin_visible = draw_skin(
             &self.skeleton,
             &mut self.meshes,
@@ -1150,6 +1150,7 @@ impl Character {
             },
             self.scale,
             fullbright,
+            || Some(identity),
         );
         if skinning::overlap::gather_only() {
             for (i, mesh) in hidden { self.meshes[i] = mesh; }
@@ -1936,19 +1937,18 @@ pub(crate) fn visible_pixels(before: &Image, after: &Image) -> usize {
         .count()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_skin(
-    skeleton: &Skeleton,
-    meshes: &mut [Option<Mesh>],
-    pose: &[Transform],
-    transform: Transform,
-    scale: f32,
-    fullbright: bool,
+    skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
+    transform: Transform, scale: f32, fullbright: bool,
+    identity: impl FnOnce() -> Option<skinning::identity::ActorId>,
 ) -> bool {
-    draw_skin_scaled(skeleton, meshes, pose, transform, scale, fullbright, &[])
+    draw_skin_deformed(skeleton, meshes, pose, transform, scale, fullbright, (&[], 1.), identity)
 }
 pub(crate) fn draw_skin_scaled(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, bone_scales: &[f32],
+    identity: impl FnOnce() -> Option<skinning::identity::ActorId>,
 ) -> bool {
     draw_skin_deformed(
         skeleton,
@@ -1958,11 +1958,13 @@ pub(crate) fn draw_skin_scaled(
         scale,
         fullbright,
         (bone_scales, 1.),
+        identity,
     )
 }
 pub(crate) fn draw_skin_alpha(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, alpha: f32,
+    identity: impl FnOnce() -> Option<skinning::identity::ActorId>,
 ) -> bool {
     draw_skin_deformed(
         skeleton,
@@ -1972,11 +1974,13 @@ pub(crate) fn draw_skin_alpha(
         scale,
         fullbright,
         (&[], alpha),
+        identity,
     )
 }
 fn draw_skin_deformed(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, (bone_scales, alpha): (&[f32], f32),
+    identity: impl FnOnce() -> Option<skinning::identity::ActorId>,
 ) -> bool {
     #[cfg(feature = "vita_renderer")]
     let use_palette = crate::render::vita_renderer::config().bone_palette;
@@ -2004,7 +2008,7 @@ fn draw_skin_deformed(
         drop(setup_profile);
         let params = skinning::Params { pose, scales: bone_scales, palette, transform,
             scale, flat, fullbright, alpha };
-        if let Some(visible) = skinning::overlap::handle(skeleton, meshes, params, visible) {
+        if let Some(visible) = skinning::overlap::handle(skeleton, meshes, params, visible, identity) {
             if !skinning::overlap::gathering() {
                 crate::frame_profile::skinned_draw(!visible);
                 if visible { skinning::overlap::submit(meshes); }

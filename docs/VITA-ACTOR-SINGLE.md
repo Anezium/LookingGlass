@@ -15,3 +15,23 @@ Mac validation on 2026-10-16 used an isolated target under `/tmp` with four Carg
 - Three-way application onto `vita-reference` at `0e245cc` was conflict-free. `vita-allmaps` at `342d8b3` conflicted in two renderer files; the reference lineage is the preferred integration target.
 
 These are host functional checks. No console execution, package, full-game acceptance or console performance gain is established by this branch. Timing and the source audit are recorded separately in `~/vita-j0/village-retained-world/jalon-23-port/ANALYSIS.md`.
+
+## Disabled worker and identity paths
+
+The disabled worker callback is the pkg-2 `Task::run`, with its original `Task`,
+`Inputs`, `Draw` and `Surface` declarations and unconditional bind initialization.
+`Task::run_single` is a separate callback. Its destinations and actor IDs live in
+parallel tables allocated and populated only for single preparation; no output
+selector or normalization test is present in the disabled vertex/surface loops.
+
+Frame startup reads the switch once and carries its mode in the existing overlap
+phase dispatch. `gather_only` is one phase equality, with no publication TLS read.
+Normal play selects an ambient traversal specialization once at gather; its
+legacy specialization has no identity scope or refresh-consumer test. Character,
+model and magma identities are lazy arguments evaluated only by direct capture.
+The inherited phase checks and consumer preservation policy still apply.
+
+Mac builds, ARM disassembly comparison and image evidence belong to
+`~/vita-j0/village-retained-world/jalon-23-port/package-r2/`. Matching worker code
+and host parity do not establish equal whole-frame wall time on the console;
+that remains the five-arm protocol's separate acceptance gate.

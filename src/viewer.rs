@@ -3392,15 +3392,24 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             level_art.story_pose(&story);
             let mut frame = crate::character::skinning::overlap::Frame::begin();
-            if crate::character::skinning::overlap::single_frame() {
+            // Select once for this frame. Both traversals of the off arm call
+            // the legacy specialization; no actor reads the publication flag.
+            macro_rules! gather_actors {
+                ($single:literal) => {{
+                    if show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic()) {
+                        alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
+                    }
+                    npcs.draw_mode::<$single>(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
+                    level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+                }};
+            }
+            if frame.single() {
                 if draw_world && show_alice && stats.invisible <= 0. { crate::lighting::shadow(&scene.world, player.feet, 22.); }
                 alice.atmosphere(&scene.atmosphere, camera);
+                gather_actors!(true);
+            } else {
+                gather_actors!(false);
             }
-            if show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic()) {
-                alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
-            }
-            npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
-            level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
             frame.dispatch();
             Some(frame)
         } else { None };
@@ -3441,7 +3450,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         {
             let _characters_profile = crate::frame_profile::span("characters_npcs");
-            npcs.draw(
+            npcs.draw_mode::<false>(
                 camera,
                 (target - camera).normalize_or_zero(),
                 &scene.atmosphere,

@@ -113,11 +113,14 @@ pub(crate) fn reset() {
     STATE.with(|s|s.borrow_mut().clear());
 }
 
-pub(crate) fn begin() {
+pub(crate) fn begin() -> bool {
     let c=crate::render::vita_renderer::config();
     let enabled=c.actor_single_prepare_active() && retained_active();
-    ACTIVE.with(|a|a.set(enabled));
-    if enabled { STATE.with(|s| {let mut s=s.borrow_mut();s.next_frame();}); }
+    if enabled {
+        ACTIVE.with(|a|a.set(true));
+        STATE.with(|s| {let mut s=s.borrow_mut();s.next_frame();});
+    }
+    enabled
 }
 pub(crate) fn end() {
     if ACTIVE.with(|a|a.replace(false)) { STATE.with(|s| {let mut s=s.borrow_mut();s.pending.clear();s.held.clear();s.held_puffs.clear();}); }
