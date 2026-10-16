@@ -112,6 +112,7 @@ mod texture_cache;
 mod traversal;
 mod ui;
 mod viewer;
+mod transition_memory;
 mod frame_profile;
 mod frame_phases;
 mod game_thread;

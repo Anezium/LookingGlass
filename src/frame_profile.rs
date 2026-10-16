@@ -52,7 +52,18 @@ pub(crate) fn pipeline_creation() {
     #[cfg(target_os="vita")]
     counts(&[("pipeline_creations",1)]);
 }
+thread_local! { static TRANSITION_FRAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+pub(crate) fn exclude_transition_frame() {
+    TRANSITION_FRAME.with(|v| v.set(true));
+    crate::light_profile::cpu_end();
+    crate::light_profile::end(false);
+    #[cfg(target_os = "vita")]
+    vita::discard_transition_frame();
+}
+fn transition_frame() -> bool { TRANSITION_FRAME.with(|v| v.get()) }
+pub(crate) fn begin_viewer_frame() { TRANSITION_FRAME.with(|v| v.set(false)); }
 pub(crate) fn begin_creation_frame() {
+    TRANSITION_FRAME.with(|v| v.set(false));
     CREATIONS.with(|c| c.borrow_mut().current=[0;2]);
     #[cfg(feature="vita_renderer")]
     { ROUTE_PUFFS.store(0,Ordering::Relaxed); ROUTE_FX_DRAWS.store(0,Ordering::Relaxed); ROUTE_SKIN_TOTAL.store(0,Ordering::Relaxed); ROUTE_SKIN_CULLED.store(0,Ordering::Relaxed); for c in &ROUTE_GPU_STATES { c.store(0,Ordering::Relaxed); } }
@@ -214,6 +225,7 @@ pub fn characters_span(label: &'static str) -> Option<Span> {
 }
 
 pub(crate) fn enabled() -> bool {
+    if transition_frame() { return false; }
     #[cfg(target_os="vita")]
     { crate::light_profile::full() }
     #[cfg(not(target_os="vita"))]
@@ -324,6 +336,7 @@ impl Drop for Span {
     fn drop(&mut self) {
         #[cfg(not(target_os = "vita"))]
         if self.label == "frame_characters" { CHARACTER_DEPTH.with(|d| d.set(d.get() - 1)); }
+        if transition_frame() { self.cancel(); return; }
         if let Some(start) = self.start {
             let ms = start.elapsed().as_secs_f64() * 1000.;
             #[cfg(target_os = "vita")]
@@ -1035,7 +1048,19 @@ mod vita {
             if s.recording && s.accepted_frames>0 && s.accepted_frames==s.mode.warmup_frames() && s.heap_before.is_none() { s.heap_before=Some(heap_used()); }
         });
     }
+    pub(super) fn discard_transition_frame() {
+        HOT_RECORDING.store(false, Relaxed);
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.recording = false;
+            s.pending.clear();
+            s.stack.clear();
+            s.wall_pending = false;
+            s.frame_start = None;
+        });
+    }
     pub fn end_frame(map: &str, gameplay: bool) -> bool {
+        let gameplay = gameplay && !transition_frame();
         counts(&[("shader_creations",0),("pipeline_creations",0)]);
         HOT_RECORDING.store(false, Relaxed);
         STATE.with(|s| {

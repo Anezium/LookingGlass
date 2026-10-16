@@ -717,11 +717,19 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut alice: Character;
     let mut aim_pointer: crate::targeting::Pointer;
     let mut campaign: Campaign;
+    macro_rules! install_loaded_scene {
+        (initial, $next:expr, $from:expr, $to:expr) => { scene = $next; };
+        (replace, $next:expr, $from:expr, $to:expr) => {
+            crate::transition_memory::replace(&mut scene, $next, "save-reload", $from, $to);
+        };
+    }
     macro_rules! apply_loaded {
         ($restored:expr) => { apply_loaded!($restored, true) };
-        ($restored:expr, $pause:expr) => {{
+        ($restored:expr, $pause:expr) => { apply_loaded!($restored, $pause, replace) };
+        ($restored:expr, $pause:expr, $install:ident) => {{
             let r = $restored;
             let level = r.game.level()?.clone();
+            let _previous_map = current;
             current = maps
                 .iter()
                 .position(|m| m == &level.map)
@@ -730,7 +738,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             retry.remember(r.game.clone());
             entry_spawn = level.entry;
             selected_entry = entry_spawn.clone();
-            scene = r.scene;
+            install_loaded_scene!($install, r.scene, &maps[_previous_map], &maps[current]);
             interactions = r.interactions;
             story = r.story;
             hints = r.hints;
@@ -819,7 +827,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let pause_on_load = !bench_session;
         #[cfg(not(target_os = "vita"))]
         let pause_on_load = true;
-        apply_loaded!(prepared.unwrap(), pause_on_load);
+        apply_loaded!(prepared.unwrap(), pause_on_load, initial);
         timing.mark("installed");
         resume_applied = true;
         println!("[lg/startup] restored scene reused map={} source={}", maps[current],
@@ -1025,6 +1033,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
     loop {
+        crate::frame_profile::begin_viewer_frame();
         crate::frame_phases::begin();
         #[cfg(feature="vita_renderer")]
         let route_running=route_session.is_some();
@@ -1975,9 +1984,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     !options.fly,
                 ) {
                     Ok(next) => {
+                        crate::transition_memory::replace(&mut scene, next.scene, "chapter-or-console", &maps[current], &maps[selected]);
                         level_art = next.art;
                         skip_scene = crate::cinematic::Skip::default();
-                        scene = next.scene;
                         hints = next.hints;
                         steam = next.steam;
                         npcs = next.npcs;
@@ -2593,9 +2602,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             });
             match arrived {
                 Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {
+                    crate::transition_memory::replace(&mut scene, next.scene, "natural-exit", &maps[current], &name);
                     stats = next_stats;
                     campaign = next_campaign;
-                    scene = next.scene;
                     hints = next.hints;
                     steam = next.steam;
                     npcs = next.npcs;
