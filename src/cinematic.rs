@@ -166,35 +166,95 @@ impl Track {
     }
 }
 
-/// Require a fresh press after entering a scene. A held gameplay key cannot skip it.
+/// One transaction covers setup, skip acceptance and the final owner handoff.
+pub struct FilmTransaction {
+    id: u64,
+    film: String,
+    owner: &'static str,
+    outcome: &'static str,
+}
+impl FilmTransaction {
+    fn new(film: &str, owner: &'static str, binding: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let t = Self { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            film: film.into(), owner, outcome: "aborted-or-error" };
+        t.event(&format!("begin binding={binding:?}"));
+        t
+    }
+    fn event(&self, event: &str) {
+        eprintln!("[lg/film-transaction] tx={} film={} owner={} {event}", self.id, self.film, self.owner);
+    }
+}
+impl Drop for FilmTransaction {
+    fn drop(&mut self) { self.event(&format!("terminal end={}", self.outcome)); }
+}
+/// A fresh press is timed with a monotonic clock, independently of simulation dt.
 #[derive(Default)]
 pub struct Skip {
     scene: Option<&'static str>,
     armed: bool,
     held: f32,
+    since: Option<std::time::Instant>,
+    down: bool,
+    binding: String,
+    film: bool,
+    transaction: Option<FilmTransaction>,
 }
 impl Skip {
-    pub fn update(
-        &mut self,
-        scene: Option<&'static str>,
-        active: bool,
-        down: bool,
-        dt: f32,
-    ) -> bool {
-        if scene != self.scene || !active || scene.is_none() {
+    pub fn film(name: &str, binding: String) -> Self {
+        Self { transaction: Some(FilmTransaction::new(name, "roq", &binding)),
+            binding, film: true, ..Self::default() }
+    }
+    pub fn binding(&mut self, binding: String) { self.binding = binding; }
+    pub fn event(&self, event: &str) {
+        if let Some(t) = &self.transaction { t.event(event); }
+    }
+    pub fn handoff(&mut self, outcome: &'static str) {
+        if let Some(t) = &mut self.transaction {
+            t.event(&format!("handoff outcome={outcome}"));
+            t.outcome = outcome;
+        }
+    }
+    pub fn update(&mut self, scene: Option<&'static str>, active: bool, down: bool) -> bool {
+        self.update_at(scene, active, down, std::time::Instant::now())
+    }
+    fn update_at(&mut self, scene: Option<&'static str>, active: bool, down: bool,
+        now: std::time::Instant) -> bool {
+        if scene != self.scene {
+            if !self.film {
+                if let Some(t) = &mut self.transaction {
+                    if t.outcome == "aborted-or-error" { t.outcome = "complete"; }
+                }
+                self.transaction = scene.map(|name| FilmTransaction::new(name, "engine", &self.binding));
+            }
             self.scene = scene;
+            self.since = None;
             self.held = 0.;
             self.armed = !down && active;
+            self.down = down;
+            self.event(&format!("state active={active} down={down} armed={} held_s=0", self.armed));
             return false;
         }
-        if !down {
-            self.armed = true;
+        let was_armed = self.armed;
+        if !active || scene.is_none() {
+            self.since = None;
             self.held = 0.;
+            self.armed = false;
+        } else if !down {
+            self.armed = true;
+            self.since = None;
+            self.held = 0.;
+        } else if self.armed {
+            let since = *self.since.get_or_insert(now);
+            self.held = now.saturating_duration_since(since).as_secs_f32();
         }
-        if down && self.armed {
-            self.held += dt.clamp(0., 0.1);
+        if self.down != down || was_armed != self.armed {
+            self.event(&format!("state active={active} down={down} armed={} held_s={:.3}", self.armed, self.held));
         }
+        self.down = down;
         if self.held >= 0.65 {
+            self.event(&format!("accepted held_s={:.3} threshold_s=0.650 binding={:?}", self.held, self.binding));
+            self.since = None;
             self.held = 0.;
             self.armed = false;
             return true;
@@ -271,26 +331,30 @@ mod tests {
         assert!(Track::parse("exec something").is_err());
     }
     #[test]
-    fn skip_requires_release_and_resets_when_paused_or_scene_changes() {
-        let mut s = Skip::default();
-        for _ in 0..30 {
-            assert!(!s.update(Some("a"), true, true, 0.1));
-        }
-        s.update(Some("a"), true, false, 0.1);
-        for _ in 0..4 {
-            assert!(!s.update(Some("a"), true, true, 0.1));
-        }
-        assert!(!s.update(Some("a"), false, true, 0.1));
-        for _ in 0..10 {
-            assert!(!s.update(Some("a"), true, true, 0.1));
-        }
-        s.update(Some("a"), true, false, 0.1);
-        let count = (0..20)
-            .filter(|_| s.update(Some("a"), true, true, 0.1))
-            .count();
-        assert_eq!(count, 1);
-        for _ in 0..20 {
-            assert!(!s.update(Some("b"), true, true, 0.1));
+    fn skip_uses_wall_time_at_one_five_and_ten_fps_and_requires_release() {
+        use std::time::{Duration, Instant};
+        for fps in [1., 5., 10.] {
+            let mut s = Skip::default();
+            let mut now = Instant::now();
+            assert!(!s.update_at(Some("a"), true, true, now));
+            now += Duration::from_secs(10);
+            assert!(!s.update_at(Some("a"), true, true, now));
+            assert!(!s.update_at(Some("a"), true, false, now));
+            assert!(!s.update_at(Some("a"), true, true, now));
+            let started = now;
+            loop {
+                now += Duration::from_secs_f64(1. / fps);
+                if s.update_at(Some("a"), true, true, now) { break; }
+                assert!(now.duration_since(started).as_secs_f64() < 2.);
+            }
+            let held = now.duration_since(started).as_secs_f64();
+            assert!(held >= 0.65 && held <= 0.65 + 1. / fps);
+            assert!(!s.update_at(Some("a"), true, true, now + Duration::from_secs(5)));
+            assert!(!s.update_at(Some("a"), true, false, now));
+            assert!(!s.update_at(Some("a"), true, true, now));
+            assert!(!s.update_at(Some("a"), false, true, now + Duration::from_secs(1)));
+            assert!(!s.update_at(Some("a"), true, true, now + Duration::from_secs(2)));
+            assert!(!s.update_at(Some("b"), true, true, now + Duration::from_secs(3)));
         }
     }
 }

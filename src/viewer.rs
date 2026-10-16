@@ -1788,6 +1788,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         .and_then(|v| v.cinema.scene_id())
                 }),
         );
+        skip_scene.binding(input.film_skip_label(&preferences));
         let skip_requested = skip_scene.update(
             skip_id,
             !paused
@@ -1797,8 +1798,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && focused
                 && !flying
                 && stats.alive(),
-            held(KeyCode::Enter) || input.pad_held("A"),
-            dt,
+            input.film_skip(&preferences),
         );
         #[cfg(target_os = "vita")]
         // Use the same scene owner/end-state path as a held Cross skip.
@@ -1808,10 +1808,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if skip_requested {
             let speaking = skip_id.is_some_and(|id| story.progress(id).is_some());
             if interactions.skip_cinematic(&scene.map, &mut scene.world, &mut player, &mut story)? {
+                skip_scene.event("engine_exit accepted=true");
                 camera_handoff.skip();
                 if speaking {
                     audio.stop_voice();
                 }
+                skip_scene.event("soundtrack_stop=not-applicable voice_stop=true");
+                skip_scene.handoff("skipped");
                 clock.pause();
                 pos = player.eye();
                 yaw = player.script_facing;
@@ -3925,11 +3928,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 {
                     skip_scene.draw(
                         &ui,
-                        &if input.desktop_pad() {
-                            "A".into()
-                        } else {
-                            input.label(&preferences, "Enter")
-                        },
+                        &input.film_skip_label(&preferences),
                     );
                 }
             }

@@ -354,11 +354,13 @@ pub async fn play(
     preferences: &Preferences,
     name: &str,
 ) -> Result<bool> {
+    let mut skip = crate::cinematic::Skip::film(name, input.film_skip_label(preferences));
     ensure!(matches!(name, "opening" | "ending"), "Unknown story movie");
     // Bench, renderbench and fullbench restore a save. They must not open a film.
     #[cfg(target_os = "vita")]
     if crate::frame_profile::story_movies_blocked() {
-        eprintln!("story movie {name} skipped: benchmark mode");
+        skip.event("bypass reason=benchmark");
+        skip.handoff("benchmark-bypass");
         return Ok(true);
     }
     let path = format!("video/{name}.roq");
@@ -387,7 +389,6 @@ pub async fn play(
     let mut paused = false;
     let mut clock_at = Instant::now();
     let mut backpressure = false;
-    let mut skip = crate::cinematic::Skip::default();
     input.suppress();
     // Clear the menu confirmation press before arming the movie's skip control.
     next_frame().await;
@@ -403,6 +404,8 @@ pub async fn play(
             }
             movie_log.played = elapsed;
             movie_log.reason = "quit";
+            skip.event("decoder_exit reason=quit soundtrack_stop=true");
+            skip.handoff("quit");
             return Ok(false);
         }
         if focused && (input.ui(KeyCode::P) || input.pad_pressed("Start")
@@ -420,12 +423,10 @@ pub async fn play(
         let now = Instant::now();
         let wall_dt = now.duration_since(clock_at).as_secs_f64();
         clock_at = now;
-        let dt = get_frame_time().clamp(0., 0.1);
         if skip.update(
             Some("story-movie"),
             active,
-            input.key(preferences, KeyCode::Enter, false) || input.pad_held("A"),
-            dt,
+            input.film_skip(preferences),
         ) {
             movie_log.reason = "skipped";
             break;
@@ -476,7 +477,7 @@ pub async fn play(
                 ..Default::default()
             },
         );
-        skip.draw(ui, &if input.desktop_pad() { "A".into() } else { input.label(preferences, "Enter") });
+        skip.draw(ui, &input.film_skip_label(preferences));
         if !active {
             ui.paused(if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
                 "Start to resume film"
@@ -486,9 +487,10 @@ pub async fn play(
         }
         next_frame().await;
     }
-    if let Some(s) = &soundtrack {
-        s.stop();
-    }
+    skip.event(&format!("decoder_exit reason={} decoded={}", movie_log.reason, video.decoded));
+    if let Some(s) = &soundtrack { s.stop(); }
+    skip.event("soundtrack_stop=true");
+    skip.handoff(movie_log.reason);
     input.suppress();
     next_frame().await;
     movie_log.played = elapsed;

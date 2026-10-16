@@ -475,6 +475,19 @@ impl Input {
             |name| self.action(prefs, name, edge),
         )
     }
+    pub fn film_skip(&self, prefs: &Preferences) -> bool {
+        self.film_skip_with(prefs, Preferences::vita_emulation(), physical)
+    }
+    fn film_skip_with(&self, prefs: &Preferences, handheld: bool, physical: impl Fn(&str, bool) -> bool) -> bool {
+        self.action_with(prefs, "Enter", false, &physical) || self.pad_held("A")
+            || (handheld && self.focused
+                && !self.blocked.contains("Enter") && physical("Enter", false))
+    }
+    pub fn film_skip_label(&self, prefs: &Preferences) -> String {
+        if Preferences::vita_emulation() { format!("{} / Cross", self.label(prefs, "Enter")) }
+        else if self.desktop_pad() { "A".into() }
+        else { self.label(prefs, "Enter") }
+    }
     pub fn running(&self, prefs: &Preferences, shift: bool) -> bool {
         self.running_with(prefs, shift, Preferences::vita_emulation())
     }
@@ -518,6 +531,20 @@ impl Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cinematic_cross_alias_preserves_gameplay_bindings_and_suppression() {
+        let mut prefs = Preferences::default(); prefs.apply_vita_preset();
+        let mut input = Input { focused: true, ..Default::default() };
+        for key in ["Enter", "E"] {
+            assert!(input.film_skip_with(&prefs, true, |k, _| k == key));
+        }
+        assert!(input.action_with(&prefs, "Space", false, |k, _| k == "Enter"));
+        assert!(!input.action_with(&prefs, "Enter", false, |k, _| k == "Enter"));
+        input.blocked.insert("Enter".into());
+        assert!(!input.film_skip_with(&prefs, true, |k, _| k == "Enter"));
+        input.focused = false;
+        assert!(!input.film_skip_with(&prefs, true, |_, _| true));
+    }
     #[test]
     fn radial_sticks_are_quiet_at_centre_and_preserve_analog_speed() {
         assert_eq!(stick(3000, -4000, 0.24), Vec2::ZERO);
