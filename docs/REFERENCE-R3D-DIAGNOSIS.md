@@ -37,8 +37,8 @@ frame yield; neither queued draws nor swap completion prove visible pixels.
 `entry_after_story` and `entered_resources` split the formerly uninstrumented
 resource phase. `[lg/audio-load] scene_presented=true` follows the real frame yield.
 
-Use `configs/r3d/baseline.json` first, then separate `actor-prepare-off.json`,
-`native-scale.json`, and `preview-every-frame.json` arms if the image stays black.
+Use `configs/PL-r3d-baseline.json` first, then separate `PL-r3d-actor-prepare-off.json`,
+`PL-r3d-native-scale.json`, and `PL-r3d-preview-every-frame.json` arms if the image stays black.
 Each arm changes exactly its named field. Capture the displayed output and retain
 all stage markers; the last completed stage localizes any remaining first-frame
 stall. The exact menu interaction, Vita GL state and priority behavior require
