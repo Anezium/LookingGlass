@@ -297,7 +297,9 @@ fn finish_entered(
         story,
         hints,
     } = loaded;
+    let mut timing = crate::startup::Phase::new("entered_resources");
     let scene = Scene::from_parts(assets, name, map, world)?;
+    timing.mark("scene");
     if options.npc_preview || options.combat_preview || options.larva_preview {
         interactions.encounters = None;
     }
@@ -315,11 +317,14 @@ fn finish_entered(
     if let Some(saved) = cached {
         npcs.restore(&saved.npcs)?;
     }
+    timing.mark("npcs");
     let steam = crate::particles::Steam::load(assets, &scene.map)?;
+    timing.mark("steam");
     // Prepare the destination cast before replacing any live level state.
     // Tab, console maps and campaign exits must carry this exact scene/art pair.
     let mut art = LevelArt::default();
     art.prepare(assets, &scene, &interactions, true)?;
+    timing.mark("level_art");
     Ok(Entered {
         art,
         scene,
@@ -689,6 +694,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut was_focused = true;
     let mut played = resume.is_none();
     let mut post_game = false;
+    #[cfg(feature = "vita_renderer")]
+    let mut load_probe = Some(crate::restore_diagnostic::Probe::new("startup-entry"));
     let mut save_frame = crate::save_preview::Frame::default();
     let mut escape_preview_ready = false;
     let mut pending_menu_save = None;
@@ -727,6 +734,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         ($restored:expr) => { apply_loaded!($restored, true) };
         ($restored:expr, $pause:expr) => { apply_loaded!($restored, $pause, replace) };
         ($restored:expr, $pause:expr, $install:ident) => {{
+            #[cfg(feature = "vita_renderer")]
+            { load_probe = Some(crate::restore_diagnostic::Probe::new("restore")); }
             let r = $restored;
             let level = r.game.level()?.clone();
             let _previous_map = current;
@@ -886,6 +895,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         environment_clock = 0.;
         audio.load(&mut assets, &maps[current], &scene.map);
         story = crate::story::Story::load(&mut assets, &maps[current]);
+        let mut entry_timing = crate::startup::Phase::new("entry_after_story");
+        eprintln!("[lg/startup] entry owner=engine map={} opening_roq_requested={opening_requested}", maps[current]);
         if options.shelf_preview {
             anyhow::ensure!(maps[current] == "skool1", "--shelf-preview requires skool1");
             let mut staging = Player::spawn(&scene.world, scene.map.spawn().0)
@@ -934,10 +945,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // Some map starts still expect a cinematic or scripted moving support.
         spawn_landing = true;
         player = spawn.unwrap_or_else(|| Player::new(pos - Vec3::Z * EYE_HEIGHT));
+        entry_timing.mark("spawn_and_story_entry");
         alice = Character::load(&mut assets).context("Loading Alice's character")?;
+        entry_timing.mark("alice_character");
         aim_pointer = crate::targeting::Pointer::load(&mut assets)?;
         alice.reset(&player, yaw);
+        entry_timing.mark("aim_pointer_and_character_reset");
         level_art.prepare(&mut assets, &scene, &interactions, true)?;
+        entry_timing.mark("level_art");
         campaign = Campaign::default();
     }
     let mut preview_throttle = crate::frame_profile::PreviewThrottle::default();
@@ -1978,6 +1993,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 || chapter_action == Some(crate::chapters::Hit::Begin)
                 || console_map
             {
+                #[cfg(feature = "vita_renderer")]
+                { load_probe = Some(crate::restore_diagnostic::Probe::new("chapter-or-console")); }
                 match enter_level(
                     &mut assets,
                     &maps[selected],
@@ -3301,6 +3318,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         clear_background(scene.atmosphere.background());
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::prepare_3d(scene.atmosphere.background());
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = &load_probe { p.gl("prepare-3d-returned"); }
         let world_camera = Camera3D {
             #[cfg(feature="vita_renderer")]
             viewport: crate::render::vita_renderer::world_viewport(),
@@ -3407,6 +3426,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             use macroquad::camera::Camera;
             crate::render_fx::set_projection(world_camera.matrix());
         }
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = &load_probe {
+            p.camera(&world_camera, player.feet, paused, skip_id);
+            p.stage("skin-gather-begin");
+        }
         #[cfg(feature="vita_renderer")]
         let mut skin_frame = if crate::render::vita_renderer::config().skin_overlap && !world_only {
             #[cfg(target_os="vita")]
@@ -3435,7 +3459,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_world");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
         }
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = &load_probe { p.stage("world-begin"); }
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = &mut load_probe {
+            p.world(scene.stats.batches, scene.stats.triangles, scene.retained_active());
+            p.stage("skin-collect-begin");
+        }
         #[cfg(feature="vita_renderer")]
         if let Some(frame) = &mut skin_frame {
             let _collect = crate::frame_profile::span("skin_collect");
@@ -3449,6 +3480,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(not(target_os = "vita"))]
         let host_characters_profile = crate::frame_profile::span("frame_characters");
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = &load_probe { p.stage("skin-collect-returned-actors-begin"); }
         let actors_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
         if !world_only && !crate::character::skinning::overlap::single_frame() {
         {
@@ -3606,6 +3639,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = &load_probe { p.gl("present-queued"); }
         if saves_writable {
             #[cfg(feature = "vita_renderer")]
             let throttled = crate::render::vita_renderer::config().save_preview == "throttled";
@@ -3634,6 +3669,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         set_default_camera();
         let hud_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Hud);
+        #[cfg(feature = "vita_renderer")]
+        let mut hud_submitted = false;
         if !world_only {
             if active {
                 #[cfg(target_os = "vita")]
@@ -3822,6 +3859,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             if (!show_details || inventory_menu) && !interactions.scripted() {
                 hud.draw(&stats, &catalog, inventory_menu, &input, &preferences);
+                #[cfg(feature = "vita_renderer")]
+                { hud_submitted = true; }
                 if !paused && !inventory_menu && !console_input && stats.alive() {
                     hud.draw_notice();
                 }
@@ -4055,6 +4094,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 "pickup_clock": pickup_clock, "transforms": transforms,
             }));
         }
+        #[cfg(feature = "vita_renderer")]
+        if let Some(p) = load_probe.take() { p.finish(&maps[current], hud_submitted); }
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(

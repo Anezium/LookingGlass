@@ -444,6 +444,7 @@ pub(crate) fn prepare_3d(bg:Color){scale::prepare(bg);}
 pub(crate) fn begin_3d_pass(action:PassAction){scale::begin(action);}
 pub(crate) fn set_3d_camera(camera:&Camera3D){scale::camera(camera);}
 pub(crate) fn present_3d(){scale::present();}
+pub(crate) fn diagnostic_target() -> Option<[u32; 2]> { scale::diagnostic_size() }
 pub(crate) fn end_world_pass() {
     depth_sentinel::opaque();
     if !(config().scaled_depth_fix && config().render_scale < 1. && crate::render_fx::retained_active()) {

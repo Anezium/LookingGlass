@@ -233,3 +233,7 @@ pub(super) fn log_depth(opaque: bool) {
         println!("[lg/vita-renderer] effective depth opaque={opaque} enabled={enabled} write={write} func={func} order={} early_z=hardware-unverified",config().opaque_order);
     });
 }
+
+pub(super) fn diagnostic_size() -> Option<[u32; 2]> {
+    TARGET.with(|t| t.borrow().as_ref().map(|t| [t.width, t.height]))
+}

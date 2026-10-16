@@ -91,6 +91,8 @@ mod route;
 mod save;
 mod save_check;
 mod save_legacy_check;
+#[cfg(feature = "vita_renderer")]
+mod restore_diagnostic;
 mod save_preview;
 mod school;
 mod school2;
