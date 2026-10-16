@@ -293,6 +293,8 @@ fn run() -> Result<()> {
             "--vita-render-view" => mode = "vita-render-view",
             #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
             "--vita-alpha-check" => mode = "vita-alpha-check",
+            #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
+            "--allmaps-entry-check" => mode = "allmaps-entry-check",
             #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
             "--vita-scale-check" => mode = "vita-scale-check",
             "--difficulty" => {
@@ -617,6 +619,20 @@ fn run() -> Result<()> {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = render::vita_renderer::visualizer(assets, o).await {
                 eprintln!("Retained world visualizer failed: {e:#}");
+                std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
+    #[cfg(all(feature = "vita_renderer",not(target_os = "vita")))]
+    if mode == "allmaps-entry-check" {
+        let mut conf = viewer::config();
+        conf.miniquad_conf.window_width = 960;
+        conf.miniquad_conf.window_height = 544;
+        conf.miniquad_conf.high_dpi = false;
+        macroquad::Window::from_config(conf, async move {
+            if let Err(e) = render::vita_renderer::allmaps::entry(assets, o).await {
+                eprintln!("Allmaps entry failed: {e:#}");
                 std::process::exit(1);
             }
         });
