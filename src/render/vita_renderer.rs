@@ -135,7 +135,7 @@ impl Default for Config {
             sim_school_mesh: true,
             sim_tower_templates: true,
             sim_npc_queries: true,
-            sim_mechanism_state: false,
+            sim_mechanism_state: true,
             renderer: "vita".into(),
             retained_maps: vec!["gvillage".into()],
             legacy_maps: Vec::new(),

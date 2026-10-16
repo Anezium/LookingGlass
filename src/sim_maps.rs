@@ -36,3 +36,14 @@ pub(crate) fn with_test_switches<T>(switches: [bool; 4], run: impl FnOnce() -> T
     let _reset = Reset(TEST_SWITCHES.with(|s| s.replace(Some(switches))));
     run()
 }
+
+/// Small exact dependency keys for mechanism publication. No allocation, hash,
+/// epsilon, or serialized save layout is involved.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct MechanismKey { words: [u32; 16], len: usize }
+impl MechanismKey {
+    pub fn new() -> Self { Self { words: [0; 16], len: 0 } }
+    pub fn u(&mut self, value: u32) { self.words[self.len] = value; self.len += 1; }
+    pub fn f(&mut self, value: f32) { self.u(value.to_bits()); }
+    pub fn option(&mut self, value: Option<f32>) { self.u(value.map_or(u32::MAX, f32::to_bits)); }
+}

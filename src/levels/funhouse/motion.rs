@@ -16,6 +16,8 @@ pub(super) struct Object {
     slide: Vec3,
     duration: f32,
     wait: f32,
+    closet: Option<usize>,
+    key: Option<crate::sim_maps::MechanismKey>,
 }
 pub fn owns(e: &super::super::Entity) -> bool {
     matches!(
@@ -69,6 +71,8 @@ pub fn load(map: &Bsp) -> Result<Vec<Object>> {
                 slide,
                 duration: num(e, "time", slide.length() / num(e, "speed", 100.).max(1.)).max(0.01),
                 wait: num(e, "wait", 1.5),
+                closet: CLOSETS.iter().position(|c| e.get("targetname").is_some_and(|n| n == &format!("{c}_wall"))),
+                key: None,
             })
         })
         .collect()
@@ -80,13 +84,56 @@ fn approach(x: f32, y: f32, d: f32) -> f32 {
         (x - d).max(y)
     }
 }
+impl Object {
+    fn inputs(&self, s: &Saved, i: usize) -> crate::sim_maps::MechanismKey {
+        let mut k = crate::sim_maps::MechanismKey::new();
+        match self.class.as_str() {
+            "func_rotatingdoor" => { k.f(s.doors[i]); k.option(s.door_signs.get(i).copied()); }
+            "func_door" if self.name == "mirror_path_door" || self.name == "t96" => k.f(s.doors[i]),
+            "func_fulcrum" => { let t = s.fulcrums.get(i).copied().unwrap_or_default(); k.f(t.x); k.f(t.y); }
+            _ => (),
+        }
+        let n = self.name.as_str();
+        if n.strip_prefix("clock_cell").and_then(|v| v.parse::<usize>().ok()).is_some_and(|v| (1..=8).contains(&v)) { k.u(s.cells as u32); }
+        if n.strip_prefix("pend_cell").and_then(|v| v.parse::<usize>().ok()).is_some_and(|v| (1..=8).contains(&v)) { k.u(s.cells as u32); k.f(s.time); }
+        if let Some(i) = self.closet { k.u(s.closets[i].is_some() as u32); }
+        match n {
+            "clock_mirror" => k.u(s.mirror as u32),
+            "pend_mirror" => { k.u(s.mirror as u32); if !s.mirror { k.f(s.time); } }
+            "cin_clock_break" => { k.u(s.arrived as u32); k.option(s.scene.as_ref().filter(|sc| sc.kind == Kind::Arrival).map(|sc| sc.clock.time)); }
+            "cine_stand" => { k.option(s.stand); if s.stand.is_some() { k.f(s.time); } }
+            "tuber" => { k.option(s.tube); if s.tube.is_some() { k.f(s.time); } }
+            "biggear1" | "biggear1_bind" | "head2_teeth" | "pend1" | "pend2" | "pend3" => k.f(s.time),
+            "gas_door1" | "gas_door2" => { k.u(s.gas as u32); k.option(s.gas_start); if s.gas_start.is_some() { k.f(s.time); } }
+            "end_door1" | "end_door2" => k.option(s.scene.as_ref().filter(|sc| sc.kind == Kind::Tweedles).map(|sc| sc.clock.time)),
+            "break_plat" => { k.option(s.floor); if s.floor.is_some() { k.f(s.time); } }
+            "pipe_hide" => { k.u(s.gas as u32); k.option(s.gas_start); if s.gas_start.is_some() { k.f(s.time); } }
+            _ => (),
+        }
+        if n.strip_prefix('t').and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| (176..=185).contains(&n)) {
+            k.u(s.gas as u32); k.option(s.gas_start); if s.gas_start.is_some() { k.f(s.time); }
+        }
+        if n.starts_with("icefloor2nd") || n.starts_with("marble_ice") {
+            k.option(s.floor); if s.floor.is_some() { k.f(s.time); }
+        }
+        k
+    }
+}
 impl Funhouse {
     pub fn rebuild(&mut self, _map: &Bsp) -> Result<()> {
         let s = &self.saved;
         let tube = s
             .tube
             .map_or(0., |t| ((s.time - t - 0.25) / 8.).clamp(0., 1.));
+        let mut rebuilt = false;
         for (i, o) in self.objects.iter_mut().enumerate() {
+            if crate::sim_maps::mechanism_state() {
+                let key = o.inputs(s, i);
+                if o.key.as_ref() == Some(&key) { continue; }
+                o.key = Some(key);
+            }
+            rebuilt = true;
+            crate::sim_maps::count("mechanism_objects_rebuilt", 1);
             let old = o.pose;
             o.pose = o.base;
             o.draw = true;
@@ -155,7 +202,9 @@ impl Funhouse {
                     };
                 }
             }
-            if let Some(i) = CLOSETS.iter().position(|c| name == format!("{c}_wall")) {
+            let closet = if crate::sim_maps::mechanism_state() { o.closet }
+                else { CLOSETS.iter().position(|c| name == format!("{c}_wall")) };
+            if let Some(i) = closet {
                 o.draw = s.closets[i].is_none();
                 o.solid = o.draw;
             }
@@ -310,6 +359,7 @@ impl Funhouse {
                 o.collider = o.shape.at_for_npcs(o.pose.translation, o.pose.rotation);
             }
         }
+        if rebuilt { crate::sim_maps::count("mechanism_rebuild_passes", 1); }
         Ok(())
     }
     pub fn move_world(
