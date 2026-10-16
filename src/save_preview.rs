@@ -138,7 +138,7 @@ pub async fn check(assets: &mut crate::assets::Assets) -> Result<()> {
     for (index, turn) in [0_f32, 1.2].into_iter().enumerate() {
         clear_background(BLACK);
         let direction = vec3((yaw + turn).cos(), (yaw + turn).sin(), 0.);
-        set_camera(&Camera3D {
+        let camera = Camera3D {
             position: player.eye(),
             target: player.eye() + direction,
             up: Vec3::Z,
@@ -146,11 +146,19 @@ pub async fn check(assets: &mut crate::assets::Assets) -> Result<()> {
             z_near: 2.,
             z_far: 30000.,
             ..Default::default()
-        });
-        scene.draw(player.eye(), 0., false, false, &interactions.transforms());
-        crate::render::depth_read_only(|| {
-            scene.draw(player.eye(), 0., false, true, &interactions.transforms())
-        });
+        };
+        set_camera(&camera);
+        // Non-village maps now use retained draws too; initialize the same view
+        // and alpha scheduler as gameplay before capturing the clean frame.
+        scene.begin_fx_view(&camera, 0., false, true);
+        let transforms = interactions.transforms();
+        scene.draw(player.eye(), 0., false, false, &transforms);
+        if scene.retained_active() {
+            scene.draw(player.eye(), 0., false, true, &transforms);
+        } else {
+            crate::render::depth_read_only(|| scene.draw(player.eye(), 0., false, true, &transforms));
+        }
+        scene.finish_fx(true);
         throttle.advance_frame();
         ensure!(throttle.capture_requested(crate::frame_profile::Mode::Full, true, true), "Save/menu request did not force a preview");
         frame.update();
