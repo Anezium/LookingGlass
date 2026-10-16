@@ -14,7 +14,6 @@ use std::{
     time::{Duration, Instant},
 };
 pub const SAMPLES: usize = 1024;
-const READY_BLOCKS:usize=2;
 #[derive(Default)]
 pub struct Metrics {
     pub rejected: AtomicUsize,
@@ -256,7 +255,7 @@ pub fn buffered<S: Source<Item = f32> + Send + 'static>(
 ) -> std::io::Result<(Worker, Callback)> {
     let (tx, rx) = queue::channel(4);
     let config = block::settings();
-    let ready_blocks = 2;
+    let ready_blocks = config.cushion;
     for _ in 0..ready_blocks {
         assert!(tx
             .push(Block {
@@ -270,7 +269,7 @@ pub fn buffered<S: Source<Item = f32> + Send + 'static>(
     let done = stop.clone();
     let stats = metrics.clone();
     let handle=thread::Builder::new().name("audio-producer".into()).stack_size(1024*1024).spawn(move||{
-        if !policy() { return; }
+        if !policy(config) { return; }
         let mut report=Instant::now();let mut timings=Vec::with_capacity(128);
         let mut stages:[Vec<f64>;7]=std::array::from_fn(|_|Vec::with_capacity(128));
         while !done.load(Ordering::Acquire) {
@@ -314,7 +313,7 @@ pub fn buffered<S: Source<Item = f32> + Send + 'static>(
         },
     ))
 }
-fn policy() -> bool {
+fn policy(config: block::Settings) -> bool {
     #[cfg(target_os = "vita")]
     unsafe {
         #[repr(C)]
@@ -352,21 +351,21 @@ fn policy() -> bool {
             fn sceKernelGetThreadInfo(id: i32, info: *mut Info) -> i32;
         }
         let id = sceKernelGetThreadId();
-        let priority = sceKernelChangeThreadPriority(id, 161);
-        let affinity = sceKernelChangeThreadCpuAffinityMask(id, 0x40000);
+        let priority = sceKernelChangeThreadPriority(id, config.priority);
+        let affinity = sceKernelChangeThreadCpuAffinityMask(id, config.affinity);
         let mut info: Info = std::mem::zeroed();
         info.size = std::mem::size_of::<Info>() as u32;
         let readback = sceKernelGetThreadInfo(id, &mut info);
-        eprintln!("[lg/audio-producer] id={id} priority_requested=161 priority_rc={priority} affinity_requested=0x40000 affinity_rc={affinity} info_rc={readback} effective_priority={} effective_affinity={:#x} stack_bytes={} ready_blocks={READY_BLOCKS}", info.priority,info.affinity,info.stack_size);
+        eprintln!("[lg/audio-producer] id={id} priority_requested={} priority_rc={priority} affinity_requested={:#x} affinity_rc={affinity} info_rc={readback} effective_priority={} effective_affinity={:#x} stack_bytes={} ready_blocks={} cushion_ms={:.3}", config.priority,config.affinity,info.priority,info.affinity,info.stack_size,config.cushion,config.cushion as f64*512./44.1);
         return priority >= 0
             && affinity >= 0
             && readback >= 0
-            && info.priority == 161
-            && info.affinity == 0x40000;
+            && info.priority == config.priority
+            && info.affinity == config.affinity;
     }
     #[cfg(not(target_os = "vita"))]
     {
-        eprintln!("[lg/audio-producer] host policy=normal stack_bytes=1048576 ready_blocks={READY_BLOCKS}");
+        eprintln!("[lg/audio-producer] host policy=normal stack_bytes=1048576 ready_blocks={} cushion_ms={:.3}",config.cushion,config.cushion as f64*512./44.1);
         true
     }
 }

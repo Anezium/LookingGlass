@@ -83,5 +83,13 @@
   "msaa_samples": 1,
   "quality": "low",
   "opaque_order": "front_to_back",
-  "world_alpha": true
+  "world_alpha": true,
+  "audio_block_mix": false,
+  "audio_preresample": false,
+  "audio_block_parameters": false,
+  "audio_ambient_voices": 0,
+  "audio_cull_gain": 0.0,
+  "audio_producer_priority": 161,
+  "audio_producer_affinity": 262144,
+  "audio_cushion_blocks": 2
 }
