@@ -491,20 +491,27 @@ fn decode_clip(data: Vec<u8>) -> Result<Clip> {
         .chunks_exact(channels)
         .map(|s| s.iter().sum::<f32>() / channels as f32)
         .collect::<Vec<_>>();
-    let (mono, rate) = if block::settings().preresample && rate != 44100 {
+    // Integer-ratio clips stay at their native rate in the level cache; the block
+    // effect interpolates them on the fly with the same arithmetic as below.
+    let (mono, rate) = if block::settings().preresample && block::step(rate).is_none() {
         let n = ((mono.len() as u64 * 44100 / rate as u64) as usize).max(1);
         ensure!(n <= MAX_PCM, "Resampled sound too large");
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            let pos=i as u64*rate as u64;
-            let j=(pos/44100) as usize;
-            let f=(pos%44100) as f32/44100.;
-            let a=mono[j]; let b=mono[(j+1).min(mono.len()-1)];
-            out.push(a+(b-a)*f);
-        }
-        (out,44100)
+        (resample_linear(&mono, rate), 44100)
     } else {(mono,rate)};
     Ok(Clip { samples: mono.into(), rate })
+}
+/// Linear interpolation of a decoded mono clip to 44.1 kHz.
+fn resample_linear(mono: &[f32], rate: u32) -> Vec<f32> {
+    let n = ((mono.len() as u64 * 44100 / rate as u64) as usize).max(1);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let pos=i as u64*rate as u64;
+        let j=(pos/44100) as usize;
+        let f=(pos%44100) as f32/44100.;
+        let a=mono[j]; let b=mono[(j+1).min(mono.len()-1)];
+        out.push(a+(b-a)*f);
+    }
+    out
 }
 struct Pan {
     left: AtomicU32,
@@ -736,6 +743,7 @@ pub struct Audio {
     pending: Vec<Request>,
     missing: BTreeSet<String>,
     cache_samples: usize,
+    limit_rejects: usize,
     retiring: Vec<FadingMusic>,
     cues: BTreeMap<String, Music>,
     room: f32,
@@ -790,6 +798,7 @@ impl Audio {
             pending: Vec::new(),
             missing: BTreeSet::new(),
             cache_samples: 0,
+            limit_rejects: 0,
             retiring: Vec::new(),
             cues: BTreeMap::new(),
             room: 0.,
@@ -831,6 +840,7 @@ impl Audio {
         self.pending.clear();
         self.missing.clear();
         self.cache_samples = 0;
+        self.limit_rejects = 0;
         self.last_sanity = None;
         self.reaction_gate = reaction::Gate::default();
         self.reaction = None;
@@ -900,6 +910,9 @@ impl Audio {
                 }
                 Err(e) => {
                     failures += 1;
+                    if e.to_string().contains("cache limit") {
+                        self.limit_rejects += 1;
+                    }
                     eprintln!("Sound unavailable: {path}: {e:#}");
                     cache.insert(path.into(), None);
                 }
@@ -2069,6 +2082,37 @@ mod tests {
             }
             println!("MIX_STAGE cumulative_stage={stage} all_emitters_ms={sum:.6}");
         }
+        Ok(())
+    }
+    /// Level preload against the 24 MiB cache for every map in the archives,
+    /// under the audio config named by LOOKING_GLASS_TEST_AUDIO_CONFIG.
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA"]
+    fn all_maps_preload_budget() -> Result<()> {
+        let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let mut assets = Assets::open(&root)?;
+        let mut maps = assets.maps();
+        maps.sort();
+        let config = block::settings();
+        let mut overflow = 0;
+        for name in &maps {
+            let map = match assets.read(&format!("maps/{name}.bsp")).and_then(|b| Bsp::parse(&b)) {
+                Ok(map) => map,
+                Err(e) => {
+                    println!("AUDIO_PRELOAD map={name} skipped=\"{e:#}\"");
+                    continue;
+                }
+            };
+            let mut audio = Audio::new(true, None);
+            let (mixer, _source) = output::mixer();
+            audio.playback = Some(Playback { _stream: None, mixer, _worker: None });
+            audio.load(&mut assets, name, &map);
+            println!("AUDIO_PRELOAD map={name} preresample={} cache_bytes={} cap_bytes={} limit_rejects={} unavailable_status=\"{}\" emitters={}",
+                config.preresample, audio.cache_samples * 4, CACHE_SAMPLES * 4, audio.limit_rejects, audio.status, audio.emitters.len());
+            overflow += audio.limit_rejects;
+        }
+        println!("AUDIO_PRELOAD_SUMMARY maps={} limit_rejects={overflow}", maps.len());
+        ensure!(overflow == 0, "level preload exceeded the audio cache");
         Ok(())
     }
     #[test]

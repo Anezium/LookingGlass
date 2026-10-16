@@ -123,7 +123,7 @@ impl Sink {
     }
     pub(super) fn append_effect(&self, pcm: super::Pcm, controls: Arc<super::acoustics::Controls>) {
         let config = block::settings();
-        if !config.mix || !config.preresample || pcm.clip.rate != 44100 {
+        if !config.mix || !config.preresample || block::step(pcm.clip.rate).is_none() {
             self.append(super::acoustics::Filter::new(pcm, controls));
             return;
         }

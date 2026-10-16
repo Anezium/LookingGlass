@@ -147,40 +147,81 @@ impl Stream {
     }
 }
 
+/// Output frames per clip frame as a power-of-two shift, when 44.1 kHz is 1x,
+/// 2x or 4x the clip rate. Other rates are resampled once at load.
+pub fn step(rate: u32) -> Option<u32> {
+    match rate {
+        44100 => Some(0),
+        22050 => Some(1),
+        11025 => Some(2),
+        _ => None,
+    }
+}
+
 pub struct Effect {
     pcm: Pcm,
     filter: acoustics::FilterState,
     tail: usize,
+    shift: u32,
+    /// Interpolation weights for the in-between frames, identical to load-time
+    /// resampling: `(k * rate) / 44100` for k in 0..(1 << shift).
+    weights: [f32; 4],
     virtualized: bool,
     parameters: bool,
 }
 impl Effect {
-    pub fn new(pcm: Pcm, controls: std::sync::Arc<acoustics::Controls>) -> Self {
-        let filter = acoustics::FilterState::new(pcm.clip.rate, controls);
+    pub fn new(mut pcm: Pcm, controls: std::sync::Arc<acoustics::Controls>) -> Self {
+        let filter = acoustics::FilterState::new(44100, controls);
+        let shift = step(pcm.clip.rate).expect("block effects need a 44.1 kHz multiple");
+        let mut weights = [0.; 4];
+        for (k, w) in weights.iter_mut().enumerate().take(1 << shift) {
+            *w = (k as u32 * pcm.clip.rate) as f32 / 44100.;
+        }
+        // `index` counts interleaved samples; move it from clip frames to output frames.
+        pcm.index <<= shift;
         Self {
             pcm,
             filter,
             tail: 0,
+            shift,
+            weights,
             virtualized: false,
             parameters: settings().parameters,
         }
     }
+    /// Clip length in 44.1 kHz output frames.
+    fn frames(&self) -> usize {
+        self.pcm.clip.samples.len() << self.shift
+    }
+    fn fetch(&self, frame: usize) -> f32 {
+        let samples = &self.pcm.clip.samples;
+        let j = frame >> self.shift;
+        let Some(&a) = samples.get(j) else {
+            return 0.;
+        };
+        let k = frame & ((1 << self.shift) - 1);
+        if k == 0 {
+            return a;
+        }
+        let b = samples[(j + 1).min(samples.len() - 1)];
+        a + (b - a) * self.weights[k]
+    }
     pub fn render(&mut self, out: &mut [f32], audible: bool) -> usize {
         let start = Instant::now();
+        let len = self.frames();
         if !audible {
             if !self.virtualized {
                 self.filter.clear();
                 self.virtualized = true;
             }
             let frames = out.len() / 2;
-            let len = self.pcm.clip.samples.len();
             let index = self.pcm.index / 2;
             let n = if self.pcm.looping {
                 self.pcm.index = ((index + frames) % len) * 2;
                 out.len()
             } else {
                 let left = len.saturating_sub(index);
-                let tail_left = (self.pcm.clip.rate as usize).saturating_sub(self.tail) / 2;
+                let tail_left = 44100usize.saturating_sub(self.tail) / 2;
                 let count = frames.min(left + tail_left);
                 self.pcm.index += count * 2;
                 self.tail += count.saturating_sub(left) * 2;
@@ -200,29 +241,23 @@ impl Effect {
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
         for frame in out.chunks_exact_mut(2) {
-            if self.pcm.index / 2 >= self.pcm.clip.samples.len() {
+            if self.pcm.index / 2 >= len {
                 if self.pcm.looping {
                     self.pcm.index = 0;
                 } else {
                     self.tail += 2;
-                    if self.tail > self.pcm.clip.rate as usize {
+                    if self.tail > 44100 {
                         break;
                     }
                 }
             }
-            let dry = self
-                .pcm
-                .clip
-                .samples
-                .get(self.pcm.index / 2)
-                .copied()
-                .unwrap_or(0.);
+            let dry = self.fetch(self.pcm.index / 2);
             self.pcm.index += 2;
             frame[0] = dry * l;
             frame[1] = dry * r;
             n += 2;
         }
-        // Effects are already decoded and resampled at load; this is PCM fetch/spatial.
+        // Clips are decoded at load; this is PCM fetch, 2x/4x interpolation and spatial.
         charge(3, start);
         let start = Instant::now();
         self.filter.process(&mut out[..n], self.parameters);
@@ -265,6 +300,31 @@ mod tests {
         native.render(&mut block, false);
         assert_eq!(native.pcm.index, (before + 1024) % (clip.samples.len() * 2));
         assert!(block.iter().all(|v| *v == 0.));
+    }
+    #[test]
+    fn native_rate_clip_matches_load_time_resampling() {
+        let mono: Vec<f32> = (0..3001).map(|i| (i as f32 * 0.071).sin() * 0.2).collect();
+        let up = super::super::resample_linear(&mono, 22050);
+        assert_eq!(up.len(), mono.len() * 2);
+        let pan = super::super::Pan::new();
+        pan.set(0.4, 0.9);
+        let controls = acoustics::Controls::new();
+        controls.set(0.3, false, 0.5);
+        for looping in [true, false] {
+            let effect = |samples: &[f32], rate, index| {
+                let clip = super::super::Clip { samples: samples.into(), rate };
+                Effect::new(Pcm { clip, index, looping, pan: pan.clone() }, controls.clone())
+            };
+            let mut native = effect(&mono, 22050, 700 * 2);
+            let mut resampled = effect(&up, 44100, 1400 * 2);
+            let (mut a, mut b) = ([0.; 1024], [0.; 1024]);
+            for block in 0..60 {
+                let audible = block % 17 != 3;
+                assert_eq!(native.render(&mut a, audible), resampled.render(&mut b, audible));
+                assert_eq!(a, b, "looping={looping} block={block}");
+                assert_eq!(native.pcm.index, resampled.pcm.index);
+            }
+        }
     }
     #[test]
     fn resampling_is_continuous_across_blocks_and_preserves_eof() {
