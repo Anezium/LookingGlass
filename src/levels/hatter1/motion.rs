@@ -17,6 +17,8 @@ pub(super) struct Object {
     wait: f32,
     speed: f32,
     limit: f32,
+    sink_index: Option<usize>,
+    key: Option<crate::sim_maps::MechanismKey>,
 }
 pub(super) fn owns(e: &super::super::Entity) -> bool {
     matches!(
@@ -65,7 +67,7 @@ pub(super) fn load(map: &Bsp) -> Result<Vec<Object>> {
                 name: e.get("targetname").cloned().unwrap_or_default(),
                 base,
                 pose: base,
-                collider: shape.at(base.translation, base.rotation),
+                collider: shape.at_for_npcs(base.translation, base.rotation),
                 shape,
                 draw: true,
                 solid: true,
@@ -88,6 +90,12 @@ pub(super) fn load(map: &Bsp) -> Result<Vec<Object>> {
                     "limit",
                     if (961..=964).contains(&id) { 16. } else { 192. },
                 ),
+                sink_index: e.get("targetname").filter(|n| fake(n)).and_then(|n| {
+                    let name = n.replacen("fake", "sink", 1);
+                    map.entities.iter().position(|e| e.get("targetname") == Some(&name))
+                        .map(|j| map.entities.iter().take(j).filter(|e| owns(e)).count())
+                }),
+                key: None,
                 class,
                 slide,
             })
@@ -99,6 +107,37 @@ fn approach(v: f32, t: f32, d: f32) -> f32 {
         (v + d).min(t)
     } else {
         (v - d).max(t)
+    }
+}
+impl Object {
+    fn inputs(&self, s: &Saved, i: usize, stop: f32, stop_time: f32) -> crate::sim_maps::MechanismKey {
+        let mut k = crate::sim_maps::MechanismKey::new();
+        if self.class == "func_rotatingdoor" || self.class == "func_door" { k.f(s.doors[i]); }
+        if self.class == "func_sinkobject" { k.f(s.sinks[i]); }
+        if let Some(j) = self.sink_index { k.f(s.sinks[j]); }
+        match self.name.as_str() {
+            "astralmonkey" => { k.f(s.age); k.option(s.levers[0]); k.option(s.levers[1]); }
+            "no_return" => { k.f(s.age); k.option(s.both()); k.option(s.no_return); }
+            "no_more_cheating" | "extendo" => { k.f(s.age); k.option(s.extendo); }
+            "Lift1" => k.f(s.lift),
+            "floater1" => { k.option(s.floater); if s.floater.is_some() { k.f(s.age); } }
+            "ClockDoor_Right" | "ClockDoor_Left" => { k.f(s.age); k.option(s.levers[2]); k.option(s.clockroom_closed); }
+            "donna_hunt" | "post_gryph_door" => k.u(s.gryphon.is_some() as u32),
+            "rage_gear" => { k.f(s.age); k.option(s.gryphon); }
+            "float_clock" | "clockdoor" => { k.f(s.age); k.option(s.clock); }
+            "monkey3" => { k.f(s.age); k.option(s.clock); }
+            "spiral_o_doom" | "cam_gear1" | "plunger" | "brk_pend" => k.f(s.age),
+            "gear1" | "gear2" => k.f(stop_time),
+            "clockmin" | "clockhr" | "monkeyass666" | "monkeyass667" => { k.f(stop); k.f(stop_time); }
+            "clock_minute_hand" | "clock_hour_hand" => {
+                k.f(stop); k.f(stop_time); k.f(s.age); k.option(s.gryphon);
+                k.option(s.scene.as_ref().filter(|sc| sc.kind == Kind::Gryphon).map(|sc| sc.time));
+            }
+            "loco_hatter_key" => { k.u(s.port.is_some() as u32); k.option(s.scene.as_ref().filter(|sc| sc.kind == Kind::Port).map(|sc| sc.time)); }
+            "dunkpanel" | "dormouse_beam_wand" => { k.option(s.hare); if s.hare.is_some() { k.f(s.age); } }
+            _ => (),
+        }
+        k
     }
 }
 impl Clockwork {
@@ -119,7 +158,15 @@ impl Clockwork {
                 .filter(|sc| sc.kind == Kind::Stop && sc.time >= 1.5)
                 .map_or(s.age, |sc| s.age - sc.time + 1.5)
         };
+        let mut rebuilt = false;
         for (k, o) in self.objects.iter_mut().enumerate() {
+            if crate::sim_maps::mechanism_state() {
+                let key = o.inputs(s, k, stop, stop_time);
+                if o.key.as_ref() == Some(&key) { continue; }
+                o.key = Some(key);
+            }
+            rebuilt = true;
+            crate::sim_maps::count("mechanism_objects_rebuilt", 1);
             let old = o.pose;
             o.pose = o.base;
             o.draw = true;
@@ -146,17 +193,12 @@ impl Clockwork {
             if fake(&o.name) {
                 o.draw = false;
                 o.solid = false;
-                let name = o.name.replacen("fake", "sink", 1);
-                if let Some((j, _)) = map
-                    .entities
-                    .iter()
-                    .enumerate()
-                    .find(|(_, e)| e.get("targetname") == Some(&name))
-                {
-                    // The index order of owned brushes is stable across loads.
-                    let index = map.entities.iter().take(j).filter(|e| owns(e)).count();
-                    o.pose.translation.z -= s.sinks[index];
-                }
+                let index = if crate::sim_maps::mechanism_state() { o.sink_index } else {
+                    let name = o.name.replacen("fake", "sink", 1);
+                    map.entities.iter().position(|e| e.get("targetname") == Some(&name))
+                        .map(|j| map.entities.iter().take(j).filter(|e| owns(e)).count())
+                };
+                if let Some(index) = index { o.pose.translation.z -= s.sinks[index]; }
             }
             match o.name.as_str() {
                 "astralmonkey" => {
@@ -300,9 +342,10 @@ impl Clockwork {
                 _ => {}
             }
             if old.translation != o.pose.translation || old.rotation != o.pose.rotation {
-                o.collider = o.shape.at(o.pose.translation, o.pose.rotation);
+                o.collider = o.shape.at_for_npcs(o.pose.translation, o.pose.rotation);
             }
         }
+        if rebuilt { crate::sim_maps::count("mechanism_rebuild_passes", 1); }
         Ok(())
     }
     fn door_target(&self, o: &Object) -> Option<bool> {

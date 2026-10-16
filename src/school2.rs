@@ -68,13 +68,20 @@ pub struct Pose {
 #[derive(Clone)]
 enum Shape {
     Brush(usize),
-    Mesh(Vec<[Vec3; 3]>),
+    Mesh {
+        triangles: std::sync::Arc<Vec<[Vec3; 3]>>,
+        template: std::sync::Arc<crate::collision::model_shape::Template>,
+    },
 }
 impl Shape {
     fn collider(&self, map: &Bsp, pose: Pose) -> Result<Collider> {
         match self {
             Self::Brush(i) => Collider::model(map, *i, pose.origin, pose.rotation, true),
-            Self::Mesh(t) => Ok(Collider::triangles(t, pose.origin, pose.rotation)),
+            Self::Mesh { triangles, template } => Ok(if crate::sim_maps::school_mesh() {
+                template.at_reused(pose.origin, pose.rotation)
+            } else {
+                Collider::triangles(triangles, pose.origin, pose.rotation)
+            }),
         }
     }
 }
@@ -258,7 +265,7 @@ impl School2 {
                     .trim_start_matches("models/")
                     .trim_end_matches(".tik");
                 let (def, model) = read_model(assets, model_name)?;
-                let triangles = model
+                let triangles: Vec<[Vec3; 3]> = model
                     .surfaces
                     .iter()
                     .flat_map(|s| {
@@ -272,7 +279,8 @@ impl School2 {
                         })
                     })
                     .collect();
-                (Shape::Mesh(triangles), Some(model_name.to_owned()))
+                let template = std::sync::Arc::new(crate::collision::model_shape::Template::triangles(&triangles));
+                (Shape::Mesh { triangles: std::sync::Arc::new(triangles), template }, Some(model_name.to_owned()))
             };
             let motion = if name.starts_with("gym_pend") || name.starts_with("gym_light") {
                 let i = name.chars().last().unwrap().to_digit(10).unwrap() as usize;

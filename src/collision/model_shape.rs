@@ -160,7 +160,13 @@ impl Convex {
     }
 }
 #[derive(Debug)]
+struct Mesh {
+    vertices: Vec<Vec3>,
+    triangles: Vec<[usize; 3]>,
+}
+#[derive(Debug)]
 struct Geometry {
+    mesh: Option<Mesh>,
     brushes: Vec<Convex>,
     patches: Vec<[Vec3; 3]>,
     bounds: Option<Bounds>,
@@ -177,6 +183,7 @@ struct EagerCache {
 pub struct Template {
     geometry: std::sync::Arc<Geometry>,
     eager: std::cell::RefCell<EagerCache>,
+    last_lazy: std::cell::RefCell<Option<([u32; 7], Collider)>>,
 }
 #[derive(Debug)]
 pub(super) struct Placed {
@@ -195,11 +202,20 @@ impl Placed {
                 let _profile = crate::frame_profile::span("collider_lazy_build");
                 #[cfg(target_os = "vita")]
                 add_counter(Counter::LazyHullBuilds, 1);
+                crate::sim_maps::count("lazy_hull_builds", 1);
                 self.geometry.at(self.origin, self.rotation)
             })
     }
 }
 impl Geometry {
+    fn triangles_at(&self, origin: Vec3, rotation: Quat) -> Vec<Hull> {
+        if let Some(mesh) = &self.mesh {
+            let points = mesh.vertices.iter().map(|v| origin + rotation * *v).collect::<Vec<_>>();
+            mesh.triangles.iter().filter_map(|t| triangle_hull(points[t[0]], points[t[1]], points[t[2]])).collect()
+        } else {
+            self.patches.iter().filter_map(|p| triangle_hull(origin + rotation * p[0], origin + rotation * p[1], origin + rotation * p[2])).collect()
+        }
+    }
     fn at_cached(&self, origin: Vec3, rotation: Quat, cache: &mut EagerCache) -> Vec<Hull> {
         // No epsilon or quaternion sign equivalence: only identical input bits
         // may reuse rotated normals. Translation never affects their selection.
@@ -208,6 +224,7 @@ impl Geometry {
         cache.normals.resize_with(self.brushes.len(), Vec::new);
         let mut hulls = Vec::with_capacity(self.brushes.len() + self.patches.len());
         for (brush, normals) in self.brushes.iter().zip(&mut cache.normals) {
+            crate::sim_maps::count("template_brush_hulls_placed", 1);
             if reorient {
                 brush.orient(rotation, &mut cache.edges, normals);
             }
@@ -242,13 +259,7 @@ impl Geometry {
             });
         }
         cache.rotation = key;
-        hulls.extend(self.patches.iter().filter_map(|p| {
-            triangle_hull(
-                origin + rotation * p[0],
-                origin + rotation * p[1],
-                origin + rotation * p[2],
-            )
-        }));
+        hulls.extend(self.triangles_at(origin, rotation));
         hulls
     }
     fn at(&self, origin: Vec3, rotation: Quat) -> Vec<Hull> {
@@ -257,17 +268,41 @@ impl Geometry {
             .iter()
             .map(|s| s.at(origin, rotation))
             .collect::<Vec<_>>();
-        hulls.extend(self.patches.iter().filter_map(|p| {
-            triangle_hull(
-                origin + rotation * p[0],
-                origin + rotation * p[1],
-                origin + rotation * p[2],
-            )
-        }));
+        hulls.extend(self.triangles_at(origin, rotation));
         hulls
     }
 }
 impl Template {
+    /// Preserve triangle order and bit-identical vertices, including degenerate faces.
+    pub fn triangles(triangles: &[[Vec3; 3]]) -> Self {
+        let mut ids = std::collections::BTreeMap::new();
+        let mut vertices = Vec::new();
+        let triangles_indexed = triangles.iter().map(|t| t.map(|v| {
+            *ids.entry(v.to_array().map(f32::to_bits)).or_insert_with(|| {
+                let id = vertices.len(); vertices.push(v); id
+            })
+        })).collect();
+        let mut template = Self::from_parts(Vec::new(), triangles.to_vec());
+        std::sync::Arc::get_mut(&mut template.geometry).unwrap().mesh = Some(Mesh { vertices, triangles: triangles_indexed });
+        template
+    }
+    /// Reuse only identical transform bits; published/lazy hulls remain immutable.
+    pub fn at_for_npcs(&self, origin: Vec3, rotation: Quat) -> Collider {
+        if crate::sim_maps::npc_queries() { self.at_reused(origin, rotation) }
+        else { self.at(origin, rotation) }
+    }
+    pub fn at_reused(&self, origin: Vec3, rotation: Quat) -> Collider {
+        let mut key = [0; 7];
+        key[..3].copy_from_slice(&origin.to_array().map(f32::to_bits));
+        key[3..].copy_from_slice(&rotation.to_array().map(f32::to_bits));
+        let mut last = self.last_lazy.borrow_mut();
+        if let Some((old, collider)) = &*last {
+            if *old == key { return collider.clone(); }
+        }
+        let collider = self.at(origin, rotation);
+        *last = Some((key, collider.clone()));
+        collider
+    }
     pub fn model(map: &Bsp, index: usize) -> Result<Self> {
         Self::load(map, index, true)
     }
@@ -324,13 +359,12 @@ impl Template {
             .copied()
             .reduce(Vec3::min)
             .zip(points.iter().copied().reduce(Vec3::max))
-            .map(|(min, max)| Bounds {
-                min: min - Vec3::splat(0.125),
-                max: max + Vec3::splat(0.125),
-            });
+            .map(|(min, max)| Bounds { min, max });
         Self {
             eager: std::cell::RefCell::default(),
+            last_lazy: std::cell::RefCell::default(),
             geometry: std::sync::Arc::new(Geometry {
+                mesh: None,
                 brushes,
                 patches,
                 bounds,
@@ -375,7 +409,23 @@ impl Template {
                     }
                 }
             }
-            Bounds { min, max }
+            // Triangle prisms transform vertices FIRST, then add their world
+            // thickness. Padding locally can round inward after translation.
+            // For rotated corners, also cover the forward rounding error of
+            // the quaternion multiply and translation (unit quaternions, fewer
+            // than 32 operations, intermediate magnitudes <= 8 * |local|_1).
+            let rounding = if rotation == Quat::IDENTITY {
+                Vec3::ZERO
+            } else {
+                (origin.abs() + Vec3::splat(8. * b.min.abs().max(b.max.abs()).element_sum()))
+                    * (32. * f32::EPSILON)
+            };
+            // Normalization can round a unit normal component one ulp above 1.
+            let padding = Vec3::splat(0.125_f32.next_up()) + rounding;
+            Bounds {
+                min: (min - padding).to_array().map(f32::next_down).into(),
+                max: (max + padding).to_array().map(f32::next_up).into(),
+            }
         });
         Collider {
             hulls: std::sync::Arc::new(Vec::new()),
@@ -396,6 +446,43 @@ impl Template {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn randomized_lazy_bounds_enclose_translated_triangle_hulls() {
+        let mut seed = 0x93a7_514du32;
+        let mut random = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed as f64 / u32::MAX as f64 * 16384. - 8192.) as f32
+        };
+        let mut old_short_bounds = 0;
+        for i in 0..200_000 {
+            let local = vec3(random(), random(), random());
+            let origin = vec3(random(), random(), random());
+            let axis = i % 3;
+            let u = [Vec3::Y, Vec3::Z, Vec3::X][axis];
+            let v = [Vec3::Z, Vec3::X, Vec3::Y][axis];
+            let triangle = [local, local + u * 3.37, local + v * 7.19];
+            let shape = Template::triangles(&[triangle]);
+            let rotation = if i < 100_000 { Quat::IDENTITY } else {
+                Quat::from_euler(glam::EulerRot::ZYX, random(), random(), random())
+            };
+            let collider = shape.at(origin, rotation);
+            let bounds = collider.bounds.unwrap();
+            for hull in collider.hulls() {
+                assert!(bounds.min.cmple(hull.bounds.min).all(), "min placement {i}: {bounds:?} {:?}", hull.bounds);
+                assert!(bounds.max.cmpge(hull.bounds.max).all(), "max placement {i}: {bounds:?} {:?}", hull.bounds);
+                if rotation == Quat::IDENTITY {
+                    let b = shape.geometry.bounds.unwrap();
+                    let old_min = origin + (b.min - Vec3::splat(0.125));
+                    let old_max = origin + (b.max + Vec3::splat(0.125));
+                    old_short_bounds += usize::from(!old_min.cmple(hull.bounds.min).all()
+                        || !old_max.cmpge(hull.bounds.max).all());
+                }
+            }
+        }
+        assert!(old_short_bounds > 0, "random corpus must exercise the original rounding gap");
+    }
     fn brush_map() -> Bsp {
         use crate::bsp::{MapBrush, Model, Shader};
         let box_planes = |min, max| World::fixture(&[(min, max)]).hulls.remove(0).planes;
@@ -708,6 +795,46 @@ mod tests {
             }
         }
     }
+    fn assert_model_bits_at_fan_poses(map: &Bsp, model: usize, base: Vec3, axis: Vec3) {
+        let shape = Template::brush_model(map, model).unwrap();
+        // 49 distinct poses per model; repeat each pose and revisit each rotation
+        // with changed origins to exercise both cache keys and scratch reuse.
+        for degrees in [0.0_f32, 0.0001, 30., 90., 179.99, 270., 359.99] {
+            let rotation = Quat::from_axis_angle(axis, degrees.to_radians());
+            for offset in [Vec3::ZERO, Vec3::X, -Vec3::Y, Vec3::Z * 0.03125,
+                vec3(-4188., 6004., 32.03125), vec3(400., -200., 50.), Vec3::splat(-0.125)] {
+                let origin = base + offset;
+                let old = Collider::model(map, model, origin, rotation, true).unwrap();
+                let expected = old.geometry_bits();
+                assert_eq!(expected, shape.at_eager(origin, rotation).geometry_bits(), "model {model}, {degrees}, {origin:?}");
+                assert_eq!(expected, shape.at_eager(origin, rotation).geometry_bits());
+            }
+        }
+    }
+    #[test]
+    fn eager_fan_fixture_matches_collider_model_bit_for_bit() {
+        let map = brush_map();
+        for model in 0..map.models.len() {
+            for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+                assert_model_bits_at_fan_poses(&map, model, Vec3::ZERO, axis);
+            }
+        }
+    }
+    #[test]
+    #[ignore = "requires user-supplied archives via LOOKING_GLASS_TEST_DATA"]
+    fn tower2_fan_models_match_collider_model_bit_for_bit() {
+        let data = std::env::var_os("LOOKING_GLASS_TEST_DATA").expect("set LOOKING_GLASS_TEST_DATA to the absolute base path");
+        assert!(std::path::Path::new(&data).is_absolute());
+        let mut assets = crate::assets::Assets::open(std::path::Path::new(&data)).unwrap();
+        let map = Bsp::parse(&assets.read("maps/tower2.bsp").unwrap()).unwrap();
+        for (i, axis) in [Vec3::X, Vec3::X, Vec3::Z, Vec3::Y, Vec3::Z].into_iter().enumerate() {
+            let name = format!("fan{:02}", i + 1);
+            let entity = map.entities.iter().find(|e| e.get("targetname") == Some(&name)).unwrap();
+            let model = entity["model"].trim_start_matches('*').parse().unwrap();
+            let base = crate::interaction::vector(&entity["origin"]).unwrap();
+            assert_model_bits_at_fan_poses(&map, model, base, axis);
+        }
+    }
     #[test]
     fn eager_brush_model_matches_legacy_sweeps_and_rider_contacts() {
         let map = brush_map();
@@ -845,6 +972,46 @@ mod tests {
             }
             assert!(clone.lazy.as_ref().unwrap().hulls.get().is_some());
             assert_eq!(lazy.interior_point(), eager.interior_point());
+        }
+    }
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+    fn bits(c: &Collider) -> Vec<u32> {
+        c.hulls().iter().flat_map(|h| {
+            h.bounds.min.to_array().into_iter().chain(h.bounds.max.to_array())
+                .chain(h.planes.iter().flat_map(|p| p.normal.to_array().into_iter().chain([p.distance])))
+                .map(f32::to_bits).collect::<Vec<_>>()
+        }).collect()
+    }
+    #[test]
+    fn indexed_mesh_placements_preserve_world_hull_bits_and_contacts() {
+        let t = vec![
+            [Vec3::ZERO, Vec3::X * 40., Vec3::Y * 30.],
+            [Vec3::ZERO, Vec3::Y * 30., Vec3::Z * 20.],
+            [Vec3::ONE; 3],
+            [vec3(-2., 0.01, 1.), vec3(1., 0., -3.), vec3(4., 2., 0.)],
+        ];
+        let template = Template::triangles(&t);
+        for i in 0..41 {
+            let origin = vec3(i as f32 * 90.1 - 2000., -17.21, 100.31);
+            let rotation = Quat::from_euler(macroquad::prelude::EulerRot::XYZ, i as f32 * 0.23, 0.17, -0.39);
+            let legacy = Collider::triangles(&t, origin, rotation);
+            let cached = template.at_reused(origin, rotation);
+            assert_eq!(bits(&legacy), bits(&cached), "pose {i}");
+            let again = template.at_reused(origin, rotation);
+            assert!(std::sync::Arc::ptr_eq(cached.lazy.as_ref().unwrap(), again.lazy.as_ref().unwrap()));
+            for j in 0..25 {
+                let start = origin + vec3(j as f32 * 5. - 60., -55., 70.);
+                let end = origin + vec3(15., 40., -30.);
+                let a = legacy.trace(start, end, PLAYER_HALF);
+                let b = cached.trace(start, end, PLAYER_HALF);
+                assert_eq!(a.fraction.to_bits(), b.fraction.to_bits());
+                assert_eq!(a.normal, b.normal);
+                assert_eq!((a.start_solid, a.all_solid), (b.start_solid, b.all_solid));
+            }
         }
     }
 }

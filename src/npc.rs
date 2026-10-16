@@ -2615,11 +2615,11 @@ impl Npcs {
         if dt <= 0. { _profile.cancel(); }
         if let Some(mut actors) = self.actor_world.take() {
             actors.copy_dynamic_from(world);
-            let result = self.update_cast(dt, &actors, eye);
+            let result = actors.with_npc_queries(|| self.update_cast(dt, &actors, eye));
             self.actor_world = Some(actors);
             result
         } else {
-            self.update_cast(dt, world, eye)
+            world.with_npc_queries(|| self.update_cast(dt, world, eye))
         }
     }
     fn update_cast(&mut self, dt: f32, world: &World, eye: Vec3) -> combat::Feedback {

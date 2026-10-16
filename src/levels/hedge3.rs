@@ -97,7 +97,7 @@ impl Labyrinth {
     fn rebuild(&mut self) {
         for (o, s) in self.objects.iter_mut().zip(&self.saved.machines) {
             o.pose = o.at(s);
-            o.collider = o.shape.at(o.pose.translation, o.pose.rotation);
+            o.collider = o.shape.at_for_npcs(o.pose.translation, o.pose.rotation);
         }
     }
 }

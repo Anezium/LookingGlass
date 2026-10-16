@@ -26,6 +26,10 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub sim_school_mesh: bool,
+    pub sim_tower_templates: bool,
+    pub sim_npc_queries: bool,
+    pub sim_mechanism_state: bool,
     pub renderer: String,
     /// Exact campaign names, or "*" for every map. Absent preserves pkg-2.
     pub retained_maps: Vec<String>,
@@ -130,6 +134,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            sim_school_mesh: false,
+            sim_tower_templates: false,
+            sim_npc_queries: false,
+            sim_mechanism_state: false,
             renderer: "vita".into(),
             retained_maps: vec!["gvillage".into()],
             legacy_maps: Vec::new(),
@@ -260,6 +268,12 @@ impl Config {
 const CONFIG_PATH: &str = "ux0:data/alice/private/vita_renderer.json";
 #[cfg(not(target_os = "vita"))]
 const CONFIG_PATH: &str = "private/vita_renderer.json";
+#[cfg(test)]
+pub fn config() -> &'static Config {
+    static CONFIG: OnceLock<Config> = OnceLock::new();
+    CONFIG.get_or_init(Config::default)
+}
+#[cfg(not(test))]
 pub fn config() -> &'static Config {
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(|| {
@@ -1878,6 +1892,16 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simulation_switches_require_explicit_opt_in() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.sim_school_mesh && !c.sim_tower_templates
+                && !c.sim_npc_queries && !c.sim_mechanism_state);
+        }
+        let c: Config = serde_json::from_str(r#"{"sim_school_mesh":true,"sim_tower_templates":true,"sim_npc_queries":true,"sim_mechanism_state":true}"#).unwrap();
+        c.validate().unwrap();
+        assert!(c.sim_school_mesh && c.sim_tower_templates && c.sim_npc_queries && c.sim_mechanism_state);
+    }
     #[test]
     fn map_selection_defaults_and_precedence() {
         let mut c: Config = serde_json::from_str("{}").unwrap();

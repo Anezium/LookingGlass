@@ -32,16 +32,31 @@ impl Tower {
     }
     pub(super) fn rebuild(&mut self, map: &Bsp) -> Result<()> {
         for j in 0..self.objects.len() {
-            let (p, r) = self.pose(&self.objects[j]);
-            let o = &mut self.objects[j];
-            if o.pose.translation != p || o.pose.rotation != r {
-                o.collider = Collider::model(map, o.model, p, r, o.name != "water")?;
-                o.pose = Transform {
-                    translation: p,
-                    rotation: r,
-                };
-            }
-            if o.name == "water" {
+            self.rebuild_object(map, j)?;
+        }
+        Ok(())
+    }
+    fn rebuild_object(&mut self, map: &Bsp, j: usize) -> Result<()> {
+        let (p, r) = self.pose(&self.objects[j]);
+        let o = &mut self.objects[j];
+        let changed = o.pose.translation != p || o.pose.rotation != r;
+        if changed {
+            o.collider = if crate::sim_maps::tower_templates() && o.name != "water" {
+                o.shape.at_eager(p, r)
+            } else {
+                Collider::model(map, o.model, p, r, o.name != "water")?
+            };
+            o.pose = Transform {
+                translation: p,
+                rotation: r,
+            };
+        }
+        if o.name == "water" {
+            if crate::sim_maps::tower_templates() {
+                // A changed water collider already contains every brush. The
+                // initial liquid was loaded independently at this same pose.
+                if changed { self.water.volume = o.collider.clone(); }
+            } else {
                 self.water.volume = Collider::model(map, o.model, p, r, false)?;
             }
         }
@@ -144,13 +159,12 @@ impl Tower {
                 for k in 1..=steps {
                     let angle = (before.fans[i] + SPEED[i] * world_dt * k as f32 / steps as f32)
                         .rem_euclid(360.);
-                    let c = Collider::model(
-                        map,
-                        o.model,
-                        o.base,
-                        Quat::from_axis_angle(axis(i), angle.to_radians()),
-                        true,
-                    )?;
+                    let rotation = Quat::from_axis_angle(axis(i), angle.to_radians());
+                    let c = if crate::sim_maps::tower_templates() {
+                        o.shape.at_eager(o.base, rotation)
+                    } else {
+                        Collider::model(map, o.model, o.base, rotation, true)?
+                    };
                     let center = p.feet + PLAYER_CENTER;
                     if c.trace(center, center, PLAYER_HALF).start_solid {
                         blocked = true;
@@ -163,7 +177,8 @@ impl Tower {
                 }
                 m.fans[i] = (before.fans[i] + SPEED[i] * world_dt).rem_euclid(360.);
             }
-            self.rebuild(map)?;
+            if crate::sim_maps::tower_templates() { self.rebuild_object(map, j)?; }
+            else { self.rebuild(map)?; }
             self.sync(w, fixed);
             let o = &self.objects[j];
             let carried = o.pose.translation + o.pose.rotation * local;
@@ -181,7 +196,8 @@ impl Tower {
                 }
             } else {
                 self.saved.machine = Some(before);
-                self.rebuild(map)?;
+                if crate::sim_maps::tower_templates() { self.rebuild_object(map, j)?; }
+                else { self.rebuild(map)?; }
                 self.sync(w, fixed);
             }
         }

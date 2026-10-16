@@ -128,7 +128,7 @@ pub(super) fn load(map: &Bsp) -> Result<Vec<Object>> {
                     translation: base,
                     rotation: Quat::IDENTITY,
                 },
-                collider: shape.at(base, Quat::IDENTITY),
+                collider: shape.at_for_npcs(base, Quat::IDENTITY),
                 shape,
             })
         })
@@ -403,7 +403,7 @@ impl Labyrinth {
                     }
                 };
                 let prev = self.objects[k].pose;
-                let c = self.objects[k].shape.at(pose.translation, pose.rotation);
+                let c = self.objects[k].shape.at_for_npcs(pose.translation, pose.rotation);
                 let hit = c.touches(p.feet + PLAYER_CENTER, p.feet + PLAYER_CENTER, PLAYER_HALF);
                 if ridden || hit {
                     let local = prev.rotation.inverse() * (p.feet - prev.translation);
@@ -467,7 +467,7 @@ impl Labyrinth {
                     self.saved.machines[k].hold = self.objects[k].wait.max(3.);
                 }
                 self.objects[k].pose = old;
-                self.objects[k].collider = self.objects[k].shape.at(old.translation, old.rotation);
+                self.objects[k].collider = self.objects[k].shape.at_for_npcs(old.translation, old.rotation);
                 *p = original;
             } else {
                 self.saved.machines[k] = after;

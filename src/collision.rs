@@ -95,6 +95,7 @@ impl Hull {
     /// the BSP's precomputed bevels alone leaves phantom solid corners outside
     /// the model bounds, so a downward trace can report start-solid at clear feet.
     fn transformed(source: &[Plane], origin: Vec3, rotation: Quat) -> Result<Self> {
+        crate::sim_maps::count("brush_hulls_built", 1);
         #[cfg(target_os = "vita")]
         let _vertices_profile = crate::frame_profile::span("collider_vertices");
         let mut vertices = Vec::<Vec3>::new();
@@ -354,6 +355,7 @@ impl Collider {
         rotation: Quat,
         solids_only: bool,
     ) -> Result<Self> {
+        crate::sim_maps::count("collider_model_calls", 1);
         let model = map
             .models
             .get(index)
@@ -549,6 +551,8 @@ impl Default for Trace {
 }
 #[derive(Debug)]
 pub struct World {
+    query_cache: std::cell::RefCell<std::collections::HashMap<[u32; 9], Trace>>,
+    query_cache_active: std::cell::Cell<bool>,
     pub traversal: crate::traversal::Traversal,
     dynamic: Vec<Collider>,
     dynamic_bounds: Option<Bounds>,
@@ -570,6 +574,30 @@ pub struct World {
 }
 
 impl World {
+    /// Scope exact static/settled query reuse to one immutable NPC update. Dynamic
+    /// colliders are still swept on every request. Entries never survive a publication; scratch capacity is reused.
+    pub fn with_npc_queries<T>(&self, run: impl FnOnce() -> T) -> T {
+        if !crate::sim_maps::npc_queries() { return run(); }
+        struct Reset<'a>(&'a World);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.0.query_cache.borrow_mut().clear();
+                self.0.query_cache_active.set(false);
+            }
+        }
+        // Nested users share the outer scope rather than discarding its entries.
+        if self.query_cache_active.replace(true) { return run(); }
+        debug_assert!(self.query_cache.borrow().is_empty());
+        let _reset = Reset(self);
+        run()
+    }
+    fn query_key(start: Vec3, end: Vec3, half: Vec3) -> [u32; 9] {
+        let mut key = [0; 9];
+        key[..3].copy_from_slice(&start.to_array().map(f32::to_bits));
+        key[3..6].copy_from_slice(&end.to_array().map(f32::to_bits));
+        key[6..].copy_from_slice(&half.to_array().map(f32::to_bits));
+        key
+    }
     pub fn from_bsp(map: &Bsp) -> Result<Self> {
         Self::from_bsp_mask(map, PLAYER_MASK)
     }
@@ -652,6 +680,8 @@ impl World {
         };
         Ok(Self {
             traversal: crate::traversal::Traversal::load(map)?,
+            query_cache: std::cell::RefCell::default(),
+            query_cache_active: std::cell::Cell::new(false),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             #[cfg(test)]
@@ -733,6 +763,7 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        crate::sim_maps::count("world_sweeps", 1);
         #[cfg(test)]
         if self.legacy_dynamic_sweeps {
             return self.sweep_geometry_legacy(start, end, half);
@@ -798,6 +829,12 @@ impl World {
     }
     /// Static support probes for hanging; moving/rotating entities are excluded.
     pub fn ledge_trace(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        let key = Self::query_key(start, end, half);
+        if let Some(hit) = self.query_cache.borrow().get(&key).copied() {
+            crate::sim_maps::count("static_query_hits", 1);
+            return hit;
+        }
+        crate::sim_maps::count("static_queries_executed", 1);
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::LedgeTraceCalls, 1);
@@ -823,7 +860,12 @@ impl World {
             });
         }
         for c in &self.settled_supports {
+            // Match dynamic collision's conservative broad phase, including SKIN.
+            // Test the placement before asking a lazy template for its hulls.
+            if crate::sim_maps::npc_queries() && c.bounds.is_none_or(|b| !query.overlaps(b)) { continue; }
             for hull in c.hulls().iter() {
+                if crate::sim_maps::npc_queries() && !query.overlaps(hull.bounds) { continue; }
+                crate::sim_maps::count("settled_hull_tests", 1);
                 #[cfg(target_os = "vita")]
                 {
                     support_hulls += 1;
@@ -836,6 +878,11 @@ impl World {
             add_counter(Counter::StaticHullsTested, tested);
             add_counter(Counter::StaticHullsClipped, clipped);
             add_counter(Counter::SettledHullsClipped, support_hulls);
+        }
+        if self.query_cache_active.get() {
+            let mut cache = self.query_cache.borrow_mut();
+            // Bound scratch memory even when a large cast issues unique queries.
+            if cache.len() < 4096 { cache.insert(key, result); }
         }
         result
     }
@@ -995,6 +1042,8 @@ impl World {
             ))
         };
         Self {
+            query_cache: std::cell::RefCell::default(),
+            query_cache_active: std::cell::Cell::new(false),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             #[cfg(test)]
@@ -1083,6 +1132,7 @@ fn clip_hull(hull: &Hull, start: Vec3, end: Vec3, half: Vec3, result: &mut Trace
 // A thin, two-sided triangular prism. Face and edge/axis bevels describe the
 // Minkowski expansion for a box. Tessellation is an approximation of curved patches.
 fn triangle_hull(a: Vec3, b: Vec3, c: Vec3) -> Option<Hull> {
+    crate::sim_maps::count("triangle_hulls_built", 1);
     let cross = (b - a).cross(c - a);
     if cross.length_squared() < 1e-6 {
         return None;
@@ -1352,3 +1402,82 @@ mod tests {
 
 #[cfg(test)]
 mod performance_tests;
+
+#[cfg(test)]
+mod sim_query_tests {
+    use super::*;
+    fn bits(t: Trace) -> [u32; 6] {
+        [t.fraction.to_bits(), t.normal.x.to_bits(), t.normal.y.to_bits(), t.normal.z.to_bits(), t.start_solid as u32, t.all_solid as u32]
+    }
+    #[test]
+    fn settled_pruning_and_scoped_reuse_keep_exact_traces_and_invalidate() {
+        let mut world = World::fixture(&[(vec3(-200., -200., -20.), vec3(200., 200., 0.))]);
+        world.set_settled_supports((-8..=8).map(|x| Collider::box_bounds(vec3(x as f32 * 100., -30., 20.), vec3(x as f32 * 100. + 40., 30., 60.))).collect());
+        let mut probes = Vec::new();
+        for x in -30..=30 {
+            for delta in [Vec3::ZERO, Vec3::Z * 200., vec3(150., -80., 120.)] {
+                for half in [Vec3::ZERO, Vec3::ONE, PLAYER_HALF] {
+                    let at = vec3(x as f32 * 15. + SKIN, -0., 60. + SKIN);
+                    probes.push((at + delta, at - delta, half));
+                }
+            }
+        }
+        let reference = crate::sim_maps::with_test_switches([false; 4], || probes.iter().map(|&(a,b,h)| bits(world.ledge_trace(a,b,h))).collect::<Vec<_>>());
+        crate::sim_maps::with_test_switches([false,false,true,false], || {
+            world.with_npc_queries(|| {
+                for ((a,b,h), expected) in probes.iter().copied().zip(reference) {
+                    assert_eq!(bits(world.ledge_trace(a,b,h)), expected);
+                    assert_eq!(bits(world.ledge_trace(a,b,h)), expected);
+                }
+                assert_eq!(world.query_cache.borrow().len(), probes.len());
+            });
+            assert!(world.query_cache.borrow().is_empty());
+            assert!(!world.query_cache_active.get());
+            let high = vec3(20.,0.,100.); let low = vec3(20.,0.,10.);
+            assert!(world.with_npc_queries(|| world.ledge_trace(high,low,Vec3::ZERO)).fraction < 1.);
+            world.set_settled_supports(Vec::new());
+            assert_eq!(world.with_npc_queries(|| world.ledge_trace(high,low,Vec3::ZERO)).fraction, 1.);
+        });
+    }
+    #[test]
+    fn scoped_query_scratch_retains_capacity_and_clears_on_unwind() {
+        crate::sim_maps::with_test_switches([false, false, true, false], || {
+            let world = World::fixture(&[]);
+            world.with_npc_queries(|| {
+                for i in 0..5000 {
+                    world.ledge_trace(Vec3::X * i as f32, Vec3::ZERO, Vec3::ZERO);
+                }
+                assert_eq!(world.query_cache.borrow().len(), 4096);
+                world.with_npc_queries(|| assert_eq!(world.query_cache.borrow().len(), 4096));
+            });
+            let capacity = world.query_cache.borrow().capacity();
+            assert!(capacity >= 4096);
+            for _ in 0..3 {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    world.with_npc_queries(|| {
+                        assert!(world.query_cache.borrow().is_empty());
+                        world.ledge_trace(Vec3::ZERO, Vec3::Z, Vec3::ZERO);
+                        panic!("exercise scope cleanup");
+                    });
+                }));
+                assert!(result.is_err());
+                assert!(!world.query_cache_active.get());
+                assert!(world.query_cache.borrow().is_empty());
+                assert_eq!(world.query_cache.borrow().capacity(), capacity);
+            }
+            world.ledge_trace(Vec3::ZERO, Vec3::Z, Vec3::ZERO);
+            assert!(world.query_cache.borrow().is_empty());
+        });
+    }
+    #[test]
+    fn distant_settled_template_stays_lazy() {
+        let t = model_shape::Template::triangles(&[[Vec3::ZERO, Vec3::X * 30., Vec3::Y * 30.]]);
+        let c = t.at(Vec3::splat(2000.), Quat::IDENTITY);
+        let mut world = World::fixture(&[]);
+        world.set_settled_supports(vec![c.clone()]);
+        crate::sim_maps::with_test_switches([false,false,true,false], || {
+            assert_eq!(world.ledge_trace(Vec3::ZERO,Vec3::Z,PLAYER_HALF).fraction, 1.);
+            assert!(c.lazy.as_ref().unwrap().pending());
+        });
+    }
+}

@@ -11,6 +11,8 @@ default = []
 vita_renderer = []
 # Optional actor publication counters; no calls or argument work in regular builds.
 actor_diagnostics = ["vita_renderer"]
+# Host-only deterministic live-window diagnostics; never used for console packages.
+sim_maps_probe = []
 
 [dependencies]
 anyhow = "1.0"
