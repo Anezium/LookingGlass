@@ -27,6 +27,8 @@ pub fn config() -> macroquad::conf::Conf {
     let (width, height, high_dpi) = (960, 544, false);
     #[cfg(not(target_os = "vita"))]
     let (width, height, high_dpi) = (1200, 680, true);
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let (width, height, high_dpi) = if crate::sim_maps::probe::enabled() { (960, 544, false) } else { (width, height, high_dpi) };
     macroquad::conf::Conf {
         miniquad_conf: Conf {
             window_title: "Looking Glass".into(),
@@ -1064,6 +1066,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
             }
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        crate::sim_maps::probe::begin();
         crate::light_profile::cpu_begin();
         if !(menu || inventory_menu || console.open || paused) {crate::character::skinning_bench_begin();}
         crate::frame_phases::mark(1);
@@ -1242,6 +1246,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let freeze_capture = opening_escape_menu || pending_menu_save.is_some() || pending_menu_newgame.is_some() || quit_after_frame;
         if freeze_capture { paused = true; clock.pause(); }
         let elapsed = get_frame_time();
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let elapsed = crate::sim_maps::probe::elapsed(elapsed);
         #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
         let elapsed=if let Some(r)=&mut route_session {(elapsed-r.recording_pause_seconds()).max(0.)}else{elapsed};
         let mut weapon_click;
@@ -1255,6 +1261,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut loot_before = interactions.loot_sources();
         loot_before.extend(npcs.loot_sources());
         let focused = window_focused() || route_running;
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let focused = focused || crate::sim_maps::probe::enabled();
         if !focused && was_focused {
             paused = true;
             clock.pause();
@@ -4019,6 +4027,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(not(target_os="vita"))]
         if !route_running {crate::frame_profile::end_creation_frame();}
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        if crate::sim_maps::probe::enabled() {
+            crate::sim_maps::probe::end(frame, &maps[current], active, &serde_json::json!({
+                "player": player, "stats": stats, "interactions": interactions.snapshot(),
+                "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
+                "character": alice.snapshot(), "environment_clock": environment_clock,
+                "pickup_clock": pickup_clock, "transforms": transforms,
+            }));
+        }
         frame += 1;
         if !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(

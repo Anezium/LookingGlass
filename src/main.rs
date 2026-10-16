@@ -1,3 +1,4 @@
+mod sim_maps;
 mod acting;
 mod ambient_animation;
 mod animation_events;

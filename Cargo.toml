@@ -9,6 +9,8 @@ description = "Local Rust compatibility research for user-supplied Alice game da
 [features]
 default = []
 vita_renderer = []
+# Host-only deterministic live-window diagnostics; never used for console packages.
+sim_maps_probe = []
 
 [dependencies]
 anyhow = "1.0"

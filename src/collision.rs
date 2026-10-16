@@ -95,6 +95,7 @@ impl Hull {
     /// the BSP's precomputed bevels alone leaves phantom solid corners outside
     /// the model bounds, so a downward trace can report start-solid at clear feet.
     fn transformed(source: &[Plane], origin: Vec3, rotation: Quat) -> Result<Self> {
+        crate::sim_maps::count("brush_hulls_built", 1);
         #[cfg(target_os = "vita")]
         let _vertices_profile = crate::frame_profile::span("collider_vertices");
         let mut vertices = Vec::<Vec3>::new();
@@ -354,6 +355,7 @@ impl Collider {
         rotation: Quat,
         solids_only: bool,
     ) -> Result<Self> {
+        crate::sim_maps::count("collider_model_calls", 1);
         let model = map
             .models
             .get(index)
@@ -733,6 +735,7 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        crate::sim_maps::count("world_sweeps", 1);
         #[cfg(test)]
         if self.legacy_dynamic_sweeps {
             return self.sweep_geometry_legacy(start, end, half);
@@ -824,6 +827,7 @@ impl World {
         }
         for c in &self.settled_supports {
             for hull in c.hulls().iter() {
+                crate::sim_maps::count("settled_hull_tests", 1);
                 #[cfg(target_os = "vita")]
                 {
                     support_hulls += 1;
@@ -1083,6 +1087,7 @@ fn clip_hull(hull: &Hull, start: Vec3, end: Vec3, half: Vec3, result: &mut Trace
 // A thin, two-sided triangular prism. Face and edge/axis bevels describe the
 // Minkowski expansion for a box. Tessellation is an approximation of curved patches.
 fn triangle_hull(a: Vec3, b: Vec3, c: Vec3) -> Option<Hull> {
+    crate::sim_maps::count("triangle_hulls_built", 1);
     let cross = (b - a).cross(c - a);
     if cross.length_squared() < 1e-6 {
         return None;

@@ -160,7 +160,13 @@ impl Convex {
     }
 }
 #[derive(Debug)]
+struct Mesh {
+    vertices: Vec<Vec3>,
+    triangles: Vec<[usize; 3]>,
+}
+#[derive(Debug)]
 struct Geometry {
+    mesh: Option<Mesh>,
     brushes: Vec<Convex>,
     patches: Vec<[Vec3; 3]>,
     bounds: Option<Bounds>,
@@ -177,6 +183,7 @@ struct EagerCache {
 pub struct Template {
     geometry: std::sync::Arc<Geometry>,
     eager: std::cell::RefCell<EagerCache>,
+    last_lazy: std::cell::RefCell<Option<([u32; 7], Collider)>>,
 }
 #[derive(Debug)]
 pub(super) struct Placed {
@@ -195,11 +202,20 @@ impl Placed {
                 let _profile = crate::frame_profile::span("collider_lazy_build");
                 #[cfg(target_os = "vita")]
                 add_counter(Counter::LazyHullBuilds, 1);
+                crate::sim_maps::count("lazy_hull_builds", 1);
                 self.geometry.at(self.origin, self.rotation)
             })
     }
 }
 impl Geometry {
+    fn triangles_at(&self, origin: Vec3, rotation: Quat) -> Vec<Hull> {
+        if let Some(mesh) = &self.mesh {
+            let points = mesh.vertices.iter().map(|v| origin + rotation * *v).collect::<Vec<_>>();
+            mesh.triangles.iter().filter_map(|t| triangle_hull(points[t[0]], points[t[1]], points[t[2]])).collect()
+        } else {
+            self.patches.iter().filter_map(|p| triangle_hull(origin + rotation * p[0], origin + rotation * p[1], origin + rotation * p[2])).collect()
+        }
+    }
     fn at_cached(&self, origin: Vec3, rotation: Quat, cache: &mut EagerCache) -> Vec<Hull> {
         // No epsilon or quaternion sign equivalence: only identical input bits
         // may reuse rotated normals. Translation never affects their selection.
@@ -242,13 +258,7 @@ impl Geometry {
             });
         }
         cache.rotation = key;
-        hulls.extend(self.patches.iter().filter_map(|p| {
-            triangle_hull(
-                origin + rotation * p[0],
-                origin + rotation * p[1],
-                origin + rotation * p[2],
-            )
-        }));
+        hulls.extend(self.triangles_at(origin, rotation));
         hulls
     }
     fn at(&self, origin: Vec3, rotation: Quat) -> Vec<Hull> {
@@ -257,17 +267,37 @@ impl Geometry {
             .iter()
             .map(|s| s.at(origin, rotation))
             .collect::<Vec<_>>();
-        hulls.extend(self.patches.iter().filter_map(|p| {
-            triangle_hull(
-                origin + rotation * p[0],
-                origin + rotation * p[1],
-                origin + rotation * p[2],
-            )
-        }));
+        hulls.extend(self.triangles_at(origin, rotation));
         hulls
     }
 }
 impl Template {
+    /// Preserve triangle order and bit-identical vertices, including degenerate faces.
+    pub fn triangles(triangles: &[[Vec3; 3]]) -> Self {
+        let mut ids = std::collections::BTreeMap::new();
+        let mut vertices = Vec::new();
+        let triangles_indexed = triangles.iter().map(|t| t.map(|v| {
+            *ids.entry(v.to_array().map(f32::to_bits)).or_insert_with(|| {
+                let id = vertices.len(); vertices.push(v); id
+            })
+        })).collect();
+        let mut template = Self::from_parts(Vec::new(), triangles.to_vec());
+        std::sync::Arc::get_mut(&mut template.geometry).unwrap().mesh = Some(Mesh { vertices, triangles: triangles_indexed });
+        template
+    }
+    /// Reuse only identical transform bits; published/lazy hulls remain immutable.
+    pub fn at_reused(&self, origin: Vec3, rotation: Quat) -> Collider {
+        let mut key = [0; 7];
+        key[..3].copy_from_slice(&origin.to_array().map(f32::to_bits));
+        key[3..].copy_from_slice(&rotation.to_array().map(f32::to_bits));
+        let mut last = self.last_lazy.borrow_mut();
+        if let Some((old, collider)) = &*last {
+            if *old == key { return collider.clone(); }
+        }
+        let collider = self.at(origin, rotation);
+        *last = Some((key, collider.clone()));
+        collider
+    }
     pub fn model(map: &Bsp, index: usize) -> Result<Self> {
         Self::load(map, index, true)
     }
@@ -330,7 +360,9 @@ impl Template {
             });
         Self {
             eager: std::cell::RefCell::default(),
+            last_lazy: std::cell::RefCell::default(),
             geometry: std::sync::Arc::new(Geometry {
+                mesh: None,
                 brushes,
                 patches,
                 bounds,
@@ -845,6 +877,46 @@ mod tests {
             }
             assert!(clone.lazy.as_ref().unwrap().hulls.get().is_some());
             assert_eq!(lazy.interior_point(), eager.interior_point());
+        }
+    }
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+    fn bits(c: &Collider) -> Vec<u32> {
+        c.hulls().iter().flat_map(|h| {
+            h.bounds.min.to_array().into_iter().chain(h.bounds.max.to_array())
+                .chain(h.planes.iter().flat_map(|p| p.normal.to_array().into_iter().chain([p.distance])))
+                .map(f32::to_bits).collect::<Vec<_>>()
+        }).collect()
+    }
+    #[test]
+    fn indexed_mesh_placements_preserve_world_hull_bits_and_contacts() {
+        let t = vec![
+            [Vec3::ZERO, Vec3::X * 40., Vec3::Y * 30.],
+            [Vec3::ZERO, Vec3::Y * 30., Vec3::Z * 20.],
+            [Vec3::ONE; 3],
+            [vec3(-2., 0.01, 1.), vec3(1., 0., -3.), vec3(4., 2., 0.)],
+        ];
+        let template = Template::triangles(&t);
+        for i in 0..41 {
+            let origin = vec3(i as f32 * 90.1 - 2000., -17.21, 100.31);
+            let rotation = Quat::from_euler(macroquad::prelude::EulerRot::XYZ, i as f32 * 0.23, 0.17, -0.39);
+            let legacy = Collider::triangles(&t, origin, rotation);
+            let cached = template.at_reused(origin, rotation);
+            assert_eq!(bits(&legacy), bits(&cached), "pose {i}");
+            let again = template.at_reused(origin, rotation);
+            assert!(std::sync::Arc::ptr_eq(cached.lazy.as_ref().unwrap(), again.lazy.as_ref().unwrap()));
+            for j in 0..25 {
+                let start = origin + vec3(j as f32 * 5. - 60., -55., 70.);
+                let end = origin + vec3(15., 40., -30.);
+                let a = legacy.trace(start, end, PLAYER_HALF);
+                let b = cached.trace(start, end, PLAYER_HALF);
+                assert_eq!(a.fraction.to_bits(), b.fraction.to_bits());
+                assert_eq!(a.normal, b.normal);
+                assert_eq!((a.start_solid, a.all_solid), (b.start_solid, b.all_solid));
+            }
         }
     }
 }

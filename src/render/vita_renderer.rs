@@ -26,6 +26,10 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub sim_school_mesh: bool,
+    pub sim_tower_templates: bool,
+    pub sim_npc_queries: bool,
+    pub sim_mechanism_state: bool,
     pub renderer: String,
     /// Exact campaign names, or "*" for every map. Absent preserves pkg-2.
     pub retained_maps: Vec<String>,
@@ -128,6 +132,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            sim_school_mesh: true,
+            sim_tower_templates: false,
+            sim_npc_queries: false,
+            sim_mechanism_state: false,
             renderer: "vita".into(),
             retained_maps: vec!["gvillage".into()],
             legacy_maps: Vec::new(),
