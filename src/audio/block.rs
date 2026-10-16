@@ -166,6 +166,9 @@ pub struct Effect {
     /// Interpolation weights for the in-between frames, identical to load-time
     /// resampling: `(k * rate) / 44100` for k in 0..(1 << shift).
     weights: [f32; 4],
+    /// Pan applied at the end of the last audible block; None after a
+    /// virtual block, where the sink's gain fade covers the re-entry.
+    pan: Option<[f32; 2]>,
     virtualized: bool,
     parameters: bool,
 }
@@ -185,6 +188,7 @@ impl Effect {
             tail: 0,
             shift,
             weights,
+            pan: None,
             virtualized: false,
             parameters: settings().parameters,
         }
@@ -212,6 +216,7 @@ impl Effect {
         if !audible {
             if !self.virtualized {
                 self.filter.clear();
+                self.pan = None;
                 self.virtualized = true;
             }
             let frames = out.len() / 2;
@@ -233,14 +238,16 @@ impl Effect {
         }
         self.virtualized = false;
         let mut n = 0;
-        let l = f32::from_bits(self.pcm.pan.left.load(std::sync::atomic::Ordering::Relaxed));
-        let r = f32::from_bits(
-            self.pcm
-                .pan
-                .right
-                .load(std::sync::atomic::Ordering::Relaxed),
-        );
-        for frame in out.chunks_exact_mut(2) {
+        let target = [
+            f32::from_bits(self.pcm.pan.left.load(std::sync::atomic::Ordering::Relaxed)),
+            f32::from_bits(self.pcm.pan.right.load(std::sync::atomic::Ordering::Relaxed)),
+        ];
+        // Pan moves linearly across the block instead of stepping at its start.
+        let [l0, r0] = self.pan.unwrap_or(target);
+        let frames = (out.len() / 2) as f32;
+        let (dl, dr) = ((target[0] - l0) / frames, (target[1] - r0) / frames);
+        self.pan = Some(target);
+        for (i, frame) in out.chunks_exact_mut(2).enumerate() {
             if self.pcm.index / 2 >= len {
                 if self.pcm.looping {
                     self.pcm.index = 0;
@@ -253,8 +260,9 @@ impl Effect {
             }
             let dry = self.fetch(self.pcm.index / 2);
             self.pcm.index += 2;
-            frame[0] = dry * l;
-            frame[1] = dry * r;
+            let t = (i + 1) as f32;
+            frame[0] = dry * (l0 + dl * t);
+            frame[1] = dry * (r0 + dr * t);
             n += 2;
         }
         // Clips are decoded at load; this is PCM fetch, 2x/4x interpolation and spatial.
@@ -325,6 +333,39 @@ mod tests {
                 assert_eq!(native.pcm.index, resampled.pcm.index);
             }
         }
+    }
+    #[test]
+    fn pan_and_reflection_changes_ramp_across_the_block() {
+        let clip = super::super::Clip { samples: vec![0.5; 4410].into(), rate: 22050 };
+        let pan = super::super::Pan::new();
+        pan.set(1., 0.);
+        let controls = acoustics::Controls::new();
+        let mut effect = Effect::new(Pcm { clip, index: 0, looping: true, pan: pan.clone() }, controls.clone());
+        effect.parameters = true;
+        let mut block = [0.; 1024];
+        let mut prev: Option<[f32; 2]> = None;
+        let mut worst = 0f32;
+        for n in 0..24 {
+            // Hard-left to hard-right, then an open room switching on.
+            if n == 12 {
+                pan.set(0., 1.);
+            }
+            if n == 18 {
+                controls.set(0., false, 1.);
+            }
+            effect.render(&mut block, true);
+            for frame in block.chunks_exact(2) {
+                if let Some([l, r]) = prev {
+                    if n >= 8 {
+                        worst = worst.max((frame[0] - l).abs()).max((frame[1] - r).abs());
+                    }
+                }
+                prev = Some([frame[0], frame[1]]);
+            }
+        }
+        // A stepped pan would jump by 0.5, the reflections by about 0.1.
+        assert!(worst < 0.003, "largest step {worst}");
+        assert!(block[1023] > 0.5 && block[1022] < 0.05, "{:?}", &block[1022..]);
     }
     #[test]
     fn resampling_is_continuous_across_blocks_and_preserves_eof() {

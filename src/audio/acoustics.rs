@@ -65,25 +65,32 @@ pub fn room(world: &World, ear: Vec3) -> f32 {
         .sum::<f32>()
         / 6.
 }
-/// Shared DSP recurrence for the block path. Coefficients and wet gain can be
-/// snapshotted once per 512-frame block (11.61 ms maximum control granularity).
+/// Shared DSP recurrence for the block path. Coefficients can be snapshotted
+/// once per 512-frame block (11.61 ms maximum control granularity); the wet
+/// gain then ramps from the previous block's value instead of stepping.
 pub struct FilterState {
-    controls: Arc<Controls>, low:[f32;2], delays:[Vec<f32>;2], cursors:[usize;2], rate:u32, cutoff:u32, alpha:f32, wet:f32,
+    controls: Arc<Controls>, low:[f32;2], delays:[Vec<f32>;2], cursors:[usize;2], rate:u32, cutoff:u32, alpha:f32, wet:f32, primed:bool,
 }
 impl FilterState {
-    pub fn new(rate:u32,controls:Arc<Controls>)->Self {let cutoff=controls.cutoff.load(Ordering::Relaxed);let alpha=1.-(-std::f32::consts::TAU*f32::from_bits(cutoff)/rate as f32).exp();Self{controls,cutoff,alpha,wet:0.,low:[0.;2],delays:[vec![0.;(rate as f32*0.047) as usize],vec![0.;(rate as f32*0.071) as usize]],cursors:[0;2],rate}}
+    pub fn new(rate:u32,controls:Arc<Controls>)->Self {let cutoff=controls.cutoff.load(Ordering::Relaxed);let alpha=1.-(-std::f32::consts::TAU*f32::from_bits(cutoff)/rate as f32).exp();Self{controls,cutoff,alpha,wet:0.,primed:false,low:[0.;2],delays:[vec![0.;(rate as f32*0.047) as usize],vec![0.;(rate as f32*0.071) as usize]],cursors:[0;2],rate}}
     fn refresh(&mut self){let cutoff=self.controls.cutoff.load(Ordering::Relaxed);if cutoff!=self.cutoff{self.cutoff=cutoff;self.alpha=1.-(-std::f32::consts::TAU*f32::from_bits(cutoff)/self.rate as f32).exp();}self.wet=f32::from_bits(self.controls.wet.load(Ordering::Relaxed));}
-    pub fn clear(&mut self){self.low=[0.;2];for d in &mut self.delays{d.fill(0.);}}
+    pub fn clear(&mut self){self.low=[0.;2];for d in &mut self.delays{d.fill(0.);}self.primed=false;}
     pub fn process(&mut self, samples:&mut[f32],block:bool){
+        let from=self.wet;
         self.refresh();
+        let to=self.wet;
+        let from=if self.primed {from} else {to};
+        self.primed=true;
+        let step=(to-from)/(samples.len()/2).max(1) as f32;
         for (i,v) in samples.iter_mut().enumerate(){
-            if !block {self.refresh();}
+            if !block {self.refresh();} else {self.wet=from+step*(i/2+1) as f32;}
             let ch=i&1;self.low[ch]+=self.alpha*(*v-self.low[ch]);
             let j=self.cursors[ch];let reflection=self.delays[ch][j];
             self.delays[ch][j]=self.low[ch]+reflection*0.32;
             self.cursors[ch]+=1;if self.cursors[ch]==self.delays[ch].len(){self.cursors[ch]=0;}
             *v=self.low[ch]+reflection*self.wet;
         }
+        if block {self.wet=to;}
     }
 }
 pub struct Filter<S> {
