@@ -260,6 +260,12 @@ impl Config {
 const CONFIG_PATH: &str = "ux0:data/alice/private/vita_renderer.json";
 #[cfg(not(target_os = "vita"))]
 const CONFIG_PATH: &str = "private/vita_renderer.json";
+#[cfg(test)]
+pub fn config() -> &'static Config {
+    static CONFIG: OnceLock<Config> = OnceLock::new();
+    CONFIG.get_or_init(Config::default)
+}
+#[cfg(not(test))]
 pub fn config() -> &'static Config {
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(|| {

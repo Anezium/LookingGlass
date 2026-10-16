@@ -4,10 +4,10 @@ macro_rules! switch {
     ($name:ident, $field:ident, $index:expr) => {
         pub fn $name() -> bool {
             #[cfg(test)]
-            if let Some(switches) = TEST_SWITCHES.with(|s| s.get()) { return switches[$index]; }
-            #[cfg(feature = "vita_renderer")]
+            { test_switches()[$index] }
+            #[cfg(all(not(test), feature = "vita_renderer"))]
             { crate::render::vita_renderer::config().$field }
-            #[cfg(not(feature = "vita_renderer"))]
+            #[cfg(all(not(test), not(feature = "vita_renderer")))]
             { false }
         }
     };
@@ -29,6 +29,19 @@ pub mod probe;
 
 #[cfg(test)]
 thread_local! { static TEST_SWITCHES: std::cell::Cell<Option<[bool; 4]>> = const { std::cell::Cell::new(None) }; }
+/// Unit tests never consult a working-directory renderer config. A whole-suite
+/// arm is selected before process startup; individual tests can override it.
+#[cfg(test)]
+fn test_switches() -> [bool; 4] {
+    TEST_SWITCHES.with(|s| s.get()).unwrap_or_else(|| {
+        static DEFAULTS: std::sync::OnceLock<[bool; 4]> = std::sync::OnceLock::new();
+        *DEFAULTS.get_or_init(|| match std::env::var("LOOKING_GLASS_TEST_SIM_SWITCHES").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("off") => [false; 4],
+            Ok("on") => [true; 4],
+            _ => panic!("LOOKING_GLASS_TEST_SIM_SWITCHES must be off or on"),
+        })
+    })
+}
 #[cfg(test)]
 pub(crate) fn with_test_switches<T>(switches: [bool; 4], run: impl FnOnce() -> T) -> T {
     struct Reset(Option<[bool; 4]>);
