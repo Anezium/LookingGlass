@@ -169,10 +169,10 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 impl Default for Config {
     fn default() -> Self {
         Self {
-            sim_school_mesh: false,
-            sim_tower_templates: false,
-            sim_npc_queries: false,
-            sim_mechanism_state: false,
+            sim_school_mesh: true,
+            sim_tower_templates: true,
+            sim_npc_queries: true,
+            sim_mechanism_state: true,
             renderer: "vita".into(),
             retained_maps: vec!["*".into()],
             legacy_maps: Vec::new(),
@@ -1936,10 +1936,10 @@ pub(crate) async fn visualizer(
 mod tests {
     use super::*;
     #[test]
-    fn simulation_switches_require_explicit_opt_in() {
+    fn simulation_switches_default_on_after_console_acceptance() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
-            assert!(!c.sim_school_mesh && !c.sim_tower_templates
-                && !c.sim_npc_queries && !c.sim_mechanism_state);
+            assert!(c.sim_school_mesh && c.sim_tower_templates
+                && c.sim_npc_queries && c.sim_mechanism_state);
         }
         let c: Config = serde_json::from_str(r#"{"sim_school_mesh":true,"sim_tower_templates":true,"sim_npc_queries":true,"sim_mechanism_state":true}"#).unwrap();
         c.validate().unwrap();
