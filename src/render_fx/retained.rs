@@ -824,11 +824,14 @@ fn merge_cached_mode<'a>(
         let versions = certified.then_some(&version_storage);
         let old_version = pool.get(&target).map(|g|g.version);
         let local_hit = local_reuse && old_version.is_some_and(|old| cache.outputs.get(&target) == Some(&old));
-        let same_topology = (hit || local_hit) && versions.as_ref().zip(cache.versions.get(&target)).is_some_and(|(a,b)|
+        // Even a globally unchanged signature must certify the recycled output:
+        // the other alpha/opaque bank can have occupied this target meanwhile.
+        let certified_hit = if local_reuse { local_hit } else { hit };
+        let same_topology = certified_hit && versions.as_ref().zip(cache.versions.get(&target)).is_some_and(|(a,b)|
             a.len()==b.len() && a.iter().zip(b).all(|(a,b)|a.identity==b.identity && a.topology==b.topology));
         let mut cached = pool.remove(&target);
         if let Some(previous) = cached.as_ref() {
-            let version_hit = (hit || local_hit) && versions.is_some_and(|v| cache.versions.get(&target) == Some(v));
+            let version_hit = certified_hit && versions.is_some_and(|v| cache.versions.get(&target) == Some(v));
             if version_hit || hit && versions.is_none() && unchanged_merged(previous, groups, target, sources) {
                 if !hit && local_hit { count("fx_merge_local_vertex_hits", 1); }
                 let cached = cached.take().unwrap();
@@ -896,7 +899,7 @@ fn merge_cached_mode<'a>(
             cache.version_scratch.insert(target, previous);
             let texture = groups[target].passes[0].mesh.texture.clone();
             let mesh = std::mem::replace(&mut groups[target].passes[0].mesh, Mesh { vertices: Vec::new(), indices: Vec::new(), texture });
-            let geometry = super::prepared::Geometry::merged(mesh, if hit || local_hit {old_version} else {None}, same_topology);
+            let geometry = super::prepared::Geometry::merged(mesh, if certified_hit {old_version} else {None}, same_topology);
             if local_reuse { cache.outputs.insert(target, geometry.version); }
             groups[target].passes[0].geometry = Some(std::rc::Rc::new(geometry));
         } else { cache.version_scratch.insert(target, version_storage); cache.outputs.remove(&target); }
@@ -1413,6 +1416,31 @@ mod tests {
                 assert_eq!(preserved, if local {2} else {0});
             });
         }
+    }
+    #[test]
+    fn unchanged_plan_rejects_recycled_geometry_from_a_different_merge_bank() {
+        crate::sim_maps::with_r2_switches([false, false, true], || {
+            let mut caches = [MergeCache::default(), MergeCache::default()];
+            let mut pool = BTreeMap::new();
+            let mut publications = (0..3).map(|_| super::super::prepared::Cache::default()).collect::<Vec<_>>();
+            for frame in 0..8 {
+                let mut baseline = (0..3).map(|i| {
+                    let mut g = fixture_group(); g.passes[0].mesh.vertices[0].position.x = i as f32; g
+                }).collect::<Vec<_>>();
+                let mut changed = baseline.iter().map(|g| {
+                    let mut copy = fixture_group(); copy.passes[0].mesh = super::super::copy_mesh(&g.passes[0].mesh); copy
+                }).collect::<Vec<_>>();
+                for (g,c) in changed.iter_mut().zip(&mut publications) { g.passes[0].geometry = Some(c.observe(&g.passes[0].mesh,None)); }
+                let (source, rest) = if frame % 2 == 0 {(1,2)} else {(2,1)};
+                let mut order = vec![(4.,Source::Actor(0)),(3.,Source::Actor(source)),(2.,Source::World(0)),(1.,Source::Actor(rest))];
+                let mut expected = order.clone(); merge_adjacent(&mut baseline,&mut expected);
+                let ids = merge_cached_mode(&mut caches[frame % 2],&mut changed,&mut order,false,true,&mut pool,true).to_vec();
+                assert_eq!(order.iter().map(|x|x.1).collect::<Vec<_>>(),expected.iter().map(|x|x.1).collect::<Vec<_>>());
+                assert!(vertices_equal(&changed[0].passes[0].geometry().vertices,&baseline[0].passes[0].geometry().vertices));
+                assert_eq!(changed[0].passes[0].geometry().indices,baseline[0].passes[0].geometry().indices);
+                for id in ids { let g = changed[id].passes[0].geometry.take().unwrap(); pool.insert(id,std::rc::Rc::try_unwrap(g).ok().unwrap()); }
+            }
+        });
     }
     #[test]
     fn uniform_and_vertex_layout_preserve_legacy_shader() {
