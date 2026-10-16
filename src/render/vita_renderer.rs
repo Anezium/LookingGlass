@@ -24,7 +24,7 @@ pub enum Clocks {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(remote = "Self", default, deny_unknown_fields)]
 pub struct Config {
     pub sim_school_mesh: bool,
     pub sim_tower_templates: bool,
@@ -133,6 +133,29 @@ pub struct Config {
     pub opaque_order:String,
     pub world_alpha:bool,
 }
+// The remote derive keeps one strict field schema while letting us distinguish
+// omitted actor preparation from an explicit request before applying defaults.
+impl serde::Serialize for Config {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        Config::serialize(self, serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for Config {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+        let actor_explicit = value.get("actor_single_prepare").is_some();
+        let overlap_explicit = value.get("skin_overlap").is_some();
+        let mut c = Config::deserialize(value).map_err(serde::de::Error::custom)?;
+        // A worker-count kill switch also disables implicitly enabled overlap.
+        // Explicit overlap=true with zero workers remains a validation error.
+        if c.skin_workers == 0 && !overlap_explicit { c.skin_overlap = false; }
+        if !actor_explicit && c.actor_single_prepare && !c.actor_single_prepare_active() {
+            c.actor_single_prepare = false;
+            eprintln!("[lg/vita-renderer] warning default actor_single_prepare inactive: prerequisite disabled; preserving configuration");
+        }
+        Ok(c)
+    }
+}
 // A malformed name is local to its entry; serde still rejects unknown keys/types.
 fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Vec<String>, D::Error> {
     let mut maps = <Vec<String> as serde::Deserialize>::deserialize(deserializer)?;
@@ -164,7 +187,7 @@ impl Default for Config {
             render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
-            profiler: None, skin_worker_bench: false, fx_prepare_cache: true,
+            profiler: Some(crate::light_profile::Level::Light), skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             mover_far_lazy: true,
@@ -178,9 +201,9 @@ impl Default for Config {
             alpha_interop: true,
             actor_max_layers: 2,
             merge_fx: true,
-            fx_batching:"adjacent".into(),fx_streaming:"orphan".into(),fx_merge_cache:true,fx_upload_cache:false,fx_max_layers:2,actor_fast_path:true,
+            fx_batching:"material".into(),fx_streaming:"ring".into(),fx_merge_cache:true,fx_upload_cache:true,fx_max_layers:1,actor_fast_path:true,
             fx_ring_safe: true,
-            actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:false,
+            actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:true,
             bone_palette: false,
             skin_frustum_cull: true,
             fast_frustum: true,
@@ -196,10 +219,10 @@ impl Default for Config {
             pvs_cache: false,
             pvs_method: "sources".into(),
             pvs_verify: false,
-            gpu_experiment: "unchanged".into(),
+            gpu_experiment: "gpu222".into(),
             world_viewport_scale: 1.,
             depth_sentinel: false, scaled_depth_fix: true,
-            render_scale:1.,msaa_samples:1,quality:"full".into(),opaque_order:"front_to_back".into(),world_alpha:true,
+            render_scale:0.75,msaa_samples:1,quality:"low".into(),opaque_order:"front_to_back".into(),world_alpha:true,
         }
     }
 }
@@ -239,12 +262,12 @@ impl Config {
         }
     }
     pub(crate) fn actor_single_prepare_active(&self)->bool {
-        self.actor_single_prepare && self.skin_overlap && self.actor_fast_path && self.actor_layer_cache
+        self.actor_single_prepare && self.skin_overlap && self.skin_workers > 0 && self.actor_fast_path && self.actor_layer_cache
             && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
     }
     fn validate(&self) -> Result<()> {
         ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
-            "actor_single_prepare requires renderer=vita, skin_overlap=true, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
+            "actor_single_prepare requires renderer=vita, skin_overlap=true, skin_workers>0, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
         ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
@@ -2054,6 +2077,25 @@ mod tests {
         }
         assert!(Config::default().actor_single_prepare_active());
     }
+    #[test]
+    fn implicit_actor_preparation_preserves_kill_switches() {
+        for (key, value) in [("renderer", serde_json::json!("legacy")),
+            ("skin_overlap", serde_json::json!(false)), ("skin_workers", serde_json::json!(0)),
+            ("actor_fast_path", serde_json::json!(false)), ("actor_layer_cache", serde_json::json!(false)),
+            ("actor_layer_reuse", serde_json::json!(true)), ("fx_prepare_cache", serde_json::json!(false))] {
+            let input = serde_json::json!({key: value, "retained_maps": ["gvillage"], "render_scale": 0.5});
+            let c: Config = serde_json::from_value(input.clone()).unwrap();
+            c.validate().unwrap();
+            assert!(!c.actor_single_prepare && !c.actor_single_prepare_active(), "{key}");
+            assert_eq!(c.retained_maps, ["gvillage"]);
+            assert_eq!(c.render_scale, 0.5);
+            assert_eq!(serde_json::to_value(&c).unwrap()[key], value);
+            let mut explicit = input;
+            explicit["actor_single_prepare"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<Config>(explicit).unwrap().validate().is_err(), "{key}");
+        }
+    }
+    #[test]
     fn j17_switches_preserve_console_selected_defaults_and_strict_types() {
         let default=serde_json::to_value(Config::default()).unwrap();
         for name in ["lights_early_out","fx_submit_state_cache","actor_layer_reuse"] {
@@ -2080,7 +2122,7 @@ mod tests {
     #[test]
     fn profiler_and_worker_bench_configuration_is_strict() {
         for level in ["light","full"] {
-            let c:Config=serde_json::from_value(serde_json::json!({"profiler":level,"skin_worker_bench":true,"skin_overlap":false,"skin_workers":0,"actor_single_prepare":false})).unwrap();
+            let c:Config=serde_json::from_value(serde_json::json!({"profiler":level,"skin_worker_bench":true,"skin_overlap":false,"skin_workers":0})).unwrap();
             c.validate().unwrap(); assert!(c.skin_worker_bench); assert_eq!(c.skin_workers,0);
         }
         assert!(serde_json::from_value::<Config>(serde_json::json!({"profiler":"silent"})).is_err());
@@ -2090,11 +2132,11 @@ mod tests {
     #[test]
     fn j12_switches_are_strict_and_have_required_defaults() {
         let c=Config::default();
-        assert_eq!(c.skin_workers,2); assert_eq!(c.profiler,None); assert!(!c.skin_worker_bench); assert!(c.fx_prepare_cache);
+        assert_eq!(c.skin_workers,2); assert_eq!(c.profiler,Some(crate::light_profile::Level::Light)); assert!(!c.skin_worker_bench); assert!(c.fx_prepare_cache);
         assert!(!c.worker_probe && !c.frame_phase_probe);
         for workers in 0..=2 {
             let c:Config=serde_json::from_value(serde_json::json!({"skin_workers":workers,"skin_overlap":workers>0,
-                "worker_probe":true,"fx_prepare_cache":false,"frame_phase_probe":true,"actor_single_prepare":false})).unwrap();
+                "worker_probe":true,"fx_prepare_cache":false,"frame_phase_probe":true})).unwrap();
             assert!(c.validate().is_ok());
         }
         for value in [serde_json::json!({"skin_workers":3}),serde_json::json!({"skin_workers":-1}),
@@ -2204,7 +2246,7 @@ mod tests {
         assert_eq!(Config::default().clocks, Clocks::Max);
         let lean: Config = serde_json::from_str(include_str!("../../configs/vita_renderer.lean.json")).unwrap();
         assert_eq!(lean.clocks, Clocks::Max);
-        assert_eq!(lean.gpu_experiment, "unchanged");
+        assert_eq!(lean.gpu_experiment, "gpu222");
     }
     #[test]
     fn clocks_accept_explicit_max() {
