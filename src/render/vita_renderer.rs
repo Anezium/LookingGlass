@@ -111,6 +111,8 @@ pub struct Config {
     pub gpu_uniform_dedupe: bool,
     /// SDK logo thread is disabled by default; the LG opening film is unaffected.
     pub startup_splash:bool,
+    /// Human fallback only; preserves normal game/renderer policy when off.
+    pub story_film_bypass: bool,
     /// Persistent binary pairs; process deduplication remains active when off.
     pub shader_cache: String,
     /// Optional cache of exact device-compressed immutable pixels.
@@ -212,6 +214,7 @@ impl Default for Config {
             gpu_state_probe: false,
             gpu_index_dedupe: false, gpu_uniform_dedupe: false,
             startup_splash:false,
+            story_film_bypass: false,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
             route_heading_lock:true,
@@ -2187,6 +2190,14 @@ mod tests {
             for value in field { *value = f32::from_bits(next); next += 1; }
         }
         assert_eq!(u.bits().to_vec(), (1..144).collect::<Vec<u32>>());
+    }
+    #[test]
+    fn story_film_bypass_is_explicit_and_default_off() {
+        let default: Config = serde_json::from_str("{}").unwrap();
+        assert!(!default.story_film_bypass);
+        let bypass: Config = serde_json::from_str(r#"{"story_film_bypass":true}"#).unwrap();
+        assert!(bypass.story_film_bypass && bypass.validate().is_ok());
+        assert!(serde_json::from_str::<Config>(r#"{"story_film_bypass":"true"}"#).is_err());
     }
     #[test]
     fn j10_switches_default_on_and_validate_legacy_settings() {

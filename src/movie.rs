@@ -345,6 +345,13 @@ fn decode_target(decoded: usize, wanted: usize, frames: usize) -> usize {
     wanted.min(frames).min(decoded.saturating_add(DECODE_BUDGET))
 }
 
+pub fn bypass_requested() -> bool {
+    #[cfg(feature = "vita_renderer")]
+    { crate::render::vita_renderer::config().story_film_bypass }
+    #[cfg(not(feature = "vita_renderer"))]
+    { false }
+}
+
 /// Returns false when the window was closed; true when watched or deliberately skipped.
 pub async fn play(
     assets: &mut Assets,
@@ -361,6 +368,11 @@ pub async fn play(
     if crate::frame_profile::story_movies_blocked() {
         skip.event("bypass reason=benchmark");
         skip.handoff("benchmark-bypass");
+        return Ok(true);
+    }
+    if bypass_requested() {
+        skip.event("bypass reason=explicit-config validation_started=false");
+        skip.handoff("config-bypass");
         return Ok(true);
     }
     let path = format!("video/{name}.roq");

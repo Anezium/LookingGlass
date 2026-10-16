@@ -81,5 +81,6 @@
   "msaa_samples": 1,
   "quality": "low",
   "opaque_order": "front_to_back",
-  "world_alpha": true
+  "world_alpha": true,
+  "story_film_bypass": false
 }

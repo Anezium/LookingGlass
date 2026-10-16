@@ -1002,6 +1002,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         && opening_requested
         && options.frames.is_none()
     {
+        #[cfg(feature = "vita_renderer")]
+        anyhow::ensure!(!(crate::movie::bypass_requested()
+            && route_session.as_ref().is_some_and(|r| r.needs_opening())),
+            "New Game route requires the opening film; disable story_film_bypass");
         match crate::movie::play(
             &mut assets,
             &mut audio,
