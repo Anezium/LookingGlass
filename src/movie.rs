@@ -5,6 +5,7 @@ use crate::{assets::Assets, audio::Audio, input::Input, preferences::Preferences
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::*;
 use std::io::{self, Read};
+use std::time::{Duration, Instant};
 
 fn word(b: &[u8], at: usize) -> Result<u16> {
     Ok(u16::from_le_bytes(
@@ -69,7 +70,9 @@ pub struct Video {
     pub fps: u16,
     pub frames: usize,
     pub decoded: usize,
-    cells: [[u8; 6]; 256],
+    // Conversion is paid once per changed codebook, never per drawn pixel.
+    cells: [[[u8; 4]; 4]; 256],
+    pub last_convert: Duration,
     groups: [[u8; 4]; 256],
     previous: Vec<u8>,
     working: Vec<u8>,
@@ -131,7 +134,8 @@ impl Video {
             fps,
             frames,
             decoded: 0,
-            cells: [[0, 0, 0, 0, 128, 128]; 256],
+            cells: [[[0, 0, 0, 255]; 4]; 256],
+            last_convert: Duration::ZERO,
             groups: [[0; 4]; 256],
             previous: blank.clone(),
             working: blank,
@@ -142,17 +146,9 @@ impl Video {
     }
     fn cell(&mut self, index: usize, x: usize, y: usize, scale: usize) {
         let c = self.cells[index];
-        let cb = c[4] as f32 - 128.;
-        let cr = c[5] as f32 - 128.;
         for row in 0..2 * scale {
             for col in 0..2 * scale {
-                let l = c[row / scale * 2 + col / scale] as f32;
-                let pixel = [
-                    (l + 1.402 * cr).round().clamp(0., 255.) as u8,
-                    (l - 0.344136 * cb - 0.714136 * cr).round().clamp(0., 255.) as u8,
-                    (l + 1.772 * cb).round().clamp(0., 255.) as u8,
-                    255,
-                ];
+                let pixel = c[row / scale * 2 + col / scale];
                 let start = ((y + row) * self.width as usize + x + col) * 4;
                 self.working[start..start + 4].copy_from_slice(&pixel);
             }
@@ -207,6 +203,7 @@ impl Video {
         Ok(())
     }
     pub fn next(&mut self, reader: &mut impl Read) -> Result<bool> {
+        self.last_convert = Duration::ZERO;
         if !self.started {
             ensure!(
                 header(reader)? == self.fps,
@@ -237,9 +234,21 @@ impl Video {
                         size == cells * 6 + groups * 4,
                         "Invalid movie codebook length"
                     );
+                    let converting = Instant::now();
                     for (i, cell) in bytes[..cells * 6].chunks_exact(6).enumerate() {
-                        self.cells[i].copy_from_slice(cell);
+                        let cb = cell[4] as f32 - 128.;
+                        let cr = cell[5] as f32 - 128.;
+                        for (pixel, &l) in self.cells[i].iter_mut().zip(&cell[..4]) {
+                            let l = l as f32;
+                            *pixel = [
+                                (l + 1.402 * cr).round().clamp(0., 255.) as u8,
+                                (l - 0.344136 * cb - 0.714136 * cr).round().clamp(0., 255.) as u8,
+                                (l + 1.772 * cb).round().clamp(0., 255.) as u8,
+                                255,
+                            ];
+                        }
                     }
+                    self.last_convert += converting.elapsed();
                     for (i, group) in bytes[cells * 6..].chunks_exact(4).enumerate() {
                         self.groups[i].copy_from_slice(group);
                     }
@@ -285,32 +294,55 @@ impl Video {
     }
 }
 
-#[cfg(target_os = "vita")]
+/// Per-film timing samples are bounded by the validated 600-second frame limit.
+#[derive(Default)]
+struct Samples(Vec<f64>);
+impl Samples {
+    fn push(&mut self, duration: Duration) { self.0.push(duration.as_secs_f64() * 1000.); }
+    fn summary(&mut self) -> String {
+        self.0.sort_by(f64::total_cmp);
+        let n = self.0.len();
+        if n == 0 { return "n=0".into(); }
+        format!("n={n},p50={:.3},p95={:.3},max={:.3}",
+            self.0[n / 2], self.0[(n - 1) * 95 / 100], self.0[n - 1])
+    }
+}
 struct MovieEndLog {
     name: String,
     frames: usize,
     duration: f64,
-    played: std::cell::Cell<f64>,
+    started: Instant,
+    played: f64,
+    reason: &'static str,
+    decode: Samples,
+    convert: Samples,
+    upload: Samples,
+    dropped: usize,
+    stalls: usize,
+    #[cfg(target_os = "vita")]
     peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
-#[cfg(target_os = "vita")]
 impl MovieEndLog {
-    fn note(&self, played: f64) {
-        self.played.set(played);
+    fn decoded(&mut self, total: Duration, convert: Duration) {
+        self.decode.push(total.saturating_sub(convert));
+        self.convert.push(convert);
     }
 }
-#[cfg(target_os = "vita")]
 impl Drop for MovieEndLog {
     fn drop(&mut self) {
-        eprintln!(
-            "story movie {} end: frames={} duration={:.2}s played={:.2}s reader_peak={}",
-            self.name,
-            self.frames,
-            self.duration,
-            self.played.get(),
-            self.peak.load(std::sync::atomic::Ordering::Relaxed)
-        );
+        eprintln!("[lg/film] id={} owner=roq end={} frames={} nominal_s={:.3} wall_s={:.3} soundtrack_s={:.3} dropped_presentations={} backpressure={} decode_read_ms=[{}] convert_ms=[{}] upload_ms=[{}]",
+            self.name, self.reason, self.frames, self.duration, self.started.elapsed().as_secs_f64(), self.played,
+            self.dropped, self.stalls, self.decode.summary(), self.convert.summary(), self.upload.summary());
+        #[cfg(target_os = "vita")]
+        eprintln!("[lg/film] id={} reader_peak={}", self.name, self.peak.load(std::sync::atomic::Ordering::Relaxed));
     }
+}
+// RoQ motion references require every frame to be decoded. Drop intermediate
+// presentations, not dependencies. If even this budget cannot catch the clock,
+// pause the soundtrack while draining debt across input/presentation boundaries.
+const DECODE_BUDGET: usize = 2;
+fn decode_target(decoded: usize, wanted: usize, frames: usize) -> usize {
+    wanted.min(frames).min(decoded.saturating_add(DECODE_BUDGET))
 }
 
 /// Returns false when the window was closed; true when watched or deliberately skipped.
@@ -332,28 +364,29 @@ pub async fn play(
     let path = format!("video/{name}.roq");
     let mut video = Video::new(assets.open_stream(&path)?)?;
     let mut reader = assets.open_stream(&path)?;
-    video.next(&mut reader)?;
-    let texture = crate::texture::upload_dynamic_rgba8(video.width, video.height, video.pixels());
-    #[cfg(target_os = "vita")]
-    let duration = video.frames as f64 / video.fps as f64;
-    #[cfg(target_os = "vita")]
-    eprintln!(
-        "story movie {name} start: frames={} duration={duration:.2}s",
-        video.frames
-    );
-    #[cfg(target_os = "vita")]
-    let movie_log = MovieEndLog {
-        name: name.to_owned(),
-        frames: video.frames,
-        duration,
-        played: std::cell::Cell::new(0.),
+    let mut movie_log = MovieEndLog {
+        name: name.to_owned(), frames: video.frames,
+        duration: video.frames as f64 / video.fps as f64,
+        started: Instant::now(), played: 0., reason: "error",
+        decode: Samples::default(), convert: Samples::default(), upload: Samples::default(),
+        dropped: 0, stalls: 0,
+        #[cfg(target_os = "vita")]
         peak: reader.peak_counter(),
     };
+    let decoding = Instant::now();
+    video.next(&mut reader)?;
+    movie_log.decoded(decoding.elapsed(), video.last_convert);
+    let uploading = Instant::now();
+    let texture = crate::texture::upload_dynamic_rgba8(video.width, video.height, video.pixels());
+    movie_log.upload.push(uploading.elapsed());
+    eprintln!("[lg/film] id={name} owner=roq start frames={} nominal_s={:.3} decode_budget={DECODE_BUDGET}", video.frames, movie_log.duration);
     texture.set_filter(FilterMode::Linear);
     audio.update(0., Vec3::ZERO, 0., true, true);
     let soundtrack = audio.movie_sound(assets, &format!("video/{name}.mp3"))?;
     let mut elapsed = 0_f64;
     let mut paused = false;
+    let mut clock_at = Instant::now();
+    let mut backpressure = false;
     let mut skip = crate::cinematic::Skip::default();
     input.suppress();
     // Clear the menu confirmation press before arming the movie's skip control.
@@ -368,8 +401,8 @@ pub async fn play(
             if let Some(s) = &soundtrack {
                 s.stop();
             }
-            #[cfg(target_os = "vita")]
-            movie_log.note(elapsed);
+            movie_log.played = elapsed;
+            movie_log.reason = "quit";
             return Ok(false);
         }
         if focused && (input.ui(KeyCode::P) || input.pad_pressed("Start")
@@ -378,12 +411,15 @@ pub async fn play(
         }
         let active = focused && !paused;
         if let Some(s) = &soundtrack {
-            if active {
+            if active && !backpressure {
                 s.play();
             } else {
                 s.pause();
             }
         }
+        let now = Instant::now();
+        let wall_dt = now.duration_since(clock_at).as_secs_f64();
+        clock_at = now;
         let dt = get_frame_time().clamp(0., 0.1);
         if skip.update(
             Some("story-movie"),
@@ -391,25 +427,37 @@ pub async fn play(
             input.key(preferences, KeyCode::Enter, false) || input.pad_held("A"),
             dt,
         ) {
+            movie_log.reason = "skipped";
             break;
         }
         if active {
-            elapsed += dt as f64;
+            if !backpressure { elapsed += wall_dt; }
             if let Some(s) = soundtrack.as_ref().filter(|s| !s.empty()) {
                 elapsed = s.get_pos().as_secs_f64();
             }
             let wanted = (elapsed * video.fps as f64) as usize + 1;
-            #[cfg(target_os = "vita")]
-            movie_log.note(elapsed);
-            if wanted > video.frames {
-                break;
+            movie_log.played = elapsed;
+            let target = decode_target(video.decoded, wanted, video.frames);
+            backpressure = target < wanted.min(video.frames);
+            if backpressure {
+                movie_log.stalls += 1;
+                if let Some(s) = &soundtrack { s.pause(); }
             }
             let before = video.decoded;
-            while video.decoded < wanted {
+            while video.decoded < target {
+                let decoding = Instant::now();
                 ensure!(video.next(&mut reader)?, "Incomplete movie decode");
+                movie_log.decoded(decoding.elapsed(), video.last_convert);
             }
             if video.decoded != before {
+                movie_log.dropped += (video.decoded - before).saturating_sub(1);
+                let uploading = Instant::now();
                 texture.update_from_bytes(video.width as u32, video.height as u32, video.pixels());
+                movie_log.upload.push(uploading.elapsed());
+            }
+            if wanted > video.frames && video.decoded == video.frames {
+                movie_log.reason = "complete";
+                break;
             }
         }
         clear_background(BLACK);
@@ -443,8 +491,7 @@ pub async fn play(
     }
     input.suppress();
     next_frame().await;
-    #[cfg(target_os = "vita")]
-    movie_log.note(elapsed);
+    movie_log.played = elapsed;
     Ok(true)
 }
 
@@ -523,6 +570,18 @@ mod tests {
         assert!(video.next(&mut truncated)?);
         assert!(video.next(&mut truncated).is_err());
         Ok(())
+    }
+    #[test]
+    fn catchup_budget_preserves_dependencies_and_caps_each_poll() {
+        let mut decoded = 1;
+        for _ in 0..100 {
+            let next = decode_target(decoded, 3000, 3731);
+            assert!(next - decoded <= 2);
+            decoded = next;
+        }
+        assert_eq!(decoded, 201);
+        assert_eq!(decode_target(3730, usize::MAX, 3731), 3731);
+        assert_eq!(decode_target(10, 5, 3731), 5);
     }
     #[test]
     fn movie_bounds_and_truncation_are_checked() {
