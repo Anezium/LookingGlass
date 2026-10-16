@@ -119,6 +119,7 @@ struct Object {
     base: Vec3,
     pose: Transform,
     collider: Collider,
+    shape: crate::collision::model_shape::Template,
 }
 struct Tower {
     objects: Vec<Object>,
@@ -151,6 +152,7 @@ impl Tower {
                         rotation: Quat::IDENTITY,
                     },
                     collider: Collider::model(map, model, base, Quat::IDENTITY, true)?,
+                    shape: crate::collision::model_shape::Template::brush_model(map, model)?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

@@ -133,7 +133,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             sim_school_mesh: true,
-            sim_tower_templates: false,
+            sim_tower_templates: true,
             sim_npc_queries: false,
             sim_mechanism_state: false,
             renderer: "vita".into(),

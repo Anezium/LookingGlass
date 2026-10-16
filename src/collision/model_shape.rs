@@ -224,6 +224,7 @@ impl Geometry {
         cache.normals.resize_with(self.brushes.len(), Vec::new);
         let mut hulls = Vec::with_capacity(self.brushes.len() + self.patches.len());
         for (brush, normals) in self.brushes.iter().zip(&mut cache.normals) {
+            crate::sim_maps::count("template_brush_hulls_placed", 1);
             if reorient {
                 brush.orient(rotation, &mut cache.edges, normals);
             }
