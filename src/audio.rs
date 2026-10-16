@@ -2017,6 +2017,55 @@ mod tests {
         audio.finish()?;
         Ok(())
     }
+    /// Identical village emitter set, listener, cadence and deterministic player
+    /// footsteps for A/B; no device scheduling or game simulation is involved.
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA and an idle timing host"]
+    fn mix_profile() -> Result<()> {
+        use std::time::Instant;
+        let root=PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let mut assets=Assets::open(&root)?;
+        let map=Bsp::parse(&assets.read("maps/gvillage.bsp")?)?;
+        let world=World::from_bsp(&map)?;
+        let mut audio=Audio::new(true,None);
+        let (mixer,source)=output::mixer();
+        audio.playback=Some(Playback{_stream:None,mixer,_worker:None});
+        let mut monitor=Monitor{source,data:audio.monitor.clone(),block:Vec::with_capacity(1024),record:false};
+        audio.load(&mut assets,"gvillage",&map);
+        assert_eq!(audio.emitters.len(),20);
+        audio.scene_presented();
+        let eye=vec3(-4144.,6120.,280.);
+        let mut times=Vec::new();
+        for block in 0..1800 {
+            if block%3==0 {
+                audio.prepare(&mut assets,&world,eye,false,512.*3./44100.);
+                audio.update(512.*3./44100.,eye,0.,false,false);
+                if block%45==0 {audio.movement(80.,true,false,false);}
+            }
+            let start=Instant::now();
+            for _ in 0..1024 { std::hint::black_box(monitor.next()); }
+            if block>=90 {times.push(start.elapsed().as_secs_f64()*1000.);}
+        }
+        times.sort_by(f64::total_cmp);let n=times.len();
+        println!("MIX_PROFILE n={n} p50_ms={:.6} p95_ms={:.6} max_ms={:.6} emitters=20 simulated_seconds={:.3}",times[n/2],times[(n-1)*95/100],times[n-1],1800.*512./44100.);
+        // Differential, batched source stages: same village clips, no per-sample clocks.
+        for stage in 0..3 {
+            let mut sum=0.;
+            for e in &audio.emitters {
+                let pcm=Pcm{clip:e.clip.clone(),index:0,looping:true,pan:e.pan.clone()};
+                let mut source:Box<dyn Source<Item=f32>>=match stage {
+                    0=>Box::new(pcm),
+                    1=>Box::new(acoustics::Filter::new(pcm,e.acoustics.clone())),
+                    _=>Box::new(rodio::source::UniformSourceIterator::new(acoustics::Filter::new(pcm,e.acoustics.clone()),2,44100))
+                };
+                let start=Instant::now();
+                for _ in 0..1024*200 {std::hint::black_box(source.next());}
+                sum+=start.elapsed().as_secs_f64()*1000./200.;
+            }
+            println!("MIX_STAGE cumulative_stage={stage} all_emitters_ms={sum:.6}");
+        }
+        Ok(())
+    }
     #[test]
     fn level_music_stays_paused_until_presentation_even_if_update_runs() {
         let mut audio = Audio::new(true, None);
