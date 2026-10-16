@@ -324,6 +324,7 @@ impl Art {
         clock: f32,
     ) {
         use macroquad::prelude::*;
+        let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::PickupOther);
         let _objects = crate::frame_profile::object_totals();
         if self.effect_visit != visit || clock < self.effect_clock {
             self.essence.clear_effects();
@@ -336,10 +337,14 @@ impl Art {
         self.effect_clock = clock;
         self.essence.begin_frame();
         for e in self.collection_fx.values() { e.begin_frame(); }
-        self.material.atmosphere(atmosphere, camera);
-        self.material.bind();
+        {
+            let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::PickupResource);
+            self.material.atmosphere(atmosphere, camera);
+            self.material.bind();
+        }
         let mut essences = Vec::new();
         for item in items {
+            let select = crate::light_profile::probe_timer(crate::light_profile::Probe::PickupSelect);
             if stats.collected.contains(&item.id)
                 || camera.distance_squared(item.origin) > 2500. * 2500.
             {
@@ -373,6 +378,7 @@ impl Art {
                 }
                 crate::inventory::PickupKind::Weapon(_) => continue,
             };
+            drop(select);
             let _mesh = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::MeshLayers);
             prop.draw_frame(
                 crate::skeletal::Transform {
@@ -400,8 +406,8 @@ impl Art {
         }
         // These authored bursts live at most 3 seconds. Keep a short tail,
         // bounded even if many items are collected between rendered frames.
-        self.collected
-            .retain(|(_, _, start, _)| (0. ..=4.).contains(&(clock - start)));
+        { let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::PickupSelect);
+            self.collected.retain(|(_, _, start, _)| (0. ..=4.).contains(&(clock - start))); }
         crate::render::depth_read_only(|| {
             for (model, origin, start, id) in &self.collected {
                 self.collection_fx[model].draw(Some(&format!("collection:{id}")), clock - start, *origin, 0., camera, atmosphere);
@@ -409,7 +415,7 @@ impl Art {
         });
         self.essence.end_frame();
         for e in self.collection_fx.values() { e.end_frame(); }
-        gl_use_default_material();
+        { let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::PickupResource); gl_use_default_material(); }
     }
 }
 

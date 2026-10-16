@@ -1699,6 +1699,7 @@ impl Attached {
         birth_pose: impl Fn(f32, Option<&str>) -> crate::skeletal::Transform,
         enabled: impl Fn(&str, f32, bool) -> bool,
     ) {
+        let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::AttachedSample);
         self.steam.puffs.clear();
         self.live_births.clear();
         let mut previous = if self.reuse_scratch { Default::default() } else { std::mem::take(&mut self.births) };

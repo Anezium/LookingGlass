@@ -18,6 +18,7 @@
   "uniform_field_cache": true,
   "render_draw_timing": false,
   "worker_probe": false,
+  "sim_span_probe": false,
   "skin_workers": 2,
   "skin_overlap": true,
   "lights_early_out": true,

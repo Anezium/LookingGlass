@@ -419,9 +419,9 @@ impl Store {
         let start = std::time::Instant::now();
         let completed = self.pending > 0;
         let mut panic = None;
-        for worker in &mut self.workers[..self.pending] {
+        for (index, worker) in self.workers[..self.pending].iter_mut().enumerate() {
             match worker.wait_result() {
-                Ok(m) => self.service_us += m.ns / 1000,
+                Ok(m) => { self.service_us += m.ns / 1000; crate::light_profile::probe_skin_service(index, m.ns); },
                 Err(p) => {
                     if panic.is_none() {
                         panic = Some(p);

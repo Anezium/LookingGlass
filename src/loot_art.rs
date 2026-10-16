@@ -145,6 +145,7 @@ impl Art {
                 crate::render_fx::retained::count("vita_fx_dropped_layers", (self.layers[i].len() - limit) as u64);
             }
             for layer in &self.layers[i][..limit] {
+                { let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::PropLayerNumeric);
                 for (v, &base) in mesh.vertices.iter_mut().zip(&uv) {
                     v.uv = layer.spec.view_uv(
                         base,
@@ -154,6 +155,8 @@ impl Art {
                         clock,
                     );
                 }
+                }
+                let _resource = crate::light_profile::probe_timer(crate::light_profile::Probe::PropPublishResource);
                 mesh.texture = Some(layer.texture.clone());
                 if crate::render_fx::active() {
                     if let Ok(p) = crate::render_fx::pass(

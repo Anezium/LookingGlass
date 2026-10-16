@@ -352,3 +352,15 @@ mod persistent_tests {
         assert!(flag.load(Ordering::Acquire));
     }
 }
+
+/// Kernel running time is in microseconds, independent of CPU frequency.
+#[cfg(target_os = "vita")]
+pub(crate) fn current_runtime() -> Result<(i32, u64, i32, i32), i32> {
+    unsafe {
+        let id = sceKernelGetThreadId();
+        let mut info: ThreadInfo = std::mem::zeroed();
+        info.size = std::mem::size_of::<ThreadInfo>() as u32;
+        let rc = sceKernelGetThreadInfo(id, &mut info);
+        if rc < 0 { Err(rc) } else { Ok((id, info.run_clocks, info.affinity, info.priority)) }
+    }
+}
