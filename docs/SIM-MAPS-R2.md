@@ -38,10 +38,16 @@ new keys and otherwise fall back to all renderer defaults.
 ## Mac validation, 16 October 2026
 
 Runtime checkpoint `f9ef6ba` passes four independent/combined 13-map off/on
-campaigns: 4,800 frame hashes per arm per campaign, 19,200 exact comparisons,
-and 52 identical live PNG pairs. The original eight-map r3c baseline hashes
+campaigns: each gate runs 4,800 frames per arm across 13 maps (12 x 300
+plus funhouse x 1,200); 19,200 is four gates x 4,800 paired frame-hash
+comparisons. Image parity is one final frame per map per gate (52 PNG pairs),
+not an image comparison on every frame. The original eight-map r3c baseline hashes
 also match with the new switches off. The saved-scene renderer fixture adds
 15 identical image pairs, including camera, material-clock and fullbright variants.
+Frame hashes cover simulation state, not `fx_merge_local_reuse` geometry or draw
+output. The FX reuse proof consists of the exact geometry/certificate unit tests
+and the sampled final-frame/renderer-fixture image pairs; it does not establish
+per-frame image parity throughout those windows.
 Both full unit suites pass 881 tests with zero failures and three explicit ignores;
 the real-data fan fixture passes separately in both arms. Native tower2/hedge3
 checks and routes plus funhouse checks pass in both arms. The final guard changes
@@ -61,3 +67,15 @@ the pinned vitaGL archive/header and game archives are unchanged. The production
 ELF excludes the host probe. No console timing, memory or fidelity acceptance is
 claimed; all three candidates remain default off. Private ANALYSIS.md,
 FINAL-VERIFICATION.json, checksums and PROTOCOL.md provide the complete handoff.
+
+## Review follow-up
+
+The fan pose tests now compare every lazy `Template::at` hull's ordered plane
+normal/distance bits and min/max bound bits directly with `Collider::model`
+(`Hull::transformed`), on synthetic fixtures and all five real tower2 fans.
+The lazy placement's outer broadphase box is conservative by design; it is not
+substituted for the individual hull comparisons. Synthetic and real-data tests
+pass in both off/on arms using the shared Mac host target and timing lock.
+No production behavior changes in this follow-up; the three defaults stay false.
+The owned entry, whole-inventory restoration, 60-second frame-stat watchdog and
+skool2 entry-camera protocol is [SIM-MAPS-R2-PROTOCOL.md](SIM-MAPS-R2-PROTOCOL.md).
