@@ -799,7 +799,7 @@ mod tests {
         let shape = Template::brush_model(map, model).unwrap();
         // 49 distinct poses per model; repeat each pose and revisit each rotation
         // with changed origins to exercise both cache keys and scratch reuse.
-        for degrees in [0._f32, 0.0001, 30., 90., 179.99, 270., 359.99] {
+        for degrees in [0.0_f32, 0.0001, 30., 90., 179.99, 270., 359.99] {
             let rotation = Quat::from_axis_angle(axis, degrees.to_radians());
             for offset in [Vec3::ZERO, Vec3::X, -Vec3::Y, Vec3::Z * 0.03125,
                 vec3(-4188., 6004., 32.03125), vec3(400., -200., 50.), Vec3::splat(-0.125)] {

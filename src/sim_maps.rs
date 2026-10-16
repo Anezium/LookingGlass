@@ -50,6 +50,19 @@ pub(crate) fn with_test_switches<T>(switches: [bool; 4], run: impl FnOnce() -> T
     run()
 }
 
+#[test]
+fn test_arm_and_nested_overrides_are_independent_of_renderer_config() {
+    let current = || [school_mesh(), tower_templates(), npc_queries(), mechanism_state()];
+    let expected = [std::env::var("LOOKING_GLASS_TEST_SIM_SWITCHES").as_deref() == Ok("on"); 4];
+    assert_eq!(current(), expected);
+    with_test_switches([true, false, true, false], || {
+        assert_eq!(current(), [true, false, true, false]);
+        with_test_switches([false; 4], || assert_eq!(current(), [false; 4]));
+        assert_eq!(current(), [true, false, true, false]);
+    });
+    assert_eq!(current(), expected);
+}
+
 /// Small exact dependency keys for mechanism publication. No allocation, hash,
 /// epsilon, or serialized save layout is involved.
 #[derive(Clone, PartialEq, Eq)]
