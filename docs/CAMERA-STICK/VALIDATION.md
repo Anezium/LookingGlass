@@ -22,9 +22,15 @@ Runtime source: `8a480e3c235c92b967f443f16bfd2c5f174fe0d8`; base r3f `0bd6241`.
   `aarch64-apple-darwin`, and branch-specific intermediate `CARGO_BUILD_BUILD_DIR`
   under that shared directory, with four Cargo jobs. Compiled test executables
   are reused for switch arms and data fixtures.
-- Ten-map frame gate: all 7,800 neutral-input per-frame state hashes equal r3f,
-  in both simulation switch arms (3,900 frames each). Full logs remain in the
-  evidence directory; no performance claim is made.
+- Host-only ten-map frame gate: all 7,800 neutral-input per-frame state hashes
+  equal r3f in both simulation switch arms (3,900 frames each). This ran a host
+  build where `Input::vita_look` and its caller are cfg-gated out. It proves
+  the non-Vita path is unchanged; it does not test or prove Vita camera behavior.
+  Host unit tests separately exercise the pure stick math and logger. Vita SDK
+  input, menu wiring and actual console behavior still need the human protocol;
+  the Vita package build checks compilation, not playability or target replay
+  equivalence. Full logs remain in the evidence directory; no performance claim
+  is made.
 - Native Mac Vita build uses nightly-2026-10-11, locked dependencies,
   vita_renderer only and r3f's -neon flags. SFO, process parameters, SDK/vitaGL
   identity and packaged renderer/simulation configs match r3f. VPK CRC,
