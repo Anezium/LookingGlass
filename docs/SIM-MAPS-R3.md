@@ -31,3 +31,23 @@ same binary; host state hashes and sampled images do not certify console timing,
 audio, transient memory or complete visual fidelity. Roll back SELF and renderer
 config together because older binaries reject new keys. Console validation and
 switch acceptance remain pending; this implementation never contacts the console.
+
+## r3h capture package
+
+The `vita-sim-maps-3-r3h` branch reapplies this change on reference r3h `ea2e9bd`.
+Capture mode (`profiler: "light"`, `profile_capture: true`) also retains door
+world-trace, own-collider-trace and deferred-pair counts in the bounded accepted
+frame buffer. Each explicit paused report writes a matching `*-doors.csv` beside
+its light timing CSV. Its rows sum consecutive 60-frame windows, including the
+last partial window, with first/last frame numbers and the actual frame count.
+Normal play never writes these reports or accumulates door profiler counts.
+One constant-size update per door search avoids strings, allocation and timers.
+The existing host-only probe remains excluded from Vita builds.
+
+Updated package and owner protocol: `~/vita-j0/atoz/sim-maps-3-r3h/`.
+Both arms enable capture and retain identical r3h settings except for
+`sim_hatter_door_candidates`. Require the companion counters in both arms;
+use only matching accepted-frame populations and reject zero-only hatter1 proof.
+At hand-off restore the human's exact session-start build (expected r3h), its
+matching reference config, saves and diagnostics from the owner-created backup.
+The implementation does not contact the console.
