@@ -91,5 +91,8 @@
   "audio_cull_gain": 0.0,
   "audio_producer_priority": 161,
   "audio_producer_affinity": 262144,
-  "audio_cushion_blocks": 2
+  "audio_cushion_blocks": 2,
+  "audio_log_thread": false,
+  "audio_music_thread": false,
+  "audio_music_priority": 170
 }
