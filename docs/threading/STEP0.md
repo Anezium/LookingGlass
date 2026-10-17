@@ -130,3 +130,30 @@ Full default/all-feature suites, fixed-input simulation hashes and frozen PNGs
 must match across same-binary off/on arms; host timings are not console claims.
 On console preserve stalls, use paired medians/p95 and measure probe overhead.
 See the packaged PROTOCOL.md; no threading implementation is authorized by this step.
+
+## On r3f
+
+Branch `vita-threading-step0-r3f` carries this instrumentation onto
+`vita-reference-r3f` 0bd6241. The 43 CSV columns, their boundaries and
+nesting are unchanged. r3f's own viewer additions (startup timing marks,
+load diagnostics, audio game-stage marks) fall inside the existing scopes:
+loading-only probes land in `scene_post_sim` or `other`, stage marks in the
+skin-gather/collect `other` regions.
+
+The audio sampling point moved with r3f's output path. With
+`audio_pcm_worker` true (the r3f candidate), the CPAL callback only copies
+ready PCM blocks; the Monitor, and therefore this probe, runs on the
+`audio-producer` thread (priority 161, affinity 0x40000). Each 1024-sample
+Monitor block is one producer block. So on r3f:
+
+- `[lg/audio-cpu]` `thread_id` matches the `[lg/audio-producer] id=` line,
+  not the CPAL callback thread. `audio_thread_cpu_us` is that producer's whole
+  scheduled CPU: mixing, effect decode, resampling, voice DSP, Monitor and
+  probe overhead. It excludes music decode on the `audio-music` thread
+  (`audio_music_thread`) and the callback's PCM copy.
+- `monitor_late_blocks` counts producer block starts more than one block plus
+  1 ms after the previous start. The producer runs up to the cushion ahead of
+  output, so this is a producer scheduling estimate. r3f's
+  `pcm_starved_blocks` remains the authoritative output starvation count.
+- With `audio_pcm_worker` false the Monitor runs on the CPAL callback as on
+  r3b and the original reading applies.
