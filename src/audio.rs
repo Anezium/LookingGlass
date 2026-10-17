@@ -67,6 +67,18 @@ const EFFECTS: [&str; 22] = [
     "sound/character/alice/swim1.wav",
     "sound/character/alice/swim2.wav",
 ];
+// Shared by sanity/health/will shards and every meta-essence size. Reserve
+// these before level speakers so the bounded cache cannot evict a core pickup.
+const PICKUP_EFFECTS: &[&str] = &[
+    "sound/item/essence/small/mtespu.wav",
+    "sound/item/essence/small/mtesactive.wav",
+    "sound/item/essence/medium/mtespu.wav",
+    "sound/item/essence/medium/mtesactive.wav",
+    "sound/item/essence/large/mtespu.wav",
+    "sound/item/essence/large/mtesactive.wav",
+    "sound/item/essence/super/mtespu.wav",
+    "sound/item/essence/super/mtesactive.wav",
+];
 const WORLD_EFFECTS: &[&str] = &[
     "sound/character/alice/drink.wav",
     "sound/world/machine/globe_open.wav",
@@ -885,10 +897,8 @@ impl Audio {
         // Preload authored emitters and core player cues. Global enemy/weapon
         // libraries belong to unrelated levels too; prepare() resolves those on
         // actual requests, retaining them only while the same 24 MiB budget fits.
-        for path in spec
-            .speakers
-            .iter()
-            .map(|s| s.path.as_str())
+        for path in PICKUP_EFFECTS.iter().copied()
+            .chain(spec.speakers.iter().map(|s| s.path.as_str()))
             .chain(EFFECTS)
             .chain(alice_sounds.paths())
             .chain(
@@ -920,6 +930,9 @@ impl Audio {
                     }
                     eprintln!("Sound unavailable: {path}: {e:#}");
                     cache.insert(path.into(), None);
+                    // Pickup misses must never retry a decode during play.
+                    // Other level sounds retain their existing fallback policy.
+                    if PICKUP_EFFECTS.contains(&path) { self.missing.insert(path.into()); }
                 }
             }
         }
@@ -1668,7 +1681,7 @@ pub fn check(assets: &mut Assets) -> Result<()> {
     );
     refs.extend(EXTRA_EFFECTS.iter().map(|s| s.to_string()));
     refs.extend(crate::beyond::SOUNDS.map(String::from));
-    refs.extend(WORLD_EFFECTS.iter().map(|s| s.to_string()));
+    refs.extend(WORLD_EFFECTS.iter().chain(PICKUP_EFFECTS).map(|s| s.to_string()));
     refs.extend(crate::dice::SOUNDS.map(String::from));
     refs.extend(crate::ladybug::SOUNDS.map(String::from));
     let mut missing = Vec::new();
@@ -2119,6 +2132,15 @@ mod tests {
             let (mixer, _source) = output::mixer();
             audio.playback = Some(Playback { _stream: None, mixer, _worker: None });
             audio.load(&mut assets, name, &map);
+            for &path in PICKUP_EFFECTS {
+                ensure!(audio.world_clips.contains_key(path), "pickup cue was not preloaded: {name} {path}");
+                audio.queue(path, Some(Vec3::ZERO), 1.);
+            }
+            let samples_before = audio.cache_samples;
+            // Exercise the real runtime request path with all pickup cues; any
+            // missing preload would grow the cache/read+decode here.
+            audio.prepare(&mut assets, &World::fixture(&[]), Vec3::ZERO, false, 0.016);
+            ensure!(audio.cache_samples == samples_before, "pickup runtime decode on {name}");
             let speech = audio.emitters.iter().filter(|e| speech(&e.spec.path)).count();
             println!("AUDIO_PRELOAD map={name} preresample={} cache_bytes={} cap_bytes={} limit_rejects={} unavailable_status=\"{}\" emitters={} speech_emitters={speech}",
                 config.preresample, audio.cache_samples * 4, CACHE_SAMPLES * 4, audio.limit_rejects, audio.status, audio.emitters.len());
