@@ -110,8 +110,13 @@ impl Sink {
         if !self.controls.alive.load(Ordering::Acquire) {
             return;
         }
+        let mut source: SourceBox = Box::new(source.convert_samples::<f32>());
+        let config = block::settings();
+        if config.music_thread && config.mix && self.controls.music.load(Ordering::Relaxed) {
+            source = super::music::decode_ahead(source, config.music_priority, config.affinity);
+        }
         let packet = Packet {
-            source: Queued::Source(Box::new(source.convert_samples::<f32>())),
+            source: Queued::Source(source),
             generation: self.controls.generation.load(Ordering::Relaxed),
         };
         self.controls.count.fetch_add(1, Ordering::Relaxed);

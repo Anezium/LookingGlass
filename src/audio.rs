@@ -4,6 +4,7 @@ mod queue;
 pub mod sink;
 mod output;
 mod block;
+mod music;
 pub mod events;
 mod reaction;
 pub mod regression;

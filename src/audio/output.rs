@@ -380,6 +380,7 @@ struct Window {
     /// Time the producer spent printing the previous window (direct mode).
     log_ms: f64,
     dropped_reports: u32,
+    music: Option<[f64; 6]>,
 }
 #[derive(Clone, Copy)]
 enum Report {
@@ -408,6 +409,9 @@ fn print(report: &Report, config: block::Settings) {
                     eprintln!("[lg/audio-stage] stage={name} blocks={n} p50_ms={p50:.3} p95_ms={p95:.3} max_ms={max:.3}");
                 }
                 eprintln!("[lg/audio-voices] audible_ambient={} virtual_ambient={} cap={} cull_gain={}", w.voices.0, w.voices.1, config.voices, config.gain);
+            }
+            if let Some([decode_ms, chunk_max_ms, chunks, underruns, ring_min_ms, streams]) = w.music {
+                eprintln!("[lg/audio-music] decode_ms={decode_ms:.3} chunk_max_ms={chunk_max_ms:.3} chunks={chunks} underrun_frames={underruns} ring_min_ms={ring_min_ms:.1} streams={streams}");
             }
         }
     }
@@ -497,6 +501,13 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
                 if tx.push(Block{epoch,samples:block}).is_err(){stats.queued_samples.fetch_sub(SAMPLES,Ordering::Relaxed);}
             }
             if report.elapsed()>=Duration::from_secs(1){
+                let music = config.music_thread.then(|| {
+                    let m = &super::music::STATS;
+                    let ring = m.ring_min.swap(usize::MAX, Ordering::Relaxed);
+                    [m.decode_us.swap(0, Ordering::Relaxed) as f64 / 1000., m.chunk_max_us.swap(0, Ordering::Relaxed) as f64 / 1000.,
+                     m.chunks.swap(0, Ordering::Relaxed) as f64, m.underrun_frames.swap(0, Ordering::Relaxed) as f64,
+                     if ring == usize::MAX { -1. } else { ring as f64 / 2. / 44.1 }, m.streams.load(Ordering::Relaxed) as f64]
+                });
                 let n = timings.len();
                 let window = Window {
                     window_ms: report.elapsed().as_millis(), blocks: n, mix: percentiles(&mut timings),
@@ -507,7 +518,7 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
                     stages: config.mix.then(|| (std::array::from_fn(|i| percentiles(&mut stages[i])), stages[0].len())),
                     voices: (stats.audible_ambient.load(Ordering::Relaxed), stats.virtual_ambient.load(Ordering::Relaxed)),
                     gap_max_ms: gap_max, sleep_over_ms: sleep_over.max(0.), gaps_over_block: gaps, log_ms,
-                    dropped_reports: dropped.get(),
+                    dropped_reports: dropped.get(), music,
                 };
                 log_ms = emit(Report::Window(window));
                 for values in &mut stages { values.clear(); }

@@ -127,6 +127,10 @@ pub struct Config {
     /// The producer never prints: per-second windows go through a lock-free
     /// queue to a lowest-priority reporter thread.
     pub audio_log_thread: bool,
+    /// Music decodes on its own lower-priority thread into a PCM ring; the
+    /// producer only copies decoded samples.
+    pub audio_music_thread: bool,
+    pub audio_music_priority: i32,
     /// Persistent binary pairs; process deduplication remains active when off.
     pub shader_cache: String,
     /// Optional cache of exact device-compressed immutable pixels.
@@ -239,6 +243,8 @@ impl Default for Config {
             audio_producer_affinity: 0x40000,
             audio_cushion_blocks: 2,
             audio_log_thread: false,
+            audio_music_thread: false,
+            audio_music_priority: 170,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
             route_heading_lock:true,
@@ -296,6 +302,7 @@ impl Config {
         ensure!((160..=191).contains(&self.audio_producer_priority), "audio_producer_priority must be 160..191 (below skin workers)");
         ensure!(matches!(self.audio_producer_affinity,0x10000|0x20000|0x40000), "audio_producer_affinity must select CPU0, CPU1 or CPU2");
         ensure!((1..=8).contains(&self.audio_cushion_blocks), "audio_cushion_blocks must be 1..8");
+        ensure!(self.audio_music_priority > self.audio_producer_priority && self.audio_music_priority <= 191, "audio_music_priority must be below the producer's urgency (greater than audio_producer_priority, at most 191)");
         ensure!(self.audio_ambient_voices<=128 && self.audio_cull_gain.is_finite() && (0. ..=0.1).contains(&self.audio_cull_gain), "invalid audio voice budget");
         ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
             "actor_single_prepare requires renderer=vita, skin_overlap=true, skin_workers>0, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
