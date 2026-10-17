@@ -12,7 +12,9 @@ an archive artifact. Restore the previous SELF and preferences to roll back.
    or set `pad_sensitivity: 1.0` in preferences with the game stopped).
    Set Invert Look off and controller Stick Deadzone .24. The controller
    sensitivity/inversion page and Game page refer to the same settings.
-   Mouse/touch sensitivity and invert_mouse stay independent. Existing saved
+   Separate Touch Sensitivity / Invert Touch rows expose sensitivity /
+   invert_mouse on Vita. Host controls emulation keeps the original mouse
+   Game rows. Existing saved
    pad_sensitivity/invert_pad values are respected; no settings are migrated.
 2. On a safe flat area of gvillage, release both sticks after loading, keep
    the left stick neutral and hold right stick fully right for 5 seconds.
