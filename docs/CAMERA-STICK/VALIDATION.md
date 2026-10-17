@@ -1,6 +1,6 @@
 # Camera stick validation and package
 
-Runtime source: `8a480e3c235c92b967f443f16bfd2c5f174fe0d8`; base r3f `0bd6241`.
+Runtime source: `528823daeaa8643674760e01f68dd94cd541dd65`; base r3f `0bd6241`.
 
 - Old full-axis yaw/pitch at 30/40 FPS: default 34.377/45.837 degrees/s;
   maximum 103.132/137.510 degrees/s (source-derived, before pitch clamp).
@@ -12,11 +12,15 @@ Runtime source: `8a480e3c235c92b967f443f16bfd2c5f174fe0d8`; base r3f `0bd6241`.
 - Host tests cover rate/dt independence at 20/30/40/60/120 FPS and alternating
   25/38 ms, sensitivity range/continuity, dead zone, response curve, inversion,
   wrap/clamp, neutral bit preservation, measured yaw and modal neutral gating.
-- Direct host measurements of the production turn/logger code at 30/40 FPS:
-  209.9998/210.0003 degrees/s default yaw and 420.0000/420.0001 maximum.
+- Direct host measurements of production turn/logger code at 30/40 FPS:
+  about 210 degrees/s at rescaled |x|=1 and 195.921 degrees/s at |x|=.96,
+  with peak_abs_x and full_deflection classifications reported correctly.
   `RATE-MEASUREMENT.log` records these separately from pending console checks.
-- Existing six test-suite arms (default/all features, sim off/on, real-data fan)
-  passed; real PK3 and collision trace ignored suites passed. Host renderer
+- Existing six test-suite arms passed: 908 all-feature and 825 default tests
+  in each simulation-switch arm, plus real-data fan fixtures in both arms.
+  Real PK3 and collision trace ignored suites passed. Focused layout tests
+  verify row labels and spacing; pure logger tests verify peak windows,
+  including worn-stick values below .99. Host renderer
   image parity, controls, save previews and config checks passed.
 - Host tests use the required shared `CARGO_TARGET_DIR`, native
   `aarch64-apple-darwin`, and branch-specific intermediate `CARGO_BUILD_BUILD_DIR`
@@ -35,11 +39,11 @@ Runtime source: `8a480e3c235c92b967f443f16bfd2c5f174fe0d8`; base r3f `0bd6241`.
   vita_renderer only and r3f's -neon flags. SFO, process parameters, SDK/vitaGL
   identity and packaged renderer/simulation configs match r3f. VPK CRC,
   SELF/SFO contents, imports, ELF metadata margin and absence of host probes passed.
-- SELF SHA-256: `0a40bc0ff5b4eb684e99b9902f6c4828035632524bb1aaa1b8d18d8d9bef33ab`
-- VPK SHA-256: `a4f9f1850353fb5c74389c499999450369ecb09c000343c0dbf067b6b1ec7c47`
+- SELF SHA-256: `9cffa0b720ce67031a7e17fa529bdf1f8eb6fb08d50104438347dcf172cbed51`
+- VPK SHA-256: `eb6eb0fe4d702aa6763a924a89fb68444c3922357a82e1b4347d78f22e5016de`
 
-Artifacts and reproducible drivers: `/Users/anezium/vita-j0/atoz/camera-stick/`.
+Artifacts and reproducible drivers: `/Users/anezium/vita-j0/atoz/camera-stick/review-fixes/`.
 Package: `package/`; detailed results: `FINAL-VERIFICATION.json`, `SUITES.json`,
-`GATE-camera.json`, `HOST-VERIFICATION.json` and `package/VERIFICATION.json`.
+`GATE-review.json`, `HOST-VERIFICATION.json` and `package/VERIFICATION.json`.
 No assets are committed. No console was contacted. Human feel and console-rate
 validation remain pending the companion `PROTOCOL.md`.
