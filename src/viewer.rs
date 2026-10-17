@@ -119,9 +119,11 @@ impl LevelArt {
         if i.fortress.is_some() && self.fortress.is_none() {
             self.fortress = Some(crate::fortress::cinema::Art::load(assets)?);
         }
+        let mut timing = crate::startup::Phase::new("level_art");
         if cat && self.cheshire.is_none() {
             self.cheshire = Some(crate::cheshire::Art::load(assets)?);
         }
+        timing.mark("cheshire");
         if i.school.is_some() && self.school.is_none() {
             let specs = crate::texture::read_materials(assets)?;
             self.school = Some(crate::school::Art::load(assets, &specs)?);
@@ -151,9 +153,11 @@ impl LevelArt {
         if i.pandemonium.is_some() && self.pandemonium.is_none() {
             self.pandemonium = Some(crate::pandemonium::Art::load(assets)?);
         }
+        timing.mark("destination_cast");
         if i.encounters.is_some() && self.encounters.is_none() {
             self.encounters = Some(crate::encounters::Art::load(assets)?);
         }
+        timing.mark("encounters");
         if self.levels.is_empty() {
             for slot in &i.levels {
                 self.levels.push(
@@ -336,6 +340,52 @@ fn finish_entered(
         environment_clock: cached.map_or(0., |s| s.environment_clock),
         pickup_clock: cached.map_or(0., |s| s.pickup_clock),
     })
+}
+
+// Present before the synchronous resource work starts. This overlay remains
+// visible until the first destination frame; it does not claim animated progress.
+async fn present_transition_loading(name: &str) {
+    crate::frame_profile::exclude_transition_frame();
+    set_default_camera();
+    clear_background(BLACK);
+    let text = "Loading";
+    let size = 32.;
+    let width = measure_text(text, None, size as u16, 1.).width;
+    draw_text(text, (screen_width()-width)*0.5, screen_height()*0.48, size, WHITE);
+    let title = crate::campaign::level_title(name);
+    let width = measure_text(title, None, 20, 1.).width;
+    draw_text(title, (screen_width()-width)*0.5, screen_height()*0.58, 20., GRAY);
+    #[cfg(not(target_os="vita"))]
+    if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_CAPTURE") {
+        save_capture(std::path::Path::new(&path)).expect("loading indicator capture");
+    }
+    next_frame().await;
+    eprintln!("[lg/transition] loading_indicator=presented destination={name}");
+}
+
+fn enter_natural(
+    assets: &mut Assets, stats: &mut Stats, campaign: &mut Campaign,
+    leaving: Level, exit: &crate::campaign::Exit, options: &Options,
+) -> Result<(Entered, crate::movement::Player, Vec3, f32)> {
+    let visit = crate::campaign::arrive(assets, stats, campaign, leaving, exit, false)?;
+    let crate::campaign::NextVisit { map, entry, cached, loaded, player, eye, yaw, .. } = visit;
+    let entered = finish_entered(assets, loaded, &map, entry.as_deref(), cached.as_ref(), options)?;
+    Ok((entered, player, eye, yaw))
+}
+
+#[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+pub(crate) async fn check_transition_loading(assets: &mut Assets, options: &Options) -> Result<()> {
+    let store = Store::new(options.save_dir.clone(), assets.fingerprint()?);
+    let loaded = store.read(Slot::Auto)?;
+    let mut game = loaded.game;
+    let leaving = game.level()?.clone();
+    let exit = ("pandemonium".to_string(), Some("player_start".to_string()));
+    present_transition_loading(&exit.0).await;
+    let start = std::time::Instant::now();
+    let (next, _, _, _) = enter_natural(assets, &mut game.stats, &mut game.campaign, leaving, &exit, options)?;
+    anyhow::ensure!(next.interactions.pandemonium.is_some() && next.art.pandemonium.is_some(), "natural destination cast");
+    println!("PASS natural transition loading indicator and destination; host_load_ms={:.3}", start.elapsed().as_secs_f64()*1000.);
+    Ok(())
 }
 
 pub(crate) fn save_capture(path: &std::path::Path) -> Result<()> {
@@ -2615,35 +2665,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // also decide. The exit is all or nothing, so it works on copies of the resources and
             // the ledger until the destination's window half has loaded too.
             let (mut next_stats, mut next_campaign) = (stats.clone(), campaign.clone());
-            let arrived = crate::campaign::arrive(
-                &mut assets,
-                &mut next_stats,
-                &mut next_campaign,
-                leaving,
-                &exit,
-                false,
-            )
-            .and_then(|visit| {
-                let crate::campaign::NextVisit {
-                    map,
-                    entry,
-                    cached,
-                    loaded,
-                    player,
-                    eye,
-                    yaw,
-                    ..
-                } = visit;
-                let next = finish_entered(
-                    &mut assets,
-                    loaded,
-                    &map,
-                    entry.as_deref(),
-                    cached.as_ref(),
-                    &options,
-                )?;
-                Ok((next, player, eye, yaw))
-            });
+            clock.pause();
+            audio.update(0., pos, yaw, true, true);
+            #[cfg(target_os="vita")]
+            crate::frame_profile::report(&maps[current])?;
+            present_transition_loading(&name).await;
+            let transition_started = std::time::Instant::now();
+            let arrived = enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options);
             match arrived {
                 Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {
                     crate::transition_memory::replace(&mut scene, next.scene, "natural-exit", &maps[current], &name);
@@ -2677,6 +2705,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         &catalog,
                     );
                     audio.load(&mut assets, &name, &scene.map);
+                    eprintln!("[lg/transition] destination={name} resources_audio_ms={:.3}", transition_started.elapsed().as_secs_f64()*1000.);
                     // A blocked entrance already failed the exit, so there is no flight fallback.
                     (pos, yaw) = (arrived_eye, arrived_yaw);
                     flying = false;

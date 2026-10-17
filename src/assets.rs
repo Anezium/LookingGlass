@@ -20,6 +20,8 @@ pub struct Assets {
     entries: BTreeMap<String, (usize, usize, u64, u32)>,
     pub base: PathBuf,
     content_fingerprint: Option<String>,
+    // One immutable, override-resolved shader library per mounted corpus.
+    pub(crate) material_specs: Option<std::rc::Rc<BTreeMap<String, crate::texture::MaterialSpec>>>,
 }
 
 impl Assets {
@@ -91,6 +93,7 @@ impl Assets {
             entries,
             base: base.to_path_buf(),
             content_fingerprint: None,
+            material_specs: None,
         })
     }
 
@@ -126,6 +129,7 @@ impl Assets {
         })
     }
     pub fn read(&mut self, name: &str) -> Result<Vec<u8>> {
+        let _timing = crate::startup::WorkTimer::new(crate::startup::Work::AssetRead);
         let &(p, i, _, _) = self
             .entries
             .get(&normalize(name))
@@ -428,6 +432,29 @@ mod tests {
         drop(assets);
         fs::remove_file(path)?;
         fs::remove_dir(dir)?;
+        Ok(())
+    }
+    #[test]
+    fn material_library_is_shared_per_mount_and_respects_pack_overrides() -> Result<()> {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("looking-glass-material-cache-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        for (name, image) in [("pak0.pk3", "old"), ("pak5.pk3", "new")] {
+            let mut z = zip::ZipWriter::new(File::create(dir.join(name))?);
+            z.start_file("scripts/test.shader", zip::write::FileOptions::default())?;
+            z.write_all(format!("test\n{{\n{{\nmap {image}\n}}\n}}\n").as_bytes())?;
+            z.finish()?;
+        }
+        let mut a = Assets::open(&dir)?;
+        let first = crate::texture::read_materials(&mut a)?;
+        assert_eq!(first["test"].candidates, ["new"]);
+        let again = crate::texture::read_materials(&mut a)?;
+        assert!(std::rc::Rc::ptr_eq(&first, &again));
+        let mut other = Assets::open(&dir)?;
+        let independent = crate::texture::read_materials(&mut other)?;
+        assert!(!std::rc::Rc::ptr_eq(&first, &independent));
+        drop((a, other));
+        fs::remove_dir_all(dir)?;
         Ok(())
     }
     #[test]

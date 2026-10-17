@@ -2,9 +2,9 @@
 use std::{cell::RefCell, time::Instant};
 
 #[derive(Clone, Copy, Default)]
-struct Counters { calls: [u64; 4], ms: [f64; 4] }
+struct Counters { calls: [u64; 6], ms: [f64; 6] }
 thread_local! { static STATE: RefCell<(usize, Counters)> = RefCell::new((0, Counters::default())); }
-pub(crate) enum Work { TextureRead, TextureDecode, TextureUpload, ShaderCreation }
+pub(crate) enum Work { TextureRead, TextureDecode, TextureUpload, ShaderCreation, AssetRead, MaterialParse }
 pub(crate) struct WorkTimer { start: Option<Instant>, index: usize }
 impl WorkTimer {
     pub fn new(work: Work) -> Self {
@@ -40,7 +40,7 @@ impl Phase {
         let counters = STATE.with(|s| s.borrow().1);
         eprintln!("[lg/startup] {} {label} elapsed_ms={:.3} total_ms={:.3}", self.scope,
             now.duration_since(self.last).as_secs_f64()*1000., now.duration_since(self.start).as_secs_f64()*1000.);
-        for (i, name) in ["texture_read", "texture_decode", "texture_upload_dxt_on_vita", "shader_creation"].iter().enumerate() {
+        for (i, name) in ["texture_read", "texture_decode", "texture_upload_dxt_on_vita", "shader_creation", "asset_read_inclusive", "material_parse_inclusive"].iter().enumerate() {
             let calls = counters.calls[i] - self.previous.calls[i];
             if calls > 0 {
                 eprintln!("[lg/startup] {} {label} work={name} calls={calls} elapsed_ms={:.3}", self.scope, counters.ms[i] - self.previous.ms[i]);

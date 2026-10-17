@@ -553,6 +553,8 @@ fn run() -> Result<()> {
             "--loot-render-check" => mode = "loot-render",
             #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
             "--pickup-fx-check" => mode = "pickup-fx",
+            #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+            "--transition-loading-check" => mode = "transition-loading",
             "--traversal-check" => mode = "traversal",
             "--ledge-check" => mode = "ledge",
             "--ledge-render-check" => mode = "ledge-render",
@@ -1418,9 +1420,11 @@ fn run() -> Result<()> {
         return Ok(());
     }
     #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
-    if mode == "pickup-fx" {
+    if mode == "pickup-fx" || mode == "transition-loading" {
         macroquad::Window::from_config(viewer::config(), async move {
-            if let Err(e) = pickup_effects::check(&mut assets).await {
+            let result = if mode == "pickup-fx" { pickup_effects::check(&mut assets).await }
+                else { viewer::check_transition_loading(&mut assets, &o).await };
+            if let Err(e) = result {
                 eprintln!("Pickup fixture failed: {e:#}"); std::process::exit(1);
             }
         });

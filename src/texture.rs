@@ -190,7 +190,13 @@ pub struct MaterialSpec {
     pub stages: Vec<crate::materials::Stage>,
 }
 
-pub fn read_materials(assets: &mut Assets) -> Result<BTreeMap<String, MaterialSpec>> {
+pub fn read_materials(assets: &mut Assets) -> Result<std::rc::Rc<BTreeMap<String, MaterialSpec>>> {
+    #[cfg(not(target_os="vita"))]
+    let reuse = std::env::var_os("LOOKING_GLASS_MATERIAL_CACHE_OFF").is_none();
+    #[cfg(target_os="vita")]
+    let reuse = true;
+    if reuse { if let Some(specs) = &assets.material_specs { return Ok(specs.clone()); } }
+    let _timing = crate::startup::WorkTimer::new(crate::startup::Work::MaterialParse);
     let files = assets
         .names()
         .filter(|n| n.ends_with(".shader"))
@@ -204,6 +210,8 @@ pub fn read_materials(assets: &mut Assets) -> Result<BTreeMap<String, MaterialSp
             crate::materials::parse(&text).with_context(|| format!("Material file {name}"))?,
         );
     }
+    let result = std::rc::Rc::new(result);
+    if reuse { assets.material_specs = Some(result.clone()); }
     Ok(result)
 }
 
