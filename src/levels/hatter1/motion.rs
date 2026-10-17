@@ -371,6 +371,9 @@ impl Clockwork {
         }
     }
     pub(super) fn door_pick(&self, w: &World, eye: Vec3, aim: Vec3) -> Option<usize> {
+        self.door_pick_mode(w, eye, aim, crate::sim_maps::hatter_door_candidates())
+    }
+    fn door_pick_mode(&self, w: &World, eye: Vec3, aim: Vec3, defer: bool) -> Option<usize> {
         self.objects.iter().enumerate().find_map(|(k, o)| {
             if !o.class.contains("door")
                 || self.door_target(o).is_some()
@@ -380,14 +383,62 @@ impl Clockwork {
             }
             let target = (o.bounds.0 + o.bounds.1) * 0.5;
             let d = target - eye;
+            // Preserve the original arithmetic, strict comparisons and object order.
+            // Both traces are pure queries; their results are unused on rejection.
+            let candidate = d.length() < 150.
+                && d.normalize_or_zero().dot(aim.normalize_or_zero()) > 0.3;
+            crate::sim_maps::count("hatter_door_considered", 1);
+            crate::sim_maps::count("hatter_door_range_facing_rejected", u64::from(!candidate));
+            if defer && !candidate {
+                crate::sim_maps::count("hatter_door_trace_pairs_deferred", 1);
+                return None;
+            }
+            crate::sim_maps::count("hatter_door_world_traces", 1);
             let tr = w.sweep(eye, target, Vec3::splat(0.5));
+            crate::sim_maps::count("hatter_door_own_traces", 1);
             let own = o.collider.trace(eye, target, Vec3::splat(0.5));
-            (d.length() < 150.
-                && d.normalize_or_zero().dot(aim.normalize_or_zero()) > 0.3
+            (candidate
                 && !tr.start_solid
                 && tr.fraction + 0.02 >= own.fraction)
                 .then_some(k)
         })
+    }
+    #[cfg(not(target_os="vita"))]
+    pub(super) fn check_door_candidates(&self, w: &World) -> Result<()> {
+        let mut cases = 0;
+        let mut selected = 0;
+        for door in self.objects.iter().filter(|o| o.class.contains("door")) {
+            let center = (door.bounds.0 + door.bounds.1) * 0.5;
+            for offset in [Vec3::ZERO, Vec3::X * 149.999, Vec3::X * 150.,
+                Vec3::X * 150.001, -Vec3::X * 80., Vec3::Y * 80.,
+                -Vec3::Y * 80., Vec3::Z * 40.] {
+                let eye = center + offset;
+                let toward = (center - eye).normalize_or_zero();
+                for aim in [Vec3::ZERO, toward, -toward, Vec3::X, Vec3::Y] {
+                    // Independent pre-change search, including eager trace order.
+                    let expected = self.objects.iter().enumerate().find_map(|(k, o)| {
+                        if !o.class.contains("door") || self.door_target(o).is_some()
+                            || o.flags & (8 | 128) != 0 { return None; }
+                        let target = (o.bounds.0 + o.bounds.1) * 0.5;
+                        let d = target - eye;
+                        let tr = w.sweep(eye, target, Vec3::splat(0.5));
+                        let own = o.collider.trace(eye, target, Vec3::splat(0.5));
+                        (d.length() < 150.
+                            && d.normalize_or_zero().dot(aim.normalize_or_zero()) > 0.3
+                            && !tr.start_solid && tr.fraction + 0.02 >= own.fraction).then_some(k)
+                    });
+                    for defer in [false, true] {
+                        ensure!(self.door_pick_mode(w, eye, aim, defer) == expected,
+                            "Door candidate changed selection at {eye:?}, aim {aim:?}");
+                    }
+                    cases += 1;
+                    selected += usize::from(expected.is_some());
+                }
+            }
+        }
+        ensure!(cases > 0 && selected > 0, "Door fixture lacks usable near-door cases");
+        println!("PASS Clockwork door candidates: {cases} exact legacy selections, {selected} usable");
+        Ok(())
     }
     pub(super) fn use_door(&mut self, w: &World, p: &Player, aim: Vec3) {
         let selected = self.door_pick(w, p.eye(), aim);

@@ -99,5 +99,6 @@
   "audio_music_thread": false,
   "audio_music_priority": 170,
   "profile_capture": false,
-  "attached_puff_batches": true
+  "attached_puff_batches": true,
+  "sim_hatter_door_candidates": false
 }

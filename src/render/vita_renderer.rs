@@ -26,6 +26,8 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(remote = "Self", default, deny_unknown_fields)]
 pub struct Config {
+    /// Defer Clockwork door traces until their exact range/facing predicates pass.
+    pub sim_hatter_door_candidates: bool,
     /// Exact round-two candidates; console acceptance is still pending.
     pub fx_merge_local_reuse: bool,
     pub sim_triangle_candidates: bool,
@@ -197,6 +199,7 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 impl Default for Config {
     fn default() -> Self {
         Self {
+            sim_hatter_door_candidates: false,
             fx_merge_local_reuse: true,
             sim_triangle_candidates: true,
             sim_fan_candidates: true,
@@ -1985,6 +1988,17 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hatter_door_candidates_default_off_and_require_a_boolean() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.sim_hatter_door_candidates);
+        }
+        let c: Config = serde_json::from_str(r#"{"sim_hatter_door_candidates":true}"#).unwrap();
+        c.validate().unwrap(); assert!(c.sim_hatter_door_candidates);
+        for json in [r#"{"sim_hatter_door_candidates":1}"#, r#"{"sim_hatter_door_candidates":"on"}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+    }
     #[test]
     fn round_two_switches_default_on_after_console_acceptance_and_validate() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {

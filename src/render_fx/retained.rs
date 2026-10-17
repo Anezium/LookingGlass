@@ -857,9 +857,22 @@ fn merge_cached_mode<'a>(
                     indices:source.indices.as_ptr() as usize, index_len:source.indices.len(), vertex_offset:vertices, index_offset:indices });
                 vertices += source.vertices.len(); indices += source.indices.len();
             }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let reusable_output = same_topology && dest.vertices.len() == vertices;
             dest.vertices.resize(vertices, Vertex::new(0.,0.,0.,0.,0.,WHITE));
             let keep_indices = same_topology && dest.indices.len() == indices;
             if !keep_indices { dest.indices.resize(indices, 0); }
+            // Attribute unchanged source ranges only when the existing exact-output
+            // and ordered topology certificates also prove their destination offsets.
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if reusable_output {
+                if let Some(previous) = cache.versions.get(&target) {
+                    let reusable = cache.packing.iter().zip(version_storage.iter().zip(previous))
+                        .filter(|(_, (current, old))| current == old)
+                        .map(|(source, _)| source.vertex_len as u64).sum();
+                    count("fx_merge_source_reusable_vertices", reusable);
+                }
+            }
             pack_sources(&cache.packing, &mut dest.vertices, &mut dest.indices, !keep_indices,
                 crate::render::vita_renderer::config().fx_worker_prep);
             count("vita_fx_pack_vertices", vertices as u64);

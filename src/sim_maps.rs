@@ -105,3 +105,17 @@ pub(crate) fn with_r2_switches<T>(switches: [bool; 3], run: impl FnOnce() -> T) 
     let _reset = Reset(R2_TEST.with(|s| s.replace(Some(switches))));
     run()
 }
+
+// Round three remains independently default-off pending console acceptance.
+pub fn hatter_door_candidates() -> bool {
+    #[cfg(test)]
+    { match std::env::var("LOOKING_GLASS_TEST_SIM_R3").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => false,
+        Ok("on") => true,
+        _ => panic!("LOOKING_GLASS_TEST_SIM_R3 must be off or on"),
+    } }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().sim_hatter_door_candidates }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}

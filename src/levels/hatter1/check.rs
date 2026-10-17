@@ -164,6 +164,8 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
         let mut o = Clockwork::load(a, &map)?;
         let mut w = World::from_bsp(&map)?;
         w.set_dynamic(o.colliders());
+        #[cfg(not(target_os="vita"))]
+        o.check_door_candidates(&w)?;
         let mut p = Player::spawn(&w, interaction::spawn(&map, None).0)
             .context("Blocked Clockwork arrival")?;
         for n in [
@@ -217,6 +219,8 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
         ensure!(o.saved.clock.is_none(), "Duplicate chair unlocked clock");
         o.event("cube_2");
         w.set_dynamic(o.colliders());
+        #[cfg(not(target_os="vita"))]
+        o.check_door_candidates(&w)?;
         // The real route can land with only the edge of Alice's footprint on
         // the cushion. A centre-only support probe misses that valid rider.
         p = Player::new(w.actor_footing(vec3(-635.062, 2261.3633, 260.), PLAYER_CENTER,
