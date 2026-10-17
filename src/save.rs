@@ -221,6 +221,7 @@ pub struct Loaded {
     pub preview: Option<crate::save_preview::Preview>,
 }
 pub struct Store {
+    read_only: bool,
     pub directory: PathBuf,
     fingerprint: String,
 }
@@ -229,7 +230,16 @@ impl Store {
         Self {
             directory,
             fingerprint,
+            read_only: false,
         }
+    }
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+    fn writable(&self) -> Result<()> {
+        ensure!(!self.read_only, "Player saves are read-only during vita_start sessions");
+        Ok(())
     }
     fn path(&self, slot: Slot, backup: bool) -> PathBuf {
         self.directory.join(format!(
@@ -250,6 +260,7 @@ impl Store {
         game: &Game,
         preview: Option<&crate::save_preview::Preview>,
     ) -> Result<()> {
+        self.writable()?;
         game.validate()?;
         ensure!(
             game.campaign
@@ -470,10 +481,12 @@ impl Store {
         self.write_finale_checkpoint_with_preview(game, None)
     }
     pub fn write_finale_checkpoint_with_preview(&self, game: &Game, preview: Option<&crate::save_preview::Preview>) -> Result<()> {
+        self.writable()?;
         self.finale_store().write_with_preview(Slot::Auto, game, preview)?;
         self.write_with_preview(Slot::Auto, game, preview)
     }
     pub fn mark_complete(&self) -> Result<()> {
+        self.writable()?;
         std::fs::create_dir_all(&self.directory)?;
         let at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
         atomic_write(
@@ -497,7 +510,7 @@ pub fn bench_scene(validated: bool) -> BenchScene {
         BenchScene::LoadFresh
     }
 }
-fn read_limited(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_limited(path: &Path) -> Result<Vec<u8>> {
     let file =
         File::open(path).with_context(|| format!("No readable save at {}", path.display()))?;
     ensure!(file.metadata()?.len() <= LIMIT, "Save file is too large");
@@ -882,6 +895,26 @@ mod format12;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_start_store_blocks_all_writers_before_touching_existing_files() {
+        let scratch = format12::Scratch::new("read-only-start");
+        let store = scratch.store().read_only();
+        let game = format12::game(vec![format12::level("gvillage", None, serde_json::Value::Null)]);
+        let names = ["auto.json", "auto.previous.json", "slot1.json", "campaign-complete.json"];
+        for name in names { fs::write(store.directory.join(name), b"preserve").unwrap(); }
+        fs::create_dir(store.directory.join("finale-checkpoint")).unwrap();
+        fs::write(store.directory.join("finale-checkpoint/auto.json"), b"finale").unwrap();
+        for slot in Slot::ALL {
+            assert!(store.write(slot, &game).unwrap_err().to_string().contains("read-only"));
+            assert!(store.write_with_preview(slot, &game, None).is_err());
+        }
+        assert!(store.write_finale_checkpoint(&game).is_err());
+        assert!(store.write_finale_checkpoint_with_preview(&game, None).is_err());
+        assert!(store.mark_complete().is_err());
+        for name in names { assert_eq!(fs::read(store.directory.join(name)).unwrap(), b"preserve"); }
+        assert_eq!(fs::read(store.directory.join("finale-checkpoint/auto.json")).unwrap(), b"finale");
+        assert_eq!(fs::read_dir(&store.directory).unwrap().count(), 5);
+    }
     #[test]
     fn throttled_capture_for_save_persists_the_latest_decodable_menu_thumbnail() {
         let scratch = format12::Scratch::new("throttled-preview");

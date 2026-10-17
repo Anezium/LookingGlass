@@ -126,6 +126,7 @@ mod kernel_alloc;
 #[cfg(feature="vita_renderer")]
 mod route_replay;
 mod vita_sim;
+mod vita_start;
 mod viewmodel;
 mod village;
 mod village_route;
@@ -142,6 +143,7 @@ use bsp::Bsp;
 use std::path::PathBuf;
 
 pub struct Options {
+    pub vita_start: Option<vita_start::Request>,
     pub difficulty: powerups::Difficulty,
     pub save_dir: PathBuf,
     pub load: Option<save::Slot>,
@@ -263,6 +265,7 @@ fn default_data_dir() -> PathBuf {
 
 fn run() -> Result<()> {
     let mut o = Options {
+        vita_start: None,
         difficulty: Default::default(),
         save_dir: default_save_dir(),
         load: None,
@@ -291,6 +294,7 @@ fn run() -> Result<()> {
     let mut chain = campaign_chain::Args::default();
     let mut level_check: Option<&'static levels::Check> = None;
     let mut movie_name = String::new();
+    let mut start_file: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             #[cfg(feature = "vita_renderer")]
@@ -316,6 +320,7 @@ fn run() -> Result<()> {
                         .context("--load requires quick, auto or slot1-slot4")?,
                 )?)
             }
+            "--vita-start" => start_file = Some(args.next().context("--vita-start requires a request file")?.into()),
             "--entry" => o.entry = Some(args.next().context("--entry requires a named entrance")?),
             "--new-game" => o.new_game = true,
             "--save-check-write" => mode = "save-write",
@@ -610,6 +615,15 @@ fn run() -> Result<()> {
                 Some(check) => level_check = Some(check),
                 None => bail!("Unknown option: {arg}; use --help"),
             },
+        }
+    }
+    #[cfg(target_os = "vita")]
+    let start_file = Some(start_file.unwrap_or_else(|| "ux0:data/alice/private/vita_start.json".into()));
+    if let Some(path) = start_file {
+        if let Some(request) = vita_start::consume(&path)? {
+            ensure_view_start(mode, level_check.is_some())?;
+            request.apply(&mut o);
+            o.vita_start = Some(request);
         }
     }
     if o.capture.is_some() && o.frames.is_none() {
@@ -1535,5 +1549,10 @@ fn run() -> Result<()> {
             std::process::exit(1);
         }
     });
+    Ok(())
+}
+
+fn ensure_view_start(mode: &str, level_check: bool) -> Result<()> {
+    anyhow::ensure!(mode == "view" && !level_check, "vita_start requires normal viewer mode");
     Ok(())
 }

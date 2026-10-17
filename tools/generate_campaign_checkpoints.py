@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 
 def sha(path):
@@ -34,7 +35,7 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
     commands = []
 
-    def run(name, flags):
+    def run(name, flags, stop_visit=None):
         cell = root / 'host' / name
         private = cell / 'private'
         private.mkdir(parents=True, exist_ok=False)
@@ -42,8 +43,23 @@ def main():
         shutil.copy2(args.sim, private / 'vita_sim.json')
         command = [str(binary), '--data', str(data), '--no-audio', *flags]
         with (cell / 'run.log').open('w') as log:
-            result = subprocess.run(command, cwd=cell, env=env, stdout=log, stderr=subprocess.STDOUT)
-        commands.append(dict(command=command, cwd=str(cell), exit_code=result.returncode,
+            process = subprocess.Popen(command, cwd=cell, env=env, stdout=log, stderr=subprocess.STDOUT)
+            stopped = False
+            while process.poll() is None:
+                files = list((private / 'campaign-chain').glob(f'{stop_visit:02}-*.json')) if stop_visit else []
+                if files:
+                    try:
+                        ready = json.loads(files[0].read_text())
+                        stopped = ready['index'] == stop_visit and bool(ready['entrance_digest'])
+                    except (ValueError, KeyError):
+                        pass
+                    if stopped:
+                        process.terminate()
+                        break
+                time.sleep(0.1)
+            code = process.wait()
+        commands.append(dict(command=command, cwd=str(cell), exit_code=code,
+                             stopped_after_checkpoint=stopped,
                              log_sha256=sha(cell / 'run.log')))
         return cell / 'private' / 'campaign-chain'
 
@@ -54,7 +70,7 @@ def main():
         if list(out.glob(f'{visit:02}-*.json')):
             continue
         chain = run(f'fixture-{visit:02}', ['--campaign-route-check', '--campaign-from',
-                                         str(visit), '--campaign-to', str(visit)])
+                                         str(visit), '--campaign-to', str(visit)], stop_visit=visit)
         for f in chain.glob(f'{visit:02}-*.json'):
             shutil.copy2(f, out / f.name)
     rows = []

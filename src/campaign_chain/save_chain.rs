@@ -209,6 +209,19 @@ fn native_game(
     Ok(game)
 }
 
+/// Restore an entrance through the existing native save-chain conversion in memory.
+/// This creates no save files and checks the actual restored native objects.
+pub(crate) fn restore_entrance(assets: &mut Assets, checkpoint: &Checkpoint) -> Result<Restored> {
+    let mut alice = Character::load(assets)?;
+    let game = native_game(assets, &mut alice, checkpoint, &checkpoint.ledger, false)?;
+    let restored = Restored::build(assets, game.clone())?;
+    same(&level_of(&restored)?, game.level()?, "checkpoint native level")?;
+    same(&restored.game.player, &game.player, "checkpoint player")?;
+    same(&restored.game.stats, &game.stats, "checkpoint resources")?;
+    same(&restored.alice.snapshot(), &game.character, "checkpoint Alice")?;
+    Ok(restored)
+}
+
 /// The checkpoints the headless chain left, in visit order.
 fn chain_files() -> Result<Vec<VisitFile>> {
     let mut files = Vec::new();

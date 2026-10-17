@@ -577,13 +577,20 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         || options.shelf_preview
         || options.start_at.is_some()
         || options.story_preview.is_some());
+    let test_start = options.vita_start.is_some();
     #[cfg(feature="vita_renderer")]
-    let mut route_session=crate::route_replay::Session::open(&mut options)?;
+    let mut route_session=if test_start { None } else { crate::route_replay::Session::open(&mut options)? };
     eprintln!("[lg/startup] route options ready; save store begin");
     let save_store_start = std::time::Instant::now();
     let fingerprint = assets.fingerprint()?;
     let store_start = std::time::Instant::now();
     let store = Store::new(options.save_dir.clone(), fingerprint);
+    let store = if test_start { store.read_only() } else { store };
+    let start_restored = options.vita_start.as_ref().map(|r| r.restore(&mut assets)).transpose()?.flatten();
+    let start_hash = start_restored.as_ref().map(crate::vita_start::native_hash).transpose()?;
+    let start_resume = start_restored.as_ref().map(|r| save::Loaded {
+        game: r.game.clone(), saved_at: 0, backup: false, preview: None,
+    });
     eprintln!("[lg/startup] save store ready elapsed_ms={:.3} store_construct_ms={:.3} viewer_elapsed_ms={:.3}",save_store_start.elapsed().as_secs_f64()*1000.,store_start.elapsed().as_secs_f64()*1000.,startup.elapsed().as_secs_f64()*1000.);
     #[cfg(feature="vita_renderer")]
     let route_resume=route_session.as_ref().map(|r|r.resume(&store)).transpose()?.flatten();
@@ -593,7 +600,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let maps = assets.maps();
     let mut audio = Audio::new(options.no_audio, options.audio_capture.clone());
     #[cfg(target_os = "vita")]
-    let mut bench_session = crate::frame_profile::startup_bench();
+    let mut bench_session = !test_start && crate::frame_profile::startup_bench();
     #[cfg(target_os = "vita")]
     let mut bench_restored = None;
     #[cfg(target_os = "vita")]
@@ -618,7 +625,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(not(target_os = "vita"))]
     let bench_resume: Option<save::Loaded> = None;
     let mut opening_requested = options.new_game && options.map == "gvillage";
-    let resume = if let Some(loaded)=route_resume { Some(loaded) } else if let Some(loaded) = bench_resume {
+    let resume = if let Some(loaded)=start_resume { Some(loaded) } else if let Some(loaded)=route_resume { Some(loaded) } else if let Some(loaded) = bench_resume {
         Some(loaded)
     } else if let Some(slot) = options.load {
         anyhow::ensure!(
@@ -801,9 +808,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }};
     }
     #[cfg(target_os = "vita")]
-    let prepared = bench_restored.take();
+    let prepared = start_restored.or_else(|| bench_restored.take());
     #[cfg(not(target_os = "vita"))]
-    let prepared: Option<save::Restored> = None;
+    let prepared = start_restored;
     // Menu Continue/Load and --load must reuse their restored scene just like benches.
     // Prepare before the fresh-game branch; failed restoration keeps the existing
     // paused fresh-scene/error behavior, without retrying an expensive restore.
@@ -814,6 +821,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             Err(error) => { resume_error = Some(format!("Could not restore save: {error:#}")); None }
         }
     } else { None };
+    anyhow::ensure!(!test_start || resume.is_none() || prepared.is_some(), "Requested checkpoint restoration failed");
     let mut resume_applied = false;
     let validated = prepared.is_some();
     if save::bench_scene(validated) == save::BenchScene::ReuseValidated {
@@ -997,6 +1005,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }};
     }
+    if test_start {
+        let hash = crate::vita_start::game_hash(&game_snapshot!())?;
+        anyhow::ensure!(start_hash.as_ref().is_none_or(|expected| expected == &hash),
+            "Installed checkpoint differs from the restored native state");
+        println!("[lg/vita-start] installed map={} native_state_hash={hash} saves=read-only", maps[current]);
+    }
     if resume.is_none()
         && saves_enabled
         && opening_requested
@@ -1119,9 +1133,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         #[cfg(target_os = "vita")]
-        let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
+        let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session) && !test_start;
         #[cfg(not(target_os = "vita"))]
-        let saves_writable = saves_enabled;
+        let saves_writable = saves_enabled && !test_start;
         #[cfg(target_os = "vita")]
         let simulate = !crate::frame_profile::simulation_frozen();
         #[cfg(not(target_os = "vita"))]
@@ -4136,9 +4150,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         audio.scene_presented();
     }
     #[cfg(target_os = "vita")]
-    let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
+    let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session) && !test_start;
     #[cfg(not(target_os = "vita"))]
-    let saves_writable = saves_enabled;
+    let saves_writable = saves_enabled && !test_start;
     if saves_writable && played && stats.alive() && options.frames.is_none() && !post_game {
         if let Err(e) =
             store.write_with_preview(Slot::Auto, &game_snapshot!(), save_frame.preview().as_ref())

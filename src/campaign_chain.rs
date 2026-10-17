@@ -952,6 +952,30 @@ fn read_visit(index: usize) -> Result<Option<VisitFile>> {
     Ok(Some(file))
 }
 
+/// Read an upstream entrance from the console's existing private directory.
+/// No fixture is silently substituted and no checkpoint or save is written.
+pub fn load_start_checkpoint(
+    assets: &mut Assets,
+    directory: &Path,
+    selector: &str,
+) -> Result<(Checkpoint, String)> {
+    let index = parse_visit(selector)?;
+    let path = directory.join(file_name(index));
+    let bytes = save::read_limited(&path)?;
+    save::validate_json(&serde_json::from_slice(&bytes)?)?;
+    let file: VisitFile = serde_json::from_slice(&bytes)?;
+    ensure!(file.format == VISIT_FORMAT && file.version == 1
+        && file.index == index + 1 && file.visit == campaign::visits()[index]
+        && campaign::visit_index(&file.entrance.level.map, file.entrance.level.entry.as_deref()) == Some(index),
+        "Wrong campaign checkpoint: {}", path.display());
+    let route = Route::resume(assets, &file.entrance)?;
+    let hash = route.state_hash()?;
+    ensure!(hash == file.entrance_digest, "Campaign checkpoint state_hash mismatch: expected {}, restored {hash}", file.entrance_digest);
+    println!("[lg/vita-start] checkpoint={} strict={} fixture={} diagnosis={}",
+        path.display(), file.strict, file.fixture, file.diagnosis);
+    Ok((route.checkpoint(), hash))
+}
+
 /// Whether this run may start from a visit's checkpoint file. A checkpoint is proof only for the
 /// run that would have produced it: the same difficulty, and, for a strict chain, one that was
 /// strict, came from New Game state and restored nothing.
