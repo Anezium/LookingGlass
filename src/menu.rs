@@ -213,6 +213,20 @@ fn load_texture(assets: &mut Assets, path: &str, additive: bool) -> Result<Textu
     Ok(tex)
 }
 
+// Extra touch rows fit above the stock Game footer on the Vita screen.
+fn game_rows(vita: bool) -> Vec<(String, f32)> {
+    if vita {
+        [("Stick Sensitivity", 60.), ("Invert Look", 104.),
+         ("Camera Distance", 136.), ("Always Run", 180.), ("Subtitles", 212.),
+         ("Touch Sensitivity", 244.), ("Invert Touch", 288.)]
+            .into_iter().map(|(label, y)| (label.into(), y)).collect()
+    } else {
+        [("Sensitivity", 80.), ("Invert Mouse", 130.), ("Camera Distance", 168.),
+         ("Always Run", 222.), ("Subtitles", 270.)]
+            .into_iter().map(|(label, y)| (label.into(), y)).collect()
+    }
+}
+
 pub struct Menu {
     pub page: Option<Page>,
     pub message: String,
@@ -635,13 +649,7 @@ impl Menu {
                         ("Effects Volume".into(), 208.),
                         ("Mute".into(), 298.),
                     ],
-                    Page::Game => vec![
-                        ("Sensitivity".into(), 80.),
-                        ("Invert Mouse".into(), 130.),
-                        ("Camera Distance".into(), 168.),
-                        ("Always Run".into(), 222.),
-                        ("Subtitles".into(), 270.),
-                    ],
+                    Page::Game => game_rows(cfg!(target_os = "vita")),
                     _ => Vec::new(),
                 };
                 let mut buttons = rows
@@ -700,10 +708,18 @@ impl Menu {
                 self.draft_audio.effects = (self.draft_audio.effects + delta * 0.05).clamp(0., 1.)
             }
             (Page::Audio, 2) => self.draft_audio.muted = !self.draft_audio.muted,
+            (Page::Game, 0) if cfg!(target_os = "vita") => {
+                self.draft.pad_sensitivity = (self.draft.pad_sensitivity + delta * 0.1).clamp(0.2, 3.)
+            }
+            (Page::Game, 1) if cfg!(target_os = "vita") => self.draft.invert_pad = !self.draft.invert_pad,
             (Page::Game, 0) => {
                 self.draft.sensitivity = (self.draft.sensitivity + delta * 0.1).clamp(0.2, 3.)
             }
             (Page::Game, 1) => self.draft.invert_mouse = !self.draft.invert_mouse,
+            (Page::Game, 5) if cfg!(target_os = "vita") => {
+                self.draft.sensitivity = (self.draft.sensitivity + delta * 0.1).clamp(0.2, 3.)
+            }
+            (Page::Game, 6) if cfg!(target_os = "vita") => self.draft.invert_mouse = !self.draft.invert_mouse,
             (Page::Game, 2) => {
                 self.draft.camera_distance =
                     (self.draft.camera_distance + delta * 10.).clamp(80., 220.)
@@ -727,7 +743,9 @@ impl Menu {
     fn toggle(&self, page: Page, row: usize) -> Option<bool> {
         match (page, row) {
             (Page::Audio, 2) => Some(self.draft_audio.muted),
+            (Page::Game, 1) if cfg!(target_os = "vita") => Some(self.draft.invert_pad),
             (Page::Game, 1) => Some(self.draft.invert_mouse),
+            (Page::Game, 6) if cfg!(target_os = "vita") => Some(self.draft.invert_mouse),
             (Page::Game, 3) => Some(self.draft.always_run),
             (Page::Game, 4) => Some(self.draft.subtitles),
             (Page::Controls, row) if row == BINDINGS.len() + 1 => Some(self.draft.invert_pad),
@@ -742,7 +760,9 @@ impl Menu {
         match (page, row) {
             (Page::Audio, 0) => Some(self.draft_audio.music),
             (Page::Audio, 1) => Some(self.draft_audio.effects),
+            (Page::Game, 0) if cfg!(target_os = "vita") => Some((self.draft.pad_sensitivity - 0.2) / 2.8),
             (Page::Game, 0) => Some((self.draft.sensitivity - 0.2) / 2.8),
+            (Page::Game, 5) if cfg!(target_os = "vita") => Some((self.draft.sensitivity - 0.2) / 2.8),
             (Page::Game, 2) => Some(((self.draft.camera_distance - 80.) / 140.).clamp(0., 1.)),
             (Page::Controls, row) if row == BINDINGS.len() => {
                 Some((self.draft.pad_sensitivity - 0.2) / 2.8)
@@ -758,7 +778,9 @@ impl Menu {
         match (page, row) {
             (Page::Audio, 0) => self.draft_audio.music = v,
             (Page::Audio, 1) => self.draft_audio.effects = v,
+            (Page::Game, 0) if cfg!(target_os = "vita") => self.draft.pad_sensitivity = 0.2 + v * 2.8,
             (Page::Game, 0) => self.draft.sensitivity = 0.2 + v * 2.8,
+            (Page::Game, 5) if cfg!(target_os = "vita") => self.draft.sensitivity = 0.2 + v * 2.8,
             (Page::Game, 2) => self.draft.camera_distance = 80. + v * 140.,
             (Page::Controls, row) if row == BINDINGS.len() => {
                 self.draft.pad_sensitivity = 0.2 + v * 2.8
@@ -1560,6 +1582,24 @@ impl Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn game_look_rows_preserve_host_mouse_and_expose_vita_touch_separately() {
+        let host = game_rows(false);
+        assert_eq!(host.len(), 5);
+        assert_eq!(host[0], ("Sensitivity".into(), 80.));
+        assert_eq!(host[1], ("Invert Mouse".into(), 130.));
+        let vita = game_rows(true);
+        assert_eq!(vita.len(), 7);
+        assert_eq!(vita[0].0, "Stick Sensitivity");
+        assert_eq!(vita[1].0, "Invert Look");
+        assert_eq!(vita[5].0, "Touch Sensitivity");
+        assert_eq!(vita[6].0, "Invert Touch");
+        for (i, row) in vita.iter().enumerate() {
+            let height = if matches!(i, 0 | 2 | 5) { 40. } else { 26. };
+            let next_y = vita.get(i + 1).map_or(319., |next| next.1);
+            assert!(row.1 + height <= next_y, "overlapping Game row {i}");
+        }
+    }
     #[test]
     fn vita_cross_confirms_selection_despite_duplicate_pointer_edges() {
         // Main Load/Save, Autosave, Load, Quit/Yes, and pause Resume indices.

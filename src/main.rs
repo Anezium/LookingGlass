@@ -226,6 +226,8 @@ fn app_main() {
                     right: KeyCode::D,
                 },
                 cross_is_left_click: true,
+                // Gameplay reads the analog stick as angular velocity, not mouse counts.
+                right_stick_raw_speed: 0.,
                 ..Default::default()
             },
             ..Default::default()
