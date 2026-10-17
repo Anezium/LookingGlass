@@ -64,7 +64,12 @@ impl Request {
         if let Some(name) = &self.capture {
             ensure!(self.frames.is_some(), "capture requires frames");
             ensure!(
-                name.strip_suffix(".png").is_some_and(simple_name),
+                name.strip_suffix(".png").is_some_and(|stem| {
+                    !stem.is_empty()
+                        && stem
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                }),
                 "capture must be a simple .png filename in private"
             );
             ensure!(
@@ -186,7 +191,7 @@ mod tests {
         assert!(consume(&path).unwrap().is_none());
         fs::write(
             &path,
-            r#"{"campaign_from":30,"frames":1,"capture":"tower.png"}"#,
+            r#"{"campaign_from":30,"frames":1,"capture":"checkpoint-pilot-30.png"}"#,
         )
         .unwrap();
         let r = consume(&path).unwrap().unwrap();
