@@ -374,7 +374,8 @@ impl Clockwork {
         self.door_pick_mode(w, eye, aim, crate::sim_maps::hatter_door_candidates())
     }
     fn door_pick_mode(&self, w: &World, eye: Vec3, aim: Vec3, defer: bool) -> Option<usize> {
-        self.objects.iter().enumerate().find_map(|(k, o)| {
+        let mut counts = [0u64; 3];
+        let picked = self.objects.iter().enumerate().find_map(|(k, o)| {
             if !o.class.contains("door")
                 || self.door_target(o).is_some()
                 || o.flags & (8 | 128) != 0
@@ -390,18 +391,23 @@ impl Clockwork {
             crate::sim_maps::count("hatter_door_considered", 1);
             crate::sim_maps::count("hatter_door_range_facing_rejected", u64::from(!candidate));
             if defer && !candidate {
+                counts[2] += 1;
                 crate::sim_maps::count("hatter_door_trace_pairs_deferred", 1);
                 return None;
             }
+            counts[0] += 1;
             crate::sim_maps::count("hatter_door_world_traces", 1);
             let tr = w.sweep(eye, target, Vec3::splat(0.5));
+            counts[1] += 1;
             crate::sim_maps::count("hatter_door_own_traces", 1);
             let own = o.collider.trace(eye, target, Vec3::splat(0.5));
             (candidate
                 && !tr.start_solid
                 && tr.fraction + 0.02 >= own.fraction)
                 .then_some(k)
-        })
+        });
+        crate::light_profile::door_counts(counts[0], counts[1], counts[2]);
+        picked
     }
     #[cfg(not(target_os="vita"))]
     pub(super) fn check_door_candidates(&self, w: &World) -> Result<()> {

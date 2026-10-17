@@ -59,6 +59,7 @@ struct Row {
     skin_fallbacks: u64,
     skin_overflow: u64,
     fx: [u64; 8],
+    door: [u64; 3],
     render: [RenderMetrics; 6],
 }
 /// Engine submission calls, counted at their owning phase. Texture binds count
@@ -180,6 +181,22 @@ impl Ring {
         self.start = Some(now);
         self.current = Row::default();
     }
+    // Counts follow the same accepted-frame population and bounded capture as timings.
+    // Write only at the explicit capture report boundary, never during gameplay.
+    fn write_door_windows(&self, out: &mut impl Write) -> std::io::Result<()> {
+        writeln!(out, "frame_first,frame_last,frames,hatter_door_world_traces,hatter_door_own_traces,hatter_door_trace_pairs_deferred")?;
+        if let Some(rows) = &self.capture {
+            for window in rows.chunks(WINDOW) {
+                let totals = window.iter().fold([0u64; 3], |mut sum, row| {
+                    for (dst, count) in sum.iter_mut().zip(row.door) { *dst += count; }
+                    sum
+                });
+                writeln!(out, "{},{},{},{},{},{}", window[0].frame,
+                    window.last().unwrap().frame, window.len(), totals[0], totals[1], totals[2])?;
+            }
+        }
+        Ok(())
+    }
     fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
         write!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us")?;
         for phase in PHASE_NAMES {
@@ -218,6 +235,17 @@ pub(crate) fn begin(_map: &str, _mode: Mode) {
         return;
     }
     RING.with(|r| r.borrow_mut().begin(Instant::now()));
+}
+/// One update per door search, no strings, allocation, timers or I/O.
+pub(crate) fn door_counts(world: u64, own: u64, deferred: u64) {
+    if active() && capture_enabled() {
+        RING.with(|r| {
+            let mut r = r.borrow_mut();
+            for (dst, count) in r.current.door.iter_mut().zip([world, own, deferred]) {
+                *dst += count;
+            }
+        });
+    }
 }
 pub(crate) fn skin_collect_wait(us: u64) {
     if active() { RING.with(|r| r.borrow_mut().current.skin_collect_wait_us += us); }
@@ -314,6 +342,10 @@ fn export_window(map: &str, mode: Mode) -> anyhow::Result<()> {
         let mut out = std::io::BufWriter::new(std::fs::File::create(dir.join(&name))?);
         r.write(&mut out)?;
         out.flush()?;
+        let name = format!("{map}-{}-light-{}-doors.csv", mode_name(mode), r.count);
+        let mut doors = std::io::BufWriter::new(std::fs::File::create(dir.join(&name))?);
+        r.write_door_windows(&mut doors)?;
+        doors.flush()?;
         r.exported = r.count;
         Ok(())
     })
@@ -332,6 +364,30 @@ fn mode_name(mode: Mode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn door_windows_match_accepted_frames_and_include_partial_window() {
+        let mut r = Ring::capture();
+        let origin = Instant::now(); r.begin(origin);
+        for i in 1..=125 {
+            r.current.door = [i, i, 2 * i];
+            r.pending = true;
+            r.begin(origin + std::time::Duration::from_micros(i));
+        }
+        let mut out = Vec::new(); r.write_door_windows(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(&lines[1..], &["1,60,60,1830,1830,3660", "61,120,60,5430,5430,10860", "121,125,5,615,615,1230"]);
+        assert_eq!(r.current.door, [0; 3]);
+        // Rejected frames must not contaminate the next accepted population.
+        r.current.door = [999; 3]; r.pending = false;
+        r.begin(origin + std::time::Duration::from_micros(126));
+        assert_eq!(r.current.door, [0; 3]);
+        assert_eq!(r.capture.as_ref().unwrap().len(), 125);
+        let mut normal = Vec::new(); Ring::default().write_door_windows(&mut normal).unwrap();
+        assert_eq!(String::from_utf8(normal).unwrap().lines().count(), 1);
+        reset(); door_counts(1, 2, 3);
+        RING.with(|r| assert_eq!(r.borrow().current.door, [0; 3]));
+    }
     #[test]
     fn defaults_and_explicit_levels_cover_every_mode() {
         for mode in [
