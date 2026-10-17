@@ -347,7 +347,7 @@ pub struct Input {
     #[cfg(target_os = "vita")]
     vita_look_neutral: bool,
     #[cfg(target_os = "vita")]
-    vita_look_log: crate::look::stick::RateLog,
+    vita_look_log: std::cell::RefCell<crate::look::stick::RateLog>,
 }
 impl Input {
     pub fn update(&mut self, prefs: &Preferences, focused: bool) {
@@ -519,12 +519,12 @@ impl Input {
             * prefs.pad_sensitivity
     }
     #[cfg(target_os = "vita")]
-    pub fn vita_look(&mut self, prefs: &Preferences, elapsed: f32, yaw: &mut f32, pitch: &mut f32) {
+    pub fn vita_look(&self, prefs: &Preferences, elapsed: f32, yaw: &mut f32, pitch: &mut f32) {
         let axis = self.pad.look_axis;
         let before = *yaw;
         crate::look::stick::turn(axis, prefs.pad_sensitivity, prefs.invert_pad, elapsed, yaw, pitch);
         // Measure the applied, wrapped yaw change rather than printing the configured rate.
-        self.vita_look_log.sample(axis, elapsed, before, *yaw);
+        self.vita_look_log.borrow_mut().sample(axis, elapsed, before, *yaw);
     }
     pub fn desktop_pad(&self) -> bool {
         self.using_pad && !Preferences::vita_emulation()
