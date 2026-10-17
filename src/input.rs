@@ -646,6 +646,16 @@ mod tests {
 mod vita_preset_tests {
     use super::*;
     #[test]
+    fn vita_sticks_require_neutral_independently_after_modal_boundaries() {
+        let (mut movement_neutral, mut look_neutral) = (true, true);
+        assert_eq!(resumed_axis(Vec2::X, &mut look_neutral), Vec2::ZERO);
+        resumed_axis(Vec2::ZERO, &mut movement_neutral);
+        assert_eq!(resumed_axis(Vec2::X, &mut movement_neutral), Vec2::X);
+        assert_eq!(resumed_axis(Vec2::X, &mut look_neutral), Vec2::ZERO);
+        resumed_axis(Vec2::ZERO, &mut look_neutral);
+        assert_eq!(resumed_axis(Vec2::X, &mut look_neutral), Vec2::X);
+    }
+    #[test]
     fn analog_walk_run_threshold_and_physical_prompt_names() {
         let mut needs_neutral = true;
         assert_eq!(resumed_axis(vec2(0., 1.), &mut needs_neutral), Vec2::ZERO);

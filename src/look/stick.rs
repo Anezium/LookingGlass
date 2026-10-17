@@ -107,6 +107,26 @@ mod tests {
     }
 
     #[test]
+    fn measured_yaw_rate_includes_wrap_and_matches_default_and_maximum() {
+        for hz in [30, 40] {
+            for sensitivity in [1., 3.] {
+                let mut log = RateLog::default();
+                let (mut yaw, mut pitch) = (0.01, 0.);
+                for _ in 0..hz / 2 {
+                    let before = yaw;
+                    turn(Vec2::X, sensitivity, false, 1. / hz as f32, &mut yaw, &mut pitch);
+                    log.sample(Vec2::X, 1. / hz as f32, before, yaw);
+                }
+                let measured = log.yaw.to_degrees() / log.seconds;
+                assert!((measured + rates(sensitivity).x).abs() < 0.002);
+                log.sample(Vec2::ZERO, 0.025, yaw, yaw);
+                assert_eq!(log.frames, 0);
+                assert_eq!(log.seconds, 0.);
+            }
+        }
+    }
+
+    #[test]
     fn neutral_inversion_wrap_limits_and_stalls() {
         let (mut yaw, mut pitch) = (-0.0_f32, -0.0_f32);
         turn(Vec2::ZERO, 3., true, 0.038, &mut yaw, &mut pitch);
