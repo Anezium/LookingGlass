@@ -213,7 +213,12 @@ fn native_game(
 /// This creates no save files and checks the actual restored native objects.
 pub(crate) fn restore_entrance(assets: &mut Assets, checkpoint: &Checkpoint) -> Result<Restored> {
     let mut alice = Character::load(assets)?;
-    let game = native_game(assets, &mut alice, checkpoint, &checkpoint.ledger, false)?;
+    let mut game = native_game(assets, &mut alice, checkpoint, &checkpoint.ledger, false)?;
+    // Route entrances precede their first tick: equipment-derived player flags
+    // (notably the late-game Turtle shell) may still be unset. Native Continue
+    // applies these in save::settle; prepare the expected native representation
+    // with that same existing rule, without changing the checkpoint or its hash.
+    game.stats.prepare_player(&mut game.player);
     let restored = Restored::build(assets, game.clone())?;
     same(&level_of(&restored)?, game.level()?, "checkpoint native level")?;
     same(&restored.game.player, &game.player, "checkpoint player")?;
