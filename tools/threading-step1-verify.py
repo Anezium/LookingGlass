@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Mac-only step-1 checks with cooperative lock and frozen binary. No console IO."""
-import argparse, hashlib, json, os, shutil, subprocess, time, select
+import argparse, hashlib, json, os, shutil, subprocess, time, select, re
 from pathlib import Path
 P=argparse.ArgumentParser()
 P.add_argument('--evidence',type=Path,required=True)
@@ -95,17 +95,31 @@ else:
     results=dict(binary_sha256=sha(B),simulation=[],images=[])
     metrics=dict(LOOKING_GLASS_RENDER_METRICS='1',LOOKING_GLASS_WORLD_HASHES='1',LOOKING_GLASS_HOST_CLOCK_STEP='0')
     for name in ['skool2','hedge3','tower2','funhouse','hatter1','potears3','fortress1','gvillage','skool1','pandemonium']:
-        pair=[];n=1200 if name=='funhouse' else 300
+        pair=[];viewports=[];n=1200 if name=='funhouse' else 300
         for arm in ['off','on']:
             c=cell('sim-'+name,arm,probe=True)
             log=run(str(c.relative_to(E))+'/run',[B,'--data',D,'--map',name,'--no-audio','--frames',n,'--save-dir',c/'private/saves'],cwd=c,
                 extra=dict(metrics,LOOKING_GLASS_SIM_MAPS_PROBE='1',LOOKING_GLASS_SIM_MAPS_DT='0.05',LOOKING_GLASS_SIM_MAPS_COUNTERS='1'))
             rows=[json.loads(s.split(' ',1)[1]) for s in log.read_text().splitlines() if s.startswith('SIM_MAPS_FRAME ')]
             assert len(rows)==n,(name,arm,len(rows));pair.append((rows,hashes(log)))
+            viewports.append(re.search(r'stage=prepare-3d-returned .*?viewport=(\[[^\]]+\])',log.read_text()).group(1))
         assert [r['state_sha256'] for r in pair[0][0]]==[r['state_sha256'] for r in pair[1][0]],(name,'state')
         assert [r['counters'] for r in pair[0][0]]==[r['counters'] for r in pair[1][0]],(name,'workload')
-        assert pair[0][1]==pair[1][1],(name,'numeric output')
-        results['simulation'].append(dict(map=name,frames_per_arm=n,state_equal=True,counters_equal=True,world_hashes_equal=True));save('PARITY.json',results)
+        world=[p[1] for p in pair];assert all(len(h)==n*2 for h in world),(name,'world sample count')
+        # Cocoa animates Preferences::display's 960->1200 resize. If the first
+        # viewports differ, those initial projection/uniform bits are not matched
+        # inputs. Retain/report both, compare their visibility sets, and require
+        # every later frame's complete bits. Fixed-entry/clock fixtures below
+        # still require complete parity including their first frame.
+        startup_projection_mismatch=world[0][:2]!=world[1][:2]
+        if startup_projection_mismatch:
+            assert viewports[0]!=viewports[1],(name,'unexplained first-frame mismatch')
+            assert [h['visibility_sha256'] for h in world[0][:2]]==[h['visibility_sha256'] for h in world[1][:2]],(name,'initial visibility')
+        assert world[0][2:]==world[1][2:],(name,'numeric output after startup')
+        results['simulation'].append(dict(map=name,frames_per_arm=n,state_equal=True,counters_equal=True,
+            world_full_bit_frames=n-int(startup_projection_mismatch),world_visibility_frames=n,
+            startup_viewports=viewports,startup_projection_mismatch=startup_projection_mismatch,
+            startup_world_hashes=[h[:2] for h in world]));save('PARITY.json',results)
     for mode in ['renderer-host-check','skin-overlap-render-check']:
         pair=[]
         for arm in ['off','on']:
