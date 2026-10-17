@@ -117,6 +117,7 @@ pub enum Mode {
 impl Mode {
     #[cfg(target_os = "vita")]
     pub(crate) fn read() -> Self {
+        if !crate::light_profile::capture_enabled() { return Self::Full; }
         Self::parse(&std::fs::read_to_string("ux0:data/alice/private/profile_mode").unwrap_or_default())
     }
     #[cfg(any(target_os = "vita", test))]
@@ -1163,6 +1164,7 @@ mod vita {
             "mean_ms": if n>0 {Some(v.iter().sum::<f64>()/n as f64)} else {None}, "total_ms":v.iter().sum::<f64>()})
     }
     pub fn report(map: &str) -> anyhow::Result<()> {
+        if !crate::light_profile::capture_enabled() { return Ok(()); }
         if !crate::light_profile::full() { return crate::light_profile::export(map); }
         if !enabled() {
             return Ok(());

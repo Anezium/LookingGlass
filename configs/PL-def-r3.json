@@ -27,7 +27,7 @@
   "fx_submit_state_cache": true,
   "actor_layer_reuse": false,
   "actor_single_prepare": true,
-  "profiler": "light",
+  "profiler": "off",
   "skin_worker_bench": false,
   "fx_prepare_cache": true,
   "particle_producer_reuse": true,
@@ -97,5 +97,6 @@
   "audio_cushion_blocks": 2,
   "audio_log_thread": false,
   "audio_music_thread": false,
-  "audio_music_priority": 170
+  "audio_music_priority": 170,
+  "profile_capture": false
 }
