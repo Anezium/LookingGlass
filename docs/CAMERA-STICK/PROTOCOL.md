@@ -4,9 +4,9 @@ This package changes only camera input/menu wiring relative to r3f 0bd6241.
 No console was contacted for implementation or host validation. Feel and actual
 console rates remain pending a human test. Use the existing r3f renderer/audio
 configs, game data, save and launch procedure. Preserve the installed SELF,
-preferences and save first; install the supplied SELF using your normal manual
-workflow, or use the VPK when appropriate to your existing installation.
-Restore the previous SELF and preferences to roll back.
+preferences and save first; install the supplied SELF using the established
+manual SELF-only overwrite procedure from the r3f campaign. Keep the VPK as
+an archive artifact. Restore the previous SELF and preferences to roll back.
 
 1. Open Options > Game. Set **Stick Sensitivity** to 1.0 (28.57% of slider;
    or set `pad_sensitivity: 1.0` in preferences with the game stopped).
