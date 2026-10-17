@@ -44,6 +44,9 @@ impl Buffer {
     pub(super) fn prepare_world(&mut self, puffs: &[Puff], emitters: &[Emitter], camera: Vec3, direction: Vec3) {
         self.prepare_mode(puffs, emitters, camera, Some(direction), true);
     }
+    pub(super) fn prepare_attached(&mut self, puffs: &[Puff], emitters: &[Emitter], camera: Vec3) {
+        self.prepare_mode(puffs, emitters, camera, None, true);
+    }
     fn prepare_mode(&mut self, puffs: &[Puff], emitters: &[Emitter], camera: Vec3, direction: Option<Vec3>, raw: bool) {
         let _span = crate::frame_profile::span("particle_producer");
         self.live = 0;
@@ -163,6 +166,12 @@ mod tests {
             assert_eq!(scope.finish(),0);assert!(buffer.publications.is_empty());
             for i in 0..steam.puffs.len(){assert!(same(&buffer.raw_quad(i).unwrap(),&steam.puff_mesh(i,camera,Vec3::X).vertices));}
         }
+        buffer.prepare_attached(&steam.puffs,&steam.emitters,camera);
+        for i in 0..steam.puffs.len() {
+            let direction=(steam.puffs[i].position-camera).normalize_or_zero();
+            assert!(same(&buffer.raw_quad(i).unwrap(),&steam.puff_mesh(i,camera,direction).vertices));
+        }
+        assert!(buffer.publications.is_empty());
         buffer.prepare(&steam.puffs,&steam.emitters,camera,None);
         assert!(buffer.raw_quad(0).is_none());assert!(buffer.geometry(0).is_some());
     }

@@ -73,6 +73,8 @@ pub struct Config {
     pub particle_producer_reuse: bool,
     /// Publish world puffs once per final joint-alpha material batch.
     pub world_puff_batches: bool,
+    /// Send additive attached quads to the joint-alpha batch bank directly.
+    pub attached_puff_batches: bool,
     pub fx_merge_in_place: bool,
     pub fx_worker_prep: bool,
     pub frame_phase_probe: bool,
@@ -217,7 +219,7 @@ impl Default for Config {
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
-            particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
+            particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,

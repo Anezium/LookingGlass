@@ -98,5 +98,6 @@
   "sim_triangle_candidates": true,
   "sim_fan_candidates": true,
   "fx_merge_local_reuse": true,
-  "profile_capture": true
+  "profile_capture": true,
+  "attached_puff_batches": true
 }

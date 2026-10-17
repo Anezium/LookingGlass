@@ -551,6 +551,8 @@ fn run() -> Result<()> {
             "--swim-render-check" => mode = "swim-render",
             "--items-check" => mode = "items",
             "--loot-render-check" => mode = "loot-render",
+            #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+            "--pickup-fx-check" => mode = "pickup-fx",
             "--traversal-check" => mode = "traversal",
             "--ledge-check" => mode = "ledge",
             "--ledge-render-check" => mode = "ledge-render",
@@ -1411,6 +1413,15 @@ fn run() -> Result<()> {
             if let Err(e) = viewer::check_level_swaps(&mut assets, &o).await {
                 eprintln!("Level swap check failed: {e:#}");
                 std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
+    #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+    if mode == "pickup-fx" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = pickup_effects::check(&mut assets).await {
+                eprintln!("Pickup fixture failed: {e:#}"); std::process::exit(1);
             }
         });
         return Ok(());

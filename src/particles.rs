@@ -1234,6 +1234,17 @@ impl Steam {
                 self.quads.borrow_mut().prepare_world(&self.puffs, &self.emitters, camera, direction);
                 return;
             }
+            // Preserve the same sorted per-puff registration order, but avoid
+            // one Rc geometry/pass publication per additive attached sprite.
+            // The joint-alpha bank keeps world/actor/material barriers and owns
+            // the final immutable arrays and unchanged quad indices.
+            if direction.is_none() && crate::render_fx::world_puff_batches_active()
+                && crate::render::vita_renderer::config().attached_puff_batches
+                && self.puffs.iter().all(|p| self.emitters[p.emitter].additive)
+            {
+                self.quads.borrow_mut().prepare_attached(&self.puffs, &self.emitters, camera);
+                return;
+            }
             self.quads.borrow_mut().prepare(&self.puffs, &self.emitters, camera, direction);
         }
     }
@@ -1651,6 +1662,8 @@ impl Attached {
         }
         self.draw_sampled(camera, atmosphere);
     }
+    #[cfg(not(target_os="vita"))]
+    pub(crate) fn live_puffs(&self) -> usize { self.steam.puffs.len() }
     pub(crate) fn draw_sampled(&mut self, camera: Vec3, atmosphere: &Atmosphere) {
         if crate::character::skinning::overlap::gathering() { return; }
         #[cfg(feature="vita_renderer")]

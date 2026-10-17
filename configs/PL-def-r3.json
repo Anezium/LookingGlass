@@ -98,5 +98,6 @@
   "audio_log_thread": false,
   "audio_music_thread": false,
   "audio_music_priority": 170,
-  "profile_capture": false
+  "profile_capture": false,
+  "attached_puff_batches": true
 }

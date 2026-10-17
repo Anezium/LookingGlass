@@ -197,6 +197,56 @@ impl Effect {
     }
 }
 
+/// Real authored 75-sprite fixture through the retained publication/merge/upload path.
+#[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+pub(crate) async fn check(assets: &mut Assets) -> Result<()> {
+    use crate::render_fx::retained;
+    let specs = texture::read_materials(assets)?;
+    let atmosphere = Atmosphere::default();
+    let eye = vec3(0., -180., 50.);
+    let camera = Camera3D { position: eye, target: vec3(0.,0.,12.), up: Vec3::Z,
+        fovy: 70_f32.to_radians(), z_near: 1., z_far: 1000., ..Default::default() };
+    let mut gpu = retained::Gpu::new()?;
+    std::fs::create_dir_all("private/pickup-fixture")?;
+    let mut report = Vec::new();
+    for model in ["p_h1","p_h2","p_m1","p_m2","w_me_small","w_me_medium","w_me_large","w_me_super"] {
+        let effect = Effect::load(assets, model, "pickup", &specs)?;
+        let mut samples = Vec::new();
+        let mut finish_samples = Vec::new();
+        let mut counters = serde_json::Value::Null;
+        let iterations = if std::env::var_os("LOOKING_GLASS_PICKUP_TIMING").is_some() && model == "p_h1" { 360 } else { 12 };
+        for frame in 0..iterations {
+            clear_background(BLACK);
+            crate::render::vita_renderer::prepare_3d(BLACK);
+            crate::render::vita_renderer::set_3d_camera(&camera);
+            let age = if model == "p_h1" { 0.15 + (frame % 60) as f32 / 30. } else { 0.15 };
+            retained::begin_view(&camera, age, &atmosphere, false, true);
+            let started = std::time::Instant::now();
+            effect.draw(Some("fixture"), age, Vec3::ZERO, 0., eye, &atmosphere);
+            let producer_us = started.elapsed().as_secs_f64() * 1e6;
+            let started = std::time::Instant::now();
+            let (_, dropped) = retained::finish(&mut gpu, &[], true, |_| unreachable!());
+            let finish_us = started.elapsed().as_secs_f64() * 1e6;
+            crate::render::vita_renderer::present_3d();
+            anyhow::ensure!(dropped == 0, "dropped fixture quads: {model}");
+            if frame >= 10 { samples.push(producer_us); finish_samples.push(finish_us); }
+            counters = retained::host_report();
+            if frame == 10 {
+                let count: usize = effect.instances.borrow().values().flat_map(|i| &i.particles).map(|p| p.live_puffs()).sum();
+                if model.starts_with("p_") { anyhow::ensure!(count == 75, "expected 75 authored sprites, {model}: {count}"); }
+                let image = get_screen_data();
+                anyhow::ensure!(image.bytes.chunks_exact(4).any(|p| p[..3] != [0,0,0]), "empty pickup: {model}");
+                image.export_png(&format!("private/pickup-fixture/{model}.png"));
+            }
+            set_default_camera(); next_frame().await;
+        }
+        let stats = |mut v: Vec<f64>| { v.sort_by(f64::total_cmp); serde_json::json!({"n":v.len(),"median_us":v[v.len()/2],"p95_us":v[v.len()*95/100],"max_us":v[v.len()-1]}) };
+        report.push(serde_json::json!({"model":model,"age_min":0.15,"age_max":if model == "p_h1" { 0.15 + 59./30. } else { 0.15 },"producer":stats(samples),"fx_finish_cpu":stats(finish_samples),"last_frame_counters":counters}));
+    }
+    std::fs::write("private/pickup-fixture/report.json", serde_json::to_vec_pretty(&report)?)?;
+    println!("PASS real pickup retained fixture, 75-sprite shards, images and CPU samples");
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
