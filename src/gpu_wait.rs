@@ -2,7 +2,7 @@
 //! of the profiler. Elapsed API time includes preemption; off-CPU is not GPU time.
 #![cfg_attr(not(target_os="vita"), allow(dead_code))]
 use std::{cell::RefCell, time::Instant};
-pub(crate) const NAMES: [&str; 30] = [
+pub(crate) const NAMES: [&str; 33] = [
     "gpu_submit_wall_us", "gpu_submit_cpu_us", "gpu_submit_nonwait_cpu_us",
     "gpu_wait_api_wall_us", "gpu_wait_api_cpu_us", "gpu_wait_off_cpu_us",
     "gpu_gl_flush_us", "gpu_gl_flush_calls", "gpu_gl_finish_us", "gpu_gl_finish_calls",
@@ -14,21 +14,26 @@ pub(crate) const NAMES: [&str; 30] = [
     "gpu_gxm_begin_scene_us", "gpu_gxm_begin_scene_calls",
     "gpu_gxm_end_scene_us", "gpu_gxm_end_scene_calls",
     "gpu_submit_scopes", "gpu_clock_reads", "gpu_clock_errors", "gpu_probe_frames",
+    "gpu_gl_flush_cpu_us", "gpu_gl_finish_cpu_us", "gpu_vgl_swap_cpu_us",
 ];
 pub(crate) const COUNT: usize = NAMES.len();
 #[derive(Clone, Copy)]
 pub(crate) enum Api { Flush, Finish, Swap, GxmFinish, TransferFinish, Notification,
     DisplayAdd, DisplayFinish, BeginScene, EndScene }
 impl Api { fn wait(self) -> bool { self as usize >= Self::GxmFinish as usize } }
-#[derive(Default)]
 struct State {
     enabled: bool, values: [u64; COUNT], submit_depth: usize, wait_depth: usize,
     wait_cpu_in_submit: u64, swap_depth: usize,
+}
+impl Default for State {
+    fn default() -> Self { Self { enabled:false,values:[0;COUNT],submit_depth:0,
+        wait_depth:0,wait_cpu_in_submit:0,swap_depth:0 } }
 }
 impl State {
     fn api(&mut self, api: Api, m: Sample, outer_wait: bool) {
         let offset = 6 + api as usize * 2;
         self.values[offset] += m.wall_us; self.values[offset+1] += 1;
+        if (api as usize) < 3 { self.values[30+api as usize] += m.cpu_us; }
         if outer_wait {
             self.values[3] += m.wall_us;
             self.values[4] += m.cpu_us;
@@ -194,7 +199,7 @@ mod tests {
         s.api(Api::Finish,Sample {wall_us:120,cpu_us:20,valid:true},false);
         s.submit(Sample {wall_us:300,cpu_us:150,valid:true});
         assert_eq!(&s.values[..6], &[300,150,142,100,8,92]);
-        assert_eq!(s.values[8],120); assert_eq!(s.values[9],1);
+        assert_eq!(s.values[8],120); assert_eq!(s.values[9],1); assert_eq!(s.values[31],20);
         assert_eq!(s.values[28],0);
     }
     #[test]

@@ -32,6 +32,13 @@ class CsvContract(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); self.fixture(root,columns)
                 with self.assertRaises(ValueError): report.read_window(root,False)
+    def test_off_cpu_quantiles_use_per_frame_differences(self):
+        rows=[]
+        for wall,cpu in [(0,0),(100,99),(100,1)]:
+            row={k:0 for k in report.COLUMNS};row.update(gpu_gl_finish_us=wall,gpu_gl_finish_cpu_us=cpu);rows.append(row)
+        summary=report.summarize_rows(rows)
+        self.assertEqual(summary['gpu_gl_finish_off_cpu_us_estimate']['median'],1)
+        self.assertEqual(summary['gpu_gl_finish_off_cpu_us_estimate']['max'],99)
     def test_rejects_inactive_gpu_probe(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); self.fixture(root,probe=True)

@@ -18,7 +18,7 @@ for name in ['gvillage','hatter1','potears1']:
             contract.require(all(r['world_prepare_fallbacks']==0 for r in rows),f'{name}/{pair}/{arm}: inline fallback')
             contract.require(all((r['world_prepare_jobs']>0)==(arm=='on') for r in rows),f'{name}/{pair}/{arm}: incorrect worker arm')
             arms[arm]=dict(raw_files=list(map(str,files)),selected_rows=rows,
-                columns={k:contract.stats([r[k] for r in rows]) for k in contract.COLUMNS if k!='frame'})
+                columns=contract.summarize_rows(rows))
         delta={k:{q:arms['on']['columns'][k][q]-arms['off']['columns'][k][q] for q in ['median','p95','max','mean']}
             for k in ['wall_us','frame_cpu_us','swap_us']}
         runs.append(dict(map=name,pair=pair,arms=arms,worker_on_minus_off_us=delta))
@@ -27,7 +27,7 @@ for name in ['gvillage','hatter1','potears1']:
     pooled[name]={}
     for arm in ['off','on']:
         rows=[row for run in runs if run['map']==name for row in run['arms'][arm]['selected_rows']]
-        pooled[name][arm]={k:contract.stats([row[k] for row in rows]) for k in contract.COLUMNS if k!='frame'}
+        pooled[name][arm]=contract.summarize_rows(rows)
 a.out.write_text(json.dumps(dict(kind=a.kind,sim_span_probe=probe,runs=runs,pooled=pooled,
     stalls_removed=0,p95='sorted[floor(.95*N)]',audio_images_and_provenance_require_log_review=True),indent=2)+'\n')
 print('PASS',a.kind,len(runs)*2,'launches; GPU, audio, image and provenance interpretation still required')

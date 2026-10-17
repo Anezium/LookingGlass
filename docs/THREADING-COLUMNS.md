@@ -191,7 +191,7 @@ Audio interpretation is the r3f producer-thread interpretation above.
 
 ## Existing GPU-call waits and submission CPU (step 0b amendment)
 
-The current schema has **200 unique fields** (the 170 above plus these 30).
+The current schema has **203 unique fields** (the 170 above plus these 33).
 These fields are a separate, overlapping axis: do not add them to the exclusive
 step-0 sum, render phases, inherited swap_us, or each other indiscriminately.
 They are zero with sim_span_probe=false. No extra GL flush, finish, readback,
@@ -257,6 +257,14 @@ GPU rows include the frame tail and swap, and are copied into the preceding
 light row at its next begin, matching existing wall/swap ownership. Backend work
 before the next viewer begin belongs to that preceding wall interval. Storage is
 fixed capacity, and no exports/allocations occur inside the driver wrappers.
-The reducer requires the complete ordered 200-column schema, GPU observation on
+The reducer requires the complete ordered 203-column schema, GPU observation on
 every retained on row, valid clocks, one swap per row, submission coverage and
-observed GXM scene hooks. Probe-off zeros include all 30 GPU fields.
+observed GXM scene hooks. Probe-off zeros include all 33 GPU fields.
+
+The three parent call CPU fields gpu_gl_flush_cpu_us, gpu_gl_finish_cpu_us and
+gpu_vgl_swap_cpu_us retain the scheduled-CPU readings already taken by those
+brackets; no extra clock reads are needed. The reducers also report
+`gpu_<parent>_off_cpu_us_estimate` as per-frame max(0, elapsed minus CPU), then
+compute median/p95/max over those per-frame differences. Subtracting independent
+aggregate medians or p95s is not a valid wait estimate. These inclusive parent
+estimates overlap their GXM children and include preemption/boundary error.
