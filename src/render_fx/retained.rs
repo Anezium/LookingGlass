@@ -30,6 +30,7 @@ fn boundary(site: &'static str) {
     let _site = crate::frame_profile::span(site);
     #[cfg(target_os = "vita")]
     crate::frame_profile::flush_boundary(site);
+    let _submission = crate::gpu_wait::submission();
     unsafe {
         get_internal_gl().flush();
     }
@@ -362,7 +363,6 @@ impl Gpu {
     }
     fn upload(&mut self, slot: usize, p: &Pass) -> Result<usize> {
         crate::game_thread::assert_current();
-        let mut step0_upload = crate::light_profile::probe_timer(crate::light_profile::Probe::FxUploadCompare);
         let mesh=p.geometry();
         ensure!(
             if crate::render::vita_renderer::config().fx_prepare_cache {
@@ -372,7 +372,6 @@ impl Gpu {
             mesh.vertices.len(),
             mesh.indices.len()
         );
-        step0_upload.switch(crate::light_profile::Probe::FxUploadResource);
         // Resolve managed Texture2D IDs before borrowing the Macroquad context.
         let white = self.white.raw_miniquad_id();
         let texture = p
@@ -401,7 +400,6 @@ impl Gpu {
             ctx.delete_buffer(old.index);
             self.stats.growths += 1;
         }
-        step0_upload.switch(crate::light_profile::Probe::FxUploadCompare);
         let b = &mut self.buffers[slot];
         b.bindings.images[0] = texture;
         // Adapted from NextOs-Ports/Looking-Glass-NextOS d59b16f (felc18-blip).
@@ -422,7 +420,6 @@ impl Gpu {
         }
         let plan = UploadPlan::new(c.fx_upload_cache || version.is_some(), c.gpu_index_dedupe || version.is_some(), same_vertex, same_index);
         if plan.full_hit { self.stats.upload_hits += 1; }
-        step0_upload.switch(crate::light_profile::Probe::FxUploadGl);
         let gl_started = std::time::Instant::now();
         let metrics = &mut self.stats.render[usize::from(p.effect)];
         metrics.buffer_updates += u64::from(plan.vertex) + u64::from(plan.index);
@@ -442,7 +439,6 @@ impl Gpu {
             self.stats.upload_gl_us += us;
             count("vita_fx_upload_gl_us", us);
         }
-        step0_upload.switch(crate::light_profile::Probe::FxUploadCopy);
         if version.is_none() && track_vertex && !same_vertex {
             b.previous_vertices.clear();
             b.previous_vertices.extend_from_slice(&mesh.vertices);
@@ -623,8 +619,7 @@ struct PacketKey {
 }
 fn packet_key(p: &Pass) -> PacketKey {
     PacketKey {
-        texture: { let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::FxKeyResource);
-            p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id) },
+        texture: p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id),
         state: [
             p.blend_index as u32,
             u32::from(p.depth_equal),
@@ -815,7 +810,6 @@ fn merge_cached_mode<'a>(
         if let Some(previous) = cached.as_ref() {
             let version_hit = hit && versions.is_some_and(|v| cache.versions.get(&target) == Some(v));
             if hit && (version_hit || versions.is_none() && unchanged_merged(previous, groups, target, sources)) {
-                let _resource = crate::light_profile::probe_timer(crate::light_profile::Probe::FxKeyResource);
                 let cached = cached.take().unwrap();
                 if versions.is_some() { groups[target].passes[0].geometry=Some(std::rc::Rc::new(cached)); }
                 else { groups[target].passes[0].geometry=None; groups[target].passes[0].mesh=cached.mesh; }
@@ -829,8 +823,7 @@ fn merge_cached_mode<'a>(
         }
         if in_place {
             let mut dest = cached.map(|g|g.mesh).unwrap_or_else(|| Mesh {vertices:Vec::new(),indices:Vec::new(),texture:None});
-            { let _resource = crate::light_profile::probe_timer(crate::light_profile::Probe::FxKeyResource);
-                dest.texture = groups[target].passes[0].mesh.texture.clone(); }
+            dest.texture = groups[target].passes[0].mesh.texture.clone();
             cache.packing.clear();
             let mut vertices = 0; let mut indices = 0;
             for id in std::iter::once(target).chain(sources.iter().copied()) {
@@ -847,7 +840,6 @@ fn merge_cached_mode<'a>(
             count("vita_fx_pack_vertices", vertices as u64);
             count("vita_fx_pack_indices", if keep_indices {0} else {indices as u64});
             count("vita_fx_certified_indices_reused", if keep_indices {indices as u64} else {0});
-            let _resource = crate::light_profile::probe_timer(crate::light_profile::Probe::FxKeyResource);
             groups[target].passes[0].geometry = None;
             groups[target].passes[0].mesh = dest;
             for &source in sources {
@@ -855,7 +847,6 @@ fn merge_cached_mode<'a>(
                 groups[source].passes.clear();
             }
         } else {
-        let _resource = crate::light_profile::probe_timer(crate::light_profile::Probe::FxKeyResource);
         if let Some(mut cached) = cached {
             let old = groups[target].passes[0].geometry();
             cached.mesh.texture = groups[target].passes[0].mesh.texture.clone();
@@ -879,7 +870,6 @@ fn merge_cached_mode<'a>(
         }
         }
         if certified {
-            let _resource = crate::light_profile::probe_timer(crate::light_profile::Probe::FxKeyResource);
             let previous = cache.versions.insert(target, version_storage).unwrap_or_default();
             cache.version_scratch.insert(target, previous);
             let texture = groups[target].passes[0].mesh.texture.clone();
@@ -1045,6 +1035,7 @@ pub(crate) fn finish_world(
     let mut invalid = 0;
     {
         let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::FxUploadCpu);
+        let _submission = crate::gpu_wait::submission();
         let upload_started = std::time::Instant::now();
         let _span = crate::frame_profile::span("vita_fx_upload");
         let mut uniform_templates=[None;4];
@@ -1075,6 +1066,8 @@ pub(crate) fn finish_world(
         }
         gpu.shared_storage = shared_uploads;
         let cpu_us = (upload_started.elapsed().as_micros() as u64).saturating_sub(gpu.stats.upload_gl_us);
+        // Reuse the existing per-upload GL clock: no probe clock inside the pass loop.
+        crate::light_profile::probe_child(crate::light_profile::Probe::FxUploadGl, gpu.stats.upload_gl_us * 1000);
         crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadCpu, cpu_us);
         crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadGl, gpu.stats.upload_gl_us);
         crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadBytes, gpu.stats.upload_bytes);
@@ -1098,6 +1091,7 @@ pub(crate) fn finish_world(
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent);
         }
     };
+    let submission = crate::gpu_wait::submission();
     unsafe {
         crate::render::vita_renderer::begin_3d_pass(PassAction::Nothing);
         macroquad::miniquad::gl::glDepthMask(1);
@@ -1144,6 +1138,7 @@ pub(crate) fn finish_world(
         macroquad::miniquad::gl::glDepthMask(1);
         get_internal_gl().quad_context.end_render_pass();
     }
+    drop(submission);
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
         f.active = false;

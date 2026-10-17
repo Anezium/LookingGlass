@@ -25,14 +25,13 @@ impl Plane {
     fn new(camera: &Camera3D) -> Result<Self> { Self::with_opaque(camera, false) }
     fn with_opaque(camera: &Camera3D, opaque: bool) -> Result<Self> {
         let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
-        let recipe = Recipe {
+        let recipe = NumericRecipe {
             stage: Stage {
                 blend: if opaque { Blend::Opaque } else { Blend::Alpha },
                 constant_rgb: Some(if opaque { Vec3::X } else { Vec3::Y }),
                 vertex_alpha: true,
                 ..Default::default()
             },
-            textures: vec![white.clone()],
             lit: false,
             rank: 0,
             blend: 1,

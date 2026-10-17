@@ -87,6 +87,7 @@ pub fn low_fragment()->String {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Uniforms {
     pub mvp: [f32; 16],
     pub model: [f32; 16],

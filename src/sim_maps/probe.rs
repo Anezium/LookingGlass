@@ -36,7 +36,8 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     COUNTS.with(|c| println!("SIM_MAPS_FRAME {}", serde_json::json!({
         "frame": frame, "map": map, "active": active,
         "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow(),
-        "step0": crate::light_profile::probe_host_report()
+        "step0": crate::light_profile::probe_host_report(),
+        "world_prepare": crate::light_profile::world_host_report()
     })));
     if std::env::var_os("LOOKING_GLASS_SIM_MAPS_STATE").is_some() {
         std::fs::write(format!("state-{frame:05}.json"), bytes).unwrap();

@@ -187,6 +187,8 @@ pub unsafe extern "C" fn __wrap_vglGetProcAddress(n:*const c_char)->*mut c_void 
         b"glCreateProgram"=>create_program as *const () as _, b"glAttachShader"=>attach as *const () as _,
         b"glLinkProgram"=>link as *const () as _, b"glDeleteProgram"=>delete_program as *const () as _,
         _=>{
+            #[cfg(target_os="vita")]
+            if let Some(p)=crate::gpu_wait::lookup(CStr::from_ptr(n).to_bytes()) {return p;}
             #[cfg(all(target_os="vita",feature="vita_renderer"))]
             if let Some(p)=crate::render_tail::lookup(CStr::from_ptr(n).to_bytes()) {return p;}
             api::get_proc(n)

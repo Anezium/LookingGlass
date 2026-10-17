@@ -14,7 +14,9 @@ fn main() {
             format!("{:x}", Sha256::digest(bytes))
         }).collect::<Vec<_>>().join(":");
         println!("cargo:rustc-env=LG_VITAGL_ID={identity}");
-        for symbol in ["malloc", "calloc", "realloc", "vglGetProcAddress", "glTexImage2D", "vglSwapBuffers", "sceCtrlPeekBufferPositive"] {
+        for symbol in ["malloc", "calloc", "realloc", "vglGetProcAddress", "glTexImage2D", "vglSwapBuffers", "sceCtrlPeekBufferPositive",
+            "glFlush", "glFinish", "sceGxmFinish", "sceGxmTransferFinish", "sceGxmNotificationWait",
+            "sceGxmDisplayQueueAddEntry", "sceGxmDisplayQueueFinish", "sceGxmBeginScene", "sceGxmEndScene"] {
             println!("cargo:rustc-link-arg=-Wl,--wrap={symbol}");
         }
         // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.

@@ -51,11 +51,15 @@ struct Row {
     render: [RenderMetrics; 6],
     probe_ns: [u64; PROBE_COUNT],
     sim_ns: u64,
+    probe_scopes: u64,
+    world: [u64; WORLD_COUNT],
+    gpu: [u64; crate::gpu_wait::COUNT],
 }
 impl Default for Row {
     fn default() -> Self { Self { frame: 0, wall_us: 0, cpu_us: 0, swap_us: 0,
         skin_collect_wait_us: 0, skin_gather_us: 0, skin_fallbacks: 0, skin_overflow: 0,
-        fx: [0; 8], render: [RenderMetrics::default(); 6], probe_ns: [0; PROBE_COUNT], sim_ns: 0 } }
+        fx: [0; 8], render: [RenderMetrics::default(); 6], probe_ns: [0; PROBE_COUNT], sim_ns: 0,
+        probe_scopes: 0, world: [0; WORLD_COUNT], gpu: [0; crate::gpu_wait::COUNT] } }
 }
 /// Engine submission calls, counted at their owning phase. Texture binds count
 /// image slots passed to apply_bindings; backend cache hits are not GL calls.
@@ -120,7 +124,11 @@ impl Drop for RenderTimer {
     }
 }
 #[cfg(not(target_os = "vita"))]
-pub(crate) fn render_host_reset() { RING.with(|r| r.borrow_mut().current.render = Default::default()); }
+pub(crate) fn render_host_reset() { RING.with(|r| {
+    let mut r = r.borrow_mut(); r.current.render = Default::default();
+    r.current.world = [0; WORLD_COUNT]; r.current.probe_ns.fill(0);
+    r.current.sim_ns = 0; r.current.probe_scopes = 0;
+}); }
 #[cfg(not(target_os = "vita"))]
 pub(crate) fn render_host_report() -> serde_json::Value {
     RING.with(|r| {
@@ -139,6 +147,7 @@ struct Ring {
     swap_start: Option<Instant>,
     current: Row,
     pending: bool,
+    stack: ProbeStack,
 }
 impl Default for Ring {
     fn default() -> Self {
@@ -152,6 +161,7 @@ impl Default for Ring {
             swap_start: None,
             current: Row::default(),
             pending: false,
+            stack: ProbeStack::default(),
         }
     }
 }
@@ -176,7 +186,9 @@ impl Ring {
             }
         }
         for name in PROBE_NAMES { write!(out, ",{name}_us")?; }
-        write!(out, ",sim_blocks_us")?;
+        write!(out, ",sim_blocks_us,probe_scopes")?;
+        for name in WORLD_NAMES { write!(out, ",{name}")?; }
+        for name in crate::gpu_wait::NAMES { write!(out, ",{name}")?; }
         writeln!(out)?;
         let first = self.count.saturating_sub(WINDOW);
         for i in first..self.count {
@@ -191,7 +203,9 @@ impl Ring {
                     p.visibility_tests, p.uniform_gl_calls, p.visibility_cpu_ns / 1000, p.parameter_cpu_ns / 1000, p.deferred_cpu_ns / 1000, p.texture_gl_binds, p.state_gl_calls, p.program_gl_changes)?;
             }
             for ns in r.probe_ns { write!(out, ",{}", ns / 1000)?; }
-            write!(out, ",{}", r.sim_ns / 1000)?;
+            write!(out, ",{},{}", r.sim_ns / 1000, r.probe_scopes)?;
+            for v in r.world { write!(out, ",{v}")?; }
+            for v in r.gpu { write!(out, ",{v}")?; }
             writeln!(out)?;
         }
         Ok(())
@@ -199,13 +213,16 @@ impl Ring {
 }
 thread_local! { static RING: RefCell<Ring> = RefCell::default(); }
 pub(crate) fn reset() {
+    crate::gpu_wait::reset();
     RING.with(|r| *r.borrow_mut() = Ring::default());
 }
 pub(crate) fn begin(map: &str, mode: Mode) {
     if !active() {
+        crate::gpu_wait::reset();
         return;
     }
-    RING.with(|r| r.borrow_mut().begin(Instant::now()));
+    let gpu = crate::gpu_wait::finish_frame(probe_active());
+    RING.with(|r| { let mut r = r.borrow_mut(); r.current.gpu = gpu; r.begin(Instant::now()); });
     if let Err(e) = export_window(map, mode) {
         eprintln!("[lg/light] export failed: {e}");
     }
@@ -223,6 +240,21 @@ pub(crate) fn skin_overlap(gather_us: u64, fallbacks: u64, overflow: bool) {
         });
     }
 }
+/// Step-1 world preparation hand-off, recorded in both arms of the switch.
+#[derive(Clone, Copy)]
+pub(crate) enum WorldMetric { Jobs, Fallbacks, DispatchUs, WaitUs, ServiceUs, InlineUs, QueueUs }
+const WORLD_COUNT: usize = WorldMetric::QueueUs as usize + 1;
+const WORLD_NAMES: [&str; WORLD_COUNT] = ["world_prepare_jobs", "world_prepare_fallbacks",
+    "world_prepare_dispatch_us", "world_prepare_wait_us", "world_prepare_service_us", "world_prepare_inline_us", "world_prepare_queue_us"];
+pub(crate) fn world_add(metric: WorldMetric, value: u64) {
+    if render_active() { RING.with(|r| r.borrow_mut().current.world[metric as usize] += value); }
+}
+#[cfg(not(target_os = "vita"))]
+pub(crate) fn world_host_report() -> serde_json::Value {
+    RING.with(|r| { let r = r.borrow(); serde_json::Value::Object(WORLD_NAMES.into_iter()
+        .zip(r.current.world).map(|(k, v)| (k.to_owned(), v.into())).collect()) })
+}
+const COLUMNS: usize = 124 + PROBE_COUNT + 2 + WORLD_COUNT + crate::gpu_wait::COUNT;
 #[derive(Clone, Copy)]
 pub(crate) enum FxMetric { Producer, Merge, UploadCpu, UploadGl, UploadBytes, FinishPrepare, WorkerWait, FinishRecycle }
 pub(crate) fn fx_add(metric: FxMetric, value: u64) {
@@ -241,7 +273,9 @@ impl Drop for FxTimer { fn drop(&mut self) { fx_add(self.0, self.1.elapsed().as_
 
 pub(crate) fn cpu_begin() {
     #[cfg(not(target_os = "vita"))]
-    if probe_active() { RING.with(|r| { let mut r = r.borrow_mut(); r.current.probe_ns.fill(0); r.current.sim_ns = 0; }); }
+    if probe_active() { RING.with(|r| { let mut r = r.borrow_mut(); r.current.probe_ns.fill(0); r.current.sim_ns = 0; r.current.probe_scopes = 0; }); }
+    #[cfg(not(target_os = "vita"))]
+    if render_active() { RING.with(|r| { let mut r = r.borrow_mut(); r.current.world = [0; WORLD_COUNT]; r.current.render = Default::default(); }); }
 
     if active() {
         RING.with(|r| r.borrow_mut().cpu_start = Some(Instant::now()));
@@ -374,10 +408,10 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.lines().count(), 61);
         assert!(s.lines().next().unwrap().contains("world_opaque_draws"));
-        assert_eq!(s.lines().next().unwrap().split(',').count(), 124 + PROBE_COUNT + 1);
+        assert_eq!(s.lines().next().unwrap().split(',').count(), COLUMNS);
         assert!(s.lines().nth(1).unwrap().starts_with("66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0,"));
         assert!(s.lines().last().unwrap().starts_with("125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0,"));
-        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 124 + PROBE_COUNT + 1));
+        assert!(s.lines().skip(1).all(|line| line.split(',').count() == COLUMNS));
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);
@@ -395,8 +429,7 @@ pub(crate) enum Probe {
     Input, InteractionSearch, Interactions, Movers, Movement, Story, Particles,
     Combat, Alice, Audio, Camera, Listener, Scene, HudQueries, HudOther,
     Other, WorldVisibility, WorldParameters, WorldTexture, WorldPassResource,
-    FxSort, FxBatch, FxObserve, FxMerge, FxKeyResource, FxBatchResource, FxUploadCpu, FxUploadResource,
-    FxUploadGl, FxUploadCompare, FxUploadCopy, FxRecycle, FxRecycleResource, PickupOther,
+    FxSort, FxBatch, FxObserve, FxMerge, FxUploadCpu, FxUploadGl, FxRecycle, FxRecycleResource, PickupOther,
     PropNumeric, PropLayerNumeric, PickupSelect, PropPublishResource, PickupResource, AttachedSample,
     SkinWorker0, SkinWorker1,
 }
@@ -406,9 +439,10 @@ const PROBE_NAMES: [&str; PROBE_COUNT] = [
     "particles", "combat", "alice", "audio", "camera", "listener", "scene_post_sim",
     "hud_queries", "hud_other", "other", "world_opaque_visibility_numeric",
     "world_opaque_parameter_numeric", "world_opaque_texture_resource", "world_opaque_pass_resource",
-    "fx_sort_cpu", "fx_batch_cpu", "fx_observe_cpu", "fx_merge_cpu", "fx_key_resource", "fx_batch_resource", "fx_upload_cpu",
-    "fx_upload_resource", "fx_upload_gl", "fx_upload_compare_cpu", "fx_upload_copy_cpu",
-    "fx_recycle_cpu", "fx_recycle_resource", "pickup_other_mixed", "prop_numeric", "prop_layer_numeric", "pickup_select_cpu", "prop_publish_resource",
+    // FX scopes open once per stage per frame (step 0b). Names must not repeat
+    // the existing FX counters above: fx_upload_cpu_us/fx_upload_gl_us.
+    "fx_sort_cpu", "fx_batch_mixed", "fx_observe_cpu", "fx_merge_mixed", "fx_upload_pack_mixed",
+    "fx_upload_buffer_gl", "fx_recycle_cpu", "fx_recycle_resource", "pickup_other_mixed", "prop_numeric", "prop_layer_numeric", "pickup_select_cpu", "prop_publish_resource",
     "pickup_resource", "attached_sample_cpu", "skin_worker0_service", "skin_worker1_service",
 ];
 pub(crate) fn probe_active() -> bool {
@@ -430,14 +464,15 @@ impl ProbeStack {
         ns.saturating_sub(child)
     }
 }
-thread_local! { static PROBE_STACK: RefCell<ProbeStack> = RefCell::default(); }
 pub(crate) struct ProbeTimer { metric: Probe, start: Option<Instant>, depth: usize }
 pub(crate) fn probe_timer(metric: Probe) -> ProbeTimer { probe_timer_when(metric, true) }
 pub(crate) fn probe_timer_when(metric: Probe, enabled: bool) -> ProbeTimer {
     let mut timer = ProbeTimer { metric, start: None, depth: 0 };
     if enabled && probe_active() {
-        timer.depth = PROBE_STACK.with(|s| {
-            let mut s = s.borrow_mut();
+        timer.depth = RING.with(|r| {
+            let mut r = r.borrow_mut();
+            r.current.probe_scopes += 1;
+            let s = &mut r.stack;
             let depth = s.depth;
             assert!(depth < s.entries.len(), "probe nesting overflow");
             s.entries[depth] = ProbeEntry::default();
@@ -452,12 +487,9 @@ impl ProbeTimer {
     fn finish(&mut self) {
         if let Some(start) = self.start.take() {
             let ns = start.elapsed().as_nanos() as u64;
-            let exclusive = PROBE_STACK.with(|s| {
-                let mut s = s.borrow_mut();
-                s.close(self.depth, ns)
-            });
             RING.with(|r| {
                 let mut r = r.borrow_mut();
+                let exclusive = r.stack.close(self.depth, ns);
                 r.current.probe_ns[self.metric as usize] += exclusive;
                 if self.depth == 0 && self.metric as usize <= Probe::Listener as usize { r.current.sim_ns += ns; }
             });
@@ -467,6 +499,18 @@ impl ProbeTimer {
     pub(crate) fn switch_when(&mut self, metric: Probe, enabled: bool) { self.finish(); *self = probe_timer_when(metric, enabled); }
 }
 impl Drop for ProbeTimer { fn drop(&mut self) { self.finish(); } }
+/// Attribute an interval that the caller already timed as a child of the open
+/// scope. No clock read: the parent loses `ns`, `metric` gains it.
+pub(crate) fn probe_child(metric: Probe, ns: u64) {
+    if probe_active() {
+        RING.with(|r| {
+            let mut r = r.borrow_mut();
+            let depth = r.stack.depth;
+            if depth > 0 { r.stack.entries[depth - 1].child_ns += ns; }
+            r.current.probe_ns[metric as usize] += ns;
+        });
+    }
+}
 pub(crate) fn probe_skin_service(worker: usize, ns: u64) {
     if probe_active() {
         RING.with(|r| r.borrow_mut().current.probe_ns[Probe::SkinWorker0 as usize + worker] += ns);
@@ -476,7 +520,7 @@ pub(crate) fn probe_skin_service(worker: usize, ns: u64) {
 pub(crate) fn probe_host_report() -> serde_json::Value {
     RING.with(|r| { let r = r.borrow(); serde_json::json!({
         "enabled": probe_active(), "exclusive_ns": r.current.probe_ns.to_vec(),
-        "sim_blocks_ns": r.current.sim_ns,
+        "sim_blocks_ns": r.current.sim_ns, "scopes": r.current.probe_scopes,
     }) })
 }
 
@@ -506,5 +550,18 @@ mod probe_tests {
         let values: Vec<_> = text.lines().nth(1).unwrap().split(',').collect();
         assert_eq!(values[header.iter().position(|&s| s == "sim_blocks_us").unwrap()], "123");
         assert_eq!(values[header.iter().position(|&s| s == "skin_worker0_service_us").unwrap()], "987");
+        // Readers key rows by column name: a repeated name silently hides a value.
+        let mut unique = std::collections::BTreeSet::new();
+        assert!(header.iter().all(|name| unique.insert(*name)), "duplicate CSV column");
+        assert_eq!(header.len(), COLUMNS);
+        assert!(header.contains(&"fx_upload_cpu_us") && header.contains(&"fx_upload_pack_mixed_us"));
+        assert!(header.contains(&"probe_scopes") && header.contains(&"world_prepare_wait_us"));
+    }
+    #[test]
+    fn child_credit_moves_time_without_a_clock() {
+        let mut stack = ProbeStack::default();
+        stack.depth = 1;
+        stack.entries[0].child_ns += 40;
+        assert_eq!(stack.close(0, 100), 60);
     }
 }

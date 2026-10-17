@@ -22,6 +22,7 @@ enum Phase {
     Ready,
 }
 thread_local! {
+    static CPU_BORROWED: Cell<bool> = const { Cell::new(false) };
     static PHASE: Cell<Phase> = const { Cell::new(Phase::Idle) };
     static STORE: RefCell<Option<Box<Store>>> = const { RefCell::new(None) };
 }
@@ -376,6 +377,7 @@ impl Store {
         true
     }
     fn dispatch(&mut self) {
+        assert!(!CPU_BORROWED.with(Cell::get), "world job must join before skin dispatch");
         assert_eq!(self.pending, 0);
         let i = unsafe { &*self.input.get() };
         let draws = i.draws.len();
@@ -534,6 +536,7 @@ fn same_surface_inputs(surface:&SkinSurface, old:&Inputs, draw:&Draw, p:Params<'
 /// as well as owned publications; the preallocated worker arena stays warm.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn reset_publications() {
+    assert!(!CPU_BORROWED.with(Cell::get), "scene replacement during CPU loan");
     assert!(PHASE.with(|p|p.get()==Phase::Idle),"scene load before skin workers drained");
     STORE.with(|s| {if let Some(store)=s.borrow_mut().as_mut() {
         assert_eq!(store.pending,0);
@@ -545,6 +548,7 @@ pub(crate) fn reset_publications() {
     crate::render_fx::actor_publication::reset();
 }
 pub(crate) fn startup(workers: usize, probe: bool) {
+    assert!(!CPU_BORROWED.with(Cell::get), "pool replacement during CPU loan");
     // J13's game thread was sampled on CPU2: reserve CPU0, never contend with worker2.
     crate::skin_worker::pin_game(probe);
     STORE.with(|s| *s.borrow_mut() = Some(Store::new(workers, probe)));
@@ -556,7 +560,7 @@ pub(crate) fn cpu_pair(first: impl FnOnce() + Send, second: impl FnOnce() + Send
     let started = std::time::Instant::now();
     let service = STORE.with(|store| {
         let mut store = store.borrow_mut();
-        if let Some(store) = store.as_mut().filter(|s| s.pending == 0) {
+        if let Some(store) = store.as_mut().filter(|s| s.pending == 0 && !CPU_BORROWED.with(Cell::get)) {
             if store.workers.len() == 2 {
                 let (a, b) = store.workers.split_at_mut(1);
                 let times = crate::skin_worker::Worker::pair(&mut a[0], &mut b[0], first, second);
@@ -573,6 +577,62 @@ pub(crate) fn cpu_pair(first: impl FnOnce() + Send, second: impl FnOnce() + Send
     crate::light_profile::fx_add(crate::light_profile::FxMetric::WorkerWait, wait);
     crate::render_fx::retained::count("fx_worker_wait_us", wait);
     crate::render_fx::retained::count("fx_worker_max_service_us", service);
+}
+
+/// Owned, asynchronous CPU loan. The boxed task remains stable until the worker
+/// has drained. No STORE borrow spans gathering, and no skin arena is lent.
+#[cfg(feature="vita_renderer")]
+struct CpuTask<T> { work: Option<Box<dyn FnOnce() -> T + Send>>, output: Option<T>, queued_at: std::time::Instant, queue_us: u64 }
+#[cfg(feature="vita_renderer")]
+pub(crate) struct CpuJob<T: Send + 'static> {
+    task: Box<CpuTask<T>>, worker: Option<crate::skin_worker::Worker>,
+    _game: crate::game_thread::GameThread,
+}
+#[cfg(feature="vita_renderer")]
+pub(crate) fn cpu_start<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> CpuJob<T> {
+    assert!(!CPU_BORROWED.with(Cell::get), "nested CPU loan");
+    let worker = STORE.with(|s| { let mut s = s.borrow_mut();
+        s.as_mut().filter(|s| s.pending == 0 && !s.workers.is_empty()).map(|s| s.workers.remove(0)) });
+    let mut job = CpuJob { task: Box::new(CpuTask { work: Some(Box::new(work)), output: None, queued_at: std::time::Instant::now(), queue_us: 0 }),
+        worker, _game: crate::game_thread::GameThread::default() };
+    unsafe fn call<T>(address: usize) {
+        let task = &mut *(address as *mut CpuTask<T>);
+        task.queue_us = task.queued_at.elapsed().as_micros() as u64;
+        task.output = Some(task.work.take().unwrap()());
+    }
+    if let Some(worker) = &mut job.worker {
+        CPU_BORROWED.with(|b| b.set(true));
+        // Box owns all inputs, stays alive through wait_result even on unwinding.
+        job.task.queued_at = std::time::Instant::now();
+        unsafe { worker.start(&mut *job.task as *mut CpuTask<T> as usize, call::<T>); }
+    } else { job.task.output = Some(job.task.work.take().unwrap()()); }
+    job
+}
+#[cfg(feature="vita_renderer")]
+impl<T: Send + 'static> CpuJob<T> {
+    /// Only the synchronous fallback is readable before the hand-off joins.
+    pub(crate) fn inline_output(&self) -> Option<&T> {
+        if self.worker.is_none() { self.task.output.as_ref() } else { None }
+    }
+    fn drain(&mut self) -> Result<u64, Box<dyn std::any::Any + Send>> {
+        let Some(mut worker) = self.worker.take() else { return Ok(0); };
+        let result = worker.wait_result().map(|m| m.ns / 1000);
+        STORE.with(|s| s.borrow_mut().as_mut().expect("pool removed during loan").workers.insert(0, worker));
+        CPU_BORROWED.with(|b| b.set(false));
+        result
+    }
+    pub(crate) fn finish(mut self) -> (T, bool, u64, u64, u64) {
+        let worker = self.worker.is_some();
+        let start = std::time::Instant::now();
+        let result = self.drain();
+        let wait_us = start.elapsed().as_micros() as u64;
+        let service_us = match result { Ok(ns) => ns, Err(p) => std::panic::resume_unwind(p) };
+        (self.task.output.take().expect("CPU job returned no output"), worker, wait_us, service_us, self.task.queue_us)
+    }
+}
+#[cfg(feature="vita_renderer")]
+impl<T: Send + 'static> Drop for CpuJob<T> {
+    fn drop(&mut self) { let _ = self.drain(); }
 }
 
 /// A non-Send guard drains pending CPU work before a frame/load/panic can leave scope.
@@ -1161,5 +1221,35 @@ mod tests {
         frame.collect();
         assert_eq!(handle(&s, &mut meshes, params(&pose), true), Some(true));
         drop(frame);
+    }
+}
+
+#[cfg(all(test, feature="vita_renderer"))]
+mod cpu_loan_tests {
+    use super::*;
+    #[test]
+    fn owned_job_overlaps_gather_drains_on_drop_and_recovers_from_both_panics() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        startup(2,false);
+        let game = std::thread::current().id();
+        let job = cpu_start(move || { assert_ne!(std::thread::current().id(),game); 42 });
+        assert!(CPU_BORROWED.with(Cell::get));
+        // Beginning a gather can reset skin scratch without touching the owned job.
+        STORE.with(|s| s.borrow_mut().as_mut().unwrap().reset());
+        let (value,worker,_,_,_) = job.finish(); assert_eq!(value,42); assert!(worker);
+        assert_eq!(STORE.with(|s| s.borrow().as_ref().unwrap().workers.len()),2);
+        let finished = Arc::new(AtomicBool::new(false)); let other = finished.clone();
+        drop(cpu_start(move || { other.store(true,Ordering::Release); }));
+        assert!(finished.load(Ordering::Acquire));
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cpu_start(|| panic!("CPU job test panic")).finish();
+        })); assert!(failure.is_err()); assert!(!CPU_BORROWED.with(Cell::get));
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _job = cpu_start(|| 1);
+            panic!("gather test panic");
+        })); assert!(failure.is_err()); assert!(!CPU_BORROWED.with(Cell::get));
+        assert_eq!(cpu_start(|| 43).finish().0,43);
+        STORE.with(|s| *s.borrow_mut() = None);
+        assert_eq!(cpu_start(|| 44).finish().0,44);
     }
 }

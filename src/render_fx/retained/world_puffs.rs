@@ -13,8 +13,7 @@ pub(crate) struct Puff {
 fn normalized(blend: Blend) -> Blend { if blend == Blend::Add { Blend::AlphaAdd } else { blend } }
 fn puff_key(p: &Puff) -> PacketKey {
     let stage = Stage::default();
-    PacketKey { texture: { let _probe = crate::light_profile::probe_timer(crate::light_profile::Probe::FxKeyResource);
-        p.texture.as_ref().map(Texture2D::raw_miniquad_id) }, state: [
+    PacketKey { texture: p.texture.as_ref().map(Texture2D::raw_miniquad_id), state: [
         crate::render::blend_index(normalized(p.blend)) as u32, 0, 0, u32::from(stage.clamp),
         (stage.alpha_test as f32).to_bits(), stage.alpha_reference.to_bits(),
         1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(),
@@ -139,7 +138,6 @@ impl Bank {
                 continue;
             }
             let geometry = Self::pack(batch, groups, puffs);
-            let _resource = crate::light_profile::probe_timer(crate::light_profile::Probe::FxBatchResource);
             let mut p = match first {
                 Source::Actor(id) => groups[id].passes.pop().unwrap(),
                 Source::Puff(id) => {

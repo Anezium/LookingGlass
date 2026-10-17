@@ -117,6 +117,7 @@ mod viewer;
 mod transition_memory;
 mod frame_profile;
 mod frame_phases;
+mod gpu_wait;
 mod game_thread;
 mod skin_worker;
 mod light_profile;

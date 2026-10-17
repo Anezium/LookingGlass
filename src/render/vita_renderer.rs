@@ -4,6 +4,8 @@ mod scale;
 mod depth_sentinel;
 mod pvs_cache;
 mod state_cache;
+mod world_prepare;
+pub(crate) type WorldJob = world_prepare::Job;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -54,6 +56,8 @@ pub struct Config {
     pub worker_probe: bool,
     /// Additional light-profiler attribution; false preserves the r3b probe-off arm.
     pub sim_span_probe: bool,
+    /// Same-frame numeric world preparation on the CPU1 skin worker. Default off.
+    pub world_prepare_worker: bool,
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
     pub skin_overlap: bool,
@@ -207,7 +211,7 @@ impl Default for Config {
             world_parameter_time_split: true,
             uniform_field_cache: true,
             render_draw_timing: false,
-            worker_probe: false, sim_span_probe: false, skin_workers: 2, skin_overlap: true,
+            worker_probe: false, sim_span_probe: false, world_prepare_worker: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             profiler: Some(crate::light_profile::Level::Light), skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -480,7 +484,7 @@ pub(crate) fn world_viewport() -> Option<(i32,i32,i32,i32)> {
 pub(crate) fn apply_world_viewport() {
     if let Some((x,y,w,h))=world_viewport() { unsafe { get_internal_gl().quad_context.apply_viewport(x,y,w,h); } }
 }
-pub(crate) fn prepare_3d(bg:Color){scale::prepare(bg);}
+pub(crate) fn prepare_3d(bg:Color){crate::gpu_wait::tail_end();let _submit=crate::gpu_wait::submission();scale::prepare(bg);}
 pub(crate) fn begin_3d_pass(action:PassAction){scale::begin(action);}
 pub(crate) fn set_3d_camera(camera:&Camera3D){scale::camera(camera);}
 pub(crate) fn present_3d(){scale::present();}
@@ -603,9 +607,8 @@ impl Geometry {
     }
 }
 #[derive(Clone)]
-struct Recipe {
+struct NumericRecipe {
     stage: Stage,
-    textures: Vec<Texture2D>,
     lit: bool,
     rank: usize,
     blend: usize,
@@ -615,6 +618,13 @@ struct Recipe {
     motion: Option<crate::sky_sequence::Motion>,
     deform: Option<Deform>,
 }
+#[derive(Clone)]
+struct Recipe { numeric: Arc<NumericRecipe>, textures: Vec<Texture2D> }
+impl std::ops::Deref for Recipe {
+    type Target = NumericRecipe;
+    fn deref(&self) -> &Self::Target { &self.numeric }
+}
+
 struct Pending {
     parameter: usize,
     geometry: Geometry,
@@ -743,7 +753,7 @@ struct Prepared {
     uniforms: Option<shader::Uniforms>,
 }
 struct Parameter {
-    recipe: Recipe,
+    recipe: Arc<NumericRecipe>,
     uniforms: shader::Uniforms,
     bits: [u32; 143],
     generation: u64,
@@ -776,9 +786,8 @@ impl Parameter {
 pub struct Renderer {
     _game_thread: crate::game_thread::GameThread,
     groups: Vec<Group>,
-    parameters: Vec<Parameter>,
-    parameter_key: Option<[u32; 51]>,
-    parameter_generation: u64,
+    cpu: Option<world_prepare::State>,
+    opaque_ready: bool,
     field_uniforms: [super::uniform_fields::Cache; 2],
     pvs: Pvs,
     pipelines: Vec<Pipeline>,
@@ -788,13 +797,8 @@ pub struct Renderer {
     sky_pipeline: Pipeline,
     sky_shader: ShaderId,
     sky_bindings: Bindings,
-    alpha_order: Vec<(f32, usize)>,
     prepared: Vec<Prepared>,
     fx_gpu: Option<crate::render_fx::retained::Gpu>,
-    visibility_key: Option<[u32; 26]>,
-    visibility_generation: u64,
-    visibility: Vec<(u64, Option<(f32, Mat4)>)>,
-    models: Vec<Option<Mat4>>,
 }
 fn blend_class(blend: Blend) -> usize {
     match blend {
@@ -869,9 +873,8 @@ impl Renderer {
                     continue;
                 }
                 let recipe_started=std::time::Instant::now();
-                let recipe = Recipe {
+                let recipe = Recipe { textures: layer.textures.clone(), numeric: Arc::new(NumericRecipe {
                     stage: layer.spec.clone(),
-                    textures: layer.textures.clone(),
                     lit: layer.lit,
                     rank,
                     blend: blend_class(layer.spec.blend),
@@ -890,7 +893,7 @@ impl Renderer {
                             matches!(d, Deform::Wave(..) | Deform::Move(..) | Deform::Bulge(..))
                         })
                         .cloned(),
-                };
+                }) };
                 rank += 1;
                 let texture_keys = layer
                     .textures
@@ -1199,6 +1202,7 @@ impl Renderer {
             "skipped_sky_batches":scene.batches.iter().filter(|b| b.sky).count() + scene.sky_props.len(),
             "portals_disabled":true,"frozen_ropes":scene.rope_shapes.len(),
             "parameter_recipes": parameter_recipes.len(),
+            "world_prepare_extra_fixed_payload_bytes": groups.len() * (std::mem::size_of::<world_prepare::Group>() + std::mem::size_of::<world_prepare::Prepared>()),
             "world_cache_fixed_payload_bytes": groups.len() * (std::mem::size_of::<(u64,Option<(f32,Mat4)>)>() + std::mem::size_of::<Option<Mat4>>()) + parameter_recipes.len() * std::mem::size_of::<Parameter>(),
             "clusters":pvs.clusters.len(),"unique_cluster_lists":unique,"pipelines":16+low_pipelines.len(),"uniform_staging_capacity_bytes":groups.len()*std::mem::size_of::<Prepared>(),"dropped_layers":dropped_layers,
             "frozen_ambient_models":frozen_models,"frozen_deforms":frozen_deforms,"dynamic_world_lights":0,"geometry_uploads_per_frame":0,"load_groups_ms":groups_ms,"load_recipes_ms":recipes_ms,"load_chunks_ms":chunks_ms,"source_chunks":source_chunks,"load_pipelines_upload_ms":upload_ms,"load_pvs_ms":pvs_ms,"load_total_ms":started.elapsed().as_secs_f64()*1000.,"pvs_cache_status":cache_status,"pvs_method":c.pvs_method});
@@ -1213,20 +1217,16 @@ impl Renderer {
             let time_uv = recipe.stage.mods.iter().any(|m| matches!(m,
                 TcMod::Scroll(_) | TcMod::Rotate(_) | TcMod::Stretch(_) | TcMod::Turb(_)));
             let time_gain = recipe.stage.rgb.is_some() || recipe.stage.alpha.is_some();
-            Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0, model: [0;16],
+            Parameter { recipe: recipe.numeric, bits: u.bits(), uniforms: u, generation: 0, model: [0;16],
                 time: 0_f32.to_bits(), time_uv, time_gain }
         }).collect();
         resources.committed = true;
         Ok(Self {
             _game_thread: crate::game_thread::GameThread::new(),
-            parameters, parameter_key: None, parameter_generation: 0,
+            cpu: Some(world_prepare::State::new(&groups, parameters)), opaque_ready: false,
             field_uniforms: std::array::from_fn(|_| super::uniform_fields::Cache::new(shader::meta())),
-            alpha_order: Vec::with_capacity(groups.len()),
             prepared: Vec::with_capacity(groups.len()),
             fx_gpu: None,
-            visibility_key: None, visibility_generation: 0,
-            visibility: vec![(0, None); groups.len()],
-            models: vec![None; groups.len()],
             groups,
             pvs,
             pipelines,
@@ -1235,6 +1235,29 @@ impl Renderer {
             sky_shader,
             sky_bindings,
         })
+    }
+    pub(super) fn start_world_prepare(&mut self, scene: &Scene, eye: Vec3, time: f32,
+        fullbright: bool, transforms: &[(usize, Vec3, Quat)]) -> world_prepare::Job {
+        assert!(!self.opaque_ready, "unconsumed world preparation");
+        let start = std::time::Instant::now();
+        let mut cpu = self.cpu.take().expect("world preparation already in flight");
+        cpu.snapshot(self, scene, eye, time, fullbright, false, transforms);
+        let job = crate::character::skinning::overlap::cpu_start(move || { cpu.run(); cpu });
+        if let Some(cpu) = job.inline_output() { cpu.credit_inline(); }
+        crate::light_profile::world_add(crate::light_profile::WorldMetric::DispatchUs, start.elapsed().as_micros() as u64);
+        job
+    }
+    pub(super) fn complete_world_prepare(&mut self, job: world_prepare::Job) {
+        let (cpu, worker, wait_us, service_us, queue_us) = job.finish();
+        assert!(self.cpu.is_none());
+        self.cpu = Some(cpu);
+        self.opaque_ready = true;
+        use crate::light_profile::{world_add, WorldMetric as M};
+        world_add(M::Jobs, u64::from(worker));
+        world_add(M::Fallbacks, u64::from(!worker));
+        world_add(M::WaitUs, wait_us);
+        world_add(M::ServiceUs, service_us);
+        world_add(M::QueueUs, queue_us);
     }
     pub(super) fn draw(
         &mut self,
@@ -1255,121 +1278,32 @@ impl Renderer {
         count("vita_world_retransformed_vertices", 0);
         count("vita_world_rebuilt_indices", 0);
         count("vita_world_sorted_triangles", 0);
-        let mut step0_world = crate::light_profile::probe_timer_when(crate::light_profile::Probe::WorldVisibility, !alpha);
-        let visibility_started = std::time::Instant::now();
-        let visibility_span = crate::frame_profile::span("vita_cluster_frustum");
-        let projection = crate::render_fx::projection().expect("world camera projection");
-        let cluster = scene.map.visibility.cluster(eye, &scene.map.planes);
-        let lists = self.pvs.get(cluster);
-        let ids = if alpha { &lists.alpha } else { &lists.opaque };
-        self.alpha_order.clear();
-        let reuse = config().world_view_reuse;
-        let mut key = [0u32; 26];
-        key[..16].copy_from_slice(&projection.to_cols_array().map(f32::to_bits));
-        key[16..19].copy_from_slice(&eye.to_array().map(f32::to_bits));
-        key[19..25].copy_from_slice(&crate::render_fx::depth_view_bits());
-        key[25] = u32::from(crate::render_fx::retained_active());
-        if self.visibility_key != Some(key) {
-            self.visibility_key = Some(key);
-            self.visibility_generation = self.visibility_generation.wrapping_add(1);
-            if self.visibility_generation == 0 {
-                self.visibility.fill((0, None));
-                self.visibility_generation = 1;
-            }
+        // Secondary views/diagnostics have no actor-gather window: same-frame join.
+        if !alpha && !self.opaque_ready && config().world_prepare_worker {
+            let job = self.start_world_prepare(scene, eye, time, fullbright, transforms);
+            self.complete_world_prepare(job);
         }
-        let mut tests = 0u64;
-        let mut hits = 0u64;
-        for &id in ids {
-            let g = &self.groups[id];
-            let static_group = g.recipe.model.is_none() && g.recipe.motion.is_none();
-            let result = if reuse && static_group && self.visibility[id].0 == self.visibility_generation {
-                hits += 1;
-                self.visibility[id].1
-            } else {
-                let result = model_matrix(&g.recipe, time, transforms).and_then(|model| {
-                    tests += 1;
-                    in_frustum(projection * model, g.min, g.max).then(|| {
-                        let depth = if crate::render_fx::retained_active() {
-                            crate::render_fx::group_depth(model.transform_point3(g.center))
-                        } else { (model.transform_point3(g.center) - eye).length_squared() };
-                        (depth, model)
-                    })
-                });
-                if reuse && static_group { self.visibility[id] = (self.visibility_generation, result); }
-                result
-            };
-            self.models[id] = result.map(|(_, model)| model);
-            if let Some((depth, _)) = result { self.alpha_order.push((depth, id)); }
+        if alpha || !self.opaque_ready {
+            let started = std::time::Instant::now();
+            let mut cpu = self.cpu.take().expect("world preparation already in flight");
+            cpu.snapshot(self, scene, eye, time, fullbright, alpha, transforms);
+            cpu.run();
+            if !alpha { cpu.credit_inline(); }
+            self.cpu = Some(cpu);
+            if !alpha { crate::light_profile::world_add(crate::light_profile::WorldMetric::InlineUs, started.elapsed().as_micros() as u64); }
         }
-        crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: tests,
-            visibility_cpu_ns: visibility_started.elapsed().as_nanos() as u64, ..Default::default() });
-        count("vita_world_visibility_cache_hits", hits);
-        drop(visibility_span);
-        if alpha && !config().world_alpha {self.alpha_order.clear();}
-        if !alpha && config().opaque_order=="front_to_back" {self.alpha_order.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||a.1.cmp(&b.1)));}
-        if alpha && config().sort_alpha && !crate::render_fx::retained_active() {
-            let _sort = crate::frame_profile::span("vita_alpha_group_sort");
-            self.alpha_order
-                .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        }
-        step0_world.switch_when(crate::light_profile::Probe::WorldParameters, !alpha);
+        self.opaque_ready = false;
+        let cpu = self.cpu.as_ref().unwrap();
+        cpu.publish(phase, !alpha);
         self.prepared.clear();
-        {
-            let parameters_started = std::time::Instant::now();
-            let _parameters = crate::frame_profile::span("vita_world_parameters");
-            let parameter_reuse = config().world_parameter_reuse;
-            let split = config().world_parameter_time_split;
-            let key = parameter_view_key(projection, eye, fullbright, scene.atlas_grid,
-                if split {0.} else {time}, &scene.atmosphere);
-            if self.parameter_key != Some(key) {
-                self.parameter_key = Some(key);
-                self.parameter_generation = self.parameter_generation.wrapping_add(1);
-                if self.parameter_generation == 0 {
-                    for p in &mut self.parameters { p.generation = 0; }
-                    self.parameter_generation = 1;
-                }
-            }
-            let mut builds = 0;
-            let mut time_updates = 0;
-            for &(depth, id) in &self.alpha_order {
-                let g = &self.groups[id];
-                let model = if reuse { self.models[id].unwrap() }
-                    else { model_matrix(&g.recipe, time, transforms).unwrap() };
-                let u = if parameter_reuse {
-                    let p = &mut self.parameters[g.parameter];
-                    let model_bits = model.to_cols_array().map(f32::to_bits);
-                    if p.generation != self.parameter_generation || p.model != model_bits {
-                        p.uniforms = uniforms(&p.recipe, time, eye, model, projection, fullbright, scene.atlas_grid);
-                        p.uniforms.atmosphere(&scene.atmosphere, eye);
-                        p.bits = p.uniforms.bits();
-                        p.generation = self.parameter_generation;
-                        p.model = model_bits;
-                        p.time = time.to_bits();
-                        builds += 1;
-                    } else if split && p.time != time.to_bits() {
-                        p.update_time(time);
-                        time_updates += 1;
-                    }
-                    None
-                } else {
-                    let mut u = uniforms(&g.recipe, time, eye, model, projection, fullbright, scene.atlas_grid);
-                    u.atmosphere(&scene.atmosphere, eye);
-                    builds += 1;
-                    Some(u)
-                };
-                let texture = {
-                    let _probe = crate::light_profile::probe_timer_when(crate::light_profile::Probe::WorldTexture, !alpha);
-                    g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id()
-                };
-                self.prepared.push(Prepared { depth, group: id, texture, uniforms: u });
-            }
-            crate::light_profile::render_add(phase, RenderMetrics {
-                parameter_cpu_ns: parameters_started.elapsed().as_nanos() as u64, ..Default::default() });
-            count("vita_world_parameter_builds", builds);
-            count("vita_world_parameter_time_updates", time_updates);
-            count("vita_world_parameter_reuses", self.prepared.len() as u64 - builds);
+        // Only the owning game thread resolves managed texture handles.
+        let _texture = crate::light_profile::probe_timer_when(crate::light_profile::Probe::WorldTexture, !alpha);
+        for p in &cpu.prepared {
+            let g = &self.groups[p.group];
+            let texture = g.recipe.textures[p.texture_frame].raw_miniquad_id();
+            self.prepared.push(Prepared { depth: p.depth, group: p.group, texture, uniforms: p.uniforms });
         }
-        drop(step0_world);
+        drop(_texture);
         for cache in &mut self.field_uniforms { cache.interrupt(); }
         if alpha && crate::render_fx::retained_active() {
             // Keep immutable bindings and uniforms until all actor/effect groups are known.
@@ -1391,6 +1325,7 @@ impl Renderer {
             count("vita_world_culled_groups", stats.culled as u64);
             return stats;
         }
+        let _submission = crate::gpu_wait::submission();
         let step0_pass = crate::light_profile::probe_timer_when(crate::light_profile::Probe::WorldPassResource, !alpha);
         // Direct actor packets never queue Macroquad geometry.
         if !world_only() && !crate::render_fx::retained_active() {
@@ -1411,7 +1346,7 @@ impl Renderer {
             } else {
                 self.pvs.unknown.opaque.len()
             })
-            .saturating_sub(self.alpha_order.len()),
+            .saturating_sub(self.prepared.len()),
             ..Default::default()
         };
         if !alpha && config().sky {
@@ -1460,7 +1395,7 @@ impl Renderer {
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
-            let u = prepared.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
+            let u = prepared.uniforms.as_ref().unwrap_or(&self.cpu.as_ref().unwrap().parameters[g.parameter].uniforms);
             g.bindings.images[0] = texture;
             let pi = g.recipe.blend * 3 + g.recipe.cull;
             let gl = unsafe { get_internal_gl() };
@@ -1474,7 +1409,7 @@ impl Renderer {
                 cache.observe(pipeline, low, !alpha,
                     (g.bindings.vertex_buffers[0], g.bindings.index_buffer,
                      g.bindings.images[0], g.bindings.images[1]),
-                    prepared.uniforms.as_ref().map_or(self.parameters[g.parameter].bits, shader::Uniforms::bits))
+                    prepared.uniforms.as_ref().map_or(self.cpu.as_ref().unwrap().parameters[g.parameter].bits, shader::Uniforms::bits))
             } else {
                 state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
             };
@@ -1608,7 +1543,7 @@ impl Renderer {
             let p = &self.prepared[id];
             let g = &mut self.groups[p.group];
             g.bindings.images[0] = p.texture;
-            let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
+            let u = p.uniforms.as_ref().unwrap_or(&self.cpu.as_ref().unwrap().parameters[g.parameter].uniforms);
             let ctx = unsafe { get_internal_gl() }.quad_context;
             let start = totals.start();
             ctx.apply_pipeline(&self.pipelines[g.recipe.blend * 3 + g.recipe.cull]);
@@ -1712,7 +1647,7 @@ fn parameter_view_key(projection: Mat4, eye: Vec3, fullbright: bool, atlas: Vec2
     }
     key
 }
-fn model_matrix(recipe: &Recipe, time: f32, transforms: &[(usize, Vec3, Quat)]) -> Option<Mat4> {
+fn model_matrix(recipe: &NumericRecipe, time: f32, transforms: &[(usize, Vec3, Quat)]) -> Option<Mat4> {
     let rigid = if let Some(id) = recipe.model {
         let (_, p, r) = transforms.iter().find(|t| t.0 == id)?;
         Mat4::from_rotation_translation(*r, *p)
@@ -1727,6 +1662,7 @@ fn model_matrix(recipe: &Recipe, time: f32, transforms: &[(usize, Vec3, Quat)]) 
                 .map_or(Mat4::IDENTITY, |m| m.matrix(time)),
     )
 }
+#[cfg(test)]
 fn in_frustum(m: Mat4, min: Vec3, max: Vec3) -> bool {
     !super::outside_matrix(m, min, max)
 }
@@ -1772,7 +1708,7 @@ fn uv_matrices(stage: &Stage, time: f32) -> (Mat4, Mat4, [f32; 4]) {
     (m, after, turb)
 }
 fn uniforms(
-    recipe: &Recipe,
+    recipe: &NumericRecipe,
     time: f32,
     eye: Vec3,
     model: Mat4,
@@ -2053,15 +1989,15 @@ mod tests {
             TcMod::Scroll(vec2(0.2,-0.3)), TcMod::Turb([0.,0.15,0.4,0.7]),
             TcMod::Rotate(18.), TcMod::Stretch(wave.clone()), TcMod::Scale(vec2(2.,0.8))]] {
             let dynamic = mods.iter().any(|m|matches!(m,TcMod::Scroll(_)|TcMod::Turb(_)|TcMod::Rotate(_)|TcMod::Stretch(_)));
-            let recipe = Recipe { stage:Stage {mods,rgb:Some(wave.clone()),alpha:Some(wave.clone()),
-                constant_rgb:Some(vec3(0.8,0.7,0.4)),..Default::default()}, textures:vec![],lit:true,
+            let recipe = NumericRecipe { stage:Stage {mods,rgb:Some(wave.clone()),alpha:Some(wave.clone()),
+                constant_rgb:Some(vec3(0.8,0.7,0.4)),..Default::default()}, lit:true,
                 rank:0,blend:1,opaque:false,cull:0,model:None,motion:None,
                 deform:Some(Deform::Move(Vec3::Z,wave.clone())) };
             let model=Mat4::from_translation(Vec3::X*32.);
             let projection=Mat4::from_scale(Vec3::splat(0.3));
             let eye=vec3(3.,5.,7.);
             let u=uniforms(&recipe,0.,eye,model,projection,false,Vec2::ONE);
-            let mut p=Parameter {recipe,bits:u.bits(),uniforms:u,generation:1,model:model.to_cols_array().map(f32::to_bits),
+            let mut p=Parameter {recipe:Arc::new(recipe),bits:u.bits(),uniforms:u,generation:1,model:model.to_cols_array().map(f32::to_bits),
                 time:0,time_uv:dynamic,time_gain:true};
             for time in [-0.,0.3,3.,20.,0.,f32::from_bits(0x7fc00001)] {
                 let expected=uniforms(&p.recipe,time,eye,model,projection,false,Vec2::ONE).bits();
@@ -2220,8 +2156,8 @@ mod tests {
     #[test]
     fn world_uniform_bits_include_every_metadata_field_in_order() {
         let stage = Stage::default();
-        let recipe = Recipe {
-            stage, textures: vec![], lit: false, rank: 0, blend: 0, opaque: true,
+        let recipe = NumericRecipe {
+            stage, lit: false, rank: 0, blend: 0, opaque: true,
             cull: 0, model: None, motion: None, deform: None,
         };
         let mut u = uniforms(&recipe,0.,Vec3::ZERO,Mat4::IDENTITY,Mat4::IDENTITY,false,Vec2::ONE);

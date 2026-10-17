@@ -2133,6 +2133,19 @@ impl Scene {
         }
         crate::render_fx::finish();
     }
+    #[cfg(feature="vita_renderer")]
+    pub(crate) fn start_world_prepare(&mut self, eye: Vec3, time: f32, fullbright: bool,
+        transforms: &[(usize, Vec3, Quat)]) -> Option<vita_renderer::WorldJob> {
+        if !vita_renderer::config().world_prepare_worker { return None; }
+        let mut renderer = self.retained.take()?;
+        let job = renderer.start_world_prepare(self, eye, time, fullbright, transforms);
+        self.retained = Some(renderer);
+        Some(job)
+    }
+    #[cfg(feature="vita_renderer")]
+    pub(crate) fn complete_world_prepare(&mut self, job: Option<vita_renderer::WorldJob>) {
+        if let Some(job) = job { self.retained.as_mut().expect("world renderer replaced during preparation").complete_world_prepare(job); }
+    }
     pub fn draw(
         &mut self,
         camera: Vec3,

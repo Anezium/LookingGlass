@@ -32,6 +32,7 @@ pub(crate) fn begin() {
     STATE.with(|s| { let mut s=s.borrow_mut(); s.tail=true; s.pending=Default::default(); s.start=None; });
 }
 pub(crate) fn end() {
+    crate::gpu_wait::tail_end();
     STATE.with(|s| { let mut s=s.borrow_mut(); s.tail=false; s.pending=Default::default(); s.start=None; });
 }
 pub(crate) fn register(program:u32, name:&str) {
@@ -43,6 +44,7 @@ pub(crate) fn unregister(program:u32) {
 fn event(update: impl FnOnce(&mut RenderMetrics)) {
     if !crate::light_profile::render_active() { return; }
     STATE.with(|s| { let mut s=s.borrow_mut(); if s.tail {
+        crate::gpu_wait::tail_begin();
         if s.start.is_none() {s.start=Some(Instant::now());}
         update(&mut s.pending);
     } });
@@ -138,7 +140,7 @@ mod hooks {
         buffer_data => glBufferData(t:u32,n:isize,p:*const c_void,u:u32) {buffer(n,p);};
         buffer_sub => glBufferSubData(t:u32,o:isize,n:isize,p:*const c_void) {buffer(n,p);}
     }
-    unsafe extern "C" fn elements(t:u32,n:i32,k:u32,p:*const c_void,i:i32) {api::glDrawElementsInstanced(t,n,k,p,i);draw();}
+    unsafe extern "C" fn elements(t:u32,n:i32,k:u32,p:*const c_void,i:i32) {api::glDrawElementsInstanced(t,n,k,p,i);draw();crate::gpu_wait::tail_end();}
     #[cfg(target_os="macos")]
     unsafe extern "C" fn link(p:u32) {api::glLinkProgram(p);register(p,crate::shader_cache::name());}
     #[cfg(target_os="macos")]

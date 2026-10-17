@@ -3451,6 +3451,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             p.stage("skin-gather-begin");
         }
         #[cfg(feature="vita_renderer")]
+        let world_job = if draw_world { scene.start_world_prepare(camera, environment_clock, fullbright, &transforms) } else { None };
+        #[cfg(feature="vita_renderer")]
         let mut skin_frame = if crate::render::vita_renderer::config().skin_overlap && !world_only {
             step0_block.switch(crate::light_profile::Probe::Other);
             #[cfg(target_os = "vita")]
@@ -3471,10 +3473,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
             level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+            scene.complete_world_prepare(world_job);
             frame.dispatch();
             crate::audio::game_stage(0);
             Some(frame)
-        } else { None };
+        } else { scene.complete_world_prepare(world_job); None };
         step0_block.switch(crate::light_profile::Probe::Other);
         #[cfg(target_os = "vita")]
         {
@@ -4227,13 +4230,15 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
                     active.scene.prepare_camera_portals(&view,time,false,&transforms);
                     active.scene.begin_fx_view(&view,time,false,true);
                     active.art.story_pose(&active.story);
+                    let world_job = active.scene.start_world_prepare(camera,time,false,&transforms);
                     let mut skin_frame=if overlapped {
                         let mut f=crate::character::skinning::overlap::Frame::begin();
                         alice.draw_ghost(player.feet,false,frame==2);
                         active.npcs.draw(camera,(target-camera).normalize_or_zero(),&active.scene.atmosphere,false);
                         active.art.draw(&active.interactions,&active.hints,&active.scene.atmosphere,camera,false);
+                        active.scene.complete_world_prepare(world_job);
                         f.dispatch();Some(f)
-                    } else {None};
+                    } else {active.scene.complete_world_prepare(world_job);None};
                     active.scene.draw(camera,time,false,false,&transforms);
                     if let Some(f)=&mut skin_frame {f.collect();}
                     if !crate::character::skinning::overlap::single_frame() {
@@ -4358,10 +4363,12 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         let started = std::time::Instant::now();
         state.scene.prepare_camera_portals(&view, time, fullbright, &transforms);
         state.scene.begin_fx_view(&view, time, fullbright, true);
+        let world_job = state.scene.start_world_prepare(view.position,time,fullbright,&transforms);
         let mut skin = crate::character::skinning::overlap::Frame::begin();
         state.alice.draw_ghost(state.game.player.feet, fullbright, false);
         state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright);
         art.draw(&state.interactions, &state.hints, &state.scene.atmosphere, view.position, fullbright);
+        state.scene.complete_world_prepare(world_job);
         skin.dispatch();
         let allocation_scope = crate::kernel_alloc::Scope::begin();
         state.scene.draw(view.position, time, fullbright, false, &transforms);
@@ -4402,6 +4409,8 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         if frame >= 60 {
             samples.push(serde_json::json!({"frame":frame,"variant":variant,"cpu_ns":cpu_ns + crate::light_profile::render_host_deferred_ns(),"world_allocations":world_allocations,
                 "phases":crate::light_profile::render_host_report(),
+                "world_prepare":crate::light_profile::world_host_report(),
+                "step0":crate::light_profile::probe_host_report(),
                 "counts":crate::render_fx::retained::host_report()}));
         }
     }

@@ -46,6 +46,7 @@ pub(crate) async fn entry(mut assets: crate::assets::Assets, options: crate::Opt
                 "seed":0x416c696365u64,"material_time":time,"frames":frames,"scope":"world + ambient props at initial chapter gameplay spawn; no cast/HUD/cinematic replay",
                 "spawn_eye":spawn.to_array(),"player_feet":player.as_ref().map(|p|p.feet.to_array()),"yaw":yaw,"transforms":transforms,
                 "portal_candidate_surfaces":portal_surfaces,"authored_sky_surfaces":sky_surfaces,"rope_strands":scene.world.traversal.ropes.len(),
+                "world_prepare":crate::light_profile::world_host_report(),
                 "legacy_portals_loaded":scene.camera_portals.len(),"missing_images":scene.missing,"stats":scene.stats,"report":report()});
             std::fs::create_dir_all("private")?;
             std::fs::write("private/allmaps-entry.json", serde_json::to_vec_pretty(&result)?)?;
