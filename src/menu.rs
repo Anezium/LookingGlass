@@ -636,8 +636,8 @@ impl Menu {
                         ("Mute".into(), 298.),
                     ],
                     Page::Game => vec![
-                        ("Sensitivity".into(), 80.),
-                        ("Invert Mouse".into(), 130.),
+                        (if Preferences::vita_emulation() { "Stick Sensitivity" } else { "Sensitivity" }.into(), 80.),
+                        (if Preferences::vita_emulation() { "Invert Look" } else { "Invert Mouse" }.into(), 130.),
                         ("Camera Distance".into(), 168.),
                         ("Always Run".into(), 222.),
                         ("Subtitles".into(), 270.),
@@ -700,6 +700,10 @@ impl Menu {
                 self.draft_audio.effects = (self.draft_audio.effects + delta * 0.05).clamp(0., 1.)
             }
             (Page::Audio, 2) => self.draft_audio.muted = !self.draft_audio.muted,
+            (Page::Game, 0) if Preferences::vita_emulation() => {
+                self.draft.pad_sensitivity = (self.draft.pad_sensitivity + delta * 0.1).clamp(0.2, 3.)
+            }
+            (Page::Game, 1) if Preferences::vita_emulation() => self.draft.invert_pad = !self.draft.invert_pad,
             (Page::Game, 0) => {
                 self.draft.sensitivity = (self.draft.sensitivity + delta * 0.1).clamp(0.2, 3.)
             }
@@ -727,6 +731,7 @@ impl Menu {
     fn toggle(&self, page: Page, row: usize) -> Option<bool> {
         match (page, row) {
             (Page::Audio, 2) => Some(self.draft_audio.muted),
+            (Page::Game, 1) if Preferences::vita_emulation() => Some(self.draft.invert_pad),
             (Page::Game, 1) => Some(self.draft.invert_mouse),
             (Page::Game, 3) => Some(self.draft.always_run),
             (Page::Game, 4) => Some(self.draft.subtitles),
@@ -742,6 +747,7 @@ impl Menu {
         match (page, row) {
             (Page::Audio, 0) => Some(self.draft_audio.music),
             (Page::Audio, 1) => Some(self.draft_audio.effects),
+            (Page::Game, 0) if Preferences::vita_emulation() => Some((self.draft.pad_sensitivity - 0.2) / 2.8),
             (Page::Game, 0) => Some((self.draft.sensitivity - 0.2) / 2.8),
             (Page::Game, 2) => Some(((self.draft.camera_distance - 80.) / 140.).clamp(0., 1.)),
             (Page::Controls, row) if row == BINDINGS.len() => {
@@ -758,6 +764,7 @@ impl Menu {
         match (page, row) {
             (Page::Audio, 0) => self.draft_audio.music = v,
             (Page::Audio, 1) => self.draft_audio.effects = v,
+            (Page::Game, 0) if Preferences::vita_emulation() => self.draft.pad_sensitivity = 0.2 + v * 2.8,
             (Page::Game, 0) => self.draft.sensitivity = 0.2 + v * 2.8,
             (Page::Game, 2) => self.draft.camera_distance = 80. + v * 140.,
             (Page::Controls, row) if row == BINDINGS.len() => {

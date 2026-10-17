@@ -2075,9 +2075,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && stats.alive()
         {
             if !scripted_view && !bench {
+                #[cfg(target_os = "vita")]
+                input.vita_look(&preferences, elapsed, &mut yaw, &mut pitch);
+                #[cfg(not(target_os = "vita"))]
+                {
                 let look = input.look(&preferences);
                 yaw -= look.x * dt * 2.5;
                 pitch += look.y * dt * 2.;
+                }
             }
             if !scripted_view && held(KeyCode::Left) {
                 yaw += dt * 1.3;

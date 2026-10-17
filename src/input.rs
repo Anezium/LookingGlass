@@ -230,7 +230,7 @@ fn stick(x: i16, y: i16, deadzone: f32) -> Vec2 {
 // Read the analog magnitude without changing the pinned miniquad backend.
 // Backend W/A/S/D still serves menus/host emulation, but not Vita gameplay movement.
 #[cfg(target_os = "vita")]
-fn vita_movement(deadzone: f32) -> Vec2 {
+fn vita_sticks(deadzone: f32) -> (Vec2, Vec2) {
     // VitaSDK psp2common/ctrl.h SceCtrlData (0x20 bytes).
     #[repr(C)]
     struct CtrlData { timestamp: u64, buttons: u32, lx: u8, ly: u8, rx: u8, ry: u8, rest: [u8; 16] }
@@ -239,9 +239,10 @@ fn vita_movement(deadzone: f32) -> Vec2 {
     extern "C" { fn sceCtrlPeekBufferPositive(port: i32, data: *mut CtrlData, count: i32) -> i32; }
     let mut data: CtrlData = unsafe { std::mem::zeroed() };
     let rc = unsafe { sceCtrlPeekBufferPositive(0, &mut data, 1) };
-    if rc <= 0 || data.buttons & 0x10000 != 0 { return Vec2::ZERO; }
+    if rc <= 0 || data.buttons & 0x10000 != 0 { return (Vec2::ZERO, Vec2::ZERO); }
     let axis = |v: u8| (((v as f32 - 128.) / 127.).clamp(-1., 1.) * 32767.) as i16;
-    stick(axis(data.lx), -axis(data.ly), deadzone)
+    (stick(axis(data.lx), -axis(data.ly), deadzone),
+     stick(axis(data.rx), -axis(data.ry), deadzone))
 }
 
 #[cfg(any(target_os = "vita", test))]
@@ -343,6 +344,10 @@ pub struct Input {
     focused: bool,
     #[cfg(target_os = "vita")]
     vita_neutral: bool,
+    #[cfg(target_os = "vita")]
+    vita_look_neutral: bool,
+    #[cfg(target_os = "vita")]
+    vita_look_log: crate::look::stick::RateLog,
 }
 impl Input {
     pub fn update(&mut self, prefs: &Preferences, focused: bool) {
@@ -363,9 +368,14 @@ impl Input {
             .update(raw, focused, prefs.pad_deadzone, get_frame_time().min(0.1));
         #[cfg(target_os = "vita")]
         {
-            if !self.focused { self.vita_neutral = true; }
-            let movement = if focused { vita_movement(prefs.pad_deadzone) } else { Vec2::ZERO };
+            if !self.focused {
+                self.vita_neutral = true;
+                self.vita_look_neutral = true;
+            }
+            let (movement, look) = if focused { vita_sticks(prefs.pad_deadzone) }
+                else { (Vec2::ZERO, Vec2::ZERO) };
             self.pad.move_axis = resumed_axis(movement, &mut self.vita_neutral);
+            self.pad.look_axis = resumed_axis(look, &mut self.vita_look_neutral);
         }
         if !focused {
             self.suppress();
@@ -393,7 +403,11 @@ impl Input {
     /// On menus/load/focus boundaries, held inputs must be released before reuse.
     pub fn suppress(&mut self) {
         #[cfg(target_os = "vita")]
-        { self.vita_neutral = true; }
+        {
+            self.vita_neutral = true;
+            self.vita_look_neutral = true;
+            self.vita_look_log = Default::default();
+        }
         self.pad.suppress();
         for &(s, _) in KEYS {
             if physical(s, false) {
@@ -504,6 +518,14 @@ impl Input {
             * vec2(1., if prefs.invert_pad { -1. } else { 1. })
             * prefs.pad_sensitivity
     }
+    #[cfg(target_os = "vita")]
+    pub fn vita_look(&mut self, prefs: &Preferences, elapsed: f32, yaw: &mut f32, pitch: &mut f32) {
+        let axis = self.pad.look_axis;
+        let before = *yaw;
+        crate::look::stick::turn(axis, prefs.pad_sensitivity, prefs.invert_pad, elapsed, yaw, pitch);
+        // Measure the applied, wrapped yaw change rather than printing the configured rate.
+        self.vita_look_log.sample(axis, elapsed, before, *yaw);
+    }
     pub fn desktop_pad(&self) -> bool {
         self.using_pad && !Preferences::vita_emulation()
     }
@@ -551,6 +573,24 @@ mod tests {
         let half = stick(0, 20000, 0.24);
         assert!(half.y > 0.4 && half.y < 0.6);
         assert!((stick(i16::MAX, i16::MIN, 0.24).length() - 1.).abs() < 0.0001);
+    }
+    #[test]
+    fn vita_look_deadzone_rescales_cardinal_diagonal_and_endpoints() {
+        for dz in [0.1, 0.24, 0.4] {
+            assert_eq!(stick(0, 0, dz), Vec2::ZERO);
+            assert_eq!(stick((dz * 32767.) as i16, 0, dz), Vec2::ZERO);
+            let diagonal = (dz * 32767. / 2_f32.sqrt()) as i16;
+            assert_eq!(stick(diagonal, diagonal, dz), Vec2::ZERO);
+            let just_outside = stick(((dz + 0.001) * 32767.) as i16, 0, dz);
+            assert!(just_outside.x > 0. && just_outside.x < 0.002);
+            assert_eq!(stick(i16::MAX, 0, dz), Vec2::X);
+            assert_eq!(stick(i16::MIN, 0, dz), -Vec2::X);
+            let half = stick(((dz + (1. - dz) * 0.5) * 32767.) as i16, 0, dz);
+            assert!((half.x - 0.5).abs() < 0.0001);
+            let diagonal = stick(i16::MAX, i16::MAX, dz);
+            assert!((diagonal.length() - 1.).abs() < 1e-6);
+            assert_eq!(diagonal.x, diagonal.y);
+        }
     }
     #[test]
     fn reconnect_focus_and_modal_boundaries_require_release() {
