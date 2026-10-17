@@ -33,27 +33,36 @@ pub fn turn(axis: Vec2, sensitivity: f32, inverted: bool, elapsed: f32, yaw: &mu
     *pitch = (*pitch + change.y).clamp(-1.5, 1.5);
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct RateLog {
     seconds: f32,
     yaw: f32,
     frames: u32,
+    peak_abs_x: f32,
+    full_frames: u32,
 }
 impl RateLog {
-    pub fn sample(&mut self, axis: Vec2, elapsed: f32, before: f32, after: f32) {
-        // Horizontal end-stop only; diagonals intentionally divide the angular velocity.
-        if axis.x.abs() < 0.99 || axis.y.abs() > 0.05 || seconds(elapsed) == 0. {
+    fn window(&mut self, axis: Vec2, elapsed: f32, before: f32, after: f32) -> Option<Self> {
+        // Report sub-maximal horizontal windows too: worn sticks may never reach .99.
+        // Diagonals intentionally divide angular velocity and are excluded here.
+        if axis.x == 0. || axis.y.abs() > 0.05 || seconds(elapsed) == 0. {
             *self = Self::default();
-            return;
+            return None;
         }
         self.seconds += seconds(elapsed);
         self.yaw += (after - before + std::f32::consts::PI)
             .rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         self.frames += 1;
-        if self.seconds >= 1. {
-            eprintln!("[lg/camera-stick] full_deflection frames={} seconds={:.4} yaw_deg_s={:.3}",
-                self.frames, self.seconds, self.yaw.to_degrees() / self.seconds);
-            *self = Self::default();
+        self.peak_abs_x = self.peak_abs_x.max(axis.x.abs());
+        self.full_frames += u32::from(axis.x.abs() >= 0.99);
+        (self.seconds >= 1.).then(|| std::mem::take(self))
+    }
+
+    pub fn sample(&mut self, axis: Vec2, elapsed: f32, before: f32, after: f32) {
+        if let Some(window) = self.window(axis, elapsed, before, after) {
+            eprintln!("[lg/camera-stick] horizontal_window frames={} seconds={:.4} yaw_deg_s={:.3} peak_abs_x={:.4} full_deflection={}",
+                window.frames, window.seconds, window.yaw.to_degrees() / window.seconds,
+                window.peak_abs_x, window.full_frames == window.frames);
         }
     }
 }
@@ -124,6 +133,50 @@ mod tests {
                 assert_eq!(log.seconds, 0.);
             }
         }
+    }
+
+    #[test]
+    fn worn_sticks_emit_measured_windows_below_full_threshold() {
+        for hz in [30, 40] {
+            for x in [-0.96, 0.96, 1.] {
+                let mut log = RateLog::default();
+                let (mut yaw, mut pitch) = (0.01, 0.);
+                let mut completed = None;
+                for _ in 0..=hz {
+                    let before = yaw;
+                    turn(vec2(x, 0.), 1., false, 1. / hz as f32, &mut yaw, &mut pitch);
+                    if let Some(window) = log.window(vec2(x, 0.), 1. / hz as f32, before, yaw) {
+                        completed = Some(window);
+                        break;
+                    }
+                }
+                let window = completed.expect("sub-maximal stick must still produce a window");
+                assert_eq!(window.peak_abs_x, x.abs());
+                assert_eq!(window.full_frames == window.frames, x.abs() >= 0.99);
+                let expected = -x.signum() * 210. * x.abs().powf(CURVE);
+                assert!((window.yaw.to_degrees() / window.seconds - expected).abs() < 0.002);
+                assert_eq!(log.frames, 0);
+                assert_eq!(log.peak_abs_x, 0.);
+            }
+        }
+    }
+
+    #[test]
+    fn logger_peak_covers_the_whole_window_and_neutral_clears_it() {
+        let mut log = RateLog::default();
+        let mut completed = None;
+        for i in 0..11 {
+            let x = if i == 0 { 0.98 } else { 0.8 };
+            if let Some(window) = log.window(vec2(x, 0.), 0.1, 0., 0.) {
+                completed = Some(window);
+                break;
+            }
+        }
+        assert_eq!(completed.unwrap().peak_abs_x, 0.98);
+        log.window(vec2(0.9, 0.), 0.1, 0., 0.);
+        log.window(Vec2::ZERO, 0.1, 0., 0.);
+        assert_eq!(log.peak_abs_x, 0.);
+        assert_eq!(log.frames, 0);
     }
 
     #[test]

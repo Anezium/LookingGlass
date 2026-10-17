@@ -22,14 +22,19 @@ an archive artifact. Restore the previous SELF and preferences to roll back.
    .857 seconds. Repeat left; release should stop immediately. Pan while
    walking/running, then repeat in a slower area (25–38 ms frames).
 3. Collect the game's existing log by the normal human capture workflow.
-   Lines are emitted once per >=1 second of horizontal full deflection:
-   `[lg/camera-stick] full_deflection frames=30 seconds=1.0000 yaw_deg_s=-210.000`
-   Negative yaw means right; left is positive. Default magnitude target
-   210 degrees/s (+/-2% for byte end-stop/capture variation), at both frame
-   rates. This is measured wrapped yaw change divided by integrated render
-   seconds, not a copy of the configured rate. Report the actual lines.
-   A sign reversal during a sample cancels some yaw: hold one direction
-   steadily. Logs require rescaled abs(x)>=.99 and abs(y)<=.05.
+   Horizontal movement windows are logged every >=1 second, even below .99:
+   `[lg/camera-stick] horizontal_window frames=30 seconds=1.0000 yaw_deg_s=-210.000 peak_abs_x=1.0000 full_deflection=true`
+   `peak_abs_x` is the largest dead-zone-rescaled |x| in that window.
+   Negative yaw means right; left is positive. With a steady stick at 1.0,
+   expect 210 degrees/s (+/-2%) at both frame rates. `full_deflection=true`
+   means every sampled |x| was >=.99. A worn stick below .99 still logs its
+   peak and measured yaw; `full_deflection=false` is not a camera failure.
+   For a steady horizontal rescaled value x, expected speed is
+   `210 * abs(x)^1.7` at default sensitivity. A changing window's peak alone
+   does not predict its average speed. Report the actual lines while holding
+   one direction steadily (sign reversals cancel yaw). Diagonal samples with
+   rescaled abs(y)>.05 are excluded. This measures wrapped applied yaw change
+   divided by integrated render seconds; console behavior still needs this test.
 4. Repeat at minimum .2 and maximum 3.0: expect yaw 60 and 420 degrees/s.
    Reset to 1.0 afterward. Full-axis pitch is 135 degrees/s by default
    (minimum 40, maximum 270), stopping at +/-85.944 degrees. Test pitch near
