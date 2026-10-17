@@ -79,3 +79,14 @@ pass in both off/on arms using the shared Mac host target and timing lock.
 No production behavior changes in this follow-up; the three defaults stay false.
 The owned entry, whole-inventory restoration, 60-second frame-stat watchdog and
 skool2 entry-camera protocol is [SIM-MAPS-R2-PROTOCOL.md](SIM-MAPS-R2-PROTOCOL.md).
+
+## On r3f
+
+Branch `vita-sim-maps-2-r3f` carries the round-two commits onto
+`vita-reference-r3f` 0bd6241 so console numbers include r3f's working audio
+path. The commits applied without conflicts; the source diff against the base
+is identical to round two's diff against r3c. r3f changes no simulation or FX
+code these switches touch. The three switches stay default false. Both console
+arms use r3f's audio candidate settings plus the three booleans, and the
+protocol is unchanged: village from the reference Autosave only. Host gates,
+suites and the package are in the private `~/vita-j0/atoz/sim-maps-2-r3f/`.
