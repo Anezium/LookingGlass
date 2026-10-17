@@ -33,6 +33,9 @@ The log records the consumed request's SHA-256, selected visit and a full
 before simulation. A mismatching hash refuses startup. The existing native
 save-chain bridge then supplies Alice and the native cast from local assets;
 `native_restored ... native_state_hash=` hashes the actual restored game objects.
+Native Continue initializes equipment-derived player flags, including the late-game
+Turtle Shell breath flag, before the native hash is taken. The checkpoint and its
+Route hash are unchanged by this preparation.
 These two hashes describe different representations and must each be compared
 with its corresponding host value. A headless route hash alone does not certify
 native actors, rendering or subsequent gameplay.
@@ -46,3 +49,31 @@ Its manifest distinguishes proven carried checkpoints from staged fixtures.
 Game data, checkpoints, packages, logs and local paths belong in private evidence,
 not the source repository. See the evidence `PROTOCOL.md` for the pilot sequence,
 per-visit expected hashes and restoration of the human's r3f package.
+
+Mac verification on r3f (2026-10-17): all 39 entrance files restore in separate
+native processes with equal stored Route hashes, equal restored/installed native
+hashes, consumed requests, captures and byte-identical save sentinels. All 39
+registry fingerprints match unchanged r3f; malformed requests, missing/wrong/tampered
+checkpoints and direct map/entry starts are checked separately. Simulation code and
+Cargo.lock are unchanged. The paused village entrance includes its authored black
+cinematic fade; the pilot protocol also requires interactive visibility/control
+checks after resuming each representative visit.
+
+The unchanged r3f strict chain and native campaign replay both stop at visit 02
+Pandemonium's 640-versus-460 slime-tick assertion with the recorded input family.
+Only entrances 01–02 are strict carried states; the other 37 generated entrances
+retain upstream's `fixture=true` chapter-loadout label. They are useful test starts,
+not evidence of earned campaign completion. The local manifest records each
+process, intentional post-entrance stop, state hash and file SHA-256. The full save
+sweep also retains r3f's known Cat-trigger fixture failure after 188 writes;
+unwritten later registered cases are not claimed passing.
+
+The final source passes 902 all-features and 819 default Rust tests (seven
+asset-dependent tests ignored), plus the Python/source-package checks. All 188
+produced save payload checksums and serialized future hashes match unchanged r3f
+byte-for-byte; the 154 original save cases are included. Source audit also passes
+after allowing the ten already-committed r3e/r3f authored presets by exact filename.
+The evidence package includes SHA-256s, five representative pilot requests and the
+original human r3f SELF/VPK/settings handback kit. No console connection or install
+was performed during implementation; the protocol requires existing directories
+and uses flat checkpoint uploads, with no MKD.
