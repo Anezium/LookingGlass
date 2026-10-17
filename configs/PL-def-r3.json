@@ -19,6 +19,7 @@
   "render_draw_timing": false,
   "worker_probe": false,
   "sim_span_probe": false,
+  "world_prepare_worker": false,
   "skin_workers": 2,
   "skin_overlap": true,
   "lights_early_out": true,
