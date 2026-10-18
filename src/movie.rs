@@ -415,10 +415,9 @@ pub async fn play(
             if let Some(s) = &soundtrack {
                 s.stop();
             }
-            audio.flush_movie();
             movie_log.played = elapsed;
             movie_log.reason = "quit";
-            skip.event("decoder_exit reason=quit soundtrack_stop=true");
+            skip.event("decoder_exit reason=quit soundtrack_stop=true movie_pcm_revoked=true pcm_prefetch_flushed=false");
             skip.handoff("quit");
             return Ok(false);
         }
@@ -505,8 +504,7 @@ pub async fn play(
     }
     skip.event(&format!("decoder_exit reason={} decoded={}", movie_log.reason, video.decoded));
     if let Some(s) = &soundtrack { s.stop(); }
-    audio.flush_movie();
-    skip.event("soundtrack_stop=true pcm_prefetch_flushed=true");
+    skip.event("soundtrack_stop=true movie_pcm_revoked=true pcm_prefetch_flushed=false");
     skip.handoff(movie_log.reason);
     input.suppress();
     next_frame().await;

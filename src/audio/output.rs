@@ -32,6 +32,8 @@ pub struct Metrics {
     pub virtual_ambient: AtomicUsize,
     epoch: AtomicU32,
     flushes: AtomicUsize,
+    movie_serial: AtomicU32,
+    movie: Arc<AtomicU32>,
 }
 pub struct Control {
     pending: queue::Sender<Output>,
@@ -43,6 +45,9 @@ pub struct Mixer {
     metrics: Arc<Metrics>,
     sample: usize,
     block: [f32; SAMPLES],
+    without_movie: [f32; SAMPLES],
+    movie: u32,
+    has_movies: bool,
     at: usize,
     ranks: Vec<(usize, f32)>,
     config: block::Settings,
@@ -61,6 +66,9 @@ pub fn mixer() -> (Control, Mixer) {
             metrics,
             sample: 0,
             block: [0.; SAMPLES],
+            without_movie: [0.; SAMPLES],
+            movie: 0,
+            has_movies: false,
             at: SAMPLES,
             ranks: Vec::with_capacity(128),
             config: block::settings(),
@@ -75,6 +83,19 @@ impl Control {
     pub fn sink(&self) -> Sink {
         let _api = super::sink::ApiTimer::new();
         let (sink, output) = Sink::new_idle();
+        self.publish(sink, output)
+    }
+    pub fn movie_sink(&self) -> Sink {
+        let _api = super::sink::ApiTimer::new();
+        // Never recycle an identity, including on wrap. New publication revokes
+        // every older movie; at most one movie can contribute to an interval.
+        let id = self.metrics.movie_serial.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+            |n| n.checked_add(1)).expect("movie instance IDs exhausted") + 1;
+        let (sink, output) = Sink::new_movie(id, self.metrics.movie.clone());
+        self.metrics.movie.store(id, Ordering::Release);
+        self.publish(sink, output)
+    }
+    fn publish(&self, sink: Sink, output: Output) -> Sink {
         if self.pending.push(output).is_err() {
             self.metrics.rejected.fetch_add(1, Ordering::Relaxed);
             eprintln!("[lg/audio-control] mixer_queue_full dropped=1 wait_us=0");
@@ -83,10 +104,35 @@ impl Control {
     }
 }
 impl Mixer {
+    pub(super) fn premix(&mut self, epoch: u32) -> Block {
+        if self.config.mix {
+            self.render();
+            let mut block = Block::silence(epoch);
+            block.samples = self.block;
+            block.movie = self.movie;
+            if self.movie != 0 { block.without_movie = Some(self.without_movie); }
+            block
+        } else {
+            // Legacy sample mixer: still render each source exactly once per
+            // value, retaining its ordinary sum order and control cadence.
+            while let Some(s) = self.pending.pop() { self.has_movies |= s.movie_id() != 0; self.sources.push(s); }
+            let active = self.metrics.movie.load(Ordering::Acquire);
+            let mut block = Block::silence(epoch);
+            block.movie = active;
+            if active != 0 { block.without_movie = Some([0.; SAMPLES]); }
+            for i in 0..SAMPLES {
+                let (normal, other) = self.legacy_sample(Some(active));
+                block.samples[i] = normal;
+                if let Some(samples) = &mut block.without_movie { samples[i] = other; }
+            }
+            block
+        }
+    }
     fn render(&mut self) {
         block::reset();
         let start = Instant::now();
         while let Some(s) = self.pending.pop() {
+            self.has_movies |= s.movie_id() != 0;
             self.sources.push(s);
         }
         self.metrics
@@ -121,6 +167,13 @@ impl Mixer {
         );
         block::charge(6, start);
         self.block.fill(0.);
+        // Snapshot before rendering, never retag PCM with a later control ID.
+        let active = self.metrics.movie.load(Ordering::Acquire);
+        self.movie = if active != 0 && self.sources.iter().any(|s| s.movie_id() == active) { active } else { 0 };
+        let movie = self.movie;
+        let has_movies = self.has_movies;
+        if movie != 0 { self.without_movie.fill(0.); }
+        let without_movie = &mut self.without_movie;
         let mut scratch = [0.; SAMPLES];
         let mixed = &mut self.block;
         self.sources.retain_mut(|s| {
@@ -131,30 +184,26 @@ impl Mixer {
                 Rendered::Audio => {}
             }
             let start = Instant::now();
+            let id = if has_movies { s.movie_id() } else { 0 };
+            if id != 0 && id != movie { return true; }
             for (dst, src) in mixed.iter_mut().zip(scratch.iter()) {
                 *dst += *src;
+            }
+            if movie != 0 && id == 0 {
+                for (dst, src) in without_movie.iter_mut().zip(scratch.iter()) { *dst += *src; }
             }
             block::charge(4, start);
             true
         });
+        if has_movies { self.has_movies = self.sources.iter().any(|s| s.movie_id() != 0); }
         self.at = 0;
     }
-}
-impl Iterator for Mixer {
-    type Item = f32;
-    fn next(&mut self) -> Option<f32> {
-        if self.config.mix {
-            if self.at == SAMPLES {
-                self.render();
-            }
-            let v = self.block[self.at];
-            self.at += 1;
-            return Some(v);
-        }
+    fn legacy_sample(&mut self, movie: Option<u32>) -> (f32, f32) {
         // Moving pending owned sources cannot run a decoder. Each Output
         // normalizes its source only when the consumer first asks for samples.
         let mut added = false;
         while let Some(source) = self.pending.pop() {
+            self.has_movies |= source.movie_id() != 0;
             self.sources.push(source);
             added = true;
         }
@@ -165,14 +214,39 @@ impl Iterator for Mixer {
                 .fetch_max(self.sources.len(), Ordering::Relaxed);
         }
         let mut sum = 0.;
-        self.sources.retain_mut(|s| match s.next() {
-            Some(v) => {
-                sum += v;
-                true
+        let mut other = 0.;
+        let active = &self.metrics.movie;
+        let has_movies = self.has_movies;
+        self.sources.retain_mut(|s| {
+            let id = if has_movies { s.movie_id() } else { 0 };
+            // A replacement arriving during legacy sample mixing starts in
+            // the next interval, with its own first stereo pair intact. Other
+            // sinks keep their existing per-sample publication semantics.
+            if movie.is_some_and(|interval| id != 0 && id != interval)
+                && active.load(Ordering::Acquire) == id { return true; }
+            match s.next() {
+                Some(v) => {
+                    if movie.is_none() || id == 0 || movie == Some(id) { sum += v; }
+                    if movie.is_some_and(|id| id != 0) && id == 0 { other += v; }
+                    true
+                }
+                None => false,
             }
-            None => false,
         });
-        Some(sum)
+        (sum, other)
+    }
+}
+impl Iterator for Mixer {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        if self.config.mix {
+            if self.at == SAMPLES { self.render(); }
+            let v = self.block[self.at];
+            self.at += 1;
+            Some(v)
+        } else {
+            Some(self.legacy_sample(None).0)
+        }
     }
 }
 impl Source for Mixer {
@@ -189,13 +263,50 @@ impl Source for Mixer {
         None
     }
 }
-struct Block {
+pub(super) struct Block {
     epoch: u32,
-    samples: [f32; SAMPLES],
+    pub(super) samples: [f32; SAMPLES],
+    pub(super) without_movie: Option<[f32; SAMPLES]>,
+    movie: u32,
+}
+impl Block {
+    fn silence(epoch: u32) -> Self {
+        Self { epoch, samples: [0.; SAMPLES], without_movie: None, movie: 0 }
+    }
+}
+/// Runs exclusively on the producer. Both premixes must already be limited.
+pub(super) trait PcmSource: Send + 'static {
+    fn pcm_block(&mut self, epoch: u32) -> Block;
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProducerPoint { Full, Epoch, Rendered, PrePush, Pushed }
+/// The real worker's single step. The empty hook optimizes away in production;
+/// deterministic tests stop this exact path without replacing the PCM mixer.
+fn producer_step<S: PcmSource>(source: &mut S, tx: &queue::Sender<Block>,
+    metrics: &Metrics, cushion: usize, mut point: impl FnMut(ProducerPoint)) -> Option<f64>
+{
+    if tx.len() >= cushion {
+        point(ProducerPoint::Full);
+        return None;
+    }
+    let epoch = metrics.epoch.load(Ordering::Acquire);
+    point(ProducerPoint::Epoch);
+    let start = Instant::now();
+    let block = source.pcm_block(epoch);
+    let total = start.elapsed().as_secs_f64() * 1000.;
+    point(ProducerPoint::Rendered);
+    metrics.queued_samples.fetch_add(SAMPLES, Ordering::Relaxed);
+    point(ProducerPoint::PrePush);
+    if tx.push(block).is_err() { metrics.queued_samples.fetch_sub(SAMPLES, Ordering::Relaxed); }
+    point(ProducerPoint::Pushed);
+    Some(total)
 }
 pub struct Callback {
     ready: queue::Receiver<Block>,
     block: [f32; SAMPLES],
+    without_movie: [f32; SAMPLES],
+    movie: u32,
+    use_movie: bool,
     at: usize,
     epoch: u32,
     metrics: Arc<Metrics>,
@@ -203,6 +314,11 @@ pub struct Callback {
 impl Iterator for Callback {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
+        self.next_with(|| {})
+    }
+}
+impl Callback {
+    fn next_with(&mut self, mut dequeued: impl FnMut()) -> Option<f32> {
         let epoch = self.metrics.epoch.load(Ordering::Acquire);
         let flushed = self.at % 2 == 0 && self.epoch != epoch;
         if flushed {
@@ -211,6 +327,7 @@ impl Iterator for Callback {
         if self.at == SAMPLES {
             self.epoch = epoch;
             self.block = [0.; SAMPLES];
+            self.movie = 0;
             let mut found = false;
             // The queue has at most eight slots; stale prefetch is discarded in
             // bounded work without changing either endpoint's ownership.
@@ -218,11 +335,14 @@ impl Iterator for Callback {
                 let Some(block) = self.ready.pop() else {
                     break;
                 };
+                dequeued();
                 self.metrics
                     .queued_samples
                     .fetch_sub(SAMPLES, Ordering::Relaxed);
                 if block.epoch == epoch {
                     self.block = block.samples;
+                    if let Some(samples) = block.without_movie { self.without_movie = samples; }
+                    self.movie = block.movie;
                     found = true;
                     break;
                 }
@@ -235,7 +355,10 @@ impl Iterator for Callback {
             }
             self.at = 0;
         }
-        let v = self.block[self.at];
+        if self.at % 2 == 0 {
+            self.use_movie = self.movie == 0 || self.metrics.movie.load(Ordering::Acquire) == self.movie;
+        }
+        let v = if self.use_movie { self.block[self.at] } else { self.without_movie[self.at] };
         self.at += 1;
         Some(v)
     }
@@ -423,13 +546,13 @@ fn print(report: &Report, config: block::Settings) {
         }
     }
 }
-pub fn buffered<S: Source<Item = f32> + Send + 'static>(
+pub fn buffered<S: PcmSource>(
     source: S,
     metrics: Arc<Metrics>,
 ) -> std::io::Result<(Worker, Callback)> {
     buffered_with(source, metrics, block::settings())
 }
-fn buffered_with<S: Source<Item = f32> + Send + 'static>(
+fn buffered_with<S: PcmSource>(
     mut source: S,
     metrics: Arc<Metrics>,
     config: block::Settings,
@@ -438,10 +561,7 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
     let ready_blocks = config.cushion;
     for _ in 0..ready_blocks {
         assert!(tx
-            .push(Block {
-                epoch: 0,
-                samples: [0.; SAMPLES]
-            })
+            .push(Block::silence(0))
             .is_ok());
         metrics.queued_samples.fetch_add(SAMPLES, Ordering::Relaxed);
     }
@@ -494,18 +614,12 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
             wake = now;
             gap_max = gap_max.max(gap);
             if gap > block_ms { gaps += 1; }
-            if tx.len()>=ready_blocks {
+            if let Some(total) = producer_step(&mut source, &tx, &stats, ready_blocks, |_| {}) {
+                timings.push(total);
+                if config.mix {let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
+            } else {
                 thread::sleep(Duration::from_millis(1));
                 sleep_over = sleep_over.max(wake.elapsed().as_secs_f64() * 1000. - 1.);
-            }
-            else {
-                let epoch=stats.epoch.load(Ordering::Acquire);
-                let start=Instant::now();let mut block=[0.;SAMPLES];
-                for v in &mut block {*v=source.next().unwrap_or(0.);}
-                let total=start.elapsed().as_secs_f64()*1000.;timings.push(total);
-                if config.mix {let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
-                stats.queued_samples.fetch_add(SAMPLES,Ordering::Relaxed);
-                if tx.push(Block{epoch,samples:block}).is_err(){stats.queued_samples.fetch_sub(SAMPLES,Ordering::Relaxed);}
             }
             if report.elapsed()>=Duration::from_secs(1){
                 let music = config.music_thread.then(|| {
@@ -543,6 +657,9 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
         Callback {
             ready: rx,
             block: [0.; SAMPLES],
+            without_movie: [0.; SAMPLES],
+            movie: 0,
+            use_movie: true,
             at: SAMPLES,
             epoch: 0,
             metrics,
@@ -552,11 +669,17 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct Plain<S>(S);
+    impl<S: Source<Item=f32> + Send + 'static> PcmSource for Plain<S> {
+        fn pcm_block(&mut self, epoch: u32) -> Block {
+            let mut block = Block::silence(epoch);
+            for v in &mut block.samples { *v = self.0.next().unwrap_or(0.); }
+            block
+        }
+    }
     /// Synthetic 86-sink scene matching the hedge3 voice inventory (8 audible,
     /// 69 virtual ambience, 9 uncapped sources). No original game data.
-    #[test]
-    #[ignore = "host timing/equivalence diagnostic; run explicitly in release mode"]
-    fn hedge_voice_inventory_profile() {
+    fn hedge_inventory_pcm(timed: bool) -> (String, Vec<f64>) {
         use sha2::{Digest, Sha256};
         let (control, mut mixer) = mixer();
         mixer.config.mix = true;
@@ -586,13 +709,31 @@ mod tests {
             if block % 97 == 0 { sinks[block % 77].set_volume(0.9); }
             if block == 200 { sinks[80].pause(); }
             if block == 220 { sinks[80].play(); }
-            let start = Instant::now();
+            let start = timed.then(Instant::now);
             mixer.render();
-            times.push(start.elapsed().as_secs_f64() * 1000.);
+            if let Some(start) = start { times.push(start.elapsed().as_secs_f64() * 1000.); }
             for sample in mixer.block { digest.update(sample.to_bits().to_le_bytes()); }
         }
         assert_eq!(control.metrics.virtual_ambient.load(Ordering::Relaxed), 69);
-        println!("hedge_voice_inventory p50/p95/max_ms={:?} pcm_sha256={:x}", percentiles(&mut times), digest.finalize());
+        (format!("{:x}", digest.finalize()), times)
+    }
+    #[test]
+    #[ignore = "requires pinned r3j audio configuration; PCM equivalence only, no timing"]
+    fn hedge_voice_inventory_pcm_without_timing() {
+        let config = block::settings();
+        assert!(config.mix && config.preresample && config.parameters
+            && config.voices == 8 && config.gain == 0.001,
+            "set LOOKING_GLASS_TEST_AUDIO_CONFIG to the pinned r3j reference config");
+        let (hash, times) = hedge_inventory_pcm(false);
+        assert!(times.is_empty());
+        println!("hedge_voice_inventory pcm_sha256={hash} timing=false");
+        assert_eq!(hash, "a33978c46f2bf621e70015352f86604c360af0d92ae662e9a72271743253c1dd");
+    }
+    #[test]
+    #[ignore = "host timing/equivalence diagnostic; run explicitly in release mode"]
+    fn hedge_voice_inventory_profile() {
+        let (hash, mut times) = hedge_inventory_pcm(true);
+        println!("hedge_voice_inventory p50/p95/max_ms={:?} pcm_sha256={hash}", percentiles(&mut times));
     }
     #[test]
     fn ambience_cap_reselects_gain_and_preserves_player_and_voice_time() {
@@ -658,7 +799,7 @@ mod tests {
     fn eight_block_cushion_with_reporter_thread_delivers_in_order() {
         let mut config=block::settings();config.cushion=8;config.log_thread=true;
         let metrics=Arc::new(Metrics::default());
-        let (worker,mut callback)=buffered_with(rodio::buffer::SamplesBuffer::new(2,44100,vec![0.5;2*44100]),metrics.clone(),config).unwrap();
+        let (worker,mut callback)=buffered_with(Plain(rodio::buffer::SamplesBuffer::new(2,44100,vec![0.5;2*44100])),metrics.clone(),config).unwrap();
         assert_eq!(metrics.queued_samples.load(Ordering::Relaxed),8*SAMPLES);
         // Eight silent prefill blocks (92.88 ms), then producer output.
         assert!(callback.by_ref().take(8*SAMPLES).all(|v|v==0.));
@@ -674,7 +815,7 @@ mod tests {
         assert!(tx
             .push(Block {
                 epoch: 0,
-                samples: [0.8; SAMPLES]
+                samples: [0.8; SAMPLES], ..Block::silence(0)
             })
             .is_ok());
         metrics.queued_samples.store(SAMPLES, Ordering::Relaxed);
@@ -684,6 +825,7 @@ mod tests {
             block: [0.; SAMPLES],
             at: SAMPLES,
             epoch: 0,
+            without_movie: [0.; SAMPLES], movie: 0, use_movie: true,
             metrics: metrics.clone(),
         };
         assert!(callback.by_ref().take(SAMPLES).all(|v| v == 0.));
@@ -698,14 +840,14 @@ mod tests {
         assert!(tx
             .push(Block {
                 epoch: 1,
-                samples: [0.3; SAMPLES]
+                samples: [0.3; SAMPLES], ..Block::silence(1)
             })
             .is_ok());
         metrics.queued_samples.store(SAMPLES, Ordering::Relaxed);
         assert_eq!(callback.next(), Some(0.3));
         // Fresh PCM already available at another flush needs no silent block.
         metrics.epoch.store(2, Ordering::Release);
-        assert!(tx.push(Block { epoch: 2, samples: [0.6; SAMPLES] }).is_ok());
+        assert!(tx.push(Block { epoch: 2, samples: [0.6; SAMPLES], ..Block::silence(2) }).is_ok());
         metrics.queued_samples.store(SAMPLES, Ordering::Relaxed);
         assert_eq!(callback.next(), Some(0.3)); // finish the current stereo pair
         assert_eq!(callback.next(), Some(0.6));
@@ -747,10 +889,10 @@ mod tests {
         let (release, blocked) = mpsc::channel();
         let metrics = Arc::new(Metrics::default());
         let (worker, mut callback) = buffered(
-            Blocked {
+            Plain(Blocked {
                 entered: Some(entered),
                 release: blocked,
-            },
+            }),
             metrics.clone(),
         )
         .unwrap();
@@ -769,3 +911,7 @@ mod tests {
         drop(worker);
     }
 }
+
+#[cfg(test)]
+#[path = "output/film_tests.rs"]
+mod film_tests;

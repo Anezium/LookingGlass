@@ -637,6 +637,24 @@ impl<S: Source<Item = f32>> Iterator for Monitor<S> {
         Some(sample)
     }
 }
+impl output::PcmSource for Monitor<output::Mixer> {
+    fn pcm_block(&mut self, epoch: u32) -> output::Block {
+        let mut pcm = self.source.premix(epoch);
+        // Limiting is nonlinear: prepare both sums independently, never
+        // subtract movie samples from a limited mix in the device callback.
+        for sample in &mut pcm.samples {
+            *sample = acoustics::limit(*sample);
+            self.block.push(*sample);
+            if self.block.len() == output::SAMPLES { self.flush(); }
+        }
+        if let Some(samples) = &mut pcm.without_movie {
+            for sample in samples { *sample = acoustics::limit(*sample); }
+        }
+        // Capture records the producer's normal premix, before the callback's
+        // later selective revocation. It is not final device PCM evidence.
+        pcm
+    }
+}
 impl<S: Source<Item = f32>> Source for Monitor<S> {
     fn current_frame_len(&self) -> Option<usize> {
         None
@@ -1469,9 +1487,6 @@ impl Audio {
             sink.stop();
         }
     }
-    pub fn flush_movie(&self) {
-        if let Some(p)=&self.playback { p.mixer.flush(); }
-    }
     pub fn movie_position(&self, sink: &Sink) -> Duration {
         let queued = self.playback.as_ref().filter(|p| p._worker.is_some())
             .map_or(0, |p| p.mixer.metrics.queued_samples.load(Ordering::Relaxed));
@@ -1481,7 +1496,7 @@ impl Audio {
         let Some(playback) = &self.playback else {
             return Ok(None);
         };
-        let sink = playback.sink();
+        let sink = playback.mixer.movie_sink();
         sink.pause();
         sink.set_volume(if self.settings.muted {
             0.

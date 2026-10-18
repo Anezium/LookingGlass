@@ -39,6 +39,8 @@ enum Current {
     Effect(block::Effect),
 }
 struct Controls {
+    // Immutable role, assigned before the Output enters the mixer queue.
+    movie: Option<(u32, Arc<AtomicU32>)>,
     pause: AtomicBool,
     alive: AtomicBool,
     generation: AtomicU32,
@@ -77,7 +79,14 @@ pub(super) enum Rendered {
 }
 impl Sink {
     pub fn new_idle() -> (Self, Output) {
+        Self::new_role(None)
+    }
+    pub(super) fn new_movie(id: u32, active: Arc<AtomicU32>) -> (Self, Output) {
+        Self::new_role(Some((id, active)))
+    }
+    fn new_role(movie: Option<(u32, Arc<AtomicU32>)>) -> (Self, Output) {
         let controls = Arc::new(Controls {
+            movie,
             pause: AtomicBool::new(false),
             alive: AtomicBool::new(true),
             generation: AtomicU32::new(0),
@@ -184,6 +193,10 @@ impl Sink {
     }
     pub fn stop(&self) {
         let _api = ApiTimer::new();
+        if let Some((id, active)) = &self.controls.movie {
+            // An old sink must never invalidate its replacement.
+            let _ = active.compare_exchange(*id, 0, Ordering::AcqRel, Ordering::Acquire);
+        }
         self.controls.generation.fetch_add(1, Ordering::Relaxed);
     }
     pub fn len(&self) -> usize {
@@ -205,6 +218,9 @@ impl Drop for Sink {
     }
 }
 impl Output {
+    pub(super) fn movie_id(&self) -> u32 {
+        self.controls.movie.as_ref().map_or(0, |(id, _)| *id)
+    }
     pub fn rank(&self) -> Option<f32> {
         if self.controls.ambient.load(Ordering::Relaxed) {
             Some(if self.controls.pause.load(Ordering::Relaxed)
