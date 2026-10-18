@@ -2,7 +2,7 @@
 //! every source/DSP/decoder call off the high-priority device callback.
 use super::{
     block, queue,
-    sink::{Output, Sink},
+    sink::{Output, Rendered, Sink},
 };
 use rodio::Source;
 use std::{
@@ -23,6 +23,9 @@ const HYSTERESIS: f32 = 1.25;
 pub struct Metrics {
     pub rejected: AtomicUsize,
     pub starved: AtomicUsize,
+    /// Subset of `starved`: the first silent block immediately after an
+    /// intentional prefetch flush. Total starvation remains visible unchanged.
+    flush_silence: AtomicUsize,
     pub queued_samples: AtomicUsize,
     pub active_peak: AtomicUsize,
     pub audible_ambient: AtomicUsize,
@@ -119,22 +122,21 @@ impl Mixer {
         block::charge(6, start);
         self.block.fill(0.);
         let mut scratch = [0.; SAMPLES];
-        let mut dead = Vec::new();
-        for (i, s) in self.sources.iter_mut().enumerate() {
+        let mixed = &mut self.block;
+        self.sources.retain_mut(|s| {
             let audible = s.selected || s.rank().is_none();
-            if !s.render(&mut scratch, audible) {
-                dead.push(i);
-                continue;
+            match s.render(&mut scratch, audible) {
+                Rendered::Dead => return false,
+                Rendered::Silent => return true,
+                Rendered::Audio => {}
             }
             let start = Instant::now();
-            for (dst, src) in self.block.iter_mut().zip(scratch.iter()) {
+            for (dst, src) in mixed.iter_mut().zip(scratch.iter()) {
                 *dst += *src;
             }
             block::charge(4, start);
-        }
-        for i in dead.into_iter().rev() {
-            self.sources.remove(i);
-        }
+            true
+        });
         self.at = 0;
     }
 }
@@ -202,7 +204,8 @@ impl Iterator for Callback {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
         let epoch = self.metrics.epoch.load(Ordering::Acquire);
-        if self.at % 2 == 0 && self.epoch != epoch {
+        let flushed = self.at % 2 == 0 && self.epoch != epoch;
+        if flushed {
             self.at = SAMPLES;
         }
         if self.at == SAMPLES {
@@ -226,6 +229,9 @@ impl Iterator for Callback {
             }
             if !found {
                 self.metrics.starved.fetch_add(1, Ordering::Relaxed);
+                if flushed {
+                    self.metrics.flush_silence.fetch_add(1, Ordering::Relaxed);
+                }
             }
             self.at = 0;
         }
@@ -364,6 +370,7 @@ struct Window {
     blocks: usize,
     mix: [f64; 3],
     starved: usize,
+    flush_silence: usize,
     rejected: usize,
     flushes: usize,
     queued: usize,
@@ -401,8 +408,8 @@ fn print(report: &Report, config: block::Settings) {
             p.describe(), c.cushion, c.cushion as f64 * 512. / 44.1, if c.log_thread { "reporter" } else { "producer" }),
         Report::Window(w) => {
             let [p50, p95, max] = w.mix;
-            eprintln!("[lg/audio-realtime] window_ms={} producer_blocks={} producer_mix_p50_ms={p50:.3} producer_mix_p95_ms={p95:.3} producer_mix_max_ms={max:.3} pcm_starved_blocks={} rejected_sinks={} intentional_pcm_flushes={} queued_samples={} game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0 producer_game_control_lock_attempts=0 producer_lock_wait_max_us=0 game_audio_api_max_us={} live_sink_peak={} game_stage={} game_stage_age_ms={} callback_source=bounded-pcm producer_gap_max_ms={:.3} producer_sleep_overshoot_max_ms={:.3} producer_gaps_over_block={} producer_log_ms={:.3} log_path={} dropped_reports={}",
-                w.window_ms, w.blocks, w.starved, w.rejected, w.flushes, w.queued, w.api_max_us, w.live_peak, w.game_stage.0, w.game_stage.1,
+            eprintln!("[lg/audio-realtime] window_ms={} producer_blocks={} producer_mix_p50_ms={p50:.3} producer_mix_p95_ms={p95:.3} producer_mix_max_ms={max:.3} pcm_starved_blocks={} rejected_sinks={} intentional_pcm_flushes={} pcm_flush_silence_blocks={} queued_samples={} game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0 producer_game_control_lock_attempts=0 producer_lock_wait_max_us=0 game_audio_api_max_us={} live_sink_peak={} game_stage={} game_stage_age_ms={} callback_source=bounded-pcm producer_gap_max_ms={:.3} producer_sleep_overshoot_max_ms={:.3} producer_gaps_over_block={} producer_log_ms={:.3} log_path={} dropped_reports={}",
+                w.window_ms, w.blocks, w.starved, w.rejected, w.flushes, w.flush_silence, w.queued, w.api_max_us, w.live_peak, w.game_stage.0, w.game_stage.1,
                 w.gap_max_ms, w.sleep_over_ms, w.gaps_over_block, w.log_ms, if config.log_thread { "reporter" } else { "producer" }, w.dropped_reports);
             if let Some((stages, n)) = w.stages {
                 for (name, [p50, p95, max]) in block::STAGES.iter().zip(stages) {
@@ -511,7 +518,7 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
                 let n = timings.len();
                 let window = Window {
                     window_ms: report.elapsed().as_millis(), blocks: n, mix: percentiles(&mut timings),
-                    starved: stats.starved.swap(0,Ordering::Relaxed), rejected: stats.rejected.swap(0,Ordering::Relaxed),
+                    starved: stats.starved.swap(0,Ordering::Relaxed), flush_silence: stats.flush_silence.swap(0,Ordering::Relaxed), rejected: stats.rejected.swap(0,Ordering::Relaxed),
                     flushes: stats.flushes.swap(0,Ordering::Relaxed), queued: stats.queued_samples.load(Ordering::Relaxed),
                     api_max_us: super::sink::API_MAX_US.swap(0,Ordering::Relaxed), live_peak: stats.active_peak.swap(0,Ordering::Relaxed),
                     game_stage: super::game_stage_snapshot(),
@@ -545,6 +552,48 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Synthetic 86-sink scene matching the hedge3 voice inventory (8 audible,
+    /// 69 virtual ambience, 9 uncapped sources). No original game data.
+    #[test]
+    #[ignore = "host timing/equivalence diagnostic; run explicitly in release mode"]
+    fn hedge_voice_inventory_profile() {
+        use sha2::{Digest, Sha256};
+        let (control, mut mixer) = mixer();
+        mixer.config.mix = true;
+        mixer.config.voices = 8;
+        mixer.config.gain = 0.001;
+        let clip = super::super::Clip {
+            samples: (0..4001).map(|i| ((i % 113) as f32 - 56.) / 1120.).collect::<Vec<_>>().into(),
+            rate: 11025,
+        };
+        let mut sinks = Vec::new();
+        for i in 0..86 {
+            let sink = control.sink();
+            if i < 77 { sink.set_ambient(); }
+            sink.set_volume(0.05 + (i % 17) as f32 * 0.01);
+            let pan = super::super::Pan::new();
+            pan.set(0.4, 0.7);
+            let acoustic = super::super::acoustics::Controls::new();
+            acoustic.set(0.3, false, 0.6);
+            sink.append_effect(super::super::Pcm {
+                clip: clip.clone(), index: i * 14, looping: true, pan,
+            }, acoustic);
+            sinks.push(sink);
+        }
+        let mut times = Vec::new();
+        let mut digest = Sha256::new();
+        for block in 0..600 {
+            if block % 97 == 0 { sinks[block % 77].set_volume(0.9); }
+            if block == 200 { sinks[80].pause(); }
+            if block == 220 { sinks[80].play(); }
+            let start = Instant::now();
+            mixer.render();
+            times.push(start.elapsed().as_secs_f64() * 1000.);
+            for sample in mixer.block { digest.update(sample.to_bits().to_le_bytes()); }
+        }
+        assert_eq!(control.metrics.virtual_ambient.load(Ordering::Relaxed), 69);
+        println!("hedge_voice_inventory p50/p95/max_ms={:?} pcm_sha256={:x}", percentiles(&mut times), digest.finalize());
+    }
     #[test]
     fn ambience_cap_reselects_gain_and_preserves_player_and_voice_time() {
         let (control,mut mixer)=mixer();
@@ -639,6 +688,13 @@ mod tests {
         };
         assert!(callback.by_ref().take(SAMPLES).all(|v| v == 0.));
         assert_eq!(metrics.queued_samples.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.starved.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.flush_silence.load(Ordering::Relaxed), 1);
+        // A producer still missing a whole block later is a genuine further
+        // underrun: the flush must not mask it or keep extending a grace period.
+        assert!(callback.by_ref().take(SAMPLES).all(|v| v == 0.));
+        assert_eq!(metrics.starved.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.flush_silence.load(Ordering::Relaxed), 1);
         assert!(tx
             .push(Block {
                 epoch: 1,
@@ -647,6 +703,14 @@ mod tests {
             .is_ok());
         metrics.queued_samples.store(SAMPLES, Ordering::Relaxed);
         assert_eq!(callback.next(), Some(0.3));
+        // Fresh PCM already available at another flush needs no silent block.
+        metrics.epoch.store(2, Ordering::Release);
+        assert!(tx.push(Block { epoch: 2, samples: [0.6; SAMPLES] }).is_ok());
+        metrics.queued_samples.store(SAMPLES, Ordering::Relaxed);
+        assert_eq!(callback.next(), Some(0.3)); // finish the current stereo pair
+        assert_eq!(callback.next(), Some(0.6));
+        assert_eq!(metrics.starved.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.flush_silence.load(Ordering::Relaxed), 1);
     }
     #[test]
     fn callback_never_waits_for_blocked_mixer_and_reports_starvation() {
@@ -700,6 +764,7 @@ mod tests {
         assert!(start.elapsed() < Duration::from_millis(5));
         assert!(samples.iter().all(|v| *v == 0.));
         assert_eq!(metrics.starved.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.flush_silence.load(Ordering::Relaxed), 0);
         release.send(()).unwrap();
         drop(worker);
     }
