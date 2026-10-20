@@ -725,6 +725,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut camera_handoff = crate::camera::Handoff::default();
     let mut rail_camera = crate::camera::Follow::default();
     let mut clock = FixedClock::default();
+    #[cfg(feature = "native_timing")]
+    let mut timing = crate::native_timing::Session::open()?;
     let mut recovery = Recovery::default();
     let mut retry = recovery::RetryPoint::default();
     let mut paused = false;
@@ -774,8 +776,25 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut alice: Character;
     let mut aim_pointer: crate::targeting::Pointer;
     let mut campaign: Campaign;
+    #[cfg(feature = "native_timing")]
+    macro_rules! timing_state {
+        () => { crate::native_timing::State::observe(environment_clock, pickup_clock,
+            clock.ticks, [pos.x, pos.y, pos.z, yaw, pitch]) };
+    }
+    #[cfg(feature = "native_timing")]
+    macro_rules! timing_ready {
+        ($reason:expr) => { timing.with(|r| r.ready(&maps[current], entry_spawn.as_deref(),
+            $reason, timing_state!())) };
+    }
+    #[cfg(feature = "native_timing")]
+    macro_rules! timing_install_reason {
+        (initial) => { crate::native_timing::Reason::StartSave };
+        (replace) => { crate::native_timing::Reason::Load };
+        (retry) => { crate::native_timing::Reason::Retry };
+    }
     macro_rules! install_loaded_scene {
         (initial, $next:expr, $from:expr, $to:expr) => { scene = $next; };
+        (retry, $next:expr, $from:expr, $to:expr) => { install_loaded_scene!(replace, $next, $from, $to); };
         (replace, $next:expr, $from:expr, $to:expr) => {
             crate::transition_memory::replace(&mut scene, $next, "save-reload", $from, $to);
         };
@@ -788,6 +807,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             { load_probe = Some(crate::restore_diagnostic::Probe::new("restore")); }
             let r = $restored;
             let level = r.game.level()?.clone();
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.before_install());
             let _previous_map = current;
             current = maps
                 .iter()
@@ -848,6 +869,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             post_game = false;
             escape_menu.post_game = false;
             save_frame.clear();
+            #[cfg(feature = "native_timing")]
+            timing_ready!(timing_install_reason!($install));
         }};
     }
     #[cfg(target_os = "vita")]
@@ -892,6 +915,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         println!("[lg/startup] restored scene reused map={} source={}", maps[current],
             if options.load.is_some() { "load" } else { "continue-or-bench" });
     } else {
+        #[cfg(feature = "native_timing")]
+        timing.with(|r| r.before_install());
         scene = load_scene(&mut assets, &maps[current], options.difficulty)?;
         level_art = LevelArt::default();
         skip_scene = crate::cinematic::Skip::default();
@@ -1004,6 +1029,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         level_art.prepare(&mut assets, &scene, &interactions, true)?;
         entry_timing.mark("level_art");
         campaign = Campaign::default();
+        #[cfg(feature = "native_timing")]
+        timing_ready!(crate::native_timing::Reason::Fresh);
     }
     let mut preview_throttle = crate::frame_profile::PreviewThrottle::default();
     #[cfg(target_os = "vita")]
@@ -1056,6 +1083,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         anyhow::ensure!(!(crate::movie::bypass_requested()
             && route_session.as_ref().is_some_and(|r| r.needs_opening())),
             "New Game route requires the opening film; disable story_film_bypass");
+        #[cfg(feature = "native_timing")]
+        timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningEnter, crate::native_timing::CINEMA));
         match crate::movie::play(
             &mut assets,
             &mut audio,
@@ -1080,6 +1109,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Some(route)=&mut route_session {route.opening_complete();}
             },
         }
+        #[cfg(feature = "native_timing")]
+        timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningExit, crate::native_timing::CINEMA));
         clock.pause();
     }
     if resume_applied {
@@ -1102,6 +1133,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
     loop {
+        #[cfg(feature = "native_timing")]
+        timing.with(|r| r.begin(timing_state!()));
         crate::frame_profile::begin_viewer_frame();
         crate::frame_phases::begin();
         #[cfg(feature="vita_renderer")]
@@ -1152,6 +1185,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         crate::sim_maps::probe::begin();
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let mut host_block = crate::frame_profile::span("frame_input");
+        #[cfg(feature = "native_timing")]
+        timing.with(|r| r.cpu_begin());
         crate::light_profile::cpu_begin();
         if !(menu || inventory_menu || console.open || paused) {crate::character::skinning_bench_begin();}
         crate::frame_phases::mark(1);
@@ -1214,6 +1249,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let opening_escape_menu = throttle_normal && escape_menu.page.is_some() && !escape_preview_ready;
         if opening_escape_menu { paused = true; clock.pause(); }
         if escape_menu.page.is_some() && (!throttle_normal || escape_preview_ready) {
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| {
+                r.discontinuity(crate::native_timing::Milestone::ModalEnter, crate::native_timing::MODAL | crate::native_timing::PAUSED);
+                r.request_stop(); // Seal only at the next REAL viewer begin, never export time.
+            });
             escape_preview_ready = false;
             weapon_buttons.block();
             input.suppress();
@@ -1228,6 +1268,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let action = escape_menu
                 .run(&mut preferences, &mut audio, &store, pos, yaw, &mut input)
                 .await;
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::ModalExit, crate::native_timing::MODAL));
             use crate::menu::Action;
             match action {
                 Action::Resume => {
@@ -1280,6 +1322,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     }
                 }
                 Action::Load(slot) => {
+                    #[cfg(feature = "native_timing")]
+                    timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
                     if saves_enabled {
                         match store
                             .read(slot)
@@ -1290,7 +1334,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                                 escape_menu.close();
                                 hud.announce("Game restored / P or click to resume");
                             }
-                            Err(e) => escape_menu.message = format!("Load failed: {e:#}"),
+                            Err(e) => {
+                                #[cfg(feature = "native_timing")]
+                                timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
+                                escape_menu.message = format!("Load failed: {e:#}");
+                            },
                         }
                     } else {
                         escape_menu.message = "Loading is unavailable in a staged preview".into();
@@ -1342,6 +1390,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut advance_dialogue = false;
         let dt = if simulate { elapsed.clamp(0., 0.05) } else { 0. };
         let world_dt = stats.powers.world_dt(dt);
+        #[cfg(feature = "native_timing")]
+        timing.with(|r| r.simulation(elapsed, dt, world_dt));
         let power_before = stats.active_power().map(|(k, _)| k);
         let loot_visit = save::visit_key(&maps[current], entry_spawn.as_deref());
         let mut loot_before = interactions.loot_sources();
@@ -1373,6 +1423,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             true
         } else { false };
         if let Some(difficulty) = new_game_requested.take() {
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningEnter, crate::native_timing::CINEMA));
             match crate::movie::play(
                 &mut assets,
                 &mut audio,
@@ -1391,6 +1443,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 Ok(true) => (),
             }
             clock.pause();
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningExit, crate::native_timing::CINEMA));
             selected = maps
                 .iter()
                 .position(|name| name == "gvillage")
@@ -1623,6 +1677,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         if let Some(slot) = load_requested {
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             if saves_enabled {
                 match store.read(slot).and_then(|loaded| {
                     let backup = loaded.backup;
@@ -1641,6 +1697,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     Err(e) => {
                         clock.pause();
                         paused = true;
+                        #[cfg(feature = "native_timing")]
+                        timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
                         let message = format!("Load failed: {e:#}");
                         hud.announce(&message);
                         console.print(&message);
@@ -1882,6 +1940,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if skip_requested {
             let speaking = skip_id.is_some_and(|id| story.progress(id).is_some());
             if interactions.skip_cinematic(&scene.map, &mut scene.world, &mut player, &mut story)? {
+                #[cfg(feature = "native_timing")]
+                timing.with(|r| r.discontinuity(crate::native_timing::Milestone::SkipComplete, crate::native_timing::SKIP));
                 skip_scene.event("engine_exit accepted=true");
                 camera_handoff.skip();
                 if speaking {
@@ -1907,17 +1967,21 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // A failed attempt must roll the entire world back with Alice. Do this
         // before the live transport guard: dying during a ride must remain retryable.
         if saves_enabled && !stats.alive() && (recover || restart || console_restart) {
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref()))
                 .and_then(|game| save::Restored::build(&mut assets, game))
             {
                 Ok(restored) => {
-                    apply_loaded!(restored, false);
+                    apply_loaded!(restored, false, retry);
                     weapon_buttons.block();
                     hud.announce("Checkpoint restored");
                     println!("Death retry: restored complete checkpoint for {}", maps[current]);
                 }
                 Err(e) => {
                     paused = true;
+                    #[cfg(feature = "native_timing")]
+                    timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
                     hud.announce(format!("Could not restore checkpoint: {e:#}"));
                     eprintln!("Death retry failed: {e:#}");
                 }
@@ -2054,6 +2118,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             {
                 #[cfg(feature = "vita_renderer")]
                 { load_probe = Some(crate::restore_diagnostic::Probe::new("chapter-or-console")); }
+                #[cfg(feature = "native_timing")]
+                timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
                 match enter_level(
                     &mut assets,
                     &maps[selected],
@@ -2063,6 +2129,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     !options.fly,
                 ) {
                     Ok(next) => {
+                        #[cfg(feature = "native_timing")]
+                        timing.with(|r| r.before_install());
                         crate::transition_memory::replace(&mut scene, next.scene, "chapter-or-console", &maps[current], &maps[selected]);
                         level_art = next.art;
                         skip_scene = crate::cinematic::Skip::default();
@@ -2112,8 +2180,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         notice.clear();
                         menu = false;
                         retry.remember(game_snapshot!());
+                        #[cfg(feature = "native_timing")]
+                        timing_ready!(crate::native_timing::Reason::ChapterOrConsole);
                     }
                     Err(e) => {
+                        #[cfg(feature = "native_timing")]
+                        timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
                         notice = format!("Could not open level: {e:#}");
                         if console_map {
                             console.print(notice.clone());
@@ -2631,6 +2703,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if saves_writable { if let Err(e) = store.mark_complete() { eprintln!("Completion marker failed: {e:#}"); } }
             mouse_look.release();
             input.suppress();
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::EndingEnter, crate::native_timing::CINEMA));
             match crate::movie::play(
                 &mut assets,
                 &mut audio,
@@ -2645,6 +2719,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 Err(e) => eprintln!("Ending film failed: {e:#}"),
                 Ok(true) => (),
             }
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::EndingExit, crate::native_timing::CINEMA));
             escape_menu.post_game = true;
             escape_menu.open(crate::menu::Page::Credits, &preferences, audio.settings);
             escape_menu.message = "Campaign complete / Continue replays the final encounter".into();
@@ -2669,11 +2745,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             audio.update(0., pos, yaw, true, true);
             #[cfg(target_os="vita")]
             crate::frame_profile::report(&maps[current])?;
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::TransitionBegin, crate::native_timing::TRANSITION));
             present_transition_loading(&name).await;
             let transition_started = std::time::Instant::now();
             let arrived = enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options);
             match arrived {
                 Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {
+                    #[cfg(feature = "native_timing")]
+                    timing.with(|r| r.before_install());
                     crate::transition_memory::replace(&mut scene, next.scene, "natural-exit", &maps[current], &name);
                     stats = next_stats;
                     campaign = next_campaign;
@@ -2728,9 +2808,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         entry_spawn.as_deref(),
                     );
                     hud.announce(&level_choices[visit].title);
+                    #[cfg(feature = "native_timing")]
+                    timing_ready!(crate::native_timing::Reason::Natural);
                 }
                 Err(e) => {
                     interactions.transition_failed(&exit);
+                    #[cfg(feature = "native_timing")]
+                    timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::TRANSITION));
                     hud.announce(format!("Could not enter next map: {e}"));
                 }
             }
@@ -4153,6 +4237,21 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(frame_profile);
         crate::character::skinning_bench_end();
+        #[cfg(feature = "native_timing")]
+        timing.with(|r| {
+            use crate::native_timing as nt;
+            let mut reasons = 0;
+            if !active { reasons |= nt::INACTIVE; }
+            if paused { reasons |= nt::PAUSED; }
+            if !focused { reasons |= nt::UNFOCUSED; }
+            if menu || inventory_menu || console_input { reasons |= nt::OVERLAY; }
+            if !stats.alive() { reasons |= nt::DEAD; }
+            if flying { reasons |= nt::FLYING; }
+            if !simulate { reasons |= nt::FROZEN_SIM; }
+            if skip_id.is_some() || pand_cinematic || scripted_camera.is_some() || story.busy()
+                || interactions.school.as_ref().is_some_and(|s| s.cinematic()) { reasons |= nt::CINEMA; }
+            r.end(timing_state!(), reasons);
+        });
         crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]
@@ -4161,6 +4260,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let gameplay = active && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none()
                 && !story.busy() && !interactions.school.as_ref().is_some_and(|s| s.cinematic());
             let report_due = crate::frame_profile::end_frame(&maps[current], gameplay);
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.measured(crate::frame_profile::native_timing_measured_id()));
             if bench && gameplay && crate::frame_profile::bench_accepted_frames().is_some_and(|n| n > 0)
                 && bench_camera.is_none()
             {
@@ -4218,6 +4319,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
     #[cfg(not(target_os = "vita"))]
     let saves_writable = saves_enabled;
+    #[cfg(feature = "native_timing")]
+    if let Err(error) = timing.export_after_viewer() { eprintln!("Native timing export failed: {error:#}"); }
     if saves_writable && played && stats.alive() && options.frames.is_none() && !post_game {
         if let Err(e) =
             store.write_with_preview(Slot::Auto, &game_snapshot!(), save_frame.preview().as_ref())

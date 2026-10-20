@@ -61,6 +61,10 @@ pub(crate) fn exclude_transition_frame() {
     vita::discard_transition_frame();
 }
 fn transition_frame() -> bool { TRANSITION_FRAME.with(|v| v.get()) }
+#[cfg(all(feature = "native_timing", target_os = "vita"))]
+thread_local! { static NATIVE_MEASURED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
+#[cfg(all(feature = "native_timing", target_os = "vita"))]
+pub(crate) fn native_timing_measured_id() -> Option<u64> { NATIVE_MEASURED.with(|id| id.get()) }
 pub(crate) fn begin_viewer_frame() { TRANSITION_FRAME.with(|v| v.set(false)); }
 pub(crate) fn begin_creation_frame() {
     TRANSITION_FRAME.with(|v| v.set(false));
@@ -1065,6 +1069,8 @@ mod vita {
         });
     }
     pub fn end_frame(map: &str, gameplay: bool) -> bool {
+        #[cfg(feature = "native_timing")]
+        NATIVE_MEASURED.with(|id| id.set(None));
         let gameplay = gameplay && !transition_frame();
         counts(&[("shader_creations",0),("pipeline_creations",0)]);
         HOT_RECORDING.store(false, Relaxed);
@@ -1074,7 +1080,10 @@ mod vita {
                 if gameplay { s.accepted_frames += 1; }
                 let measured = gameplay && s.accepted_frames > s.mode.warmup_frames();
                 crate::light_profile::end(measured);
-                if measured { s.frames += 1; }
+                if measured { s.frames += 1;
+                    #[cfg(feature = "native_timing")]
+                    NATIVE_MEASURED.with(|id| id.set(Some(s.frames as u64)));
+                }
                 return s.mode.is_bench() && s.frames == 120;
             }
             if !enabled() || s.map != map || !gameplay {
@@ -1143,6 +1152,8 @@ mod vita {
             s.world.add(&counts); s.window_world.add(&counts);
             s.window_cpu_ms += totals.get("frame_cpu").copied().unwrap_or(0.);
             s.frames += 1;
+            #[cfg(feature = "native_timing")]
+            NATIVE_MEASURED.with(|id| id.set(Some(s.frames as u64)));
             crate::frame_phases::measured(s.frames);
             crate::frame_phases::mark(4);
             if s.frames % 10 == 0 {

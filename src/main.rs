@@ -120,6 +120,8 @@ mod frame_phases;
 mod game_thread;
 mod skin_worker;
 mod light_profile;
+#[cfg(feature = "native_timing")]
+mod native_timing;
 #[cfg(feature="vita_renderer")]
 mod render_tail;
 mod kernel_alloc;
