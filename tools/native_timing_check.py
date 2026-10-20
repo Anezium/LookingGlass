@@ -103,7 +103,7 @@ def f32(bits):
     return result
 
 
-def check_capture(directory, generation, age_offset_us):
+def check_capture(directory, generation, age_offset_us, *, allow_test_clock=False):
     directory = Path(directory)
     uint(generation); uint(age_offset_us)
     with (directory/'manifest.json').open('rb') as file:
@@ -128,7 +128,7 @@ def check_capture(directory, generation, age_offset_us):
         phase2_unimplemented=literal(GAPS), campaign_qualified=literal(False))
     obj(m, mf)
     need(m['run_id'] is not None and m['run_id'] != [0]*16 and not m['invalid_identity'], 'UNKNOWN run/world identity')
-    need(m['clock_id'] in ('vita-newlib-clock4-process-us', 'host-shared-Instant-session-us'), 'clock domain')
+    need(m['clock_id'] in ('vita-newlib-clock4-process-us', 'host-shared-Instant-session-us') or (allow_test_clock is True and m['clock_id'] == 'host-injected-fake-us'), 'clock domain; injected test clocks require explicit opt-in')
     expected_id = bytes(m['run_id']).hex() + '-0000000000000001'
     need(m['capture_ordinal'] == 1 and not m['repeated_cumulative_export'], 'repeated cumulative export')
     need(m['capture_id'] == expected_id and directory.name == expected_id, 'capture identity/path')
@@ -230,7 +230,7 @@ def check_capture(directory, generation, age_offset_us):
     playable = [e for e in events if e['kind'] == 'FirstPlayable' and e['generation'] == generation]
     need(len(playable) == 1 and playable[0]['native_us'] < settle, 'missing/late/duplicate first-playable epoch')
     # Factual simulation boundaries only. No exact simulation-age/pair claim.
-    return dict(source_population_contract=True, campaign_qualified=False, phase2_unimplemented=GAPS,
+    return dict(source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', phase2_unimplemented=GAPS,
         metadata_assurance=m['metadata_assurance'], native_start_us=s, native_end_us=t,
         generation=generation, world=world, N=len(population), small_sample=len(population)<120,
         selected_viewer_seq=[f['viewer_seq'] for f in population],
@@ -248,9 +248,10 @@ def main():
     parser.add_argument('capture', type=Path)
     parser.add_argument('--generation', required=True, type=int)
     parser.add_argument('--age-offset-us', required=True, type=int)
+    parser.add_argument('--allow-test-clock', action='store_true', help='explicitly allow injected HOST TEST fixtures; never native evidence')
     args = parser.parse_args()
     try:
-        result = check_capture(args.capture, args.generation, args.age_offset_us)
+        result = check_capture(args.capture, args.generation, args.age_offset_us, allow_test_clock=args.allow_test_clock)
     except (Invalid, OSError, OverflowError) as error:
         parser.exit(2, f'UNQUALIFIED phase1 records: {error}\n')
     print(json.dumps(result, indent=2))

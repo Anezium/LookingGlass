@@ -83,7 +83,7 @@ use native_timing::*;
 use std::sync::atomic::{AtomicUsize,Ordering};
 static REPLACES:AtomicUsize=AtomicUsize::new(0);
 mod transition_memory { pub fn replace(scene:&mut i32,next:i32,_reason:&str,_from:&str,_to:&str) {super::REPLACES.fetch_add(1,super::Ordering::Relaxed);*scene=next;} }
-struct Fake {now:u64} impl clock::Source for Fake {fn read_us(&mut self)->Result<u64,clock::Error>{Ok(self.now)}}
+struct Fake {now:u64} impl clock::Source for Fake {fn domain(&self)->&'static str{"host-injected-fake-us"} fn read_us(&mut self)->Result<u64,clock::Error>{Ok(self.now)}}
 struct TestSession {r:Recorder<Fake>} impl TestSession {fn with(&mut self,f:impl FnOnce(&mut Recorder<Fake>)){f(&mut self.r)}}
 struct V {x:f32,y:f32,z:f32} struct T {ticks:u64} struct Stats {yes:bool,powers:Powers} impl Stats {fn alive(&self)->bool{self.yes}}
 struct Powers;impl Powers{fn world_dt(&self,dt:f32)->f32{dt}}
@@ -129,6 +129,7 @@ INSTALLS
  for measured in [false,true,true,false,true]{NATIVE_MEASURED.with(|id|id.set(None));LIGHT
  assert_eq!(native_timing_measured_id(),measured.then_some(s.frames as u64));}
  assert_eq!(s.frames,3);FULL assert_eq!(native_timing_measured_id(),Some(4));
+ println!("HOST Native storage={} Recorder={} auxiliary={} budget={}",STORAGE_BYTES,std::mem::size_of::<Recorder<clock::Native>>(),AUX_RESERVE,BUDGET);
  println!("actual extracted viewer hooks PASS: six same-map install reasons, failed preparation generation, begin/cpu/sim/end, eligibility, skip/modal sealing, exact legacy ID bookkeeping");
 }
 '''

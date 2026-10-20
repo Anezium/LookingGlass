@@ -77,6 +77,9 @@ visible. Nested loops are explicitly discontinuous intervals/events; their inner
 backend frames are not mislabeled main viewer frames. Legacy measured IDs are
 read from the actual Vita end_frame path; they remain map/mode-local identifiers,
 not an unambiguous join to a legacy file. Host legacy IDs are unavailable/null.
+The operation epoch observes lifecycle/status/load/skip/modal changes. It does
+not attest every physical input, external command, save or capture request; quiet
+input/command isolation still needs phase 2 evidence.
 Neither legacy wall/cpu/swap values nor legacy accepted/reset/capacity semantics
 are changed. The new CPU bounds are separate observations around viewer CPU work;
 backend swap bounds are explicitly unavailable, never estimated by subtraction.
@@ -106,8 +109,8 @@ than trimming or expanding. After-stop event/world loss also disqualifies.
 Buffers reserve 6144 Frame, 512 Event and 128 World slots once, never overwrite,
 never grow in hot methods, and track exact completed/stored/lost counts. This is
 an independent buffer; the legacy 4096 capture and heap guard are unchanged.
-On the tested aarch64 host: Frame264B, World320B, Event56B, Recorder672B; reserved
-storage1,692,320B plus64KiB auxiliary reserve =1,757,856B <=2,097,152B. Compile-time
+On the tested aarch64 host: Frame264B, World320B, Event56B, Native Recorder664B; reserved
+storage1,692,312B plus64KiB auxiliary reserve =1,757,848B <=2,097,152B. Compile-time
 and runtime checks enforce the cap on each target using actual sizes/capacities.
 Auxiliary reserve covers the <=4097B startup read, bounded parsed config, bounded
 manifest/maps/paths/hash/serializer and stack scratch. Payload serialization streams
@@ -148,6 +151,10 @@ bytes with/without observations. The test tools import no campaign/network helpe
 The extraction tool accepts ALICE_TIMING_HOOK_RUN for a new evidence subdirectory
 and ALICE_TIMING_HOOK_MUTANT=retry-ready/pause-reason/dt-cap for negative witnesses.
 The checker tests require the actual Rust-generated fixtures, not a Python model.
+Injected exports identify their clock as `host-injected-fake-us`. The production
+checker rejects that domain by default; `--allow-test-clock` is required for these
+HOST TEST fixtures and the result explicitly says `test_clock:true`. This option
+never makes test data native evidence.
 
 The checker rejects malformed/missing/extra fields, booleans as numbers, duplicate
 JSON keys/rows, reorder/gaps, missing/invalid epochs, clock faults/backwards,

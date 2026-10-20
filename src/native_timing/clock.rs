@@ -12,6 +12,7 @@ pub enum Error {
 }
 
 pub trait Source {
+    fn domain(&self) -> &'static str;
     fn read_us(&mut self) -> Result<u64, Error>;
 }
 #[derive(Default)]
@@ -69,6 +70,9 @@ pub fn now_us() -> Result<u64, Error> {
     }
 }
 impl Source for Native {
+    fn domain(&self) -> &'static str {
+        DOMAIN
+    }
     fn read_us(&mut self) -> Result<u64, Error> {
         now_us()
     }

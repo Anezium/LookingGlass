@@ -117,7 +117,7 @@ impl<C: Source> Recorder<C> {
             &Snapshot {
                 schema: "alice-native-phase1-v1",
                 run_id: self.run_id,
-                clock_id: clock::DOMAIN,
+                clock_id: self.clock.source.domain(),
                 capture_ordinal: self.export_attempts,
                 frames: &self.frames,
                 worlds: &self.worlds,
@@ -136,7 +136,7 @@ impl<C: Source> Recorder<C> {
         let mut manifest = serde_json::json!({
             "schema":"alice-native-phase1-v1", "complete":true,
             "run_id":self.run_id, "capture_id":capture, "capture_ordinal":self.export_attempts,
-            "clock_id":clock::DOMAIN, "clock_unit":"us", "clock_resolution":"Vita source microseconds; host quantized to us",
+            "clock_id":self.clock.source.domain(), "clock_unit":"us", "clock_resolution":"Vita source microseconds; host quantized to us",
             "clock_lifetime":"Vita process lifetime OR host shared Instant session; NEVER join launches or UTC",
             "records_file":"records.json", "records_sha256":receipt_sha, "records_bytes":receipt_bytes,
             "frame_count":self.frames.len(), "world_count":self.worlds.len(), "event_count":self.events.len(),

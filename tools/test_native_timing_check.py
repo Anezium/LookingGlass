@@ -11,6 +11,10 @@ import unittest
 import native_timing_check as check
 
 
+def checked(*args):
+    return check.check_capture(*args, allow_test_clock=True)
+
+
 class ActualCaptureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -31,12 +35,16 @@ class ActualCaptureTests(unittest.TestCase):
         (path/'records.json').write_bytes(payload)
         (path/'manifest.json').write_text(json.dumps(m))
         with self.assertRaises(check.Invalid) as result:
-            check.check_capture(path, 1, 20_000_000)
+            checked(path, 1, 20_000_000)
         if expected:
             self.assertIn(expected, str(result.exception))
 
+    def test_injected_clock_rejected_by_default(self):
+        with self.assertRaisesRegex(check.Invalid,'injected test clocks'):
+            check.check_capture(self.exact,1,20_000_000)
+
     def test_exact_actual_native_recorder(self):
-        r = check.check_capture(self.exact, 1, 20_000_000)
+        r = checked(self.exact, 1, 20_000_000)
         self.assertEqual(r['N'], 3000)
         self.assertEqual(r['sum_full_frame_us'],30_000_000)
         self.assertEqual(r['boundary_viewer_seq'], [])
@@ -44,7 +52,7 @@ class ActualCaptureTests(unittest.TestCase):
         self.assertFalse(r['small_sample'])
 
     def test_straddles_whole_actual_intervals(self):
-        r = check.check_capture(self.root/'straddle'/self.capture_name,1,20_000_000)
+        r = checked(self.root/'straddle'/self.capture_name,1,20_000_000)
         self.assertEqual(r['selected_viewer_seq'],list(range(7,18)))
         self.assertEqual(r['boundary_viewer_seq'],[7,17])
         self.assertEqual(r['sum_full_frame_us'],33_000_000)
@@ -52,7 +60,7 @@ class ActualCaptureTests(unittest.TestCase):
         self.assertTrue(r['small_sample'])
 
     def test_one_long_frame_small_no_extension_no_clipping(self):
-        r=check.check_capture(self.root/'long'/self.capture_name,1,20_000_000)
+        r=checked(self.root/'long'/self.capture_name,1,20_000_000)
         self.assertEqual(r['N'],1)
         self.assertEqual(r['sum_full_frame_us'],60_000_000)
         self.assertEqual(r['boundary_viewer_seq'],[3])
@@ -109,7 +117,7 @@ class ActualCaptureTests(unittest.TestCase):
             d['events'][-1].update(native_us=25_000_000,kind='ModalEnter')
         self.modified(edit)
     def test_missing_source_identity_stays_unknown(self):
-        result=check.check_capture(self.exact,1,20_000_000)
+        result=checked(self.exact,1,20_000_000)
         self.assertIn('UNKNOWN',result['metadata_assurance'])
         self.assertFalse(result['campaign_qualified'])
     def test_unknown_extra_field(self): self.modified(lambda m,d:d.update(qualification=True))
@@ -119,18 +127,18 @@ class ActualCaptureTests(unittest.TestCase):
     def test_hash_mismatch(self):
         path=self.root/'checker-cases'/self._testMethodName/self.capture_name;path.mkdir(parents=True)
         (path/'manifest.json').write_text(json.dumps(self.manifest));(path/'records.json').write_bytes(b'{}')
-        with self.assertRaises(check.Invalid):check.check_capture(path,1,20_000_000)
+        with self.assertRaises(check.Invalid):checked(path,1,20_000_000)
     def test_actual_repeated_export_rejected(self):
         with self.assertRaisesRegex(check.Invalid,'repeated cumulative'):
-            check.check_capture(self.root/'repeated'/('07'*16+'-0000000000000002'),1,20_000_000)
+            checked(self.root/'repeated'/('07'*16+'-0000000000000002'),1,20_000_000)
     def test_actual_partial_writer_exports_rejected(self):
         for index in range(3):
             with self.subTest(index=index), self.assertRaises((OSError,check.Invalid)):
-                check.check_capture(self.root/f'failure-{index}'/self.capture_name,1,20_000_000)
+                checked(self.root/f'failure-{index}'/self.capture_name,1,20_000_000)
     def test_actual_unfinalized_pending_rejected(self):
         with self.assertRaisesRegex(check.Invalid,'pending'):
-            check.check_capture(self.root/'pending'/self.capture_name,1,20_000_000)
+            checked(self.root/'pending'/self.capture_name,1,20_000_000)
     def test_window_overflow(self):
-        with self.assertRaises(check.Invalid):check.check_capture(self.exact,1,2**64-1)
+        with self.assertRaises(check.Invalid):checked(self.exact,1,2**64-1)
 
 if __name__=='__main__':unittest.main(verbosity=2)

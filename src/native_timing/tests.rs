@@ -3,6 +3,9 @@ use std::{cell::Cell, path::PathBuf, rc::Rc};
 #[derive(Clone)]
 struct Fake(Rc<Cell<Result<u64, clock::Error>>>);
 impl Source for Fake {
+    fn domain(&self) -> &'static str {
+        "host-injected-fake-us"
+    }
     fn read_us(&mut self) -> Result<u64, clock::Error> {
         self.0.get()
     }
