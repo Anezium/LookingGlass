@@ -1,6 +1,7 @@
 """Adversarial checks of actual scheduled Rust Recorder export, not synthetic timing."""
 import copy,hashlib,json,os,subprocess,sys,unittest
 import native_timing_schedule_check as schedule
+from native_timing_overlay import display_lines
 from pathlib import Path
 import native_timing_check as c
 class ActualSchedule(unittest.TestCase):
@@ -99,7 +100,8 @@ class ReviewRequest(unittest.TestCase):
         root.mkdir(parents=True,exist_ok=True)
         output=root/'request.json'
         argv=[sys.executable,str(Path(__file__).with_name('native_timing_review_request.py')),
-            '--run-id','07'*16,'--token','1','2','1000000','1','0','--auth',auth,'--output',str(output)]
+            '--run-id','07'*16,'--token','1','2','1000000','1','0','--auth',auth,'--start-us','40000000',
+            '--checks',*[line.rsplit(' ck=',1)[1] for line in display_lines('07'*16,[1,2,1000000,1,0],'01'*16,40000000)],'--output',str(output)]
         result=subprocess.run(argv,capture_output=True,text=True)
         attempt=len(list(root.glob('command-*.json')))+1
         with (root/f'command-{attempt}.json').open('x') as log:

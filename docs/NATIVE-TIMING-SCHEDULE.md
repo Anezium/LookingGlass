@@ -23,3 +23,56 @@ The diagnostic journal keeps its existing capacities:6144frames,8192blocks,128fe
 The v2 token message is exactly 48 bytes: `LGNTW001` followed by five little-endian u64 fields (ordinal, viewer sequence, submitted microseconds, generation, operation). Its tag is the first 16 bytes of HMAC-SHA256. Python checks length, unique retained frame references/tags, issued ordinal bounds, retained/reviewed consistency, generation, operation, maximum age and the deadline. Python cannot verify HMAC because the per-process key is withheld; a structurally consistent receipt remains UNATTESTED, including an evicted reviewed token. The native ACK path performs authentication.
 
 The host memory proof inventories every production `native_timing` static and rejects unaccounted additions. `SESSION_CLAIM`, the producer `UNIVERSE`, and the host-only clock `ORIGIN` are already included in the producer bootstrap reservation. The two raw counter slots and the operation enabled/epoch/sticky-wrap statics (1 + 4 + 1 = 6 bytes, checked against their actual Rust sizes) consume auxiliary reserve. Probe allocator and test-only statics are excluded from production accounting. These are requested host payload and measured host export-thread stack numbers; linker padding, allocator/OS overhead, native RAM and native stack high-water remain unmeasured.
+
+V3 changes only the pre-deadline review readout. Four white bitmap lines on an
+opaque 960x120 black box replace the small review font. Each bitmap pixel is a
+3x3 square; the glyph is 4x7 pixels (12x21 screen pixels), with a 13-pixel advance
+and a 30-pixel line pitch. The slashed zero differs from 6 and 8; lowercase b/d
+and c/e have distinct bitmaps. The canonical table and rectangle geometry live
+in `src/native_timing/overlay.rs`; the Python renderer/reader reads that Rust
+table directly. No font file or new Rust dependency is loaded. The existing
+post-capture CLOSED notice remains outside this review readout.
+
+Every value is lowercase hexadecimal in groups of four, including numeric
+fields (fixed 16 hex digits for a u64). The four lines are:
+
+```text
+run=RRRR RRRR RRRR RRRR RRRR RRRR RRRR RRRR ck=XXXX
+auth=AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA ck=XXXX
+t=TTTT TTTT TTTT TTTT|f=FFFF FFFF FFFF FFFF|u=UUUU UUUU UUUU UUUU ck=XXXX
+g=GGGG GGGG GGGG GGGG|o=OOOO OOOO OOOO OOOO|s=SSSS SSSS SSSS SSSS ck=XXXX
+```
+
+`t` is the token ordinal, `f` the submitted viewer sequence, `u` the submitted
+native microseconds, `g` generation, `o` operation and `s` the fixed start S.
+The longest line is 73 characters and fits in 953x120 pixels including margins.
+For each line, CRC-16/CCITT-FALSE uses poly 0x1021, init 0xffff, no reflection,
+no final XOR, and the ASCII bytes before ` ck=` with every group space removed.
+There are no other spaces in the body: field separators are literal `|`.
+There is no newline, NUL, ` ck=` or check code in the CRC input. Thus the exact
+byte-string forms are `run=` + 32 hex digits; `auth=` + 32 hex digits;
+`t=` + 16 hex digits + `|f=` + 16 hex digits + `|u=` + 16 hex digits;
+and `g=` + 16 hex digits + `|o=` + 16 hex digits + `|s=` + 16 hex digits.
+For example `run=2060 52db 4ecc 5124 280c 7235 1533 8d28` checks the exact bytes
+`b"run=206052db4ecc5124280c723515338d28"`. The standard `123456789` vector is
+0x29b1. CRCs detect transcription errors; they do not authenticate any data.
+
+After returning and visually inspecting the actual image, pass all four lines
+(including checks) to `tools/native_timing_review_request.py --lines-file FILE
+--output REQUEST` or repeat `--line '...'` four times. Alternatively supply
+`--run-id`, the five **decimal** `--token` fields, `--auth`, decimal `--start-us`,
+and all four copied `--checks`. All CRCs are mandatory in either mode. The helper
+names a bad line and refuses to create the request on mismatch. Never regenerate
+checks from guessed data to bypass a mismatch. The ACK JSON, HMAC input, token
+ring, S/T, deadline, clocks and acquisition buffers are unchanged.
+
+`tools/native_timing_overlay_read.py CAPTURE.png` reads 1280x720 driver images,
+locates the top bitmap grid/opaque box, decodes its glyphs and verifies all four
+CRCs. Run it with the existing `/Users/anezium/vita-j0/venv/bin/python` (Pillow).
+Its JSON contains four transcribed lines and a prominent transcription-aid label;
+it never writes a review request. It refuses missing, ambiguous or corrupt text.
+The reviewer must still look at the actual image; a valid CRC or synthetic-reader
+test is no evidence of human inspection, native HMAC acceptance or camera timing.
+The reader currently supports the full-screen driver scale with a small positive
+capture offset; arbitrary perspective, crop, rotation and exposure are untested.
+The glyph static payload is charged in the host auxiliary memory proof.

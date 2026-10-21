@@ -8,6 +8,7 @@ pub mod audio_types;
 pub mod clock;
 mod export;
 pub mod operations;
+pub mod overlay;
 pub mod schedule;
 #[cfg(test)]
 mod tests;
@@ -229,7 +230,7 @@ pub const RAW_SLOT_BYTES: usize =
     2 * std::mem::size_of::<std::sync::OnceLock<std::sync::Arc<audio_counters::Raw>>>();
 // Operations statics are additional auxiliary payload; Session/Universe/clock
 // statics are already charged in audio_producer::BOOTSTRAP_RESERVE.
-pub const STATIC_AUX_BYTES: usize = RAW_SLOT_BYTES + operations::STATIC_BYTES;
+pub const STATIC_AUX_BYTES: usize = RAW_SLOT_BYTES + operations::STATIC_BYTES + overlay::STATIC_BYTES;
 // Exact type of clock::now_us's host-only ORIGIN. Keep its preexisting
 // conservative reservation on all targets without changing the clock code.
 pub const CLOCK_STATIC_RESERVE_BYTES: usize =
@@ -712,25 +713,7 @@ impl Session {
                 plan.fault
             );
         } else if let Some(t) = plan.submit(now, r.viewer_seq, r.generation, r.operation, state) {
-            let _ = write!(text, "NT ");
-            for b in r.run_id.unwrap_or([0; 16]) {
-                let _ = write!(text, "{b:02x}");
-            }
-            let _ = write!(text, " auth=");
-            for b in t.auth {
-                let _ = write!(text, "{b:02x}");
-            }
-            let _ = write!(text, "\n");
-            let _ = write!(
-                text,
-                "token={} frame={} us={} gen={} op={} S={}",
-                t.ordinal,
-                t.viewer_seq,
-                t.submitted_us,
-                t.generation,
-                t.operation,
-                plan.start_us.unwrap_or(0)
-            );
+            text = overlay::review(r.run_id.unwrap_or([0;16]),t,plan.start_us.unwrap_or(0));
         }
         (text.len > 0).then_some(text)
     }

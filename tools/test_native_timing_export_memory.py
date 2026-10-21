@@ -23,7 +23,7 @@ def main():
     # Fail closed when a production static is added without updating the ledger.
     # Standalone probes, host fixtures and cfg(test) modules are not production.
     expected={'mod.rs':['SESSION_CLAIM'],'operations.rs':['ENABLED','EPOCH','WRAPPED'],
-        'clock.rs':['ORIGIN'],'audio_producer.rs':['UNIVERSE']}
+        'clock.rs':['ORIGIN'],'audio_producer.rs':['UNIVERSE'],'overlay.rs':['GLYPHS']}
     actual={}
     for source in (ROOT/'src/native_timing').rglob('*.rs'):
         if source.name in ('tests.rs','export_memory_probe.rs','host_fixture.rs'):continue
@@ -36,7 +36,7 @@ def main():
     assert 'static ORIGIN: OnceLock<Instant> = OnceLock::new();' in clock
     assert 'use std::{sync::OnceLock, time::Instant};' in clock
     (out/'static-inventory.json').write_text(json.dumps(dict(production=actual,
-        auxiliary=['operations::{ENABLED,EPOCH,WRAPPED}','two existing raw OnceLock slots'],
+        auxiliary=['operations::{ENABLED,EPOCH,WRAPPED}','two existing raw OnceLock slots','overlay::GLYPHS'],
         already_in_producer_bootstrap=['SESSION_CLAIM','UNIVERSE','clock::ORIGIN (host only; conservative reserve on native)'],
         sizes='Rust size_of_val/size_of constants checked in compiled probe',
         excluded='probe allocator and cfg(test) statics; linker padding and allocator/OS overhead unmeasured'),indent=2)+'\n')

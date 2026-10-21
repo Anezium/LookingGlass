@@ -149,6 +149,8 @@ def main():
     full=profile[full_start:profile.index('            crate::frame_phases::measured(s.frames);',full_start)]
     code='''#![allow(dead_code,unused_mut,unused_variables)]
 #[path="MODULE"] mod native_timing;
+// The extracted hook harness never exercises Session's filesystem paths.
+mod preferences {pub fn path(_: &str)->std::path::PathBuf {panic!("Session filesystem outside hook-only harness")}}
 use native_timing::*;
 use std::sync::atomic::{AtomicUsize,Ordering};
 static REPLACES:AtomicUsize=AtomicUsize::new(0);

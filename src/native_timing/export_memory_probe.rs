@@ -177,9 +177,9 @@ fn main() {
     assert!(storage + AUX_RESERVE <= BUDGET);
     println!("HOST export_heap_peak={peak} actual_thread_stack={actual_stack} allocations={count} retained_path={retained} manifest_bytes={} storage={storage} aux={AUX_RESERVE} total_reserved={} limit={BUDGET}; native stack/device RAM UNTESTED", manifest.len(), storage + AUX_RESERVE);
     let storage_statics = SESSION_CLAIM_BYTES + audio_producer::STATIC_BYTES + CLOCK_STATIC_RESERVE_BYTES;
-    assert_eq!(STATIC_AUX_BYTES, RAW_SLOT_BYTES + operations::STATIC_BYTES);
+    assert_eq!(STATIC_AUX_BYTES, RAW_SLOT_BYTES + operations::STATIC_BYTES + overlay::STATIC_BYTES);
     assert_eq!(operations::STATIC_BYTES, 6);
     assert!(storage_statics <= audio_producer::BOOTSTRAP_RESERVE);
-    println!("HOST static_payload operations={} raw_slots={} session_claim={} universe={} clock_origin={} storage_statics_already_charged={storage_statics} aux_statics={STATIC_AUX_BYTES} static_total={} aux_used={} aux_limit={AUX_RESERVE}; probe allocator/test-only statics excluded; linker padding and native RAM UNMEASURED", operations::STATIC_BYTES, RAW_SLOT_BYTES, SESSION_CLAIM_BYTES, audio_producer::STATIC_BYTES, CLOCK_STATIC_RESERVE_BYTES, storage_statics + STATIC_AUX_BYTES, peak + actual_stack + STATIC_AUX_BYTES);
+    println!("HOST static_payload glyph_table={} operations={} raw_slots={} session_claim={} universe={} clock_origin={} storage_statics_already_charged={storage_statics} aux_statics={STATIC_AUX_BYTES} static_total={} aux_used={} aux_limit={AUX_RESERVE}; probe allocator/test-only statics excluded; linker padding and native RAM UNMEASURED", overlay::STATIC_BYTES, operations::STATIC_BYTES, RAW_SLOT_BYTES, SESSION_CLAIM_BYTES, audio_producer::STATIC_BYTES, CLOCK_STATIC_RESERVE_BYTES, storage_statics + STATIC_AUX_BYTES, peak + actual_stack + STATIC_AUX_BYTES);
     println!("HOST raw_snapshot_size={} raw_max_storage={MAX_RAW_STORAGE} raw_slots_in_aux={RAW_SLOT_BYTES}", std::mem::size_of::<audio_counters::Snapshot>());
 }

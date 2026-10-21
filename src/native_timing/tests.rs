@@ -1028,7 +1028,12 @@ fn actual_session_schedule_config_and_bounded_ack_file_are_consumed_only_before_
     r.ready("tower2", None, Reason::StartSave, state(0));
     r.begin(state(0));
     let label = session.schedule_anchor(state(0)).unwrap();
-    assert!(label.as_str().starts_with("NT "));
+    assert!(label.as_str().starts_with("run="));
+    assert_eq!(label.as_str().lines().count(),4);
+    for line in label.as_str().lines() {
+        let (body,check)=line.rsplit_once(" ck=").unwrap();
+        assert_eq!(format!("{:04x}",overlay::crc16(body)),check);
+    }
     let r = session.recorder.as_ref().unwrap();
     let token = r.schedule.as_ref().unwrap().latest().unwrap();
     let request = serde_json::json!({"run_id":r.run_id,"token":{"ordinal":token.ordinal,"viewer_seq":token.viewer_seq,"submitted_us":token.submitted_us,"generation":token.generation,"operation":token.operation,"auth":token.auth}});

@@ -4247,8 +4247,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         crate::character::skinning_bench_end();
         #[cfg(feature="native_timing")]
         if let Some(text)=timing.schedule_anchor(timing_state!()) {
-            draw_rectangle(0.,0.,screen_width(),42.,BLACK);
-            for (i,line) in text.as_str().split('\n').enumerate(){draw_text(line,4.,16.+i as f32*16.,12.,WHITE);}
+            if text.as_str().starts_with("run=") {
+                use crate::native_timing::overlay;
+                draw_rectangle(0.,0.,screen_width(),overlay::BOX_HEIGHT as f32,BLACK);
+                overlay::rectangles(text.as_str(),|x,y,w,h|draw_rectangle(x as f32,y as f32,w as f32,h as f32,WHITE));
+            } else {
+                draw_rectangle(0.,0.,screen_width(),42.,BLACK);
+                draw_text(text.as_str(),4.,16.,12.,WHITE);
+            }
         }
         #[cfg(feature = "native_timing")]
         timing.with(|r| {

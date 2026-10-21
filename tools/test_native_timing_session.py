@@ -14,6 +14,8 @@ def main():
             if path.suffix=='.rlib':artifacts[row['target']['name']]=path
     code='''#![allow(dead_code)]
 #[path="MODULE"]mod native_timing;
+// Bind the production Session filesystem calls to this case's owned cwd.
+mod preferences {pub fn path(name: &str)->std::path::PathBuf {std::path::Path::new("private").join(name)}}
 use native_timing::*;
 fn main(){
  let want=std::env::args().nth(1).unwrap();
