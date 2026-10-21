@@ -76,3 +76,8 @@ test is no evidence of human inspection, native HMAC acceptance or camera timing
 The reader currently supports the full-screen driver scale with a small positive
 capture offset; arbitrary perspective, crop, rotation and exposure are untested.
 The glyph static payload is charged in the host auxiliary memory proof.
+
+The host-only matched-pair CLI, frozen 150-second Gate 1 template, observed-state
+brackets, frame metrics and independent evidence receipt contract are documented
+in [NATIVE-TIMING-PAIR.md](NATIVE-TIMING-PAIR.md). A successful single export or
+pair assessment still leaves method/campaign qualification false.

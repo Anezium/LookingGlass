@@ -12,6 +12,7 @@ from pathlib import Path
 import struct
 import sys
 import importlib.util
+from dataclasses import dataclass
 if __name__ == "__main__":
     sys.modules["native_timing_check"] = sys.modules[__name__]
 
@@ -107,6 +108,21 @@ def reject_keys(pairs):
 
 def load(raw):
     try:
+        # Bound nesting independently of the interpreter's recursion limit.
+        # Ignore brackets inside strings, including escaped quotation marks.
+        source = raw.decode('utf-8') if isinstance(raw, bytes) else raw
+        depth = 0
+        quoted = escaped = False
+        for char in source:
+            if quoted:
+                if escaped: escaped = False
+                elif char == '\\': escaped = True
+                elif char == '"': quoted = False
+            elif char == '"': quoted = True
+            elif char in '[{':
+                depth += 1
+                need(depth <= 64, 'malformed JSON')
+            elif char in ']}': depth -= 1
         return json.loads(raw, object_pairs_hook=reject_keys,
                           parse_constant=lambda _: (_ for _ in ()).throw(Invalid('nonfinite JSON')))
     except Invalid:
@@ -121,7 +137,23 @@ def f32(bits):
     return result
 
 
-def check_capture(directory, generation, age_offset_us, *, allow_test_clock=False):
+@dataclass(frozen=True)
+class ValidatedCapture:
+    directory: Path
+    manifest: dict
+    records: dict
+    world: dict
+    generation: int
+    start_us: int
+    end_us: int
+    population: list
+    continuous: list
+    producer: object
+    raw_guards: object
+    manifest_sha256: str
+
+
+def validate_capture(directory, generation, age_offset_us, *, allow_test_clock=False):
     directory = Path(directory)
     uint(generation); uint(age_offset_us)
     with (directory/'manifest.json').open('rb') as file:
@@ -271,9 +303,21 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
         need(m['raw_counter_storage_bytes'] == raw['capacity']*raw['snapshot_size']+raw['shared_bytes'], 'counter storage receipt')
     producer = None
     if "audio_producer_storage_bytes" in m:
-        producer=sibling("native_timing_audio_check").validate(d['audio_producer'],m,s,t,d.get('raw_counters'))
+        producer=sibling("native_timing_audio_check").validate_structure(d['audio_producer'],m,s,t,d.get('raw_counters'))
         if raw_guards is None:
             raw_guards={f:dict(guard='UNKNOWN',reason='raw counters not captured; raw-zero gate unavailable') for f in ('PcmStarvedBlocks','MusicUnderrunFrames')}
+    return ValidatedCapture(directory, m, d, world, generation, s, t, population,
+                            continuous, producer, raw_guards, hashlib.sha256(manifest_raw).hexdigest())
+
+
+def check_capture(directory, generation, age_offset_us, *, allow_test_clock=False):
+    v = validate_capture(directory, generation, age_offset_us, allow_test_clock=allow_test_clock)
+    m, world, population = v.manifest, v.world, v.population
+    scheduled = 'schedule_storage_bytes' in m
+    s, t, producer, raw_guards = v.start_us, v.end_us, v.producer, v.raw_guards
+    if producer is not None:
+        need(sibling('native_timing_audio_check').assess_producer_gate(producer)['gate'] == 'PASS',
+             'producer intersecting window p95 exceeds 8ms')
     # Factual simulation boundaries only. No exact simulation-age/pair claim.
     return dict(native_audio_data_complete=producer is not None, producer_observations=producer, method_qualified=False, route_activity="UNKNOWN; binding does not prove mix/music controls, eligible decode-ahead, job admission, ring or active voice; zero may be vacuous", phase2a_status="PRODUCER_OBSERVATIONS_UNATTESTED" if producer is not None else ("PARTIAL_COUNTERS_ONLY_UNQUALIFIED" if raw_guards is not None else "UNIMPLEMENTED"), raw_counter_guards=raw_guards, audio_qualified=False, source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', clock_id=m['clock_id'], provenance='UNATTESTED; self-consistent hash only', phase2_unimplemented=m["phase2_unimplemented"],
         metadata_assurance=m['metadata_assurance'], native_start_us=s, native_end_us=t,

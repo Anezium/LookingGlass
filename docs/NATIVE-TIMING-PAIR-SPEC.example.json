@@ -1,0 +1,59 @@
+{
+  "schema": "alice-native-pair-spec-v1",
+  "pair_id": "gate1-pandemonium-AB-01",
+  "experiment_kind": "AB",
+  "planned_order": "AB",
+  "route": {
+    "map": "pandemonium",
+    "entry": "player_start",
+    "reason": "StartSave",
+    "input_save_sha256": "ea4cd221d9f950e613188ccf3ecf2c1eabb1d34106f413125864320d364c8fa9",
+    "policy": {
+      "route": "unchanged human Autosave; ordinary Load Save/Autosave/resume",
+      "intro": "ordinary",
+      "skip": "none",
+      "input": "neutral-standing"
+    }
+  },
+  "window_us": 30000000,
+  "limits": {
+    "sim_age_seconds": 0.05,
+    "physics_ticks": 6,
+    "median_ratio_upper": 1.01,
+    "p95_ratio_upper": 1.02,
+    "max_extra_us": 5000,
+    "producer_p95_ms": 8.0,
+    "slow_frame_us": 100000
+  },
+  "treatment": {
+    "key": "sim_hatter_door_candidates",
+    "A": false,
+    "B": true
+  },
+  "arms": {
+    "A": {
+      "directory": "/absolute/original-exports/A",
+      "generation": 1,
+      "age_offset_us": 150000000,
+      "expected": {
+        "source_sha256": null,
+        "build_sha256": null,
+        "game_config_sha256": null,
+        "recorder_config_sha256": null,
+        "save_sha256": "ea4cd221d9f950e613188ccf3ecf2c1eabb1d34106f413125864320d364c8fa9"
+      }
+    },
+    "B": {
+      "directory": "/absolute/original-exports/B",
+      "generation": 1,
+      "age_offset_us": 150000000,
+      "expected": {
+        "source_sha256": null,
+        "build_sha256": null,
+        "game_config_sha256": null,
+        "recorder_config_sha256": null,
+        "save_sha256": "ea4cd221d9f950e613188ccf3ecf2c1eabb1d34106f413125864320d364c8fa9"
+      }
+    }
+  }
+}

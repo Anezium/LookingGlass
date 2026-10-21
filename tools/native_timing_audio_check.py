@@ -27,7 +27,7 @@ def bits_value(bits):
 def stamp(x,reason):
     need(x is not None and x['fault'] is None and x['pre_us'] is not None and x['post_us'] is not None and x['pre_us']<=x['post_us'],reason)
 
-def validate(a,m,s,t,raw=None):
+def validate_structure(a,m,s,t,raw=None):
     obj(a,dict(schema=literal('alice-producer-v1'),status=text,terminal=u32,run_id=nullable(array(octet,16)),clock_id=nullable(text),audio_id=nullable(u32),worker_id=nullable(u32),topology=nullable(u32),lifecycle=nullable(lambda x:obj(x,LIFE)),counter_lifetimes=array(nullable(array(octet,16)),2),binding=nullable(lambda x:obj(x,STAMP)),start_request_us=nullable(uint),seal_request=nullable(lambda x:obj(x,STAMP)),wait_us=uint,wait_limit_us=uint,completed_identity=nullable(lambda x:obj(x,dict(run_id=nullable(array(octet,16)),clock_id=text,audio_id=u32,worker_id=u32))),repeat_seal=boolean,receipt=nullable(lambda x:obj(x,RECEIPT)),blocks=array(lambda x:obj(x,BLOCK)),fences=array(lambda x:obj(x,FENCE)),legacy=array(lambda x:obj(x,LEGACY)),storage=lambda x:obj(x,STORAGE),estimator=literal('sorted[n/2],sorted[(n-1)*95/100],sorted[n-1]; exact legacy total_ms f64 bits')))
     need(a['status']=='Delivered' and a['terminal']==1,'producer completion unavailable')
     need(a['run_id']==m['run_id'] and a['clock_id']==m['clock_id'] and a['audio_id'] not in (0,None) and a['worker_id'] not in (0,None) and a['audio_id']!=a['worker_id'] and a['topology'] not in (0,None),'producer identity')
@@ -94,5 +94,18 @@ def validate(a,m,s,t,raw=None):
     selected=[f for f in fences if f['begin_us']<t and f['end_us']>s]
     need(selected and selected[0]['begin_us']<=s and selected[-1]['end_us']>=t,'producer window coverage')
     need(all(f['n']>0 for f in selected),'producer empty intersecting fence')
-    need(all(bits_value(f['quantile_ms_bits'][1])<=8.0 for f in selected),'producer intersecting window p95 exceeds 8ms')
     return dict(structurally_complete=True,provenance='UNATTESTED; self-consistent hash only',selected_fence_ids=[f['seq'] for f in selected],boundary_fence_ids=[f['seq'] for f in selected if f['begin_us']<s or f['end_us']>t],single_block_fence_ids=[f['seq'] for f in selected if f['n']==1],N=[f['n'] for f in selected],p95_ms=[bits_value(f['quantile_ms_bits'][1]) for f in selected],legacy_queue_drops=r['legacy_queue_dropped'],physical_output='UNKNOWN',decoder_stop='UNKNOWN',thread_returned=True if life['thread_join']==1 else 'UNKNOWN')
+
+
+def assess_producer_gate(observations):
+    if observations is None:
+        return dict(gate='UNKNOWN', limit_ms=8.0, failing_fence_ids=[])
+    failing = [i for i, value in zip(observations['selected_fence_ids'], observations['p95_ms'])
+               if value > 8.0]
+    return dict(gate='FAIL' if failing else 'PASS', limit_ms=8.0, failing_fence_ids=failing)
+
+
+def validate(a,m,s,t,raw=None):
+    result = validate_structure(a,m,s,t,raw)
+    need(assess_producer_gate(result)['gate']=='PASS','producer intersecting window p95 exceeds 8ms')
+    return result

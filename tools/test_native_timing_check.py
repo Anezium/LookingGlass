@@ -111,7 +111,13 @@ class ActualCaptureTests(unittest.TestCase):
         self.modified(lambda m,d:self.second_generation(m,d,True), expected='non-gameplay/generation/operation during settle/window')
     def test_clock_lifetime_utc_claim(self): self.modified(lambda m,d:m.update(clock_lifetime='UTC'), expected='unexpected constant')
     def test_missing_first_playable(self): self.modified(lambda m,d:d['events'][2].update(kind='Status'), expected='missing/late/duplicate first-playable epoch')
-    def test_deep_malformed_json(self): self.modified(lambda m,d:None,raw=b'['*2000+b']'*2000, expected='malformed JSON')
+    def test_deep_malformed_json(self):
+        # The loader guarantees a fixed bound, independent of CPython's stack.
+        self.modified(lambda m,d:None,raw=b'['*65+b']'*65, expected='malformed JSON')
+
+    def test_loader_depth_bound_and_quoted_brackets(self):
+        self.assertIsInstance(check.load(b'['*64+b'0'+b']'*64),list)
+        self.assertEqual(check.load(b'{"text":"[[[\\\"{{}"}'), {'text':'[[["{{}'})
     def test_unknown_identity(self): self.modified(lambda m,d:m.update(run_id=None), expected='UNKNOWN run/world identity')
     def test_clock_domain(self): self.modified(lambda m,d:d.update(clock_id='UTC'), expected='payload identity')
     def test_clock_fault(self): self.modified(lambda m,d:m.update(clock_fault='ReadFailed'), expected='clock/arithmetic failure')
