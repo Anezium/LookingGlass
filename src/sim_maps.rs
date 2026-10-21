@@ -119,3 +119,17 @@ pub fn hatter_door_candidates() -> bool {
     #[cfg(all(not(test), not(feature="vita_renderer")))]
     { false }
 }
+
+// Hedge3 levers remain independently default-off pending console acceptance.
+macro_rules! hedge_switch {
+    ($name:ident, $field:ident) => {
+        pub fn $name() -> bool {
+            #[cfg(test)] { std::env::var("LOOKING_GLASS_TEST_HEDGE3").as_deref() == Ok("on") }
+            #[cfg(all(not(test), feature="vita_renderer"))]
+            { crate::render::vita_renderer::config().$field }
+            #[cfg(all(not(test), not(feature="vita_renderer")))] { false }
+        }
+    };
+}
+hedge_switch!(lights_static_cache, lights_static_cache);
+hedge_switch!(dynamic_buckets, sim_dynamic_buckets);

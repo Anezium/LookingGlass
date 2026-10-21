@@ -555,6 +555,27 @@ impl Default for Trace {
         }
     }
 }
+/// Spatially sorted groups of four AABBs. Query results are sorted back into
+/// publication order before narrow phase, including equal-fraction contacts.
+#[derive(Debug)]
+struct DynamicBucket { bounds: Bounds, indices: Vec<usize> }
+impl DynamicBucket {
+    fn build(colliders: &[Collider]) -> Vec<Self> {
+        let mut indices: Vec<_> = (0..colliders.len()).filter(|&i| colliders[i].bounds.is_some()).collect();
+        indices.sort_by(|&a, &b| {
+            let a = colliders[a].bounds.unwrap();
+            let b = colliders[b].bounds.unwrap();
+            (a.min.x + a.max.x).total_cmp(&(b.min.x + b.max.x))
+        });
+        indices.chunks(4).map(|chunk| Self {
+            bounds: chunk.iter().map(|&i| colliders[i].bounds.unwrap()).reduce(Bounds::union).unwrap(),
+            indices: chunk.to_vec(),
+        }).collect()
+    }
+}
+#[derive(Debug, Default)]
+struct LightCertificates { entries: Vec<([u32; 9], bool)>, next: usize }
+
 #[derive(Debug)]
 pub struct World {
     query_cache: std::cell::RefCell<std::collections::HashMap<[u32; 9], Trace>>,
@@ -562,6 +583,8 @@ pub struct World {
     pub traversal: crate::traversal::Traversal,
     dynamic: Vec<Collider>,
     dynamic_bounds: Option<Bounds>,
+    dynamic_buckets: std::sync::Arc<Vec<DynamicBucket>>,
+    light_certificates: std::cell::RefCell<LightCertificates>,
     #[cfg(test)]
     pub(crate) legacy_dynamic_sweeps: bool,
     #[cfg(test)]
@@ -690,6 +713,8 @@ impl World {
             query_cache_active: std::cell::Cell::new(false),
             dynamic: Vec::new(),
             dynamic_bounds: None,
+            dynamic_buckets: std::sync::Arc::default(),
+            light_certificates: std::cell::RefCell::default(),
             #[cfg(test)]
             legacy_dynamic_sweeps: false,
             #[cfg(test)]
@@ -706,6 +731,34 @@ impl World {
             min: map.world_min,
             max: map.world_max,
         })
+    }
+
+    /// A cached negative certificate is valid only at bit-identical endpoints
+    /// in this World. Static hulls/tree never change after construction. Settled,
+    /// dynamic and weapon geometry can only lower the final sweep fraction.
+    /// Return (visible, reused_negative_certificate).
+    pub(crate) fn light_visible_cached(&self, eye: Vec3, light: Vec3) -> (bool, bool) {
+        let key = Self::query_key(eye, light, Vec3::ZERO);
+        let cached = self.light_certificates.borrow().entries.iter().find(|(k, _)| *k == key).map(|(_, b)| *b);
+        if cached == Some(true) { return (false, true); }
+        if cached.is_none() {
+            let query = SweepBounds::new(eye, light, Vec3::ZERO);
+            let mut trace = Trace::default();
+            if let Some(tree) = &self.tree {
+                tree.visit(&query, &mut |i| {
+                    if query.overlaps(self.hulls[i].bounds) {
+                        clip_hull(&self.hulls[i], eye, light, Vec3::ZERO, &mut trace);
+                    }
+                });
+            }
+            let blocked = trace.fraction < 0.995;
+            crate::sim_maps::count("lights_certificate_builds", 1);
+            let mut cache = self.light_certificates.borrow_mut();
+            if cache.entries.len() < 64 { cache.entries.push((key, blocked)); }
+            else { let next = cache.next; cache.entries[next] = (key, blocked); cache.next = (next + 1) % 64; }
+            if blocked { return (false, false); }
+        }
+        (self.sweep(eye, light, Vec3::ZERO).fraction >= 0.995, false)
     }
 
     /// Trace a box centre from start to end. Zero extents give a point trace.
@@ -790,18 +843,26 @@ impl World {
             add_counter(Counter::DynamicBoundsRejected, 1);
             return result;
         }
+        let candidates = crate::sim_maps::dynamic_buckets().then(|| {
+            let mut indices = Vec::new();
+            for bucket in self.dynamic_buckets.iter() {
+                crate::sim_maps::count("dynamic_buckets_tested", 1);
+                // Use precisely the old AABB predicate, rather than a tighter
+                // slab predicate whose rounding could prune an old candidate.
+                if bucket.bounds.overlaps(query.bounds) { indices.extend_from_slice(&bucket.indices); }
+            }
+            indices.sort_unstable();
+            indices
+        });
+        let count = candidates.as_ref().map_or(self.dynamic.len(), Vec::len);
+        crate::sim_maps::count("dynamic_colliders_tested", count as u64);
         #[cfg(target_os = "vita")]
-        {
-            add_counter(Counter::DynamicCollidersTested, self.dynamic.len() as u32);
-        }
-        #[cfg(target_os = "vita")]
+        add_counter(Counter::DynamicCollidersTested, count as u32);
         let mut rejected = 0;
-        for collider in &self.dynamic {
+        for n in 0..count {
+            let collider = &self.dynamic[candidates.as_ref().map_or(n, |v| v[n])];
             if collider.bounds.is_none_or(|b| !b.overlaps(query.bounds)) {
-                #[cfg(target_os = "vita")]
-                {
-                    rejected += 1;
-                }
+                rejected += 1;
                 continue;
             }
             // Reuse reciprocal directions/padding rather than rebuilding them
@@ -816,6 +877,20 @@ impl World {
         }
         #[cfg(target_os = "vita")]
         add_counter(Counter::DynamicCollidersRejected, rejected);
+        crate::sim_maps::count("dynamic_colliders_rejected", rejected as u64);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var_os("LOOKING_GLASS_HEDGE3_VERIFY").is_some() {
+            let mut reference = self.ledge_trace(start, end, half);
+            for collider in &self.dynamic {
+                let t = collider.trace(start, end, half);
+                reference.start_solid |= t.start_solid;
+                reference.all_solid |= t.all_solid;
+                if t.fraction < reference.fraction { reference.fraction = t.fraction; reference.normal = t.normal; }
+            }
+            let bits = |t: Trace| (t.fraction.to_bits(), t.normal.to_array().map(f32::to_bits), t.start_solid, t.all_solid);
+            assert_eq!(bits(result), bits(reference), "dynamic per-query equality");
+            crate::sim_maps::count("dynamic_query_equal", 1);
+        }
         result
     }
     #[cfg(test)]
@@ -896,12 +971,17 @@ impl World {
     pub fn copy_dynamic_from(&mut self, other: &Self) {
         self.dynamic.clone_from(&other.dynamic);
         self.dynamic_bounds = other.dynamic_bounds;
+        self.dynamic_buckets = other.dynamic_buckets.clone();
         self.traversal.actor_pushes.clone_from(&other.traversal.actor_pushes);
         self.settled_supports.clone_from(&other.settled_supports);
         self.weapon_obstacles.clone_from(&other.weapon_obstacles);
         self.dynamic_liquids.clone_from(&other.dynamic_liquids);
     }
     pub fn set_dynamic(&mut self, colliders: Vec<Collider>) {
+        self.dynamic_buckets = if crate::sim_maps::dynamic_buckets() {
+            crate::sim_maps::count("dynamic_bucket_builds", 1);
+            std::sync::Arc::new(DynamicBucket::build(&colliders))
+        } else { std::sync::Arc::default() };
         self.dynamic_bounds = colliders.iter().filter_map(|c| c.bounds).reduce(Bounds::union);
         #[cfg(test)]
         if let Some(publications) = &mut self.dynamic_publications {
@@ -1052,6 +1132,8 @@ impl World {
             query_cache_active: std::cell::Cell::new(false),
             dynamic: Vec::new(),
             dynamic_bounds: None,
+            dynamic_buckets: std::sync::Arc::default(),
+            light_certificates: std::cell::RefCell::default(),
             #[cfg(test)]
             legacy_dynamic_sweeps: false,
             #[cfg(test)]

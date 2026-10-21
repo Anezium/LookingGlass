@@ -100,5 +100,7 @@
   "audio_music_priority": 170,
   "profile_capture": false,
   "attached_puff_batches": true,
-  "sim_hatter_door_candidates": false
+  "sim_hatter_door_candidates": false,
+  "lights_static_cache": false,
+  "sim_dynamic_buckets": false
 }

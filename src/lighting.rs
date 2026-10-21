@@ -27,8 +27,31 @@ pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
     let early = crate::render::vita_renderer::config().lights_early_out;
     #[cfg(not(feature = "vita_renderer"))]
     let early = false;
-    let (lights, candidates, sweeps) = select_visible(lights, eye, limit, early,
-        |l| world.sweep(eye, l.position, Vec3::ZERO).fraction >= 0.995);
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    let started = std::time::Instant::now();
+    let mut reused = 0;
+    let (lights, candidates, sweeps) = select_visible(lights, eye, limit, early, |l| {
+        if crate::sim_maps::lights_static_cache() {
+            let (visible, hit) = world.light_visible_cached(eye, l.position);
+            reused += usize::from(hit);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if std::env::var_os("LOOKING_GLASS_HEDGE3_VERIFY").is_some() {
+                assert_eq!(visible, world.sweep(eye, l.position, Vec3::ZERO).fraction >= 0.995, "light per-query equality");
+                crate::sim_maps::count("light_query_equal", 1);
+            }
+            visible
+        } else { world.sweep(eye, l.position, Vec3::ZERO).fraction >= 0.995 }
+    });
+    let sweeps = sweeps - reused;
+    #[cfg(not(feature="vita_renderer"))]
+    crate::sim_maps::count("lights_candidates", candidates as u64);
+    #[cfg(not(feature="vita_renderer"))]
+    crate::sim_maps::count("lights_sweeps", sweeps as u64);
+    crate::sim_maps::count("lights_cache_hits", reused as u64);
+    #[cfg(not(feature="vita_renderer"))]
+    crate::sim_maps::count("lights_selected", lights.len() as u64);
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    crate::sim_maps::probe::span("lights_select", started.elapsed().as_secs_f64() * 1000.);
     #[cfg(target_os="vita")]
     crate::frame_profile::counts(&[("lights_candidates", candidates as u64),
         ("lights_sweeps", sweeps as u64), ("lights_selected", lights.len() as u64)]);
@@ -271,6 +294,41 @@ pub fn flares(eye: Vec3, direction: Vec3) {
 mod tests {
     use super::*;
     #[test]
+    fn per_frame_cached_selection_matches_with_camera_lights_and_dynamic_blockers_moving() {
+        let mut world = World::fixture(&[(vec3(4., -4., -100.), vec3(6., 4., 100.))]);
+        let mut frames = 0;
+        for frame in 0..200 {
+            world.set_dynamic(vec![crate::collision::Collider::fixture(
+                vec3(3., frame as f32 % 11. - 5., -20.), vec3(4., frame as f32 % 11. - 3., 20.))]);
+            world.set_settled_supports(vec![]);
+            let eye = vec3(0., (frame / 20) as f32 - 5., 0.);
+            let lights: Vec<_> = (0..40).map(|i| Light {
+                position: vec3(10., i as f32 - 20. + (frame / 7) as f32, 0.),
+                color: vec3(frame as f32, i as f32, 1.), radius: 100., only_models: i%2==0, flare:i%3==0,
+            }).collect();
+            for limit in [2, 8] {
+                let (a,_,_) = select_visible(lights.clone(),eye,limit,true, |l| world.sweep(eye,l.position,Vec3::ZERO).fraction >= 0.995);
+                let (b,_,_) = select_visible(lights.clone(),eye,limit,true, |l| world.light_visible_cached(eye,l.position).0);
+                assert_eq!(format!("{a:?}"),format!("{b:?}"), "frame={frame} limit={limit}");
+            }
+            frames += 1;
+        }
+        assert_eq!(frames,200);
+        // A static-clear certificate never caches visibility of a dynamic door.
+        let mut world = World::fixture(&[]);
+        let light = vec3(10.,0.,0.);
+        assert_eq!(world.light_visible_cached(Vec3::ZERO,light),(true,false));
+        world.set_dynamic(vec![crate::collision::Collider::fixture(vec3(4.,-1.,-1.),vec3(6.,1.,1.))]);
+        assert_eq!(world.light_visible_cached(Vec3::ZERO,light),(false,false));
+        world.set_dynamic(vec![]);
+        assert_eq!(world.light_visible_cached(Vec3::ZERO,light),(true,false));
+        // Cache ownership cannot cross maps, even with identical endpoints.
+        let wall = World::fixture(&[(vec3(4.,-1.,-1.),vec3(6.,1.,1.))]);
+        assert_eq!(wall.light_visible_cached(Vec3::ZERO,light),(false,false));
+        assert_eq!(wall.light_visible_cached(Vec3::ZERO,light),(false,true));
+        assert_eq!(world.light_visible_cached(Vec3::ZERO,light),(true,false));
+    }
+    #[test]
     fn early_visibility_preserves_stable_order_boundary_values_and_flares() {
         let lights: Vec<_> = (0..40).map(|i| Light { position: Vec3::X * i as f32,
             color: vec3(i as f32, 2., 3.), radius:100., only_models:i%2==0, flare:i%3==0 }).collect();
@@ -343,4 +401,14 @@ mod tests {
         );
         assert_eq!(count(), 0);
     }
+}
+
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) fn selected_bits() -> Vec<Vec<u32>> {
+    LIGHTS.with(|lights| lights.borrow().iter().map(|l| {
+        let mut bits = l.position.to_array().map(f32::to_bits).to_vec();
+        bits.extend(l.color.to_array().map(f32::to_bits));
+        bits.extend([l.radius.to_bits(), u32::from(l.only_models), u32::from(l.flare)]);
+        bits
+    }).collect())
 }

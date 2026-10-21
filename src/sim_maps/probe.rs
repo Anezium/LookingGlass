@@ -38,6 +38,7 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     let hash = format!("{:x}", Sha256::digest(&bytes));
     COUNTS.with(|c| println!("SIM_MAPS_FRAME {}", serde_json::json!({
         "frame": frame, "map": map, "active": active,
+        "selected_lights_bits": crate::lighting::selected_bits(),
         "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow(),
         "spans_ms": SPANS.with(|s| s.borrow().clone()),
         "render": crate::light_profile::render_host_report()

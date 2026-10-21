@@ -28,6 +28,10 @@ pub enum Clocks {
 pub struct Config {
     /// Defer Clockwork door traces until their exact range/facing predicates pass.
     pub sim_hatter_door_candidates: bool,
+    /// Exact static occlusion certificates for unchanged eye/light positions.
+    pub lights_static_cache: bool,
+    /// Spatial AABB buckets; preserve original dynamic contact order.
+    pub sim_dynamic_buckets: bool,
     /// Exact round-two candidates; console acceptance is still pending.
     pub fx_merge_local_reuse: bool,
     pub sim_triangle_candidates: bool,
@@ -200,6 +204,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             sim_hatter_door_candidates: false,
+            lights_static_cache: false,
+            sim_dynamic_buckets: false,
             fx_merge_local_reuse: true,
             sim_triangle_candidates: true,
             sim_fan_candidates: true,
@@ -1988,6 +1994,22 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hedge3_switches_are_independent_strict_booleans_and_default_off() {
+        for config in [Config::default(), serde_json::from_str("{}").unwrap()] {
+            assert!(!config.lights_static_cache && !config.sim_dynamic_buckets);
+        }
+        for name in ["lights_static_cache", "sim_dynamic_buckets"] {
+            for invalid in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
+                assert!(serde_json::from_value::<Config>(serde_json::json!({name:invalid})).is_err());
+            }
+            let value = serde_json::json!({name:true});
+            let config: Config = serde_json::from_value(value).unwrap();
+            config.validate().unwrap();
+            assert_eq!(config.lights_static_cache, name == "lights_static_cache");
+            assert_eq!(config.sim_dynamic_buckets, name == "sim_dynamic_buckets");
+        }
+    }
     #[test]
     fn hatter_door_candidates_default_off_and_require_a_boolean() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
