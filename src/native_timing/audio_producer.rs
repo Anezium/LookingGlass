@@ -102,6 +102,7 @@ impl Universe {
     }
 }
 pub static UNIVERSE: Universe = Universe::new();
+pub const STATIC_BYTES: usize = std::mem::size_of_val(&UNIVERSE);
 #[derive(Clone, Copy, Serialize)]
 pub struct Stamp {
     pub pre_us: Option<u64>,
@@ -675,15 +676,15 @@ pub const BOOTSTRAP_RESERVE: usize = size_of::<Capture<clock::Native>>()
     + size_of::<Bootstrap>()
     + 2 * size_of::<usize>()
     + size_of::<AudioState>()
-    + size_of::<Universe>()
+    + STATIC_BYTES
     + queue::allocation_bytes::<Start>(1)
     + 2 * size_of::<queue::Sender<Start>>()
     + 32 * 1024
     + DONE_ALLOCATION_BYTES
     + size_of::<ReporterExit>()
     + size_of::<Arc<Bootstrap>>()
-    + size_of::<AtomicBool>()
-    + size_of::<std::sync::OnceLock<std::time::Instant>>();
+    + super::SESSION_CLAIM_BYTES
+    + super::CLOCK_STATIC_RESERVE_BYTES;
 pub const FIXED_RESERVE: usize = BOOTSTRAP_RESERVE
     + size_of::<Owner>()
     + size_of::<Control>()

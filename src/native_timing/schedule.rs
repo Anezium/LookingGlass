@@ -2,6 +2,7 @@
 //! Submitted tokens identify a rendered frame, never physical camera exposure.
 use super::{State, Text};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 pub const WINDOW_US: u64 = 30_000_000;
 pub const GUARD_US: u64 = 2_000_000;
 pub const PRE_GUARD_US: u64 = 12_000_000;
@@ -33,7 +34,7 @@ pub struct Token {
     pub submitted_us: u64,
     pub generation: u64,
     pub operation: u64,
-    pub state: State,
+    pub auth: [u8; 16],
 }
 #[derive(Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +44,7 @@ pub struct Reference {
     pub submitted_us: u64,
     pub generation: u64,
     pub operation: u64,
+    pub auth: [u8; 16],
 }
 impl From<Token> for Reference {
     fn from(t: Token) -> Self {
@@ -52,18 +54,11 @@ impl From<Token> for Reference {
             submitted_us: t.submitted_us,
             generation: t.generation,
             operation: t.operation,
+            auth: t.auth,
         }
     }
 }
-impl Reference {
-    fn matches(self, t: Token) -> bool {
-        self.ordinal == t.ordinal
-            && self.viewer_seq == t.viewer_seq
-            && self.submitted_us == t.submitted_us
-            && self.generation == t.generation
-            && self.operation == t.operation
-    }
-}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ack {
@@ -73,6 +68,8 @@ pub struct Ack {
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 pub enum Fault {
     Clock,
+    Entropy,
+    Authentication,
     WrongMap,
     Generation,
     Overflow,
@@ -105,12 +102,14 @@ pub struct Schedule {
     pub start_state: Option<State>,
     pub end_state: Option<State>,
     pub fault: Option<Fault>,
+    pub token_mac_kat: bool,
+    pub token_authentication: &'static str,
     pub physical_image_time: &'static str,
     pub campaign_qualified: bool,
     #[serde(skip)]
     next_poll_us: u64,
     #[serde(skip)]
-    next_token_us: u64,
+    token_key: Option<[u8; 32]>,
     #[serde(skip)]
     pub started: bool,
     #[serde(skip)]
@@ -118,8 +117,17 @@ pub struct Schedule {
 }
 impl Schedule {
     pub fn new(cfg: Config) -> Self {
+        let token_mac_kat = mac_self_test();
+        let token_key = super::export::random_id()
+            .zip(super::export::random_id())
+            .map(|(a, b)| {
+                let mut key = [0; 32];
+                key[..16].copy_from_slice(&a);
+                key[16..].copy_from_slice(&b);
+                key
+            });
         Self {
-            schema: "alice-native-window-v1",
+            schema: "alice-native-window-v2",
             expected_map: Text::new(&cfg.map).unwrap(),
             ready_offset_us: cfg.ready_offset_us,
             ready_us: None,
@@ -136,14 +144,41 @@ impl Schedule {
             seal_request_us: None,
             start_state: None,
             end_state: None,
-            fault: None,
+            fault: if !token_mac_kat {
+                Some(Fault::Authentication)
+            } else if token_key.is_some() {
+                None
+            } else {
+                Some(Fault::Entropy)
+            },
+            token_mac_kat,
+            token_authentication:
+                "HMAC-SHA256/128; per-process random key withheld; native receipt UNATTESTED",
             physical_image_time: "UNKNOWN; submitted token is not camera exposure time",
             campaign_qualified: false,
             next_poll_us: 0,
-            next_token_us: 0,
+            token_key,
             started: false,
             finished: false,
         }
+    }
+    fn authenticate(&self, t: Reference) -> Option<[u8; 16]> {
+        let key = self.token_key?;
+        let mut message = [0u8; 48];
+        message[..8].copy_from_slice(b"LGNTW001");
+        for (i, v) in [
+            t.ordinal,
+            t.viewer_seq,
+            t.submitted_us,
+            t.generation,
+            t.operation,
+        ]
+        .iter()
+        .enumerate()
+        {
+            message[8 + i * 8..16 + i * 8].copy_from_slice(&v.to_le_bytes());
+        }
+        Some(hmac(&key, &message)[..16].try_into().unwrap())
     }
     pub fn storage_bytes(&self) -> usize {
         self.tokens.capacity() * std::mem::size_of::<Token>()
@@ -199,25 +234,26 @@ impl Schedule {
         seq: u64,
         generation: u64,
         operation: u64,
-        state: State,
+        _state: State,
     ) -> Option<Token> {
-        if !self.review_open(now) || now < self.next_token_us {
-            return self.latest();
+        if !self.review_open(now) || seq == 0 || self.latest().is_some_and(|t| t.viewer_seq == seq)
+        {
+            return None;
         }
-        self.next_token_us = now.saturating_add(POLL_US);
         let Some(ordinal) = self.token_total.checked_add(1) else {
             self.reject(Fault::Overflow);
             return None;
         };
         self.token_total = ordinal;
-        let t = Token {
+        let mut t = Token {
             ordinal,
             viewer_seq: seq,
             submitted_us: now,
             generation,
             operation,
-            state,
+            auth: [0; 16],
         };
+        t.auth = self.authenticate(Reference::from(t))?;
         let slot = ((ordinal - 1) % TOKEN_CAP as u64) as usize;
         if self.tokens.len() < TOKEN_CAP {
             self.tokens.push(t);
@@ -250,7 +286,14 @@ impl Schedule {
         }
         if Some(ack.run_id) != run_id
             || run_id == Some([0; 16])
-            || !self.tokens.iter().any(|t| ack.token.matches(*t))
+            || ack.token.ordinal == 0
+            || ack.token.ordinal > self.token_total
+            || self.authenticate(ack.token).is_none_or(|tag| {
+                !tag.iter()
+                    .zip(ack.token.auth)
+                    .fold(0u8, |diff, (a, b)| diff | (*a ^ b))
+                    .eq(&0)
+            })
             || ack.token.generation != generation
             || Some(generation) != self.generation
             || ack.token.operation != operation
@@ -260,7 +303,14 @@ impl Schedule {
             self.reject(Fault::InvalidReview);
             return;
         }
-        self.reviewed_token = self.tokens.iter().find(|t| ack.token.matches(**t)).copied();
+        self.reviewed_token = Some(Token {
+            ordinal: ack.token.ordinal,
+            viewer_seq: ack.token.viewer_seq,
+            submitted_us: ack.token.submitted_us,
+            generation: ack.token.generation,
+            operation: ack.token.operation,
+            auth: ack.token.auth,
+        });
         self.review_ack_us = Some(now);
     }
     /// Main-thread clock only; window never moves after a late/missing review.
@@ -314,9 +364,103 @@ impl Schedule {
         (start, false)
     }
 }
+// Fixed-size HMAC-SHA256. Key generated once before world installation, never
+// exported. This authenticates issued submitted-frame references, not photographs.
+fn hmac(key: &[u8; 32], message: &[u8]) -> [u8; 32] {
+    let mut pad = [0x36u8; 64];
+    for (p, k) in pad.iter_mut().zip(key) {
+        *p ^= *k;
+    }
+    let mut inner = Sha256::new();
+    inner.update(pad);
+    inner.update(message);
+    let digest = inner.finalize();
+    pad.fill(0x5c);
+    for (p, k) in pad.iter_mut().zip(key) {
+        *p ^= *k;
+    }
+    let mut outer = Sha256::new();
+    outer.update(pad);
+    outer.update(digest);
+    outer.finalize().into()
+}
+fn mac_self_test() -> bool {
+    let mut key = [0u8; 32];
+    key[..20].fill(0x0b);
+    hmac(&key, b"Hi There")
+        == [
+            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b,
+            0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c,
+            0x2e, 0x32, 0xcf, 0xf7,
+        ]
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hmac_sha256_full_standard_vector() {
+        let mut key = [0u8; 32];
+        key[..20].fill(0x0b);
+        assert_eq!(
+            hmac(&key, b"Hi There"),
+            [
+                0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b,
+                0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c,
+                0x2e, 0x32, 0xcf, 0xf7
+            ]
+        );
+    }
+    #[test]
+    fn each_submitted_frame_has_unique_authenticated_reference_even_after_ring_wrap() {
+        let mut p = plan();
+        let first = p.submit(1_000_000, 1, 1, 2, State::default()).unwrap();
+        assert!(p.submit(1_000_001, 1, 1, 2, State::default()).is_none());
+        for i in 2..=200 {
+            let next = p
+                .submit(1_000_000 + i * 1000, i, 1, 2, State::default())
+                .unwrap();
+            assert_ne!(next.auth, first.auth);
+        }
+        assert!(!p.tokens.contains(&first));
+        p.acknowledge(
+            Ack {
+                run_id: [7; 16],
+                token: first.into(),
+            },
+            Some([7; 16]),
+            2_000_000,
+            1,
+            2,
+        );
+        assert_eq!(p.reviewed_token, Some(first));
+        assert!(p.fault.is_none());
+    }
+    #[test]
+    fn authenticated_field_and_tag_tampering_rejects_without_a_later_ring_lookup() {
+        for field in 0..6 {
+            let mut p = plan();
+            let mut t = p.submit(1_000_000, 1, 1, 2, State::default()).unwrap();
+            match field {
+                0 => t.ordinal += 1,
+                1 => t.viewer_seq += 1,
+                2 => t.submitted_us += 1,
+                3 => t.generation += 1,
+                4 => t.operation += 1,
+                _ => t.auth[15] ^= 1,
+            }
+            p.acknowledge(
+                Ack {
+                    run_id: [7; 16],
+                    token: t.into(),
+                },
+                Some([7; 16]),
+                2_000_000,
+                1,
+                2,
+            );
+            assert_eq!(p.fault, Some(Fault::InvalidReview));
+        }
+    }
     fn plan() -> Schedule {
         let mut p = Schedule::new(Config {
             map: "tower2".into(),
@@ -412,7 +556,7 @@ mod tests {
         assert!(!p.poll_due(1_000_001));
         ack(&mut p);
         assert!(!p.poll_due(4_000_000));
-        assert!(p.submit(40_000_000, 100, 1, 2, State::default()).is_some());
+        assert!(p.submit(40_000_000, 100, 1, 2, State::default()).is_none());
         assert_eq!(p.token_total, 1);
     }
     #[test]

@@ -227,6 +227,13 @@ pub const MAX_RAW_STORAGE: usize = audio_counters::SNAPSHOT_CAP
 // them in auxiliary scratch even when the feature's config is disabled.
 pub const RAW_SLOT_BYTES: usize =
     2 * std::mem::size_of::<std::sync::OnceLock<std::sync::Arc<audio_counters::Raw>>>();
+// Operations statics are additional auxiliary payload; Session/Universe/clock
+// statics are already charged in audio_producer::BOOTSTRAP_RESERVE.
+pub const STATIC_AUX_BYTES: usize = RAW_SLOT_BYTES + operations::STATIC_BYTES;
+// Exact type of clock::now_us's host-only ORIGIN. Keep its preexisting
+// conservative reservation on all targets without changing the clock code.
+pub const CLOCK_STATIC_RESERVE_BYTES: usize =
+    std::mem::size_of::<std::sync::OnceLock<std::time::Instant>>();
 const _: () = assert!(
     STORAGE_BYTES
         + MAX_RAW_STORAGE
@@ -298,7 +305,7 @@ impl<C: Source> Recorder<C> {
     pub fn discontinuity(&mut self, kind: Milestone, reason: u32) {
         Self::inc(&mut self.operation, &mut self.arithmetic_overflow);
         if let Some(plan) = &mut self.schedule {
-            if plan.started && !plan.finished {
+            if (plan.started || plan.review_ack_us.is_some()) && !plan.finished {
                 plan.reject(schedule::Fault::Interrupted);
             }
         }
@@ -496,7 +503,7 @@ impl<C: Source> Recorder<C> {
     }
     pub fn schedule_input(&mut self, active: bool) {
         if let Some(plan) = &mut self.schedule {
-            if active && plan.started && !plan.finished {
+            if active && (plan.started || plan.review_ack_us.is_some()) && !plan.finished {
                 plan.reject(schedule::Fault::Interrupted);
             }
         }
@@ -561,6 +568,7 @@ pub struct Session {
     pub recorder: Option<Box<Recorder<Native>>>,
 }
 static SESSION_CLAIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub const SESSION_CLAIM_BYTES: usize = std::mem::size_of_val(&SESSION_CLAIM);
 impl Session {
     /// Config is <=4096 bytes, read once before world install. Missing/disabled
     /// config performs no recorder allocation. Invalid config fails explicitly.
@@ -708,9 +716,14 @@ impl Session {
             for b in r.run_id.unwrap_or([0; 16]) {
                 let _ = write!(text, "{b:02x}");
             }
+            let _ = write!(text, " auth=");
+            for b in t.auth {
+                let _ = write!(text, "{b:02x}");
+            }
+            let _ = write!(text, "\n");
             let _ = write!(
                 text,
-                " token={} frame={} us={} gen={} op={} S={}",
+                "token={} frame={} us={} gen={} op={} S={}",
                 t.ordinal,
                 t.viewer_seq,
                 t.submitted_us,

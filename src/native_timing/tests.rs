@@ -937,6 +937,39 @@ fn scheduled_actual_recorder_waits_without_capture_then_seals_before_human_quit(
     r.export(&root("scheduled")).unwrap();
 }
 #[test]
+fn input_after_review_before_acquisition_invalidates_anchor_without_moving_window() {
+    let (mut r, c) = fake();
+    r.schedule = Some(schedule::Schedule::new(schedule::Config {
+        map: "tower2".into(),
+        ready_offset_us: 40_000_000,
+    }));
+    r.ready("tower2", None, Reason::Fresh, state(0));
+    let t = r
+        .schedule
+        .as_mut()
+        .unwrap()
+        .submit(1, 1, 1, 0, state(0))
+        .unwrap();
+    r.schedule.as_mut().unwrap().acknowledge(
+        schedule::Ack {
+            run_id: [7; 16],
+            token: t.into(),
+        },
+        r.run_id,
+        2,
+        1,
+        0,
+    );
+    r.schedule_input(true);
+    c.0.set(Ok(10));
+    r.begin(state(0));
+    assert_eq!(
+        r.schedule.as_ref().unwrap().fault,
+        Some(schedule::Fault::Interrupted)
+    );
+    assert_eq!(r.schedule.as_ref().unwrap().start_us, Some(40_000_000));
+}
+#[test]
 fn scheduled_actual_modal_or_input_interrupt_does_not_wait_for_viewer_exit_to_seal() {
     let (mut r, c) = fake();
     r.schedule = Some(schedule::Schedule::new(schedule::Config {
@@ -998,7 +1031,7 @@ fn actual_session_schedule_config_and_bounded_ack_file_are_consumed_only_before_
     assert!(label.as_str().starts_with("NT "));
     let r = session.recorder.as_ref().unwrap();
     let token = r.schedule.as_ref().unwrap().latest().unwrap();
-    let request = serde_json::json!({"run_id":r.run_id,"token":{"ordinal":token.ordinal,"viewer_seq":token.viewer_seq,"submitted_us":token.submitted_us,"generation":token.generation,"operation":token.operation}});
+    let request = serde_json::json!({"run_id":r.run_id,"token":{"ordinal":token.ordinal,"viewer_seq":token.viewer_seq,"submitted_us":token.submitted_us,"generation":token.generation,"operation":token.operation,"auth":token.auth}});
     std::fs::write(
         dir.join("native-timing-review.json"),
         serde_json::to_vec(&request).unwrap(),

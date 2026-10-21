@@ -3,6 +3,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static EPOCH: AtomicU32 = AtomicU32::new(0);
 static WRAPPED: AtomicBool = AtomicBool::new(false);
+// Charge the actual three statics, including the sticky overflow flag. This is
+// payload accounting, not linker alignment or native process RAM.
+pub const STATIC_BYTES: usize = std::mem::size_of_val(&ENABLED)
+    + std::mem::size_of_val(&EPOCH)
+    + std::mem::size_of_val(&WRAPPED);
+const _: () = assert!(STATIC_BYTES == 6);
 pub fn enable() {
     ENABLED.store(true, SeqCst);
 }

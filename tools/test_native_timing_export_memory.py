@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 
@@ -19,6 +20,26 @@ def main():
     p=argparse.ArgumentParser()
     p.add_argument('--output',required=True,type=Path)
     args=p.parse_args();out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
+    # Fail closed when a production static is added without updating the ledger.
+    # Standalone probes, host fixtures and cfg(test) modules are not production.
+    expected={'mod.rs':['SESSION_CLAIM'],'operations.rs':['ENABLED','EPOCH','WRAPPED'],
+        'clock.rs':['ORIGIN'],'audio_producer.rs':['UNIVERSE']}
+    actual={}
+    for source in (ROOT/'src/native_timing').rglob('*.rs'):
+        if source.name in ('tests.rs','export_memory_probe.rs','host_fixture.rs'):continue
+        names=re.findall(r'\bstatic\s+(\w+)\s*:',source.read_text())
+        if names:actual[str(source.relative_to(ROOT/'src/native_timing'))]=names
+    assert actual==expected,('unaccounted production static',actual)
+    # The function-local host clock static is private. Verify its declared type
+    # matches the size_of reservation, without modifying any clock code.
+    clock=(ROOT/'src/native_timing/clock.rs').read_text()
+    assert 'static ORIGIN: OnceLock<Instant> = OnceLock::new();' in clock
+    assert 'use std::{sync::OnceLock, time::Instant};' in clock
+    (out/'static-inventory.json').write_text(json.dumps(dict(production=actual,
+        auxiliary=['operations::{ENABLED,EPOCH,WRAPPED}','two existing raw OnceLock slots'],
+        already_in_producer_bootstrap=['SESSION_CLAIM','UNIVERSE','clock::ORIGIN (host only; conservative reserve on native)'],
+        sizes='Rust size_of_val/size_of constants checked in compiled probe',
+        excluded='probe allocator and cfg(test) statics; linker padding and allocator/OS overhead unmeasured'),indent=2)+'\n')
     cargo=Path.home()/'.cargo/bin/cargo';rustc=Path.home()/'.cargo/bin/rustc'
     locked=hashlib.sha256((ROOT/'Cargo.lock').read_bytes()).hexdigest()
     command=[str(cargo),'build','--locked','--offline','--features','native_timing','--message-format=json']

@@ -4248,7 +4248,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature="native_timing")]
         if let Some(text)=timing.schedule_anchor(timing_state!()) {
             draw_rectangle(0.,0.,screen_width(),42.,BLACK);
-            draw_text(text.as_str(),4.,18.,12.,WHITE);
+            for (i,line) in text.as_str().split('\n').enumerate(){draw_text(line,4.,16.+i as f32*16.,12.,WHITE);}
         }
         #[cfg(feature = "native_timing")]
         timing.with(|r| {
