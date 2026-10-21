@@ -133,6 +133,7 @@ pub enum Milestone {
     LoadAttempt,
     LoadFailed,
     StopRequested,
+    Recovery,
 }
 #[derive(Clone, Copy, Serialize)]
 pub struct Event {

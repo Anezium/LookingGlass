@@ -1999,6 +1999,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             });
         }
         if (recover || restart || console_restart) && !in_transport {
+            #[cfg(feature = "native_timing")]
+            timing.with(|r| r.discontinuity(crate::native_timing::Milestone::Recovery, crate::native_timing::OPERATION));
             let entry = interaction::spawn(&scene.map, entry_spawn.as_deref());
             let entry = if options.larva_preview && maps[current] == "centipede1" {
                 npcs.larva_preview_start(&scene.world)?

@@ -411,3 +411,261 @@ fn bounded_host_real_clock_cost_and_disabled_control() {
     .unwrap();
     println!("HOST ONLY {value}");
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IoFault {
+    None,
+    Write,
+    Flush,
+    Sync,
+    InterruptedOnce,
+    ZeroWrite,
+}
+#[derive(Default)]
+struct IoCounts {
+    writes: usize,
+    flushes: usize,
+    syncs: usize,
+    bytes: usize,
+}
+struct ObservedFile {
+    file: std::fs::File,
+    counts: Rc<std::cell::RefCell<IoCounts>>,
+    fault: IoFault,
+    short: usize,
+}
+impl std::io::Write for ObservedFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.counts.borrow_mut().writes += 1;
+        match self.fault {
+            IoFault::Write => return Err(std::io::Error::other("underlying write failure")),
+            IoFault::ZeroWrite => return Ok(0),
+            IoFault::InterruptedOnce => {
+                self.fault = IoFault::None;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            _ => {}
+        }
+        let n = self.file.write(&bytes[..bytes.len().min(self.short)])?;
+        self.counts.borrow_mut().bytes += n;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.counts.borrow_mut().flushes += 1;
+        if self.fault == IoFault::Flush {
+            return Err(std::io::Error::other("underlying flush failure"));
+        }
+        self.file.flush()
+    }
+}
+impl export::DurableWrite for ObservedFile {
+    fn sync_all(&self) -> std::io::Result<()> {
+        let mut counts = self.counts.borrow_mut();
+        assert!(counts.flushes > 0, "sync before buffer flush");
+        counts.syncs += 1;
+        if self.fault == IoFault::Sync {
+            return Err(std::io::Error::other("underlying sync failure"));
+        }
+        self.file.sync_all()
+    }
+}
+fn observed_file(
+    path: &std::path::Path,
+    counts: Rc<std::cell::RefCell<IoCounts>>,
+    fault: IoFault,
+    short: usize,
+) -> std::io::Result<ObservedFile> {
+    Ok(ObservedFile {
+        file: std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?,
+        counts,
+        fault,
+        short,
+    })
+}
+fn verify_receipt(dir: &std::path::Path) -> (usize, serde_json::Value) {
+    use sha2::{Digest, Sha256};
+    let raw = std::fs::read(dir.join("records.json")).unwrap();
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(m["records_bytes"], raw.len());
+    assert_eq!(m["records_sha256"], format!("{:x}", Sha256::digest(&raw)));
+    assert!(serde_json::from_slice::<serde_json::Value>(&raw).is_ok());
+    (raw.len(), m)
+}
+#[test]
+fn buffered_full_capture_bounds_underlying_writes_and_preserves_exact_receipt() {
+    let (mut r, c) = fake();
+    r.metadata = Metadata {
+        source_sha256: Some([255; 32]),
+        build_sha256: Some([255; 32]),
+        game_config_sha256: Some([255; 32]),
+        startup_save_sha256: Some([255; 32]),
+        recorder_config_sha256: [255; 32],
+    };
+    r.ready("tower2", Some("Tower2_Start"), Reason::StartSave, state(60));
+    for i in 0..FRAME_CAP - 1 {
+        c.0.set(Ok(i as u64 * 10_000));
+        frame(&mut r, state(60), state(61), 0);
+    }
+    r.request_stop();
+    c.0.set(Ok(FRAME_CAP as u64 * 10_000));
+    r.begin(state(61));
+    let counts = Rc::new(std::cell::RefCell::new(IoCounts::default()));
+    let dir = r
+        .export_with(&root("buffered-full"), None, |p| {
+            observed_file(p, counts.clone(), IoFault::None, usize::MAX)
+        })
+        .unwrap();
+    let (bytes, manifest) = verify_receipt(&dir);
+    let counts = counts.borrow();
+    assert_eq!(counts.bytes, bytes);
+    // Streaming JSON tokens should coalesce into full 32KiB writes plus one tail.
+    // The +1 permits the serializer to cross a buffer boundary without growth.
+    assert!(counts.writes <= bytes.div_ceil(export::EXPORT_BUFFER) + 1);
+    assert!(
+        counts.writes < 256,
+        "unbuffered JSON token writes regressed"
+    );
+    assert_eq!((counts.flushes, counts.syncs), (1, 1));
+    assert_eq!(manifest["frame_count"], FRAME_CAP - 1);
+    assert!(std::fs::metadata(dir.join("manifest.json")).unwrap().len() < 16 * 1024);
+    assert!(r.actual_storage_bytes() + AUX_RESERVE <= BUDGET);
+    assert_eq!(export::EXPORT_BUFFER, 32 * 1024);
+    println!(
+        "HOST buffered full export bytes={bytes} underlying_writes={} buffer={} aux={AUX_RESERVE}",
+        counts.writes,
+        export::EXPORT_BUFFER
+    );
+}
+#[test]
+fn buffered_short_writes_interrupted_retry_and_tail_flush_hash_exact_bytes() {
+    use std::io::Write;
+    for (name, fault) in [
+        ("short", IoFault::None),
+        ("interrupted", IoFault::InterruptedOnce),
+    ] {
+        let path = root(&format!("buffer-{name}"));
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("payload");
+        let counts = Rc::new(std::cell::RefCell::new(IoCounts::default()));
+        let sink = observed_file(&file, counts.clone(), fault, 7).unwrap();
+        let mut writer = export::HashWriter::buffered(sink);
+        let payload = vec![173; export::EXPORT_BUFFER * 2 + 37];
+        // Exercise both short direct writes and a pending tail at finish.
+        writer.write_all(&payload).unwrap();
+        let (bytes, hash) = writer.finish().unwrap();
+        let actual = std::fs::read(file).unwrap();
+        assert_eq!(actual, payload);
+        assert_eq!(bytes, payload.len() as u64);
+        use sha2::{Digest, Sha256};
+        assert_eq!(hash, format!("{:x}", Sha256::digest(&payload)));
+        assert_eq!(counts.borrow().bytes, payload.len());
+        assert_eq!(counts.borrow().syncs, 1);
+    }
+}
+#[test]
+fn real_buffered_write_flush_and_sync_failures_never_publish_manifest() {
+    for fault in [
+        IoFault::Write,
+        IoFault::Flush,
+        IoFault::Sync,
+        IoFault::ZeroWrite,
+    ] {
+        let (mut r, _) = fake();
+        let path = root(&format!("buffer-failure-{fault:?}"));
+        let counts = Rc::new(std::cell::RefCell::new(IoCounts::default()));
+        let error = r
+            .export_with(&path, None, |p| observed_file(p, counts.clone(), fault, 19))
+            .unwrap_err();
+        let child = std::fs::read_dir(&path)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(!child.join("manifest.json").exists());
+        let counts = counts.borrow();
+        assert!(counts.writes > 0);
+        match fault {
+            IoFault::Write => {
+                assert!(error.to_string().contains("write failure"));
+                assert_eq!(counts.syncs, 0);
+            }
+            IoFault::Flush => {
+                assert!(error.to_string().contains("flush failure"));
+                assert_eq!(counts.syncs, 0);
+            }
+            IoFault::Sync => {
+                assert!(error.to_string().contains("sync failure"));
+                assert_eq!(counts.syncs, 1);
+            }
+            IoFault::ZeroWrite => {
+                assert_eq!(
+                    error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                    std::io::ErrorKind::WriteZero
+                );
+                assert_eq!(counts.syncs, 0);
+            }
+            _ => unreachable!(),
+        }
+        drop(counts);
+        // Retry preserves failed output and is explicitly cumulative/unqualified.
+        let retry = r.export(&path).unwrap();
+        assert_ne!(retry, child);
+        assert_eq!(verify_receipt(&retry).1["repeated_cumulative_export"], true);
+        assert!(child.join("records.json").exists());
+    }
+}
+#[test]
+fn recovery_invalidates_in_place_reset_without_inventing_generation() {
+    for (name, recovery_us) in [
+        ("recovery-settle", 15_000_000),
+        ("recovery-window", 25_000_000),
+    ] {
+        let (mut r, c) = fake();
+        r.ready("tower2", None, Reason::Fresh, state(0));
+        for b in (0..50_020_000).step_by(10_000) {
+            c.0.set(Ok(b));
+            r.begin(state(0));
+            r.cpu_begin();
+            r.simulation(0.01, 0.01, 0.01);
+            if b == recovery_us {
+                let operation = r.operation;
+                r.discontinuity(Milestone::Recovery, OPERATION);
+                assert_eq!(r.generation, 1);
+                assert_eq!(r.worlds.len(), 1);
+                assert_eq!(r.operation, operation + 1);
+                assert!(r.pending.unwrap().reasons & OPERATION != 0);
+            }
+            r.end(state(1), 0);
+        }
+        r.request_stop();
+        c.0.set(Ok(50_020_000));
+        r.begin(state(1));
+        r.export(&root(name)).unwrap();
+    }
+}
+#[test]
+fn postseal_event_loss_remains_explicit_and_first_menu_quit_stays_pending() {
+    let (mut r, c) = fake();
+    r.ready("tower2", None, Reason::Fresh, state(0));
+    frame(&mut r, state(0), state(1), 0);
+    r.discontinuity(Milestone::ModalEnter, MODAL);
+    r.request_stop();
+    assert!(!r.stopped);
+    assert!(r.pending.is_some());
+    // Only a real subsequent begin can seal; Quit/export cannot supply it.
+    c.0.set(Ok(1000));
+    r.begin(state(1));
+    let frame_count = r.frames.len();
+    for _ in 0..EVENT_CAP {
+        r.discontinuity(Milestone::Recovery, OPERATION);
+    }
+    assert!(r.lost_events > 0);
+    assert_eq!(r.frames.len(), frame_count);
+    assert!(r.stopped && r.pending.is_none());
+    r.export(&root("postseal-loss")).unwrap();
+}

@@ -168,7 +168,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
             f32(bits)
     previous_event = None
     kinds = {'InstallBegin','Ready','FirstPlayable','Status','ModalEnter','ModalExit','OpeningEnter','OpeningExit',
-             'EndingEnter','EndingExit','SkipComplete','TransitionBegin','LoadAttempt','LoadFailed','StopRequested'}
+             'EndingEnter','EndingExit','SkipComplete','TransitionBegin','LoadAttempt','LoadFailed','StopRequested','Recovery'}
     for i, event in enumerate(events, 1):
         need(event['ordinal'] == i and event['native_us'] is not None and event['kind'] in kinds, 'event sequence/clock/kind')
         need(event['generation'] <= len(worlds) and event['viewer_seq'] <= m['viewer_seq'] and
@@ -230,7 +230,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     playable = [e for e in events if e['kind'] == 'FirstPlayable' and e['generation'] == generation]
     need(len(playable) == 1 and playable[0]['native_us'] < settle, 'missing/late/duplicate first-playable epoch')
     # Factual simulation boundaries only. No exact simulation-age/pair claim.
-    return dict(source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', phase2_unimplemented=GAPS,
+    return dict(source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', clock_id=m['clock_id'], provenance='UNATTESTED; self-consistent hash only', phase2_unimplemented=GAPS,
         metadata_assurance=m['metadata_assurance'], native_start_us=s, native_end_us=t,
         generation=generation, world=world, N=len(population), small_sample=len(population)<120,
         selected_viewer_seq=[f['viewer_seq'] for f in population],

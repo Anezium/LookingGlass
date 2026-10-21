@@ -5,6 +5,9 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
+/// Bounded export buffer, inside AUX_RESERVE. serde_json issues one write per
+/// token; without it every token becomes a separate file write on the device.
+pub(super) const EXPORT_BUFFER: usize = 32 * 1024;
 
 pub fn hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
@@ -25,7 +28,7 @@ pub fn random_id() -> Option<[u8; 16]> {
     let mut out = [0; 16];
     #[cfg(target_os = "vita")]
     {
-        #[link(name = "SceLibRng_stub")]
+        #[link(name = "SceLibKernel_stub")]
         extern "C" {
             fn sceKernelGetRandomNumber(out: *mut u8, size: u32) -> i32;
         }
@@ -54,7 +57,9 @@ struct Snapshot<'a> {
     events: &'a [Event],
     pending: &'a Option<Frame>,
 }
-struct HashWriter<W> {
+/// The buffer is INSIDE this writer: the receipt counts exactly the prefix
+/// accepted by Write, including short writes. A failed flush/sync has no receipt.
+pub(super) struct HashWriter<W> {
     inner: W,
     hash: Sha256,
     bytes: u64,
@@ -71,6 +76,30 @@ impl<W: Write> Write for HashWriter<W> {
     }
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+pub(super) trait DurableWrite: Write {
+    fn sync_all(&self) -> io::Result<()>;
+}
+impl DurableWrite for File {
+    fn sync_all(&self) -> io::Result<()> {
+        File::sync_all(self)
+    }
+}
+impl<W: DurableWrite> HashWriter<io::BufWriter<W>> {
+    pub(super) fn buffered(inner: W) -> Self {
+        Self {
+            inner: io::BufWriter::with_capacity(EXPORT_BUFFER, inner),
+            hash: Sha256::new(),
+            bytes: 0,
+        }
+    }
+    pub(super) fn finish(mut self) -> io::Result<(u64, String)> {
+        // Flush every accepted byte, including a short final buffer, before
+        // syncing the underlying file. Drop the buffer before building metadata.
+        self.flush()?;
+        self.inner.get_ref().sync_all()?;
+        Ok((self.bytes, hex(&self.hash.finalize())))
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,6 +122,16 @@ impl<C: Source> Recorder<C> {
         root: &Path,
         fail: Option<Stage>,
     ) -> anyhow::Result<PathBuf> {
+        self.export_with(root, fail, exclusive)
+    }
+    // Same production transaction with an injectable underlying durable writer.
+    // Tests exercise real buffering, short writes and write/flush/sync failures.
+    pub(super) fn export_with<W: DurableWrite>(
+        &mut self,
+        root: &Path,
+        fail: Option<Stage>,
+        open: impl FnOnce(&Path) -> io::Result<W>,
+    ) -> anyhow::Result<PathBuf> {
         Self::inc(&mut self.export_attempts, &mut self.arithmetic_overflow);
         fs::create_dir_all(root)?;
         let run = self
@@ -103,11 +142,7 @@ impl<C: Source> Recorder<C> {
         let dir = root.join(&capture);
         // Never overwrite a previous/partial capture. Ordinal increments BEFORE IO.
         fs::create_dir(&dir)?;
-        let mut writer = HashWriter {
-            inner: exclusive(&dir.join("records.json"))?,
-            hash: Sha256::new(),
-            bytes: 0,
-        };
+        let mut writer = HashWriter::buffered(open(&dir.join("records.json"))?);
         if fail == Some(Stage::Data) {
             writer.write_all(b"{\"schema\":")?;
             anyhow::bail!("injected payload write failure");
@@ -125,10 +160,7 @@ impl<C: Source> Recorder<C> {
                 pending: &self.pending,
             },
         )?;
-        writer.flush()?;
-        writer.inner.sync_all()?;
-        let receipt_bytes = writer.bytes;
-        let receipt_sha = hex(&writer.hash.finalize());
+        let (receipt_bytes, receipt_sha) = writer.finish()?;
         if fail == Some(Stage::BeforeManifest) {
             anyhow::bail!("injected failure before manifest");
         }

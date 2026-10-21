@@ -42,8 +42,19 @@ def call(source,needle,offset=0):
     return source[start:end+1]
 
 
+HOOK='''                        #[cfg(feature = "native_timing")]
+                        timing.with(|r| r.before_install());
+'''
+REPLACE='''                        crate::transition_memory::replace(&mut scene, next.scene, "chapter-or-console", &maps[current], &maps[selected]);
+'''
+CHAPTER_ORDER=(HOOK+REPLACE,REPLACE+HOOK)
+
+
 def main():
     source=(ROOT/'src/viewer.rs').read_text()
+    if os.environ.get('ALICE_TIMING_HOOK_MUTANT')=='chapter-order':
+        assert source.count(CHAPTER_ORDER[0])==1
+        source=source.replace(*CHAPTER_ORDER)
     profile=(ROOT/'src/frame_profile.rs').read_text()
     OUT.mkdir(parents=True,exist_ok=False)
     extracted={name:macro(source,name) for name in ('timing_state','timing_ready','timing_install_reason','install_loaded_scene')}
@@ -65,9 +76,33 @@ def main():
     assert run.count('crate::transition_memory::replace(')==3
     assert run.count('timing_ready!(')==4
     assert 'apply_loaded!(restored, false, retry)' in run
-    for assignment,ready in [('scene = load_scene(',fresh),('"chapter-or-console", &maps[current]',chapter),('"natural-exit", &maps[current]',natural)]:
-        a=run.index(assignment);b=run.index(ready,a)
-        assert run.rfind(before,0,a)>=0 and b>a
+    # Exact per-site static contracts. Each slice starts at its own branch/macro,
+    # so no preceding install can satisfy another site's invalidation assertion.
+    loaded=macro(source,'apply_loaded')
+    sites={
+        'Fresh':(run[run.index('    } else {',run.index('apply_loaded!(prepared.unwrap()')):run.index(fresh)+len(fresh)],'scene = load_scene(',fresh),
+        'ChapterOrConsole':(run[run.index('                    Ok(next) => {'):run.index(chapter)+len(chapter)],'crate::transition_memory::replace(',chapter),
+        'Natural':(run[run.index('                Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {'):run.index(natural)+len(natural)],'crate::transition_memory::replace(',natural),
+        'StartSave':(loaded,'current = maps',restore),
+        'Load':(loaded,'current = maps',restore),
+        'Retry':(loaded,'current = maps',restore),
+    }
+    site_contracts={}
+    for reason,(site,mutation,ready) in sites.items():
+        assert site.count(before)==1 and site.count(ready)==1, reason
+        if os.environ.get('ALICE_TIMING_HOOK_MUTANT')!='chapter-order':
+            assert site.index(before)<site.index(mutation)<site.index(ready), reason
+        site_contracts[reason]=dict(before=site.index(before),first_mutation=site.index(mutation),ready=site.index(ready))
+    # apply_loaded invalidates before changing current, then installs resources
+    # and observes ready after input suppression/last state assignment.
+    assert loaded.index(before)<loaded.index('current = maps')<loaded.index('install_loaded_scene!($install')<loaded.index('save_frame.clear();')<loaded.index(restore)
+    assert 'apply_loaded!(prepared.unwrap(), pause_on_load, initial)' in run
+    assert 'apply_loaded!(restored);' in run and 'apply_loaded!(restored, false, retry)' in run
+    # Pin the actual Recovery branch and its first statement before ANY live reset.
+    recovery_start=source.index('        if (recover || restart || console_restart) && !in_transport {')
+    recovery_site=source[recovery_start:balanced(source,source.index('{',recovery_start),'{','}')]
+    recovery=call(recovery_site,'timing.with(|r| r.discontinuity(crate::native_timing::Milestone::Recovery')
+    assert recovery_site.index(recovery)<recovery_site.index('let entry = interaction::spawn(')<recovery_site.index('recovery.clear();')<recovery_site.index('player = restored;')
     # Exact production legacy ID bookkeeping is also compiled/executed on host.
     tls=profile[profile.index('thread_local! { static NATIVE_MEASURED:'):]
     tls=tls[:tls.index('\n#[cfg(')]
@@ -98,9 +133,12 @@ fn main(){
  let pos=V{x:1.,y:2.,z:3.};let yaw=0.3f32;let pitch=-0.2f32;let mut scene:i32;
 MACROS
 INSTALLS
- assert_eq!(REPLACES.load(Ordering::Relaxed),5);assert_eq!(scene,6);
+ assert_eq!(REPLACES.load(Ordering::Relaxed),4);assert_eq!(scene,6);
  let generation=timing.r.generation;FAILED
  assert_eq!(generation,timing.r.generation); // actual failed hook never installs
+ // Isolate interval/eligibility checks from install-order probes above.
+ timing=TestSession{r:Recorder::new(Fake{now:0},Some([5;16]),Metadata::default())};
+ timing.r.ready("tower2",None,Reason::Fresh,State::default());
  let mut paused=false;let mut focused=true;let mut menu=false;let inventory_menu=false;
  let console_input=false;let mut simulate=true;let skip_id:Option<u8>=None;
  let pand_cinematic=false;let scripted_camera:Option<u8>=None;
@@ -120,6 +158,12 @@ INSTALLS
    if index==4{assert!(row.reasons&FROZEN_SIM!=0)}
    assert_eq!(row.simulation.unwrap().dt_bits,(if simulate {0.05f32}else{0.}).to_bits());
  }
+ let old_generation=timing.r.generation;let old_operation=timing.r.operation;
+ RECOVERY
+ assert_eq!(timing.r.generation,old_generation);
+ assert_eq!(timing.r.operation,old_operation+1);
+ assert!(timing.r.pending.unwrap().reasons&OPERATION!=0);
+ assert!(matches!(timing.r.events.last().unwrap().kind,Milestone::Recovery));
  HOOK_SKIP HOOK_MODAL
  assert!(timing.r.pending.unwrap().reasons&(SKIP|MODAL|OPERATION)!=0);
  assert!(!timing.r.stopped);timing.r.clock.source.now=9000;BEGIN
@@ -134,17 +178,24 @@ INSTALLS
 }
 '''
     installs=[]
-    for index,(reason,ready) in enumerate([('Fresh',fresh),('StartSave',restore.replace('$install','initial')),
-        ('Load',restore.replace('$install','replace')),('Retry',restore.replace('$install','retry')),
-        ('ChapterOrConsole',chapter),('Natural',natural)],1):
-        action='install_loaded_scene!(initial, 11, &maps[current], &maps[current]);' if index==1 else 'install_loaded_scene!('+('retry' if reason=='Retry' else 'replace')+', '+str(index)+', &maps[current], &maps[current]);'
-        installs.append(before+action+ready+f'assert_eq!(timing.r.generation,{index});assert_eq!(timing.r.worlds.last().unwrap().baseline.physics_ticks,47);')
+    for index,reason in enumerate(['Fresh','StartSave','Load','Retry','ChapterOrConsole','Natural'],1):
+        site,mutation,ready=sites[reason]
+        if reason in ('StartSave','Load','Retry'):
+            mode={'StartSave':'initial','Load':'replace','Retry':'retry'}[reason]
+            ready=ready.replace('$install',mode)
+        else:
+            mode='initial' if reason=='Fresh' else 'replace'
+        action=f'install_loaded_scene!({mode}, {index}, &maps[current], &maps[current]);'
+        # Execute actual source hook ORDER, replacing only game mutation/resource
+        # work with a stub that checks the recorder BEFORE changing the scene.
+        tokens=[(site.index(before),before),(site.index(mutation),f'assert!(timing.r.pending.unwrap().reasons & (INSTALL|OPERATION)==(INSTALL|OPERATION), "{reason} mutation before invalidation");'+action+f'environment_clock={index}.25;'),(site.index(sites[reason][2]),ready)]
+        installs.append(f'timing.r.clock.source.now={index}*100;timing.r.begin(State::default());'+''.join(text for _,text in sorted(tokens))+f'assert_eq!(timing.r.generation,{index});assert_eq!(timing.r.worlds.last().unwrap().baseline.environment_bits,({index}.25f32).to_bits());assert_eq!(timing.r.worlds.last().unwrap().baseline.physics_ticks,47);')
     dt=re.search(r'let dt = if simulate \{ elapsed\.clamp\(0\., 0\.05\) \} else \{ 0\. \};',source).group()
     worlddt='let world_dt = stats.powers.world_dt(dt);'
     assert worlddt in source
     values={'MODULE':str(ROOT/'src/native_timing/mod.rs'),'TLS':tls,'GETTER':getter,'MACROS':'\n'.join(extracted.values()),
         'INSTALLS':'\n'.join(installs),'FAILED':failed,'BEGIN':begin,'CPU':cpu,'DT':dt,'WORLD_DT':worlddt,
-        'SIMULATION':simulation,'END':end,'HOOK_SKIP':skip,'HOOK_MODAL':modal,'LIGHT':light,'FULL':full}
+        'SIMULATION':simulation,'END':end,'RECOVERY':recovery,'HOOK_SKIP':skip,'HOOK_MODAL':modal,'LIGHT':light,'FULL':full}
     code=re.sub(r'\b('+'|'.join(values)+r')\b',lambda m:values[m.group()],code)
     mutant=os.environ.get('ALICE_TIMING_HOOK_MUTANT')
     if mutant=='retry-ready':
@@ -153,10 +204,12 @@ INSTALLS
         code=code.replace('if paused { reasons |= nt::PAUSED; }','')
     elif mutant=='dt-cap':
         code=code.replace('elapsed.clamp(0., 0.05)','elapsed.clamp(0., 0.5)')
+    elif mutant=='chapter-order':
+        pass  # actual extracted order is compiled; mutation must fail semantically
     elif mutant:
         raise ValueError('unknown mutant')
     src=OUT/'hooks.rs';src.write_text(code)
-    target=ROOT/'target/debug'
+    target=Path(os.environ.get('CARGO_TARGET_DIR',str(ROOT/'target')))/'debug'
     files=list(target.rglob('*.rlib'))+list(target.rglob('*.dylib'))
     cmd=[str(Path.home()/'.cargo/bin/rustc'),'--edition=2021','--cfg','feature="native_timing"',str(src),'-o',str(OUT/'hooks')]
     for parent in sorted({str(p.parent) for p in files}):cmd+=['-L','dependency='+parent]
@@ -172,7 +225,7 @@ INSTALLS
     if result.returncode:raise RuntimeError(result.stdout+result.stderr)
     (OUT/'source-evidence.json').write_text(json.dumps({'viewer_sha256':hashlib.sha256(source.encode()).hexdigest(),
         'frame_profile_sha256':hashlib.sha256(profile.encode()).hexdigest(),'generated_harness_sha256':hashlib.sha256(code.encode()).hexdigest(),
-        'extracted_macros':list(extracted),'compiled_executed':True,'scope':'actual hook text with game stubs, not full rendered/asset/device playthrough'},indent=2)+'\n')
+        'extracted_macros':list(extracted),'per_site_order':site_contracts,'recovery_hook':recovery,'compiled_executed':True,'scope':'actual hook text with game stubs, not full rendered/asset/device playthrough'},indent=2)+'\n')
     print(result.stdout,end='')
 
 if __name__=='__main__':main()
