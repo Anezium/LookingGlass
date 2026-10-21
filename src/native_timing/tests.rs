@@ -755,11 +755,29 @@ mod producer_fixture;
 #[test]
 fn requested_rows_and_complete_producer_journal_use_actual_export_transaction() {
     use audio_producer::*;
-    for (name, span) in [("audio-exact", 1_000_000u64), ("audio-straddle", 3_000_000)] {
+    let ramp20: Vec<f64> = (0..20).map(|i| 1.0 + i as f64 * 0.25).collect();
+    let ramp21: Vec<f64> = (0..21).map(|i| i as f64 * 0.25).collect();
+    let mut high95 = vec![1.0; 18];
+    high95.extend([9.0, 9.5]);
+    let mut highmax = vec![1.0; 20];
+    highmax.push(9.0);
+    let zeros: Vec<f64> = (0..20)
+        .map(|i| if i % 2 == 0 { 0.0 } else { -0.0 })
+        .collect();
+    for (name, span, values, quantiles, raw) in [
+        ("audio-exact", 1_000_000u64, vec![6.0], [6.0; 3], true),
+        ("audio-straddle", 3_000_000, vec![6.0], [6.0; 3], true),
+        ("audio-n20-index", 3_000_000, ramp20, [3.5, 5.5, 5.75], true),
+        ("audio-n21-index", 3_000_000, ramp21, [2.5, 4.75, 5.0], true),
+        ("audio-p95-fail", 3_000_000, high95, [1.0, 9.0, 9.5], true),
+        ("audio-max-pass", 3_000_000, highmax, [1.0, 1.0, 9.0], true),
+        ("audio-signed-zero", 3_000_000, zeros, [0.0; 3], true),
+        ("audio-no-raw", 3_000_000, vec![6.0], [6.0; 3], false),
+    ] {
         let (mut r, c) = fake();
         let pcm = std::sync::OnceLock::new();
         let music = std::sync::OnceLock::new();
-        r.raw_requested = true;
+        r.raw_requested = raw;
         r.bind_raw_counters(Some(&pcm), Some(&music));
         let (mut owner, mut journal, f, _) = producer_fixture::setup();
         owner.request_start(Some(1_000_000));
@@ -767,18 +785,21 @@ fn requested_rows_and_complete_producer_journal_use_actual_export_transaction() 
         journal.poll();
         let mut b = 1_000_000;
         while b + span < 59_000_000 {
-            f.0.set(Ok(b + 10));
-            let begin = journal.block_begin();
-            f.0.set(Ok(b + span - 10));
-            journal.block_end(begin, 6.0);
+            let step = span / (values.len() as u64 + 1);
+            for (i, value) in values.iter().enumerate() {
+                f.0.set(Ok(b + 1 + i as u64 * step));
+                let begin = journal.block_begin();
+                f.0.set(Ok(b + (i as u64 + 1) * step));
+                journal.block_end(begin, *value);
+            }
             f.0.set(Ok(b + span));
             let cut = journal.legacy_begin();
             f.0.set(Ok(b + span + 1));
             journal.legacy_end(
                 cut,
                 audio_types::Window {
-                    blocks: 1,
-                    mix: [6.; 3],
+                    blocks: values.len(),
+                    mix: quantiles,
                     ..Default::default()
                 },
                 true,
@@ -796,6 +817,16 @@ fn requested_rows_and_complete_producer_journal_use_actual_export_transaction() 
         owner.collect(std::time::Duration::ZERO);
         owner.freeze();
         assert_eq!(owner.status, "Delivered");
+        for fence in &owner.completed.as_ref().unwrap().buffers.fences {
+            if fence.legacy_id != 0 {
+                assert_eq!(fence.n as usize, values.len());
+                assert_eq!(
+                    fence.quantile_ms_bits,
+                    quantiles.map(f64::to_bits),
+                    "explicit fixture order statistics"
+                );
+            }
+        }
         owner.associate_counters(r.raw_counters.as_ref());
         r.audio_producer = Some(Box::new(owner));
         r.ready("tower2", None, Reason::Fresh, state(0));

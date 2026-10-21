@@ -59,7 +59,9 @@ or an active voice, so zero can be vacuous.
 The optional schema extension carries raw bindings, snapshots, per-field lifetime,
 width, activation brackets, counts, capacities, sizes and shared allocation bytes.
 It is covered by the payload hash and manifest storage receipt. Absence remains
-explicit PHASE2A UNIMPLEMENTED. The offline checker validates strict keys/types,
+explicit; with producer data and no raw section, both raw-zero gates are UNKNOWN
+with a reason that raw counters were not captured. Without either section,
+PHASE2A remains UNIMPLEMENTED. The offline checker validates strict keys/types,
 file order, identities, brackets, dimensions and counter monotonicity. It uses only
 the prescribed Binding/AfterViewer pair, retaining every Requested snapshot.
 For each field, before.post<=S and after.pre>=T with same lifetime/no fault and
@@ -67,8 +69,10 @@ delta0 proves zero over a **containing superset** of W. Positive surrounding del
 is FAIL; the exact positive count inside W stays UNKNOWN. Missing coverage is
 UNKNOWN. No selection of favorable counters, interpolation or gap repair occurs.
 `audio_qualified` and `campaign_qualified` are always false, including raw-zero.
-The phase1 gaps list deliberately retains the full raw-bracket/audio-fence stage:
-these partial reads do not close the complete audio capture contract.
+The manifest gaps list follows actual sections: a raw section removes
+`raw-counter-brackets`; a producer section removes `audio-producer-fences`.
+Counter-only still lacks producer fences, while producer-only lacks raw brackets.
+This inventory does not close raw-zero, full audio qualification or Phase2B.
 
 The new inline capture fields are included in Recorder layout; snapshot capacity
 and two shared Raw allocations (including Arc strong/weak headers) are included

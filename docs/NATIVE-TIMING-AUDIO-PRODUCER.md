@@ -16,13 +16,24 @@ Producer consumption has its own later timestamp. This is an implemented viewer
 path, not a native-age scheduler. Explicit prepare/start/seal APIs support a
 future caller; they do not implement Phase 2B. Load/menu/prelude time can exhaust
 the journal. Capacity exhaustion rejects rather than trims, overwrites or grows.
+The current journal spans the whole viewer session, from the first Recorder begin
+through Quit/export, even after the phase1 frame recorder has sealed. At 44.1kHz,
+8191 usable block rows cover about 95.1 seconds; the separate usable fence limit
+is 127 rows (about 127 seconds with nominal one-second cuts). These are independent
+limits. A long session sets LOSS. The strict `check_capture` rejects the entire
+capture when producer validation is Invalid, including an otherwise usable
+phase1 frame population. This coupling is a current limitation. Changing journal
+scheduling or separating verdicts belongs to a future stage.
 
 ## Lifetimes and ownership
 
 Feature builds observe mixer identity creation in the actual mixer constructor,
 a separate worker ordinal/spawn-request metadata bracket, and actual producer
 thread entry/policy. A spawn request is not a created thread or hardware-output
-start. Binding, attachment and start consumption are distinct observations.
+start. The `worker_spawn_request` bracket surrounds early ordinal allocation at
+buffered-body entry, before PCM prefill and reporter creation; it does not bracket
+the later Builder::spawn call. Binding, attachment and start consumption are
+distinct observations.
 Counter UUIDs identify counter activation lifetimes, not mixer/worker lifetimes.
 No pre-binding producer blocks, reports or raw events are reconstructed.
 
@@ -97,13 +108,18 @@ real WorkerStop is a distinct reason. Loop closure precedes source destructors
 and is not OS thread return, decoder stop or physical-output stop. Main records
 producer join outcome only after joining. Reporter closure/panic and reporter
 join outcome are also distinct. Export usually precedes these later joins; it
-cannot claim future stop facts or append them retroactively.
+cannot claim future stop facts or append them retroactively. Checker output
+`thread_returned` is UNKNOWN until a successful join proves return; absence of a
+join does not prove that the thread has not returned.
 
 The reporter now acquires producer_done and then drains. Playback stop alone
 cannot end it. Producer_done is published after the last legacy emit attempt and
 diagnostic close/abort, including unwind and policy rejection. A producer spawn
 failure closes and joins the already-created reporter before returning the error.
 No new reporter, playback restart, gain/fade/epoch or queue policy is introduced.
+This final reporter drain correction also applies to feature-off builds.
+The collect wait can delay the existing exit AutoSave by up to two seconds plus
+OS scheduling overshoot, before export IO itself. Forced close can lose that save.
 
 ## Storage and observer cost
 
@@ -119,13 +135,15 @@ All capacities are checked/reported. The existing producer stack is 1MiB; no new
 thread stack is allocated. The reservation conservatively charges a whole 32KiB
 host worker-test stack plus measured inline and allocated types. The actual host
 worker test requested 16KiB and queried 28,672 bytes. Native stack behavior remains
-untested. Small metadata remains reserved even for a producer-disabled recorder.
+untested. The 32KiB reserve is an accounting charge, not an additional stack
+allocation or a measurement of incremental observer stack usage. Small metadata
+remains reserved even for a producer-disabled recorder.
 The historical `allocated_storage_bytes` field includes these explicit reserves.
 
 The committed memory runner fills 6143 frames, 127 worlds, 511 events, all raw
 slots, 8191 blocks, 127 fences and 127 legacy rows. Actual production exporter
-opt0/2 host runs measured 33,360 bytes peak requested export heap plus the entire
-28,672-byte export-thread stack and 32 raw-slot bytes: 62,064 <=65,536. Total
+opt0/2 host runs measured 33,340 bytes peak requested export heap plus the entire
+28,672-byte export-thread stack and 32 raw-slot bytes: 62,044 <=65,536. Total
 reservation with the probe's clock was 2,058,669 <=2,097,152. The unchanged 32KiB
 buffer is released before the small manifest is built. Measurements are path
 and host dependent; allocator bookkeeping, OS/thread runtime, process RSS, actual
@@ -155,7 +173,15 @@ quantile bits. It checks identity/lifetimes, policy, exact contiguity/endpoints,
 counts, loss, saturation, partials and bounded dimensions. It selects ALL fences
 with `begin<T && end>S`, including both boundaries, requires gapless W coverage,
 each N>0 and each p95<=8.0ms (8000us). There is no pooled or game-frame p95.
-`native_audio_data_complete` means structural/unattested data only. Audio,
+`native_audio_data_complete` means structural/unattested producer data only.
+With producer capture enabled and raw counters disabled, each raw-zero gate is
+UNKNOWN with an explicit absence reason. The manifest's `phase2_unimplemented`
+list follows actual sections: counter-only has raw brackets but no producer
+fences; producer-only has producer fences but no raw brackets. This is a section
+inventory, not raw-zero qualification or Phase2B scheduling. The legacy
+`audio_qualification: UNIMPLEMENTED` key describes full qualification; it does
+not deny the available structural producer data. Physical output, decoder stop
+and route activity remain UNKNOWN. Audio,
 method and campaign qualification remain false. Phase1 and counter-only formats
 remain explicitly distinct. `python3 -I` loads trusted sibling checker modules
 from the checker's own directory; malformed data still fails closed.

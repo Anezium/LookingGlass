@@ -18,7 +18,9 @@ if __name__ == "__main__":
 SCHEMA = 'alice-native-phase1-v1'
 GAPS = ['audio-producer-fences', 'raw-counter-brackets', 'image-tokens', 'review-ack',
         'native-age-automation', 'pair-equivalence', 'complete-qualification']
-GAPS_AUDIO = GAPS[2:]
+def gaps(producer, raw):
+    return [g for g in GAPS if not ((g == 'audio-producer-fences' and producer) or
+                                  (g == 'raw-counter-brackets' and raw))]
 U64 = 2**64 - 1
 MASK = 2**14 - 1
 
@@ -140,7 +142,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
         repeated_cumulative_export=boolean,
         swap_observations=literal('UNAVAILABLE; never estimated from wall minus CPU'),
         door_observations=literal('UNIMPLEMENTED per-frame; legacy door chunks remain separate/unjoined'),
-        phase2_unimplemented=literal(GAPS_AUDIO if "audio_producer_storage_bytes" in m else GAPS), campaign_qualified=literal(False))
+        phase2_unimplemented=literal(gaps("audio_producer_storage_bytes" in m, "raw_counter_storage_bytes" in m)), campaign_qualified=literal(False))
     if "raw_counter_storage_bytes" in m: mf["raw_counter_storage_bytes"] = uint
     if "audio_producer_storage_bytes" in m: mf["audio_producer_storage_bytes"] = uint
     if "producer_bootstrap_reserve_bytes" in m: mf["producer_bootstrap_reserve_bytes"] = uint
@@ -261,6 +263,8 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     producer = None
     if "audio_producer_storage_bytes" in m:
         producer=sibling("native_timing_audio_check").validate(d['audio_producer'],m,s,t,d.get('raw_counters'))
+        if raw_guards is None:
+            raw_guards={f:dict(guard='UNKNOWN',reason='raw counters not captured; raw-zero gate unavailable') for f in ('PcmStarvedBlocks','MusicUnderrunFrames')}
     # Factual simulation boundaries only. No exact simulation-age/pair claim.
     return dict(native_audio_data_complete=producer is not None, producer_observations=producer, method_qualified=False, route_activity="UNKNOWN; binding does not prove mix/music controls, eligible decode-ahead, job admission, ring or active voice; zero may be vacuous", phase2a_status="PRODUCER_OBSERVATIONS_UNATTESTED" if producer is not None else ("PARTIAL_COUNTERS_ONLY_UNQUALIFIED" if raw_guards is not None else "UNIMPLEMENTED"), raw_counter_guards=raw_guards, audio_qualified=False, source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', clock_id=m['clock_id'], provenance='UNATTESTED; self-consistent hash only', phase2_unimplemented=m["phase2_unimplemented"],
         metadata_assurance=m['metadata_assurance'], native_start_us=s, native_end_us=t,

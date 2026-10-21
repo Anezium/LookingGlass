@@ -31,7 +31,7 @@ class ActualCounterTests(unittest.TestCase):
         self.assertEqual(r['phase2a_status'],'PARTIAL_COUNTERS_ONLY_UNQUALIFIED')
         self.assertFalse(r['audio_qualified']);self.assertFalse(r['campaign_qualified'])
         for row in r['raw_counter_guards'].values():self.assertEqual(row['guard'],'ZERO_ON_CONTAINING_SUPERSET')
-        self.assertIn('audio-producer-fences',r['phase2_unimplemented'])
+        self.assertIn('audio-producer-fences',r['phase2_unimplemented']);self.assertNotIn('raw-counter-brackets',r['phase2_unimplemented'])
     def test_positive_surrounding_delta_fails_exact_inside_count_unknown(self):
         r=self.checked(self.root/'raw-positive'/self.name)
         pcm=r['raw_counter_guards']['PcmStarvedBlocks']
@@ -115,6 +115,15 @@ class RequestedCounterTests(unittest.TestCase):
     def test_requested_monotone(self):self.modified(lambda m,d:d['raw_counters']['snapshots'][4].update(value=2),'counter reset/wrap')
     def test_binding_unique(self):self.modified(lambda m,d:d['raw_counters']['snapshots'][2].update(tag='Binding'),'counter binding snapshot order')
     def test_final_last(self):self.modified(lambda m,d:d['raw_counters']['snapshots'][4].update(tag='AfterViewer'),'counter final snapshot order')
+    def test_unique_afterviewer_followed_by_requested_is_rejected(self):
+        def edit(m,d):
+            rows=d['raw_counters']['snapshots']
+            # Exactly ONE final row per field: only the last-position clause
+            # rejects this order; duplicate-final detection cannot mask it.
+            for row in rows:
+                if row['tag']=='AfterViewer':row['tag']='Requested'
+            rows[4]['tag']='AfterViewer'
+        self.modified(edit,'counter final snapshot order')
     def test_activation_order(self):self.modified(lambda m,d:d['raw_counters']['pcm'].update(activation_post_us=1),'counter missing/backward bracket')
 
 if __name__=='__main__':unittest.main(verbosity=2)

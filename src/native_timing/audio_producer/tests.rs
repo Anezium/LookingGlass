@@ -213,6 +213,11 @@ fn duplicate_admission_and_topology_changes_never_allocate_second_buffers() {
     o.request_start(Some(1));
     f.0.set(Ok(2));
     j.poll();
+    assert_ne!(
+        j.receipt.flags & TOPOLOGY,
+        0,
+        "Start must reject changed topology before close"
+    );
     f.0.set(Ok(3));
     finish(&mut o, &mut j, &f);
     assert_ne!(o.completed.unwrap().receipt.flags & TOPOLOGY, 0);
@@ -463,4 +468,186 @@ fn start_publication_failure_and_combined_start_seal_remain_unqualified() {
     let d = o.completed.unwrap();
     assert!(d.receipt.no_residual_interval);
     assert!(d.buffers.fences.is_empty());
+}
+
+// Ownership and lifecycle regressions.
+thread_local! {
+    /// Test seam: runs once between collect's terminal load and its closure load.
+    pub static COLLECT_GAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+#[test]
+fn delivery_between_terminal_and_closure_loads_stays_delivered() {
+    let (mut o, mut j, f, b) = setup();
+    o.request_start(Some(1));
+    f.0.set(Ok(2));
+    j.poll();
+    f.0.set(Ok(3));
+    let blk = j.block_begin();
+    f.0.set(Ok(4));
+    j.block_end(blk, 1.0);
+    f.0.set(Ok(5));
+    COLLECT_GAP.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            // Production WorkerStop order: deliver, then close the loop.
+            j.close("WorkerStop");
+            b.close(1);
+        }))
+    });
+    o.collect(Duration::from_millis(50));
+    assert_eq!(
+        o.status, "Delivered",
+        "delivered capture misreported as never attached"
+    );
+    assert_eq!(o.completed.as_ref().unwrap().receipt.reason, "WorkerStop");
+}
+#[test]
+fn terminal_is_pending_whenever_the_completed_push_begins() {
+    let (mut o, mut j, f, _) = setup();
+    o.request_start(Some(1));
+    f.0.set(Ok(2));
+    j.poll();
+    f.0.set(Ok(3));
+    let control = o.control.as_ref().unwrap().clone();
+    let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+    let record = seen.clone();
+    queue::PUSH_OBSERVER.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            record.set(Some(control.terminal.load(Acquire)))
+        }))
+    });
+    finish(&mut o, &mut j, &f);
+    queue::PUSH_OBSERVER.with(|h| *h.borrow_mut() = None);
+    assert_eq!(
+        seen.get(),
+        Some(PENDING),
+        "ack published before the complete bundle push"
+    );
+    assert_eq!(o.status, "Delivered");
+}
+#[test]
+fn topology_replacement_after_start_is_flagged_at_close() {
+    let (mut o, mut j, f, b) = setup();
+    o.request_start(Some(1));
+    f.0.set(Ok(2));
+    j.poll();
+    assert_eq!(j.receipt.flags & TOPOLOGY, 0);
+    let other = AudioState::mixer(b.universe);
+    other.mixer_dropped();
+    f.0.set(Ok(3));
+    finish(&mut o, &mut j, &f);
+    assert_ne!(
+        o.completed.unwrap().receipt.flags & TOPOLOGY,
+        0,
+        "replacement after Start must stay invalid"
+    );
+}
+#[test]
+fn delivered_bundle_with_mismatched_published_summary_is_protocol_failure() {
+    let (mut o, mut j, f, _) = setup();
+    o.request_start(Some(1));
+    f.0.set(Ok(2));
+    j.poll();
+    f.0.set(Ok(3));
+    let blk = j.block_begin();
+    f.0.set(Ok(4));
+    j.block_end(blk, 1.0);
+    f.0.set(Ok(5));
+    let mut c = Checked::new(f.clone());
+    o.request_seal(&mut c);
+    j.poll();
+    o.control.as_ref().unwrap().final_blocks.store(99, Relaxed);
+    o.collect(Duration::ZERO);
+    assert_eq!(
+        o.status, "ProtocolFailure",
+        "main must validate counts against the published summary"
+    );
+    assert!(o.completed.is_some());
+}
+#[test]
+fn equal_timestamp_cuts_fail_closed_without_clock_fault() {
+    let (mut o, mut j, f, _) = setup();
+    o.request_start(Some(1));
+    f.0.set(Ok(2));
+    j.poll();
+    let cut = j.legacy_begin();
+    j.legacy_end(cut, Window::default(), true);
+    f.0.set(Ok(3));
+    finish(&mut o, &mut j, &f);
+    let r = o.completed.unwrap().receipt;
+    assert!(r.clock_fault.is_none());
+    assert_ne!(
+        r.flags & RESOLUTION,
+        0,
+        "zero-width legacy cut must be explicit"
+    );
+    let (mut o, mut j, f, _) = setup();
+    o.request_start(Some(1));
+    f.0.set(Ok(2));
+    j.poll();
+    let blk = j.block_begin();
+    j.block_end(blk, 1.0);
+    f.0.set(Ok(3));
+    finish(&mut o, &mut j, &f);
+    let r = o.completed.unwrap().receipt;
+    assert!(r.clock_fault.is_none());
+    assert_ne!(
+        r.flags & RESOLUTION,
+        0,
+        "completion at the interval begin must be explicit"
+    );
+}
+
+#[test]
+fn equal_completion_at_begin_is_flagged_before_any_fence() {
+    let (mut o, mut j, f, _) = setup();
+    o.request_start(Some(1));
+    f.0.set(Ok(2));
+    j.poll();
+    let b = j.block_begin();
+    j.block_end(b, 1.0);
+    assert!(j.clock.fault.is_none());
+    assert_eq!(
+        j.receipt.flags, RESOLUTION,
+        "equal completion must be flagged at block completion"
+    );
+}
+#[test]
+fn injected_invalid_membership_is_a_separate_defense_in_depth() {
+    let (mut o, mut j, f, _) = setup();
+    o.request_start(Some(1));
+    f.0.set(Ok(2));
+    j.poll();
+    // Directly inject an invalid row to isolate the fence defense. Normal
+    // block_end already flags this, so this is not a separate lifecycle defect.
+    j.active.as_mut().unwrap().buffers.blocks.push(Block {
+        begin_us: 2,
+        end_us: 2,
+        total_ms_bits: 1.0f64.to_bits(),
+    });
+    f.0.set(Ok(3));
+    j.legacy_begin();
+    assert!(j.clock.fault.is_none());
+    assert_eq!(
+        j.receipt.flags, RESOLUTION,
+        "fence must independently reject invalid membership"
+    );
+}
+#[test]
+fn injected_nonfinite_totals_fail_closed_defense_in_depth() {
+    // Instant::elapsed cannot produce these. This tests the hook's protocol
+    // defense, not a reachable production clock/lifecycle failure.
+    for value in [f64::NAN, f64::INFINITY, -1.0] {
+        let (mut o, mut j, f, _) = setup();
+        o.request_start(Some(1));
+        f.0.set(Ok(2));
+        j.poll();
+        f.0.set(Ok(3));
+        let b = j.block_begin();
+        f.0.set(Ok(4));
+        j.block_end(b, value);
+        assert_eq!(
+            j.receipt.flags, PROTOCOL,
+            "invalid injected total must flag protocol"
+        );
+    }
 }

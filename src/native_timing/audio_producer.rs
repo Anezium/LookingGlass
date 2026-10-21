@@ -642,7 +642,17 @@ impl Owner {
                 }
                 break;
             }
+            #[cfg(test)]
+            if let Some(hook) = tests::COLLECT_GAP.with(|h| h.borrow_mut().take()) {
+                hook();
+            }
             if self.bootstrap.as_ref().unwrap().loop_closed.load(Acquire) {
+                // Every producer exit publishes terminal before loop closure's
+                // Release. A delivery/abort between these loads must retain its
+                // actual terminal classification after this Acquire.
+                if c.terminal.load(Acquire) != PENDING {
+                    continue;
+                }
                 self.status = "NoAttachment";
                 break;
             }

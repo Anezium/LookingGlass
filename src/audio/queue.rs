@@ -50,8 +50,15 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         },
     )
 }
+#[cfg(test)]
+thread_local! {
+    /// Test-only observer run at the start of every push on this thread.
+    pub static PUSH_OBSERVER: std::cell::RefCell<Option<Box<dyn FnMut()>>> = std::cell::RefCell::new(None);
+}
 impl<T> Sender<T> {
     pub fn push(&self, value: T) -> Result<(), T> {
+        #[cfg(test)]
+        PUSH_OBSERVER.with(|o| if let Some(f) = o.borrow_mut().as_mut() { f() });
         let write = self.shared.write.load(Ordering::Relaxed);
         let read = self.shared.read.load(Ordering::Acquire);
         if write.wrapping_sub(read) >= self.shared.slots.len() {

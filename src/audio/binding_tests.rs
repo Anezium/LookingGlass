@@ -175,7 +175,33 @@ fn actual_audio_session_begin_and_export_request_real_worker_capture() -> Result
     let mut timing = session(true);
     timing.recorder.as_mut().unwrap().producer_requested = true;
     audio.bind_native_counters(&mut timing);
+    assert_eq!(
+        timing
+            .recorder
+            .as_ref()
+            .unwrap()
+            .audio_producer
+            .as_ref()
+            .unwrap()
+            .control
+            .as_ref()
+            .unwrap()
+            .request
+            .load(std::sync::atomic::Ordering::Acquire)
+            & crate::native_timing::audio_producer::START,
+        0,
+        "binding alone must not request producer start"
+    );
     timing.with(|r| r.begin(crate::native_timing::State::default()));
+    {
+        let r = timing.recorder.as_ref().unwrap();
+        let c = r.audio_producer.as_ref().unwrap().control.as_ref().unwrap();
+        assert_eq!(
+            Some(c.start_us.load(std::sync::atomic::Ordering::Relaxed)),
+            r.pending.as_ref().unwrap().begin_us,
+            "start must reuse the first begin timestamp"
+        );
+    }
     assert!(
         timing
             .recorder
@@ -222,6 +248,16 @@ fn actual_audio_session_begin_and_export_request_real_worker_capture() -> Result
         .snapshots
         .iter()
         .any(|row| row.tag == crate::native_timing::audio_counters::Tag::AfterViewer));
+    let seal_post = owner.seal.unwrap().post_us.unwrap();
+    assert!(
+        raw.snapshots
+            .iter()
+            .filter(|row| row.tag == crate::native_timing::audio_counters::Tag::AfterViewer)
+            .all(|row| row.pre_us.unwrap() >= seal_post
+                && row.pre_us.unwrap()
+                    >= owner.completed.as_ref().unwrap().receipt.final_us.unwrap()),
+        "AfterViewer reads must follow seal handling"
+    );
     let bundle = std::fs::read_dir(root)?.next().unwrap()?.path();
     let value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle.join("records.json"))?)?;

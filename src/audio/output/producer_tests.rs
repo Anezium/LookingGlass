@@ -462,3 +462,115 @@ fn reporter_panic_is_distinct_from_loop_closure_and_join_receipt() {
     assert_eq!(b.reporter_join.load(Ordering::Acquire), 2);
     assert_eq!(b.joined.load(Ordering::Acquire), 1);
 }
+
+// Ownership and lifecycle regressions.
+#[test]
+fn mixer_drop_and_replacement_change_live_topology() {
+    let u = universe();
+    let (control, mixer) = mixer_with(u);
+    let live = u.topology().expect("one live mixer");
+    drop(mixer);
+    assert!(
+        u.topology().is_none(),
+        "dropped mixer must leave no live topology"
+    );
+    let (_c2, _m2) = mixer_with(u);
+    assert_ne!(
+        u.topology(),
+        Some(live),
+        "replacement must change the topology epoch"
+    );
+    drop(control);
+}
+#[test]
+fn legacy_emit_outcomes_match_cumulative_drop_counter() {
+    #[cfg(feature = "native_timing")]
+    let _music_serial = native_music_test_guard();
+    let (control, _mixer) = mixer_with(universe());
+    let mut cfg = block::settings();
+    cfg.log_thread = true;
+    cfg.cushion = 1;
+    let (gate, rx) = mpsc::channel();
+    let hooks = TestHooks {
+        interval: Duration::ZERO,
+        reporter_gate: Some(rx),
+        ..TestHooks::default()
+    };
+    let (worker, mut cb) = buffered_body(
+        rodio::buffer::SamplesBuffer::new(2, 44100, vec![0.5; 44100 * 2]),
+        control.metrics.clone(),
+        cfg,
+        Native,
+        hooks,
+    )
+    .unwrap();
+    wait(|| worker.bootstrap.entry.get().is_some());
+    let mut c = Checked::new(Native);
+    let mut owner = worker.prepare_native(&mut c, Some([7; 16]));
+    owner.request_start(c.read());
+    for _ in 0..16 {
+        cb.by_ref().take(SAMPLES).for_each(drop);
+        wait(|| cb.ready.has_pending());
+    }
+    owner.request_seal(&mut c);
+    owner.collect(Duration::from_secs(2));
+    assert_eq!(owner.status, "Delivered");
+    let legacy = &owner.completed.as_ref().unwrap().buffers.legacy;
+    assert!(legacy.iter().any(|l| !l.emitted) && legacy.iter().any(|l| l.emitted));
+    for w in legacy.windows(2) {
+        assert_eq!(
+            w[1].window.dropped_reports,
+            w[0].window.dropped_reports + u32::from(!w[0].emitted),
+            "retained emit outcome disagrees with the legacy drop counter"
+        );
+    }
+    gate.send(()).unwrap();
+    drop(worker);
+}
+/// Genuine Mixer/buffered_body/reporter journal with the Native clock, paced
+/// consumption and short legacy intervals; serialized for the Python checker.
+#[test]
+fn genuine_worker_journal_is_written_for_the_strict_checker() {
+    #[cfg(feature = "native_timing")]
+    let _music_serial = native_music_test_guard();
+    let (control, mixer) = mixer_with(universe());
+    control.sink().append(rodio::buffer::SamplesBuffer::new(
+        2,
+        44100,
+        vec![0.25; 44100 * 8],
+    ));
+    let mut cfg = block::settings();
+    cfg.log_thread = true;
+    cfg.cushion = 2;
+    let hooks = TestHooks {
+        interval: Duration::from_millis(25),
+        ..TestHooks::default()
+    };
+    let (worker, mut cb) =
+        buffered_body(mixer, control.metrics.clone(), cfg, Native, hooks).unwrap();
+    wait(|| worker.bootstrap.entry.get().is_some());
+    let mut c = Checked::new(Native);
+    let mut owner = worker.prepare_native(&mut c, Some([7; 16]));
+    owner.request_start(c.read());
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(700) {
+        wait(|| cb.ready.has_pending());
+        cb.by_ref().take(SAMPLES).for_each(drop);
+        thread::sleep(Duration::from_millis(2));
+    }
+    owner.request_seal(&mut c);
+    owner.collect(Duration::from_secs(2));
+    owner.freeze();
+    assert_eq!(owner.status, "Delivered");
+    let d = owner.completed.as_ref().unwrap();
+    assert_eq!(d.receipt.flags, 0);
+    assert!(
+        d.buffers.legacy.len() >= 4,
+        "several genuine legacy windows"
+    );
+    let out = std::path::PathBuf::from(std::env::var("ALICE_TIMING_TEST_OUTPUT").unwrap())
+        .join("genuine-worker");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("owner.json"), serde_json::to_vec(&owner).unwrap()).unwrap();
+    drop(worker);
+}

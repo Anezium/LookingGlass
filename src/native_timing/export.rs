@@ -202,7 +202,12 @@ impl<C: Source> Recorder<C> {
             "repeated_cumulative_export":self.export_attempts != 1,
             "swap_observations":"UNAVAILABLE; never estimated from wall minus CPU",
             "door_observations":"UNIMPLEMENTED per-frame; legacy door chunks remain separate/unjoined",
-            "phase2_unimplemented":if self.audio_producer.is_some(){&["image-tokens","review-ack","native-age-automation","pair-equivalence","complete-qualification"][..]}else{&["audio-producer-fences","raw-counter-brackets","image-tokens","review-ack","native-age-automation","pair-equivalence","complete-qualification"][..]},
+            "phase2_unimplemented":([
+                self.audio_producer.is_none().then_some("audio-producer-fences"),
+                self.raw_counters.is_none().then_some("raw-counter-brackets"),
+                Some("image-tokens"), Some("review-ack"), Some("native-age-automation"),
+                Some("pair-equivalence"), Some("complete-qualification"),
+            ].into_iter().flatten().collect::<Vec<_>>()),
             "campaign_qualified":false
         });
         if let serde_json::Value::Object(fields) = fields {

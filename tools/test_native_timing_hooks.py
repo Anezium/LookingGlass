@@ -71,6 +71,9 @@ def main():
         pos=source.index('recovery.clear();',start)+len('recovery.clear();')
         source=source[:pos]+hook+source[pos:]
     assert re.search(r'let mut timing = crate::native_timing::Session::open\(\)\?;\s*#\[cfg\(feature = "native_timing"\)\]\s*audio.bind_native_counters\(&mut timing\);',source)
+    out=(ROOT/'src/audio/output.rs').read_text()
+    # STATIC placement contract (not a semantic mutant kill): native cut precedes legacy swaps/emit/reset.
+    assert out.index('let native_cut = diagnostic.legacy_begin();')<out.index('let music = config.music_thread.then(')<out.index('let window = Window {')<out.index('log_ms = emit(Report::Window(window));')<out.index('diagnostic.legacy_end(native_cut, window, last_emitted.get());')<out.index('timings.clear();report=Instant::now();'),'static: native fence cut must precede legacy collection/emit/reset'
     after=source.index('if let Err(error) = timing.export_after_viewer()')
     assert after<source.index('store.write_with_preview(Slot::Auto',after)<source.index('audio.finish()?',after)
     profile=(ROOT/'src/frame_profile.rs').read_text()
