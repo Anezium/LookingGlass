@@ -72,6 +72,7 @@ struct State {
     active: bool,
     current: Option<(usize, usize, Instant)>,
     times: [[f64; 4]; LABELS.len()],
+    children: [[f64; 4]; LABELS.len()],
     counts: [[u64; 3]; LABELS.len()],
 }
 impl State {
@@ -110,9 +111,24 @@ impl Drop for Frame {
             let mut s = s.borrow_mut();
             debug_assert!(s.current.is_none());
             s.active = false;
-            crate::frame_profile::npc_frame(LABELS, &s.times, &s.counts);
+            crate::frame_profile::npc_frame(LABELS, &s.times, &s.children, &s.counts);
         });
     }
+}
+
+/// Existing scoped spans are already charged to `npcs` by the full profiler.
+/// Retain their attribution inside the containing phase without charging twice.
+#[cfg(any(target_os = "vita", test))]
+pub(crate) fn scoped_child(ms: f64) {
+    if !ACTIVE.load(Relaxed) {
+        return;
+    }
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        if let Some((kind, phase, _)) = s.current {
+            s.children[kind][phase] += ms;
+        }
+    });
 }
 
 pub(crate) struct Controller<'a> {
@@ -194,6 +210,15 @@ mod tests {
         s.switch(Some((0, 0)), t(12));
         s.switch(None, t(15));
         assert_eq!(s.times[0], [5., 6., 4., 0.]);
+        s.children[0][1] = 2.;
+        // The existing child has already charged two milliseconds to npcs.
+        // The aggregate adds thirteen, so the fifteen millisecond controller
+        // is charged once, and movement exclusive retains four milliseconds.
+        assert_eq!(
+            2. + crate::frame_profile::npc_incremental_charge(&s.times, &s.children),
+            15.
+        );
+        assert_eq!(s.times[0][1] - s.children[0][1], 4.);
         let c = CollisionCounts::default();
         c.sweep();
         c.hulls(10);
@@ -222,6 +247,7 @@ mod tests {
             c.sweep();
             let _move = work(Phase::Movement);
             c.hulls(7);
+            scoped_child(1e-9);
             {
                 let _pose = work(Phase::Animation);
                 c.sweep();
@@ -231,6 +257,7 @@ mod tests {
         STATE.with(|s| {
             let s = s.borrow();
             assert_eq!(s.counts[Kind::Ant as usize], [1, 2, 7]);
+            assert_eq!(s.children[Kind::Ant as usize], [0., 1e-9, 0., 0.]);
             assert!(s.current.is_none());
             assert!(s
                 .times

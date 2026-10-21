@@ -269,12 +269,17 @@ impl<const N: usize> Totals<N> {
     }
 }
 pub(crate) type NpcLabels = (&'static str, [&'static str; 4], [&'static str; 3]);
+#[cfg(any(target_os = "vita", test))]
+pub(crate) fn npc_incremental_charge(times: &[[f64; 4]], children: &[[f64; 4]]) -> f64 {
+    times.iter().flatten().sum::<f64>() - children.iter().flatten().sum::<f64>()
+}
 /// One publication of fixed NPC scratch, with disjoint controller leaves.
-pub(crate) fn npc_frame(labels: &[NpcLabels], times: &[[f64; 4]], counts: &[[u64; 3]]) {
+pub(crate) fn npc_frame(labels: &[NpcLabels], times: &[[f64; 4]], children: &[[f64; 4]], counts: &[[u64; 3]]) {
     #[cfg(target_os = "vita")]
-    vita::npc_frame(labels, times, counts);
+    vita::npc_frame(labels, times, children, counts);
     #[cfg(not(target_os = "vita"))]
     {
+        let _ = children;
         crate::sim_maps::count("npc_profile_publications", 1);
         for (i, &(label, leaves, counters)) in labels.iter().enumerate() {
             aggregate_leaves(&[label], &[times[i].iter().sum()]);
@@ -844,6 +849,7 @@ mod vita {
             let (_, _, children) = s.stack.remove(i);
             if let Some(parent) = s.stack.last_mut() {
                 parent.2 += ms;
+                if parent.1 == "npcs" { crate::npc::profile::scoped_child(ms); }
             }
             let exclusive = ms - children;
             s.pending.push((label, ms, exclusive));
@@ -869,11 +875,11 @@ mod vita {
             for (&label, &ms) in labels.iter().zip(values) { s.pending.push((label, ms, ms)); }
         });
     }
-    pub(super) fn npc_frame(labels: &[NpcLabels], times: &[[f64; 4]], counts: &[[u64; 3]]) {
+    pub(super) fn npc_frame(labels: &[NpcLabels], times: &[[f64; 4]], children: &[[f64; 4]], counts: &[[u64; 3]]) {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             if !s.recording { return; }
-            let total = times.iter().flatten().sum::<f64>();
+            let total = super::npc_incremental_charge(times, children);
             if let Some(parent) = s.stack.last_mut() { parent.2 += total; }
             // NPC updates are owned by frame_combat. Keep the global and existing
             // owner counter views, without changing collision owner routing.
@@ -882,7 +888,9 @@ mod vita {
             *s.pending_counts.entry(("", "npc_profile_publications")).or_default() += 1;
             for (i, &(label, leaves, counters)) in labels.iter().enumerate() {
                 s.pending.push((label, times[i].iter().sum(), 0.));
-                for (name, ms) in leaves.into_iter().zip(times[i]) { s.pending.push((name, ms, ms)); }
+                for ((name, ms), child) in leaves.into_iter().zip(times[i]).zip(children[i]) {
+                    s.pending.push((name, ms, ms - child));
+                }
                 for (name, n) in counters.into_iter().zip(counts[i]) {
                     *s.pending_counts.entry(("", name)).or_default() += n;
                     if let Some(owner) = owner { *s.pending_counts.entry((owner, name)).or_default() += n; }
