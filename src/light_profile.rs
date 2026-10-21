@@ -48,7 +48,7 @@ pub(crate) fn capture_enabled() -> bool {
 const WINDOW: usize = 60;
 // ~3.7 MiB only when explicitly armed, captures the first 4,096 accepted frames without a per-frame writer.
 const CAPTURE_ROWS: usize = 4096;
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Row {
     frame: u64,
     wall_us: u64,
@@ -61,6 +61,12 @@ struct Row {
     fx: [u64; 8],
     door: [u64; 3],
     render: [RenderMetrics; 6],
+    gpu: [u64; crate::gpu_wait::COUNT],
+}
+impl Default for Row {
+    fn default() -> Self { Self { frame:0, wall_us:0, cpu_us:0, swap_us:0,
+        skin_collect_wait_us:0, skin_gather_us:0, skin_fallbacks:0, skin_overflow:0,
+        fx:[0;8], door:[0;3], render:[RenderMetrics::default();6], gpu:[0;crate::gpu_wait::COUNT] } }
 }
 /// Engine submission calls, counted at their owning phase. Texture binds count
 /// image slots passed to apply_bindings; backend cache hits are not GL calls.
@@ -197,6 +203,16 @@ impl Ring {
         }
         Ok(())
     }
+    fn write_gpu(&self, out: &mut impl Write) -> std::io::Result<()> {
+        write!(out, "frame,wall_us")?;
+        for name in crate::gpu_wait::NAMES { write!(out, ",{name}")?; }
+        writeln!(out)?;
+        if let Some(rows) = &self.capture { for r in rows {
+            write!(out, "{},{}", r.frame, r.wall_us)?;
+            for v in r.gpu { write!(out, ",{v}")?; } writeln!(out)?;
+        } }
+        Ok(())
+    }
     fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
         write!(out, "frame,wall_us,frame_cpu_us,swap_us,skin_collect_wait_us,skin_gather_us,skin_fallbacks,skin_overflow,particle_producer_us,fx_merge_us,fx_upload_cpu_us,fx_upload_gl_us,fx_upload_bytes,fx_finish_prepare_us,fx_worker_wait_us,fx_finish_recycle_us")?;
         for phase in PHASE_NAMES {
@@ -228,13 +244,19 @@ impl Ring {
 }
 thread_local! { static RING: RefCell<Ring> = RefCell::default(); }
 pub(crate) fn reset() {
+    crate::gpu_wait::reset();
     RING.with(|r| *r.borrow_mut() = if capture_enabled() { Ring::capture() } else { Ring::default() });
 }
 pub(crate) fn begin(_map: &str, _mode: Mode) {
     if !active() {
         return;
     }
-    RING.with(|r| r.borrow_mut().begin(Instant::now()));
+    #[cfg(feature="vita_renderer")]
+    let observe = crate::gpu_wait::requested(crate::render::vita_renderer::config());
+    #[cfg(not(feature="vita_renderer"))]
+    let observe = false;
+    let gpu = crate::gpu_wait::finish_frame(observe);
+    RING.with(|r| { let mut r=r.borrow_mut(); r.current.gpu=gpu; r.begin(Instant::now()); });
 }
 /// One update per door search, no strings, allocation, timers or I/O.
 pub(crate) fn door_counts(world: u64, own: u64, deferred: u64) {
@@ -281,6 +303,7 @@ impl Drop for FxTimer { fn drop(&mut self) {
 } }
 
 pub(crate) fn cpu_begin() {
+    crate::gpu_wait::frame_work_begin();
     if active() {
         RING.with(|r| r.borrow_mut().cpu_start = Some(Instant::now()));
     }
@@ -346,6 +369,9 @@ fn export_window(map: &str, mode: Mode) -> anyhow::Result<()> {
         let mut doors = std::io::BufWriter::new(std::fs::File::create(dir.join(&name))?);
         r.write_door_windows(&mut doors)?;
         doors.flush()?;
+        let name = format!("{map}-{}-light-{}-gpu.csv", mode_name(mode), r.count);
+        let mut gpu = std::io::BufWriter::new(std::fs::File::create(dir.join(&name))?);
+        r.write_gpu(&mut gpu)?; gpu.flush()?;
         r.exported = r.count;
         Ok(())
     })
@@ -465,5 +491,26 @@ mod tests {
         assert_eq!(r.current.skin_overflow, 0);
         r.begin(origin + std::time::Duration::from_micros(2000));
         assert_eq!(r.count, 125);
+    }
+}
+
+#[cfg(test)]
+mod gpu_export_tests {
+    use super::*;
+    #[test]
+    fn gpu_sidecar_matches_previous_accepted_wall_population_through_swap() {
+        let mut ring=Ring::capture(); let t=Instant::now(); ring.begin(t);
+        ring.current.gpu[0]=13; ring.current.gpu[10]=7; ring.pending=true;
+        ring.begin(t+std::time::Duration::from_micros(40));
+        ring.current.gpu[0]=999; ring.pending=false;
+        ring.begin(t+std::time::Duration::from_micros(100));
+        let mut out=Vec::new(); ring.write_gpu(&mut out).unwrap();
+        let text=String::from_utf8(out).unwrap(); let lines:Vec<_>=text.lines().collect();
+        assert_eq!(lines.len(),2);
+        assert_eq!(lines[0].split(',').count(),crate::gpu_wait::COUNT+2);
+        let row:Vec<u64>=lines[1].split(',').map(|v|v.parse().unwrap()).collect();
+        assert_eq!(&row[..3], &[1,40,13]); assert_eq!(row[12],7);
+        // A GPU row is copied, never cleared at end_frame before swap has run.
+        assert_eq!(ring.capture.as_ref().unwrap().len(),1);
     }
 }

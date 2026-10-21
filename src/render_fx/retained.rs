@@ -27,6 +27,7 @@ pub(crate) fn count(name: &'static str, value: u64) {
     HOST_COUNTS.with(|c| *c.borrow_mut().entry(name).or_default() += value);
 }
 fn boundary(site: &'static str) {
+    let _submission = crate::gpu_wait::submission();
     let _span = crate::frame_profile::span("gl_flush");
     let _site = crate::frame_profile::span(site);
     #[cfg(target_os = "vita")]
@@ -1070,6 +1071,7 @@ pub(crate) fn finish_world(
     let mut ranges = std::mem::take(&mut gpu.range_storage); ranges.clear();
     let mut invalid = 0;
     {
+        let _submission = crate::gpu_wait::submission();
         let upload_started = std::time::Instant::now();
         let _span = crate::frame_profile::span("vita_fx_upload");
         let mut uniform_templates=[None;4];
@@ -1123,6 +1125,7 @@ pub(crate) fn finish_world(
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent);
         }
     };
+    let submission = crate::gpu_wait::submission();
     unsafe {
         crate::render::vita_renderer::begin_3d_pass(PassAction::Nothing);
         macroquad::miniquad::gl::glDepthMask(1);
@@ -1169,6 +1172,7 @@ pub(crate) fn finish_world(
         macroquad::miniquad::gl::glDepthMask(1);
         get_internal_gl().quad_context.end_render_pass();
     }
+    drop(submission);
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
         f.active = false;

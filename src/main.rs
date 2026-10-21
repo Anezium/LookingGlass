@@ -118,6 +118,7 @@ mod transition_memory;
 mod frame_profile;
 mod frame_phases;
 mod game_thread;
+mod gpu_wait;
 mod skin_worker;
 mod light_profile;
 #[cfg(feature = "native_timing")]

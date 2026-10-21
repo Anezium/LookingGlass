@@ -35,6 +35,7 @@
   "fx_merge_in_place": true,
   "fx_worker_prep": true,
   "frame_phase_probe": false,
+  "gpu_wait_probe": false,
   "mover_far_lazy": true,
   "mover_lazy_publish": true,
   "pickup_fx_cache": true,

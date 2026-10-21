@@ -80,6 +80,8 @@ pub struct Config {
     pub fx_merge_in_place: bool,
     pub fx_worker_prep: bool,
     pub frame_phase_probe: bool,
+    /// Passive existing-call GPU wait split; requires light profiler and capture.
+    pub gpu_wait_probe: bool,
     pub mover_far_lazy: bool,
     pub mover_lazy_publish: bool,
     pub pickup_fx_cache: bool,
@@ -223,7 +225,7 @@ impl Default for Config {
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
-            frame_phase_probe: false,
+            frame_phase_probe: false, gpu_wait_probe: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
@@ -492,7 +494,7 @@ pub(crate) fn world_viewport() -> Option<(i32,i32,i32,i32)> {
 pub(crate) fn apply_world_viewport() {
     if let Some((x,y,w,h))=world_viewport() { unsafe { get_internal_gl().quad_context.apply_viewport(x,y,w,h); } }
 }
-pub(crate) fn prepare_3d(bg:Color){scale::prepare(bg);}
+pub(crate) fn prepare_3d(bg:Color){crate::gpu_wait::tail_end();let _submit=crate::gpu_wait::submission();scale::prepare(bg);}
 pub(crate) fn begin_3d_pass(action:PassAction){scale::begin(action);}
 pub(crate) fn set_3d_camera(camera:&Camera3D){scale::camera(camera);}
 pub(crate) fn present_3d(){scale::present();}
@@ -1397,6 +1399,7 @@ impl Renderer {
             count("vita_world_culled_groups", stats.culled as u64);
             return stats;
         }
+        let _submission = crate::gpu_wait::submission();
         // Direct actor packets never queue Macroquad geometry.
         if !world_only() && !crate::render_fx::retained_active() {
             let _flush = crate::frame_profile::span("gl_flush");
