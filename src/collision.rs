@@ -585,6 +585,7 @@ pub struct World {
     dynamic_bounds: Option<Bounds>,
     dynamic_buckets: std::sync::Arc<Vec<DynamicBucket>>,
     light_certificates: std::cell::RefCell<LightCertificates>,
+    pub(crate) npc_profile: crate::npc::profile::CollisionCounts,
     #[cfg(test)]
     pub(crate) legacy_dynamic_sweeps: bool,
     #[cfg(test)]
@@ -610,13 +611,18 @@ impl World {
         struct Reset<'a>(&'a World);
         impl Drop for Reset<'_> {
             fn drop(&mut self) {
+                let _prepare = crate::npc::profile::controller(
+                    crate::npc::profile::Kind::Prepare, &self.0.npc_profile, false);
                 self.0.query_cache.borrow_mut().clear();
                 self.0.query_cache_active.set(false);
             }
         }
         // Nested users share the outer scope rather than discarding its entries.
-        if self.query_cache_active.replace(true) { return run(); }
+        let prepare = crate::npc::profile::controller(
+            crate::npc::profile::Kind::Prepare, &self.npc_profile, false);
+        if self.query_cache_active.replace(true) { drop(prepare); return run(); }
         debug_assert!(self.query_cache.borrow().is_empty());
+        drop(prepare);
         let _reset = Reset(self);
         run()
     }
@@ -715,6 +721,7 @@ impl World {
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
             light_certificates: std::cell::RefCell::default(),
+            npc_profile: Default::default(),
             #[cfg(test)]
             legacy_dynamic_sweeps: false,
             #[cfg(test)]
@@ -822,6 +829,7 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        self.npc_profile.sweep();
         crate::sim_maps::count("world_sweeps", 1);
         #[cfg(test)]
         if self.legacy_dynamic_sweeps {
@@ -920,16 +928,15 @@ impl World {
         {
             add_counter(Counter::LedgeTraceCalls, 1);
         }
+        let count_static = cfg!(target_os = "vita") || self.npc_profile.active();
+        let mut tested = 0u32;
         #[cfg(target_os = "vita")]
-        let (mut tested, mut clipped, mut support_hulls) = (0u32, 0u32, 0u32);
+        let (mut clipped, mut support_hulls) = (0u32, 0u32);
         let query = SweepBounds::new(start, end, half);
         let mut result = Trace::default();
         if let Some(tree) = &self.tree {
             tree.visit(&query, &mut |index| {
-                #[cfg(target_os = "vita")]
-                {
-                    tested += 1;
-                }
+                if count_static { tested += 1; }
                 let hull = &self.hulls[index];
                 if query.overlaps(hull.bounds) {
                     #[cfg(target_os = "vita")]
@@ -960,6 +967,7 @@ impl World {
             add_counter(Counter::StaticHullsClipped, clipped);
             add_counter(Counter::SettledHullsClipped, support_hulls);
         }
+        self.npc_profile.hulls(tested as u64);
         if self.query_cache_active.get() {
             let mut cache = self.query_cache.borrow_mut();
             // Bound scratch memory even when a large cast issues unique queries.
@@ -1134,6 +1142,7 @@ impl World {
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
             light_certificates: std::cell::RefCell::default(),
+            npc_profile: Default::default(),
             #[cfg(test)]
             legacy_dynamic_sweeps: false,
             #[cfg(test)]

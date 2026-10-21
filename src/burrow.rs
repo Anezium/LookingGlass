@@ -170,6 +170,7 @@ impl Insect {
         self.set(Phase::Leap);
     }
     pub fn place(&mut self, world: &World) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if self.placed {
             return;
         }
@@ -319,6 +320,7 @@ impl Insect {
         self.sound()
     }
     fn settle(&mut self, world: &World) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         let body = self.target(0);
         self.feet += self.recoil.step(STEP, world, body);
         let body = self.target(0);
@@ -344,6 +346,7 @@ impl Insect {
                 .is_some()
     }
     fn walk(&mut self, world: &World, delta: Vec3, speed: f32) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         let dir = delta.with_z(0.).normalize_or_zero();
         for angle in [0., 0.65, -0.65, 1.1, -1.1] {
             let next = combat::walk_body(
@@ -449,6 +452,7 @@ impl Insect {
                 }
             }
             Phase::Melee => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 for (i, &(frame, damage)) in self.melee_events().iter().enumerate() {
                     if self.contacts & (1 << i) == 0
                         && self.time >= frame * rig.frame(self.kind.model(), self.clip())
@@ -586,6 +590,7 @@ impl Insect {
                 }
             }
             Phase::Attach | Phase::Suck => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 let target = self.opponents.bodies(eye).into_iter().find(|t| {
                     Some(t.id) == self.victim && !(t.id == crate::dice::ALICE && self.notarget)
                 });

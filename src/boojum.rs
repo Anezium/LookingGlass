@@ -198,6 +198,7 @@ impl Boojum {
         self.feet += self.recoil.step(dt, world, self.target(0));
         self.time += dt;
         self.wait = (self.wait - dt).max(0.);
+        let _npc_section = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         let player = self.opponents.bodies(eye);
         self.waves.retain_mut(|w| {
             let next = w.position + w.direction * w.speed * dt;
@@ -219,6 +220,7 @@ impl Boojum {
             w.age += dt;
             !hit.start_solid && hit.fraction >= 1. && w.age < 1.
         });
+        drop(_npc_section);
         if self.state == State::Dead {
             self.fall = (self.fall + 400. * dt).min(400.);
             let center = self.target(0).center;
@@ -261,6 +263,7 @@ impl Boojum {
                 }
             }
             State::Scream => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 // Reviewed source model events: five small screams, then one wave.
                 while self.next_shot < 6
                     && self.time >= timing.frame * (16. + 2. * self.next_shot as f32)

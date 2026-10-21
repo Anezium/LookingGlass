@@ -272,6 +272,7 @@ impl Model {
     /// Chronological (start, end] crossings, including frame zero on a fresh play.
     /// Catch-up is bounded relative to the current cycle, even after hours of looping.
     pub fn between(&self, name: &str, span: Span) -> Vec<&Command> {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Animation);
         if ![span.start, span.end, span.duration, span.frame_time]
             .iter()
             .all(|x| x.is_finite())

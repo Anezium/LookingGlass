@@ -265,6 +265,7 @@ impl Creature {
         self.health > 0. && !self.kind.rock() && self.phase != Phase::Wall
     }
     pub fn place(&mut self, world: &World) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if self.placed {
             return;
         }
@@ -455,9 +456,11 @@ impl Creature {
         None
     }
     fn move_ground(&mut self, world: &World, delta: Vec3) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         self.feet = combat::walk_body(world, self.feet, delta, self.target(0).half);
     }
     fn move_fly(&mut self, world: &World, delta: Vec3) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         let b = self.target(0);
         let tr = world.sweep(b.center, b.center + delta, b.half);
         if !tr.start_solid {
@@ -714,6 +717,7 @@ impl Creature {
                 }
             }
             Phase::Melee => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if self.kind == Kind::Phantom {
                     if self.cues == 0 && self.time >= duration * 0.5 {
                         self.cues = 1;
@@ -764,6 +768,7 @@ impl Creature {
                 }
             }
             Phase::Ranged => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if self.kind.spider() {
                     let cues: &[usize] = if self.kind == Kind::WallSpider {
                         &[9, 11, 13, 16, 19, 22]

@@ -300,6 +300,7 @@ impl Ant {
     fn step(&mut self, world: &World, player_eye: Vec3, data: &impl Timing, out: &mut Feedback) {
         self.electric = (self.electric - 1. / 120.).max(0.);
         let dt = 1. / 120.;
+        let _npc_gravity = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         let half = HALF * self.scale;
         self.feet += self.recoil.step(dt, world, self.target(0));
         self.time += dt;
@@ -312,6 +313,8 @@ impl Ant {
         if down.start_solid || down.fraction < 1. {
             self.falling = 0.;
         }
+        drop(_npc_gravity);
+        let _npc_section = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         let bodies = self.opponents.bodies(player_eye);
         self.blasts.retain_mut(|b| {
             b.time += dt;
@@ -373,6 +376,7 @@ impl Ant {
             }
             !wall.start_solid && (b.grenade || wall.fraction == 1.) && b.age < 5.
         });
+        drop(_npc_section);
         if self.phase == Phase::Dead {
             self.time = self.time.min(data.duration(self.model(), self.clip()) + 7.);
             return;
@@ -434,6 +438,7 @@ impl Ant {
         let duration = data.duration(self.model(), self.clip());
         match self.phase {
             Phase::Melee => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !self.fired
                     && self.time
                         >= data.frame(self.model(), "attack_1")
@@ -461,6 +466,7 @@ impl Ant {
             }
             Phase::Ready if self.time >= duration => self.set(Phase::Fire),
             Phase::Fire => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !self.fired
                     && self.time
                         >= data.frame(self.model(), self.clip())
@@ -533,6 +539,7 @@ impl Ant {
         }
     }
     fn walk(&mut self, world: &World, delta: Vec3, step: f32) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         self.feet = self.detour.walk(world, self.feet, self.feet + delta.with_z(0.),
             HALF * self.scale, step * self.scale, 1. / 120.);
     }

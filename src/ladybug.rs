@@ -313,6 +313,7 @@ impl Ladybug {
             b.age += STEP;
             b.age < 0.6
         });
+        let _npc_section = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         let targets = self.opponents.bodies(eye);
         self.acorns.retain_mut(|p| {
             p.age += STEP;
@@ -359,6 +360,7 @@ impl Ladybug {
             }
             !impact
         });
+        drop(_npc_section);
         let previous = self.time;
         self.time += STEP;
         self.reload = (self.reload - STEP).max(0.);
@@ -415,6 +417,7 @@ impl Ladybug {
                 }
             }
             State::Attack => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if notarget && !self.released {
                     self.enter(State::Patrol);
                     return;

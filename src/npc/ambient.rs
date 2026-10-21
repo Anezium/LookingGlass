@@ -38,6 +38,7 @@ pub(super) fn path(map: &Bsp, name: &str, entry: Option<&str>) -> Result<Vec<Vec
     Ok(path)
 }
 pub(super) fn advance(actor: &mut Actor, dt: f32, world: &World, path: &[Vec3], speed: f32) {
+    let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
     if dt <= 0. || !dt.is_finite() || actor.greeting > 0. || actor.speaking {
         return;
     }

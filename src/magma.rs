@@ -109,6 +109,7 @@ impl Magma {
         }
     }
     pub fn place(&mut self, world: &World) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if !self.grounded && self.launch.is_none() {
             let b = self.target(0);
             if let Some(p) = world.actor_footing(self.feet, Vec3::Z * b.half.z, b.half, 1024.) {
@@ -374,6 +375,7 @@ impl Magma {
                 }
             }
             Phase::Punch | Phase::Rock | Phase::Bash => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 let phase = self.phase;
                 let events: &[(f32, f32, f32, f32)] = match phase {
                     Phase::Rock => &[(11., 112., 10., 15.)],
@@ -457,6 +459,7 @@ impl Magma {
                 }
             }
             Phase::Spit => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 let frame = 10. * data.frame(MODEL, self.clip());
                 if self.cues == 0 && self.time >= frame {
                     self.cues = 1;

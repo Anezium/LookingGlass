@@ -272,6 +272,7 @@ impl Plant {
         None
     }
     fn fire(&mut self, data: &impl Rig, aim: Vec3, frame: f32, yaw: f32) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         if self.shots.len() >= 12 {
             return;
         }
@@ -299,6 +300,7 @@ impl Plant {
         });
     }
     fn projectiles(&mut self, world: &World, eye: Vec3, out: &mut Feedback) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         let targets = self.opponents.bodies(eye);
         self.shots.retain_mut(|s| {
             let end = s.position + s.direction * 600. * STEP;
@@ -412,6 +414,7 @@ impl Plant {
                 }
             }
             Phase::Melee => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if self.contacts == 0
                     && self.time >= 14. * data.frame(self.kind.model(), self.clip())
                 {
@@ -435,6 +438,7 @@ impl Plant {
                 }
             }
             Phase::Spit | Phase::Fan => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 let events: &[(f32, f32)] = if self.phase == Phase::Fan {
                     &[(11., -80.), (14., 80.), (17., -40.), (20., 40.), (23., 0.)]
                 } else if self.kind == Kind::Rose {
@@ -458,6 +462,7 @@ impl Plant {
                 }
             }
             Phase::Suck => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !visible || distance >= 416. || self.time >= 2. {
                     self.set(Phase::Release);
                 } else if distance < 100. {
@@ -472,6 +477,7 @@ impl Plant {
                 }
             }
             Phase::Grab => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !visible || distance >= 120. {
                     self.set(Phase::Release);
                 } else if self.time >= duration {
@@ -480,6 +486,7 @@ impl Plant {
                 }
             }
             Phase::Digest => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !visible || distance >= 120. {
                     self.set(Phase::Release);
                 } else {

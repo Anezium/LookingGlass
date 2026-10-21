@@ -68,6 +68,7 @@ impl Recoil {
         }
     }
     pub fn step(&mut self, dt: f32, world: &World, body: Target) -> Vec3 {
+    let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if dt <= 0. { return Vec3::ZERO; }
         for push in &world.traversal.actor_pushes {
             if push.enabled && push.volume.touches(body.center, body.center + self.velocity * dt, body.half) {
@@ -100,6 +101,7 @@ pub fn contact(ctx: &Context<'_>, start: Vec3, end: Vec3, radius: f32) -> Option
     contact_box(ctx, start, end, Vec3::splat(radius))
 }
 pub fn contact_box(ctx: &Context<'_>, start: Vec3, end: Vec3, half: Vec3) -> Option<(usize, f32)> {
+    let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
     let candidate = ctx
         .targets
         .iter()
@@ -493,6 +495,7 @@ impl Guard {
             .retain_mut(|s| s.advance(dt, world, &bodies, out));
         // Authored actor starts can sit above the floor; settle with a swept body,
         // including after a platform moves away, instead of firing while suspended.
+        let _npc_gravity = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         self.falling = (self.falling + 800. * dt).min(800.);
         let body = self.target(0);
         let down = world.sweep(
@@ -506,6 +509,7 @@ impl Guard {
         if down.start_solid || down.fraction < 1. {
             self.falling = 0.;
         }
+        drop(_npc_gravity);
         if self.state == State::Dead {
             if self.cut {
                 let recipe = timing
@@ -595,6 +599,7 @@ impl Guard {
             State::Alert if self.time >= timing.alert => self.set_state(State::Chase),
             State::Pain if self.time >= timing.pain => self.set_state(State::Chase),
             State::Attack => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !self.hit && self.time >= timing.hit {
                     self.hit = true;
                     if self.ranged && visible {
@@ -656,6 +661,7 @@ pub struct Bolt {
 }
 impl Bolt {
     fn advance(&mut self, dt: f32, world: &World, targets: &[Target], out: &mut Feedback) -> bool {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         let next = self.position + self.direction * 700. * dt;
         if let Some((id, _)) = contact(&Context { world, targets }, self.position, next, 8.) {
             out.strike(id, 7., self.direction * 150., DamageKind::Electric);
@@ -685,6 +691,7 @@ pub(crate) fn walk_body_liquids(
     half: Vec3,
     allowed: i32,
 ) -> Vec3 {
+    let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
     let lift = Vec3::Z * 16.;
     let center = feet + Vec3::Z * (half.z + 0.1);
     let up = world.sweep(center, center + lift, half);

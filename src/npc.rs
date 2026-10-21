@@ -1,5 +1,6 @@
 //! Placed, animated characters with bounded local reactions. No original AI/scripts run.
 mod ambient;
+pub(crate) mod profile;
 mod visual_lod;
 pub(crate) mod attack_fx;
 mod garden;
@@ -1760,6 +1761,7 @@ impl Actor {
         self.yaw += difference.clamp(-dt * 1.8, dt * 1.8);
     }
     fn ground(&mut self, dt: f32, world: &World, meta: &Metadata) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if let Some(p) = &mut self.resident {
             p.place(world);
             return;
@@ -2613,8 +2615,12 @@ impl Npcs {
     pub fn update(&mut self, dt: f32, world: &World, eye: Vec3) -> combat::Feedback {
         let mut _profile = crate::frame_profile::span("npcs");
         if dt <= 0. { _profile.cancel(); }
+        let _detail = profile::frame(dt);
         if let Some(mut actors) = self.actor_world.take() {
-            actors.copy_dynamic_from(world);
+            {
+                let _prepare = profile::controller(profile::Kind::Prepare, &world.npc_profile, false);
+                actors.copy_dynamic_from(world);
+            }
             let result = actors.with_npc_queries(|| self.update_cast(dt, &actors, eye));
             self.actor_world = Some(actors);
             result
@@ -2624,96 +2630,102 @@ impl Npcs {
     }
     fn update_cast(&mut self, dt: f32, world: &World, eye: Vec3) -> combat::Feedback {
         let mut feedback = combat::Feedback::default();
-        if let Some(g)=&mut self.garden {g.update(dt,world,eye,&mut self.actors,&self.models);}
+        {
+            let _garden = profile::controller(profile::Kind::Garden, &world.npc_profile, false);
+            if let Some(g)=&mut self.garden {g.update(dt,world,eye,&mut self.actors,&self.models);}
+        }
         self.companion_routes
             .update(&mut self.actors, dt, world, eye, |index, clip| {
                 let d = &self.models[index].data;
                 d.clips[clip].distance * d.def.scale / d.clips[clip].duration()
             });
-        if dt.is_finite() && dt > 0. {
-            for ambush in &self.resident_ambushes {
-                if !ambush.touches(eye) {
-                    continue;
-                }
-                for actor in &mut self.actors {
-                    if let Some(p) = &mut actor.resident {
-                        if ambush.wake.contains(&actor.spawn.name) {
-                            p.awake = true;
-                        }
-                        if ambush.patrols.contains(&actor.spawn.name) {
-                            if let resident::Body::Ladybug(b) = &mut p.body {
-                                b.patrol_started = true;
-                            }
-                        }
+        {
+            let _ambush = profile::controller(profile::Kind::Ambush, &world.npc_profile, false);
+            if dt.is_finite() && dt > 0. {
+                for ambush in &self.resident_ambushes {
+                    if !ambush.touches(eye) {
+                        continue;
                     }
-
-                    if let (Some(id), Some(p)) =
-                        (actor.spawn.resident_spawn, actor.resident.as_mut())
-                    {
-                        if !p.active && p.delay.is_none() {
-                            if let Some((_, delay)) =
-                                ambush.receivers.iter().find(|(e, _)| *e == id)
-                            {
-                                p.delay = Some(*delay);
-                            }
-                        }
-                    }
-                }
-            }
-            for ambush in &self.clock_ambushes {
-                if !ambush.touches(eye) {
-                    continue;
-                }
-                for actor in &mut self.actors {
-                    if let (Some(id), Some(imp)) = (actor.spawn.clock_spawn, actor.clock.as_mut()) {
-                        if !imp.active && imp.spawn_delay.is_none() {
-                            if let Some((_, delay)) =
-                                ambush.receivers.iter().find(|(entity, _)| *entity == id)
-                            {
-                                imp.spawn_delay = Some(*delay);
-                            }
-                        }
-                    }
-                }
-            }
-            for ambush in &self.imp_ambushes {
-                if !ambush.touches(eye) {
-                    continue;
-                }
-                for actor in &mut self.actors {
-                    if let (Some(id), Some(imp)) = (actor.spawn.imp_spawn, actor.imp.as_mut()) {
-                        if !imp.active && imp.spawn_delay.is_none() {
-                            if let Some((_, delay)) =
-                                ambush.receivers.iter().find(|(entity, _)| *entity == id)
-                            {
-                                imp.spawn_delay = Some(*delay);
-                            }
-                        }
-                    }
-                }
-            }
-            for ambush in &self.chess_ambushes {
-                if ambush.touches(eye) {
                     for actor in &mut self.actors {
-                        if actor
-                            .spawn
-                            .chess_spawn
-                            .is_some_and(|id| ambush.suppress.contains(&id))
-                        {
-                            if let Some(p) = &mut actor.chess {
-                                if !p.active && p.spawn_delay.is_none() {
-                                    p.suppressed = true;
+                        if let Some(p) = &mut actor.resident {
+                            if ambush.wake.contains(&actor.spawn.name) {
+                                p.awake = true;
+                            }
+                            if ambush.patrols.contains(&actor.spawn.name) {
+                                if let resident::Body::Ladybug(b) = &mut p.body {
+                                    b.patrol_started = true;
                                 }
                             }
                         }
-                        if actor
-                            .spawn
-                            .chess_spawn
-                            .is_some_and(|id| ambush.entities.contains(&id))
+
+                        if let (Some(id), Some(p)) =
+                            (actor.spawn.resident_spawn, actor.resident.as_mut())
                         {
-                            if let Some(p) = &mut actor.chess {
-                                if !p.active && !p.suppressed && p.spawn_delay.is_none() {
-                                    p.spawn_delay = Some(ambush.delay);
+                            if !p.active && p.delay.is_none() {
+                                if let Some((_, delay)) =
+                                    ambush.receivers.iter().find(|(e, _)| *e == id)
+                                {
+                                    p.delay = Some(*delay);
+                                }
+                            }
+                        }
+                    }
+                }
+                for ambush in &self.clock_ambushes {
+                    if !ambush.touches(eye) {
+                        continue;
+                    }
+                    for actor in &mut self.actors {
+                        if let (Some(id), Some(imp)) = (actor.spawn.clock_spawn, actor.clock.as_mut()) {
+                            if !imp.active && imp.spawn_delay.is_none() {
+                                if let Some((_, delay)) =
+                                    ambush.receivers.iter().find(|(entity, _)| *entity == id)
+                                {
+                                    imp.spawn_delay = Some(*delay);
+                                }
+                            }
+                        }
+                    }
+                }
+                for ambush in &self.imp_ambushes {
+                    if !ambush.touches(eye) {
+                        continue;
+                    }
+                    for actor in &mut self.actors {
+                        if let (Some(id), Some(imp)) = (actor.spawn.imp_spawn, actor.imp.as_mut()) {
+                            if !imp.active && imp.spawn_delay.is_none() {
+                                if let Some((_, delay)) =
+                                    ambush.receivers.iter().find(|(entity, _)| *entity == id)
+                                {
+                                    imp.spawn_delay = Some(*delay);
+                                }
+                            }
+                        }
+                    }
+                }
+                for ambush in &self.chess_ambushes {
+                    if ambush.touches(eye) {
+                        for actor in &mut self.actors {
+                            if actor
+                                .spawn
+                                .chess_spawn
+                                .is_some_and(|id| ambush.suppress.contains(&id))
+                            {
+                                if let Some(p) = &mut actor.chess {
+                                    if !p.active && p.spawn_delay.is_none() {
+                                        p.suppressed = true;
+                                    }
+                                }
+                            }
+                            if actor
+                                .spawn
+                                .chess_spawn
+                                .is_some_and(|id| ambush.entities.contains(&id))
+                            {
+                                if let Some(p) = &mut actor.chess {
+                                    if !p.active && !p.suppressed && p.spawn_delay.is_none() {
+                                        p.spawn_delay = Some(ambush.delay);
+                                    }
                                 }
                             }
                         }
@@ -2753,6 +2765,31 @@ impl Npcs {
             if actor.guide.is_some() {
                 continue;
             }
+            let kind = if let Some(p) = &actor.resident {
+                match &p.body {
+                    resident::Body::Wildlife(_) => profile::Kind::Wildlife,
+                    resident::Body::Plant(_) => profile::Kind::Plant,
+                    resident::Body::Card(_) => profile::Kind::Card,
+                    resident::Body::Snark(_) => profile::Kind::Snark,
+                    resident::Body::Insect(_) => profile::Kind::Insect,
+                    resident::Body::Magma(_) => profile::Kind::Magma,
+                    resident::Body::Diamond(_) => profile::Kind::Diamond,
+                    resident::Body::Boojum(_) => profile::Kind::Boojum,
+                    resident::Body::Ladybug(_) => profile::Kind::Ladybug,
+                }
+            } else if actor.clock.is_some() { profile::Kind::Clockwork }
+            else if actor.imp.is_some() { profile::Kind::FireImp }
+            else if let Some(p) = &actor.chess {
+                match p.kind {
+                    crate::chess::Kind::Pawn => profile::Kind::Pawn,
+                    crate::chess::Kind::Knight => profile::Kind::Knight,
+                    crate::chess::Kind::Bishop => profile::Kind::Bishop,
+                    crate::chess::Kind::Rook => profile::Kind::Rook,
+                }
+            } else if actor.ant.is_some() { profile::Kind::Ant }
+            else if actor.guard.is_some() { profile::Kind::Guard }
+            else { profile::Kind::Ambient };
+            let _controller = profile::controller(kind, &world.npc_profile, true);
             actor.ground(dt, world, &self.models[actor.model].data.meta);
             if let Some(p) = &mut actor.resident {
                 p.update(
@@ -3913,6 +3950,7 @@ impl crate::ant::Timing for Data {
 }
 impl crate::clockwork::Rig for Data {
     fn tag(&self, clip: &str, time: f32, tag: &str) -> Transform {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Animation);
         let bone = self
             .skeleton
             .bones

@@ -289,6 +289,7 @@ impl Snark {
         }
     }
     fn projectiles(&mut self, world: &World, eye: Vec3, out: &mut Feedback) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         let targets = self.opponents.bodies(eye);
         for acid in &mut self.acid {
             acid.time += STEP;
@@ -456,6 +457,7 @@ impl Snark {
                 }
             }
             Phase::Bite => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !self.contact && self.time >= 8. * data.frame(self.kind.model(), self.clip()) {
                     self.contact = true;
                     if visible && facing && distance < 120. * self.scale {
@@ -473,6 +475,7 @@ impl Snark {
                 }
             }
             Phase::Spit => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !self.contact && self.time >= 8. * data.frame(self.kind.model(), self.clip()) {
                     self.contact = true;
                     if visible && facing && self.shots.len() < 4 {
@@ -506,6 +509,7 @@ impl Snark {
                 }
             }
             Phase::Tongue => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if visible
                     && facing
                     && distance < 250.

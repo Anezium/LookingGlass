@@ -388,6 +388,7 @@ impl Piece {
         let dt = 1. / 120.;
         self.time += dt;
         self.block_cooldown = (self.block_cooldown - dt).max(0.);
+        let _npc_gravity = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         self.feet += self.recoil.step(dt, world, self.target(0));
         self.falling = (self.falling + 800. * dt).min(800.);
         let body = self.target(0);
@@ -402,6 +403,7 @@ impl Piece {
         if down.start_solid || down.fraction < 1. {
             self.falling = 0.;
         }
+        drop(_npc_gravity);
         if let Some(b) = &mut self.beam {
             b.age += dt;
             if b.age >= 0.125 {
@@ -461,6 +463,7 @@ impl Piece {
         let reach = if self.kind == Kind::Pawn { 85. } else { 100. } * self.scale;
         match self.phase {
             Phase::Melee | Phase::ChargeHit | Phase::Beam => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 let frame = match self.phase {
                     Phase::ChargeHit => 2.,
                     Phase::Beam => 10.,

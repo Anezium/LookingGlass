@@ -197,6 +197,7 @@ impl Guard {
         }
     }
     pub fn place(&mut self, world: &World) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if self.placed {
             return;
         }
@@ -403,6 +404,7 @@ impl Guard {
         });
     }
     fn projectiles(&mut self, world: &World, eye: Vec3, out: &mut Feedback) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         self.impacts.retain_mut(|i| {
             i.age += STEP;
             i.age < 2.
@@ -492,6 +494,7 @@ impl Guard {
             }
             return;
         }
+        let _npc_gravity = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         let body = self.target(0);
         self.feet += self.recoil.step(STEP, world, body);
         let body = self.target(0);
@@ -507,6 +510,7 @@ impl Guard {
         if trace.fraction < 1. || trace.start_solid {
             self.falling = 0.;
         }
+        drop(_npc_gravity);
         self.time += STEP;
         if self.loops() && self.time > 3600. {
             self.time = 0.;
@@ -631,6 +635,7 @@ impl Guard {
                 }
             }
             Phase::Melee | Phase::Combo => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 let events: &[(f32, f32)] = match self.clip() {
                     "attack1" => &[(8., 15.)],
                     "attack2" => &[(11., 15.)],

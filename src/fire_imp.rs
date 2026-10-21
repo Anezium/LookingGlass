@@ -248,6 +248,7 @@ impl Imp {
             return;
         }
         self.time += STEP;
+        let _npc_gravity = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if let Some(v) = self.launch.take() { self.flight = Some(v); }
         if let Some(mut velocity) = self.flight {
             velocity.z -= 800. * STEP;
@@ -278,6 +279,7 @@ impl Imp {
         if down.start_solid || down.fraction < 1. {
             self.falling = 0.;
         }
+        drop(_npc_gravity);
         let duration = data.duration(MODEL, self.clip());
         if self.phase == Phase::Dead {
             if self.time >= 5. {
@@ -350,6 +352,7 @@ impl Imp {
             visible && facing && distance <= 90. * self.scale && delta.z.abs() < 65. * self.scale;
         match self.phase {
             Phase::Attack => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 if !self.sounded && self.time >= data.frame(MODEL, self.clip()) * 10. {
                     self.sounded = true;
                     out.spatial_sounds

@@ -30,6 +30,7 @@ impl Detour {
         distance: f32,
         dt: f32,
     ) -> Vec3 {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if dt <= 0. || distance <= 0. {
             return feet;
         }

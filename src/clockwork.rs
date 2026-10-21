@@ -251,6 +251,7 @@ impl Automaton {
         }
     }
     fn projectiles(&mut self, world: &World, eye: Vec3, out: &mut Feedback) {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         for impact in &mut self.impacts {
             impact.age += STEP;
         }
@@ -344,6 +345,7 @@ impl Automaton {
         }
         self.time += STEP;
         self.cooldown = (self.cooldown - STEP).max(0.);
+        let _npc_gravity = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         self.feet += self.recoil.step(STEP, world, self.target(0));
         self.falling = (self.falling + 800. * STEP).min(800.);
         let body = self.target(0);
@@ -358,6 +360,7 @@ impl Automaton {
         if down.start_solid || down.fraction < 1. {
             self.falling = 0.;
         }
+        drop(_npc_gravity);
         if self.phase == Phase::Dead {
             self.time = self.time.min(duration + 7.);
             return;
@@ -406,6 +409,7 @@ impl Automaton {
             visible && facing && distance <= 130. * self.scale && delta.z.abs() < 75. * self.scale;
         match self.phase {
             Phase::Punch => {
+                let _npc_attack = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
                 for (i, frame) in [9., 12., 16.].into_iter().enumerate() {
                     if self.contacts & (1 << i) == 0
                         && self.time >= frame * data.frame(MODEL, self.clip())

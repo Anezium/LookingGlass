@@ -229,6 +229,7 @@ impl Skeleton {
             .collect()
     }
     pub fn global_pose(&self, local: &[Transform]) -> Vec<Transform> {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Animation);
         let mut world: Vec<Transform> = Vec::with_capacity(self.bones.len());
         for (bone, &pose) in self.bones.iter().zip(local) {
             world.push(match bone.parent {
@@ -448,6 +449,7 @@ impl Animation {
         time + ((cycles * self.frames.len() as f32 + end_frame) - frame).max(0.) * self.frame_time
     }
     pub fn sample(&self, time: f32, looping: bool) -> Vec<Transform> {
+        let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Animation);
         crate::character::skinning::prepared::sample(self as *const Self as usize, time, looping,
             || self.sample_uncached(time, looping))
     }

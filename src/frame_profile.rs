@@ -268,6 +268,21 @@ impl<const N: usize> Totals<N> {
         if self.active { aggregate_leaves(&labels, &self.values); }
     }
 }
+pub(crate) type NpcLabels = (&'static str, [&'static str; 4], [&'static str; 3]);
+/// One publication of fixed NPC scratch, with disjoint controller leaves.
+pub(crate) fn npc_frame(labels: &[NpcLabels], times: &[[f64; 4]], counts: &[[u64; 3]]) {
+    #[cfg(target_os = "vita")]
+    vita::npc_frame(labels, times, counts);
+    #[cfg(not(target_os = "vita"))]
+    {
+        crate::sim_maps::count("npc_profile_publications", 1);
+        for (i, &(label, leaves, counters)) in labels.iter().enumerate() {
+            aggregate_leaves(&[label], &[times[i].iter().sum()]);
+            aggregate_leaves(&leaves, &times[i]);
+            for (name, n) in counters.into_iter().zip(counts[i]) { crate::sim_maps::count(name, n); }
+        }
+    }
+}
 fn aggregate_leaves(labels: &[&'static str], values: &[f64]) {
     #[cfg(target_os = "vita")]
     vita::aggregate_leaves(labels, values);
@@ -852,6 +867,27 @@ mod vita {
             if !s.recording { return; }
             if let Some(parent) = s.stack.last_mut() { parent.2 += values.iter().sum::<f64>(); }
             for (&label, &ms) in labels.iter().zip(values) { s.pending.push((label, ms, ms)); }
+        });
+    }
+    pub(super) fn npc_frame(labels: &[NpcLabels], times: &[[f64; 4]], counts: &[[u64; 3]]) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.recording { return; }
+            let total = times.iter().flatten().sum::<f64>();
+            if let Some(parent) = s.stack.last_mut() { parent.2 += total; }
+            // NPC updates are owned by frame_combat. Keep the global and existing
+            // owner counter views, without changing collision owner routing.
+            let owner = s.stack.iter().rev().find_map(|(_, label, _)|
+                (*label == "frame_combat").then_some(*label));
+            *s.pending_counts.entry(("", "npc_profile_publications")).or_default() += 1;
+            for (i, &(label, leaves, counters)) in labels.iter().enumerate() {
+                s.pending.push((label, times[i].iter().sum(), 0.));
+                for (name, ms) in leaves.into_iter().zip(times[i]) { s.pending.push((name, ms, ms)); }
+                for (name, n) in counters.into_iter().zip(counts[i]) {
+                    *s.pending_counts.entry(("", name)).or_default() += n;
+                    if let Some(owner) = owner { *s.pending_counts.entry((owner, name)).or_default() += n; }
+                }
+            }
         });
     }
     // Call once after local integer loops. No per-plan or per-triplet timing.

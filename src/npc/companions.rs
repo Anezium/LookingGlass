@@ -181,11 +181,13 @@ impl Routes {
             return;
         }
         let world = if let Some(actors) = &mut self.actor_world {
+            let _prepare = super::profile::controller(super::profile::Kind::Prepare, &world.npc_profile, false);
             actors.copy_dynamic_from(world);
             &*actors
         } else {
             world
         };
+        let shared = super::profile::controller(super::profile::Kind::Companions, &world.npc_profile, false);
         let touch = |c: &Option<Collider>, p: Vec3, half: Vec3| {
             c.as_ref().is_some_and(|c| c.trace(p, p, half).start_solid)
         };
@@ -204,10 +206,12 @@ impl Routes {
                 .as_ref()
                 .is_some_and(|g| g.role == Role::Prelude && g.stage == 3)
         });
+        drop(shared);
         for actor in actors.iter_mut() {
             let Some(mut s) = actor.guide.take() else {
                 continue;
             };
+            let _controller = super::profile::controller(super::profile::Kind::Companions, &world.npc_profile, true);
             if s.role == Role::Prelude && s.stage < 3 {
                 if start && s.stage != 1 {
                     s.stage = 1;
@@ -352,6 +356,7 @@ impl Routes {
 /// Scripted waypoints cross narrow, chamfered steps. Require support under the
 /// centre and sweep the whole body; requiring all four corners rejects those steps.
 fn walk_route(world: &World, feet: Vec3, delta: Vec3, half: Vec3) -> Vec3 {
+    let _npc_work = super::profile::work(super::profile::Phase::Movement);
     let center = feet + Vec3::Z * (half.z + 0.1);
     let up = world.sweep(center, center + Vec3::Z * 16., half);
     if up.start_solid {
@@ -379,6 +384,7 @@ fn walk_route(world: &World, feet: Vec3, delta: Vec3, half: Vec3) -> Vec3 {
 }
 
 fn route_clear(world: &World, from: Vec3, to: Vec3, half: Vec3) -> bool {
+    let _npc_work = super::profile::work(super::profile::Phase::Movement);
     let delta = (to - from).with_z(0.);
     if delta.length() > 350. {
         return false;
