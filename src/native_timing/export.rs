@@ -52,6 +52,8 @@ struct Snapshot<'a> {
     run_id: Option<[u8; 16]>,
     clock_id: &'static str,
     capture_ordinal: u64,
+    #[serde(skip_serializing_if="Option::is_none")]
+    schedule: &'a Option<schedule::Schedule>,
     frames: &'a [Frame],
     worlds: &'a [World],
     events: &'a [Event],
@@ -158,6 +160,7 @@ impl<C: Source> Recorder<C> {
                 run_id: self.run_id,
                 clock_id: self.clock.source.domain(),
                 capture_ordinal: self.export_attempts,
+                schedule: &self.schedule,
                 frames: &self.frames,
                 worlds: &self.worlds,
                 events: &self.events,
@@ -205,13 +208,17 @@ impl<C: Source> Recorder<C> {
             "phase2_unimplemented":([
                 self.audio_producer.is_none().then_some("audio-producer-fences"),
                 self.raw_counters.is_none().then_some("raw-counter-brackets"),
-                Some("image-tokens"), Some("review-ack"), Some("native-age-automation"),
+                self.schedule.is_none().then_some("image-tokens"), self.schedule.is_none().then_some("review-ack"), self.schedule.is_none().then_some("native-age-automation"),
                 Some("pair-equivalence"), Some("complete-qualification"),
             ].into_iter().flatten().collect::<Vec<_>>()),
             "campaign_qualified":false
         });
         if let serde_json::Value::Object(fields) = fields {
             manifest.as_object_mut().unwrap().extend(fields);
+        }
+        if let Some(plan)=&self.schedule {
+            manifest.as_object_mut().unwrap().insert("schedule_storage_bytes".into(),plan.storage_bytes().into());
+            manifest.as_object_mut().unwrap().insert("schedule_token_size".into(),std::mem::size_of::<schedule::Token>().into());
         }
         if let Some(raw) = &self.raw_counters {
             manifest.as_object_mut().unwrap().insert(

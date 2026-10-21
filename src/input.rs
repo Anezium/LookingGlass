@@ -426,6 +426,13 @@ impl Input {
             .find(|(_, m)| self.pad.pressed & m != 0)
             .map(|(s, _)| *s)
     }
+    #[cfg(feature="native_timing")]
+    pub fn diagnostic_activity(&self)->bool {
+        self.pad.down!=0 || self.pad.move_axis!=Vec2::ZERO || self.pad.look_axis!=Vec2::ZERO
+            || mouse_delta_position()!=Vec2::ZERO || mouse_wheel().1!=0.
+            || KEYS.iter().any(|(_,k)|is_key_down(*k))
+            || [MouseButton::Left,MouseButton::Right,MouseButton::Middle].iter().any(|b|is_mouse_button_down(*b))
+    }
     pub fn pad_pressed(&self, name: &str) -> bool {
         self.focused && self.pad.pressed & pad_mask(name) != 0
     }

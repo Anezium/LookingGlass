@@ -250,6 +250,8 @@ impl Store {
         game: &Game,
         preview: Option<&crate::save_preview::Preview>,
     ) -> Result<()> {
+        #[cfg(feature="native_timing")]
+        crate::native_timing::operations::attempt();
         game.validate()?;
         ensure!(
             game.campaign
@@ -1005,4 +1007,23 @@ pub(crate) fn simulation_save_bytes(player: &Player, village: crate::village::Sn
         game_data: "synthetic-game-data".into(), saved_at: 0,
         checksum, payload, preview: serde_json::Value::Null,
     }).unwrap()
+
+
+}
+
+#[cfg(all(test,feature="native_timing"))]
+mod native_isolation_tests {
+    use super::*;
+    #[cfg(feature="native_timing")]
+    #[test]
+    fn actual_failed_save_attempt_is_visible_to_native_isolation_guard() {
+        crate::native_timing::operations::enable();
+        let mut game=format12::game(vec![format12::level("gvillage",None,serde_json::Value::Null)]);
+        game.current="missing-visit".into();
+        let before=crate::native_timing::operations::snapshot().0;
+        let store=Store::new(PathBuf::from("unused-invalid-save-must-not-be-created"),"fixture".into());
+        assert!(store.write(Slot::Auto,&game).is_err());
+        assert_eq!(crate::native_timing::operations::snapshot().0,before+1);
+        assert!(!store.directory.exists());
+    }
 }

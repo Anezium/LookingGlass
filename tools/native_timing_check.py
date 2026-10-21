@@ -18,9 +18,10 @@ if __name__ == "__main__":
 SCHEMA = 'alice-native-phase1-v1'
 GAPS = ['audio-producer-fences', 'raw-counter-brackets', 'image-tokens', 'review-ack',
         'native-age-automation', 'pair-equivalence', 'complete-qualification']
-def gaps(producer, raw):
+def gaps(producer, raw, scheduled=False):
     return [g for g in GAPS if not ((g == 'audio-producer-fences' and producer) or
-                                  (g == 'raw-counter-brackets' and raw))]
+                                  (g == 'raw-counter-brackets' and raw) or
+                                  (g in ('image-tokens','review-ack','native-age-automation') and scheduled))]
 U64 = 2**64 - 1
 MASK = 2**14 - 1
 
@@ -142,7 +143,11 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
         repeated_cumulative_export=boolean,
         swap_observations=literal('UNAVAILABLE; never estimated from wall minus CPU'),
         door_observations=literal('UNIMPLEMENTED per-frame; legacy door chunks remain separate/unjoined'),
-        phase2_unimplemented=literal(gaps("audio_producer_storage_bytes" in m, "raw_counter_storage_bytes" in m)), campaign_qualified=literal(False))
+        phase2_unimplemented=literal(gaps("audio_producer_storage_bytes" in m, "raw_counter_storage_bytes" in m, "schedule_storage_bytes" in m)), campaign_qualified=literal(False))
+    scheduled="schedule_storage_bytes" in m
+    if scheduled:
+        mf['schedule_storage_bytes']=uint
+        mf['schedule_token_size']=uint
     if "raw_counter_storage_bytes" in m: mf["raw_counter_storage_bytes"] = uint
     if "audio_producer_storage_bytes" in m: mf["audio_producer_storage_bytes"] = uint
     if "producer_bootstrap_reserve_bytes" in m: mf["producer_bootstrap_reserve_bytes"] = uint
@@ -159,6 +164,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     need(m['budget_bytes'] == 2*1024*1024 and m['aux_reserve_bytes'] == 65536, 'budget contract')
     size = (m['recorder_size'] + m['frame_capacity']*m['frame_size'] +
             m['world_capacity']*m['world_size'] + m['event_capacity']*m['event_size'])
+    size += m.get('schedule_storage_bytes',0)
     size += m.get('raw_counter_storage_bytes',0)+m.get('audio_producer_storage_bytes',0)+m.get('producer_bootstrap_reserve_bytes',0)
     need(0<=m.get('producer_bootstrap_reserve_bytes',0)<=65536 and (not m.get('audio_producer_storage_bytes',0) or m.get('producer_bootstrap_reserve_bytes',0)==0),'producer bootstrap reserve')
     need(size == m['allocated_storage_bytes'] and size + m['aux_reserve_bytes'] <= m['budget_bytes'], 'allocation budget')
@@ -172,6 +178,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
         events=array(lambda x: obj(x, EVENT)), pending=nullable(lambda x: obj(x, FRAME)))
     if "raw_counter_storage_bytes" in m: df["raw_counters"] = lambda x: None
     if "audio_producer_storage_bytes" in m: df["audio_producer"] = lambda x: None
+    if scheduled: df["schedule"]=lambda x: None
     obj(d, df)
     need(d['run_id'] == m['run_id'] and d['clock_id'] == m['clock_id'] and d['capture_ordinal'] == 1, 'payload identity')
     need(d['pending'] is None, 'payload pending interval')
@@ -180,7 +187,8 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
                                    (worlds,'world_count','generation_total','world_capacity'),
                                    (events,'event_count','event_total','event_capacity')):
         need(0 < len(rows) == m[count] == m[total] < m[cap], 'count/saturation/loss')
-    need(m['viewer_seq'] >= len(frames)+1 and m['capture_stop_viewer_seq'] == len(frames)+1 and m['capture_stop_us'] == frames[-1]['end_us'] and m['first_viewer_seq'] == 1 and m['last_viewer_seq'] == len(frames), 'sequence manifest')
+    first=m['first_viewer_seq'] if scheduled else 1
+    need(first is not None and first>=1 and m['viewer_seq'] >= first+len(frames) and m['capture_stop_viewer_seq'] == first+len(frames) and m['capture_stop_us'] == frames[-1]['end_us'] and m['first_viewer_seq'] == first and m['last_viewer_seq'] == first+len(frames)-1, 'sequence manifest')
     previous = None
     for i, w in enumerate(worlds, 1):
         need(w['generation'] == i and w['ready_us'] is not None, 'world generation/ready')
@@ -193,7 +201,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
             f32(bits)
     previous_event = None
     kinds = {'InstallBegin','Ready','FirstPlayable','Status','ModalEnter','ModalExit','OpeningEnter','OpeningExit',
-             'EndingEnter','EndingExit','SkipComplete','TransitionBegin','LoadAttempt','LoadFailed','StopRequested','Recovery'}
+             'EndingEnter','EndingExit','SkipComplete','TransitionBegin','LoadAttempt','LoadFailed','StopRequested','Recovery','ExternalOperation'}
     for i, event in enumerate(events, 1):
         need(event['ordinal'] == i and event['native_us'] is not None and event['kind'] in kinds, 'event sequence/clock/kind')
         need(event['generation'] <= len(worlds) and event['viewer_seq'] <= m['viewer_seq'] and
@@ -207,7 +215,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     previous = None
     for i, f in enumerate(frames, 1):
         b, e = f['begin_us'], f['end_us']
-        need(f['viewer_seq'] == i and b is not None and e is not None and b < e, 'frame sequence/clock/duration')
+        need(f['viewer_seq'] == first+i-1 and b is not None and e is not None and b < e, 'frame sequence/clock/duration')
         need(1 <= f['begin_generation'] <= f['end_generation'] <= len(worlds), 'frame generation')
         need(worlds[f['begin_generation']-1]['ready_us'] <= b, 'frame before ready')
         need(f['begin_operation'] <= f['end_operation'] <= m['operation_total'], 'frame operation')
@@ -242,6 +250,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     s = world['ready_us'] + age_offset_us
     t = s + 30_000_000
     need(s >= 10_000_000 and t <= U64, 'window arithmetic/settle')
+    if scheduled: sibling("native_timing_schedule_check").validate(d["schedule"],m,world,generation,age_offset_us,frames,s,t)
     settle = s - 10_000_000
     need(frames[0]['end_us'] <= settle and frames[-1]['begin_us'] >= t, 'missing complete guards around settle/window')
     population = [f for f in frames if f['begin_us'] < t and f['end_us'] > s]
@@ -276,7 +285,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
         window_us=30_000_000, sum_full_frame_us=sum(f['end_us']-f['begin_us'] for f in population),
         simulation_at_first_begin=population[0]['before'], simulation_at_last_end=population[-1]['after'],
         simulation_age_equivalence='UNKNOWN; no interpolation/retiming', audio_qualification='UNIMPLEMENTED',
-        image_qualification='UNIMPLEMENTED', door_totals='UNKNOWN; no clipped/prorated legacy chunks')
+        image_qualification=('SUBMITTED_TOKEN_AND_NATIVE_ACK_UNATTESTED; physical exposure time UNKNOWN' if scheduled else 'UNIMPLEMENTED'), door_totals='UNKNOWN; no clipped/prorated legacy chunks')
 
 
 def main():

@@ -180,6 +180,8 @@ impl Console {
         if line.trim().is_empty() {
             return None;
         }
+        #[cfg(feature="native_timing")]
+        crate::native_timing::operations::attempt();
         self.print(format!("> {line}"));
         println!("Console: {line}");
         if self.history.back() != Some(&line) {
@@ -394,4 +396,14 @@ mod tests {
         s.insert('é');
         assert_eq!(s.input.len(), 256);
     }
+    #[cfg(feature="native_timing")]
+    #[test]
+    fn actual_console_submission_is_visible_to_native_isolation_guard() {
+        crate::native_timing::operations::enable();
+        let before=crate::native_timing::operations::snapshot().0;
+        let mut console=Console::default();console.input="help".into();
+        assert!(console.submit().unwrap().is_ok());
+        assert_eq!(crate::native_timing::operations::snapshot().0,before+1);
+    }
+
 }

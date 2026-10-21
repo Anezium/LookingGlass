@@ -1,12 +1,14 @@
-//! Phase 1 passive observations only. Feature AND startup config gated.
-//! No audio fences, image tokens, review acknowledgement, native-age scheduling,
-//! pair equivalence or campaign qualification. See docs/NATIVE-TIMING-PHASE1.md.
+//! Feature AND startup config gated observations, producer journal and optional
+//! immutable residence-age scheduling. Submitted-frame tokens/native review ack
+//! do not attest camera exposure, external quiet, paired state or campaign results.
 pub mod audio_counters;
 pub mod audio_producer;
 #[path = "../audio/output_types.rs"]
 pub mod audio_types;
 pub mod clock;
 mod export;
+pub mod operations;
+pub mod schedule;
 #[cfg(test)]
 mod tests;
 #[path = "../audio/queue.rs"]
@@ -33,7 +35,8 @@ pub const OVERLAY: u32 = 2048;
 pub const DEAD: u32 = 4096;
 pub const FLYING: u32 = 8192;
 
-#[derive(Clone, Copy, Default, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct State {
     pub environment_bits: u32,
     pub pickup_bits: u32,
@@ -140,6 +143,7 @@ pub enum Milestone {
     LoadFailed,
     StopRequested,
     Recovery,
+    ExternalOperation,
 }
 #[derive(Clone, Copy, Serialize)]
 pub struct Event {
@@ -156,6 +160,8 @@ pub struct Event {
 #[serde(deny_unknown_fields)]
 struct Config {
     enabled: bool,
+    #[serde(default)]
+    schedule: Option<schedule::Config>,
     #[serde(default)]
     audio_raw_counters: bool,
     #[serde(default)]
@@ -175,6 +181,8 @@ pub struct Metadata {
 }
 
 pub struct Recorder<C: Source> {
+    pub schedule: Option<schedule::Schedule>,
+    external_epoch: u32,
     pub producer_requested: bool,
     producer_start_sent: bool,
     pub audio_producer: Option<Box<audio_producer::Owner>>,
@@ -219,12 +227,20 @@ pub const MAX_RAW_STORAGE: usize = audio_counters::SNAPSHOT_CAP
 // them in auxiliary scratch even when the feature's config is disabled.
 pub const RAW_SLOT_BYTES: usize =
     2 * std::mem::size_of::<std::sync::OnceLock<std::sync::Arc<audio_counters::Raw>>>();
-const _: () =
-    assert!(STORAGE_BYTES + MAX_RAW_STORAGE + audio_producer::MAX_STORAGE + AUX_RESERVE <= BUDGET);
+const _: () = assert!(
+    STORAGE_BYTES
+        + MAX_RAW_STORAGE
+        + audio_producer::MAX_STORAGE
+        + schedule::TOKEN_CAP * std::mem::size_of::<schedule::Token>()
+        + AUX_RESERVE
+        <= BUDGET
+);
 
 impl<C: Source> Recorder<C> {
     pub fn new(clock: C, run_id: Option<[u8; 16]>, metadata: Metadata) -> Self {
         Self {
+            schedule: None,
+            external_epoch: operations::snapshot().0,
             producer_requested: false,
             producer_start_sent: false,
             audio_producer: None,
@@ -281,6 +297,11 @@ impl<C: Source> Recorder<C> {
     }
     pub fn discontinuity(&mut self, kind: Milestone, reason: u32) {
         Self::inc(&mut self.operation, &mut self.arithmetic_overflow);
+        if let Some(plan) = &mut self.schedule {
+            if plan.started && !plan.finished {
+                plan.reject(schedule::Fault::Interrupted);
+            }
+        }
         if let Some(row) = &mut self.pending {
             row.reasons |= reason | OPERATION;
         }
@@ -322,6 +343,9 @@ impl<C: Source> Recorder<C> {
         } else {
             Self::inc(&mut self.lost_worlds, &mut self.arithmetic_overflow);
         }
+        if let Some(schedule) = &mut self.schedule {
+            schedule.ready(map, self.generation, world.ready_us);
+        }
         self.event(Milestone::Ready, 0);
     }
     pub fn begin(&mut self, before: State) {
@@ -330,7 +354,39 @@ impl<C: Source> Recorder<C> {
             return;
         }
         let now = self.clock.read();
-        if !self.producer_start_sent {
+        if self.schedule.is_some() {
+            let (epoch, wrapped) = operations::snapshot();
+            if wrapped {
+                self.schedule
+                    .as_mut()
+                    .unwrap()
+                    .reject(schedule::Fault::Overflow);
+            }
+            if epoch != self.external_epoch {
+                self.external_epoch = epoch;
+                self.discontinuity(Milestone::ExternalOperation, OPERATION);
+            }
+        }
+        if let Some(plan) = &mut self.schedule {
+            let (start, seal) = plan.tick(now, self.generation, before);
+            if start {
+                if let Some(owner) = &self.audio_producer {
+                    owner.request_start(now);
+                    self.producer_start_sent = true;
+                }
+                if let Some(raw) = &mut self.raw_counters {
+                    raw.sample(&mut self.clock, audio_counters::Tag::Requested);
+                }
+            }
+            if seal {
+                self.seal_producer();
+                self.stop_requested = true;
+            }
+            if !self.schedule.as_ref().unwrap().started || self.stopped {
+                return;
+            }
+        }
+        if self.schedule.is_none() && !self.producer_start_sent {
             if let Some(owner) = &self.audio_producer {
                 owner.request_start(now);
                 self.producer_start_sent = true;
@@ -395,6 +451,11 @@ impl<C: Source> Recorder<C> {
     }
     pub fn end(&mut self, after: State, reasons: u32) {
         let now = self.clock.read();
+        if let Some(plan) = &mut self.schedule {
+            if plan.started && !plan.finished && reasons != 0 {
+                plan.reject(schedule::Fault::Ineligible);
+            }
+        }
         if self.status != Some(reasons) {
             self.discontinuity(Milestone::Status, reasons);
             self.status = Some(reasons);
@@ -421,10 +482,35 @@ impl<C: Source> Recorder<C> {
         }
     }
     /// Stop acquisition at the NEXT actual viewer begin, never at export time.
+    pub fn seal_producer(&mut self) {
+        if let Some(owner) = &mut self.audio_producer {
+            if owner.seal.is_none() {
+                owner.request_seal(&mut self.clock);
+            }
+        }
+        if self.schedule.is_some() {
+            if let Some(raw) = &mut self.raw_counters {
+                raw.sample(&mut self.clock, audio_counters::Tag::Requested);
+            }
+        }
+    }
+    pub fn schedule_input(&mut self, active: bool) {
+        if let Some(plan) = &mut self.schedule {
+            if active && plan.started && !plan.finished {
+                plan.reject(schedule::Fault::Interrupted);
+            }
+        }
+    }
     pub fn request_stop(&mut self) {
         if !self.stop_requested && !self.stopped {
             self.event(Milestone::StopRequested, 0);
             self.stop_requested = true;
+            if let Some(plan) = &mut self.schedule {
+                if !plan.finished {
+                    plan.reject(schedule::Fault::Interrupted);
+                }
+            }
+            self.seal_producer();
         }
     }
     /// Setup-only, after Session::open; a worker/callback can already be active.
@@ -457,6 +543,10 @@ impl<C: Source> Recorder<C> {
                 .audio_producer
                 .as_ref()
                 .map_or(audio_producer::BOOTSTRAP_RESERVE, |o| o.reserved)
+            + self
+                .schedule
+                .as_ref()
+                .map_or(0, schedule::Schedule::storage_bytes)
             + self.frames.capacity() * std::mem::size_of::<Frame>()
             + self.worlds.capacity() * std::mem::size_of::<World>()
             + self.events.capacity() * std::mem::size_of::<Event>()
@@ -476,7 +566,8 @@ impl Session {
     /// config performs no recorder allocation. Invalid config fails explicitly.
     pub fn open() -> anyhow::Result<Self> {
         use std::io::Read;
-        let file = match std::fs::File::open(crate::preferences::path("native-timing-config.json")) {
+        let file = match std::fs::File::open(crate::preferences::path("native-timing-config.json"))
+        {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self { recorder: None })
@@ -497,6 +588,13 @@ impl Session {
             !SESSION_CLAIM.swap(true, std::sync::atomic::Ordering::SeqCst),
             "native timing Session already claimed"
         );
+        if let Some(plan) = &cfg.schedule {
+            plan.validate()?;
+            anyhow::ensure!(
+                cfg.audio_raw_counters && cfg.audio_producer_capture,
+                "schedule requires raw counters and producer capture"
+            );
+        }
         let metadata = Metadata {
             source_sha256: export::parse_hash(cfg.source_sha256)?,
             build_sha256: export::parse_hash(cfg.build_sha256)?,
@@ -505,6 +603,10 @@ impl Session {
             recorder_config_sha256: export::hash(&bytes),
         };
         let mut recorder = Box::new(Recorder::new(Native, export::random_id(), metadata));
+        recorder.schedule = cfg.schedule.map(schedule::Schedule::new);
+        if recorder.schedule.is_some() {
+            operations::enable();
+        }
         recorder.raw_requested = cfg.audio_raw_counters;
         recorder.producer_requested = cfg.audio_producer_capture;
         anyhow::ensure!(
@@ -521,6 +623,104 @@ impl Session {
             f(r);
         }
     }
+    /// Bounded request file checked ONLY before review deadline, never in W or guards.
+    /// The separate host write follows actual image return/inspection. It is not a physical camera timestamp.
+    pub fn poll_schedule_review(&mut self) {
+        use std::io::Read;
+        let Some(r) = &mut self.recorder else {
+            return;
+        };
+        let Some(plan) = &mut r.schedule else {
+            return;
+        };
+        let Some(now) = r.clock.read() else {
+            plan.reject(schedule::Fault::Clock);
+            return;
+        };
+        if !plan.poll_due(now) {
+            return;
+        }
+        let file = match std::fs::File::open(crate::preferences::path("native-timing-review.json"))
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => {
+                plan.reject(schedule::Fault::InvalidReview);
+                return;
+            }
+        };
+        let mut bytes = [0u8; 1025];
+        let mut used = 0;
+        let mut file = file.take(1025);
+        loop {
+            match file.read(&mut bytes[used..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    used += n;
+                    if used == bytes.len() {
+                        plan.reject(schedule::Fault::InvalidReview);
+                        return;
+                    }
+                }
+                Err(_) => {
+                    plan.reject(schedule::Fault::InvalidReview);
+                    return;
+                }
+            }
+        }
+        let Some(acknowledged) = r.clock.read() else {
+            plan.reject(schedule::Fault::Clock);
+            return;
+        };
+        match serde_json::from_slice(&bytes[..used]) {
+            Ok(ack) => plan.acknowledge(ack, r.run_id, acknowledged, r.generation, r.operation),
+            Err(_) => plan.reject(schedule::Fault::InvalidReview),
+        }
+    }
+    /// Diagnostic overlay submitted outside acquisition only, using a fixed stack string.
+    pub fn schedule_anchor(&mut self, state: State) -> Option<AnchorText> {
+        use std::fmt::Write;
+        let Some(r) = &mut self.recorder else {
+            return None;
+        };
+        let Some(plan) = &mut r.schedule else {
+            return None;
+        };
+        let Some(now) = r.clock.read() else {
+            plan.reject(schedule::Fault::Clock);
+            return None;
+        };
+        if !plan.review_open(now) && !plan.finished {
+            return None;
+        }
+        let mut text = AnchorText {
+            bytes: [0; 384],
+            len: 0,
+        };
+        if plan.finished {
+            let _ = write!(
+                text,
+                "NATIVE CAPTURE CLOSED fault={:?} — Quit normally",
+                plan.fault
+            );
+        } else if let Some(t) = plan.submit(now, r.viewer_seq, r.generation, r.operation, state) {
+            let _ = write!(text, "NT ");
+            for b in r.run_id.unwrap_or([0; 16]) {
+                let _ = write!(text, "{b:02x}");
+            }
+            let _ = write!(
+                text,
+                " token={} frame={} us={} gen={} op={} S={}",
+                t.ordinal,
+                t.viewer_seq,
+                t.submitted_us,
+                t.generation,
+                t.operation,
+                plan.start_us.unwrap_or(0)
+            );
+        }
+        (text.len > 0).then_some(text)
+    }
     /// Invoked only after the viewer loop has ended. No pending finalization.
     pub fn export_after_viewer(&mut self) -> anyhow::Result<()> {
         self.export_after_viewer_to(&crate::preferences::path("native-timing"))
@@ -528,7 +728,9 @@ impl Session {
     pub(crate) fn export_after_viewer_to(&mut self, root: &std::path::Path) -> anyhow::Result<()> {
         if let Some(r) = &mut self.recorder {
             if let Some(owner) = &mut r.audio_producer {
-                owner.request_seal(&mut r.clock);
+                if owner.seal.is_none() {
+                    owner.request_seal(&mut r.clock);
+                }
                 owner.collect(std::time::Duration::from_secs(2));
                 owner.freeze();
             }
@@ -537,6 +739,26 @@ impl Session {
             }
             r.export(root)?;
         }
+        Ok(())
+    }
+}
+
+pub struct AnchorText {
+    bytes: [u8; 384],
+    len: usize,
+}
+impl AnchorText {
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("INVALID TOKEN")
+    }
+}
+impl std::fmt::Write for AnchorText {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        if self.len + s.len() > self.bytes.len() {
+            return Err(std::fmt::Error);
+        }
+        self.bytes[self.len..self.len + s.len()].copy_from_slice(s.as_bytes());
+        self.len += s.len();
         Ok(())
     }
 }

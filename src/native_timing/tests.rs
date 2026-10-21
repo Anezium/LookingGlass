@@ -890,3 +890,199 @@ fn actual_session_after_viewer_export_samples_each_raw_field() {
     assert_eq!(rows.len(), 4, "AfterViewer field reads missing");
     assert!(rows[2..].iter().all(|row| row["tag"] == "AfterViewer"));
 }
+
+#[test]
+fn scheduled_actual_recorder_waits_without_capture_then_seals_before_human_quit() {
+    let (mut r, c) = fake();
+    r.schedule = Some(schedule::Schedule::new(schedule::Config {
+        map: "tower2".into(),
+        ready_offset_us: 40_000_000,
+    }));
+    r.ready("tower2", None, Reason::StartSave, state(0));
+    // Real viewer loops continue before the native-age acquisition; no frame/audio journal yet.
+    for i in 0..100 {
+        c.0.set(Ok(i * 10_000));
+        frame(&mut r, state(i), state(i + 1), 0);
+    }
+    assert!(r.frames.is_empty() && r.pending.is_none() && !r.producer_start_sent);
+    let t = r
+        .schedule
+        .as_mut()
+        .unwrap()
+        .submit(1_000_000, r.viewer_seq, 1, r.operation, state(100))
+        .unwrap();
+    r.schedule.as_mut().unwrap().acknowledge(
+        schedule::Ack {
+            run_id: [7; 16],
+            token: t.into(),
+        },
+        r.run_id,
+        2_000_000,
+        1,
+        r.operation,
+    );
+    for i in 100..=7200 {
+        c.0.set(Ok(i * 10_000));
+        frame(&mut r, state(i), state(i + 1), 0);
+    }
+    assert!(r.stopped && r.pending.is_none());
+    assert_eq!(r.capture_stop_us, Some(72_000_000));
+    assert_eq!(r.frames.first().unwrap().begin_us, Some(28_000_000));
+    assert_eq!(r.frames.len(), 4400);
+    assert!(r.schedule.as_ref().unwrap().fault.is_none());
+    // Human may spend minutes on menus after capture: no additional acquisition or deadline slide.
+    c.0.set(Ok(900_000_000));
+    r.begin(state(7200));
+    assert_eq!(r.frames.len(), 4400);
+    r.export(&root("scheduled")).unwrap();
+}
+#[test]
+fn scheduled_actual_modal_or_input_interrupt_does_not_wait_for_viewer_exit_to_seal() {
+    let (mut r, c) = fake();
+    r.schedule = Some(schedule::Schedule::new(schedule::Config {
+        map: "tower2".into(),
+        ready_offset_us: 40_000_000,
+    }));
+    r.ready("tower2", None, Reason::Fresh, state(0));
+    let t = r
+        .schedule
+        .as_mut()
+        .unwrap()
+        .submit(1, 1, 1, 0, state(0))
+        .unwrap();
+    r.schedule.as_mut().unwrap().acknowledge(
+        schedule::Ack {
+            run_id: [7; 16],
+            token: t.into(),
+        },
+        r.run_id,
+        2,
+        1,
+        0,
+    );
+    c.0.set(Ok(28_000_000));
+    frame(&mut r, state(0), state(1), 0);
+    r.schedule_input(true);
+    c.0.set(Ok(28_010_000));
+    r.begin(state(1));
+    assert!(r.stopped);
+    assert_eq!(
+        r.schedule.as_ref().unwrap().fault,
+        Some(schedule::Fault::Interrupted)
+    );
+}
+
+#[test]
+fn actual_session_schedule_config_and_bounded_ack_file_are_consumed_only_before_deadline() {
+    let dir = root("session-schedule");
+    std::fs::create_dir_all(&dir).unwrap();
+    let previous = std::env::var_os("LOOKING_GLASS_SETTINGS_DIR");
+    std::env::set_var("LOOKING_GLASS_SETTINGS_DIR", &dir);
+    struct Reset(Option<std::ffi::OsString>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => std::env::set_var("LOOKING_GLASS_SETTINGS_DIR", v),
+                None => std::env::remove_var("LOOKING_GLASS_SETTINGS_DIR"),
+            };
+            SESSION_CLAIM.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _reset = Reset(previous);
+    std::fs::write(dir.join("native-timing-config.json"),br#"{"enabled":true,"audio_raw_counters":true,"audio_producer_capture":true,"schedule":{"map":"tower2","ready_offset_us":40000000}}"#).unwrap();
+    let mut session = Session::open().unwrap();
+    let r = session.recorder.as_mut().unwrap();
+    r.ready("tower2", None, Reason::StartSave, state(0));
+    r.begin(state(0));
+    let label = session.schedule_anchor(state(0)).unwrap();
+    assert!(label.as_str().starts_with("NT "));
+    let r = session.recorder.as_ref().unwrap();
+    let token = r.schedule.as_ref().unwrap().latest().unwrap();
+    let request = serde_json::json!({"run_id":r.run_id,"token":{"ordinal":token.ordinal,"viewer_seq":token.viewer_seq,"submitted_us":token.submitted_us,"generation":token.generation,"operation":token.operation}});
+    std::fs::write(
+        dir.join("native-timing-review.json"),
+        serde_json::to_vec(&request).unwrap(),
+    )
+    .unwrap();
+    session.poll_schedule_review();
+    let p = session
+        .recorder
+        .as_ref()
+        .unwrap()
+        .schedule
+        .as_ref()
+        .unwrap();
+    assert_eq!(p.reviewed_token, Some(token));
+    assert!(p.fault.is_none());
+    // Once accepted, the file is never opened again; later corruption cannot alter the acknowledged token.
+    std::fs::write(dir.join("native-timing-review.json"), vec![b'!'; 2000]).unwrap();
+    session.poll_schedule_review();
+    assert!(session
+        .recorder
+        .as_ref()
+        .unwrap()
+        .schedule
+        .as_ref()
+        .unwrap()
+        .fault
+        .is_none());
+    // A separate actual Session/Recorder fails closed on the bounded oversized request.
+    let mut r = Recorder::new(Native, Some([7; 16]), Metadata::default());
+    r.schedule = Some(schedule::Schedule::new(schedule::Config {
+        map: "tower2".into(),
+        ready_offset_us: 40_000_000,
+    }));
+    r.ready("tower2", None, Reason::Fresh, state(0));
+    let mut other = Session {
+        recorder: Some(Box::new(r)),
+    };
+    other.poll_schedule_review();
+    assert_eq!(
+        other
+            .recorder
+            .as_ref()
+            .unwrap()
+            .schedule
+            .as_ref()
+            .unwrap()
+            .fault,
+        Some(schedule::Fault::InvalidReview)
+    );
+}
+#[test]
+fn operation_attempt_epoch_invalidates_scheduled_actual_interval() {
+    operations::enable();
+    let (mut r, c) = fake();
+    r.schedule = Some(schedule::Schedule::new(schedule::Config {
+        map: "tower2".into(),
+        ready_offset_us: 40_000_000,
+    }));
+    r.ready("tower2", None, Reason::Fresh, state(0));
+    let t = r
+        .schedule
+        .as_mut()
+        .unwrap()
+        .submit(1, 1, 1, 0, state(0))
+        .unwrap();
+    r.schedule.as_mut().unwrap().acknowledge(
+        schedule::Ack {
+            run_id: [7; 16],
+            token: t.into(),
+        },
+        r.run_id,
+        2,
+        1,
+        0,
+    );
+    c.0.set(Ok(28_000_000));
+    frame(&mut r, state(0), state(1), 0);
+    operations::attempt();
+    c.0.set(Ok(28_010_000));
+    r.begin(state(1));
+    assert!(r.stopped);
+    assert_eq!(
+        r.schedule.as_ref().unwrap().fault,
+        Some(schedule::Fault::Interrupted)
+    );
+    assert_ne!(r.frames[0].reasons & OPERATION, 0);
+}

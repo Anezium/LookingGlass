@@ -4,6 +4,9 @@
 #![allow(dead_code)]
 #[path = "mod.rs"]
 mod native_timing;
+// The actual exporter receives an explicit owned root below. Session startup is
+// not used in this standalone process; prevent accidentally exercising a shim.
+mod preferences {pub fn path(_: &str)->std::path::PathBuf {panic!("Session path is outside this exporter-only probe")}}
 use native_timing::*;
 #[path = "audio_producer/host_fixture.rs"]
 mod host_fixture;
@@ -68,7 +71,8 @@ fn main() {
     let root = std::path::PathBuf::from(&output);
     // All metadata hashes present with maximum decimal byte width. All bounded
     // datasets populated, including maximum escaped map/entry lengths.
-    let mut r = Recorder::new(
+    // Production Session owns Box<Recorder>; retain that layout on the export thread.
+    let mut r = Box::new(Recorder::new(
         Fake(0),
         Some([255; 16]),
         Metadata {
@@ -78,7 +82,7 @@ fn main() {
             startup_save_sha256: Some([255; 32]),
             recorder_config_sha256: [255; 32],
         },
-    );
+    ));
     for _ in 0..WORLD_CAP - 1 {
         r.ready(
             &"\0".repeat(64),
@@ -115,6 +119,10 @@ fn main() {
     let audio = r.audio_producer.as_ref().unwrap();
     let buffers = &audio.completed.as_ref().unwrap().buffers;
     println!("HOST actual layout NativeRecorder={} FakeRecorder={} Block={} Fence={} Legacy={} Buffers={} Control={} Bootstrap={} AudioState={} Universe={} Owner={} CaptureNative={} Start={} OptionStart={} Completed={} OptionCompleted={} StartChannel={} CompletedChannel={} producer_stack_reserve=32768 bootstrap_reserve={} fixed_reserve={} capacities={:?} rows={:?}",std::mem::size_of::<Recorder<clock::Native>>(),std::mem::size_of::<Recorder<Fake>>(),std::mem::size_of::<audio_producer::Block>(),std::mem::size_of::<audio_producer::Fence>(),std::mem::size_of::<audio_producer::Legacy>(),std::mem::size_of::<audio_producer::Buffers>(),std::mem::size_of::<audio_producer::Control>(),std::mem::size_of::<audio_producer::Bootstrap>(),std::mem::size_of::<audio_producer::AudioState>(),std::mem::size_of::<audio_producer::Universe>(),std::mem::size_of::<audio_producer::Owner>(),std::mem::size_of::<audio_producer::Capture<clock::Native>>(),std::mem::size_of::<audio_producer::Start>(),std::mem::size_of::<Option<audio_producer::Start>>(),std::mem::size_of::<audio_producer::Completed>(),std::mem::size_of::<Option<audio_producer::Completed>>(),transfer::allocation_bytes::<audio_producer::Start>(1),transfer::allocation_bytes::<audio_producer::Completed>(1),audio_producer::BOOTSTRAP_RESERVE,audio_producer::FIXED_RESERVE,buffers.capacities(),[buffers.blocks.len(),buffers.fences.len(),buffers.legacy.len()]);
+    let mut plan=schedule::Schedule::new(schedule::Config{map:"\0".repeat(64),ready_offset_us:600_000_000});
+    plan.ready(&"\0".repeat(64),1,Some(0));
+    for i in 0..schedule::TOKEN_CAP {plan.submit(i as u64*schedule::POLL_US,i as u64+1,1,0,State::default());}
+    r.schedule=Some(plan);
     let storage = r.actual_storage_bytes();
     // Run export on a bounded HOST stack. On macOS verify the actual pthread
     // allocation (rather than assuming Builder's requested minimum is exact).

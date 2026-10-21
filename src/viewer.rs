@@ -389,6 +389,8 @@ pub(crate) async fn check_transition_loading(assets: &mut Assets, options: &Opti
 }
 
 pub(crate) fn save_capture(path: &std::path::Path) -> Result<()> {
+    #[cfg(feature="native_timing")]
+    crate::native_timing::operations::attempt();
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
@@ -1136,7 +1138,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut profile_report_due = false;
     loop {
         #[cfg(feature = "native_timing")]
-        timing.with(|r| r.begin(timing_state!()));
+        { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
         crate::frame_profile::begin_viewer_frame();
         crate::frame_phases::begin();
         #[cfg(feature="vita_renderer")]
@@ -1218,6 +1220,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
         input.update(&preferences, physical_input && window_focused() && !bench && !route_running);
+        #[cfg(feature="native_timing")]
+        timing.with(|r| {if r.schedule.is_some(){r.schedule_input(input.diagnostic_activity());}});
         preview_throttle.advance_frame();
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
@@ -1254,7 +1258,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             #[cfg(feature = "native_timing")]
             timing.with(|r| {
                 r.discontinuity(crate::native_timing::Milestone::ModalEnter, crate::native_timing::MODAL | crate::native_timing::PAUSED);
-                r.request_stop(); // Seal only at the next REAL viewer begin, never export time.
+                r.request_stop(); // Seal producer before entering any blocking modal loop.
             });
             escape_preview_ready = false;
             weapon_buttons.block();
@@ -4241,6 +4245,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(frame_profile);
         crate::character::skinning_bench_end();
+        #[cfg(feature="native_timing")]
+        if let Some(text)=timing.schedule_anchor(timing_state!()) {
+            draw_rectangle(0.,0.,screen_width(),42.,BLACK);
+            draw_text(text.as_str(),4.,18.,12.,WHITE);
+        }
         #[cfg(feature = "native_timing")]
         timing.with(|r| {
             use crate::native_timing as nt;
