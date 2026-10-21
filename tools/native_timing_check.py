@@ -11,17 +11,29 @@ import math
 from pathlib import Path
 import struct
 import sys
+import importlib.util
 if __name__ == "__main__":
     sys.modules["native_timing_check"] = sys.modules[__name__]
 
 SCHEMA = 'alice-native-phase1-v1'
 GAPS = ['audio-producer-fences', 'raw-counter-brackets', 'image-tokens', 'review-ack',
         'native-age-automation', 'pair-equivalence', 'complete-qualification']
+GAPS_AUDIO = GAPS[2:]
 U64 = 2**64 - 1
 MASK = 2**14 - 1
 
 class Invalid(ValueError):
     pass
+
+def sibling(name):
+    # -I removes script directories from sys.path. Load this trusted code by its
+    # own resolved path, independent of cwd or paths in an untrusted capture.
+    if name in sys.modules: return sys.modules[name]
+    spec=importlib.util.spec_from_file_location(name,Path(__file__).resolve().parent/(name+'.py'))
+    module=importlib.util.module_from_spec(spec)
+    sys.modules[name]=module
+    spec.loader.exec_module(module)
+    return module
 
 def need(ok, reason):
     if not ok:
@@ -128,8 +140,10 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
         repeated_cumulative_export=boolean,
         swap_observations=literal('UNAVAILABLE; never estimated from wall minus CPU'),
         door_observations=literal('UNIMPLEMENTED per-frame; legacy door chunks remain separate/unjoined'),
-        phase2_unimplemented=literal(GAPS), campaign_qualified=literal(False))
+        phase2_unimplemented=literal(GAPS_AUDIO if "audio_producer_storage_bytes" in m else GAPS), campaign_qualified=literal(False))
     if "raw_counter_storage_bytes" in m: mf["raw_counter_storage_bytes"] = uint
+    if "audio_producer_storage_bytes" in m: mf["audio_producer_storage_bytes"] = uint
+    if "producer_bootstrap_reserve_bytes" in m: mf["producer_bootstrap_reserve_bytes"] = uint
     obj(m, mf)
     need(m['run_id'] is not None and m['run_id'] != [0]*16 and not m['invalid_identity'], 'UNKNOWN run/world identity')
     need(m['clock_id'] in ('vita-newlib-clock4-process-us', 'host-shared-Instant-session-us') or (allow_test_clock is True and m['clock_id'] == 'host-injected-fake-us'), 'clock domain; injected test clocks require explicit opt-in')
@@ -143,7 +157,8 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     need(m['budget_bytes'] == 2*1024*1024 and m['aux_reserve_bytes'] == 65536, 'budget contract')
     size = (m['recorder_size'] + m['frame_capacity']*m['frame_size'] +
             m['world_capacity']*m['world_size'] + m['event_capacity']*m['event_size'])
-    size += m.get('raw_counter_storage_bytes',0)
+    size += m.get('raw_counter_storage_bytes',0)+m.get('audio_producer_storage_bytes',0)+m.get('producer_bootstrap_reserve_bytes',0)
+    need(0<=m.get('producer_bootstrap_reserve_bytes',0)<=65536 and (not m.get('audio_producer_storage_bytes',0) or m.get('producer_bootstrap_reserve_bytes',0)==0),'producer bootstrap reserve')
     need(size == m['allocated_storage_bytes'] and size + m['aux_reserve_bytes'] <= m['budget_bytes'], 'allocation budget')
     need(0 < m['records_bytes'] <= 16*1024*1024, 'payload length cap')
     with (directory/'records.json').open('rb') as file:
@@ -154,6 +169,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
         frames=array(lambda x: obj(x, FRAME)), worlds=array(lambda x: obj(x, WORLD)),
         events=array(lambda x: obj(x, EVENT)), pending=nullable(lambda x: obj(x, FRAME)))
     if "raw_counter_storage_bytes" in m: df["raw_counters"] = lambda x: None
+    if "audio_producer_storage_bytes" in m: df["audio_producer"] = lambda x: None
     obj(d, df)
     need(d['run_id'] == m['run_id'] and d['clock_id'] == m['clock_id'] and d['capture_ordinal'] == 1, 'payload identity')
     need(d['pending'] is None, 'payload pending interval')
@@ -238,12 +254,15 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     need(len(playable) == 1 and playable[0]['native_us'] < settle, 'missing/late/duplicate first-playable epoch')
     raw_guards = None
     if "raw_counter_storage_bytes" in m:
-        import native_timing_counter_check as counters
+        counters=sibling("native_timing_counter_check")
         raw = d['raw_counters']
         raw_guards = counters.validate(raw,m['clock_id'],s,t)
         need(m['raw_counter_storage_bytes'] == raw['capacity']*raw['snapshot_size']+raw['shared_bytes'], 'counter storage receipt')
+    producer = None
+    if "audio_producer_storage_bytes" in m:
+        producer=sibling("native_timing_audio_check").validate(d['audio_producer'],m,s,t,d.get('raw_counters'))
     # Factual simulation boundaries only. No exact simulation-age/pair claim.
-    return dict(phase2a_status="PARTIAL_COUNTERS_ONLY_UNQUALIFIED" if raw_guards is not None else "UNIMPLEMENTED", raw_counter_guards=raw_guards, audio_qualified=False, source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', clock_id=m['clock_id'], provenance='UNATTESTED; self-consistent hash only', phase2_unimplemented=GAPS,
+    return dict(native_audio_data_complete=producer is not None, producer_observations=producer, method_qualified=False, route_activity="UNKNOWN; binding does not prove mix/music controls, eligible decode-ahead, job admission, ring or active voice; zero may be vacuous", phase2a_status="PRODUCER_OBSERVATIONS_UNATTESTED" if producer is not None else ("PARTIAL_COUNTERS_ONLY_UNQUALIFIED" if raw_guards is not None else "UNIMPLEMENTED"), raw_counter_guards=raw_guards, audio_qualified=False, source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', clock_id=m['clock_id'], provenance='UNATTESTED; self-consistent hash only', phase2_unimplemented=m["phase2_unimplemented"],
         metadata_assurance=m['metadata_assurance'], native_start_us=s, native_end_us=t,
         generation=generation, world=world, N=len(population), small_sample=len(population)<120,
         selected_viewer_seq=[f['viewer_seq'] for f in population],

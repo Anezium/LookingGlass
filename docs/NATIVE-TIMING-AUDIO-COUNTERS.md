@@ -1,10 +1,10 @@
 # Partial audio counter candidate
 
-This checkpoint is **PARTIAL_COUNTERS_ONLY_UNQUALIFIED**. PHASE2A is incomplete.
-There are no native producer fences, report/block identities, complete worker
-lifetime/drain/final-partial evidence or audio-window p95 checks in this change.
-The unchanged asynchronous legacy reports cannot supply any of those facts.
-Audio, full-method, campaign, native and device qualification remain unavailable.
+Counter-only exports remain **PARTIAL_COUNTERS_ONLY_UNQUALIFIED**. The separate
+opt-in [producer journal](NATIVE-TIMING-AUDIO-PRODUCER.md) now supplies producer
+fences and completion evidence; it does not upgrade a counter-only export.
+The source is awaiting independent review. Audio, method, campaign, native and
+device qualification remain unavailable.
 
 With `native_timing` and a valid enabled startup recorder config, the additional
 optional boolean `audio_raw_counters` (default false) enables these observations.
@@ -51,6 +51,10 @@ Clock errors/backwards readings, missing/changed identities, invalid brackets,
 reset, loss or saturation reject. Snapshot storage is preallocated for 16 records,
 never grows or overwrites, and reports attempts/loss. At cap it is unqualified.
 Full JSON evidence streams by reference through the existing 32KiB buffer.
+Publication confirmation is main-thread order after OnceLock returns, not a
+bounded cross-thread visibility proof. Music route activity is UNKNOWN: binding
+does not prove mix/music controls, eligible decode-ahead, job admission, a ring
+or an active voice, so zero can be vacuous.
 
 The optional schema extension carries raw bindings, snapshots, per-field lifetime,
 width, activation brackets, counts, capacities, sizes and shared allocation bytes.
@@ -71,7 +75,9 @@ and two shared Raw allocations (including Arc strong/weak headers) are included
 in `actual_storage_bytes`. The two added OnceLock slots are charged to the existing
 64KiB auxiliary reserve, including config-false feature builds. Compile-time worst
 case includes both raw counters and all 16 snapshots within the unchanged 2MiB
-cap. No new queue or producer timing vector exists. No heap guard was increased.
+cap. The optional producer journal has its own separately accounted storage and
+ownership queues. Counter-only data does not contain that journal. No heap guard
+was increased.
 
 Run the maintainable host allocation regression with:
 
@@ -89,14 +95,10 @@ retained. The small (<16KiB) manifest remains unbuffered. BufWriter Drop can ret
 a failed flush and leave parseable orphan records; a missing manifest still
 rejects in the checker and CLI. Export still precedes exit autosave.
 
-The concrete remaining audio blocker is worker-owned completion and transfer:
-the legacy reporter observes the common stop flag and can exit before the
-producer finishes its last enqueue. Its dropped count is visible only through a
-later successful legacy report. Neither an empty queue nor this after-viewer
-counter snapshot proves final emission/drain. A separate bounded capture path
-must implement and test producer fences, completion membership, policy/identity,
-request handling, shutdown/final partial and produced/emitted/dropped/stopped
-receipts. Those changes are not implemented or accepted by this candidate.
+Producer-owned capture, final publication, distinct shutdown facts and the
+reporter drain correction are described in the producer journal document. Raw
+counter reads remain independent surrounding observations; neither an empty
+report queue nor AfterViewer implies a producer fence or stopped/drained fact.
 
 All image/review-ack/action chronology, native-age scheduling/deadline, paired
 simulation/state/pose tolerances, physical input/command/save/capture isolation

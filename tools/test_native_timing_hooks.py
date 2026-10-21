@@ -70,6 +70,9 @@ def main():
         start=source.index('        if (recover || restart || console_restart) && !in_transport {')
         pos=source.index('recovery.clear();',start)+len('recovery.clear();')
         source=source[:pos]+hook+source[pos:]
+    assert re.search(r'let mut timing = crate::native_timing::Session::open\(\)\?;\s*#\[cfg\(feature = "native_timing"\)\]\s*audio.bind_native_counters\(&mut timing\);',source)
+    after=source.index('if let Err(error) = timing.export_after_viewer()')
+    assert after<source.index('store.write_with_preview(Slot::Auto',after)<source.index('audio.finish()?',after)
     profile=(ROOT/'src/frame_profile.rs').read_text()
     OUT.mkdir(parents=True,exist_ok=False)
     extracted={name:macro(source,name) for name in ('timing_state','timing_ready','timing_install_reason','install_loaded_scene')}

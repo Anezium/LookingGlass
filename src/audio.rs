@@ -798,6 +798,19 @@ impl Audio {
             self.playback.as_ref().filter(|p| p._worker.is_some()).map(|p| &p.mixer.metrics.raw_starvation),
             block::settings().music_thread.then_some(&music::RAW_UNDERRUNS),
         ));
+        timing.with(|r| {
+            if r.producer_requested {
+                if let Some(owner)=&mut r.audio_producer {owner.status="DuplicateSessionClaim";return;}
+                r.audio_producer = Some(Box::new(match self.playback.as_ref().and_then(|p| p._worker.as_ref()) {
+                    Some(worker) => worker.prepare_native(&mut r.clock,r.run_id),
+                    None => crate::native_timing::audio_producer::Owner::unavailable("NoBufferedWorker"),
+                }));
+                r.audio_producer.as_mut().unwrap().associate_counters(r.raw_counters.as_ref());
+                if r.actual_storage_bytes()+crate::native_timing::AUX_RESERVE>crate::native_timing::BUDGET {
+                    r.audio_producer.as_mut().unwrap().status="AllocationBudgetExceeded";
+                }
+            }
+        });
     }
     pub fn new(disabled: bool, capture: Option<PathBuf>) -> Self {
         let monitor = Arc::new(MonitorData::default());
@@ -1966,6 +1979,8 @@ mod tests {
     #[test]
     #[ignore = "requires LOOKING_GLASS_TEST_DATA and an idle timing host"]
     fn loading_callback_model() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         use std::time::Instant;
         let root = std::path::PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
         let mut assets = Assets::open(&root)?;
@@ -2015,6 +2030,8 @@ mod tests {
     #[test]
     #[ignore = "requires LOOKING_GLASS_TEST_DATA and an idle timing host"]
     fn realtime_village_model() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         use std::time::Instant;
         let root=std::path::PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
         let mut assets=Assets::open(&root)?;
@@ -2072,6 +2089,8 @@ mod tests {
     #[test]
     #[ignore = "requires LOOKING_GLASS_TEST_DATA and an idle timing host"]
     fn mix_profile() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         use std::time::Instant;
         let root=PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
         let mut assets=Assets::open(&root)?;
@@ -2123,6 +2142,8 @@ mod tests {
     #[test]
     #[ignore = "requires LOOKING_GLASS_TEST_DATA"]
     fn all_maps_preload_budget() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
         let mut assets = Assets::open(&root)?;
         let mut maps = assets.maps();
@@ -2161,6 +2182,8 @@ mod tests {
     }
     #[test]
     fn speaker_speech_is_never_ranked_as_ambience() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         assert!(speech("sound/character/queen/q2_idle.wav"));
         assert!(!speech("sound/ambience/background/bubbles1.wav"));
         assert!(!speech("sound/world/machine/steamloop1.wav"));
@@ -2178,6 +2201,8 @@ mod tests {
     }
     #[test]
     fn level_music_stays_paused_until_presentation_even_if_update_runs() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let mut audio = Audio::new(true, None);
         let (sink, _queue) = Sink::new_idle();
         sink.pause();
@@ -2193,6 +2218,8 @@ mod tests {
     }
     #[test]
     fn watch_keeps_pcm_playing_but_defers_random_speaker_events() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let mut audio = Audio::new(true, None);
         let (sink, _output) = Sink::new_idle();
         sink.append(rodio::buffer::SamplesBuffer::new(
@@ -2233,6 +2260,8 @@ mod tests {
     }
     #[test]
     fn alternate_music_preserves_authored_loop_and_fade_settings() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let cues = music_cues("path sound/music/final\nnormal queen.mp3\n!normal loop\n!normal fadetime 1\nsuspense finale.mp3\n!suspense volume .7\n!suspense fadetime 2")?;
         assert!(cues["normal"].looping);
         assert!(!cues["suspense"].looping);
@@ -2242,6 +2271,8 @@ mod tests {
     }
     #[test]
     fn outgoing_music_obeys_crossfade_pause_mute_and_cleanup() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let mut audio = Audio::new(true, None);
         audio.settings = Settings::default();
         let (sink, _queue) = Sink::new_idle();
@@ -2275,6 +2306,8 @@ mod tests {
     }
     #[test]
     fn dialogue_pauses_independently_mutes_and_releases_music_ducking() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let mut audio = Audio::new(true, None);
         audio.settings = Settings::default();
         let (voice, _voice_output) = Sink::new_idle();
@@ -2318,6 +2351,8 @@ mod tests {
     }
     #[test]
     fn parses_music_and_paths_with_spaces() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let m = music_spec("path sound/music\r\nnormal song.mp3\n!normal loop\n!normal volume .8\n!normal fadetime 5")?.unwrap();
         assert_eq!(m.path, "sound/music/song.mp3");
         assert!(m.looping);
@@ -2331,6 +2366,8 @@ mod tests {
     }
     #[test]
     fn migrated_speaker_reuses_sound_manager_but_keeps_distinct_sources() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let make = |x| {
             sound_specs(&format!(
                 "spawn TriggerSpeaker origin \"{x} 0 0\" spawnflags 1 sound sound/ambient.wav"
@@ -2350,6 +2387,8 @@ mod tests {
     }
     #[test]
     fn settings_reject_nan_and_clamp() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let s = Settings::parse("music=NaN\neffects=4\nmuted=true");
         assert_eq!(s.music, 0.5);
         assert_eq!(s.effects, 1.);
@@ -2357,6 +2396,8 @@ mod tests {
     }
     #[test]
     fn empty_speaker_reference_does_not_shift_key_value_pairs() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         assert_eq!(words("sound \"\" next 1")?, vec!["sound", "", "next", "1"]);
         assert!(sound_specs(
             "spawn TriggerSpeaker origin \"0 0 0\" spawnflags 1 sound \"\" _addtosoundmanager 0"
@@ -2366,6 +2407,8 @@ mod tests {
     }
     #[test]
     fn sink_controls_silence_and_resume_without_resetting() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let (sink, mut output) = Sink::new_idle();
         sink.append(Pcm {
             clip: Clip {
@@ -2393,6 +2436,8 @@ mod tests {
     }
     #[test]
     fn panning_rotates_and_falls_off_with_distance() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let (l, r, a) = spatial(vec3(0., -10., 0.), 0., 100.);
         assert_eq!(l, 0.);
         assert_eq!(r, 1.);
@@ -2403,6 +2448,8 @@ mod tests {
     }
     #[test]
     fn pcm_loops_and_preserves_stereo_pairing() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let pan = Pan::new();
         pan.set(1., 0.5);
         let clip = Clip {
@@ -2424,6 +2471,8 @@ mod tests {
     }
     #[test]
     fn wav_decode_and_bounded_monitor() -> Result<()> {
+        #[cfg(feature="native_timing")]
+        let _music_serial=output::native_music_test_guard();
         let mut bytes = Cursor::new(Vec::new());
         {
             let mut w = hound::WavWriter::new(
@@ -2463,3 +2512,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "native_timing"))]
+#[path = "audio/binding_tests.rs"]
+mod binding_tests;

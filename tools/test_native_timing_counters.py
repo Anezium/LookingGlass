@@ -92,7 +92,29 @@ class ActualCounterTests(unittest.TestCase):
         result=subprocess.run([sys.executable,'-B',str(Path(check.__file__)),str(path),'--generation','1','--age-offset-us','20000000','--allow-test-clock'],capture_output=True,text=True)
         self.assertEqual(result.returncode,2);self.assertIn('manifest.json',result.stderr)
     def test_cli_counter_extension(self):
-        result=subprocess.run([sys.executable,'-B',str(Path(check.__file__)),str(self.base),'--generation','1','--age-offset-us','20000000','--allow-test-clock'],capture_output=True,text=True)
+        result=subprocess.run([sys.executable,'-I','-B',str(Path(check.__file__)),str(self.base),'--generation','1','--age-offset-us','20000000','--allow-test-clock'],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(json.loads(result.stdout)['phase2a_status'],'PARTIAL_COUNTERS_ONLY_UNQUALIFIED')
+
+class RequestedCounterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root=Path(os.environ['ALICE_TIMING_TEST_OUTPUT']);cls.name='07'*16+'-0000000000000001'
+        cls.base=cls.root/'raw-requested'/cls.name
+        cls.m=json.loads((cls.base/'manifest.json').read_bytes());cls.d=json.loads((cls.base/'records.json').read_bytes())
+    checked=ActualCounterTests.checked
+    modified=ActualCounterTests.modified
+    def test_actual_requested_rows_bracket_window_and_keep_positive_middle(self):
+        r=self.checked(self.base);rows=self.d['raw_counters']['snapshots']
+        requests=[x for x in rows if x['tag']=='Requested' and x['field']=='PcmStarvedBlocks']
+        self.assertEqual([x['value'] for x in requests],[0,1,1])
+        self.assertLess(requests[0]['post_us'],20_000_000);self.assertGreater(requests[-1]['pre_us'],50_000_000)
+        self.assertEqual(r['raw_counter_guards']['PcmStarvedBlocks']['guard'],'FAIL')
+        self.assertIn('UNKNOWN',r['route_activity']);self.assertFalse(r['audio_qualified'])
+    def test_requested_busy(self):self.modified(lambda m,d:d['raw_counters']['snapshots'][2].update(busy=True),'counter concurrent read/wrap fault')
+    def test_requested_monotone(self):self.modified(lambda m,d:d['raw_counters']['snapshots'][4].update(value=2),'counter reset/wrap')
+    def test_binding_unique(self):self.modified(lambda m,d:d['raw_counters']['snapshots'][2].update(tag='Binding'),'counter binding snapshot order')
+    def test_final_last(self):self.modified(lambda m,d:d['raw_counters']['snapshots'][4].update(tag='AfterViewer'),'counter final snapshot order')
+    def test_activation_order(self):self.modified(lambda m,d:d['raw_counters']['pcm'].update(activation_post_us=1),'counter missing/backward bracket')
+
 if __name__=='__main__':unittest.main(verbosity=2)

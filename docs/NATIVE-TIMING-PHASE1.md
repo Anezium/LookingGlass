@@ -1,10 +1,11 @@
 # Native timing observations — phase 1 candidate
 
 This is a source checkpoint awaiting independent review. It is **not a usable
-campaign method or a source acceptance**. Audio producer fences/raw counter
-brackets (except the explicitly unqualified counter-only candidate described in
-[NATIVE-TIMING-AUDIO-COUNTERS.md](NATIVE-TIMING-AUDIO-COUNTERS.md)), image tokens, separate review acknowledgement, automatic native-age
-acquisition, paired state equivalence and full qualification remain phase 2.
+campaign method or a source acceptance**. The optional audio source observations are described in
+[NATIVE-TIMING-AUDIO-PRODUCER.md](NATIVE-TIMING-AUDIO-PRODUCER.md) and
+[NATIVE-TIMING-AUDIO-COUNTERS.md](NATIVE-TIMING-AUDIO-COUNTERS.md). Image tokens,
+separate review acknowledgement, automatic native-age acquisition, paired state
+equivalence and full qualification remain Phase 2B.
 The original raw-zero, producer-window p95 <=8ms and heap <180MiB gates remain.
 
 ## Enablement and identity
@@ -123,6 +124,8 @@ than trimming or expanding. After-stop event/world loss also disqualifies.
 Buffers reserve 6144 Frame, 512 Event and 128 World slots once, never overwrite,
 never grow in hot methods, and track exact completed/stored/lost counts. This is
 an independent buffer; the legacy 4096 capture and heap guard are unchanged.
+The following figures describe the initial Phase1 layout; current expanded
+reservations and actual type measurements are in the producer document.
 On the tested aarch64 host: Frame264B, World320B, Event56B, Native Recorder664B; reserved
 storage1,692,312B plus64KiB auxiliary reserve =1,757,848B <=2,097,152B. Compile-time
 and runtime checks enforce the cap on each target using actual sizes/capacities.

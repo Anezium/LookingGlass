@@ -260,6 +260,7 @@ mod tests {
     #[cfg(feature = "native_timing")]
     #[test]
     fn native_raw_music_counts_actual_unavailable_source_frames_and_not_eof() {
+        let _serial=TEST_COUNTER_LOCK.lock().unwrap_or_else(|p|p.into_inner());
         use crate::native_timing::{audio_counters::{Raw,Capture,Tag},clock::{Checked,Native}};
         let mut clock=Checked::new(Native);
         let raw=Raw::activate(&RAW_UNDERRUNS,&mut clock,Some([8;16]));
@@ -279,6 +280,7 @@ mod tests {
     }
     #[test]
     fn ring_source_preserves_samples_reports_underruns_as_silent_frames_and_ends() {
+        let _serial=TEST_COUNTER_LOCK.lock().unwrap_or_else(|p|p.into_inner());
         let input: Vec<f32> = (0..5000).map(|i| i as f32).collect();
         let source = Box::new(rodio::buffer::SamplesBuffer::new(2, 22050, input.clone()));
         let mut ring = decode_ahead(source, 170, 0x40000);
@@ -303,3 +305,9 @@ mod tests {
         assert_eq!(real, input);
     }
 }
+
+#[cfg(all(test, feature = "native_timing"))]
+mod counter_tests;
+
+#[cfg(test)]
+pub(super) static TEST_COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

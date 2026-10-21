@@ -35,7 +35,7 @@ def main():
             if path.suffix=='.rlib':artifacts[row['target']['name']]=path
     for opt in (0,2):
         binary=out/f'export-memory-o{opt}'
-        command=[str(rustc),'--edition=2021','-C',f'opt-level={opt}',str(ROOT/'src/native_timing/export_memory_probe.rs'),'-o',str(binary)]
+        command=[str(rustc),'--edition=2021','--cfg','feature="native_timing"','-C',f'opt-level={opt}',str(ROOT/'src/native_timing/export_memory_probe.rs'),'-o',str(binary)]
         for parent in sorted(parents):command+=['-L','dependency='+str(parent)]
         for name in ('serde','serde_json','anyhow','sha2'):
             lib=artifacts[name];command+=['--extern',name+'='+str(lib)]

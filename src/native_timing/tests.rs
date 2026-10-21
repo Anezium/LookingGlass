@@ -513,6 +513,7 @@ fn buffered_full_capture_bounds_underlying_writes_and_preserves_exact_receipt() 
     r.request_stop();
     c.0.set(Ok(FRAME_CAP as u64 * 10_000));
     r.begin(state(61));
+    r.audio_producer = Some(Box::new(producer_fixture::filled(8191, 127, 127)));
     let counts = Rc::new(std::cell::RefCell::new(IoCounts::default()));
     let dir = r
         .export_with(&root("buffered-full"), None, |p| {
@@ -747,4 +748,114 @@ fn parseable_orphan_after_drop_retry_still_has_no_manifest() {
     let raw = std::fs::read(dir.join("records.json")).unwrap();
     assert!(serde_json::from_slice::<serde_json::Value>(&raw).is_ok());
     assert!(!dir.join("manifest.json").exists());
+}
+
+#[path = "audio_producer/host_fixture.rs"]
+mod producer_fixture;
+#[test]
+fn requested_rows_and_complete_producer_journal_use_actual_export_transaction() {
+    use audio_producer::*;
+    for (name, span) in [("audio-exact", 1_000_000u64), ("audio-straddle", 3_000_000)] {
+        let (mut r, c) = fake();
+        let pcm = std::sync::OnceLock::new();
+        let music = std::sync::OnceLock::new();
+        r.raw_requested = true;
+        r.bind_raw_counters(Some(&pcm), Some(&music));
+        let (mut owner, mut journal, f, _) = producer_fixture::setup();
+        owner.request_start(Some(1_000_000));
+        f.0.set(Ok(1_000_000));
+        journal.poll();
+        let mut b = 1_000_000;
+        while b + span < 59_000_000 {
+            f.0.set(Ok(b + 10));
+            let begin = journal.block_begin();
+            f.0.set(Ok(b + span - 10));
+            journal.block_end(begin, 6.0);
+            f.0.set(Ok(b + span));
+            let cut = journal.legacy_begin();
+            f.0.set(Ok(b + span + 1));
+            journal.legacy_end(
+                cut,
+                audio_types::Window {
+                    blocks: 1,
+                    mix: [6.; 3],
+                    ..Default::default()
+                },
+                true,
+            );
+            b += span;
+        }
+        f.0.set(Ok(b + 10));
+        let begin = journal.block_begin();
+        f.0.set(Ok(59_999_000));
+        journal.block_end(begin, 7.0);
+        f.0.set(Ok(60_000_000));
+        let mut fc = clock::Checked::new(f.clone());
+        owner.request_seal(&mut fc);
+        journal.poll();
+        owner.collect(std::time::Duration::ZERO);
+        owner.freeze();
+        assert_eq!(owner.status, "Delivered");
+        owner.associate_counters(r.raw_counters.as_ref());
+        r.audio_producer = Some(Box::new(owner));
+        r.ready("tower2", None, Reason::Fresh, state(0));
+        for b in (0..60_020_000).step_by(10_000) {
+            c.0.set(Ok(b));
+            frame(&mut r, state(0), state(1), 0);
+        }
+        r.request_stop();
+        c.0.set(Ok(60_020_000));
+        r.begin(state(1));
+        r.sample_raw_counters(audio_counters::Tag::AfterViewer);
+        r.export(&root(name)).unwrap();
+    }
+    let (mut r, c) = fake();
+    let pcm = std::sync::OnceLock::new();
+    let music = std::sync::OnceLock::new();
+    r.raw_requested = true;
+    r.bind_raw_counters(Some(&pcm), Some(&music));
+    r.ready("tower2", None, Reason::Fresh, state(0));
+    for b in (0..50_020_000).step_by(10_000) {
+        c.0.set(Ok(b));
+        if b == 19_000_000 || b == 51_000_000 {
+            r.sample_raw_counters(audio_counters::Tag::Requested);
+        }
+        if b == 25_000_000 {
+            pcm.get().unwrap().event();
+            r.sample_raw_counters(audio_counters::Tag::Requested);
+        }
+        frame(&mut r, state(0), state(1), 0);
+    }
+    c.0.set(Ok(51_000_000));
+    r.sample_raw_counters(audio_counters::Tag::Requested);
+    r.request_stop();
+    r.begin(state(1));
+    r.sample_raw_counters(audio_counters::Tag::AfterViewer);
+    r.export(&root("raw-requested")).unwrap();
+}
+#[test]
+fn actual_session_after_viewer_export_samples_each_raw_field() {
+    let mut r = Box::new(Recorder::new(
+        clock::Native,
+        Some([7; 16]),
+        Metadata::default(),
+    ));
+    r.raw_requested = true;
+    let pcm = std::sync::OnceLock::new();
+    let music = std::sync::OnceLock::new();
+    r.bind_raw_counters(Some(&pcm), Some(&music));
+    let mut session = Session { recorder: Some(r) };
+    let path = root("session-afterviewer");
+    session.export_after_viewer_to(&path).unwrap();
+    let dir = std::fs::read_dir(path)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let data: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("records.json")).unwrap()).unwrap();
+    let rows = data["raw_counters"]["snapshots"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "AfterViewer field reads missing");
+    assert!(rows[2..].iter().all(|row| row["tag"] == "AfterViewer"));
 }

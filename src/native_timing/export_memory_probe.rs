@@ -5,6 +5,8 @@
 #[path = "mod.rs"]
 mod native_timing;
 use native_timing::*;
+#[path = "audio_producer/host_fixture.rs"]
+mod host_fixture;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 
@@ -105,6 +107,14 @@ fn main() {
     for _ in 0..audio_counters::SNAPSHOT_CAP / 2 - 1 {
         r.sample_raw_counters(audio_counters::Tag::Requested);
     }
+    r.audio_producer = Some(Box::new(host_fixture::filled(8191, 127, 127)));
+    r.audio_producer
+        .as_mut()
+        .unwrap()
+        .associate_counters(r.raw_counters.as_ref());
+    let audio = r.audio_producer.as_ref().unwrap();
+    let buffers = &audio.completed.as_ref().unwrap().buffers;
+    println!("HOST actual layout NativeRecorder={} FakeRecorder={} Block={} Fence={} Legacy={} Buffers={} Control={} Bootstrap={} AudioState={} Universe={} Owner={} CaptureNative={} Start={} OptionStart={} Completed={} OptionCompleted={} StartChannel={} CompletedChannel={} producer_stack_reserve=32768 bootstrap_reserve={} fixed_reserve={} capacities={:?} rows={:?}",std::mem::size_of::<Recorder<clock::Native>>(),std::mem::size_of::<Recorder<Fake>>(),std::mem::size_of::<audio_producer::Block>(),std::mem::size_of::<audio_producer::Fence>(),std::mem::size_of::<audio_producer::Legacy>(),std::mem::size_of::<audio_producer::Buffers>(),std::mem::size_of::<audio_producer::Control>(),std::mem::size_of::<audio_producer::Bootstrap>(),std::mem::size_of::<audio_producer::AudioState>(),std::mem::size_of::<audio_producer::Universe>(),std::mem::size_of::<audio_producer::Owner>(),std::mem::size_of::<audio_producer::Capture<clock::Native>>(),std::mem::size_of::<audio_producer::Start>(),std::mem::size_of::<Option<audio_producer::Start>>(),std::mem::size_of::<audio_producer::Completed>(),std::mem::size_of::<Option<audio_producer::Completed>>(),transfer::allocation_bytes::<audio_producer::Start>(1),transfer::allocation_bytes::<audio_producer::Completed>(1),audio_producer::BOOTSTRAP_RESERVE,audio_producer::FIXED_RESERVE,buffers.capacities(),[buffers.blocks.len(),buffers.fences.len(),buffers.legacy.len()]);
     let storage = r.actual_storage_bytes();
     // Run export on a bounded HOST stack. On macOS verify the actual pthread
     // allocation (rather than assuming Builder's requested minimum is exact).
@@ -140,6 +150,10 @@ fn main() {
     assert_eq!(value["frame_count"], FRAME_CAP - 1);
     assert_eq!(value["world_count"], WORLD_CAP - 1);
     assert_eq!(value["event_count"], EVENT_CAP - 1);
+    assert_eq!(
+        value["audio_producer_storage_bytes"],
+        audio_producer::MAX_STORAGE
+    );
     assert!(manifest.len() < 16 * 1024);
     // Reserve bounds requested HOST heap plus the ENTIRE measured export-thread
     // stack, including fixed/hash/serializer scratch. Allocator bookkeeping and

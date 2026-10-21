@@ -25,6 +25,13 @@ pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
     unique: PhantomData<Cell<()>>,
 }
+/// Requested storage for the existing allocation, including Arc's two counters.
+/// Endpoint inline storage is charged by its owner; allocator bookkeeping excluded.
+#[cfg(feature = "native_timing")]
+pub const fn allocation_bytes<T>(capacity: usize) -> usize {
+    std::mem::size_of::<Shared<T>>() + 2 * std::mem::size_of::<usize>()
+        + capacity * std::mem::size_of::<Option<T>>()
+}
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity.is_power_of_two() && capacity < usize::MAX / 2);
     let shared = Arc::new(Shared {
@@ -66,6 +73,8 @@ impl<T> Sender<T> {
     }
 }
 impl<T> Receiver<T> {
+    #[cfg(test)]
+    pub fn has_pending(&self) -> bool {self.shared.write.load(Ordering::Acquire)!=self.shared.read.load(Ordering::Relaxed)}
     pub fn pop(&self) -> Option<T> {
         let read = self.shared.read.load(Ordering::Relaxed);
         if self.shared.write.load(Ordering::Acquire) == read {

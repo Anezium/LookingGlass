@@ -2,10 +2,15 @@
 //! No audio fences, image tokens, review acknowledgement, native-age scheduling,
 //! pair equivalence or campaign qualification. See docs/NATIVE-TIMING-PHASE1.md.
 pub mod audio_counters;
+pub mod audio_producer;
+#[path = "../audio/output_types.rs"]
+pub mod audio_types;
 pub mod clock;
 mod export;
 #[cfg(test)]
 mod tests;
+#[path = "../audio/queue.rs"]
+pub mod transfer;
 use clock::{Checked, Native, Source};
 use serde::{Deserialize, Serialize};
 
@@ -153,6 +158,8 @@ struct Config {
     enabled: bool,
     #[serde(default)]
     audio_raw_counters: bool,
+    #[serde(default)]
+    audio_producer_capture: bool,
     source_sha256: Option<String>,
     build_sha256: Option<String>,
     game_config_sha256: Option<String>,
@@ -168,6 +175,9 @@ pub struct Metadata {
 }
 
 pub struct Recorder<C: Source> {
+    pub producer_requested: bool,
+    producer_start_sent: bool,
+    pub audio_producer: Option<Box<audio_producer::Owner>>,
     pub raw_requested: bool,
     pub raw_counters: Option<audio_counters::Capture>,
     pub clock: Checked<C>,
@@ -209,11 +219,15 @@ pub const MAX_RAW_STORAGE: usize = audio_counters::SNAPSHOT_CAP
 // them in auxiliary scratch even when the feature's config is disabled.
 pub const RAW_SLOT_BYTES: usize =
     2 * std::mem::size_of::<std::sync::OnceLock<std::sync::Arc<audio_counters::Raw>>>();
-const _: () = assert!(STORAGE_BYTES + MAX_RAW_STORAGE + AUX_RESERVE <= BUDGET);
+const _: () =
+    assert!(STORAGE_BYTES + MAX_RAW_STORAGE + audio_producer::MAX_STORAGE + AUX_RESERVE <= BUDGET);
 
 impl<C: Source> Recorder<C> {
     pub fn new(clock: C, run_id: Option<[u8; 16]>, metadata: Metadata) -> Self {
         Self {
+            producer_requested: false,
+            producer_start_sent: false,
+            audio_producer: None,
             raw_requested: false,
             raw_counters: None,
             clock: Checked::new(clock),
@@ -316,6 +330,12 @@ impl<C: Source> Recorder<C> {
             return;
         }
         let now = self.clock.read();
+        if !self.producer_start_sent {
+            if let Some(owner) = &self.audio_producer {
+                owner.request_start(now);
+                self.producer_start_sent = true;
+            }
+        }
         if let Some(mut row) = self.pending.take() {
             row.end_us = now;
             row.end_generation = self.generation;
@@ -433,6 +453,10 @@ impl<C: Source> Recorder<C> {
     }
     pub fn actual_storage_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
+            + self
+                .audio_producer
+                .as_ref()
+                .map_or(audio_producer::BOOTSTRAP_RESERVE, |o| o.reserved)
             + self.frames.capacity() * std::mem::size_of::<Frame>()
             + self.worlds.capacity() * std::mem::size_of::<World>()
             + self.events.capacity() * std::mem::size_of::<Event>()
@@ -446,6 +470,7 @@ impl<C: Source> Recorder<C> {
 pub struct Session {
     pub recorder: Option<Box<Recorder<Native>>>,
 }
+static SESSION_CLAIM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 impl Session {
     /// Config is <=4096 bytes, read once before world install. Missing/disabled
     /// config performs no recorder allocation. Invalid config fails explicitly.
@@ -468,6 +493,10 @@ impl Session {
         if !cfg.enabled {
             return Ok(Self { recorder: None });
         }
+        anyhow::ensure!(
+            !SESSION_CLAIM.swap(true, std::sync::atomic::Ordering::SeqCst),
+            "native timing Session already claimed"
+        );
         let metadata = Metadata {
             source_sha256: export::parse_hash(cfg.source_sha256)?,
             build_sha256: export::parse_hash(cfg.build_sha256)?,
@@ -477,6 +506,7 @@ impl Session {
         };
         let mut recorder = Box::new(Recorder::new(Native, export::random_id(), metadata));
         recorder.raw_requested = cfg.audio_raw_counters;
+        recorder.producer_requested = cfg.audio_producer_capture;
         anyhow::ensure!(
             recorder.actual_storage_bytes() + AUX_RESERVE <= BUDGET,
             "timing allocation budget"
@@ -493,11 +523,19 @@ impl Session {
     }
     /// Invoked only after the viewer loop has ended. No pending finalization.
     pub fn export_after_viewer(&mut self) -> anyhow::Result<()> {
+        self.export_after_viewer_to(std::path::Path::new("private/native-timing"))
+    }
+    pub(crate) fn export_after_viewer_to(&mut self, root: &std::path::Path) -> anyhow::Result<()> {
         if let Some(r) = &mut self.recorder {
+            if let Some(owner) = &mut r.audio_producer {
+                owner.request_seal(&mut r.clock);
+                owner.collect(std::time::Duration::from_secs(2));
+                owner.freeze();
+            }
             if let Some(raw) = &mut r.raw_counters {
                 raw.sample(&mut r.clock, audio_counters::Tag::AfterViewer);
             }
-            r.export(std::path::Path::new("private/native-timing"))?;
+            r.export(root)?;
         }
         Ok(())
     }

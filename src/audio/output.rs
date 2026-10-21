@@ -1,5 +1,11 @@
-//! The game publishes source handles without locks. Optional PCM buffering keeps
-//! every source/DSP/decoder call off the high-priority device callback.
+//! Optional bounded PCM worker and producer observations.
+#[cfg(not(feature = "native_timing"))]
+#[path = "output_types.rs"]
+mod output_types;
+#[cfg(not(feature = "native_timing"))]
+use output_types::{ThreadPolicy, Window};
+#[cfg(feature = "native_timing")]
+use crate::native_timing::{audio_types::{ThreadPolicy, Window}, audio_producer as diagnostic};
 use super::{
     block, queue,
     sink::{Output, Sink},
@@ -23,6 +29,8 @@ const HYSTERESIS: f32 = 1.25;
 pub struct Metrics {
     #[cfg(feature = "native_timing")]
     pub raw_starvation: std::sync::OnceLock<Arc<crate::native_timing::audio_counters::Raw>>,
+    #[cfg(feature = "native_timing")]
+    pub native: diagnostic::AudioState,
     pub rejected: AtomicUsize,
     pub starved: AtomicUsize,
     pub queued_samples: AtomicUsize,
@@ -47,8 +55,15 @@ pub struct Mixer {
     config: block::Settings,
 }
 pub fn mixer() -> (Control, Mixer) {
+    mixer_with(#[cfg(feature = "native_timing")] &diagnostic::UNIVERSE)
+}
+pub(super) fn mixer_with(#[cfg(feature = "native_timing")] universe: &'static diagnostic::Universe) -> (Control,Mixer) {
     let (tx, rx) = queue::channel(128);
-    let metrics = Arc::new(Metrics::default());
+    let metrics = Arc::new(Metrics {
+        #[cfg(feature = "native_timing")]
+        native: diagnostic::AudioState::mixer(universe),
+        ..Metrics::default()
+    });
     (
         Control {
             pending: tx,
@@ -140,6 +155,8 @@ impl Mixer {
         self.at = 0;
     }
 }
+#[cfg(feature = "native_timing")]
+impl Drop for Mixer { fn drop(&mut self) { self.metrics.native.mixer_dropped(); } }
 impl Iterator for Mixer {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
@@ -259,29 +276,39 @@ pub struct Worker {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     reporter: Option<JoinHandle<()>>,
+    #[cfg(feature = "native_timing")]
+    pub(crate) bootstrap: Arc<diagnostic::Bootstrap>,
+    #[cfg(feature = "native_timing")]
+    start: crate::native_timing::transfer::Sender<diagnostic::Start>,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        for handle in [self.handle.take(), self.reporter.take()].into_iter().flatten() {
-            let _ = handle.join();
+        if let Some(handle) = self.handle.take() {
+            let result = handle.join();
+            #[cfg(feature = "native_timing")]
+            self.bootstrap.joined.store(if result.is_ok() {1} else {2}, Ordering::Release);
+            #[cfg(not(feature = "native_timing"))]
+            let _ = result;
+        }
+        if let Some(reporter) = self.reporter.take() {
+            let result = reporter.join();
+            #[cfg(feature = "native_timing")]
+            self.bootstrap.reporter_join.store(if result.is_ok() {1} else {2}, Ordering::Release);
+            #[cfg(not(feature = "native_timing"))]
+            let _ = result;
         }
     }
 }
-/// Thread placement readback, recorded by the thread it describes.
-#[derive(Clone, Copy, Default)]
-pub struct ThreadPolicy {
-    host: bool,
-    id: i32,
-    priority_requested: i32,
-    priority_rc: i32,
-    affinity_requested: i32,
-    affinity_rc: i32,
-    info_rc: i32,
-    priority: i32,
-    affinity: i32,
-    stack: i32,
+#[cfg(feature = "native_timing")]
+impl Worker {
+    pub fn prepare_native<C: crate::native_timing::clock::Source>(&self, clock: &mut crate::native_timing::clock::Checked<C>, run: Option<[u8;16]>) -> diagnostic::Owner {
+        diagnostic::Owner::prepare(self.bootstrap.clone(), &self.start, clock, run)
+    }
 }
+struct ProducerDone(Arc<AtomicBool>);
+impl Drop for ProducerDone { fn drop(&mut self) { self.0.store(true, Ordering::Release); } }
+/// Thread placement readback, recorded by the thread it describes.
 impl ThreadPolicy {
     fn applied(&self) -> bool {
         self.host
@@ -365,30 +392,6 @@ pub fn thread_policy(priority: i32, affinity: i32) -> ThreadPolicy {
 }
 /// One second of producer statistics, built without allocating so the
 /// producer can hand it to the reporter thread instead of printing.
-#[derive(Clone, Copy, Default)]
-struct Window {
-    window_ms: u128,
-    blocks: usize,
-    mix: [f64; 3],
-    starved: usize,
-    rejected: usize,
-    flushes: usize,
-    queued: usize,
-    api_max_us: u32,
-    live_peak: usize,
-    game_stage: (u32, u32),
-    stages: Option<([[f64; 3]; 7], usize)>,
-    voices: (usize, usize),
-    /// Longest interval between producer loop wakeups, its 1 ms sleep
-    /// overshoot, and wakeups more than one block apart.
-    gap_max_ms: f64,
-    sleep_over_ms: f64,
-    gaps_over_block: u32,
-    /// Time the producer spent printing the previous window (direct mode).
-    log_ms: f64,
-    dropped_reports: u32,
-    music: Option<[f64; 6]>,
-}
 #[derive(Clone, Copy)]
 enum Report {
     Policy(ThreadPolicy, block::Settings),
@@ -430,10 +433,37 @@ pub fn buffered<S: Source<Item = f32> + Send + 'static>(
     buffered_with(source, metrics, block::settings())
 }
 fn buffered_with<S: Source<Item = f32> + Send + 'static>(
-    mut source: S,
-    metrics: Arc<Metrics>,
-    config: block::Settings,
+    source: S, metrics: Arc<Metrics>, config: block::Settings,
 ) -> std::io::Result<(Worker, Callback)> {
+    buffered_inner(source, metrics, config, #[cfg(feature = "native_timing")] crate::native_timing::clock::Native)
+}
+#[cfg(feature = "native_timing")]
+fn buffered_inner<S: Source<Item = f32> + Send + 'static, C: crate::native_timing::clock::Source + Send + 'static>(
+    source:S, metrics:Arc<Metrics>, config:block::Settings, clock:C,
+) -> std::io::Result<(Worker,Callback)> { buffered_body(source,metrics,config,clock, #[cfg(test)] TestHooks::default()) }
+#[cfg(not(feature = "native_timing"))]
+fn buffered_inner<S: Source<Item = f32> + Send + 'static>(source:S, metrics:Arc<Metrics>, config:block::Settings) -> std::io::Result<(Worker,Callback)> { buffered_body(source,metrics,config, #[cfg(test)] TestHooks::default()) }
+#[cfg(test)]
+struct TestHooks {
+    interval:Duration, policy_fail:bool, spawn_fail:bool, stack:usize,
+    reporter_gate:Option<std::sync::mpsc::Receiver<()>>,
+    reporter_seen:Option<std::sync::mpsc::Sender<usize>>,
+    reporter_pass:Option<std::sync::mpsc::Sender<(bool,usize)>>,
+    reporter_panic:bool,
+}
+#[cfg(test)]
+impl Default for TestHooks {fn default()->Self{Self{interval:Duration::from_secs(1),policy_fail:false,spawn_fail:false,stack:1024*1024,reporter_gate:None,reporter_seen:None,reporter_pass:None,reporter_panic:false}}}
+fn buffered_body<S: Source<Item = f32> + Send + 'static, #[cfg(feature = "native_timing")] C: crate::native_timing::clock::Source + Send + 'static>(
+    mut source:S, metrics:Arc<Metrics>, config:block::Settings, #[cfg(feature = "native_timing")] clock:C, #[cfg(test)] hooks:TestHooks,
+) -> std::io::Result<(Worker,Callback)> {
+    #[cfg(feature = "native_timing")]
+    metrics.native.claim_worker()?;
+    #[cfg(feature = "native_timing")]
+    let bootstrap = Arc::new(diagnostic::Bootstrap::new(&metrics.native));
+    #[cfg(feature = "native_timing")]
+    let _ = metrics.native.bootstrap.set(bootstrap.clone());
+    #[cfg(feature = "native_timing")]
+    let (start, start_rx) = crate::native_timing::transfer::channel(1);
     let (tx, rx) = queue::channel(READY_SLOTS);
     let ready_blocks = config.cushion;
     for _ in 0..ready_blocks {
@@ -446,34 +476,85 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
         metrics.queued_samples.fetch_add(SAMPLES, Ordering::Relaxed);
     }
     let stop = Arc::new(AtomicBool::new(false));
+    let producer_done = Arc::new(AtomicBool::new(false));
+    let closure_done = producer_done.clone();
     let done = stop.clone();
     let stats = metrics.clone();
     let (reports, inbox) = queue::channel::<Report>(8);
+    #[cfg(test)]
+    let (reporter_gate,reporter_seen,reporter_pass)=(hooks.reporter_gate,hooks.reporter_seen,hooks.reporter_pass);
+    #[cfg(feature = "native_timing")]
+    if config.log_thread {bootstrap.reporter.store(1, Ordering::Release);}
     let reporter = if config.log_thread {
-        let done = stop.clone();
+        #[cfg(feature = "native_timing")]
+        let reporter_bootstrap=bootstrap.clone();
+        let done = producer_done.clone();
         Some(thread::Builder::new().name("audio-report".into()).stack_size(256 * 1024).spawn(move || {
+            #[cfg(feature = "native_timing")]
+            let mut exit=diagnostic::ReporterExit{bootstrap:reporter_bootstrap,normal:false};
+            #[cfg(test)]
+            if hooks.reporter_panic {panic!("injected reporter panic");}
             // Lowest application priority on any core: it may run late, never early.
             let _ = thread_policy(191, 0);
+            #[cfg(test)]
+            if let Some(gate)=reporter_gate { let _=gate.recv_timeout(Duration::from_secs(5)); }
+            #[cfg(test)]
+            let mut seen=0usize;
             loop {
                 let stopping = done.load(Ordering::Acquire);
                 while let Some(report) = inbox.pop() {
                     print(&report, config);
+                    #[cfg(test)]
+                    {seen+=1;}
+                }
+                #[cfg(test)]
+                if let Some(tx)=&reporter_pass {let _=tx.send((stopping,seen));}
+                if stopping {
+                    #[cfg(test)]
+                    if let Some(tx)=&reporter_seen{let _=tx.send(seen);}
                 }
                 if stopping {
                     break;
                 }
                 thread::sleep(Duration::from_millis(100));
             }
+            #[cfg(feature = "native_timing")]
+            {exit.normal=true;}
         })?)
     } else {
         None
     };
-    let handle=thread::Builder::new().name("audio-producer".into()).stack_size(1024*1024).spawn(move||{
+    #[cfg(feature = "native_timing")]
+    let producer_bootstrap = bootstrap.clone();
+    #[cfg(test)]
+    let producer_stack=hooks.stack;
+    #[cfg(not(test))]
+    let producer_stack=1024*1024;
+    #[cfg(test)]
+    let spawn_failure=hooks.spawn_fail;
+    #[cfg(not(test))]
+    let spawn_failure=false;
+    let spawn_producer=|| thread::Builder::new().name("audio-producer".into()).stack_size(producer_stack).spawn(move||{
+        let _loop_done = ProducerDone(closure_done);
+        #[cfg(feature = "native_timing")]
+        let _native_exit = diagnostic::ExitGuard(producer_bootstrap.clone());
+        #[cfg(feature = "native_timing")]
+        let entry = {let mut clock=crate::native_timing::clock::Checked::new(crate::native_timing::clock::Native); diagnostic::Stamp::read(&mut clock)};
         let policy = thread_policy(config.priority, config.affinity);
+        #[cfg(test)]
+        let policy=if hooks.policy_fail {ThreadPolicy{host:false,priority_rc:-1,..policy}}else{policy};
+        #[cfg(feature = "native_timing")]
+        let _ = producer_bootstrap.entry.set(diagnostic::WorkerBirth {entry,policy,applied:policy.applied()});
+        #[cfg(feature = "native_timing")]
+        let mut diagnostic = diagnostic::Capture::new(clock, producer_bootstrap.clone(), start_rx);
         let dropped = std::cell::Cell::new(0);
+        #[cfg(feature = "native_timing")]
+        let last_emitted = std::cell::Cell::new(true);
         let emit = |report: Report| -> f64 {
+            #[cfg(feature = "native_timing")]
+            last_emitted.set(true);
             if config.log_thread {
-                if reports.push(report).is_err() { dropped.set(dropped.get() + 1); }
+                if reports.push(report).is_err() { dropped.set(dropped.get() + 1); #[cfg(feature = "native_timing")] last_emitted.set(false); }
                 0.
             } else {
                 let start = Instant::now();
@@ -482,13 +563,19 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
             }
         };
         emit(Report::Policy(policy, config));
-        if !policy.applied() { return; }
+        if !policy.applied() {
+            #[cfg(feature = "native_timing")]
+            producer_bootstrap.close(2);
+            return;
+        }
         let block_ms = SAMPLES as f64 / 2. / 44.1;
         let mut report=Instant::now();let mut timings=Vec::with_capacity(128);
         let mut stages:[Vec<f64>;7]=std::array::from_fn(|_|Vec::with_capacity(128));
         let mut wake = Instant::now();
         let (mut gap_max, mut sleep_over, mut gaps, mut log_ms) = (0f64, 0f64, 0u32, 0f64);
         while !done.load(Ordering::Acquire) {
+            #[cfg(feature = "native_timing")]
+            diagnostic.poll();
             let now = Instant::now();
             let gap = (now - wake).as_secs_f64() * 1000.;
             wake = now;
@@ -500,14 +587,25 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
             }
             else {
                 let epoch=stats.epoch.load(Ordering::Acquire);
+                #[cfg(feature = "native_timing")]
+                let native_begin = diagnostic.block_begin();
                 let start=Instant::now();let mut block=[0.;SAMPLES];
                 for v in &mut block {*v=source.next().unwrap_or(0.);}
-                let total=start.elapsed().as_secs_f64()*1000.;timings.push(total);
+                let total=start.elapsed().as_secs_f64()*1000.;
+                #[cfg(feature = "native_timing")]
+                diagnostic.block_end(native_begin,total);
+                timings.push(total);
                 if config.mix {let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
                 stats.queued_samples.fetch_add(SAMPLES,Ordering::Relaxed);
                 if tx.push(Block{epoch,samples:block}).is_err(){stats.queued_samples.fetch_sub(SAMPLES,Ordering::Relaxed);}
             }
-            if report.elapsed()>=Duration::from_secs(1){
+            #[cfg(test)]
+            let report_due=report.elapsed()>=hooks.interval;
+            #[cfg(not(test))]
+            let report_due=report.elapsed()>=Duration::from_secs(1);
+            if report_due{
+                #[cfg(feature = "native_timing")]
+                let native_cut = diagnostic.legacy_begin();
                 let music = config.music_thread.then(|| {
                     let m = &super::music::STATS;
                     let ring = m.ring_min.swap(usize::MAX, Ordering::Relaxed);
@@ -528,17 +626,41 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
                     dropped_reports: dropped.get(), music,
                 };
                 log_ms = emit(Report::Window(window));
+                #[cfg(feature = "native_timing")]
+                diagnostic.legacy_end(native_cut, window, last_emitted.get());
                 for values in &mut stages { values.clear(); }
                 (gap_max, sleep_over, gaps) = (0., 0., 0);
                 timings.clear();report=Instant::now();
             }
         }
-    })?;
+        #[cfg(feature = "native_timing")]
+        { diagnostic.close("WorkerStop"); producer_bootstrap.close(1); }
+    });
+    let handle=if spawn_failure {Err(std::io::Error::other("injected producer spawn failure"))}else{spawn_producer()};
+    let handle = match handle {
+        Ok(handle) => handle,
+        Err(error) => {
+            #[cfg(feature = "native_timing")]
+            bootstrap.close(4);
+            producer_done.store(true,Ordering::Release);
+            if let Some(reporter)=reporter { let result=reporter.join();
+                #[cfg(feature = "native_timing")]
+                bootstrap.reporter_join.store(if result.is_ok(){1}else{2}, Ordering::Release);
+                #[cfg(not(feature = "native_timing"))]
+                let _=result;
+            }
+            return Err(error);
+        }
+    };
     Ok((
         Worker {
             stop,
             handle: Some(handle),
             reporter,
+            #[cfg(feature = "native_timing")]
+            bootstrap,
+            #[cfg(feature = "native_timing")]
+            start,
         },
         Callback {
             ready: rx,
@@ -549,12 +671,18 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
         },
     ))
 }
+#[cfg(all(test,feature="native_timing"))]
+pub(super) fn native_music_test_guard()->Option<std::sync::MutexGuard<'static,()>>{
+    block::settings().music_thread.then(||super::music::TEST_COUNTER_LOCK.lock().unwrap_or_else(|p|p.into_inner()))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[cfg(feature = "native_timing")]
     #[test]
     fn native_raw_starvation_observes_actual_callback_late_binding_and_legacy_resets() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=native_music_test_guard();
         use crate::native_timing::{audio_counters::Tag, clock::Native, Metadata, Recorder};
         let (tx,rx)=queue::channel(4);let metrics=Arc::new(Metrics::default());
         let mut callback=Callback{ready:rx,block:[0.;SAMPLES],at:SAMPLES,epoch:0,metrics:metrics.clone()};
@@ -589,6 +717,8 @@ mod tests {
     #[cfg(feature = "native_timing")]
     #[test]
     fn host_only_counter_callback_cost_and_event_counts() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=native_music_test_guard();
         use crate::native_timing::{audio_counters::Tag, clock::Native, Metadata, Recorder};
         let mut costs=Vec::new();
         for enabled in [false,true] {
@@ -610,6 +740,8 @@ mod tests {
     }
     #[test]
     fn ambience_cap_reselects_gain_and_preserves_player_and_voice_time() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=native_music_test_guard();
         let (control,mut mixer)=mixer();
         mixer.config.mix=true;mixer.config.voices=1;mixer.config.gain=0.01;
         let a=control.sink();a.set_ambient();a.set_volume(0.5);
@@ -644,6 +776,8 @@ mod tests {
     }
     #[test]
     fn ambience_near_the_cap_boundary_fades_without_discontinuities() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=native_music_test_guard();
         let (control,mut mixer)=mixer();
         mixer.config.mix=true;mixer.config.voices=8;mixer.config.gain=0.001;
         let dc=|v:f32|rodio::buffer::SamplesBuffer::new(2,44100,vec![v;2*44100]);
@@ -670,6 +804,8 @@ mod tests {
     }
     #[test]
     fn eight_block_cushion_with_reporter_thread_delivers_in_order() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=native_music_test_guard();
         let mut config=block::settings();config.cushion=8;config.log_thread=true;
         let metrics=Arc::new(Metrics::default());
         let (worker,mut callback)=buffered_with(rodio::buffer::SamplesBuffer::new(2,44100,vec![0.5;2*44100]),metrics.clone(),config).unwrap();
@@ -683,6 +819,8 @@ mod tests {
     }
     #[test]
     fn film_stop_flush_rejects_already_prefetched_samples() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=native_music_test_guard();
         let (tx, rx) = queue::channel(4);
         let metrics = Arc::new(Metrics::default());
         assert!(tx
@@ -713,6 +851,8 @@ mod tests {
     }
     #[test]
     fn callback_never_waits_for_blocked_mixer_and_reports_starvation() {
+        #[cfg(feature="native_timing")]
+        let _music_serial=native_music_test_guard();
         use std::sync::mpsc;
         struct Blocked {
             entered: Option<mpsc::Sender<()>>,
@@ -767,3 +907,9 @@ mod tests {
         drop(worker);
     }
 }
+
+#[cfg(all(test,feature="native_timing"))]
+mod producer_tests;
+
+#[cfg(all(test, feature = "native_timing"))]
+mod counter_tests;

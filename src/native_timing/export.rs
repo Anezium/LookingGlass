@@ -58,6 +58,8 @@ struct Snapshot<'a> {
     pending: &'a Option<Frame>,
     #[serde(skip_serializing_if = "Option::is_none")]
     raw_counters: &'a Option<audio_counters::Capture>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_producer: &'a Option<Box<audio_producer::Owner>>,
 }
 /// The buffer is INSIDE this writer: the receipt counts exactly the prefix
 /// accepted by Write, including short writes. A failed flush/sync has no receipt.
@@ -161,6 +163,7 @@ impl<C: Source> Recorder<C> {
                 events: &self.events,
                 pending: &self.pending,
                 raw_counters: &self.raw_counters,
+                audio_producer: &self.audio_producer,
             },
         )?;
         let (receipt_bytes, receipt_sha) = writer.finish()?;
@@ -199,7 +202,7 @@ impl<C: Source> Recorder<C> {
             "repeated_cumulative_export":self.export_attempts != 1,
             "swap_observations":"UNAVAILABLE; never estimated from wall minus CPU",
             "door_observations":"UNIMPLEMENTED per-frame; legacy door chunks remain separate/unjoined",
-            "phase2_unimplemented":["audio-producer-fences","raw-counter-brackets","image-tokens","review-ack","native-age-automation","pair-equivalence","complete-qualification"],
+            "phase2_unimplemented":if self.audio_producer.is_some(){&["image-tokens","review-ack","native-age-automation","pair-equivalence","complete-qualification"][..]}else{&["audio-producer-fences","raw-counter-brackets","image-tokens","review-ack","native-age-automation","pair-equivalence","complete-qualification"][..]},
             "campaign_qualified":false
         });
         if let serde_json::Value::Object(fields) = fields {
@@ -211,6 +214,21 @@ impl<C: Source> Recorder<C> {
                 raw.storage_bytes().into(),
             );
         }
+        if let Some(audio) = &self.audio_producer {
+            manifest
+                .as_object_mut()
+                .unwrap()
+                .insert("audio_producer_storage_bytes".into(), audio.reserved.into());
+        }
+        manifest.as_object_mut().unwrap().insert(
+            "producer_bootstrap_reserve_bytes".into(),
+            if self.audio_producer.is_none() {
+                audio_producer::BOOTSTRAP_RESERVE
+            } else {
+                0
+            }
+            .into(),
+        );
         let mut out = exclusive(&dir.join("manifest.json"))?;
         if fail == Some(Stage::Manifest) {
             out.write_all(b"{\"complete\":")?;
