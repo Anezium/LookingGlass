@@ -21,6 +21,8 @@ const READY_SLOTS: usize = 8;
 const HYSTERESIS: f32 = 1.25;
 #[derive(Default)]
 pub struct Metrics {
+    #[cfg(feature = "native_timing")]
+    pub raw_starvation: std::sync::OnceLock<Arc<crate::native_timing::audio_counters::Raw>>,
     pub rejected: AtomicUsize,
     pub starved: AtomicUsize,
     pub queued_samples: AtomicUsize,
@@ -225,6 +227,11 @@ impl Iterator for Callback {
                 }
             }
             if !found {
+                #[cfg(feature = "native_timing")]
+                if let Some(raw) = self.metrics.raw_starvation.get() {
+                    raw.event_with(|| { self.metrics.starved.fetch_add(1, Ordering::Relaxed); });
+                } else { self.metrics.starved.fetch_add(1, Ordering::Relaxed); }
+                #[cfg(not(feature = "native_timing"))]
                 self.metrics.starved.fetch_add(1, Ordering::Relaxed);
             }
             self.at = 0;
@@ -545,6 +552,62 @@ fn buffered_with<S: Source<Item = f32> + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "native_timing")]
+    #[test]
+    fn native_raw_starvation_observes_actual_callback_late_binding_and_legacy_resets() {
+        use crate::native_timing::{audio_counters::Tag, clock::Native, Metadata, Recorder};
+        let (tx,rx)=queue::channel(4);let metrics=Arc::new(Metrics::default());
+        let mut callback=Callback{ready:rx,block:[0.;SAMPLES],at:SAMPLES,epoch:0,metrics:metrics.clone()};
+        // The callback has already run before the viewer Session can bind.
+        assert!(callback.by_ref().take(SAMPLES).all(|v|v==0.));
+        assert_eq!(metrics.starved.load(Ordering::Relaxed),1);
+        assert!(metrics.raw_starvation.get().is_none());
+        let mut recorder=Recorder::new(Native,Some([7;16]),Metadata::default());
+        recorder.raw_requested=true;recorder.bind_raw_counters(Some(&metrics.raw_starvation),None);
+        assert_eq!(recorder.raw_counters.as_ref().unwrap().snapshots[0].value,0);
+        let scope=crate::kernel_alloc::Scope::begin();
+        for _ in 0..2 { assert!(callback.by_ref().take(SAMPLES).all(|v|v==0.)); }
+        assert_eq!(scope.finish(),0);
+        assert_eq!(metrics.starved.swap(0,Ordering::Relaxed),3);
+        recorder.sample_raw_counters(Tag::Requested);
+        assert_eq!(recorder.raw_counters.as_ref().unwrap().snapshots[1].value,2);
+        tx.push(Block{epoch:0,samples:[0.3;SAMPLES]}).ok().unwrap();
+        metrics.queued_samples.store(SAMPLES,Ordering::Relaxed);
+        assert!(callback.by_ref().take(SAMPLES).all(|v|v==0.3));
+        recorder.sample_raw_counters(Tag::Requested);
+        assert_eq!(recorder.raw_counters.as_ref().unwrap().snapshots[2].value,2);
+        // Intentional flush invalidates stale PCM. It remains RAW starvation;
+        // this baseline has no film-branch flush subset to subtract.
+        tx.push(Block{epoch:0,samples:[0.8;SAMPLES]}).ok().unwrap();
+        metrics.queued_samples.store(SAMPLES,Ordering::Relaxed);
+        metrics.epoch.store(1,Ordering::Release);
+        assert!(callback.by_ref().take(SAMPLES).all(|v|v==0.));
+        recorder.sample_raw_counters(Tag::Requested);
+        assert_eq!(recorder.raw_counters.as_ref().unwrap().snapshots[3].value,3);
+        assert_eq!(metrics.starved.load(Ordering::Relaxed),1);
+    }
+    #[cfg(feature = "native_timing")]
+    #[test]
+    fn host_only_counter_callback_cost_and_event_counts() {
+        use crate::native_timing::{audio_counters::Tag, clock::Native, Metadata, Recorder};
+        let mut costs=Vec::new();
+        for enabled in [false,true] {
+            let (_tx,rx)=queue::channel(4);let metrics=Arc::new(Metrics::default());
+            let mut callback=Callback{ready:rx,block:[0.;SAMPLES],at:SAMPLES,epoch:0,metrics:metrics.clone()};
+            let mut recorder=Recorder::new(Native,Some([7;16]),Metadata::default());
+            recorder.raw_requested=enabled;recorder.bind_raw_counters(Some(&metrics.raw_starvation),None);
+            let scope=crate::kernel_alloc::Scope::begin();let start=Instant::now();
+            for _ in 0..1024*SAMPLES { std::hint::black_box(callback.next()); }
+            let ns=start.elapsed().as_nanos();assert_eq!(scope.finish(),0);
+            assert_eq!(metrics.starved.load(Ordering::Relaxed),1024);
+            if enabled {
+                recorder.sample_raw_counters(Tag::Requested);
+                assert_eq!(recorder.raw_counters.as_ref().unwrap().snapshots[1].value,1024);
+            } else {assert!(metrics.raw_starvation.get().is_none());}
+            costs.push((enabled,ns));
+        }
+        println!("HOST ONLY actual callback 1048576 scalar samples/1024 starvation events; raw config/enabled+ns={costs:?}; zero hot allocations; not Vita estimate");
+    }
     #[test]
     fn ambience_cap_reselects_gain_and_preserves_player_and_voice_time() {
         let (control,mut mixer)=mixer();

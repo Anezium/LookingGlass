@@ -669,3 +669,82 @@ fn postseal_event_loss_remains_explicit_and_first_menu_quit_stays_pending() {
     assert!(r.stopped && r.pending.is_none());
     r.export(&root("postseal-loss")).unwrap();
 }
+
+#[test]
+fn raw_counter_extension_exports_actual_reads_not_synthetic_window_counters() {
+    for (name, positive, missing) in [
+        ("raw-zero", false, false),
+        ("raw-positive", true, false),
+        ("raw-missing", false, true),
+    ] {
+        let (mut r, c) = fake();
+        // Activation follows already-started audio in production. Never backdate
+        // it or reconstruct counters from the old reset-per-report values.
+        let pcm = std::sync::OnceLock::new();
+        let music = std::sync::OnceLock::new();
+        r.raw_requested = true;
+        r.bind_raw_counters(Some(&pcm), if missing { None } else { Some(&music) });
+        r.ready("tower2", Some("Tower2_Start"), Reason::StartSave, state(60));
+        for b in (0..50_020_000).step_by(10_000) {
+            c.0.set(Ok(b));
+            if positive && b == 25_000_000 {
+                pcm.get().unwrap().event();
+            }
+            frame(&mut r, state(60), state(61), 0);
+        }
+        r.request_stop();
+        c.0.set(Ok(50_020_000));
+        r.begin(state(61));
+        r.sample_raw_counters(audio_counters::Tag::AfterViewer);
+        assert!(r.actual_storage_bytes() + AUX_RESERVE <= BUDGET);
+        r.export(&root(name)).unwrap();
+    }
+}
+
+#[test]
+fn parseable_orphan_after_drop_retry_still_has_no_manifest() {
+    // Fail only the FIRST final buffer flush, then permit BufWriter::Drop to
+    // retry it. This intentionally leaves complete parseable orphan records.
+    struct OnceFail {
+        file: std::fs::File,
+        fail: bool,
+    }
+    impl std::io::Write for OnceFail {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.fail {
+                self.fail = false;
+                Err(std::io::Error::other("first flush"))
+            } else {
+                self.file.write(b)
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+    impl export::DurableWrite for OnceFail {
+        fn sync_all(&self) -> std::io::Result<()> {
+            self.file.sync_all()
+        }
+    }
+    let (mut r, _) = fake();
+    let path = root("parseable-orphan");
+    assert!(r
+        .export_with(&path, None, |p| Ok(OnceFail {
+            file: std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(p)?,
+            fail: true
+        }))
+        .is_err());
+    let dir = std::fs::read_dir(&path)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let raw = std::fs::read(dir.join("records.json")).unwrap();
+    assert!(serde_json::from_slice::<serde_json::Value>(&raw).is_ok());
+    assert!(!dir.join("manifest.json").exists());
+}

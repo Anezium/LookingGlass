@@ -41,7 +41,7 @@ class ActualCaptureTests(unittest.TestCase):
         self.assertEqual(expected, str(result.exception))
 
     def test_injected_clock_rejected_by_default(self):
-        with self.assertRaisesRegex(check.Invalid,'injected test clocks'):
+        with self.assertRaisesRegex(check.Invalid,'^clock domain; injected test clocks require explicit opt-in$'):
             check.check_capture(self.exact,1,20_000_000)
 
     def test_exact_actual_native_recorder(self):
@@ -151,7 +151,7 @@ class ActualCaptureTests(unittest.TestCase):
         (path/'manifest.json').write_text(json.dumps(self.manifest));(path/'records.json').write_bytes(b'{}')
         with self.assertRaisesRegex(check.Invalid,'^payload hash/length$'):checked(path,1,20_000_000)
     def test_actual_repeated_export_rejected(self):
-        with self.assertRaisesRegex(check.Invalid,'repeated cumulative'):
+        with self.assertRaisesRegex(check.Invalid,'^repeated cumulative export$'):
             checked(self.root/'repeated'/('07'*16+'-0000000000000002'),1,20_000_000)
     def test_actual_partial_writer_exports_rejected(self):
         for index in range(3):
@@ -163,7 +163,7 @@ class ActualCaptureTests(unittest.TestCase):
                     with self.assertRaises(FileNotFoundError) as caught: checked(path,1,20_000_000)
                     self.assertEqual(Path(caught.exception.filename),path/'manifest.json')
     def test_actual_unfinalized_pending_rejected(self):
-        with self.assertRaisesRegex(check.Invalid,'pending'):
+        with self.assertRaisesRegex(check.Invalid,'^unresolved pending interval$'):
             checked(self.root/'pending'/self.capture_name,1,20_000_000)
     def test_window_overflow(self):
         with self.assertRaisesRegex(check.Invalid,'^window arithmetic/settle$'):checked(self.exact,1,2**64-1)

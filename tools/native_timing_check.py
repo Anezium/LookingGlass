@@ -10,6 +10,9 @@ import json
 import math
 from pathlib import Path
 import struct
+import sys
+if __name__ == "__main__":
+    sys.modules["native_timing_check"] = sys.modules[__name__]
 
 SCHEMA = 'alice-native-phase1-v1'
 GAPS = ['audio-producer-fences', 'raw-counter-brackets', 'image-tokens', 'review-ack',
@@ -126,6 +129,7 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
         swap_observations=literal('UNAVAILABLE; never estimated from wall minus CPU'),
         door_observations=literal('UNIMPLEMENTED per-frame; legacy door chunks remain separate/unjoined'),
         phase2_unimplemented=literal(GAPS), campaign_qualified=literal(False))
+    if "raw_counter_storage_bytes" in m: mf["raw_counter_storage_bytes"] = uint
     obj(m, mf)
     need(m['run_id'] is not None and m['run_id'] != [0]*16 and not m['invalid_identity'], 'UNKNOWN run/world identity')
     need(m['clock_id'] in ('vita-newlib-clock4-process-us', 'host-shared-Instant-session-us') or (allow_test_clock is True and m['clock_id'] == 'host-injected-fake-us'), 'clock domain; injected test clocks require explicit opt-in')
@@ -139,15 +143,18 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     need(m['budget_bytes'] == 2*1024*1024 and m['aux_reserve_bytes'] == 65536, 'budget contract')
     size = (m['recorder_size'] + m['frame_capacity']*m['frame_size'] +
             m['world_capacity']*m['world_size'] + m['event_capacity']*m['event_size'])
+    size += m.get('raw_counter_storage_bytes',0)
     need(size == m['allocated_storage_bytes'] and size + m['aux_reserve_bytes'] <= m['budget_bytes'], 'allocation budget')
     need(0 < m['records_bytes'] <= 16*1024*1024, 'payload length cap')
     with (directory/'records.json').open('rb') as file:
         raw = file.read(m['records_bytes']+1)
     need(len(raw) == m['records_bytes'] and hashlib.sha256(raw).hexdigest() == m['records_sha256'], 'payload hash/length')
     d = load(raw)
-    obj(d, dict(schema=literal(SCHEMA), run_id=array(octet,16), clock_id=text, capture_ordinal=uint,
+    df = dict(schema=literal(SCHEMA), run_id=array(octet,16), clock_id=text, capture_ordinal=uint,
         frames=array(lambda x: obj(x, FRAME)), worlds=array(lambda x: obj(x, WORLD)),
-        events=array(lambda x: obj(x, EVENT)), pending=nullable(lambda x: obj(x, FRAME))))
+        events=array(lambda x: obj(x, EVENT)), pending=nullable(lambda x: obj(x, FRAME)))
+    if "raw_counter_storage_bytes" in m: df["raw_counters"] = lambda x: None
+    obj(d, df)
     need(d['run_id'] == m['run_id'] and d['clock_id'] == m['clock_id'] and d['capture_ordinal'] == 1, 'payload identity')
     need(d['pending'] is None, 'payload pending interval')
     frames, worlds, events = d['frames'], d['worlds'], d['events']
@@ -229,8 +236,14 @@ def check_capture(directory, generation, age_offset_us, *, allow_test_clock=Fals
     need(not any(settle <= e['native_us'] < t for e in events), 'milestone/operation inside settle/window')
     playable = [e for e in events if e['kind'] == 'FirstPlayable' and e['generation'] == generation]
     need(len(playable) == 1 and playable[0]['native_us'] < settle, 'missing/late/duplicate first-playable epoch')
+    raw_guards = None
+    if "raw_counter_storage_bytes" in m:
+        import native_timing_counter_check as counters
+        raw = d['raw_counters']
+        raw_guards = counters.validate(raw,m['clock_id'],s,t)
+        need(m['raw_counter_storage_bytes'] == raw['capacity']*raw['snapshot_size']+raw['shared_bytes'], 'counter storage receipt')
     # Factual simulation boundaries only. No exact simulation-age/pair claim.
-    return dict(source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', clock_id=m['clock_id'], provenance='UNATTESTED; self-consistent hash only', phase2_unimplemented=GAPS,
+    return dict(phase2a_status="PARTIAL_COUNTERS_ONLY_UNQUALIFIED" if raw_guards is not None else "UNIMPLEMENTED", raw_counter_guards=raw_guards, audio_qualified=False, source_population_contract=True, campaign_qualified=False, test_clock=m['clock_id'] == 'host-injected-fake-us', clock_id=m['clock_id'], provenance='UNATTESTED; self-consistent hash only', phase2_unimplemented=GAPS,
         metadata_assurance=m['metadata_assurance'], native_start_us=s, native_end_us=t,
         generation=generation, world=world, N=len(population), small_sample=len(population)<120,
         selected_viewer_seq=[f['viewer_seq'] for f in population],

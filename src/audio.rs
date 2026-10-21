@@ -790,6 +790,15 @@ pub struct Audio {
     landings: u64,
 }
 impl Audio {
+    /// Binding observes only events AFTER activation. Playback may already be
+    /// running; no earlier counter values or audio lifetime are reconstructed.
+    #[cfg(feature = "native_timing")]
+    pub fn bind_native_counters(&self, timing: &mut crate::native_timing::Session) {
+        timing.with(|r| r.bind_raw_counters(
+            self.playback.as_ref().filter(|p| p._worker.is_some()).map(|p| &p.mixer.metrics.raw_starvation),
+            block::settings().music_thread.then_some(&music::RAW_UNDERRUNS),
+        ));
+    }
     pub fn new(disabled: bool, capture: Option<PathBuf>) -> Self {
         let monitor = Arc::new(MonitorData::default());
         if capture.is_some() {

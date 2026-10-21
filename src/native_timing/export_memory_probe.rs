@@ -98,6 +98,13 @@ fn main() {
     while r.events.len() < EVENT_CAP - 1 {
         r.event(Milestone::Recovery, OPERATION);
     }
+    r.raw_requested = true;
+    let pcm = std::sync::OnceLock::new();
+    let music = std::sync::OnceLock::new();
+    r.bind_raw_counters(Some(&pcm), Some(&music));
+    for _ in 0..audio_counters::SNAPSHOT_CAP / 2 - 1 {
+        r.sample_raw_counters(audio_counters::Tag::Requested);
+    }
     let storage = r.actual_storage_bytes();
     // Run export on a bounded HOST stack. On macOS verify the actual pthread
     // allocation (rather than assuming Builder's requested minimum is exact).
@@ -141,10 +148,11 @@ fn main() {
     if cfg!(target_os = "macos") {
         assert!(actual_stack > 0 && actual_stack <= 32 * 1024);
         assert!(
-            peak + actual_stack <= AUX_RESERVE,
+            peak + actual_stack + RAW_SLOT_BYTES <= AUX_RESERVE,
             "auxiliary reserve exceeded"
         );
     }
     assert!(storage + AUX_RESERVE <= BUDGET);
     println!("HOST export_heap_peak={peak} actual_thread_stack={actual_stack} allocations={count} retained_path={retained} manifest_bytes={} storage={storage} aux={AUX_RESERVE} total_reserved={} limit={BUDGET}; native stack/device RAM UNTESTED", manifest.len(), storage + AUX_RESERVE);
+    println!("HOST raw_snapshot_size={} raw_max_storage={MAX_RAW_STORAGE} raw_slots_in_aux={RAW_SLOT_BYTES}", std::mem::size_of::<audio_counters::Snapshot>());
 }

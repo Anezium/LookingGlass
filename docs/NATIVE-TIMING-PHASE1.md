@@ -2,7 +2,8 @@
 
 This is a source checkpoint awaiting independent review. It is **not a usable
 campaign method or a source acceptance**. Audio producer fences/raw counter
-brackets, image tokens, separate review acknowledgement, automatic native-age
+brackets (except the explicitly unqualified counter-only candidate described in
+[NATIVE-TIMING-AUDIO-COUNTERS.md](NATIVE-TIMING-AUDIO-COUNTERS.md)), image tokens, separate review acknowledgement, automatic native-age
 acquisition, paired state equivalence and full qualification remain phase 2.
 The original raw-zero, producer-window p95 <=8ms and heap <180MiB gates remain.
 
@@ -173,7 +174,8 @@ recorder, with small game-dependency stubs; it is not an asset/rendered playthro
 Separate in-crate tests compare actual FixedClock/Player/powers and exact state
 bytes with/without observations. The test tools import no campaign/network helper.
 The extraction tool accepts ALICE_TIMING_HOOK_RUN for a new evidence subdirectory
-and ALICE_TIMING_HOOK_MUTANT=retry-ready/pause-reason/dt-cap/chapter-order for
+and ALICE_TIMING_HOOK_MUTANT=retry-ready/pause-reason/dt-cap/chapter-order/
+natural_ready_early/chapter_ready_early/recovery-after-reset for
 compiled semantic negative witnesses. Exact per-site static contracts are checked
 separately; the chapter-order mutant bypasses only that static assertion so its
 actual extracted order must compile and fail before the stub live mutation.

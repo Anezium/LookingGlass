@@ -30,6 +30,8 @@ pub struct Stats {
     pub ring_min: AtomicUsize,
     pub streams: AtomicUsize,
 }
+#[cfg(feature = "native_timing")]
+pub(super) static RAW_UNDERRUNS: OnceLock<Arc<crate::native_timing::audio_counters::Raw>> = OnceLock::new();
 pub static STATS: Stats = Stats {
     decode_us: AtomicU32::new(0),
     chunk_max_us: AtomicU32::new(0),
@@ -121,6 +123,11 @@ impl Iterator for RingSource {
                 }
                 // The decoder publishes whole frames, so this is a frame start.
                 debug_assert_eq!(self.phase, 0);
+                #[cfg(feature = "native_timing")]
+                if let Some(raw) = RAW_UNDERRUNS.get() {
+                    raw.event_with(|| { STATS.underrun_frames.fetch_add(1, Ordering::Relaxed); });
+                } else { STATS.underrun_frames.fetch_add(1, Ordering::Relaxed); }
+                #[cfg(not(feature = "native_timing"))]
                 STATS.underrun_frames.fetch_add(1, Ordering::Relaxed);
                 self.silence = self.channels as usize - 1;
                 return Some(0.);
@@ -250,6 +257,26 @@ fn run(jobs: super::queue::Receiver<Job>, priority: i32, affinity: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "native_timing")]
+    #[test]
+    fn native_raw_music_counts_actual_unavailable_source_frames_and_not_eof() {
+        use crate::native_timing::{audio_counters::{Raw,Capture,Tag},clock::{Checked,Native}};
+        let mut clock=Checked::new(Native);
+        let raw=Raw::activate(&RAW_UNDERRUNS,&mut clock,Some([8;16]));
+        let mut capture=Capture::new(None,Some(raw));capture.sample(&mut clock,Tag::Binding);
+        let before=capture.snapshots[0].value;
+        let ring=Ring::new();
+        let mut source=RingSource{ring:ring.clone(),read:0,ready:0,rate:44100,channels:2,silence:0,phase:0};
+        assert_eq!(source.next(),Some(0.));assert_eq!(source.next(),Some(0.));
+        capture.sample(&mut clock,Tag::Requested);
+        // Other host tests can also pull global music sources concurrently.
+        // The isolated Raw unit test pins exact counts; this pins the actual
+        // production unavailable-frame branch and channel pairing.
+        assert!(capture.snapshots[1].value>=before+1);
+        ring.eof.store(true,Ordering::Release);
+        assert_eq!(source.next(),None);
+        ring.push(&[0.25,0.75]);assert_eq!(source.next(),Some(0.25));assert_eq!(source.next(),Some(0.75));
+    }
     #[test]
     fn ring_source_preserves_samples_reports_underruns_as_silent_frames_and_ends() {
         let input: Vec<f32> = (0..5000).map(|i| i as f32).collect();

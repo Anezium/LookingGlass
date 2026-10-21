@@ -56,6 +56,8 @@ struct Snapshot<'a> {
     worlds: &'a [World],
     events: &'a [Event],
     pending: &'a Option<Frame>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_counters: &'a Option<audio_counters::Capture>,
 }
 /// The buffer is INSIDE this writer: the receipt counts exactly the prefix
 /// accepted by Write, including short writes. A failed flush/sync has no receipt.
@@ -158,6 +160,7 @@ impl<C: Source> Recorder<C> {
                 worlds: &self.worlds,
                 events: &self.events,
                 pending: &self.pending,
+                raw_counters: &self.raw_counters,
             },
         )?;
         let (receipt_bytes, receipt_sha) = writer.finish()?;
@@ -201,6 +204,12 @@ impl<C: Source> Recorder<C> {
         });
         if let serde_json::Value::Object(fields) = fields {
             manifest.as_object_mut().unwrap().extend(fields);
+        }
+        if let Some(raw) = &self.raw_counters {
+            manifest.as_object_mut().unwrap().insert(
+                "raw_counter_storage_bytes".into(),
+                raw.storage_bytes().into(),
+            );
         }
         let mut out = exclusive(&dir.join("manifest.json"))?;
         if fail == Some(Stage::Manifest) {

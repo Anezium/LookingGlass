@@ -727,6 +727,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut clock = FixedClock::default();
     #[cfg(feature = "native_timing")]
     let mut timing = crate::native_timing::Session::open()?;
+    #[cfg(feature = "native_timing")]
+    audio.bind_native_counters(&mut timing);
     let mut recovery = Recovery::default();
     let mut retry = recovery::RetryPoint::default();
     let mut paused = false;

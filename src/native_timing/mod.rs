@@ -1,6 +1,7 @@
 //! Phase 1 passive observations only. Feature AND startup config gated.
 //! No audio fences, image tokens, review acknowledgement, native-age scheduling,
 //! pair equivalence or campaign qualification. See docs/NATIVE-TIMING-PHASE1.md.
+pub mod audio_counters;
 pub mod clock;
 mod export;
 #[cfg(test)]
@@ -150,6 +151,8 @@ pub struct Event {
 #[serde(deny_unknown_fields)]
 struct Config {
     enabled: bool,
+    #[serde(default)]
+    audio_raw_counters: bool,
     source_sha256: Option<String>,
     build_sha256: Option<String>,
     game_config_sha256: Option<String>,
@@ -165,6 +168,8 @@ pub struct Metadata {
 }
 
 pub struct Recorder<C: Source> {
+    pub raw_requested: bool,
+    pub raw_counters: Option<audio_counters::Capture>,
     pub clock: Checked<C>,
     pub run_id: Option<[u8; 16]>,
     pub metadata: Metadata,
@@ -197,11 +202,20 @@ pub const STORAGE_BYTES: usize = std::mem::size_of::<Recorder<Native>>()
 // Reserve 64KiB for config, export streaming/hash/file buffers and startup stack
 // scratch. Export never clones datasets. Capacities are measured again at runtime.
 pub const AUX_RESERVE: usize = 64 * 1024;
-const _: () = assert!(STORAGE_BYTES + AUX_RESERVE <= BUDGET);
+pub const MAX_RAW_STORAGE: usize = audio_counters::SNAPSHOT_CAP
+    * std::mem::size_of::<audio_counters::Snapshot>()
+    + 2 * (std::mem::size_of::<audio_counters::Raw>() + 2 * std::mem::size_of::<usize>());
+// The two OnceLock slots are in existing Metrics and music static state; reserve
+// them in auxiliary scratch even when the feature's config is disabled.
+pub const RAW_SLOT_BYTES: usize =
+    2 * std::mem::size_of::<std::sync::OnceLock<std::sync::Arc<audio_counters::Raw>>>();
+const _: () = assert!(STORAGE_BYTES + MAX_RAW_STORAGE + AUX_RESERVE <= BUDGET);
 
 impl<C: Source> Recorder<C> {
     pub fn new(clock: C, run_id: Option<[u8; 16]>, metadata: Metadata) -> Self {
         Self {
+            raw_requested: false,
+            raw_counters: None,
             clock: Checked::new(clock),
             run_id,
             metadata,
@@ -393,11 +407,39 @@ impl<C: Source> Recorder<C> {
             self.stop_requested = true;
         }
     }
+    /// Setup-only, after Session::open; a worker/callback can already be active.
+    /// Missing routes stay absent. OnceLock is read-only on the event hot path.
+    pub fn bind_raw_counters(
+        &mut self,
+        pcm: Option<&std::sync::OnceLock<std::sync::Arc<audio_counters::Raw>>>,
+        music: Option<&std::sync::OnceLock<std::sync::Arc<audio_counters::Raw>>>,
+    ) {
+        use audio_counters::{Capture, Raw, Tag};
+        if !self.raw_requested || self.raw_counters.is_some() {
+            return;
+        }
+        let pcm = pcm.map(|slot| Raw::activate(slot, &mut self.clock, export::random_id()));
+        let music = music.map(|slot| Raw::activate(slot, &mut self.clock, export::random_id()));
+        let mut capture = Capture::new(pcm, music);
+        capture.sample(&mut self.clock, Tag::Binding);
+        self.raw_counters = Some(capture);
+    }
+    /// Functional outside-window API for a future scheduler. No schedule is
+    /// implemented here; caller must retain the request chronology separately.
+    pub fn sample_raw_counters(&mut self, tag: audio_counters::Tag) {
+        if let Some(raw) = &mut self.raw_counters {
+            raw.sample(&mut self.clock, tag);
+        }
+    }
     pub fn actual_storage_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.frames.capacity() * std::mem::size_of::<Frame>()
             + self.worlds.capacity() * std::mem::size_of::<World>()
             + self.events.capacity() * std::mem::size_of::<Event>()
+            + self
+                .raw_counters
+                .as_ref()
+                .map_or(0, audio_counters::Capture::storage_bytes)
     }
 }
 
@@ -433,7 +475,8 @@ impl Session {
             startup_save_sha256: export::parse_hash(cfg.startup_save_sha256)?,
             recorder_config_sha256: export::hash(&bytes),
         };
-        let recorder = Box::new(Recorder::new(Native, export::random_id(), metadata));
+        let mut recorder = Box::new(Recorder::new(Native, export::random_id(), metadata));
+        recorder.raw_requested = cfg.audio_raw_counters;
         anyhow::ensure!(
             recorder.actual_storage_bytes() + AUX_RESERVE <= BUDGET,
             "timing allocation budget"
@@ -451,6 +494,9 @@ impl Session {
     /// Invoked only after the viewer loop has ended. No pending finalization.
     pub fn export_after_viewer(&mut self) -> anyhow::Result<()> {
         if let Some(r) = &mut self.recorder {
+            if let Some(raw) = &mut r.raw_counters {
+                raw.sample(&mut r.clock, audio_counters::Tag::AfterViewer);
+            }
             r.export(std::path::Path::new("private/native-timing"))?;
         }
         Ok(())
