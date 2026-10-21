@@ -476,7 +476,7 @@ impl Session {
     /// config performs no recorder allocation. Invalid config fails explicitly.
     pub fn open() -> anyhow::Result<Self> {
         use std::io::Read;
-        let file = match std::fs::File::open("private/native-timing-config.json") {
+        let file = match std::fs::File::open(crate::preferences::path("native-timing-config.json")) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self { recorder: None })
@@ -523,7 +523,7 @@ impl Session {
     }
     /// Invoked only after the viewer loop has ended. No pending finalization.
     pub fn export_after_viewer(&mut self) -> anyhow::Result<()> {
-        self.export_after_viewer_to(std::path::Path::new("private/native-timing"))
+        self.export_after_viewer_to(&crate::preferences::path("native-timing"))
     }
     pub(crate) fn export_after_viewer_to(&mut self, root: &std::path::Path) -> anyhow::Result<()> {
         if let Some(r) = &mut self.recorder {
