@@ -120,7 +120,7 @@ pub fn hatter_door_candidates() -> bool {
     { false }
 }
 
-// Hedge3 levers remain independently default-off pending console acceptance.
+// Independent light-cache and dynamic-bucket controls; runtime defaults live in Config.
 macro_rules! hedge_switch {
     ($name:ident, $field:ident) => {
         pub fn $name() -> bool {

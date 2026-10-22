@@ -221,10 +221,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             sim_hatter_door_candidates: false,
-            sim_npc_sight_candidates: false,
-            sim_npc_sight_cache: false,
-            sim_npc_target_stack: false,
-            lights_static_cache: false,
+            sim_npc_sight_candidates: true,
+            sim_npc_sight_cache: true,
+            sim_npc_target_stack: true,
+            lights_static_cache: true,
             sim_dynamic_buckets: false,
             fx_merge_local_reuse: true,
             fx_merge_ranges: false,
@@ -2081,35 +2081,26 @@ pub(crate) async fn visualizer(
 mod tests {
     use super::*;
     #[test]
-    fn npc_think_switches_are_independent_default_off_booleans() {
-        for c in [Config::default(), serde_json::from_str("{}").unwrap()] {
-            assert!(!c.sim_npc_sight_candidates && !c.sim_npc_sight_cache && !c.sim_npc_target_stack);
-        }
-        for name in ["sim_npc_sight_candidates", "sim_npc_sight_cache", "sim_npc_target_stack"] {
-            for invalid in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
-                assert!(serde_json::from_value::<Config>(serde_json::json!({name:invalid})).is_err());
-            }
-            let c: Config = serde_json::from_value(serde_json::json!({name:true})).unwrap();
-            c.validate().unwrap();
-            assert_eq!(c.sim_npc_sight_candidates, name == "sim_npc_sight_candidates");
-            assert_eq!(c.sim_npc_sight_cache, name == "sim_npc_sight_cache");
-            assert_eq!(c.sim_npc_target_stack, name == "sim_npc_target_stack");
-        }
-    }
-    #[test]
-    fn hedge3_switches_are_independent_strict_booleans_and_default_off() {
+    fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {
+        let fields = ["lights_static_cache", "sim_npc_sight_candidates",
+                      "sim_npc_sight_cache", "sim_npc_target_stack"];
         for config in [Config::default(), serde_json::from_str("{}").unwrap()] {
-            assert!(!config.lights_static_cache && !config.sim_dynamic_buckets);
+            let defaults = serde_json::to_value(config).unwrap();
+            for field in fields { assert_eq!(defaults[field], true); }
+            assert_eq!(defaults["sim_dynamic_buckets"], false);
         }
-        for name in ["lights_static_cache", "sim_dynamic_buckets"] {
+        for name in fields.into_iter().chain(["sim_dynamic_buckets"]) {
             for invalid in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
                 assert!(serde_json::from_value::<Config>(serde_json::json!({name:invalid})).is_err());
             }
-            let value = serde_json::json!({name:true});
-            let config: Config = serde_json::from_value(value).unwrap();
-            config.validate().unwrap();
-            assert_eq!(config.lights_static_cache, name == "lights_static_cache");
-            assert_eq!(config.sim_dynamic_buckets, name == "sim_dynamic_buckets");
+            for enabled in [false, true] {
+                let config: Config = serde_json::from_value(serde_json::json!({name:enabled})).unwrap();
+                config.validate().unwrap();
+                let actual = serde_json::to_value(config).unwrap();
+                for other in fields.into_iter().chain(["sim_dynamic_buckets"]) {
+                    assert_eq!(actual[other], if other == name { enabled } else { other != "sim_dynamic_buckets" });
+                }
+            }
         }
     }
     #[test]
