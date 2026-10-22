@@ -88,7 +88,7 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
             Rc::new(prepared::Geometry::new(m))
         };
         if c.actor_layer_reuse {shared[variant]=Some(geometry.clone());}
-        passes.push(Pass {_game_thread: crate::game_thread::GameThread::default(),geometry:Some(geometry),effect:false,blend_index:p.blend,depth_equal:p.equal,
+        passes.push(Pass {_game_thread: crate::game_thread::GameThread::default(),geometry:Some(geometry),gpu_skin:None,effect:false,blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")]
             world_static:None,
             #[cfg(target_os="vita")]
@@ -138,7 +138,8 @@ pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(V
     let mut passes=pass_storage(limit);
     for l in layers {
         let p=state(&l.stage,time);
-        passes.push(Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,
+        passes.push(Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,
+        #[cfg(feature="vita_renderer")] gpu_skin:None,effect:false,
             blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
@@ -147,4 +148,21 @@ pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(V
             gain:p.gain,fog:p.fog,model:true,appearance,filter_fade:0.});
     }
     Some((passes,alpha))
+}
+
+/// Full-profile attribution only; the disabled path retains one generic reason.
+pub(super) fn publication_rejection(surface:&Surface)->&'static str {
+    if !crate::frame_profile::enabled() {return "skin_reject_layers";}
+    let limit=crate::render::vita_renderer::config().actor_max_layers.min(surface.layers.len());
+    let layers=&surface.layers[..limit];
+    let Some(first)=layers.first() else {return "skin_reject_no_layers";};
+    for layer in layers {
+        let stage=&layer.stage;
+        if stage.environment {return "skin_reject_environment_uv";}
+        if stage.dot_alpha.is_some() {return "skin_reject_dot_alpha";}
+        if stage.vector_uv.is_some() {return "skin_reject_vector_uv";}
+        if !stage.mods.is_empty() {return "skin_reject_uv_modifiers";}
+        if stage.vertex_alpha!=first.stage.vertex_alpha {return "skin_reject_alpha_variants";}
+    }
+    "skin_reject_layers"
 }

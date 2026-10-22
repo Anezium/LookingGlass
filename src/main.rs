@@ -420,6 +420,8 @@ fn run() -> Result<()> {
             "--audio-check" => mode = "audio",
             "--character-check" => mode = "character",
             "--skin-bench" => mode = "skin-bench",
+            #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+            "--gpu-skin-check" => mode = "gpu-skin-check",
             "--skin-workers-check" => mode = "skin-workers-check",
             "--renderer-host-check" => mode = "renderer-host-check",
             "--skin-overlap-render-check" => mode = "skin-overlap-render-check",
@@ -1092,6 +1094,14 @@ fn run() -> Result<()> {
     }
     if mode == "swim" {
         return water::check(&mut assets);
+    }
+    #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+    if mode == "gpu-skin-check" {
+        macroquad::Window::from_config(viewer::config(),async move {
+            if let Err(e)=character::check_gpu_skin(&mut assets).await {
+                eprintln!("GPU skin host check failed: {e:#}");std::process::exit(1);
+            }
+        });return Ok(());
     }
     let maps = assets.maps();
     #[cfg(all(feature="vita_renderer", not(target_os="vita")))]

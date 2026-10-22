@@ -124,24 +124,25 @@ pub(crate) fn end() {
 }
 /// This address is valid only between prepare and the fully drained collect. Banks
 /// cannot be mutated again while any old packet/view still owns their publication.
-pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,key:Key)->Option<(usize,bool)> {
-    let texture=mesh.texture.as_ref()?;
-    let surface=SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade))?;
-    if SKIN_OPACITY.with(Cell::get)!=1. {return None;}
+pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,key:Key)->Result<(usize,bool,usize), &'static str> {
+    let texture=mesh.texture.as_ref().ok_or("skin_reject_texture")?;
+    let surface=SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade)).ok_or("skin_reject_registration")?;
+    if SKIN_OPACITY.with(Cell::get)!=1. {return Err("skin_reject_opacity");}
     let (time,appearance)=FRAME.with(|f| {let f=f.borrow();(f.time,f.appearance)});
-    let (passes,alpha)=actor_cache::recipe(&surface,time,appearance)?;
+    let (passes,alpha)=actor_cache::recipe(&surface,time,appearance).ok_or_else(||actor_cache::publication_rejection(&surface))?;
+    let layer_count=passes.len();
     STATE.with(|s| {
         let mut s=s.borrow_mut();
-        let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,alpha,key)?;
+        let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,alpha,key).ok_or("skin_reject_bank")?;
         let group=FRAME.with(|f| {
             let mut f=f.borrow_mut();let n=mesh.vertices.len()*passes.len();
             if f.vertices.saturating_add(n)>MAX_VERTICES {f.dropped+=1;return None;}
             f.vertices+=n;let id=f.groups.len();
             let transparent=surface.transparent||f.depth_read_only;
             f.groups.push(Group {passes,transparent});Some(id)
-        })?;
+        }).ok_or("skin_reject_frame_budget")?;
         s.pending.push((group,id,slot));
-        Some((output,alpha))
+        Ok((output,alpha,layer_count))
     })
 }
 /// Separate staging preserves world/actor and equal-depth packet barriers and ties.

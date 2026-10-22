@@ -3,7 +3,7 @@ use crate::skeletal::{SkinVertex, Transform};
 use macroquad::prelude::*;
 
 // Adapted from NextOs-Ports/Looking-Glass-NextOS 15779e4 (felc18-blip).
-pub(super) fn rotation(q: Quat) -> Mat3 {
+pub(crate) fn rotation(q: Quat) -> Mat3 {
     // Basis expansion preserves Quat * Vec3 even for packed non-unit rotations.
     Mat3::from_cols(q * Vec3::X, q * Vec3::Y, q * Vec3::Z)
 }
@@ -48,7 +48,7 @@ pub(super) fn position(src: &SkinVertex, palette: &[(Mat3, Vec3)]) -> Vec3 {
 }
 
 thread_local! { static MUTABLE_SKIN:std::cell::Cell<bool>=const {std::cell::Cell::new(false)}; }
-pub(super) fn mutable_required()->bool {MUTABLE_SKIN.with(std::cell::Cell::get)}
+pub(crate) fn mutable_required()->bool {MUTABLE_SKIN.with(std::cell::Cell::get)}
 thread_local! { static PRESERVE_SKIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// Expanding/normal-driven overlays need current vertices and rebuilt normals.
 pub(crate) struct CullGuard(Option<(bool,bool)>);
@@ -122,11 +122,11 @@ fn colors(vertices: &mut [Vertex], fullbright: bool, alpha: f32) {
 }
 
 /// Only these disjoint CPU arrays cross the scope boundary; never a Mesh/Texture.
-pub(super) struct Job<'a> {
+pub(crate) struct Job<'a> {
     pub input: &'a [SkinVertex], pub vertices: &'a mut [Vertex], pub indices: &'a [u16],
 }
 #[derive(Clone, Copy)]
-pub(super) struct Params<'a> {
+pub(crate) struct Params<'a> {
     pub pose: &'a [Transform], pub scales: &'a [f32], pub palette: &'a [(Mat3, Vec3)],
     pub transform: Transform, pub scale: f32, pub flat: bool, pub fullbright: bool, pub alpha: f32,
 }
@@ -140,7 +140,7 @@ pub(super) fn positions(job: &mut Job<'_>, p: Params<'_>) {
         dst.normal = Vec4::ZERO;
     }
 }
-pub(super) fn kernel(job: &mut Job<'_>, p: Params<'_>) {
+pub(crate) fn kernel(job: &mut Job<'_>, p: Params<'_>) {
     positions(job, p);
     shade_arrays(job.vertices, job.indices, p.flat, p.fullbright, p.alpha);
 }

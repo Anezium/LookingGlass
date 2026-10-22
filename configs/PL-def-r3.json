@@ -58,6 +58,7 @@
   "actor_batching": true,
   "actor_frustum_cull": true,
   "bone_palette": false,
+  "gpu_skin": false,
   "skin_frustum_cull": true,
   "fast_frustum": true,
   "flat_actor_light": false,

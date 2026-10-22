@@ -13,6 +13,8 @@ pub(crate) mod retained;
 mod actor_cache;
 #[cfg(feature="vita_renderer")]
 pub(crate) mod actor_publication;
+#[cfg(feature="vita_renderer")]
+pub(crate) mod gpu_skin;
 pub(crate) mod actor_vertices;
 #[cfg(feature="vita_renderer")]
 pub(crate) mod prepared;
@@ -33,6 +35,8 @@ pub struct Pass {
     _game_thread: crate::game_thread::GameThread,
     #[cfg(feature="vita_renderer")]
     geometry:Option<Rc<prepared::Geometry>>,
+    #[cfg(feature="vita_renderer")]
+    gpu_skin:Option<Rc<gpu_skin::Packet>>,
     #[cfg(feature="vita_renderer")]
     effect:bool,
     #[cfg(feature = "vita_renderer")]
@@ -500,6 +504,7 @@ pub fn finish() -> (usize, usize) {
                         _game_thread: crate::game_thread::GameThread::default(),
                         #[cfg(feature="vita_renderer")]
                         geometry:None,
+        #[cfg(feature="vita_renderer")] gpu_skin:None,
                         #[cfg(feature="vita_renderer")]
                         effect:p.effect,
                         #[cfg(feature = "vita_renderer")]
@@ -608,6 +613,7 @@ fn pass_at(
         _game_thread: crate::game_thread::GameThread::default(),
         #[cfg(feature="vita_renderer")]
         geometry:None,
+        #[cfg(feature="vita_renderer")] gpu_skin:None,
         #[cfg(feature="vita_renderer")]
         effect:false,
         #[cfg(feature = "vita_renderer")]

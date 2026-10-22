@@ -179,6 +179,7 @@ struct Store {
     service_us: u64,
     fallback: usize,
     frame: u64,
+    #[cfg(feature="vita_renderer")] diagnostics: GatherDiagnostics,
 }
 impl Store {
     fn new(workers: usize, probe: bool) -> Box<Self> {
@@ -225,6 +226,7 @@ impl Store {
             service_us: 0,
             fallback: 0,
             frame: 0,
+            #[cfg(feature="vita_renderer")] diagnostics: GatherDiagnostics::default(),
         })
     }
     fn reset(&mut self) {
@@ -251,6 +253,7 @@ impl Store {
         self.wait_us = 0;
         self.service_us = 0;
         self.fallback = 0;
+        #[cfg(feature="vita_renderer")] { self.diagnostics = GatherDiagnostics::default(); }
     }
     fn capture(
         &mut self,
@@ -341,25 +344,49 @@ impl Store {
             let Some(mesh) = mesh else { continue; };
             // Explicit consumers require live mutable fields now. Untracked topology,
             // layers and exhausted banks use the original exact serial kernel.
-            let direct = if bounded && !super::mutable_required() && surface.vertices.len()==mesh.vertices.len()
-                && surface.indices == mesh.indices {
-                // A draw can animate unrelated bones while this surface is unchanged.
-                // Compare its exact numeric dependencies on the game thread; never
-                // add J17's dual normalized-output comparison loop to the workers.
-                let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
-                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged,
-                    crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize})
-            } else { None };
-            if let Some((output, alpha_variant)) = direct {
+            let full = crate::frame_profile::enabled();
+            if full {
+                self.diagnostics.add("skin_visible_surfaces",1);
+                self.diagnostics.add("skin_visible_vertices",surface.vertices.len() as u64);
+                self.diagnostics.add("skin_visible_influences",surface.vertices.iter().map(|v|v.weights.len() as u64).sum());
+            }
+            if crate::render_fx::gpu_skin::try_capture(surface, mesh, p) { continue; }
+            let publication_started = full.then(std::time::Instant::now);
+            let direct = if super::mutable_required() { Err("skin_reject_mutable") }
+                else if actor.is_none() {Err("skin_reject_identity")}
+                else if !bounded { Err("skin_reject_arena") }
+                else if surface.vertices.len()!=mesh.vertices.len() || surface.indices!=mesh.indices { Err("skin_reject_topology") }
+                else {
+                    let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
+                    crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged,
+                        crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize})
+                };
+            if let Some(t) = publication_started { self.diagnostics.add("skin_publication_us",t.elapsed().as_nanos() as u64); }
+            if full { if let Err(reason)=direct { self.diagnostics.add(reason,1); } }
+            if let Ok((output, alpha_variant, layer_count)) = direct {
                 let vertices = self.output_len..self.output_len+mesh.vertices.len();
                 self.output_len = vertices.end;
                 i.surfaces.push(Surface { mesh:mesh_id, vertices, cpu:surface.cpu(),
                     revision:Revision {identity:0,vertices:[0;2]}, output, alpha_variant });
-                #[cfg(feature="actor_diagnostics")]
-                crate::render_fx::retained::count("actor_direct_surfaces",1);
+                if full {
+                    self.diagnostics.add("skin_direct_worker_surfaces",1);
+                    self.diagnostics.add("skin_direct_eligible_layers",layer_count as u64);
+                    if surface.used_bones.len()<=39 && surface.vertices.iter().all(|v|v.weights.len()<=2) {
+                        self.diagnostics.add("skin_two_influence_candidates",1);
+                    }
+                }
             } else {
+                let started=full.then(std::time::Instant::now);
                 super::kernel(&mut super::Job { input:&surface.vertices, vertices:&mut mesh.vertices, indices:&mesh.indices },p);
+                if let Some(t)=started {
+                    self.diagnostics.add("skin_serial_kernel_us",t.elapsed().as_nanos() as u64);
+                    self.diagnostics.add("skin_serial_surfaces",1);
+                    self.diagnostics.add("skin_serial_vertices",surface.vertices.len() as u64);
+                    self.diagnostics.add("skin_serial_influences",surface.vertices.iter().map(|v|v.weights.len() as u64).sum());
+                }
+                let started=full.then(std::time::Instant::now);
                 crate::render_fx::skin(mesh);
+                if let Some(t)=started {self.diagnostics.add("skin_serial_publication_us",t.elapsed().as_nanos() as u64);}
                 #[cfg(feature="actor_diagnostics")]
                 crate::render_fx::retained::count("actor_mutable_consumer_surfaces",1);
             }
@@ -647,6 +674,8 @@ impl Drop for Frame {
               crate::render_fx::retained::count("skin_gather_us",self.gather_us);
               crate::render_fx::retained::count("skin_overflow",u64::from(s.overflow));
               crate::render_fx::retained::count("skin_worker_service_us",s.service_us); }
+            #[cfg(feature="vita_renderer")]
+            if crate::frame_profile::enabled() { s.diagnostics.publish(); crate::render_fx::gpu_skin::publish_memory(); }
             if crate::light_profile::full() && !std::thread::panicking() {
                 eprintln!("[lg/skin-overlap] frame={} gather_us={} collect_wait_us={} worker_service_us={} fallback_draws={} overflow={}",s.frame,self.gather_us,s.wait_us,s.service_us,s.fallback,s.overflow);
             }
@@ -1162,4 +1191,29 @@ mod tests {
         assert_eq!(handle(&s, &mut meshes, params(&pose), true), Some(true));
         drop(frame);
     }
+}
+
+/// Fixed per-frame totals. No heap, influence census, clocks or publications in Light/Off.
+#[cfg(feature="vita_renderer")]
+const GATHER_COUNTERS: &[&str] = &[
+    "skin_serial_kernel_us", "skin_serial_publication_us", "skin_publication_us",
+    "skin_visible_surfaces", "skin_visible_vertices", "skin_visible_influences",
+    "skin_serial_surfaces", "skin_serial_vertices", "skin_serial_influences",
+    "skin_direct_worker_surfaces", "skin_direct_eligible_layers", "skin_two_influence_candidates", "skin_reject_mutable", "skin_reject_arena",
+    "skin_reject_topology", "skin_reject_texture", "skin_reject_registration",
+    "skin_reject_opacity", "skin_reject_layers", "skin_reject_bank", "skin_reject_frame_budget",
+    "skin_reject_identity", "skin_reject_no_layers", "skin_reject_environment_uv", "skin_reject_dot_alpha",
+    "skin_reject_vector_uv", "skin_reject_uv_modifiers", "skin_reject_alpha_variants",
+];
+#[cfg(feature="vita_renderer")]
+#[derive(Default)]
+struct GatherDiagnostics { values: [u64; GATHER_COUNTERS.len()] }
+#[cfg(feature="vita_renderer")]
+impl GatherDiagnostics {
+    fn add(&mut self, name: &'static str, value:u64) {
+        self.values[GATHER_COUNTERS.iter().position(|&n|n==name).expect("gather counter")]+=value;
+    }
+    fn publish(&self) { for (&name,&value) in GATHER_COUNTERS.iter().zip(&self.values) {
+        crate::render_fx::retained::count(name,if name.ends_with("_us") {value/1000}else{value});
+    } }
 }

@@ -73,7 +73,7 @@ pub(crate) fn begin_view(
     });
 }
 const UNIFORM_FLOATS: usize = 147;
-fn meta() -> ShaderMeta {
+pub(super) fn meta() -> ShaderMeta {
     let mut uniforms = vec![
         UniformDesc::new("Model", UniformType::Mat4),
         UniformDesc::new("Projection", UniformType::Mat4),
@@ -171,6 +171,7 @@ struct Stats {
     uniform_bytes: u64,
     upload_bytes: u64,
     upload_gl_us: u64,
+    owner_upload: [[u64;3];2],
     uploads: u64,
     growths: u64,
     upload_hits: u64,
@@ -363,6 +364,9 @@ impl Gpu {
     }
     fn upload(&mut self, slot: usize, p: &Pass) -> Result<usize> {
         crate::game_thread::assert_current();
+        if p.gpu_skin.is_some() {return Ok(usize::MAX);}
+        let full=crate::frame_profile::enabled();
+        let owner_start=full.then(std::time::Instant::now);
         let mesh=p.geometry();
         ensure!(
             if crate::render::vita_renderer::config().fx_prepare_cache {
@@ -433,9 +437,10 @@ impl Gpu {
             ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));
             self.stats.upload_bytes += (mesh.indices.len() * 2) as u64;
         } else if !plan.full_hit { self.stats.index_skips += 1; }
+        let gl_us=if plan.vertex || plan.index {gl_started.elapsed().as_micros() as u64} else {0};
         if plan.vertex || plan.index {
             self.stats.uploads += 1;
-            let us = gl_started.elapsed().as_micros() as u64;
+            let us = gl_us;
             self.stats.upload_gl_us += us;
             count("vita_fx_upload_gl_us", us);
         }
@@ -445,6 +450,12 @@ impl Gpu {
         }
         if version.is_none() && track_index && !same_index { b.previous_indices.clone_from(&mesh.indices); }
         b.version = version;
+        if let Some(start)=owner_start {
+            let owner=&mut self.stats.owner_upload[usize::from(p.effect)];
+            owner[0]+=u64::from(plan.vertex)*(mesh.vertices.len()*40) as u64 + u64::from(plan.index)*(mesh.indices.len()*2) as u64;
+            owner[1]+=gl_us;
+            owner[2]+=(start.elapsed().as_micros() as u64).saturating_sub(gl_us);
+        }
         Ok(slot)
     }
     fn prepare_pipeline(&mut self, key: (usize, bool)) {
@@ -475,6 +486,12 @@ impl Gpu {
         });
     }
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
+        if let Some(packet)=&p.gpu_skin {
+            self.submit_cache.interrupt();self.uniform_cache.interrupt();self.field_uniforms.interrupt();
+            packet.draw(p,u,depth_write);
+            self.submit_cache.interrupt();self.uniform_cache.interrupt();self.field_uniforms.interrupt();
+            return;
+        }
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(std::time::Instant::now);
@@ -726,7 +743,7 @@ fn merge_cached_mode<'a>(
             if let Source::Actor(id) = source {
                 let g = &groups[id];
                 let p = g.passes.first();
-                let eligible = g.passes.len() == 1 && p.is_some_and(|p| p.geometry.as_ref().map_or_else(|| valid_mesh(p.geometry()), |g| g.valid) && (p.effect || crate::render::vita_renderer::config().actor_batching));
+                let eligible = g.passes.len() == 1 && p.is_some_and(|p| p.gpu_skin.is_none() && p.geometry.as_ref().map_or_else(|| valid_mesh(p.geometry()), |g| g.valid) && (p.effect || crate::render::vita_renderer::config().actor_batching));
                 Signature {
                     source,
                     key: eligible.then(|| packet_key(p.unwrap())),
@@ -1023,7 +1040,7 @@ pub(crate) fn finish_world(
             }
             if let Some(g) = groups.get(id).filter(|g| g.transparent &&
                 g.passes.first().is_some_and(|p| !p.geometry().vertices.is_empty())) {
-                list.push(((center(g.passes[0].geometry()) - camera).dot(direction), Source::Actor(id)));
+                list.push(((g.passes[0].gpu_skin.as_ref().map_or_else(||center(g.passes[0].geometry()),|p|p.center) - camera).dot(direction), Source::Actor(id)));
             }
         }
         debug_assert_eq!(next_puff, puffs.len());
@@ -1080,7 +1097,7 @@ pub(crate) fn finish_world(
                 if p.geometry().indices.is_empty() {
                     continue;
                 }
-                let shared=p.geometry.as_ref().map(|m|std::rc::Rc::as_ptr(m) as usize);
+                let shared=p.geometry.as_ref().filter(|_|p.gpu_skin.is_none()).map(|m|std::rc::Rc::as_ptr(m) as usize);
                 let previous=shared.and_then(|id|shared_uploads.get(&id).copied());
                 let upload=if let Some(b)=previous {count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p)};
                 match upload {
@@ -1104,6 +1121,13 @@ pub(crate) fn finish_world(
         crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadGl, gpu.stats.upload_gl_us);
         crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadBytes, gpu.stats.upload_bytes);
         count("vita_fx_upload_cpu_us", cpu_us);
+        if crate::frame_profile::enabled() {
+            for (owner,names) in gpu.stats.owner_upload.iter().zip([
+                ["skin_actor_upload_bytes","skin_actor_upload_gl_us","skin_actor_upload_cpu_us"],
+                ["skin_fx_upload_bytes","skin_fx_upload_gl_us","skin_fx_upload_cpu_us"]]) {
+                for (name,&value) in names.into_iter().zip(owner) {count(name,value);}
+            }
+        }
     }
     count("vita_fx_capacity_samples", 1);
     count(
@@ -1508,6 +1532,7 @@ mod tests {
             passes: vec![Pass {
                 _game_thread: crate::game_thread::GameThread::default(),
                 geometry:None,
+        #[cfg(feature="vita_renderer")] gpu_skin:None,
                 effect: false,
                 blend_index: 1,
                 depth_equal: false,

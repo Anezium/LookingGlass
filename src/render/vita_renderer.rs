@@ -111,6 +111,8 @@ pub struct Config {
     pub actor_frustum_cull:bool,
     /// Matrix skinning changes float rounding: opt in after console comparison.
     pub bone_palette: bool,
+    /// Experimental one-surface Alice GPU skin. Startup-only, default off.
+    pub gpu_skin: bool,
     /// Conservative skin bounds; late overlays and normal-driven layers opt out.
     pub skin_frustum_cull: bool,
     /// Conservative center/extent clip-plane test and identity bounds shortcut.
@@ -245,6 +247,7 @@ impl Default for Config {
             fx_ring_safe: true,
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:true,
             bone_palette: false,
+            gpu_skin: false,
             skin_frustum_cull: true,
             fast_frustum: true,
             flat_actor_light: false, max_texture_dimension: None,
@@ -2375,6 +2378,9 @@ mod tests {
     fn settings_bound_gpu_passes_and_reject_bad_values() {
         assert!(Config::default().validate().is_ok());
         assert!(!Config::default().bone_palette);
+        assert!(!Config::default().gpu_skin);
+        assert!(serde_json::from_str::<Config>(r#"{"gpu_skin":"on"}"#).is_err());
+        assert!(serde_json::from_str::<Config>(r#"{"gpu_skin":true}"#).unwrap().gpu_skin);
         assert!(!Config::default().gpu_state_probe && !Config::default().gpu_index_dedupe && !Config::default().gpu_uniform_dedupe);
         assert!(serde_json::from_str::<Config>(r#"{"gpu_uniform_dedupe":"on"}"#).is_err());
         assert!(Config::default().skin_frustum_cull && Config::default().fast_frustum);

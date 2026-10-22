@@ -604,6 +604,8 @@ impl Character {
                     .with_context(|| path)?,
             );
         }
+        #[cfg(feature="vita_renderer")]
+        crate::render_fx::gpu_skin::warm(&skeleton,&skeleton.global_pose(&clips[6].sample(0.,true)));
         let specs = texture::read_materials(assets)?;
         let mut textures = BTreeMap::<String, Texture2D>::new();
         let mut meshes = Vec::new();
@@ -3192,5 +3194,92 @@ mod tests {
             "legacy Alice blocks checked: {checked} of {}",
             LEGACY_FIXTURES.len()
         );
+    }
+}
+
+/// Animated host GPU experiment. This is deliberately separate from parity gates.
+#[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+pub(crate) async fn check_gpu_skin(assets:&mut Assets)->Result<()> {
+    use crate::render_fx::{gpu_skin,retained};
+    let output=std::path::PathBuf::from(std::env::var_os("ALICE_GPU_SKIN_OUTPUT").unwrap_or_else(||"private/gpu-skin".into()));
+    std::fs::create_dir_all(&output)?;
+    gpu_skin::host_switch(true);
+    let mut alice=Character::load(assets)?;
+    if std::env::var_os("LOOKING_GLASS_GPU_SKIN_FAILURE").is_some() {
+        return alice.check_gpu_failure(&output).await;
+    }
+    let numeric=gpu_skin::audit(&alice.skeleton,&alice.animator.clips)?;
+    std::fs::write(output.join("addressing.json"),serde_json::to_vec_pretty(&gpu_skin::address_check()?)?)?;
+    std::fs::write(output.join("numeric.json"),serde_json::to_vec_pretty(&numeric)?)?;
+    let mut gpu=retained::Gpu::new()?;
+    skinning::overlap::startup(2,false);
+    let player=Player::new(Vec3::ZERO);alice.reset(&player,0.);
+    let mut witnesses=Vec::new();
+    for clip in [6,7,8,4,16] {for sample in [0,1,2] {for far in [false,true] {
+        for on in [false,true] {
+            gpu_skin::host_switch(on);
+            let time=sample as f32*0.217;
+            alice.actions.pose=alice.animator.clips[clip].sample(time,true);
+            alice.face_time=time;alice.facing=sample as f32*0.8;
+            let view=Camera3D {position:vec3(95.,-125.,65.)*if far {2.5}else{0.65},target:Vec3::Z*34.,up:Vec3::Z,
+                fovy:50_f32.to_radians(),z_near:0.1,z_far:30000.,..Default::default()};
+            clear_background(BLACK);set_camera(&view);
+            retained::begin_view(&view,time,&crate::environment::Atmosphere::default(),false,true);
+            let mut frame=skinning::overlap::Frame::begin();
+            alice.draw_ghost(Vec3::ZERO,false,false);frame.dispatch();frame.collect();drop(frame);
+            retained::finish_world(&mut gpu,&[],true,|_|{},None);
+            set_default_camera();
+            let image=get_screen_data();
+            let name=format!("clip{clip}-s{sample}-{}-{}.png",if far {"far"}else{"close"},if on {"on"}else{"off"});
+            image.export_png(output.join(&name).to_str().unwrap());
+            witnesses.push(serde_json::json!({"file":name,"on":on,"counters":retained::host_report()}));
+            next_frame().await;
+        }
+    }}}
+    // Required fallback witnesses: appearance, live UV, mutable consumer and invalid scale.
+    for case in ["ghost","consumer","uv","negative-scale"] {
+        gpu_skin::host_switch(true);
+        let view=Camera3D {position:vec3(95.,-125.,65.),target:Vec3::Z*34.,up:Vec3::Z,..Default::default()};
+        clear_background(BLACK);set_camera(&view);
+        retained::begin_view(&view,0.,&crate::environment::Atmosphere::default(),false,true);
+        let mut frame=skinning::overlap::Frame::begin();
+        let guard=skinning::CullGuard::preserve(case=="consumer");
+        let original_uv=alice.meshes[0].as_ref().unwrap().vertices[0].uv;
+        if case=="uv" {alice.meshes[0].as_mut().unwrap().vertices[0].uv.x+=0.1;}
+        let scale=alice.scale;if case=="negative-scale" {alice.scale=-scale;}
+        alice.draw_ghost(Vec3::ZERO,false,case=="ghost");alice.scale=scale;
+        drop(guard);frame.dispatch();frame.collect();drop(frame);
+        retained::finish_world(&mut gpu,&[],true,|_|{},None);set_default_camera();
+        get_screen_data().export_png(output.join(format!("fallback-{case}.png")).to_str().unwrap());
+        witnesses.push(serde_json::json!({"fallback":case,"counters":retained::host_report()}));
+        if case=="uv" {alice.meshes[0].as_mut().unwrap().vertices[0].uv=original_uv;}
+        next_frame().await;
+    }
+    std::fs::write(output.join("captures.json"),serde_json::to_vec_pretty(&witnesses)?)?;
+    gpu_skin::host_switch(false);
+    println!("GPU_SKIN_HOST_COMPLETE {}",output.display());
+    Ok(())
+}
+
+#[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+impl Character {
+    async fn check_gpu_failure(&mut self,output:&std::path::Path)->Result<()> {
+        use crate::render_fx::{gpu_skin,retained};
+        let mut gpu=retained::Gpu::new()?;skinning::overlap::startup(2,false);
+        self.reset(&Player::new(Vec3::ZERO),0.);
+        let mut reference=Vec::new();
+        for on in [false,true] {
+            gpu_skin::host_switch(on);
+            let view=Camera3D {position:vec3(95.,-125.,65.),target:Vec3::Z*34.,up:Vec3::Z,..Default::default()};
+            clear_background(BLACK);set_camera(&view);
+            retained::begin_view(&view,0.,&crate::environment::Atmosphere::default(),false,true);
+            let mut f=skinning::overlap::Frame::begin();self.draw_ghost(Vec3::ZERO,false,false);
+            f.dispatch();f.collect();drop(f);retained::finish_world(&mut gpu,&[],true,|_|{},None);set_default_camera();
+            let image=get_screen_data();image.export_png(output.join(if on {"on.png"}else{"off.png"}).to_str().unwrap());
+            anyhow::ensure!(retained::host_report()["gpu_skin_draws"].as_u64().unwrap_or(0)==0,"failed shader drew GPU");
+            if on {anyhow::ensure!(image.bytes==reference,"shader failure did not preserve exact CPU image");}else {reference=image.bytes;}
+            next_frame().await;
+        }
+        println!("GPU_SKIN_FALLBACK_PASS reason={}",std::env::var("LOOKING_GLASS_GPU_SKIN_FAILURE").unwrap());Ok(())
     }
 }
