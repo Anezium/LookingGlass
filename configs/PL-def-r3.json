@@ -105,5 +105,10 @@
   "sim_dynamic_buckets": false,
   "sim_npc_sight_candidates": false,
   "sim_npc_sight_cache": false,
-  "sim_npc_target_stack": false
+  "sim_npc_target_stack": false,
+  "world_material_sort": false,
+  "world_static_merge": false,
+  "world_uniform_persist": false,
+  "world_binding_cache": false,
+  "world_gl_state_cache": false
 }

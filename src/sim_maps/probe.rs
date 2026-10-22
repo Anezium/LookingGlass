@@ -2,6 +2,8 @@
 use std::{cell::RefCell, collections::BTreeMap, sync::OnceLock, time::Instant};
 use sha2::{Digest, Sha256};
 thread_local! {
+    static JOINT_ORDER: RefCell<Vec<(u8,usize,u32)>> = RefCell::default();
+    static WORLD_ORDER: RefCell<Vec<(usize,bool)>> = RefCell::default();
     static COUNTS: RefCell<BTreeMap<&'static str, u64>> = RefCell::default();
     static SPANS: RefCell<BTreeMap<&'static str, f64>> = RefCell::default();
     static START: RefCell<Option<Instant>> = const { RefCell::new(None) };
@@ -52,6 +54,8 @@ pub fn count(name: &'static str, n: u64) {
 }
 pub fn begin() {
     if enabled() {
+        JOINT_ORDER.with(|s|s.borrow_mut().clear());
+        WORLD_ORDER.with(|s|s.borrow_mut().clear());
         COUNTS.with(|c| c.borrow_mut().clear());
         SPANS.with(|c| c.borrow_mut().clear());
         NPC_DECISIONS.with(|c| c.borrow_mut().clear());
@@ -68,6 +72,8 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     let hash = format!("{:x}", Sha256::digest(&bytes));
     COUNTS.with(|c| println!("SIM_MAPS_FRAME {}", serde_json::json!({
         "frame": frame, "map": map, "active": active,
+        "joint_alpha_order": JOINT_ORDER.with(|s|s.borrow().clone()),
+        "blend_world_order": WORLD_ORDER.with(|s|s.borrow().clone()),
         "selected_lights_bits": crate::lighting::selected_bits(),
         "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow(),
         "npc_decisions": npc_decisions(),
@@ -81,4 +87,12 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
 
 pub fn span(label: &'static str, ms: f64) {
     if enabled() { SPANS.with(|s| *s.borrow_mut().entry(label).or_default() += ms); }
+}
+
+pub fn world_order(id: usize, alpha: bool) {
+    if enabled() {WORLD_ORDER.with(|s|s.borrow_mut().push((id,alpha)));}
+}
+
+pub fn joint_order(kind: u8, id: usize, depth: f32) {
+    if enabled() {JOINT_ORDER.with(|s|s.borrow_mut().push((kind,id,depth.to_bits())));}
 }

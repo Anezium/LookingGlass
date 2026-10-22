@@ -1,6 +1,8 @@
 //! World batches, animated material layers and inline door models.
 #[cfg(feature = "vita_renderer")]
 pub(crate) mod uniform_fields;
+#[cfg(feature = "vita_renderer")]
+pub(crate) mod submit_gl;
 use crate::{
     assets::Assets,
     bsp::Bsp,
