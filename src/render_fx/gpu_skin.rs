@@ -117,7 +117,7 @@ pub(crate) fn warm(skeleton:&Skeleton,pose:&[Transform]) {
         let mut meta=retained::meta();
         meta.uniforms.uniforms.push(UniformDesc::new("SkinRows",UniformType::Float4).array(ROWS));
         meta.uniforms.uniforms.push(UniformDesc::new("SkinArgs",UniformType::Float4));
-        let uniform_calls=meta.uniforms.uniforms.len() as u64;
+        let uniform_names:Vec<_>=meta.uniforms.uniforms.iter().map(|u|std::ffi::CString::new(u.name.as_str()).unwrap()).collect();
         crate::frame_profile::shader_creation();
         let _name=crate::shader_cache::Name::new("alice-gpu-skin-two-v1");
         let ctx=unsafe {get_internal_gl()}.quad_context;
@@ -144,6 +144,10 @@ pub(crate) fn warm(skeleton:&Skeleton,pose:&[Transform]) {
         #[cfg(not(target_os="vita"))]
         let reflected=reflected && forced!="reflection";
         if !reflected {ctx.delete_shader(shader);anyhow::bail!("GPU skin palette reflection (rows 0..32)");}
+        let uniform_calls=unsafe {
+            let mut program=0;gl::glGetIntegerv(0x8B8D,&mut program);
+            uniform_names.iter().filter(|name|gl::glGetUniformLocation(program as u32,name.as_ptr())>=0).count() as u64
+        };
         let vertex=ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable,BufferSource::slice(&packed));
         let index=ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable,BufferSource::slice(&cpu.indices));
         let mut pipelines=BTreeMap::new();
