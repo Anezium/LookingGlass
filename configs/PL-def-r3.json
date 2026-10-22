@@ -102,5 +102,10 @@
   "attached_puff_batches": true,
   "sim_hatter_door_candidates": false,
   "lights_static_cache": false,
-  "sim_dynamic_buckets": false
+  "sim_dynamic_buckets": false,
+  "world_material_sort": false,
+  "world_static_merge": false,
+  "world_uniform_persist": false,
+  "world_binding_cache": false,
+  "world_gl_state_cache": false
 }

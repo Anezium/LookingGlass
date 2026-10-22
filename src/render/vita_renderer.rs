@@ -4,6 +4,7 @@ mod scale;
 mod depth_sentinel;
 mod pvs_cache;
 mod state_cache;
+mod submit;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -53,6 +54,12 @@ pub struct Config {
     pub save_preview: String,
     /// auto/on correct Vita's two-readback orientation; off restores J10.
     pub preview_flip: String,
+    /// Experimental exact submission levers; independently default off.
+    pub world_material_sort: bool,
+    pub world_static_merge: bool,
+    pub world_uniform_persist: bool,
+    pub world_binding_cache: bool,
+    pub world_gl_state_cache: bool,
     pub world_state_cache: bool,
     pub world_view_reuse: bool,
     pub world_parameter_reuse: bool,
@@ -219,6 +226,11 @@ impl Default for Config {
             clocks: Clocks::Max,
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
+            world_material_sort: false,
+            world_static_merge: false,
+            world_uniform_persist: false,
+            world_binding_cache: false,
+            world_gl_state_cache: false,
             world_state_cache: true,
             world_view_reuse: true,
             world_parameter_reuse: true,
@@ -639,6 +651,8 @@ struct Pending {
     recipe: Recipe,
 }
 struct Group {
+    base_element: i32,
+    material_order: usize,
     parameter: usize,
     bindings: Bindings,
     indices: i32,
@@ -759,6 +773,7 @@ struct Prepared {
     group: usize,
     texture: TextureId,
     uniforms: Option<shader::Uniforms>,
+    indices: i32,
 }
 struct Parameter {
     recipe: Recipe,
@@ -794,6 +809,7 @@ impl Parameter {
 pub struct Renderer {
     _game_thread: crate::game_thread::GameThread,
     groups: Vec<Group>,
+    world_buffers: Vec<(BufferId,BufferId)>,
     parameters: Vec<Parameter>,
     parameter_key: Option<[u32; 51]>,
     parameter_generation: u64,
@@ -813,6 +829,7 @@ pub struct Renderer {
     visibility_generation: u64,
     visibility: Vec<(u64, Option<(f32, Mat4)>)>,
     models: Vec<Option<Mat4>>,
+    schedule: submit::Schedule,
 }
 fn blend_class(blend: Blend) -> usize {
     match blend {
@@ -982,7 +999,7 @@ impl Renderer {
             + b.detail.iter().map(|d| d.indices.capacity() * 2).sum::<usize>()
             + b.animation.as_ref().map_or(0, |a| a.positions.iter().map(|f| f.capacity() * std::mem::size_of::<Vec3>()).sum::<usize>())
         }).sum();
-        let mut pending_geometry_capacity_bytes: usize = pending.iter().map(|p|
+        let pending_geometry_capacity_bytes: usize = pending.iter().map(|p|
             p.geometry.vertices.capacity() * 52 + p.geometry.indices.capacity() * 2).sum();
         let pending_geometry_initial_capacity_bytes = pending_geometry_capacity_bytes;
         let mut uploaded_geometry_bytes = 0;
@@ -1089,32 +1106,55 @@ impl Renderer {
             Some(low)
         }else{None};
         resources.pipelines.extend(low_pipelines.iter().copied());
+        let material_keys = pending.iter().map(|p| format!("{:?}", p.recipe.textures.iter()
+            .map(Texture2D::raw_miniquad_id).collect::<Vec<_>>())).collect::<std::collections::BTreeSet<_>>();
+        let material_order = material_keys.into_iter().enumerate().map(|(i,k)|(k,i)).collect::<BTreeMap<_,_>>();
+        let mut packed: Vec<(Option<(usize,usize)>, Vec<WorldVertex>, Vec<u16>)> = Vec::new();
+        let mut allocations = Vec::with_capacity(pending.len());
+        for p in &mut pending {
+            let key = (c.world_static_merge && submit::static_opaque(&p.recipe))
+                .then_some((p.parameter,p.recipe.rank));
+            let slot = key.and_then(|key| packed.iter().position(|(k,v,i)| {
+                *k==Some(key) && v.len()+p.geometry.vertices.len()<=60000
+                    && i.len()+p.geometry.indices.len()<=180000
+            }));
+            let count=p.geometry.indices.len() as i32;
+            if let Some(slot)=slot {
+                let (_,v,i)=&mut packed[slot];
+                allocations.push((slot,i.len() as i32,count));
+                let offset=v.len() as u16;
+                v.append(&mut p.geometry.vertices);
+                i.extend(p.geometry.indices.drain(..).map(|x|x.checked_add(offset).expect("packed u16 index")));
+                p.geometry.vertices=Vec::new(); p.geometry.indices=Vec::new();
+            } else {
+                allocations.push((packed.len(),0,count));
+                packed.push((key,std::mem::take(&mut p.geometry.vertices),std::mem::take(&mut p.geometry.indices)));
+            }
+        }
+        let packing_capacity_bytes: usize = packed.iter().map(|(_,v,i)|v.capacity()*52+i.capacity()*2).sum();
+        let buffers = packed.into_iter().map(|(_,v,i)| {
+            let vertex = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Immutable, BufferSource::slice(&v));
+            let index = ctx.new_buffer(BufferType::IndexBuffer, BufferUsage::Immutable, BufferSource::slice(&i));
+            resources.buffers.extend([vertex,index]);
+            uploaded_geometry_bytes += v.len()*52+i.len()*2;
+            (vertex,index)
+        }).collect::<Vec<_>>();
+        construction_geometry_peak_bytes = construction_geometry_peak_bytes.max(
+            old_scene_geometry_capacity_bytes + pending_geometry_capacity_bytes + packing_capacity_bytes + uploaded_geometry_bytes);
         let mut groups = Vec::new();
-        for (p, texture) in pending.into_iter().zip(first_textures) {
+        for ((p, texture), (slot, base_element, indices)) in pending.into_iter().zip(first_textures).zip(allocations) {
             let extent = deform_extent(&p.recipe.deform);
-            let vertex = ctx.new_buffer(
-                BufferType::VertexBuffer,
-                BufferUsage::Immutable,
-                BufferSource::slice(&p.geometry.vertices),
-            );
-            let index = ctx.new_buffer(
-                BufferType::IndexBuffer,
-                BufferUsage::Immutable,
-                BufferSource::slice(&p.geometry.indices),
-            );
-            resources.buffers.extend([vertex, index]);
-            uploaded_geometry_bytes += p.geometry.vertices.len() * 52 + p.geometry.indices.len() * 2;
-            construction_geometry_peak_bytes = construction_geometry_peak_bytes.max(
-                old_scene_geometry_capacity_bytes + pending_geometry_capacity_bytes + uploaded_geometry_bytes);
-            pending_geometry_capacity_bytes -= p.geometry.vertices.capacity() * 52 + p.geometry.indices.capacity() * 2;
+            let (vertex,index) = buffers[slot];
+            let material_key = format!("{:?}", p.recipe.textures.iter().map(Texture2D::raw_miniquad_id).collect::<Vec<_>>());
             groups.push(Group {
+                base_element, material_order: material_order[&material_key],
                 parameter: p.parameter,
                 bindings: Bindings {
                     vertex_buffers: vec![vertex],
                     index_buffer: index,
                     images: vec![texture, atlas],
                 },
-                indices: p.geometry.indices.len() as i32,
+                indices,
                 min: p.geometry.min - extent,
                 max: p.geometry.max + extent,
                 center: (p.geometry.min + p.geometry.max) * 0.5,
@@ -1208,9 +1248,11 @@ impl Renderer {
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
             "old_scene_geometry_capacity_bytes":old_scene_geometry_capacity_bytes,
             "pending_geometry_initial_capacity_bytes":pending_geometry_initial_capacity_bytes,
+            "packing_capacity_bytes":packing_capacity_bytes,
+            "shared_geometry_buffers":buffers.len(),
             "construction_geometry_peak_bytes":construction_geometry_peak_bytes,
             "construction_buffer_peak_bytes":construction_buffer_peak_bytes,
-            "construction_peak_scope":"old scene geometry arrays + retained pending geometry capacity + uploaded geometry payload; final phase includes unique PVS lists and uniform staging. Excludes allocator metadata, textures, BSP/collision, remap trees, recipes and driver copies; not process RAM or a Vita OOM bound",
+            "construction_peak_scope":"conservative packing bound: old scene geometry arrays + initial pending capacity + packed capacity + uploaded geometry payload; final phase includes unique PVS lists and uniform staging. Excludes allocator metadata, textures, BSP/collision, remap trees, recipes and driver copies; not process RAM or a Vita OOM bound",
             "host_pointer_bytes":std::mem::size_of::<usize>(),
             "cpu_cluster_list_payload_including_unknown_bytes":pvs_with_unknown_bytes,
             "vita_cluster_list_payload_including_unknown_bytes":pvs_with_unknown_bytes / std::mem::size_of::<usize>() * 4,
@@ -1245,6 +1287,8 @@ impl Renderer {
             visibility_key: None, visibility_generation: 0,
             visibility: vec![(0, None); groups.len()],
             models: vec![None; groups.len()],
+            world_buffers: buffers,
+            schedule: submit::Schedule::default(),
             groups,
             pvs,
             pipelines,
@@ -1329,6 +1373,9 @@ impl Renderer {
             self.alpha_order
                 .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         }
+        if !alpha && config().world_material_sort {
+            self.schedule.apply(&mut self.alpha_order, &self.groups, projection, self.visibility_generation);
+        }
         self.prepared.clear();
         {
             let parameters_started = std::time::Instant::now();
@@ -1374,7 +1421,7 @@ impl Renderer {
                     Some(u)
                 };
                 let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
-                self.prepared.push(Prepared { depth, group: id, texture, uniforms: u });
+                self.prepared.push(Prepared { depth, group: id, texture, uniforms: u, indices: g.indices });
             }
             crate::light_profile::render_add(phase, RenderMetrics {
                 parameter_cpu_ns: parameters_started.elapsed().as_nanos() as u64, ..Default::default() });
@@ -1382,7 +1429,15 @@ impl Renderer {
             count("vita_world_parameter_time_updates", time_updates);
             count("vita_world_parameter_reuses", self.prepared.len() as u64 - builds);
         }
-        for cache in &mut self.field_uniforms { cache.interrupt(); }
+        // Uniform values are program storage. These two programs are private to
+        // this Renderer; sky, FX and HUD use other programs. Alpha uses this same
+        // cache, including interleaved callbacks, so every write stays observed.
+        if !config().world_uniform_persist {
+            for cache in &mut self.field_uniforms { cache.interrupt(); }
+        }
+        if !alpha && config().world_static_merge {
+            submit::merge(&mut self.prepared, &self.groups, &self.parameters);
+        }
         if alpha && crate::render_fx::retained_active() {
             // Keep immutable bindings and uniforms until all actor/effect groups are known.
             let stats = super::DrawStats {
@@ -1467,6 +1522,7 @@ impl Renderer {
         let mut static_batches = 0usize;
         let mut applications = [0u64; 4];
         let mut uniform_traffic = [0u64; 3];
+        let _submission = crate::render_tail::submission(config().world_binding_cache, config().world_gl_state_cache);
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
@@ -1505,7 +1561,11 @@ impl Renderer {
             }
             totals.add(1, start);
             let start = totals.start();
-            ctx.draw(0, g.indices, 1);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if alpha || g.recipe.stage.blend != Blend::Opaque {
+                crate::sim_maps::probe::world_order(prepared.group, alpha);
+            }
+            ctx.draw(g.base_element, prepared.indices, 1);
             totals.add(2, start);
             if previous_pipeline != Some(pi) {
                 pipeline_changes += 1;
@@ -1529,11 +1589,11 @@ impl Renderer {
                     } else {
                         "vita_world_opaque_triangles"
                     },
-                    g.indices as u64 / 3,
+                    prepared.indices as u64 / 3,
                 );
             }
             stats.batches += 1;
-            stats.triangles += g.indices as usize / 3;
+            stats.triangles += prepared.indices as usize / 3;
             #[cfg(target_os = "vita")]
             { static_batches += usize::from(g.recipe.model.is_none() && g.recipe.motion.is_none()); }
             #[cfg(target_os = "vita")]
@@ -1545,7 +1605,7 @@ impl Renderer {
                 crate::frame_profile::record_world_submission();
                 // Submitted here means drawn from an existing VBO; no CPU geometry upload.
                 crate::frame_profile::record_geometry(
-                    g.indices as usize / 3,
+                    prepared.indices as usize / 3,
                     0,
                     g.recipe.model.is_none(),
                 );
@@ -1633,7 +1693,9 @@ impl Renderer {
                     uniform_gl_calls: traffic.calls, ..Default::default() });
             totals.add(1, start);
             let start = totals.start();
-            ctx.draw(0, g.indices, 1);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::world_order(p.group,true);
+            ctx.draw(g.base_element, g.indices, 1);
             totals.add(2, start);
             count("vita_world_gpu_draws", 1);
             count("vita_world_alpha_triangles", g.indices as u64 / 3);
@@ -1666,9 +1728,8 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
-        for g in &self.groups {
-            ctx.delete_buffer(g.bindings.vertex_buffers[0]);
-            ctx.delete_buffer(g.bindings.index_buffer);
+        for &(vertex,index) in &self.world_buffers {
+            ctx.delete_buffer(vertex); ctx.delete_buffer(index);
         }
         for p in &self.pipelines {
             ctx.delete_pipeline(*p);
@@ -2078,6 +2139,22 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"retained_maps":["*","gvillage","typo"],"legacy_maps":["skool2","missing"]}"#).unwrap();
         assert_eq!(c.unknown_maps(|name| ["gvillage", "skool2"].contains(&name)),
             [("retained_maps", "typo"), ("legacy_maps", "missing")]);
+    }
+    #[test]
+    fn world_submission_switches_are_independent_strict_and_default_off() {
+        let fields=["world_material_sort","world_static_merge","world_uniform_persist",
+                    "world_binding_cache","world_gl_state_cache"];
+        let defaults=serde_json::to_value(Config::default()).unwrap();
+        for field in fields {
+            assert_eq!(defaults[field],false);
+            let mut input=serde_json::json!({}); input[field]=true.into();
+            let c:Config=serde_json::from_value(input.clone()).unwrap();c.validate().unwrap();
+            let actual=serde_json::to_value(c).unwrap();
+            for other in fields {assert_eq!(actual[other],other==field);}
+            for bad in [serde_json::json!(1),serde_json::json!("on"),serde_json::Value::Null] {
+                input[field]=bad;assert!(serde_json::from_value::<Config>(input.clone()).is_err());
+            }
+        }
     }
     #[test]
     fn packaged_r3_config_contains_exactly_all_runtime_defaults() {

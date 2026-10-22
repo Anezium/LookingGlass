@@ -1143,7 +1143,10 @@ pub(crate) fn finish_world(
     {
         let _span = crate::frame_profile::span("vita_joint_alpha_submit");
         let mut world_ms = 0.;
-        for (_, source) in &list {
+        for (_depth, source) in &list {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            { let (kind,id)=match *source {Source::World(id)=>(0,id),Source::Actor(id)=>(1,id),Source::Puff(id)=>(2,id)};
+              crate::sim_maps::probe::joint_order(kind,id,*_depth); }
             match *source {
                 Source::World(id) => {
                     gpu.uniform_cache.interrupt();
