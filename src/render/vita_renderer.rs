@@ -1016,6 +1016,10 @@ impl Renderer {
             .iter()
             .map(|p| p.recipe.textures[0].raw_miniquad_id())
             .collect::<Vec<_>>();
+        let material_keys_by_group = pending.iter().map(|p| format!("{:?}", p.recipe.textures.iter()
+            .map(Texture2D::raw_miniquad_id).collect::<Vec<_>>())).collect::<Vec<_>>();
+        let material_keys = material_keys_by_group.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let material_order = material_keys.into_iter().enumerate().map(|(i,k)|(k,i)).collect::<BTreeMap<_,_>>();
         let groups_ms=started.elapsed().as_secs_f64()*1000.;
         println!("[lg/vita-renderer] load groups {:.3} ms recipes={recipes_ms:.3} chunks={chunks_ms:.3} source_chunks={source_chunks} groups={} vertices={} layer_triangles={}",groups_ms,pending.len(),vertices,triangles);
         let upload_start=std::time::Instant::now();
@@ -1106,9 +1110,6 @@ impl Renderer {
             Some(low)
         }else{None};
         resources.pipelines.extend(low_pipelines.iter().copied());
-        let material_keys = pending.iter().map(|p| format!("{:?}", p.recipe.textures.iter()
-            .map(Texture2D::raw_miniquad_id).collect::<Vec<_>>())).collect::<std::collections::BTreeSet<_>>();
-        let material_order = material_keys.into_iter().enumerate().map(|(i,k)|(k,i)).collect::<BTreeMap<_,_>>();
         let mut packed: Vec<(Option<(usize,usize)>, Vec<WorldVertex>, Vec<u16>)> = Vec::new();
         let mut allocations = Vec::with_capacity(pending.len());
         for p in &mut pending {
@@ -1142,10 +1143,9 @@ impl Renderer {
         construction_geometry_peak_bytes = construction_geometry_peak_bytes.max(
             old_scene_geometry_capacity_bytes + pending_geometry_capacity_bytes + packing_capacity_bytes + uploaded_geometry_bytes);
         let mut groups = Vec::new();
-        for ((p, texture), (slot, base_element, indices)) in pending.into_iter().zip(first_textures).zip(allocations) {
+        for (((p, texture), (slot, base_element, indices)), material_key) in pending.into_iter().zip(first_textures).zip(allocations).zip(material_keys_by_group) {
             let extent = deform_extent(&p.recipe.deform);
             let (vertex,index) = buffers[slot];
-            let material_key = format!("{:?}", p.recipe.textures.iter().map(Texture2D::raw_miniquad_id).collect::<Vec<_>>());
             groups.push(Group {
                 base_element, material_order: material_order[&material_key],
                 parameter: p.parameter,
