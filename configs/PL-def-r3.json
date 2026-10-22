@@ -2,6 +2,8 @@
   "sim_triangle_candidates": true,
   "sim_fan_candidates": true,
   "fx_merge_local_reuse": true,
+  "fx_merge_ranges": false,
+  "fx_cpu_inline": false,
   "sim_school_mesh": true,
   "sim_tower_templates": true,
   "sim_npc_queries": true,

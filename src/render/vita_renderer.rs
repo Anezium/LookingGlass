@@ -39,6 +39,10 @@ pub struct Config {
     pub sim_dynamic_buckets: bool,
     /// Exact round-two candidates; console acceptance is still pending.
     pub fx_merge_local_reuse: bool,
+    /// Keep certified unchanged source ranges in a partially changing merge.
+    pub fx_merge_ranges: bool,
+    /// Run small FX numeric jobs locally instead of dispatching and joining.
+    pub fx_cpu_inline: bool,
     pub sim_triangle_candidates: bool,
     pub sim_fan_candidates: bool,
     pub sim_school_mesh: bool,
@@ -221,6 +225,8 @@ impl Default for Config {
             lights_static_cache: false,
             sim_dynamic_buckets: false,
             fx_merge_local_reuse: true,
+            fx_merge_ranges: false,
+            fx_cpu_inline: false,
             sim_triangle_candidates: true,
             sim_fan_candidates: true,
             sim_school_mesh: true,
@@ -388,6 +394,14 @@ impl Config {
 const CONFIG_PATH: &str = "ux0:data/alice/private/vita_renderer.json";
 #[cfg(not(target_os = "vita"))]
 const CONFIG_PATH: &str = "private/vita_renderer.json";
+pub(crate) fn fx_cpu_options() -> (bool, bool) {
+    #[cfg(test)]
+    {
+        static ON: OnceLock<bool> = OnceLock::new();
+        if *ON.get_or_init(||std::env::var("LOOKING_GLASS_TEST_FX_CPU").as_deref() == Ok("on")) { return (true,true); }
+    }
+    let c = config();(c.fx_merge_ranges,c.fx_cpu_inline)
+}
 #[cfg(test)]
 pub fn config() -> &'static Config {
     static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -2185,6 +2199,18 @@ mod tests {
         let c: Config = serde_json::from_slice(bytes).unwrap();
         c.validate().unwrap();
         assert_eq!(serde_json::from_slice::<serde_json::Value>(bytes).unwrap(), serde_json::to_value(Config::default()).unwrap());
+    }
+    #[test]
+    fn fx_cpu_candidates_default_off_and_require_boolean_values() {
+        let c = Config::default();assert!(!c.fx_merge_ranges && !c.fx_cpu_inline);
+        for name in ["fx_merge_ranges", "fx_cpu_inline"] {
+            for value in [serde_json::json!(false),serde_json::json!(true)] {
+                let c:Config=serde_json::from_value(serde_json::json!({name:value})).unwrap();c.validate().unwrap();
+            }
+            for value in [serde_json::json!(1),serde_json::json!("on"),serde_json::Value::Null] {
+                assert!(serde_json::from_value::<Config>(serde_json::json!({name:value})).is_err());
+            }
+        }
     }
     #[test]
     fn scaled_depth_fix_defaults_on_and_sentinel_is_opt_in() {

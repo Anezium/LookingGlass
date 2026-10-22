@@ -572,6 +572,7 @@ pub(crate) fn cpu_pair(first: impl FnOnce() + Send, second: impl FnOnce() + Send
     let wait = started.elapsed().as_micros() as u64;
     crate::light_profile::fx_add(crate::light_profile::FxMetric::WorkerWait, wait);
     crate::render_fx::retained::count("fx_worker_wait_us", wait);
+    crate::render_fx::retained::count("fx_worker_pair_jobs", 1);
     crate::render_fx::retained::count("fx_worker_max_service_us", service);
 }
 
