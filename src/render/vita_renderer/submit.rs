@@ -12,6 +12,9 @@ impl Rect {
         self.max.x < b.min.x || b.max.x < self.min.x || self.max.y < b.min.y || b.max.y < self.min.y
     }
 }
+fn join_disjoint(a: Rect, b: Rect) -> Option<Rect> {
+    a.disjoint(b).then_some(Rect {min:a.min.min(b.min),max:a.max.max(b.max)})
+}
 fn projected(g: &Group, matrix: Mat4) -> Option<Rect> {
     let mut rect = Rect { min: Vec2::splat(f32::INFINITY), max: Vec2::splat(f32::NEG_INFINITY) };
     for x in [g.min.x,g.max.x] { for y in [g.min.y,g.max.y] { for z in [g.min.z,g.max.z] {
@@ -66,11 +69,14 @@ impl Schedule {
     }
 }
 
-pub(super) fn merge(draws: &mut Vec<Prepared>, groups: &[Group], parameters: &[Parameter]) {
+pub(super) fn merge(draws: &mut Vec<Prepared>, groups: &[Group], parameters: &[Parameter], projection: Mat4) {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if std::env::var_os("LOOKING_GLASS_WORLD_PACK_ONLY").is_some() {return;}
     let mut write=0;
+    let mut previous_rect=None;
     for read in 0..draws.len() {
         let next=&draws[read]; let g=&groups[next.group];
-        let merge=write>0 && {
+        let candidate=write>0 && {
             let previous=&draws[write-1]; let p=&groups[previous.group];
             static_opaque(&g.recipe) && static_opaque(&p.recipe)
                 && p.recipe.rank==g.recipe.rank && p.recipe.cull==g.recipe.cull
@@ -81,8 +87,18 @@ pub(super) fn merge(draws: &mut Vec<Prepared>, groups: &[Group], parameters: &[P
                 && previous.uniforms.as_ref().map_or(parameters[p.parameter].bits,shader::Uniforms::bits)
                     == next.uniforms.as_ref().map_or(parameters[g.parameter].bits,shader::Uniforms::bits)
         };
-        if merge { draws[write-1].indices+=draws[read].indices; }
-        else { draws.swap(write,read); write+=1; }
+        // A draw boundary can affect equal-depth coverage/fragment derivatives
+        // on the host driver even with identical uniform and vertex bits. Keep
+        // all overlapping raster coverage in separate commands as well as in
+        // the original primitive order. The union covers EVERY coalesced range.
+        let joined=if candidate {
+            previous_rect.or_else(||projected(&groups[draws[write-1].group],projection))
+                .zip(projected(g,projection)).and_then(|(a,b)|join_disjoint(a,b))
+        } else {None};
+        if let Some(rect)=joined {
+            draws[write-1].indices+=draws[read].indices; previous_rect=Some(rect);
+        } else { draws.swap(write,read); write+=1; previous_rect=None; }
+
     }
     count("vita_world_merged_draws", (draws.len()-write) as u64);
     draws.truncate(write);
@@ -97,6 +113,17 @@ mod tests {
         assert!(!a.disjoint(a));
         assert!(!a.disjoint(Rect{min:vec2(1.,0.),max:vec2(2.,1.)}));
         assert!(a.disjoint(Rect{min:vec2(1.01,0.),max:vec2(2.,1.)}));
+    }
+    #[test]
+    fn coalescing_keeps_overlap_and_every_previous_range_as_boundaries() {
+        let a=Rect{min:vec2(0.,0.),max:vec2(1.,1.)};
+        let b=Rect{min:vec2(2.,0.),max:vec2(3.,1.)};
+        let c=Rect{min:vec2(0.5,0.),max:vec2(1.5,1.)};
+        assert!(join_disjoint(a,a).is_none());
+        let combined=join_disjoint(a,b).unwrap();
+        assert!(b.disjoint(c));
+        assert!(join_disjoint(combined,c).is_none());
+        assert!(join_disjoint(combined,Rect{min:vec2(4.,0.),max:vec2(5.,1.)}).is_some());
     }
     #[test]
     fn schedules_preserve_pixels_overlap_ties_blending_and_layer_order() {

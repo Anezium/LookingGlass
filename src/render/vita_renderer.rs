@@ -1436,7 +1436,7 @@ impl Renderer {
             for cache in &mut self.field_uniforms { cache.interrupt(); }
         }
         if !alpha && config().world_static_merge {
-            submit::merge(&mut self.prepared, &self.groups, &self.parameters);
+            submit::merge(&mut self.prepared, &self.groups, &self.parameters, projection);
         }
         if alpha && crate::render_fx::retained_active() {
             // Keep immutable bindings and uniforms until all actor/effect groups are known.
