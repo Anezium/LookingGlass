@@ -33,6 +33,9 @@ fn quad(p: &Recipe) -> [Vertex; 4] {
 fn kernel(recipes: &[Recipe], output: &mut [[Vertex; 4]]) {
     for (r, out) in recipes.iter().zip(output) { *out = quad(r); }
 }
+fn worker_job(enabled: bool, inline: bool, quads: usize) -> bool {
+    enabled && quads >= 32 && !(inline && quads <= 256)
+}
 #[derive(Default)]
 pub(super) struct Buffer {
     recipes: Vec<Recipe>, output: Vec<[Vertex;4]>, publications: Vec<Rc<Geometry>>, live: usize, raw_live: usize,
@@ -56,7 +59,11 @@ impl Buffer {
         self.recipes.extend(puffs.iter().map(|p| recipe(p, &emitters[p.emitter], camera,
             axes.unwrap_or_else(|| basis((p.position-camera).normalize_or_zero())))));
         self.output.resize(puffs.len(), [Vertex::new(0.,0.,0.,0.,0.,WHITE);4]);
-        if puffs.len() >= 32 && crate::render::vita_renderer::config().fx_worker_prep {
+        let config = crate::render::vita_renderer::config();
+        let worker = worker_job(config.fx_worker_prep, crate::render::vita_renderer::fx_cpu_options().1, puffs.len());
+        crate::render_fx::retained::count("particle_worker_jobs", u64::from(worker));
+        crate::render_fx::retained::count("particle_inline_jobs", u64::from(!worker && !puffs.is_empty()));
+        if worker {
             let mid = puffs.len()/2;
             let (a,b) = self.output.split_at_mut(mid);
             let (ra,rb) = self.recipes.split_at(mid);
@@ -93,6 +100,14 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inline_particle_boundary_preserves_large_jobs_and_worker_kill_switch() {
+        for n in [0,1,31,32,255,256,257,4096] {
+            assert_eq!(worker_job(true,false,n),n>=32);
+            assert_eq!(worker_job(true,true,n),n>256);
+            assert!(!worker_job(false,false,n));assert!(!worker_job(false,true,n));
+        }
+    }
     fn same(a: &[Vertex], b: &[Vertex]) -> bool {
         a.len()==b.len() && a.iter().zip(b).all(|(a,b)| a.position.to_array().map(f32::to_bits)==b.position.to_array().map(f32::to_bits)
             && a.uv.to_array().map(f32::to_bits)==b.uv.to_array().map(f32::to_bits)
