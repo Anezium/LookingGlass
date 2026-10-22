@@ -382,6 +382,11 @@ impl Drop for Span {
     }
 }
 
+/// A diagnostic export failure must not interrupt pause or level transition.
+pub(crate) fn log_report_error(report: anyhow::Result<()>) {
+    if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
+}
+
 #[cfg(not(target_os = "vita"))]
 pub fn report(map: &str) -> anyhow::Result<()> {
     if !enabled() {

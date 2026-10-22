@@ -10,6 +10,9 @@ fn concurrent_legacy_swaps_and_flushes_never_reset_or_subtract_raw() {
     let mut callback = Callback {
         ready: rx,
         block: [0.; SAMPLES],
+        without_movie: [0.; SAMPLES],
+        movie: 0,
+        use_movie: true,
         at: SAMPLES,
         epoch: 0,
         metrics: metrics.clone(),
@@ -39,6 +42,7 @@ fn concurrent_legacy_swaps_and_flushes_never_reset_or_subtract_raw() {
             tx.push(Block {
                 epoch: metrics.epoch.load(Ordering::Acquire),
                 samples: [0.25; SAMPLES],
+                ..Block::silence(0)
             })
             .ok()
             .unwrap();
@@ -85,6 +89,9 @@ fn config_false_binds_nothing_and_counts_only_legacy() {
     let mut callback = Callback {
         ready: rx,
         block: [0.; SAMPLES],
+        without_movie: [0.; SAMPLES],
+        movie: 0,
+        use_movie: true,
         at: SAMPLES,
         epoch: 0,
         metrics: metrics.clone(),

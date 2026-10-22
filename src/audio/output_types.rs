@@ -20,6 +20,10 @@ pub struct Window {
     pub blocks: usize,
     pub mix: [f64; 3],
     pub starved: usize,
+    /// Diagnostic subset; never subtracted from raw or legacy starvation.
+    /// Console text only: preserve the frozen native journal's Window schema.
+    #[cfg_attr(feature = "native_timing", serde(skip))]
+    pub flush_silence: usize,
     pub rejected: usize,
     pub flushes: usize,
     pub queued: usize,

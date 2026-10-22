@@ -337,18 +337,21 @@ fn export_window(map: &str, mode: Mode) -> anyhow::Result<()> {
         let dir = std::path::Path::new("ux0:data/alice/private/frame_profile");
         #[cfg(not(target_os = "vita"))]
         let dir = std::path::Path::new("private/frame_profile");
-        std::fs::create_dir_all(dir)?;
-        let name = format!("{map}-{}-light-{}.csv", mode_name(mode), r.count);
-        let mut out = std::io::BufWriter::new(std::fs::File::create(dir.join(&name))?);
-        r.write(&mut out)?;
-        out.flush()?;
-        let name = format!("{map}-{}-light-{}-doors.csv", mode_name(mode), r.count);
-        let mut doors = std::io::BufWriter::new(std::fs::File::create(dir.join(&name))?);
-        r.write_door_windows(&mut doors)?;
-        doors.flush()?;
-        r.exported = r.count;
-        Ok(())
+        write_capture(&mut r, dir, map, mode)
     })
+}
+fn write_capture(r: &mut Ring, dir: &std::path::Path, map: &str, mode: Mode) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let name = format!("{map}-{}-light-{}.csv", mode_name(mode), r.count);
+    let mut out = std::io::BufWriter::new(std::fs::File::create(dir.join(name))?);
+    r.write(&mut out)?;
+    out.flush()?;
+    let name = format!("{map}-{}-light-{}-doors.csv", mode_name(mode), r.count);
+    let mut doors = std::io::BufWriter::new(std::fs::File::create(dir.join(name))?);
+    r.write_door_windows(&mut doors)?;
+    doors.flush()?;
+    r.exported = r.count;
+    Ok(())
 }
 fn mode_name(mode: Mode) -> &'static str {
     #[cfg(any(target_os = "vita", test))]
@@ -387,6 +390,44 @@ mod tests {
         assert_eq!(String::from_utf8(normal).unwrap().lines().count(), 1);
         reset(); door_counts(1, 2, 3);
         RING.with(|r| assert_eq!(r.borrow().current.door, [0; 3]));
+    }
+    #[test]
+    fn unwritable_capture_path_logs_and_continues_without_losing_rows() {
+        // A file as parent is reliably unwritable even when tests run as root.
+        let path = std::env::temp_dir().join(format!("lg-capture-blocked-{}", std::process::id()));
+        std::fs::write(&path, b"blocked").unwrap();
+        let mut ring = Ring::capture();
+        let origin = Instant::now();
+        ring.begin(origin); ring.pending = true;
+        ring.begin(origin + std::time::Duration::from_millis(16));
+        for _boundary in ["pause", "transition"] {
+            let result = write_capture(&mut ring, &path.join("captures"), "fixture", Mode::Full);
+            assert!(result.is_err());
+            crate::frame_profile::log_report_error(result);
+            assert_eq!(ring.exported, 0);
+            assert_eq!(ring.capture.as_ref().unwrap().len(), 1);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn capture_retry_exports_both_light_and_door_rows_before_marking_exported() {
+        let dir = std::env::temp_dir().join(format!("lg-capture-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ring = Ring::capture();
+        let origin = Instant::now();
+        ring.begin(origin); ring.current.door = [1, 2, 3]; ring.pending = true;
+        ring.begin(origin + std::time::Duration::from_millis(16));
+        let doors = dir.join("fixture-full-light-1-doors.csv");
+        std::fs::create_dir(&doors).unwrap();
+        assert!(write_capture(&mut ring, &dir, "fixture", Mode::Full).is_err());
+        assert_eq!(ring.exported, 0);
+        assert_eq!(ring.capture.as_ref().unwrap().len(), 1);
+        std::fs::remove_dir(&doors).unwrap();
+        write_capture(&mut ring, &dir, "fixture", Mode::Full).unwrap();
+        assert_eq!(ring.exported, 1);
+        assert_eq!(std::fs::read_to_string(dir.join("fixture-full-light-1.csv")).unwrap().lines().count(), 2);
+        assert!(std::fs::read_to_string(doors).unwrap().ends_with("1,1,1,1,2,3\n"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn defaults_and_explicit_levels_cover_every_mode() {

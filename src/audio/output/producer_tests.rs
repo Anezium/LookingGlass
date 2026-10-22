@@ -37,6 +37,13 @@ impl Iterator for Blocked {
         Some(0.25)
     }
 }
+impl PcmSource for Blocked {
+    fn pcm_block(&mut self, epoch: u32) -> Block {
+        let mut block = Block::silence(epoch);
+        for sample in &mut block.samples { *sample = self.next().unwrap_or(0.); }
+        block
+    }
+}
 impl Source for Blocked {
     fn current_frame_len(&self) -> Option<usize> {
         None
@@ -327,7 +334,7 @@ fn actual_worker_fake_clock_and_config_false_have_bounded_clocks_and_stack() {
             ..TestHooks::default()
         };
         let (worker, mut cb) =
-            buffered_body(source, control.metrics.clone(), cfg, fake.clone(), hooks).unwrap();
+            buffered_body(tests::Plain(source), control.metrics.clone(), cfg, fake.clone(), hooks).unwrap();
         wait(|| worker.bootstrap.entry.get().is_some());
         let mut c = Checked::new(Native);
         let mut owner = if enabled {

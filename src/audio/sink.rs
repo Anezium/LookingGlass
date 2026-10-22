@@ -39,6 +39,8 @@ enum Current {
     Effect(block::Effect),
 }
 struct Controls {
+    // Immutable role, assigned before the Output enters the mixer queue.
+    movie: Option<(u32, Arc<AtomicU32>)>,
     pause: AtomicBool,
     alive: AtomicBool,
     generation: AtomicU32,
@@ -67,9 +69,24 @@ pub struct Output {
     /// Held by the mixer's ambience cap for the next ranking (hysteresis).
     pub(super) selected: bool,
 }
+/// Whether the source remains alive and whether this block needs summing.
+/// Silent sources still consume controls and advance their playback position.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Rendered {
+    Dead,
+    Silent,
+    Audio,
+}
 impl Sink {
     pub fn new_idle() -> (Self, Output) {
+        Self::new_role(None)
+    }
+    pub(super) fn new_movie(id: u32, active: Arc<AtomicU32>) -> (Self, Output) {
+        Self::new_role(Some((id, active)))
+    }
+    fn new_role(movie: Option<(u32, Arc<AtomicU32>)>) -> (Self, Output) {
         let controls = Arc::new(Controls {
+            movie,
             pause: AtomicBool::new(false),
             alive: AtomicBool::new(true),
             generation: AtomicU32::new(0),
@@ -176,6 +193,10 @@ impl Sink {
     }
     pub fn stop(&self) {
         let _api = ApiTimer::new();
+        if let Some((id, active)) = &self.controls.movie {
+            // An old sink must never invalidate its replacement.
+            let _ = active.compare_exchange(*id, 0, Ordering::AcqRel, Ordering::Acquire);
+        }
         self.controls.generation.fetch_add(1, Ordering::Relaxed);
     }
     pub fn len(&self) -> usize {
@@ -197,6 +218,9 @@ impl Drop for Sink {
     }
 }
 impl Output {
+    pub(super) fn movie_id(&self) -> u32 {
+        self.controls.movie.as_ref().map_or(0, |(id, _)| *id)
+    }
     pub fn rank(&self) -> Option<f32> {
         if self.controls.ambient.load(Ordering::Relaxed) {
             Some(if self.controls.pause.load(Ordering::Relaxed)
@@ -215,14 +239,14 @@ impl Output {
     /// gain moves linearly from the previous block's value to this one's, so a
     /// voice dropped by the ambience cap fades out over one block and a
     /// returning voice fades in from silence.
-    pub fn render(&mut self, out: &mut [f32], audible: bool) -> bool {
+    pub(super) fn render(&mut self, out: &mut [f32], audible: bool) -> Rendered {
         out.fill(0.);
         if !self.controls.alive.load(Ordering::Acquire) {
             self.discard_current();
             while self.pending.pop().is_some() {
                 self.controls.count.fetch_sub(1, Ordering::Relaxed);
             }
-            return false;
+            return Rendered::Dead;
         }
         let generation = self.controls.generation.load(Ordering::Acquire);
         if generation != self.generation {
@@ -230,7 +254,7 @@ impl Output {
             self.generation = generation;
         }
         if self.controls.pause.load(Ordering::Relaxed) {
-            return true;
+            return Rendered::Silent;
         }
         let gain = f32::from_bits(self.controls.volume.load(Ordering::Relaxed));
         let target = if audible { gain } else { 0. };
@@ -293,6 +317,14 @@ impl Output {
         self.controls
             .position
             .store(self.position, Ordering::Relaxed);
+        self.level = Some(target);
+        if at == 0 || (from == 0. && target == 0.) {
+            // Culled effects already advanced their native PCM phase above.
+            // Streams must still decode/advance too, but their samples are
+            // discarded. Avoid per-sample gain work and the mixer's sum loop.
+            out.fill(0.);
+            return Rendered::Silent;
+        }
         let start = std::time::Instant::now();
         if from == target {
             for v in out.iter_mut() {
@@ -306,9 +338,8 @@ impl Output {
                 frame[1] *= g;
             }
         }
-        self.level = Some(target);
         block::charge(3, start);
-        true
+        Rendered::Audio
     }
     fn discard_current(&mut self) {
         if self.current.take().is_some() {
@@ -436,7 +467,37 @@ mod tests {
         assert!(block.iter().all(|v| *v == 0.));
         assert_eq!(sink.len(), 0);
         drop(sink);
-        assert!(!out.render(&mut block, true));
+        assert_eq!(out.render(&mut block, true), Rendered::Dead);
+    }
+    #[test]
+    fn virtual_effect_keeps_phase_and_both_fade_blocks() {
+        let (sink, mut output) = Sink::new_idle();
+        // Queue the native block effect directly so this test also covers the
+        // default host configuration, which otherwise uses the legacy source.
+        let clip = super::super::Clip { samples: vec![0.25; 4096].into(), rate: 11025 };
+        let effect = block::Effect::new(super::super::Pcm {
+            clip, index: 0, looping: true, pan: super::super::Pan::new(),
+        }, super::super::acoustics::Controls::new());
+        sink.controls.count.store(1, Ordering::Relaxed);
+        assert!(sink.pending.push(Packet { source: Queued::Effect(effect), generation: 0 }).is_ok());
+        let mut samples = [0.; 1024];
+        assert_eq!(output.render(&mut samples, true), Rendered::Audio);
+        let first_position = sink.get_pos();
+        assert_eq!(output.render(&mut samples, false), Rendered::Audio);
+        assert!(samples[0] > 0. && samples[1023] == 0.);
+        assert_eq!(output.render(&mut samples, false), Rendered::Silent);
+        assert!(samples.iter().all(|v| *v == 0.));
+        assert!(sink.get_pos() > first_position * 2);
+        assert_eq!(output.render(&mut samples, true), Rendered::Audio);
+        assert!(samples[0] < samples[1022] && samples[1022] > 0.);
+        let position = sink.get_pos();
+        sink.pause();
+        assert_eq!(output.render(&mut samples, true), Rendered::Silent);
+        assert_eq!(sink.get_pos(), position);
+        sink.stop();
+        sink.play();
+        assert_eq!(output.render(&mut samples, true), Rendered::Silent);
+        assert_eq!(sink.len(), 0);
     }
     #[test]
     fn controls_do_not_wait_for_a_source_blocked_on_another_thread() {

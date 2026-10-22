@@ -1270,7 +1270,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             clock.pause();
             help_until = 0.;
             #[cfg(target_os = "vita")]
-            crate::frame_profile::report(&maps[current])?;
+            crate::frame_profile::log_report_error(crate::frame_profile::report(&maps[current]));
             // Consume Escape before entering the separate modal frame loop. No
             // physics, story, enemies, power-up timers or world clocks run there.
             next_frame().await;
@@ -2755,7 +2755,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             clock.pause();
             audio.update(0., pos, yaw, true, true);
             #[cfg(target_os="vita")]
-            crate::frame_profile::report(&maps[current])?;
+            crate::frame_profile::log_report_error(crate::frame_profile::report(&maps[current]));
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::TransitionBegin, crate::native_timing::TRANSITION));
             present_transition_loading(&name).await;
