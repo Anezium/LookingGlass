@@ -470,7 +470,7 @@ impl Collider {
         .then_some((feet, t.normal))
     }
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Node {
     Leaf {
         bounds: Bounds,
@@ -606,6 +606,23 @@ pub struct World {
     pub max: Vec3,
 }
 
+/// Immutable copy made once per loaded audio scene. No game caches, lazy
+/// colliders, traversal state or profiler state cross the producer boundary.
+pub(crate) struct AudioGeometry { hulls: Vec<Hull>, tree: Option<Node> }
+impl AudioGeometry {
+    pub(crate) fn sweep(&self, start: Vec3, end: Vec3) -> Trace {
+        let query = SweepBounds::new(start, end, Vec3::ZERO);
+        let mut result = Trace::default();
+        if let Some(tree) = &self.tree {
+            tree.visit(&query, &mut |i| {
+                if query.overlaps(self.hulls[i].bounds) {
+                    clip_hull(&self.hulls[i], start, end, Vec3::ZERO, &mut result);
+                }
+            });
+        }
+        result
+    }
+}
 impl World {
     fn invalidate_npc_sight(&mut self) {
         self.npc_sight_cache.get_mut().clear();
@@ -626,6 +643,26 @@ impl World {
         let mut cache = self.npc_sight_cache.borrow_mut();
         if cache.len() < 256 { cache.insert(key, trace); }
         trace
+    }
+    pub(crate) fn audio_geometry(&self) -> AudioGeometry {
+        AudioGeometry { hulls: self.hulls.clone(), tree: self.tree.clone() }
+    }
+    /// Complete the immutable static result against this frame's live geometry.
+    /// Audio uses only fraction/start-solid; preserve the original clipping order.
+    pub(crate) fn audio_complete(&self, mut result: Trace, start: Vec3, end: Vec3) -> Trace {
+        let query = SweepBounds::new(start, end, Vec3::ZERO);
+        for c in &self.settled_supports {
+            if crate::sim_maps::npc_queries() && c.bounds.is_none_or(|b| !query.overlaps(b)) { continue; }
+            for h in c.hulls().iter() {
+                if crate::sim_maps::npc_queries() && !query.overlaps(h.bounds) { continue; }
+                clip_hull(h, start, end, Vec3::ZERO, &mut result);
+            }
+        }
+        let mut result = self.sweep_dynamic(result, start, end, Vec3::ZERO);
+        for (_, c) in &self.weapon_obstacles {
+            for h in c.hulls().iter() { clip_hull(h, start, end, Vec3::ZERO, &mut result); }
+        }
+        result
     }
     /// Scope exact static/settled query reuse to one immutable NPC update. Dynamic
     /// colliders are still swept on every request. Entries never survive a publication; scratch capacity is reused.
@@ -864,7 +901,9 @@ impl World {
         {
             add_counter(Counter::SweepGeometryCalls, 1);
         }
-        let mut result = self.ledge_trace(start, end, half);
+        self.sweep_dynamic(self.ledge_trace(start, end, half), start, end, half)
+    }
+    fn sweep_dynamic(&self, mut result: Trace, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         if self.dynamic.is_empty() {
             return result;
         }

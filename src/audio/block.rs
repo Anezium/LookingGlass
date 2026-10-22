@@ -4,6 +4,7 @@ use rodio::Source;
 use std::{cell::Cell, time::Instant};
 #[derive(Clone, Copy)]
 pub struct Settings {
+    pub offmain: bool,
     pub mix: bool,
     pub preresample: bool,
     pub parameters: bool,
@@ -33,6 +34,7 @@ pub fn settings() -> Settings {
         #[cfg(not(test))]
         let c = crate::render::vita_renderer::config();
         Settings {
+            offmain: c.audio_offmain && c.audio_pcm_worker,
             mix: c.audio_block_mix,
             preresample: c.audio_preresample,
             parameters: c.audio_block_parameters,
@@ -52,6 +54,7 @@ pub fn settings() -> Settings {
     #[cfg(not(feature = "vita_renderer"))]
     {
         Settings {
+            offmain: false,
             mix: false,
             preresample: false,
             parameters: false,

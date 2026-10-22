@@ -43,8 +43,10 @@ pub struct Metrics {
 pub struct Control {
     pending: queue::Sender<Output>,
     pub metrics: Arc<Metrics>,
+    pub(super) acoustics: Option<super::offmain::Client>,
 }
 pub struct Mixer {
+    pub(super) acoustics: Option<super::offmain::Server>,
     pending: queue::Receiver<Output>,
     sources: Vec<Output>,
     metrics: Arc<Metrics>,
@@ -59,6 +61,9 @@ pub fn mixer() -> (Control, Mixer) {
 }
 pub(super) fn mixer_with(#[cfg(feature = "native_timing")] universe: &'static diagnostic::Universe) -> (Control,Mixer) {
     let (tx, rx) = queue::channel(128);
+    let (acoustic_client, acoustic_server) = if block::settings().offmain {
+        let (a,b) = super::offmain::channel(); (Some(a),Some(b))
+    } else { (None,None) };
     let metrics = Arc::new(Metrics {
         #[cfg(feature = "native_timing")]
         native: diagnostic::AudioState::mixer(universe),
@@ -67,9 +72,11 @@ pub(super) fn mixer_with(#[cfg(feature = "native_timing")] universe: &'static di
     (
         Control {
             pending: tx,
+            acoustics: acoustic_client,
             metrics: metrics.clone(),
         },
         Mixer {
+            acoustics: acoustic_server,
             pending: rx,
             sources: Vec::with_capacity(128),
             metrics,
@@ -453,8 +460,14 @@ struct TestHooks {
 }
 #[cfg(test)]
 impl Default for TestHooks {fn default()->Self{Self{interval:Duration::from_secs(1),policy_fail:false,spawn_fail:false,stack:1024*1024,reporter_gate:None,reporter_seen:None,reporter_pass:None,reporter_panic:false}}}
-fn buffered_body<S: Source<Item = f32> + Send + 'static, #[cfg(feature = "native_timing")] C: crate::native_timing::clock::Source + Send + 'static>(
-    mut source:S, metrics:Arc<Metrics>, config:block::Settings, #[cfg(feature = "native_timing")] clock:C, #[cfg(test)] hooks:TestHooks,
+pub(super) fn buffered_audio<S: Source<Item=f32> + Send + 'static>(source:S, metrics:Arc<Metrics>, jobs:Option<super::offmain::Server>) -> std::io::Result<(Worker,Callback)> {
+    buffered_body_jobs(source,metrics,block::settings(), #[cfg(feature="native_timing")] crate::native_timing::clock::Native, #[cfg(test)] TestHooks::default(), jobs)
+}
+fn buffered_body<S: Source<Item=f32> + Send + 'static, #[cfg(feature="native_timing")] C: crate::native_timing::clock::Source + Send + 'static>(source:S, metrics:Arc<Metrics>, config:block::Settings, #[cfg(feature="native_timing")] clock:C, #[cfg(test)] hooks:TestHooks) -> std::io::Result<(Worker,Callback)> {
+    buffered_body_jobs(source,metrics,config, #[cfg(feature="native_timing")] clock, #[cfg(test)] hooks,None)
+}
+fn buffered_body_jobs<S: Source<Item = f32> + Send + 'static, #[cfg(feature = "native_timing")] C: crate::native_timing::clock::Source + Send + 'static>(
+    mut source:S, metrics:Arc<Metrics>, config:block::Settings, #[cfg(feature = "native_timing")] clock:C, #[cfg(test)] hooks:TestHooks, mut jobs:Option<super::offmain::Server>,
 ) -> std::io::Result<(Worker,Callback)> {
     #[cfg(feature = "native_timing")]
     metrics.native.claim_worker()?;
@@ -582,6 +595,9 @@ fn buffered_body<S: Source<Item = f32> + Send + 'static, #[cfg(feature = "native
             gap_max = gap_max.max(gap);
             if gap > block_ms { gaps += 1; }
             if tx.len()>=ready_blocks {
+                // One immutable static trace per turn, and only with a full PCM
+                // cushion. Recheck PCM demand before every next trace.
+                if jobs.as_mut().is_some_and(|j| j.step()) { continue; }
                 thread::sleep(Duration::from_millis(1));
                 sleep_over = sleep_over.max(wake.elapsed().as_secs_f64() * 1000. - 1.);
             }

@@ -1,5 +1,6 @@
 //! Audio from the user's archives. No original DLL, executable, or script execution.
 mod acoustics;
+mod offmain;
 mod queue;
 pub mod sink;
 mod output;
@@ -687,14 +688,15 @@ impl Playback {
             }
         }
         let (stream, handle) = opened.with_context(|| format!("No usable audio output: {failure}"))?;
-        let (mixer, source) = output::mixer();
+        let (mixer, mut source) = output::mixer();
+        let jobs = source.acoustics.take();
         let monitor = Monitor { source, data, block: Vec::with_capacity(1024), record };
         #[cfg(feature = "vita_renderer")]
         let buffered = crate::render::vita_renderer::config().audio_pcm_worker;
         #[cfg(not(feature = "vita_renderer"))]
         let buffered = false;
         let worker = if buffered {
-            let (worker, callback) = output::buffered(monitor, mixer.metrics.clone())?;
+            let (worker, callback) = output::buffered_audio(monitor, mixer.metrics.clone(), jobs)?;
             handle.play_raw(callback)?;
             Some(worker)
         } else {
@@ -702,6 +704,7 @@ impl Playback {
             None
         };
         let config=block::settings();
+        eprintln!("[lg/audio-offmain] requested={} active={} mode=static-traces-only pcm-priority=first",config.offmain,buffered && config.offmain);
         eprintln!("[lg/audio-policy] block_mix={} preresample={} block_parameters={} ambient_cap={} cull_gain={} producer_priority={} producer_affinity={:#x} cushion_blocks={} cushion_ms={:.3}",config.mix,config.preresample,config.parameters,config.voices,config.gain,config.priority,config.affinity,config.cushion,config.cushion as f64*512./44.1);
         eprintln!("[lg/audio-output] buffered={buffered} callback_shared_game_locks=0 game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0");
         Ok(Self { _stream: Some(stream), mixer, _worker: worker })
@@ -873,6 +876,7 @@ impl Audio {
         game_stage(5);
         let _stage=UpdateStage;
         self.stop_voice();
+        if let Some(client) = self.playback.as_mut().and_then(|p| p.mixer.acoustics.as_mut()) { client.reset(); }
         self.retire_music();
         self.scene_presented = false;
         for old in &self.retiring { old.sink.pause(); }
@@ -1241,7 +1245,8 @@ impl Audio {
             return;
         }
         self.submerged = submerged;
-        for request in std::mem::take(&mut self.pending) {
+        let mut pending = std::mem::take(&mut self.pending);
+        for request in pending.drain(..) {
             if !self.world_clips.contains_key(&request.path)
                 && !self.missing.contains(&request.path)
             {
@@ -1267,13 +1272,38 @@ impl Audio {
                 self.resolved += u64::from(self.play_clip(clip, &request));
             }
         }
+        self.pending = pending;
+        let mut client = self.playback.as_mut().filter(|p| p._worker.is_some()).and_then(|p| p.mixer.acoustics.take());
+        if let Some(c) = &mut client {
+            c.begin(world);
+            if self.acoustic_clock - dt <= 0. {
+                acoustics::room_with(listener, |a,b| c.query(a,b));
+                for e in &self.emitters {
+                    if e.spec.origin.distance(listener) < e.spec.radius * 4. {
+                        acoustics::obstruction_with(listener,e.spec.origin,|a,b| c.query(a,b));
+                    }
+                }
+            }
+            for e in self.effects.iter().chain(self.reaction.iter()).chain(self.loops.values().map(|l| &l.effect)) {
+                if let Some(p) = e.origin { acoustics::obstruction_with(listener,p,|a,b| c.query(a,b)); }
+            }
+            c.execute();
+        }
+        self.prepare_acoustics(world, listener, submerged, dt, client.as_mut());
+        if let Some(p) = &mut self.playback { p.mixer.acoustics = client; }
+    }
+    fn prepare_acoustics(&mut self, world:&World, listener:Vec3, submerged:bool, dt:f32, mut client:Option<&mut offmain::Client>) {
+        let mut sweep = |a,b| match &mut client {
+            Some(c) => c.complete(world,a,b),
+            None => world.sweep(a,b,Vec3::ZERO),
+        };
         self.acoustic_clock -= dt;
         if self.acoustic_clock <= 0. {
             self.acoustic_clock = 0.1;
-            self.room = acoustics::room(world, listener);
+            self.room = acoustics::room_with(listener, &mut sweep);
             for e in &mut self.emitters {
                 let target = if e.spec.origin.distance(listener) < e.spec.radius * 4. {
-                    acoustics::obstruction(world, listener, e.spec.origin)
+                    acoustics::obstruction_with(listener, e.spec.origin, &mut sweep)
                 } else {
                     0.
                 };
@@ -1291,7 +1321,7 @@ impl Audio {
         {
             let target = e
                 .origin
-                .map_or(0., |p| acoustics::obstruction(world, listener, p));
+                .map_or(0., |p| acoustics::obstruction_with(listener, p, &mut sweep));
             e.obstruction += (target - e.obstruction) * (1. - (-dt * 12.).exp());
             e.acoustics.set(e.obstruction, submerged, self.room);
         }
@@ -2516,3 +2546,6 @@ mod tests {
 #[cfg(all(test, feature = "native_timing"))]
 #[path = "audio/binding_tests.rs"]
 mod binding_tests;
+
+#[cfg(test)]
+mod offmain_tests;
