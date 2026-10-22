@@ -129,6 +129,8 @@ pub struct Config {
     pub story_film_bypass: bool,
     /// Explicit console candidate: move DSP/decoding off the device callback.
     pub audio_pcm_worker: bool,
+    /// Exact static acoustic traces on the PCM producer, only while its cushion is full.
+    pub audio_offmain: bool,
     pub audio_block_mix: bool,
     pub audio_preresample: bool,
     pub audio_block_parameters: bool,
@@ -254,6 +256,7 @@ impl Default for Config {
             startup_splash:false,
             story_film_bypass: false,
             audio_pcm_worker: false,
+            audio_offmain: false,
             audio_block_mix: false,
             audio_preresample: false,
             audio_block_parameters: false,
@@ -319,6 +322,7 @@ impl Config {
             && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
     }
     fn validate(&self) -> Result<()> {
+        ensure!(!self.audio_offmain || self.audio_pcm_worker, "audio_offmain requires audio_pcm_worker");
         ensure!((160..=191).contains(&self.audio_producer_priority), "audio_producer_priority must be 160..191 (below skin workers)");
         ensure!(matches!(self.audio_producer_affinity,0x10000|0x20000|0x40000), "audio_producer_affinity must select CPU0, CPU1 or CPU2");
         ensure!((1..=8).contains(&self.audio_cushion_blocks), "audio_cushion_blocks must be 1..8");
@@ -2078,6 +2082,15 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"retained_maps":["*","gvillage","typo"],"legacy_maps":["skool2","missing"]}"#).unwrap();
         assert_eq!(c.unknown_maps(|name| ["gvillage", "skool2"].contains(&name)),
             [("retained_maps", "typo"), ("legacy_maps", "missing")]);
+    }
+    #[test]
+    fn audio_offmain_is_opt_in_and_requires_the_pcm_producer() {
+        assert!(!Config::default().audio_offmain);
+        let c:Config=serde_json::from_str(r#"{"audio_offmain":true}"#).unwrap();
+        assert!(c.validate().is_err());
+        let c:Config=serde_json::from_str(r#"{"audio_offmain":true,"audio_pcm_worker":true}"#).unwrap();
+        c.validate().unwrap();
+        assert!(serde_json::from_str::<Config>(r#"{"audio_offmain":"on"}"#).is_err());
     }
     #[test]
     fn packaged_r3_config_contains_exactly_all_runtime_defaults() {

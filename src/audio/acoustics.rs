@@ -38,13 +38,16 @@ impl Controls {
     }
 }
 pub fn obstruction(world: &World, ear: Vec3, source: Vec3) -> f32 {
+    obstruction_with(ear, source, |a,b| world.sweep(a,b,Vec3::ZERO))
+}
+pub(super) fn obstruction_with(ear: Vec3, source: Vec3, mut sweep: impl FnMut(Vec3,Vec3)->crate::collision::Trace) -> f32 {
     let delta = source - ear;
     if delta.length() < 24. {
         return 0.;
     }
     // Many speakers are embedded slightly in their wall/vent surface.
     let end = source - delta.normalize() * 16.;
-    let hit = world.sweep(ear, end, Vec3::ZERO);
+    let hit = sweep(ear, end);
     if hit.start_solid || hit.fraction < 0.99 {
         1.
     } else {
@@ -52,10 +55,13 @@ pub fn obstruction(world: &World, ear: Vec3, source: Vec3) -> f32 {
     }
 }
 pub fn room(world: &World, ear: Vec3) -> f32 {
+    room_with(ear, |a,b| world.sweep(a,b,Vec3::ZERO))
+}
+pub(super) fn room_with(ear: Vec3, mut sweep: impl FnMut(Vec3,Vec3)->crate::collision::Trace) -> f32 {
     [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z]
         .into_iter()
         .map(|dir| {
-            let trace = world.sweep(ear, ear + dir * 600., Vec3::ZERO);
+            let trace = sweep(ear, ear + dir * 600.);
             if trace.start_solid {
                 0.
             } else {
