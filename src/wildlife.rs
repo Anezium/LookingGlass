@@ -513,7 +513,7 @@ impl Creature {
     ) {
         let start = self.target(0).center;
         let forward = vec3(self.yaw.cos(), self.yaw.sin(), 0.);
-        let targets = self.opponents.bodies(eye);
+        let targets = self.opponents.think_bodies(eye);
         if let Some((id, _)) = combat::contact_box(
             &combat::Context {
                 world,
@@ -531,6 +531,8 @@ impl Creature {
         }
     }
     pub fn step(&mut self, world: &World, eye: Vec3, data: &impl Rig, out: &mut Feedback) {
+        crate::sim_maps::count("wildlife_steps", 1);
+        crate::sim_maps::count("wildlife_dead_steps", u64::from(self.health == 0.));
         let model = self.kind.model();
         if self.health == 0. {
             self.time = (self.time + DT).min(data.duration(model, self.clip()) + 3.);
@@ -566,7 +568,18 @@ impl Creature {
                 .aim(world, b.center, eye, self.notarget, !self.loops());
         let mut delta = aim - b.center;
         let distance = delta.length();
-        let tr = world.sweep(b.center, aim, Vec3::splat(0.5));
+        let candidate = !notarget && distance < if self.kind == Kind::Phantom {
+            700.
+        } else if self.kind.spider() { 1200. } else { 1000. };
+        let tr = if !crate::sim_maps::npc_sight_candidates() || candidate {
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            let _sight = crate::frame_profile::span("wildlife_sight_query");
+            world.npc_sight(b.center, aim)
+        } else {
+            crate::sim_maps::count("wildlife_sight_deferred", 1);
+            crate::collision::Trace::default()
+        };
+        crate::sim_maps::count("wildlife_sight_requests", 1);
         let visible = !notarget
             && distance
                 < if self.kind == Kind::Phantom {
@@ -578,6 +591,10 @@ impl Creature {
                 }
             && !tr.start_solid
             && tr.fraction >= 1.;
+        crate::sim_maps::count("wildlife_visible", u64::from(visible));
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        crate::sim_maps::probe::npc_decision("wildlife_sight", &(b.center, aim, notarget, victim, visible));
+        crate::sim_maps::count("wildlife_sight_candidates", u64::from(candidate));
         if self.kind.spider() {
             if visible { self.last_seen = Some(aim); self.memory = 3.; }
             else { self.memory = (self.memory - DT).max(0.); }

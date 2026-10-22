@@ -133,3 +133,34 @@ macro_rules! hedge_switch {
 }
 hedge_switch!(lights_static_cache, lights_static_cache);
 hedge_switch!(dynamic_buckets, sim_dynamic_buckets);
+
+macro_rules! think_switch {
+    ($name:ident, $field:ident, $index:expr) => {
+        pub fn $name() -> bool {
+            #[cfg(test)] { think_test_switches()[$index] }
+            #[cfg(all(not(test), feature="vita_renderer"))]
+            { crate::render::vita_renderer::config().$field }
+            #[cfg(all(not(test), not(feature="vita_renderer")))] { false }
+        }
+    };
+}
+think_switch!(npc_sight_candidates, sim_npc_sight_candidates, 0);
+think_switch!(npc_sight_cache, sim_npc_sight_cache, 1);
+think_switch!(npc_target_stack, sim_npc_target_stack, 2);
+#[cfg(test)]
+thread_local! { static THINK_TEST: std::cell::Cell<Option<[bool; 3]>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+fn think_test_switches() -> [bool; 3] {
+    THINK_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_NPC_THINK").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => [false; 3],
+        Ok("on") => [true; 3],
+        _ => panic!("LOOKING_GLASS_TEST_NPC_THINK must be off or on"),
+    })
+}
+#[cfg(test)]
+pub(crate) fn with_think_switches<T>(switches: [bool; 3], run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<[bool; 3]>);
+    impl Drop for Reset { fn drop(&mut self) { THINK_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(THINK_TEST.with(|s| s.replace(Some(switches))));
+    run()
+}

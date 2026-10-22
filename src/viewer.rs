@@ -913,6 +913,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let pause_on_load = !bench_session;
         #[cfg(not(target_os = "vita"))]
         let pause_on_load = true;
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        let pause_on_load = pause_on_load && !(crate::sim_maps::probe::enabled()
+            && std::env::var_os("LOOKING_GLASS_SIM_MAPS_RESUME_LOAD").is_some());
         apply_loaded!(prepared.unwrap(), pause_on_load, initial);
         timing.mark("installed");
         resume_applied = true;

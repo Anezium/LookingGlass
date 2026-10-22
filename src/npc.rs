@@ -2733,8 +2733,10 @@ impl Npcs {
                 }
             }
         }
-        for actor in &mut self.actors {
+        for (_actor_index, actor) in self.actors.iter_mut().enumerate() {
             actor.electric = (actor.electric - dt.max(0.)).max(0.);
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            crate::sim_maps::probe::npc_actor(_actor_index, &actor.spawn.name, &actor.spawn.model);
             if (self.owns_ladybugs && crate::pool::cinema::owns(&actor.spawn.name))
                 || (self.owns_school_first && crate::school::cinema::owns(&actor.spawn.name))
                 || (self.owns_school2 && (actor.spawn.model == "cardguard_diamond" || actor.spawn.name == "dice_cat"))
@@ -2880,6 +2882,11 @@ impl Npcs {
             } else {
                 actor.tick(dt, world, eye);
             }
+        }
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        for (actor_index, actor) in self.actors.iter().enumerate() {
+            crate::sim_maps::probe::npc_actor(actor_index, &actor.spawn.name, &actor.spawn.model);
+            crate::sim_maps::probe::npc_decision("actor_frame", actor);
         }
         feedback
     }

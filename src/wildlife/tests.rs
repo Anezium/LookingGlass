@@ -277,3 +277,46 @@ fn web_anchor_is_finite_saved_and_released_on_pain_or_leap() {
     g.hit(hit(30., DamageKind::Knife));
     assert!(g.web.is_none());
 }
+
+#[test]
+fn think_switches_preserve_every_substep_across_sight_and_geometry_changes() {
+    for kind in Kind::ALL {
+        for arm in 0..8 {
+            let mut reference = make(kind);
+            let mut candidate = reference.clone();
+            let mut world = floor();
+            for step in 0..360 {
+                if step % 40 == 0 {
+                    world.set_dynamic(if step % 80 == 0 {
+                        vec![crate::collision::Collider::fixture(
+                            vec3(60., -200., 0.), vec3(70., 200., 200.))]
+                    } else { vec![] });
+                }
+                let eye = match step % 120 {
+                    0..=39 => vec3(90., 0., 48.),
+                    40..=79 => vec3(4000., 0., 48.),
+                    _ => vec3(-150., 0., 48.),
+                };
+                for g in [&mut reference, &mut candidate] {
+                    g.notarget = (step / 30) % 2 == 1;
+                    g.opponents.summon = (step % 100 < 50).then_some(Target {
+                        id: crate::dice::SUMMON, center: vec3(120., 15., 60.), half: Vec3::splat(12.),
+                    });
+                }
+                let a = crate::sim_maps::with_think_switches([false; 3], || {
+                    let mut out = Feedback::default();
+                    reference.step(&world, eye, &Clips, &mut out);
+                    serde_json::to_vec(&out).unwrap()
+                });
+                let b = crate::sim_maps::with_think_switches([arm & 1 != 0, arm & 2 != 0, arm & 4 != 0], || {
+                    let mut out = Feedback::default();
+                    candidate.step(&world, eye, &Clips, &mut out);
+                    serde_json::to_vec(&out).unwrap()
+                });
+                assert_eq!(a, b, "feedback {kind:?} arm={arm} step={step}");
+                assert_eq!(serde_json::to_vec(&reference).unwrap(), serde_json::to_vec(&candidate).unwrap(),
+                    "state {kind:?} arm={arm} step={step}");
+            }
+        }
+    }
+}

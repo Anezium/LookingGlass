@@ -432,10 +432,23 @@ impl Resident {
         while self.accumulator + 1e-9 >= 1. / 120. {
             self.accumulator -= 1. / 120.;
             self.step(world, eye, data, out);
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            crate::sim_maps::probe::npc_decision("resident_substep", &(self as &Self, &*out));
         }
     }
     fn step(&mut self, world: &World, eye: Vec3, data: &Data, out: &mut combat::Feedback) {
         const DT: f32 = 1. / 120.;
+        match &self.body {
+            Body::Card(_) => {
+                crate::sim_maps::count("card_resident_substeps", 1);
+                crate::sim_maps::count("card_inactive_substeps", u64::from(!self.active || self.delay.is_some()));
+            }
+            Body::Wildlife(_) => {
+                crate::sim_maps::count("wildlife_resident_substeps", 1);
+                crate::sim_maps::count("wildlife_inactive_substeps", u64::from(!self.active || !self.awake || self.delay.is_some()));
+            }
+            _ => {}
+        }
         if let Some(delay) = &mut self.delay {
             *delay = (*delay - DT).max(0.);
             if *delay == 0. {
@@ -475,6 +488,7 @@ impl Resident {
             return;
         }
         if let Body::Wildlife(g) = &self.body {
+            crate::sim_maps::count("wildlife_cue_evaluations", 1);
             for cue in data.events.between(
                 g.clip(),
                 crate::animation_events::Span {

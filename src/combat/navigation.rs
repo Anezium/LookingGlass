@@ -30,6 +30,7 @@ impl Detour {
         distance: f32,
         dt: f32,
     ) -> Vec3 {
+        crate::sim_maps::count("navigation_walk_calls", 1);
         let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if dt <= 0. || distance <= 0. {
             return feet;
@@ -80,6 +81,7 @@ fn edge(world: &World, from: Vec3, goal: Vec3, half: Vec3) -> Option<Vec3> {
 }
 
 fn plan(world: &World, feet: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
+    crate::sim_maps::count("navigation_plans", 1);
     struct Node {
         p: Vec3,
         parent: usize,

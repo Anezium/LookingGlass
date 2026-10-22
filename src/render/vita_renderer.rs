@@ -26,6 +26,10 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(remote = "Self", default, deny_unknown_fields)]
 pub struct Config {
+    /// Exact NPC sight predicates, publication-scoped trace reuse and stack targets.
+    pub sim_npc_sight_candidates: bool,
+    pub sim_npc_sight_cache: bool,
+    pub sim_npc_target_stack: bool,
     /// Defer Clockwork door traces until their exact range/facing predicates pass.
     pub sim_hatter_door_candidates: bool,
     /// Exact static occlusion certificates for unchanged eye/light positions.
@@ -204,6 +208,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             sim_hatter_door_candidates: false,
+            sim_npc_sight_candidates: false,
+            sim_npc_sight_cache: false,
+            sim_npc_target_stack: false,
             lights_static_cache: false,
             sim_dynamic_buckets: false,
             fx_merge_local_reuse: true,
@@ -1994,6 +2001,22 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn npc_think_switches_are_independent_default_off_booleans() {
+        for c in [Config::default(), serde_json::from_str("{}").unwrap()] {
+            assert!(!c.sim_npc_sight_candidates && !c.sim_npc_sight_cache && !c.sim_npc_target_stack);
+        }
+        for name in ["sim_npc_sight_candidates", "sim_npc_sight_cache", "sim_npc_target_stack"] {
+            for invalid in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
+                assert!(serde_json::from_value::<Config>(serde_json::json!({name:invalid})).is_err());
+            }
+            let c: Config = serde_json::from_value(serde_json::json!({name:true})).unwrap();
+            c.validate().unwrap();
+            assert_eq!(c.sim_npc_sight_candidates, name == "sim_npc_sight_candidates");
+            assert_eq!(c.sim_npc_sight_cache, name == "sim_npc_sight_cache");
+            assert_eq!(c.sim_npc_target_stack, name == "sim_npc_target_stack");
+        }
+    }
     #[test]
     fn hedge3_switches_are_independent_strict_booleans_and_default_off() {
         for config in [Config::default(), serde_json::from_str("{}").unwrap()] {

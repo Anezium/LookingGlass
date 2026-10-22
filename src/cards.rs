@@ -409,7 +409,8 @@ impl Guard {
             i.age += STEP;
             i.age < 2.
         });
-        let targets = self.opponents.bodies(eye);
+        crate::sim_maps::count("card_projectile_body_vec_allocations", u64::from(!crate::sim_maps::npc_target_stack()));
+        let targets = self.opponents.think_bodies(eye);
         self.shots.retain_mut(|s| {
             if self.kind == Kind::Heart {
                 if let Some(t) = targets.iter().find(|t| t.id == s.victim) {
@@ -447,7 +448,7 @@ impl Guard {
                         DamageKind::Other,
                     );
                 }
-                for t in &targets {
+                for t in targets.iter() {
                     if hit.is_some_and(|(id, _)| id == t.id) {
                         continue;
                     }
@@ -476,6 +477,8 @@ impl Guard {
         });
     }
     pub fn step(&mut self, world: &World, eye: Vec3, rig: &impl Rig, out: &mut Feedback) {
+        crate::sim_maps::count("card_steps", 1);
+        crate::sim_maps::count("card_dead_steps", u64::from(self.health <= 0.));
         self.projectiles(world, eye, out);
         self.place(world);
         if self.health <= 0. {
@@ -531,10 +534,21 @@ impl Guard {
             self.notarget,
             !self.loops() && self.phase != Phase::Alert,
         );
+        crate::sim_maps::count("card_sight_requests", 1);
         let delta = aim - from;
         let distance = delta.truncate().length();
         let facing = vec2(self.yaw.cos(), self.yaw.sin()).dot(delta.truncate().normalize_or_zero());
-        let trace = world.sweep(from, aim, Vec3::splat(0.5));
+        let candidate = !notarget && delta.length() < self.vision
+            && (self.memory > 0.
+                || facing > if self.kind == Kind::Heart { -0.866 } else { -0.766 });
+        let trace = if !crate::sim_maps::npc_sight_candidates() || candidate {
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            let _sight = crate::frame_profile::span("card_sight_query");
+            world.npc_sight(from, aim)
+        } else {
+            crate::sim_maps::count("card_sight_deferred", 1);
+            crate::collision::Trace::default()
+        };
         let visible = !notarget
             && delta.length() < self.vision
             && !trace.start_solid
@@ -546,6 +560,10 @@ impl Guard {
                     } else {
                         -0.766
                     });
+        crate::sim_maps::count("card_visible", u64::from(visible));
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        crate::sim_maps::probe::npc_decision("card_sight", &(from, aim, notarget, victim, visible));
+        crate::sim_maps::count("card_sight_candidates", u64::from(candidate));
         if visible {
             self.memory = 6.;
             self.last_seen = aim;

@@ -102,5 +102,8 @@
   "attached_puff_batches": true,
   "sim_hatter_door_candidates": false,
   "lights_static_cache": false,
-  "sim_dynamic_buckets": false
+  "sim_dynamic_buckets": false,
+  "sim_npc_sight_candidates": false,
+  "sim_npc_sight_cache": false,
+  "sim_npc_target_stack": false
 }

@@ -578,6 +578,9 @@ struct LightCertificates { entries: Vec<([u32; 9], bool)>, next: usize }
 
 #[derive(Debug)]
 pub struct World {
+    // All mutable solid geometry is private and invalidates this bounded cache
+    // on publication. Static hulls/tree are immutable for this World's lifetime.
+    npc_sight_cache: std::cell::RefCell<std::collections::HashMap<[u32; 9], Trace>>,
     query_cache: std::cell::RefCell<std::collections::HashMap<[u32; 9], Trace>>,
     query_cache_active: std::cell::Cell<bool>,
     pub traversal: crate::traversal::Traversal,
@@ -604,6 +607,26 @@ pub struct World {
 }
 
 impl World {
+    fn invalidate_npc_sight(&mut self) {
+        self.npc_sight_cache.get_mut().clear();
+    }
+    /// Full trace reuse, including dynamic/settled/weapon geometry. Keys use
+    /// float bits (no tolerance), and never escape the owning collision world.
+    pub(crate) fn npc_sight(&self, start: Vec3, end: Vec3) -> Trace {
+        if !crate::sim_maps::npc_sight_cache() {
+            return self.sweep(start, end, Vec3::splat(0.5));
+        }
+        let key = Self::query_key(start, end, Vec3::splat(0.5));
+        if let Some(trace) = self.npc_sight_cache.borrow().get(&key).copied() {
+            crate::sim_maps::count("npc_sight_cache_hits", 1);
+            return trace;
+        }
+        crate::sim_maps::count("npc_sight_cache_misses", 1);
+        let trace = self.sweep(start, end, Vec3::splat(0.5));
+        let mut cache = self.npc_sight_cache.borrow_mut();
+        if cache.len() < 256 { cache.insert(key, trace); }
+        trace
+    }
     /// Scope exact static/settled query reuse to one immutable NPC update. Dynamic
     /// colliders are still swept on every request. Entries never survive a publication; scratch capacity is reused.
     pub fn with_npc_queries<T>(&self, run: impl FnOnce() -> T) -> T {
@@ -715,6 +738,7 @@ impl World {
         };
         Ok(Self {
             traversal: crate::traversal::Traversal::load(map)?,
+            npc_sight_cache: std::cell::RefCell::default(),
             query_cache: std::cell::RefCell::default(),
             query_cache_active: std::cell::Cell::new(false),
             dynamic: Vec::new(),
@@ -816,6 +840,7 @@ impl World {
         result
     }
     pub fn set_weapon_obstacles(&mut self, obstacles: Vec<crate::combat::Target>) {
+        self.invalidate_npc_sight();
         self.weapon_obstacles = obstacles
             .into_iter()
             .map(|t| {
@@ -977,6 +1002,7 @@ impl World {
     }
     /// Keep movers, doors and live weapon obstacles when using an actor collision mask.
     pub fn copy_dynamic_from(&mut self, other: &Self) {
+        self.invalidate_npc_sight();
         self.dynamic.clone_from(&other.dynamic);
         self.dynamic_bounds = other.dynamic_bounds;
         self.dynamic_buckets = other.dynamic_buckets.clone();
@@ -986,6 +1012,7 @@ impl World {
         self.dynamic_liquids.clone_from(&other.dynamic_liquids);
     }
     pub fn set_dynamic(&mut self, colliders: Vec<Collider>) {
+        self.invalidate_npc_sight();
         self.dynamic_buckets = if crate::sim_maps::dynamic_buckets() {
             crate::sim_maps::count("dynamic_bucket_builds", 1);
             std::sync::Arc::new(DynamicBucket::build(&colliders))
@@ -1000,6 +1027,7 @@ impl World {
     /// Geometry a controller has permanently settled may support hanging and pull-ups.
     /// Active movers are deliberately excluded.
     pub fn set_settled_supports(&mut self, colliders: Vec<Collider>) {
+        self.invalidate_npc_sight();
         self.settled_supports = colliders;
     }
     /// Replace the brush-entity and moving liquid volumes. They add to the map's own liquids.
@@ -1136,6 +1164,7 @@ impl World {
             ))
         };
         Self {
+            npc_sight_cache: std::cell::RefCell::default(),
             query_cache: std::cell::RefCell::default(),
             query_cache_active: std::cell::Cell::new(false),
             dynamic: Vec::new(),
@@ -1575,6 +1604,48 @@ mod sim_query_tests {
         crate::sim_maps::with_test_switches([false,false,true,false], || {
             assert_eq!(world.ledge_trace(Vec3::ZERO,Vec3::Z,PLAYER_HALF).fraction, 1.);
             assert!(c.lazy.as_ref().unwrap().pending());
+        });
+    }
+}
+
+#[cfg(test)]
+mod npc_sight_tests {
+    use super::*;
+    fn bits(t: Trace) -> (u32, [u32; 3], bool, bool) {
+        (t.fraction.to_bits(), t.normal.to_array().map(f32::to_bits), t.start_solid, t.all_solid)
+    }
+    #[test]
+    fn full_trace_cache_is_bounded_exact_and_invalidated_by_every_solid_publication() {
+        crate::sim_maps::with_think_switches([false, true, false], || {
+            let mut world = World::fixture(&[]);
+            let start = Vec3::ZERO;
+            let end = Vec3::X * 100.;
+            let check = |w: &World| {
+                let expected = bits(w.sweep(start, end, Vec3::splat(0.5)));
+                assert_eq!(bits(w.npc_sight(start, end)), expected);
+                assert_eq!(bits(w.npc_sight(start, end)), expected);
+                assert_eq!(w.npc_sight_cache.borrow().len(), 1);
+            };
+            let wall = || Collider::fixture(vec3(40., -10., -10.), vec3(50., 10., 10.));
+            check(&world);
+            world.set_dynamic(vec![wall()]);
+            assert!(world.npc_sight_cache.borrow().is_empty()); check(&world);
+            world.set_dynamic(vec![]); check(&world);
+            world.set_settled_supports(vec![wall()]);
+            assert!(world.npc_sight_cache.borrow().is_empty()); check(&world);
+            world.set_settled_supports(vec![]); check(&world);
+            world.set_weapon_obstacles(vec![crate::combat::Target { id: 42, center: Vec3::X * 45., half: Vec3::splat(5.) }]);
+            assert!(world.npc_sight_cache.borrow().is_empty()); check(&world);
+            let other = World::fixture(&[]);
+            world.copy_dynamic_from(&other);
+            assert!(world.npc_sight_cache.borrow().is_empty()); check(&world);
+            world.npc_sight(vec3(-0., 0., 0.), end);
+            assert_eq!(world.npc_sight_cache.borrow().len(), 2);
+            for n in 1..300 { world.npc_sight(Vec3::Z * n as f32, end); }
+            assert_eq!(world.npc_sight_cache.borrow().len(), 256);
+            let separate = World::fixture(&[(vec3(40., -10., -10.), vec3(50., 10., 10.))]);
+            assert!(separate.npc_sight(start, end).fraction < 1.);
+            assert_eq!(world.npc_sight(start, end).fraction, 1.);
         });
     }
 }

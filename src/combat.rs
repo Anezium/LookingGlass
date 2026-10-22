@@ -10,6 +10,7 @@ pub struct Target {
     pub half: Vec3,
 }
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(any(test, all(feature="sim_maps_probe", not(target_os="vita"))), derive(serde::Serialize))]
 pub struct Hit {
     pub id: usize,
     pub damage: f32,
@@ -18,6 +19,7 @@ pub struct Hit {
     pub knockback: Vec3,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(any(test, all(feature="sim_maps_probe", not(target_os="vita"))), derive(serde::Serialize))]
 pub enum DamageKind {
     Other,
     Blunderbuss,
@@ -184,6 +186,7 @@ pub struct Timing {
     pub death: f32,
 }
 #[derive(Default)]
+#[cfg_attr(any(test, all(feature="sim_maps_probe", not(target_os="vita"))), derive(serde::Serialize))]
 pub struct Feedback {
     pub will_drain: f32,
     pub cue_sounds: Vec<(String, Vec3)>,
@@ -217,8 +220,31 @@ pub struct Opponents {
     pub summon: Option<Target>,
     pub demon: bool,
 }
+/// Same Alice-then-summon order as `bodies`, with no heap work in the opt-in arm.
+pub(crate) enum ThinkBodies {
+    Heap(Vec<Target>),
+    Stack([Target; 2], usize),
+}
+impl std::ops::Deref for ThinkBodies {
+    type Target = [Target];
+    fn deref(&self) -> &[Target] {
+        match self { Self::Heap(v) => v, Self::Stack(v, n) => &v[..*n] }
+    }
+}
 impl Opponents {
+    pub(crate) fn think_bodies(&self, eye: Vec3) -> ThinkBodies {
+        if !crate::sim_maps::npc_target_stack() { return ThinkBodies::Heap(self.bodies(eye)); }
+        let alice = Target {
+            id: crate::dice::ALICE,
+            center: eye - Vec3::Z * 20.,
+            half: crate::collision::PLAYER_HALF,
+        };
+        crate::sim_maps::count("opponent_body_stack_calls", 1);
+        ThinkBodies::Stack([alice, self.summon.unwrap_or(alice)], 1 + usize::from(self.summon.is_some()))
+    }
     pub fn bodies(&self, eye: Vec3) -> Vec<Target> {
+        crate::sim_maps::count("opponent_body_vec_allocations", 1);
+        crate::sim_maps::count("opponent_body_vec_reallocations", u64::from(self.summon.is_some()));
         let mut bodies = vec![Target {
             id: crate::dice::ALICE,
             center: eye - Vec3::Z * 20.,
@@ -235,13 +261,19 @@ impl Opponents {
         notarget: bool,
         committed: bool,
     ) -> (Vec3, bool, usize) {
+        crate::sim_maps::count("opponent_aim_calls", 1);
         if self.summon.is_none() {
             self.demon = false;
         }
         if !committed && !self.demon {
             if let Some(d) = self.summon {
+                crate::sim_maps::count("opponent_summon_sight_requests", 1);
                 let distance = from.distance_squared(d.center);
-                let sight = world.sweep(from, d.center, Vec3::splat(0.5));
+                let candidate = distance < 1200_f32.powi(2)
+                    && (notarget || distance < from.distance_squared(eye));
+                let sight = if !crate::sim_maps::npc_sight_candidates() || candidate {
+                    world.npc_sight(from, d.center)
+                } else { crate::collision::Trace::default() };
                 if distance < 1200_f32.powi(2)
                     && (notarget || distance < from.distance_squared(eye))
                     && !sight.start_solid
