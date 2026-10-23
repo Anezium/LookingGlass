@@ -1,5 +1,9 @@
 //! Same-frame CPU skin snapshots. Render handles never enter this storage.
 //! Buffers are bounded and allocated at startup; overflow uses the serial draw.
+#[cfg(feature="frame_total_only")]
+use crate::light_profile::InactiveInstant as MetricInstant;
+#[cfg(not(feature="frame_total_only"))]
+use std::time::Instant as MetricInstant;
 use super::{rotation, shade_arrays, Params};
 use crate::render_fx::actor_vertices::{self, Revision};
 use crate::skeletal::{Skeleton, SkinSurface, Transform};
@@ -416,7 +420,7 @@ impl Store {
         }
     }
     fn drain(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
-        let start = std::time::Instant::now();
+        let start = MetricInstant::now();
         let completed = self.pending > 0;
         let mut panic = None;
         for worker in &mut self.workers[..self.pending] {
@@ -553,7 +557,7 @@ pub(crate) fn startup(workers: usize, probe: bool) {
 /// Only Send CPU closures cross the boundary; no new workers are created.
 #[cfg(feature = "vita_renderer")]
 pub(crate) fn cpu_pair(first: impl FnOnce() + Send, second: impl FnOnce() + Send) {
-    let started = std::time::Instant::now();
+    let started = MetricInstant::now();
     let service = STORE.with(|store| {
         let mut store = store.borrow_mut();
         if let Some(store) = store.as_mut().filter(|s| s.pending == 0) {
@@ -579,12 +583,12 @@ pub(crate) fn cpu_pair(first: impl FnOnce() + Send, second: impl FnOnce() + Send
 /// A non-Send guard drains pending CPU work before a frame/load/panic can leave scope.
 pub(crate) struct Frame {
     _game: crate::game_thread::GameThread,
-    gather_start: std::time::Instant,
+    gather_start: MetricInstant,
     gather_us: u64,
 }
 impl Frame {
     pub(crate) fn begin() -> Self {
-        let gather_start = std::time::Instant::now();
+        let gather_start = MetricInstant::now();
         #[cfg(feature="vita_renderer")]
         crate::render_fx::actor_publication::begin();
         assert!(PHASE.with(|p| p.get() == Phase::Idle));

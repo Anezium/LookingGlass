@@ -1024,6 +1024,7 @@ mod vita {
         record_geometry(triangles, vertices, static_batch);
     }
     pub fn begin_frame(map: &str) {
+        #[cfg(not(feature="frame_total_only"))]
         let now = Instant::now();
         super::begin_creation_frame();
 
@@ -1059,6 +1060,8 @@ mod vita {
                 crate::light_profile::begin(map, next_mode);
                 return;
             }
+            #[cfg(feature="frame_total_only")]
+            let now = Instant::now();
             reset_hot_counts();
             HOT_RECORDING.store(enabled(), Relaxed);
             // Attribute begin-to-begin wall time to the PREVIOUS measured frame.

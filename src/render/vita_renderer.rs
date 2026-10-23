@@ -1,4 +1,8 @@
 //! Direct, retained world draws. CPU geometry and PVS compilation happen at load time.
+#[cfg(feature="frame_total_only")]
+use crate::light_profile::InactiveInstant as MetricInstant;
+#[cfg(not(feature="frame_total_only"))]
+use std::time::Instant as MetricInstant;
 mod shader;
 mod scale;
 mod depth_sentinel;
@@ -1345,7 +1349,7 @@ impl Renderer {
         count("vita_world_retransformed_vertices", 0);
         count("vita_world_rebuilt_indices", 0);
         count("vita_world_sorted_triangles", 0);
-        let visibility_started = std::time::Instant::now();
+        let visibility_started = MetricInstant::now();
         let visibility_span = crate::frame_profile::span("vita_cluster_frustum");
         let projection = crate::render_fx::projection().expect("world camera projection");
         let cluster = scene.map.visibility.cluster(eye, &scene.map.planes);
@@ -1406,7 +1410,7 @@ impl Renderer {
         }
         self.prepared.clear();
         {
-            let parameters_started = std::time::Instant::now();
+            let parameters_started = MetricInstant::now();
             let _parameters = crate::frame_profile::span("vita_world_parameters");
             let parameter_reuse = config().world_parameter_reuse;
             let split = config().world_parameter_time_split;

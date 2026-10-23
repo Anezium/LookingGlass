@@ -73,6 +73,15 @@ pub(crate) fn render_host_report() -> serde_json::Value { serde_json::Value::Nul
 #[cfg(not(target_os="vita"))]
 pub(crate) fn render_host_deferred_ns() -> u64 { 0 }
 
+// Metric-only clocks at existing render call sites become zero-cost values.
+// Never use this type for simulation, waiting, deadlines or audio scheduling.
+#[derive(Clone, Copy)]
+pub(crate) struct InactiveInstant;
+impl InactiveInstant {
+    pub(crate) const fn now() -> Self { Self }
+    pub(crate) const fn elapsed(self) -> std::time::Duration { std::time::Duration::ZERO }
+}
+
 const CAPACITY: usize = 120;
 struct Ring {
     wall_us: [u64; CAPACITY],
@@ -89,6 +98,8 @@ impl Default for Ring {
 impl Ring {
     // Attribute the whole begin-to-begin interval to the previous accepted frame.
     // In particular, the final report-only begin closes frame 120 before export.
+    #[inline(never)]
+    #[export_name="alice_frame_total_sample"]
     fn begin(&mut self, now: Instant) {
         if self.pending {
             if self.count < CAPACITY {
@@ -117,6 +128,8 @@ impl Ring {
 }
 thread_local! { static RING: RefCell<Ring> = RefCell::default(); }
 pub(crate) fn reset() { RING.with(|r| *r.borrow_mut() = Ring::default()); }
+#[inline(never)]
+#[export_name="alice_frame_total_begin"]
 pub(crate) fn begin(_: &str, mode: Mode) {
     if !capture_enabled() || !mode.is_bench() { return; }
     RING.with(|r| { let mut r=r.borrow_mut(); r.armed=true; r.begin(Instant::now()); });

@@ -1,5 +1,9 @@
 //! Whole actor/effect packets share one alpha order with immutable world groups.
 //! Only dynamic LG meshes stream here; world buffers are never read or uploaded.
+#[cfg(feature="frame_total_only")]
+use crate::light_profile::InactiveInstant as MetricInstant;
+#[cfg(not(feature="frame_total_only"))]
+use std::time::Instant as MetricInstant;
 pub(super) mod state_cache;
 pub(super) mod world_puffs;
 use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
@@ -431,7 +435,7 @@ impl Gpu {
         }
         let plan = UploadPlan::new(c.fx_upload_cache || version.is_some(), c.gpu_index_dedupe || version.is_some(), same_vertex, same_index);
         if plan.full_hit { self.stats.upload_hits += 1; }
-        let gl_started = std::time::Instant::now();
+        let gl_started = MetricInstant::now();
         let metrics = &mut self.stats.render[usize::from(p.effect)];
         metrics.buffer_updates += u64::from(plan.vertex) + u64::from(plan.index);
         metrics.buffer_bytes += u64::from(plan.vertex) * (mesh.vertices.len() * 40) as u64
@@ -492,7 +496,7 @@ impl Gpu {
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
-            .then(std::time::Instant::now);
+            .then(MetricInstant::now);
         let key = (p.blend_index, p.depth_equal);
         let pipeline = self
             .pipelines
@@ -1038,7 +1042,7 @@ pub(crate) fn finish_world(
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
     let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::Fx);
-    let finish_started = std::time::Instant::now();
+    let finish_started = MetricInstant::now();
     let mut world_ns = 0u64;
     let _span = crate::frame_profile::span("vita_3d_finish");
     if flush {
@@ -1064,7 +1068,7 @@ pub(crate) fn finish_world(
     if flush {
         boundary("flush_vita_3d_packets");
     }
-    let preparation_started = std::time::Instant::now();
+    let preparation_started = MetricInstant::now();
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let preparation_span = crate::frame_profile::span("fx_finish_prepare");
     let mut list = {
@@ -1128,7 +1132,7 @@ pub(crate) fn finish_world(
     let mut ranges = std::mem::take(&mut gpu.range_storage); ranges.clear();
     let mut invalid = 0;
     {
-        let upload_started = std::time::Instant::now();
+        let upload_started = MetricInstant::now();
         let _span = crate::frame_profile::span("vita_fx_upload");
         let mut uniform_templates=[None;4];
         let mut shared_uploads=std::mem::take(&mut gpu.shared_storage); shared_uploads.clear();
@@ -1211,7 +1215,7 @@ pub(crate) fn finish_world(
                     gpu.submit_cache.interrupt();
                     gpu.field_uniforms.interrupt();
                     let start = world_totals.and_then(|t| t.borrow().start());
-                    let world_started = std::time::Instant::now();
+                    let world_started = MetricInstant::now();
                     draw_world(id);
                     world_ns += world_started.elapsed().as_nanos() as u64;
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
