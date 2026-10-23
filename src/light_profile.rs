@@ -51,6 +51,7 @@ const CAPTURE_ROWS: usize = 4096;
 #[derive(Clone, Copy, Default, Debug)]
 struct Row {
     frame: u64,
+    gl_observers: bool,
     wall_us: u64,
     cpu_us: u64,
     swap_us: u64,
@@ -180,6 +181,11 @@ impl Ring {
         self.pending = false;
         self.start = Some(now);
         self.current = Row::default();
+        #[cfg(feature="vita_renderer")]
+        {
+            let c=crate::render::vita_renderer::config();
+            self.current.gl_observers=c.world_binding_cache || c.world_gl_state_cache || c.light_gl_observers;
+        }
     }
     // Counts follow the same accepted-frame population and bounded capture as timings.
     // Write only at the explicit capture report boundary, never during gameplay.
@@ -204,7 +210,7 @@ impl Ring {
                 write!(out, ",{phase}_{field}")?;
             }
         }
-        writeln!(out)?;
+        writeln!(out, ",gl_observers")?;
         let first = self.count.saturating_sub(WINDOW);
         let rows: Vec<Row>;
         let selected = if let Some(capture) = &self.capture { capture.as_slice() } else {
@@ -212,15 +218,27 @@ impl Ring {
             &rows
         };
         for &r in selected {
-            write!(out, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", r.frame, r.wall_us, r.cpu_us, r.swap_us,
+            write!(out, "{},{},", r.frame, r.wall_us)?;
+            if r.gl_observers {write!(out, "{}", r.cpu_us)?;}
+            write!(out, ",{},{},{},{},{},{},{},{},{},{},{},{},{}", r.swap_us,
                 r.skin_collect_wait_us, r.skin_gather_us, r.skin_fallbacks, r.skin_overflow,
                 r.fx[0],r.fx[1],r.fx[2],r.fx[3],r.fx[4],r.fx[5],r.fx[6],r.fx[7])?;
-            for p in r.render {
-                write!(out, ",{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}", p.cpu_ns / 1000,
-                    p.draws, p.pipelines, p.depth_states, p.bindings, p.uniform_uploads,
-                    p.uniform_bytes, p.buffer_updates, p.buffer_bytes, p.texture_bind_slots,
-                    p.visibility_tests, p.uniform_gl_calls, p.visibility_cpu_ns / 1000, p.parameter_cpu_ns / 1000, p.deferred_cpu_ns / 1000, p.texture_gl_binds, p.state_gl_calls, p.program_gl_changes)?;
+            for (phase,p) in r.render.into_iter().enumerate() {
+                let values=[p.cpu_ns/1000,p.draws,p.pipelines,p.depth_states,p.bindings,
+                    p.uniform_uploads,p.uniform_bytes,p.buffer_updates,p.buffer_bytes,
+                    p.texture_bind_slots,p.visibility_tests,p.uniform_gl_calls,
+                    p.visibility_cpu_ns/1000,p.parameter_cpu_ns/1000,p.deferred_cpu_ns/1000,
+                    p.texture_gl_binds,p.state_gl_calls,p.program_gl_changes];
+                for (field,value) in values.into_iter().enumerate() {
+                    write!(out, ",")?;
+                    // Tail packets and all GL-level observations require hooks.
+                    // Blank complete CPU too: its deferred tail is unavailable.
+                    if r.gl_observers || (phase<4 && !matches!(field,11|14|15|16|17)) {
+                        write!(out, "{value}")?;
+                    }
+                }
             }
+            write!(out, ",{}", if r.gl_observers {"observed"} else {"direct"})?;
             writeln!(out)?;
         }
         Ok(())
@@ -396,6 +414,22 @@ fn mode_name(mode: Mode) -> &'static str {
 mod tests {
     use super::*;
     #[test]
+    fn direct_csv_marks_missing_observers_without_fabricating_zeros() {
+        for observed in [false,true] {
+            let mut r=Ring::capture();
+            r.capture.as_mut().unwrap().push(Row {gl_observers:observed,wall_us:16,cpu_us:7,..Default::default()});
+            let mut out=Vec::new();r.write(&mut out).unwrap();
+            let text=String::from_utf8(out).unwrap();let mut lines=text.lines();
+            let cells:std::collections::HashMap<_,_>=lines.next().unwrap().split(',').zip(lines.next().unwrap().split(',')).collect();
+            assert_eq!(cells["gl_observers"],if observed {"observed"} else {"direct"});
+            assert_eq!(cells["wall_us"],"16");
+            assert_eq!(cells["world_opaque_draws"],"0");
+            for key in ["frame_cpu_us","world_opaque_uniform_gl_calls","world_alpha_texture_gl_binds","actors_state_gl_calls","fx_program_gl_changes","hud_draws","present_cpu_us","hud_deferred_cpu_us"] {
+                assert_eq!(cells[key],if observed {if key=="frame_cpu_us" {"7"} else {"0"}} else {""},"{key}");
+            }
+        }
+    }
+    #[test]
     fn door_windows_match_accepted_frames_and_include_partial_window() {
         let mut r = Ring::capture();
         let origin = Instant::now(); r.begin(origin);
@@ -564,6 +598,7 @@ mod tests {
         let origin = Instant::now();
         r.begin(origin);
         for i in 1..=125 {
+            r.current.gl_observers = true;
             r.current.cpu_us = 7;
             r.current.swap_us = 2;
             r.current.skin_collect_wait_us = i;
@@ -578,10 +613,10 @@ mod tests {
         let s = String::from_utf8(out).unwrap();
         assert_eq!(s.lines().count(), 61);
         assert!(s.lines().next().unwrap().contains("world_opaque_draws"));
-        assert_eq!(s.lines().next().unwrap().split(',').count(), 124);
+        assert_eq!(s.lines().next().unwrap().split(',').count(), 125);
         assert!(s.lines().nth(1).unwrap().starts_with("66,10,7,2,66,198,0,0,0,0,0,0,0,0,0,0,"));
         assert!(s.lines().last().unwrap().starts_with("125,10,7,2,125,375,2,1,0,0,0,0,0,0,0,0,"));
-        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 124));
+        assert!(s.lines().skip(1).all(|line| line.split(',').count() == 125));
         assert_eq!(r.current.skin_gather_us, 0);
         assert_eq!(r.current.skin_fallbacks, 0);
         assert_eq!(r.current.skin_overflow, 0);
