@@ -32,6 +32,7 @@ pub(super) fn pass() -> Option<macroquad::miniquad::RenderPass> {
     })
 }
 pub(super) fn prepare(bg: Color) {
+    crate::render_tail::configure();
     crate::render_tail::end();
     log_framebuffer();
     if config().render_scale == 1. {

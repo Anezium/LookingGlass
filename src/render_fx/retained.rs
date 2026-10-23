@@ -688,12 +688,12 @@ struct MergeCache {
 #[derive(Clone, Copy)]
 struct PackSource { vertices: usize, vertex_len: usize, indices: usize, index_len: usize,
     vertex_offset: usize, index_offset: usize, keep_vertices: bool }
-fn pack_kernel(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16],
+fn pack_kernel<const RANGES: bool>(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16],
     vertex_base: usize, index_base: usize, copy_indices: bool) {
     for source in sources {
         // SAFETY: merge_cached owns all source groups without modifying them until
         // scoped CPU workers have joined (also on panic); lengths come from slices.
-        if !source.keep_vertices {
+        if !RANGES || !source.keep_vertices {
             let input = unsafe {std::slice::from_raw_parts(source.vertices as *const Vertex, source.vertex_len)};
             let start = source.vertex_offset - vertex_base;
             vertices[start..start+input.len()].copy_from_slice(input);
@@ -707,15 +707,19 @@ fn pack_kernel(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u
         }
     }
 }
-fn pack_sources(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16], copy_indices: bool, worker: bool) {
+fn pack_sources_mode<const RANGES: bool>(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16], copy_indices: bool, worker: bool) {
     if worker && vertices.len() >= 256 && sources.len() >= 2 {
         let mid = sources.len()/2;
         let vb = sources[mid].vertex_offset; let ib = sources[mid].index_offset;
         let (va,vz) = vertices.split_at_mut(vb); let (ia,iz) = indices.split_at_mut(ib);
         let (a,z) = sources.split_at(mid);
         crate::character::skinning::overlap::cpu_pair(
-            ||pack_kernel(a,va,ia,0,0,copy_indices), ||pack_kernel(z,vz,iz,vb,ib,copy_indices));
-    } else { pack_kernel(sources,vertices,indices,0,0,copy_indices); }
+            ||pack_kernel::<RANGES>(a,va,ia,0,0,copy_indices), ||pack_kernel::<RANGES>(z,vz,iz,vb,ib,copy_indices));
+    } else { pack_kernel::<RANGES>(sources,vertices,indices,0,0,copy_indices); }
+}
+#[cfg(test)]
+fn pack_sources(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16], copy_indices: bool, worker: bool) {
+    pack_sources_mode::<true>(sources, vertices, indices, copy_indices, worker);
 }
 fn merge_worker(inline: bool, copied_vertices: usize) -> bool {
     !(inline && copied_vertices <= 4096)
@@ -920,8 +924,11 @@ fn merge_cached_options<'a>(
             let worker = crate::render::vita_renderer::config().fx_worker_prep
                 && merge_worker(inline, copied);
             count("fx_merge_inline_jobs", u64::from(!worker && vertices >= 256 && cache.packing.len() >= 2));
-            pack_sources(&cache.packing, &mut dest.vertices, &mut dest.indices, !keep_indices,
-                worker);
+            if ranges {
+                pack_sources_mode::<true>(&cache.packing, &mut dest.vertices, &mut dest.indices, !keep_indices, worker);
+            } else {
+                pack_sources_mode::<false>(&cache.packing, &mut dest.vertices, &mut dest.indices, !keep_indices, worker);
+            }
             count("vita_fx_pack_vertices", copied as u64);
             count("vita_fx_pack_indices", if keep_indices {0} else {indices as u64});
             count("vita_fx_certified_indices_reused", if keep_indices {indices as u64} else {0});

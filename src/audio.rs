@@ -1291,7 +1291,14 @@ impl Audio {
             }
         }
         self.pending = pending;
-        let mut client = self.playback.as_mut().filter(|p| p._worker.is_some()).and_then(|p| p.mixer.acoustics.take());
+        // Decide once for this preparation pass. The synchronous kernel has no
+        // optional-client branch per trace, and never takes/restores client state.
+        let offmain = self.playback.as_ref().is_some_and(|p| p._worker.is_some() && p.mixer.acoustics.is_some());
+        if !offmain {
+            self.prepare_acoustics(listener, submerged, dt, |a,b| world.sweep(a,b,Vec3::ZERO));
+            return;
+        }
+        let mut client = self.playback.as_mut().and_then(|p| p.mixer.acoustics.take());
         if let Some(c) = &mut client {
             c.begin(world);
             if self.acoustic_clock - dt <= 0. {
@@ -1307,14 +1314,15 @@ impl Audio {
             }
             c.execute();
         }
-        self.prepare_acoustics(world, listener, submerged, dt, client.as_mut());
+        if let Some(c) = client.as_mut() {
+            self.prepare_acoustics(listener, submerged, dt, |a,b| c.complete(world,a,b));
+        } else {
+            self.prepare_acoustics(listener, submerged, dt, |a,b| world.sweep(a,b,Vec3::ZERO));
+        }
         if let Some(p) = &mut self.playback { p.mixer.acoustics = client; }
     }
-    fn prepare_acoustics(&mut self, world:&World, listener:Vec3, submerged:bool, dt:f32, mut client:Option<&mut offmain::Client>) {
-        let mut sweep = |a,b| match &mut client {
-            Some(c) => c.complete(world,a,b),
-            None => world.sweep(a,b,Vec3::ZERO),
-        };
+    fn prepare_acoustics(&mut self, listener:Vec3, submerged:bool, dt:f32,
+        mut sweep: impl FnMut(Vec3,Vec3)->crate::collision::Trace) {
         self.acoustic_clock -= dt;
         if self.acoustic_clock <= 0. {
             self.acoustic_clock = 0.1;

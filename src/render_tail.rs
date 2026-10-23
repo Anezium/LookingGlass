@@ -23,15 +23,17 @@ impl State {
     }
 }
 thread_local! { static SUBMIT: RefCell<crate::render::submit_gl::Cache> = RefCell::default(); }
-pub(crate) struct Submission;
+pub(crate) struct Submission(bool);
 pub(crate) fn submission(bindings:bool, raster:bool) -> Submission {
-    SUBMIT.with(|s|s.borrow_mut().begin(bindings,raster)); Submission
+    let active = bindings || raster;
+    if active { SUBMIT.with(|s|s.borrow_mut().begin(bindings,raster)); }
+    Submission(active)
 }
-impl Drop for Submission { fn drop(&mut self) {SUBMIT.with(|s|s.borrow_mut().end());} }
+impl Drop for Submission { fn drop(&mut self) {if self.0 {SUBMIT.with(|s|s.borrow_mut().end());}} }
 fn filter(kind:u8,key:u32,value:[u32;4])->bool {SUBMIT.with(|s|s.borrow_mut().raster(kind,key,value))}
 fn raw_call(name: &'static str) {
     #[cfg(all(not(target_os="vita"),feature="sim_maps_probe"))]
-    STATE.with(|s| {let s=s.borrow(); if !s.tail && matches!(s.owner,Some(RenderPhase::WorldOpaque)) {crate::sim_maps::count(name,1);} });
+    if crate::light_profile::full() { STATE.with(|s| {let s=s.borrow(); if !s.tail && matches!(s.owner,Some(RenderPhase::WorldOpaque)) {crate::sim_maps::count(name,1);} }); }
     let _=name;
 }
 thread_local! { static STATE: RefCell<State> = RefCell::default(); }
@@ -100,8 +102,41 @@ fn draw() {
 mod hooks {
     use super::*;
     use std::ffi::{c_char,c_void};
+    // Miniquad owns one GL context and calls its table on the render thread only.
+    // Select these targets at frame boundaries, never during a draw or worker job.
     macro_rules! api {
         ($($name:ident($($arg:ident:$ty:ty),*));* $(;)?) => {
+            #[derive(Clone, Copy)]
+            #[allow(non_snake_case)]
+            struct Dispatch { $($name: unsafe extern "C" fn($($ty),*),)* }
+            static mut DISPATCH: Dispatch = Dispatch { $($name: api::$name,)* };
+            static DIRECT: std::sync::OnceLock<Dispatch> = std::sync::OnceLock::new();
+            mod entry {
+                use super::*;
+                $(#[allow(non_snake_case)] pub unsafe extern "C" fn $name($($arg:$ty),*) {
+                    // No TLS, profiling, cache flags, or RefCell on the raw path.
+                    (DISPATCH.$name)($($arg),*);
+                })*
+            }
+            fn dispatch(observed: bool) -> Dispatch {
+                DIRECT.get_or_init(|| Dispatch {
+                    $($name: {
+                        #[cfg(target_os="vita")] { api::$name }
+                        #[cfg(target_os="macos")] { unsafe {std::mem::transmute(api::raw(stringify!($name)))} }
+                    },)*
+                }).with_observers(observed)
+            }
+            impl Dispatch {
+                fn with_observers(mut self, observed: bool) -> Self {
+                    if observed { $(if let Some(p)=lookup_observed(stringify!($name).as_bytes()) {
+                        self.$name=unsafe {std::mem::transmute(p)};
+                    })* }
+                    self
+                }
+            }
+            pub(crate) fn lookup(name:&[u8])->Option<*mut c_void> {
+                Some(match name { $(n if n==stringify!($name).as_bytes()=>entry::$name as *const () as _,)* _=>return None })
+            }
             #[cfg(target_os="vita")]
             mod api { use super::*; extern "C" {$(pub fn $name($($arg:$ty),*);)*} }
             #[cfg(target_os="macos")]
@@ -114,7 +149,7 @@ mod hooks {
                     assert_ne!(h,0,"OpenGL library unavailable");
                     let n=std::ffi::CString::new(name).unwrap();dlsym(h as _,n.as_ptr())
                 }
-                $(#[allow(non_snake_case)] pub unsafe fn $name($($arg:$ty),*) {
+                $(#[allow(non_snake_case)] pub unsafe extern "C" fn $name($($arg:$ty),*) {
                     static FN:std::sync::OnceLock<unsafe extern "C" fn($($ty),*)>=std::sync::OnceLock::new();
                     let f=FN.get_or_init(|| {let p=raw(stringify!($name));assert!(!p.is_null(),"missing OpenGL entry");std::mem::transmute(p)});
                     f($($arg),*);
@@ -166,7 +201,7 @@ mod hooks {
     unsafe extern "C" fn link(p:u32) {api::glLinkProgram(p);register(p,crate::shader_cache::name());}
     #[cfg(target_os="macos")]
     unsafe extern "C" fn delete(p:u32) {unregister(p);api::glDeleteProgram(p);}
-    pub(crate) fn lookup(name:&[u8])->Option<*mut c_void> {
+    fn lookup_observed(name:&[u8])->Option<*mut c_void> {
         Some(match name {
             b"glUseProgram"=>use_program as *const () as _, b"glBindTexture"=>bind_texture as *const () as _,
             b"glDepthMask"=>depth_mask as *const () as _, b"glEnable"=>enable as *const () as _, b"glDisable"=>disable as *const () as _,
@@ -184,21 +219,86 @@ mod hooks {
             _=>return None,
         })
     }
-    #[cfg(target_os="macos")]
+    #[cfg(test)]
+    mod dispatch_tests {
+        use super::*;
+        #[test]
+        fn raw_targets_bypass_hooks_and_observed_targets_retain_them() {
+            let raw=dispatch(false);
+            let observed=dispatch(true);
+            macro_rules! check { ($($name:ident),*) => { $(
+                assert_eq!(observed.$name as *const () as usize,
+                    lookup_observed(stringify!($name).as_bytes()).unwrap() as usize);
+                assert_ne!(raw.$name as *const () as usize, observed.$name as *const () as usize);
+            )* }; }
+            check!(glUseProgram,glUniform1i,glBindBuffer,glActiveTexture,
+                glVertexAttribPointer,glEnableVertexAttribArray,glVertexAttribDivisor,
+                glDepthMask,glBufferSubData,glDrawElementsInstanced);
+            #[cfg(target_os="macos")]
+            assert_eq!(raw.glBindBuffer as *const () as usize,unsafe {api::raw("glBindBuffer")} as usize);
+            #[cfg(target_os="vita")]
+            assert_eq!(raw.glBindBuffer as *const () as usize,api::glBindBuffer as *const () as usize);
+        }
+    }
+    fn observed() -> bool {
+        let c=crate::render::vita_renderer::config();
+        if c.world_binding_cache || c.world_gl_state_cache {return true;}
+        // Raw GL observers are deliberately exclusive to the full profiler.
+        #[cfg(target_os="vita")]
+        { crate::light_profile::full() }
+        #[cfg(target_os="macos")]
+        {
+            static HOST:std::sync::OnceLock<bool>=std::sync::OnceLock::new();
+            *HOST.get_or_init(||std::env::var_os("LOOKING_GLASS_FRAME_PROFILE").is_some()
+                || (std::env::var_os("LOOKING_GLASS_SIM_MAPS_PROBE").is_some()
+                    && std::env::var("LOOKING_GLASS_SIM_MAPS_COUNTERS").as_deref()!=Ok("0")))
+                && crate::light_profile::full()
+        }
+    }
+    pub(crate) fn configure() {
+        let observed=observed();
+        // One table choice per frame; the driver targets themselves have no guard.
+        static LAST:std::sync::atomic::AtomicU8=std::sync::atomic::AtomicU8::new(2);
+        if LAST.swap(u8::from(observed),std::sync::atomic::Ordering::Relaxed)!=u8::from(observed) {
+            unsafe { DISPATCH=dispatch(observed); }
+        }
+    }
+    #[cfg(target_os="vita")]
+    pub(crate) fn loader_lookup(name:&[u8])->Option<*mut c_void> {
+        let c=crate::render::vita_renderer::config();
+        // Explicit light/off policy cannot become full when profile_mode changes.
+        // Resolve straight to vitaGL at startup in this common console case.
+        if !c.world_binding_cache && !c.world_gl_state_cache
+            && matches!(c.profiler,Some(crate::light_profile::Level::Light | crate::light_profile::Level::Off)) {
+            return None;
+        }
+        lookup(name)
+    }
     pub(crate) fn install() {
-        static ONCE:std::sync::Once=std::sync::Once::new();
-        ONCE.call_once(||macroquad::miniquad::gl::load_gl_funcs(|name|unsafe {
-            let p=lookup(name.as_bytes()).unwrap_or_else(||api::raw(name));
-            (!p.is_null()).then(||std::mem::transmute(p))
-        }));
+        configure();
+        #[cfg(target_os="macos")]
+        {
+            static ONCE:std::sync::Once=std::sync::Once::new();
+            ONCE.call_once(||macroquad::miniquad::gl::load_gl_funcs(|name|unsafe {
+                let p=match name {
+                    "glLinkProgram"=>link as *const () as _,
+                    "glDeleteProgram"=>delete as *const () as _,
+                    _=>if observed() {lookup(name.as_bytes()).unwrap_or_else(||api::raw(name))}
+                        else {api::raw(name)},
+                };
+                (!p.is_null()).then(||std::mem::transmute(p))
+            }));
+        }
     }
 }
 #[cfg(target_os="vita")]
-pub(crate) use hooks::lookup;
-#[cfg(target_os="macos")]
-pub(crate) use hooks::install;
-#[cfg(not(target_os="macos"))]
+pub(crate) use hooks::loader_lookup as lookup;
+#[cfg(any(target_os="vita",target_os="macos"))]
+pub(crate) use hooks::{install,configure};
+#[cfg(not(any(target_os="vita",target_os="macos")))]
 pub(crate) fn install() {}
+#[cfg(not(any(target_os="vita",target_os="macos")))]
+pub(crate) fn configure() {}
 
 #[cfg(test)]
 mod tests {
