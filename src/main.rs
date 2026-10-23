@@ -1,3 +1,7 @@
+// Both output streams reach the same Vita debug/file logging path. Keep each
+// formatted engine record, including its newline, in one serialized operation.
+#[macro_use]
+mod logging;
 mod sim_maps;
 mod acting;
 mod ambient_animation;
