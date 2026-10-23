@@ -119,10 +119,12 @@ mod frame_profile;
 mod frame_phases;
 mod game_thread;
 mod skin_worker;
+#[cfg_attr(feature="frame_total_only", path="frame_total_profile.rs")]
 mod light_profile;
 #[cfg(feature = "native_timing")]
 mod native_timing;
 #[cfg(feature="vita_renderer")]
+#[cfg_attr(feature="frame_total_only", path="render_direct.rs")]
 mod render_tail;
 mod kernel_alloc;
 #[cfg(feature="vita_renderer")]

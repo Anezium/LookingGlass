@@ -8,6 +8,8 @@ description = "Local Rust compatibility research for user-supplied Alice game da
 
 [features]
 default = []
+# Local A/B experiment: only frame-boundary wall timing, no GL observers.
+frame_total_only = ["vita_renderer"]
 # Passive bounded phase1 timing evidence; also requires private config opt-in.
 native_timing = []
 vita_renderer = []
