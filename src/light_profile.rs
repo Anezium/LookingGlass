@@ -343,13 +343,26 @@ fn export_window(map: &str, mode: Mode) -> anyhow::Result<()> {
 fn write_capture(r: &mut Ring, dir: &std::path::Path, map: &str, mode: Mode) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     let name = format!("{map}-{}-light-{}.csv", mode_name(mode), r.count);
-    let mut out = std::io::BufWriter::new(std::fs::File::create(dir.join(name))?);
-    r.write(&mut out)?;
-    out.flush()?;
-    let name = format!("{map}-{}-light-{}-doors.csv", mode_name(mode), r.count);
-    let mut doors = std::io::BufWriter::new(std::fs::File::create(dir.join(name))?);
-    r.write_door_windows(&mut doors)?;
-    doors.flush()?;
+    let path = dir.join(name);
+    let file = std::fs::File::create(&path)?;
+    let result: anyhow::Result<()> = (|| {
+        let mut out = std::io::BufWriter::new(file);
+        r.write(&mut out)?;
+        out.flush()?;
+        let name = format!("{map}-{}-light-{}-doors.csv", mode_name(mode), r.count);
+        let mut doors = std::io::BufWriter::new(std::fs::File::create(dir.join(name))?);
+        r.write_door_windows(&mut doors)?;
+        doors.flush()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        // Both writers are closed before removing the main CSV. A retry may
+        // contain more frames and use a different name, so do not leave an orphan.
+        if let Err(cleanup) = std::fs::remove_file(&path) {
+            return Err(error.context(format!("failed to remove incomplete capture {}: {cleanup}", path.display())));
+        }
+        return Err(error);
+    }
     r.exported = r.count;
     Ok(())
 }
@@ -420,6 +433,7 @@ mod tests {
         let doors = dir.join("fixture-full-light-1-doors.csv");
         std::fs::create_dir(&doors).unwrap();
         assert!(write_capture(&mut ring, &dir, "fixture", Mode::Full).is_err());
+        assert!(!dir.join("fixture-full-light-1.csv").exists());
         assert_eq!(ring.exported, 0);
         assert_eq!(ring.capture.as_ref().unwrap().len(), 1);
         std::fs::remove_dir(&doors).unwrap();
@@ -427,6 +441,29 @@ mod tests {
         assert_eq!(ring.exported, 1);
         assert_eq!(std::fs::read_to_string(dir.join("fixture-full-light-1.csv")).unwrap().lines().count(), 2);
         assert!(std::fs::read_to_string(doors).unwrap().ends_with("1,1,1,1,2,3\n"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn failed_doors_export_leaves_no_main_csv_when_more_frames_arrive() {
+        let dir = std::env::temp_dir().join(format!("lg-capture-more-frames-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ring = Ring::capture();
+        let origin = Instant::now();
+        ring.begin(origin); ring.current.door = [1, 2, 3]; ring.pending = true;
+        ring.begin(origin + std::time::Duration::from_millis(16));
+        let blocked = dir.join("fixture-full-light-1-doors.csv");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(write_capture(&mut ring, &dir, "fixture", Mode::Full).is_err());
+        assert!(!dir.join("fixture-full-light-1.csv").exists());
+        assert_eq!(ring.exported, 0);
+        ring.current.door = [4, 5, 6]; ring.pending = true;
+        ring.begin(origin + std::time::Duration::from_millis(32));
+        write_capture(&mut ring, &dir, "fixture", Mode::Full).unwrap();
+        assert_eq!(ring.exported, 2);
+        assert_eq!(ring.capture.as_ref().unwrap().len(), 2);
+        assert!(!dir.join("fixture-full-light-1.csv").exists());
+        assert_eq!(std::fs::read_to_string(dir.join("fixture-full-light-2.csv")).unwrap().lines().count(), 3);
+        assert!(std::fs::read_to_string(dir.join("fixture-full-light-2-doors.csv")).unwrap().ends_with("1,2,2,5,7,9\n"));
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
