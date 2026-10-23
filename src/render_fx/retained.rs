@@ -1366,7 +1366,7 @@ mod tests {
         crate::character::skinning::overlap::cpu_pair(|| {
             let scope=crate::kernel_alloc::Scope::begin();
             let mut v=[Vertex::new(0.,0.,0.,0.,0.,BLACK);400];let mut i=[0;3];
-            pack_kernel(&sources[..1],&mut v,&mut i,0,0,true);assert_eq!(scope.finish(),0);
+            pack_kernel::<true>(&sources[..1],&mut v,&mut i,0,0,true);assert_eq!(scope.finish(),0);
         },||{});
         let finished=std::sync::atomic::AtomicBool::new(false);
         let failure=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||

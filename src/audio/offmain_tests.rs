@@ -90,7 +90,11 @@ fn compare(
                     }
                     c.execute();
                 }
-                audio.prepare_acoustics(world, ear, submerged, 1. / 30., client.as_mut());
+                if let Some(c) = client.as_mut() {
+                    audio.prepare_acoustics(ear, submerged, 1. / 30., |a,b| c.complete(world,a,b));
+                } else {
+                    audio.prepare_acoustics(ear, submerged, 1. / 30., |a,b| world.sweep(a,b,Vec3::ZERO));
+                }
                 audio.playback.as_mut().unwrap().mixer.acoustics = client;
                 if frame > 0 {
                     hot_allocs += scope.finish();
