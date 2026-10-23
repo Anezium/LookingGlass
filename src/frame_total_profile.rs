@@ -1,7 +1,7 @@
 //! Frame-boundary-only instrumentation for a controlled native A/B build.
 #![allow(dead_code)]
 use crate::frame_profile::Mode;
-use std::{cell::RefCell, io::Write, time::Instant};
+use std::{io::Write, sync::Mutex, time::Instant};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -126,24 +126,35 @@ impl Ring {
         Ok(())
     }
 }
-thread_local! { static RING: RefCell<Ring> = RefCell::default(); }
-pub(crate) fn reset() { RING.with(|r| *r.borrow_mut() = Ring::default()); }
+// Only begin/end/reset/export touch this fixed buffer. Worker metric callbacks
+// above are empty. The lock is uncontended and costs the same in both builds.
+// Exported, aligned storage also prevents LLVM global merging from changing
+// the timer's access sequence according to unrelated renderer Config layouts.
+#[repr(align(64))]
+struct Storage(Mutex<Ring>);
+#[export_name="alice_frame_total_ring"]
+static RING: Storage = Storage(Mutex::new(Ring {
+    wall_us: [0; CAPACITY], count: 0, start: None, pending: false,
+    armed: false, overflow: false,
+}));
+pub(crate) fn reset() { *RING.0.lock().unwrap() = Ring::default(); }
 #[inline(never)]
 #[export_name="alice_frame_total_begin"]
 pub(crate) fn begin(_: &str, mode: Mode) {
-    if !capture_enabled() || !mode.is_bench() { return; }
-    RING.with(|r| { let mut r=r.borrow_mut(); r.armed=true; r.begin(Instant::now()); });
+    // Mode::read already requires profile_capture; avoid per-frame Config
+    // layout access here. Only explicitly armed benchmark modes are sampled.
+    if !mode.is_bench() { return; }
+    let mut r=RING.0.lock().unwrap(); r.armed=true; r.begin(Instant::now());
 }
 pub(crate) fn end(measured: bool) {
-    RING.with(|r| { let mut r=r.borrow_mut(); r.pending=r.armed && measured; });
+    let mut r=RING.0.lock().unwrap(); r.pending=r.armed && measured;
 }
 pub(crate) fn export(map: &str) -> anyhow::Result<()> {
     #[cfg(target_os="vita")]
     {
         use std::path::Path;
         if !capture_enabled() { return Ok(()); }
-        RING.with(|r| {
-            let r=r.borrow();
+        let r=RING.0.lock().unwrap();
             anyhow::ensure!(r.count == CAPACITY && !r.overflow, "incomplete frame-total capture");
             anyhow::ensure!(r.wall_us.iter().all(|v| *v>0), "invalid wall interval");
             let dir=Path::new("ux0:data/alice/private/frame_profile");
@@ -156,7 +167,6 @@ pub(crate) fn export(map: &str) -> anyhow::Result<()> {
             writeln!(doors,"1,60,60,,,")?; writeln!(doors,"61,120,60,,,")?; doors.flush()?;
             println!("[lg/frame-total] measured=120 gl_hooks=0 phase_timers=0 clock=begin-to-begin");
             Ok(())
-        })
     }
     #[cfg(not(target_os="vita"))]
     { let _=map; Ok(()) }
