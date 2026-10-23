@@ -267,6 +267,12 @@ mod hooks {
     #[cfg(target_os="vita")]
     pub(crate) fn loader_lookup(name:&[u8])->Option<*mut c_void> {
         let c=crate::render::vita_renderer::config();
+        // Cache and explicit light policies are immutable after Vita startup.
+        // Match the original observer table without a dispatch trampoline.
+        if c.world_binding_cache || c.world_gl_state_cache
+            || (c.light_gl_observers && c.profiler==Some(crate::light_profile::Level::Light)) {
+            return lookup_observed(name);
+        }
         // Explicit light/off policy cannot become full when profile_mode changes.
         // Resolve straight to vitaGL at startup in this common console case.
         if !c.world_binding_cache && !c.world_gl_state_cache
@@ -285,8 +291,7 @@ mod hooks {
                 let p=match name {
                     "glLinkProgram"=>link as *const () as _,
                     "glDeleteProgram"=>delete as *const () as _,
-                    _=>if observed() {lookup(name.as_bytes()).unwrap_or_else(||api::raw(name))}
-                        else {api::raw(name)},
+                    _=>lookup(name.as_bytes()).unwrap_or_else(||api::raw(name)),
                 };
                 (!p.is_null()).then(||std::mem::transmute(p))
             }));
