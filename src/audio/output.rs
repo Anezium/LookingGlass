@@ -262,6 +262,7 @@ impl Mixer {
 }
 #[cfg(feature = "native_timing")]
 impl Drop for Mixer { fn drop(&mut self) { self.metrics.native.mixer_dropped(); } }
+#[cfg(test)]
 impl PcmSource for Mixer { fn pcm_block(&mut self, epoch: u32) -> Block { self.premix(epoch) } }
 impl Iterator for Mixer {
     type Item = f32;
