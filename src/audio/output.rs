@@ -760,7 +760,12 @@ fn buffered_body_jobs<S: PcmSource, #[cfg(feature = "native_timing")] C: crate::
                     }
                     #[cfg(not(feature = "native_timing"))]
                     let _ = (point, total);
-                }) else { continue; };
+                }) else {
+                    // Back off even if the demand checks ever diverge, without
+                    // changing the sleep or rendered-block accounting.
+                    thread::yield_now();
+                    continue;
+                };
                 timings.push(total);
                 if config.mix {let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
             }
