@@ -12,6 +12,9 @@ def main():
     p.B=p.ROOT if label=='root' else p.ROOT/label;p.B.mkdir(exist_ok=True)
     if action=='launch':
      assert p.json.loads((p.B/'STAGE.json').read_text())['status']=='PASS','Launch requires completed per-arm staging/readbacks'
+     identity=p.json.loads((p.B/'SELF-IDENTITY.json').read_text())
+     expected=p.json.loads((p.ROOT.parent/'packages'/entry_for_label(label)['package']/'VERIFICATION.json').read_text())
+     assert identity['status']=='PASS' and identity['sha256']==expected['self_sha256'] and identity['bytes']==expected['self_bytes']
      import subprocess
      health=subprocess.run(['/usr/sbin/lsof','-nP','-iTCP:9999','-sTCP:LISTEN'],capture_output=True,text=True)
      p.rec('HOST-LOGGER-PRELAUNCH.json',dict(time=p.now(),returncode=health.returncode,listener=health.stdout))
