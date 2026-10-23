@@ -147,7 +147,10 @@ mod hooks {
                     static LIB:std::sync::OnceLock<usize>=std::sync::OnceLock::new();
                     let h=*LIB.get_or_init(||dlopen(c"/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL".as_ptr(),1) as usize);
                     assert_ne!(h,0,"OpenGL library unavailable");
-                    let n=std::ffi::CString::new(name).unwrap();dlsym(h as _,n.as_ptr())
+                    let n=std::ffi::CString::new(name).unwrap();
+                    let p=dlsym(h as _,n.as_ptr());
+                    assert!(!p.is_null(),"missing OpenGL entry: {name}");
+                    p
                 }
                 $(#[allow(non_snake_case)] pub unsafe extern "C" fn $name($($arg:$ty),*) {
                     static FN:std::sync::OnceLock<unsafe extern "C" fn($($ty),*)>=std::sync::OnceLock::new();
