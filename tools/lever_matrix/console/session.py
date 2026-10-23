@@ -75,6 +75,7 @@ def stage(label,arm,mode='full'):
     print('STAGE PASS',label,arm,mode,flush=True)
 def collect(label):
     p.B=ROOT/label;mapname=entry_for_label(label,PACKAGE/'CONSOLE-PROTOCOL.json')['map']
+    assert not (p.B/'COLLECT.json').exists(), 'Run already collected; never replace its export receipt'
     names=[f'{mapname}-fullbench-light-120.csv',f'{mapname}-fullbench-light-120-doors.csv']
     a=p.snapshot('exports',[p.R+'frame_profile/'+n for n in names]);b=p.snapshot('exports-independent-readback',[p.R+'frame_profile/'+n for n in names])
     assert [(x['present'],x.get('sha256')) for x in a]==[(x['present'],x.get('sha256')) for x in b]
@@ -87,6 +88,15 @@ def collect(label):
     for x in doors:
         assert int(x['frame_first'])==nxt and int(x['frame_last'])-int(x['frame_first'])+1==int(x['frames']);nxt=int(x['frame_last'])+1
     assert nxt==121
+    digest=p.sha(Path(a[0]['local']).read_bytes())
+    assert digest==a[0]['sha256'], 'Light CSV hash differs from readback receipt'
+    for earlier in sorted(ROOT.glob('*/COLLECT.json')):
+        previous=json.loads(earlier.read_text())['files'][0]
+        assert previous['sha256']==p.sha(Path(previous['local']).read_bytes()), 'Earlier collected CSV changed'
+        if previous['sha256']==digest:
+            failure=dict(status='INVALID_STALE_EXPORT',sha256=digest,earlier_collect=str(earlier),files=a,action='Stop and restore')
+            p.rec('COLLECT-INVALID.json',failure)
+            raise AssertionError('Light CSV equals an earlier run in this session: '+str(earlier))
     capture_log(label)
     p.rec('COLLECT.json',dict(time=p.now(),files=a,required=names))
     p.rec('VALIDATION.json',dict(status='PASS_EXPORT_INTEGRITY',samples=120,door_samples=120,positive_wall=True,frame_cpu_us_unavailable=True))

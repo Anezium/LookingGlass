@@ -15,10 +15,10 @@ def main():
      identity=p.json.loads((p.B/'SELF-IDENTITY.json').read_text())
      expected=p.json.loads((p.ROOT.parent/'packages'/entry_for_label(label)['package']/'VERIFICATION.json').read_text())
      assert identity['status']=='PASS' and identity['sha256']==expected['self_sha256'] and identity['bytes']==expected['self_bytes']
-     import subprocess
-     health=subprocess.run(['/usr/sbin/lsof','-nP','-iTCP:9999','-sTCP:LISTEN'],capture_output=True,text=True)
-     p.rec('HOST-LOGGER-PRELAUNCH.json',dict(time=p.now(),returncode=health.returncode,listener=health.stdout))
-     assert health.returncode==0 and 'LISTEN' in health.stdout,'Host PrincessLog receiver absent; do not launch'
+     import runpy
+     health=runpy.run_path(str(p.ROOT/'host-log-receiver.py'))['listener_provenance']()
+     p.rec('HOST-LOGGER-PRELAUNCH.json',dict(time=p.now(),**health))
+     assert health['status']=='PASS', 'Host PrincessLog receiver absent; start the copied receiver after admission'
      logfile=p.Path('/Users/anezium/vita-j0/work/vita.log')
      p.rec('LAUNCH.json',dict(time=p.now(),host_us=time.monotonic_ns()//1000,log_offset=logfile.stat().st_size));print(p.request('vita_launch',dict(title_id='ALICELG01')),flush=True);time.sleep(20)
     elif action=='button':p.button(sys.argv[3]);time.sleep(float(sys.argv[4]) if len(sys.argv)>4 else 1)
@@ -55,7 +55,8 @@ def main():
       time.sleep(1)
     elif action=='resume':
      quiet_seconds=45
-     resume_button=sys.argv[3] if len(sys.argv)>3 else 'circle'
+     assert len(sys.argv)==4, 'Resume requires explicit circle or cross from the inspected overlay'
+     resume_button=sys.argv[3]
      assert resume_button in ['circle','cross']
      p.cmd('release all');quiet=dict(time=p.now(),host_us=time.monotonic_ns()//1000,post_resume_observation_delay_seconds=quiet_seconds,resume_button=resume_button)
      p.button(resume_button);quiet.update(resume_input_completed_at=p.now(),resume_input_completed_host_us=time.monotonic_ns()//1000);p.rec('QUIET-START.json',quiet)

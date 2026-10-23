@@ -20,6 +20,23 @@ def audio(text):
    except (ValueError,KeyError):continue
    metrics[group][k]=stats(values)
  return dict(window_counts={k:len(v) for k,v in groups.items()},metrics=metrics,raw=groups,dropped_reports_note='Individual reported values; sum is not a cumulative loss total.')
+def audit_offmain(text,entry):
+ lines=[l for l in text.splitlines() if '[lg/audio-offmain]' in l]
+ expected=entry['config_arm']=='audio' and entry['arm']=='B'
+ engagement=[kv(l) for l in lines if 'requested=' in l or 'active=' in l]
+ wanted='true' if expected else 'false'
+ assert engagement and all(x.get('requested')==wanted and x.get('active')==wanted for x in engagement), 'audio_offmain requested/active mismatch or missing receipt'
+ counters=[]
+ for line in lines:
+  row=kv(line)
+  if any(k in row for k in ('submitted','reused','fallback')):
+   values={k:int(row[k]) for k in ('submitted','reused','fallback')}
+   assert all(v>=0 for v in values.values()), 'Negative offmain counter'
+   counters.append(values)
+ if expected:assert counters, 'Missing audio B offmain fallback counters'
+ return dict(status='PASS',requested=expected,active=expected,counters=counters,
+     fallback_policy='Report each raw window; nonzero fallback is not a stop and values are not pooled')
+
 def audit(label,root=r,package=None,protocol=None):
  root=Path(root);package=Path(package) if package else root.parent
  protocol=Path(protocol) if protocol else package/'CONSOLE-PROTOCOL.json'
@@ -70,7 +87,8 @@ def audit(label,root=r,package=None,protocol=None):
  assert all(v>0 for v in audio_bench['window_counts'].values()),'Missing benchmark audio counters'
  phases=[k+'_cpu_us' for k in ['world_opaque','world_alpha','actors','fx','hud','present']]
  offmain=[l for l in t.splitlines() if '[lg/audio-offmain]' in l]
- result=dict(status='PASS',observer_checks=observer_checks,gl_observers=availability['gl_observers'],unavailable_fields=availability['unavailable_fields'],timing_gate_field='wall_us',map=mapname,runtime_config_matches_readback=True,actual_config=configs[0],actual_clocks_MHz=[444,222,222,166],retained=True,complete_benchmark=True,clean_exit=True,fields_ms={k:stats(None if x[k] is None else x[k]/1000 for x in rows) for k in rows[0] if k.endswith('_us')},six_render_phases_ms=stats(None if any(x[k] is None for k in phases) else sum(x[k] for k in phases)/1000 for x in rows),counter_stats={k:stats(x[k] for x in rows) for k in rows[0] if not k.endswith('_us') and k not in ['frame','gl_observers']},doors=list(csv.DictReader(Path(coll['files'][1]['local']).open())),audio=dict(entry_loading_information_only=audio(before),benchmark_including_warmup=audio_bench,shutdown_information=audio(after)),offmain_lines=offmain,memory_samples=[kv(l) for l in t.splitlines() if '[miniquad/vita] memory reason=' in l],camera_lines=[l for l in t.splitlines() if 'camera_eye=' in l or 'bench: camera frozen' in l],world_age='unavailable',complete_NPC_state='unavailable',listening='unavailable',continuous_loading_peak='not measured; sampled receipts only')
+ offmain_audit=audit_offmain(t,entry)
+ result=dict(status='PASS',observer_checks=observer_checks,gl_observers=availability['gl_observers'],unavailable_fields=availability['unavailable_fields'],timing_gate_field='wall_us',map=mapname,runtime_config_matches_readback=True,actual_config=configs[0],actual_clocks_MHz=[444,222,222,166],retained=True,complete_benchmark=True,clean_exit=True,fields_ms={k:stats(None if x[k] is None else x[k]/1000 for x in rows) for k in rows[0] if k.endswith('_us')},six_render_phases_ms=stats(None if any(x[k] is None for k in phases) else sum(x[k] for k in phases)/1000 for x in rows),counter_stats={k:stats(x[k] for x in rows) for k in rows[0] if not k.endswith('_us') and k not in ['frame','gl_observers']},doors=list(csv.DictReader(Path(coll['files'][1]['local']).open())),audio=dict(entry_loading_information_only=audio(before),benchmark_including_warmup=audio_bench,shutdown_information=audio(after)),offmain_lines=offmain,offmain_audit=offmain_audit,memory_samples=[kv(l) for l in t.splitlines() if '[miniquad/vita] memory reason=' in l],camera_lines=[l for l in t.splitlines() if 'camera_eye=' in l or 'bench: camera frozen' in l],world_age='unavailable',complete_NPC_state='unavailable',listening='unavailable',continuous_loading_peak='not measured; sampled receipts only')
  (run/'AUDIT.json').write_text(json.dumps(result,indent=2)+'\n')
  print(label,'PASS wall ms',result['fields_ms']['wall_us'])
  return result

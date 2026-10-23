@@ -84,6 +84,9 @@ def main():
                 if entry['map']=='pandemonium':
                     from map_identity import HUMAN_AUTO
                     (run/'SAVE-IDENTITY.json').write_text(json.dumps(dict(sha256=HUMAN_AUTO,bytes=181900,map='pandemonium$first',visit_key='pandemonium$first',canonical_map='pandemonium',fresh_session_start_readback=True,companions_restored_and_verified=True,independent_readbacks=2)))
+                enabled=config['audio_offmain'];value=str(enabled).lower()
+                runtime+=f'[lg/audio-offmain] requested={value} active={value} mode=static-traces-only\n'
+                if enabled:runtime+='[lg/audio-offmain] submitted=12 reused=3 fallback=2\n'
                 (run/'runtime-log.txt').write_text(runtime)
                 doors=root/'synthetic-doors.csv';doors.write_text('frame_first,frame_last,frames,hatter_door_world_traces,hatter_door_own_traces,hatter_door_trace_pairs_deferred\n1,60,60,,,\n61,120,60,,,\n')
                 (run/'COLLECT.json').write_text(json.dumps(dict(files=[dict(local=str(csvpath)),dict(local=str(doors))])))

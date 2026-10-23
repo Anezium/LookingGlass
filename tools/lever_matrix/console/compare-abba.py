@@ -50,7 +50,7 @@ def main():
         matched_startup_pose_within_pairs=True,cameras=cam,gl_observer_hooks_per_arm=0,
         observer_cost_correction=None,measurement='begin-to-begin wall; all other profiler fields unavailable',
         simulation_identity='full world age and NPC state unavailable; pose equality alone is insufficient',
-        next_action='Restore the fresh human-restore state and inspect HOME. A repeat or later session requires fresh ownership/time admission.')
+        next_action=('Continue to Hedge3 only if every evidence/audio/identity/save/visual gate passes and the admitted driver identity and remaining four-launch budget pass. Pandemonium INCONCLUSIVE leaves the lever unresolved.' if seq[0]['map']=='pandemonium' and status!='FAIL_WALL_GATE' else 'Restore the fresh human-restore state and inspect HOME. A repeat or later session requires fresh ownership/time admission.'))
     output=args.output or args.root/(args.block+'-ABBA-GATE.json');output.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps(result,indent=2));sys.exit(0 if status=='PASS_WALL_GATE' else 2)
 

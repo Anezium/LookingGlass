@@ -99,6 +99,7 @@ def main():
         assert [x['local'] for x in collected['files']]==[str(light),str(doors)]
         assert all(Path(x['local']).is_absolute() for x in collected['files'])
         record('collect accepts blank frame_cpu_us',rows=120,blank_frame_cpu_us_rows=120,positive_wall_rows=120,doors_coverage=[[1,60],[61,120]],snapshot_calls=snapshots,absolute_local_paths=True)
+        (run/'COLLECT.json').unlink()
         # Existing row count/positive wall/doors checks must still reject bad exports.
         valid=light.read_text();valid_doors=doors.read_text()
         for name,bad,bad_doors in [('zero wall',valid.replace('60000','0',1),valid_doors),('missing row','\n'.join(valid.splitlines()[:-1])+'\n',valid_doors),('broken doors',valid,valid_doors.replace('61,120,60','62,120,59'))]:
@@ -109,6 +110,22 @@ def main():
                 else:raise AssertionError('collect accepted '+name)
             record('collect rejects '+name)
         light.write_text(valid);doors.write_text(valid_doors)
+        # Duplicate light hashes are rejected against any earlier run of this session.
+        with no_transport(),patch.object(c,'ROOT',temp),patch.object(p,'ROOT',temp),patch.object(p,'snapshot',snapshot),patch.object(c,'capture_log',lambda label:None),contextlib.redirect_stdout(io.StringIO()):
+            c.collect(label)
+            for duplicate in [sequence[1]['label'],next(x['label'] for x in sequence if x['map']=='hedge3')]:
+                (temp/duplicate).mkdir(exist_ok=True)
+                try:c.collect(duplicate)
+                except AssertionError as error:assert 'earlier run' in str(error)
+                else:raise AssertionError('Duplicate CSV hash accepted')
+                assert json.loads((temp/duplicate/'COLLECT-INVALID.json').read_text())['status']=='INVALID_STALE_EXPORT'
+                record('collect rejects stale light CSV from earlier session run',label=duplicate)
+            # A fresh hash for a different run remains admissible.
+            distinct=light.with_name('distinct-light.csv');distinct.write_text(valid.replace('60000','60001'))
+            def fresh_snapshot(tag,paths):
+                return [dict(path=remote,present=True,local=str(local),sha256=sha(local)) for remote,local in zip(paths,[distinct,doors])]
+            with patch.object(p,'snapshot',fresh_snapshot):c.collect(sequence[1]['label'])
+            record('collect accepts distinct fresh CSV hash')
         # Run actual stage() with transport mocked, keeping manifest/config readbacks real.
         (temp/'BASELINE.json').write_text('{}')
         class FakeSession:
@@ -158,10 +175,11 @@ def main():
                         return real_read(path)
                     def request(name,*a,**k):requests.append(name);return 'MOCK ONLY'
                     def sleep(seconds):clock[0]+=max(seconds,1)
-                    with no_transport(),patch.object(p,'ROOT',temp),patch.object(p,'request',request),patch.object(p,'cmd',lambda *a:None),patch.object(p,'button',lambda *a:None),patch.object(p,'shot',lambda *a:'MOCK IMAGE'),patch.object(Path,'read_bytes',read_bytes),patch.object(time,'monotonic',lambda:clock[0]),patch.object(time,'sleep',sleep),patch.object(sys,'argv',['ui.py',label,action]),contextlib.redirect_stdout(io.StringIO()):
+                    with no_transport(),patch.object(p,'ROOT',temp),patch.object(p,'request',request),patch.object(p,'cmd',lambda *a:None),patch.object(p,'button',lambda *a:None),patch.object(p,'shot',lambda *a:'MOCK IMAGE'),patch.object(Path,'read_bytes',read_bytes),patch.object(time,'monotonic',lambda:clock[0]),patch.object(time,'sleep',sleep),patch.object(sys,'argv',['ui.py',label,action]+(['cross' if entry['map']=='pandemonium' else 'circle'] if action=='resume' else [])),contextlib.redirect_stdout(io.StringIO()):
                         ui.main()
                     quit_count=requests.count('vita_quit');should_quit=p95>=8
                     assert quit_count==int(should_quit),(label,action,p95,requests)
+                    if action=='resume':assert json.loads((run/'QUIET-START.json').read_text())['resume_button']==('cross' if entry['map']=='pandemonium' else 'circle')
                     if action=='resume' and not should_quit:assert reads[0]>=2,'Must observe unfinished bench before completion'
                     record('UI candidate producer stop on both roles',label=label,arm=entry['arm'],action=action,producer_p95_ms=p95,quit_calls=quit_count,expected_quit=should_quit)
         for label in ['reference','fixture-A','fake-reg01-hedge3-A','reg02-hedge3-B-A','reg01-hedge3-A-extra','human-restore']:
@@ -212,6 +230,8 @@ def main():
     contracts=subprocess.run([str(PY),str(OUT/'scripts/test-matrix-contracts.py')],cwd=OUT,env=env,capture_output=True,text=True,timeout=60)
     assert contracts.returncode==0,contracts.stdout+contracts.stderr
     record('matrix identity/arming/budget contracts',returncode=contracts.returncode,stdout=contracts.stdout,stderr=contracts.stderr)
+    contract_proof=json.loads((OUT/'proof/MATRIX-CONTRACT-TESTS.json').read_text())
+    record('Round 2 amendments and real manifest validation',contract_checks=len(contract_proof['checks']),proof_sha256=sha(OUT/'proof/MATRIX-CONTRACT-TESTS.json'))
     identities={str(path.relative_to(OUT)):dict(bytes=path.stat().st_size,sha256=sha(path)) for path in sorted((OUT/'packages').rglob('*')) if path.is_file()}
     record('current package identities',files=identities)
     seal=OUT/'ARTIFACT-SHA256.json'
