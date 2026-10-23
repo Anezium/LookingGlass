@@ -243,7 +243,8 @@ mod hooks {
     fn observed() -> bool {
         let c=crate::render::vita_renderer::config();
         if c.world_binding_cache || c.world_gl_state_cache {return true;}
-        // Raw GL observers are deliberately exclusive to the full profiler.
+        if c.light_gl_observers && c.profiler==Some(crate::light_profile::Level::Light) {return true;}
+        // Otherwise retain the existing full-profiler observer policy.
         #[cfg(target_os="vita")]
         { crate::light_profile::full() }
         #[cfg(target_os="macos")]
@@ -269,6 +270,7 @@ mod hooks {
         // Explicit light/off policy cannot become full when profile_mode changes.
         // Resolve straight to vitaGL at startup in this common console case.
         if !c.world_binding_cache && !c.world_gl_state_cache
+            && !(c.light_gl_observers && c.profiler==Some(crate::light_profile::Level::Light))
             && matches!(c.profiler,Some(crate::light_profile::Level::Light | crate::light_profile::Level::Off)) {
             return None;
         }

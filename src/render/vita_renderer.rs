@@ -87,6 +87,8 @@ pub struct Config {
     pub actor_single_prepare: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
+    /// Retain all GL observers under light profiling for matched comparisons.
+    pub light_gl_observers: bool,
     /// Arm bounded capture and profile-mode polling; reports only at pause/end.
     pub profile_capture: bool,
     pub skin_worker_bench: bool,
@@ -254,6 +256,7 @@ impl Default for Config {
             render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
+            light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
@@ -2348,6 +2351,14 @@ mod tests {
     }
     #[test]
     fn profiler_and_worker_bench_configuration_is_strict() {
+        assert!(!Config::default().light_gl_observers);
+        for enabled in [false,true] {
+            let c:Config=serde_json::from_value(serde_json::json!({"profiler":"light","light_gl_observers":enabled})).unwrap();
+            c.validate().unwrap(); assert_eq!(c.light_gl_observers,enabled);
+        }
+        for invalid in [serde_json::json!(0),serde_json::json!("true"),serde_json::Value::Null] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({"light_gl_observers":invalid})).is_err());
+        }
         for level in ["off","light","full"] {
             let c:Config=serde_json::from_value(serde_json::json!({"profiler":level,"skin_worker_bench":true,"skin_overlap":false,"skin_workers":0})).unwrap();
             c.validate().unwrap(); assert!(c.skin_worker_bench); assert_eq!(c.skin_workers,0);
