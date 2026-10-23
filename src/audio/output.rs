@@ -328,6 +328,22 @@ fn producer_step<S: PcmSource>(source: &mut S, tx: &queue::Sender<Block>,
     point(ProducerPoint::Pushed, total);
     Some(total)
 }
+/// A changed demand check is recoverable; keep it visible in the existing
+/// rejection counter without turning a transient full queue into permanent silence.
+fn producer_step_or_retry<S: PcmSource>(source: &mut S, tx: &queue::Sender<Block>,
+    metrics: &Metrics, cushion: usize, warned: &mut bool,
+    point: impl FnMut(ProducerPoint, f64)) -> Option<f64>
+{
+    let total = producer_step(source, tx, metrics, cushion, point);
+    if total.is_none() {
+        metrics.rejected.fetch_add(1, Ordering::Relaxed);
+        if !*warned {
+            *warned = true;
+            eprintln!("[lg/audio-producer] demand_changed retry=1 counted_in=rejected_sinks");
+        }
+    }
+    total
+}
 pub struct Callback {
     ready: queue::Receiver<Block>,
     block: [f32; SAMPLES],
@@ -714,6 +730,7 @@ fn buffered_body_jobs<S: PcmSource, #[cfg(feature = "native_timing")] C: crate::
         let mut report=Instant::now();let mut timings=Vec::with_capacity(128);
         let mut stages:[Vec<f64>;7]=std::array::from_fn(|_|Vec::with_capacity(128));
         let mut wake = Instant::now();
+        let mut retry_warned = false;
         let (mut gap_max, mut sleep_over, mut gaps, mut log_ms) = (0f64, 0f64, 0u32, 0f64);
         while !done.load(Ordering::Acquire) {
             #[cfg(feature = "native_timing")]
@@ -733,7 +750,7 @@ fn buffered_body_jobs<S: PcmSource, #[cfg(feature = "native_timing")] C: crate::
             else {
                 #[cfg(feature = "native_timing")]
                 let mut native_begin = None;
-                let total = producer_step(&mut source, &tx, &stats, ready_blocks, |point, total| {
+                let Some(total) = producer_step_or_retry(&mut source, &tx, &stats, ready_blocks, &mut retry_warned, |point, total| {
                     #[cfg(feature = "native_timing")]
                     match point {
                         ProducerPoint::Epoch => native_begin = Some(diagnostic.block_begin()),
@@ -742,7 +759,7 @@ fn buffered_body_jobs<S: PcmSource, #[cfg(feature = "native_timing")] C: crate::
                     }
                     #[cfg(not(feature = "native_timing"))]
                     let _ = (point, total);
-                }).expect("producer owns the only queue sender and checked demand");
+                }) else { continue; };
                 timings.push(total);
                 if config.mix {let mut costs=block::costs();costs[5]=(total-costs.iter().sum::<f64>()).max(0.);for (dst,v) in stages.iter_mut().zip(costs){dst.push(v);}}
             }
@@ -828,6 +845,30 @@ pub(super) fn native_music_test_guard()->Option<std::sync::MutexGuard<'static,()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn producer_retries_full_queue_without_rendering_or_losing_pcm() {
+        let (tx, rx) = queue::channel(2);
+        let metrics = Metrics::default();
+        let mut source = Plain(rodio::buffer::SamplesBuffer::new(2, 44100, vec![0.25; SAMPLES]));
+        let mut warned = false;
+        tx.push(Block::silence(0)).ok().unwrap();
+        metrics.queued_samples.store(SAMPLES, Ordering::Relaxed);
+        for expected in 1..=2 {
+            assert!(producer_step_or_retry(&mut source, &tx, &metrics, 1, &mut warned, |point, _| {
+                assert_eq!(point, ProducerPoint::Full);
+            }).is_none());
+            assert!(warned);
+            assert_eq!(metrics.rejected.load(Ordering::Relaxed), expected);
+            assert_eq!(metrics.queued_samples.load(Ordering::Relaxed), SAMPLES);
+            assert_eq!(metrics.starved.load(Ordering::Relaxed), 0);
+        }
+        rx.pop().unwrap();
+        metrics.queued_samples.fetch_sub(SAMPLES, Ordering::Relaxed);
+        assert!(producer_step_or_retry(&mut source, &tx, &metrics, 1, &mut warned, |_, _| {}).is_some());
+        assert!(rx.pop().unwrap().samples.iter().all(|&v| v == 0.25));
+        assert_eq!(metrics.queued_samples.load(Ordering::Relaxed), SAMPLES);
+        assert_eq!(metrics.rejected.load(Ordering::Relaxed), 2);
+    }
     #[cfg(feature = "native_timing")]
     #[test]
     fn native_raw_starvation_observes_actual_callback_late_binding_and_legacy_resets() {
