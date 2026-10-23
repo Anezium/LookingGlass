@@ -96,6 +96,15 @@ impl Default for Ring {
         start: None, pending: false, armed: false, overflow: false } }
 }
 impl Ring {
+    // Pause and level-transition reports in full mode have no bench window.
+    // Keep this decision outside target cfgs so host tests exercise the exact
+    // eligibility and validation path used by Vita export before any file I/O.
+    fn report_due(&self, mode: Mode) -> anyhow::Result<bool> {
+        if !self.armed || !mode.is_bench() { return Ok(false); }
+        anyhow::ensure!(self.count == CAPACITY && !self.overflow, "incomplete frame-total capture");
+        anyhow::ensure!(self.wall_us.iter().all(|v| *v > 0), "invalid wall interval");
+        Ok(true)
+    }
     // Attribute the whole begin-to-begin interval to the previous accepted frame.
     // In particular, the final report-only begin closes frame 120 before export.
     #[inline(never)]
@@ -155,8 +164,7 @@ pub(crate) fn export(map: &str) -> anyhow::Result<()> {
         use std::path::Path;
         if !capture_enabled() { return Ok(()); }
         let r=RING.0.lock().unwrap();
-            anyhow::ensure!(r.count == CAPACITY && !r.overflow, "incomplete frame-total capture");
-            anyhow::ensure!(r.wall_us.iter().all(|v| *v>0), "invalid wall interval");
+        if !r.report_due(crate::frame_profile::mode())? { return Ok(()); }
             let dir=Path::new("ux0:data/alice/private/frame_profile");
             anyhow::ensure!(dir.is_dir(), "existing frame_profile directory required");
             let stem=format!("{map}-{}-light-{}", crate::frame_profile::mode().name(), r.count);
@@ -175,6 +183,24 @@ pub(crate) fn export(map: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod frame_total_tests {
     use super::*;
+    #[test]
+    fn full_mode_pause_and_transition_reports_are_noops() {
+        let mut r=Ring::default();
+        // Actual pre-arm full-mode state: no captured frames, no interval.
+        assert_eq!(r.count, 0);
+        assert!(!r.report_due(Mode::Full).unwrap());
+        assert!(!r.report_due(Mode::FullBench).unwrap());
+        // A mode change away from an armed bench also must not export.
+        r.armed=true;
+        assert!(!r.report_due(Mode::Full).unwrap());
+        assert!(r.report_due(Mode::FullBench).is_err());
+        r.count=CAPACITY; r.wall_us=[200; CAPACITY];
+        assert!(r.report_due(Mode::FullBench).unwrap());
+        r.overflow=true;
+        assert!(r.report_due(Mode::FullBench).is_err());
+        r.overflow=false; r.wall_us[119]=0;
+        assert!(r.report_due(Mode::FullBench).is_err());
+    }
     #[test]
     fn measured_intervals_exclude_warmup_and_close_final_frame() {
         let origin=Instant::now(); let mut r=Ring::default();
