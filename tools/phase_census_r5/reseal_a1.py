@@ -10,7 +10,6 @@ assert sha(O/'CONSOLE-BRIEF.md')==BRIEF
 assert not git('status','--porcelain'), 'Commit amendment tools before resealing'
 head=git('rev-parse','HEAD');branch=git('branch','--show-current')
 assert branch=='vita-phase-census-r5-20261024'
-assert git('rev-parse','refs/remotes/origin/'+branch)==head, 'Plain-push before resealing'
 remote_head=git('ls-remote','--heads','origin',branch)
 assert remote_head.split()[0]==head, 'Remote branch must equal amendment commit'
 old=json.loads((O/'ARTIFACT-SHA256.json').read_text())
