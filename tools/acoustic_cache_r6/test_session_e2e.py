@@ -27,7 +27,7 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False):
  package=work/'package';root=package/'session-s7-acoustic-cache';root.mkdir(parents=True)
  for name in ['CONSOLE-PROTOCOL.json','PACKAGE-IDENTITY.json']:
   if (source/name).exists():shutil.copyfile(source/name,package/name)
- for name in ['configs','packages','host']:(package/name).symlink_to(source/name,target_is_directory=True)
+ for name in ['configs','packages','host','console']:(package/name).symlink_to(source/name,target_is_directory=True)
  (package/'scripts').mkdir()
  if sealed:
   with zipfile.ZipFile(sealed) as archive:
@@ -188,6 +188,8 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False):
     try:runpy.run_path(str(root/name if (root/name).exists() else package/'scripts'/name),run_name='__main__')
     except SystemExit as error:
      assert error.code in (None,0),(name,error.code)
+  call('bind_helpers.py','--root',root,'--package',package)
+  assert json.loads((root/'HELPER-BINDING.json').read_text())['status']=='PASS'
   call('verify-human-entry.py');call('preserve.py')
   receipt=json.loads((root/'SESSION.json').read_text())
   assert set(receipt['package_self_sha256'])=={'baseline','cache','cache-census'}
