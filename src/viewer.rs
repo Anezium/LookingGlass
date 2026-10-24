@@ -1142,6 +1142,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     loop {
         #[cfg(feature = "native_timing")]
         { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        crate::phase_census::begin_configured();
+        let mut census_block = crate::phase_census::span(crate::phase_census::Region::Other);
         crate::frame_profile::begin_viewer_frame();
         crate::frame_phases::begin();
         #[cfg(feature="vita_renderer")]
@@ -2310,6 +2313,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         }
                     }
                 }
+                drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Objects);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_interactions"); }
                 #[cfg(target_os = "vita")]
@@ -2340,6 +2344,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Some(sound) = events.sound {
                     audio.world_effect(&sound);
                 }
+                drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Movers);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_movers"); }
                 #[cfg(target_os = "vita")]
@@ -2347,12 +2352,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     drop(viewer_block);
                     viewer_block = crate::frame_profile::span("frame_movers");
                     crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
                 }
                 let was_cinematic = interactions.scripted();
                 let mover_dt = if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt };
                 interactions.companions_for_movers(&npcs.companions());
                 interactions.actors_for_movers(&npcs.targets());
                 interactions.advance_school(mover_dt, &scene.map, &mut scene.world, &mut player)?;
+                drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::PlayerMovement);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_movement"); }
                 #[cfg(target_os = "vita")]
@@ -2360,6 +2367,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     drop(viewer_block);
                     viewer_block = crate::frame_profile::span("frame_movement");
                     crate::frame_profile::set_owner(crate::frame_profile::Owner::Movement);
+                    crate::phase_census::set_owner(crate::phase_census::Owner::Player);
                 }
                 if was_cinematic && !interactions.scripted() {
                     yaw = player.script_facing;
@@ -2565,6 +2573,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && !flying
             && stats.alive();
         if simulate {
+        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Other);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_story"); }
         #[cfg(target_os = "vita")]
@@ -2572,6 +2581,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_story");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         hints.sync(&interactions);
         if (summon_cat || (story_active && pressed(KeyCode::C))) && !in_transport {
@@ -2839,6 +2849,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_particles");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         if !paused && !menu && !inventory_menu && !console_input && focused && stats.alive() {
             environment_clock += world_dt;
@@ -3248,6 +3259,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_audio");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         for sound in weapon_sounds {
             audio.weapon_effect(sound);
@@ -3273,6 +3285,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some((time, finished)) = rage_scene.filter(|_| simulate) {
             alice.rage_scene(time, finished, &player);
         }
+        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Other);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_camera"); }
         #[cfg(target_os = "vita")]
@@ -3280,6 +3293,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_camera");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Camera);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Camera);
         }
         let mut pand_camera = interactions.camera_after(
             interactions
@@ -3430,6 +3444,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_audio_mix");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         audio.prepare(
             &mut assets,
@@ -3592,6 +3607,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             p.stage("skin-gather-begin");
         }
         #[cfg(feature="vita_renderer")]
+        let census_gather = crate::phase_census::span(crate::phase_census::Region::ActorGather);
+        #[cfg(feature="vita_renderer")]
         let mut skin_frame = if crate::render::vita_renderer::config().skin_overlap && !world_only {
             #[cfg(target_os="vita")]
             {
@@ -3622,9 +3639,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_world");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.stage("world-begin"); }
+        #[cfg(feature="vita_renderer")]
+        drop(census_gather);
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &mut load_probe {
@@ -3635,9 +3655,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(frame) = &mut skin_frame {
             let _collect = crate::frame_profile::span("skin_collect");
             crate::audio::game_stage(2);
+            let _census = crate::phase_census::span(crate::phase_census::Region::ActorCollect);
             frame.collect();
             crate::audio::game_stage(0);
         }
+        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::ActorPublication);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_characters"); }
         #[cfg(target_os = "vita")]
@@ -3688,6 +3710,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
         drop(actors_timer);
+        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Other);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_objects"); }
         #[cfg(target_os = "vita")]
@@ -3695,6 +3718,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_objects");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         if draw_world && !world_only {
             power_art.draw(
@@ -3706,6 +3730,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 pickup_clock,
             );
         }
+        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Fx);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_world_particles"); }
         #[cfg(target_os = "vita")]
@@ -3713,6 +3738,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_world_particles");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         {
             scene.draw_with_particles(
@@ -3730,6 +3756,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 drop(viewer_block);
                 viewer_block = crate::frame_profile::span("frame_effects");
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
             }
             if !world_only {
                 if let Some(s) = &interactions.encounters {
@@ -3781,6 +3808,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         let direct_fx = crate::render_fx::retained_active();
         if !world_only || !scene.retained_active() { scene.finish_fx(true); }
+        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Other);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_first_person"); }
         #[cfg(target_os = "vita")]
@@ -3788,6 +3816,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_first_person");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         if !world_only && !third_person
             && !pand_cinematic
@@ -3814,6 +3843,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_capture");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
@@ -3839,6 +3869,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if freeze_capture { paused = pause_before_capture; clock.pause(); }
         if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
+        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Hud);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_hud"); }
         #[cfg(target_os = "vita")]
@@ -4163,6 +4194,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             console.draw(&ui);
         }
+        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Other);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_save"); }
         #[cfg(target_os = "vita")]
@@ -4170,6 +4202,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(viewer_block);
             viewer_block = crate::frame_profile::span("frame_save");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
+            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         drop(hud_timer);
         if let Some(slot) = pending_menu_save.take() {
@@ -4274,6 +4307,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 || interactions.school.as_ref().is_some_and(|s| s.cinematic()) { reasons |= nt::CINEMA; }
             r.end(timing_state!(), reasons);
         });
+        drop(census_block);
         crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
         #[cfg(target_os = "vita")]
@@ -4316,6 +4350,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 maps[current]
             )))?;
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        crate::phase_census::accept(active, frame > 60);
         if quit_after_frame { break; }
         if options.frames.is_some_and(|limit| frame >= limit) {
             #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
@@ -4323,6 +4359,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             #[cfg(not(target_os="vita"))]
             println!("[lg/shaders] host frame creations {}",crate::frame_profile::creation_report());
             crate::frame_profile::report(&maps[current])?;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::phase_census::host_finish(&maps[current])?;
             if let Some(path) = &options.capture {
                 save_capture(path)?;
             }

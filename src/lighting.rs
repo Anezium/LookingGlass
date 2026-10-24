@@ -19,6 +19,7 @@ thread_local! {
     static CROQUET: RefCell<Vec<Light>> = const {RefCell::new(Vec::new())};
 }
 pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
+    let _census = crate::phase_census::span(crate::phase_census::Region::Lights);
     #[cfg(target_os = "vita")]
     let limit = 2;
     #[cfg(not(target_os = "vita"))]

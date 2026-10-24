@@ -121,6 +121,7 @@ mod viewer;
 mod transition_memory;
 mod frame_profile;
 mod frame_phases;
+mod phase_census;
 mod game_thread;
 mod skin_worker;
 #[cfg_attr(feature="frame_total_only", path="frame_total_profile.rs")]
@@ -216,6 +217,7 @@ fn app_main() {
         light_profile::set_mode(frame_profile::Mode::read());
         character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench, c.skin_overlap);
         frame_phases::initialize();
+        phase_census::initialize();
     }
     #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
     let _ = render::vita_renderer::config();

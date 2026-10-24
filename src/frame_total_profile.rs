@@ -146,7 +146,7 @@ static RING: Storage = Storage(Mutex::new(Ring {
     wall_us: [0; CAPACITY], count: 0, start: None, pending: false,
     armed: false, overflow: false,
 }));
-pub(crate) fn reset() { *RING.0.lock().unwrap() = Ring::default(); }
+pub(crate) fn reset() { *RING.0.lock().unwrap() = Ring::default(); crate::phase_census::reset(); }
 #[inline(never)]
 #[export_name="alice_frame_total_begin"]
 pub(crate) fn begin(_: &str, mode: Mode) {
@@ -154,6 +154,7 @@ pub(crate) fn begin(_: &str, mode: Mode) {
     // layout access here. Only explicitly armed benchmark modes are sampled.
     if !mode.is_bench() { return; }
     let mut r=RING.0.lock().unwrap(); r.armed=true; r.begin(Instant::now());
+    crate::phase_census::begin_configured();
 }
 pub(crate) fn end(measured: bool) {
     let mut r=RING.0.lock().unwrap(); r.pending=r.armed && measured;
@@ -173,6 +174,7 @@ pub(crate) fn export(map: &str) -> anyhow::Result<()> {
             let mut doors=std::io::BufWriter::new(std::fs::File::create(dir.join(format!("{stem}-doors.csv")))?);
             writeln!(doors,"frame_first,frame_last,frames,hatter_door_world_traces,hatter_door_own_traces,hatter_door_trace_pairs_deferred")?;
             writeln!(doors,"1,60,60,,,")?; writeln!(doors,"61,120,60,,,")?; doors.flush()?;
+            crate::phase_census::export(map)?;
             println!("[lg/frame-total] measured=120 gl_hooks=0 phase_timers=0 clock=begin-to-begin");
             Ok(())
     }

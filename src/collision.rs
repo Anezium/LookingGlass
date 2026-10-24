@@ -644,6 +644,7 @@ impl World {
         if cache.len() < 256 { cache.insert(key, trace); }
         trace
     }
+    pub(crate) fn acoustic_scene_key(&self) -> usize { std::sync::Arc::as_ptr(&self.static_geometry) as usize }
     pub(crate) fn audio_geometry(&self) -> std::sync::Arc<StaticGeometry> {
         self.static_geometry.clone()
     }
@@ -830,6 +831,7 @@ impl World {
 
     /// Trace a box centre from start to end. Zero extents give a point trace.
     pub fn sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        let _census = crate::phase_census::sweep();
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::SweepCalls, 1);
@@ -839,6 +841,7 @@ impl World {
     /// Damage traces may contact a destructible obstacle itself, but must still
     /// respect every other obstacle. Movement never supplies an exception.
     pub fn sweep_except(&self, start: Vec3, end: Vec3, half: Vec3, ignore: Option<usize>) -> Trace {
+        let _census = crate::phase_census::sweep();
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::SweepExceptCalls, 1);
@@ -859,6 +862,8 @@ impl World {
         self.camera_obstacles = obstacles;
     }
     pub fn camera_sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        let _owner = crate::phase_census::owner(crate::phase_census::Owner::Camera);
+        let _census = crate::phase_census::sweep();
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::CameraSweepCalls, 1);
@@ -890,6 +895,7 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        let _census = crate::phase_census::sweep();
         self.npc_profile.sweep();
         crate::sim_maps::count("world_sweeps", 1);
         #[cfg(test)]

@@ -672,6 +672,8 @@ impl Duchess {
         stats: &mut Stats,
         story: &mut Story,
     ) -> Feedback {
+        let _census = crate::phase_census::span(crate::phase_census::Region::Npc);
+        let _owner = crate::phase_census::owner(crate::phase_census::Owner::Npc);
         let mut out = Feedback::default();
         if dt <= 0. || !dt.is_finite() || !stats.alive() {
             return out;

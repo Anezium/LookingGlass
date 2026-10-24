@@ -57,6 +57,7 @@ pub(crate) fn exclude_transition_frame() {
     TRANSITION_FRAME.with(|v| v.set(true));
     crate::light_profile::cpu_end();
     crate::light_profile::end(false);
+    crate::phase_census::accept(false, false);
     #[cfg(target_os = "vita")]
     vita::discard_transition_frame();
 }
@@ -1132,6 +1133,7 @@ mod vita {
                 if gameplay { s.accepted_frames += 1; }
                 let measured = gameplay && s.accepted_frames > s.mode.warmup_frames();
                 crate::light_profile::end(measured);
+                crate::phase_census::accept(gameplay, measured);
                 if measured { s.frames += 1;
                     #[cfg(feature = "native_timing")]
                     NATIVE_MEASURED.with(|id| id.set(Some(s.frames as u64)));

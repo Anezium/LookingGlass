@@ -1256,6 +1256,9 @@ impl Audio {
         submerged: bool,
         dt: f32,
     ) {
+        let _census = crate::phase_census::span(crate::phase_census::Region::AudioPrepare);
+        let _owner = crate::phase_census::owner(crate::phase_census::Owner::Audio);
+        crate::phase_census::scene(world.acoustic_scene_key());
         game_stage(4);
         let _stage=UpdateStage;
         if self.playback.is_none() {
@@ -1323,13 +1326,15 @@ impl Audio {
     }
     fn prepare_acoustics(&mut self, listener:Vec3, submerged:bool, dt:f32,
         mut sweep: impl FnMut(Vec3,Vec3)->crate::collision::Trace) {
+        let _census = crate::phase_census::span(crate::phase_census::Region::Acoustics);
+        let _owner = crate::phase_census::owner(crate::phase_census::Owner::Audio);
         self.acoustic_clock -= dt;
         if self.acoustic_clock <= 0. {
             self.acoustic_clock = 0.1;
-            self.room = acoustics::room_with(listener, &mut sweep);
+            self.room = acoustics::room_with(listener, |a,b| { crate::phase_census::query(0,a,b); sweep(a,b) });
             for e in &mut self.emitters {
                 let target = if e.spec.origin.distance(listener) < e.spec.radius * 4. {
-                    acoustics::obstruction_with(listener, e.spec.origin, &mut sweep)
+                    acoustics::obstruction_with(listener, e.spec.origin, |a,b| { crate::phase_census::query(1,a,b); sweep(a,b) })
                 } else {
                     0.
                 };
@@ -1347,7 +1352,7 @@ impl Audio {
         {
             let target = e
                 .origin
-                .map_or(0., |p| acoustics::obstruction_with(listener, p, &mut sweep));
+                .map_or(0., |p| acoustics::obstruction_with(listener, p, |a,b| { crate::phase_census::query(2,a,b); sweep(a,b) }));
             e.obstruction += (target - e.obstruction) * (1. - (-dt * 12.).exp());
             e.acoustics.set(e.obstruction, submerged, self.room);
         }

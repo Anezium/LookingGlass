@@ -415,6 +415,8 @@ impl Interactions {
     }
     /// One combat step for Pool and every registered controller.
     pub fn levels_step(&mut self, combat: &mut Combat<'_>) -> Feedback {
+        let _census = crate::phase_census::span(crate::phase_census::Region::Npc);
+        let _owner = crate::phase_census::owner(crate::phase_census::Owner::Npc);
         let mut out = level::step_controllers(&mut self.levels, combat);
         if let Some(p) = &mut self.pool {
             let f = p.combat(combat);

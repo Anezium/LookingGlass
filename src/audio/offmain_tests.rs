@@ -66,7 +66,9 @@ fn compare(
         let paused = (40..50).contains(&frame);
         let submerged = (60..80).contains(&frame);
         world.set_dynamic(vec![test_box(ear + Vec3::X * 50., Vec3::splat(10.))]);
-        for audio in [&mut a, &mut b] {
+        for (arm, audio) in [&mut a, &mut b].into_iter().enumerate() {
+            crate::phase_census::test_begin(arm==1);
+            crate::phase_census::scene(world.acoustic_scene_key());
             audio.settings.muted = (90..95).contains(&frame);
             if let Some(assets) = assets.as_deref_mut() {
                 if frame % 20 == 0 {
@@ -120,18 +122,23 @@ fn compare(
             samples += 1;
         }
     }
-    let c = b
+    crate::phase_census::test_begin(false);
+    if let Some(c) = b
         .playback
         .as_ref()
         .unwrap()
         .mixer
         .acoustics
         .as_ref()
-        .unwrap();
+    {
     assert!(c.submitted > 0);
     assert_eq!(c.fallback, 0);
     assert_eq!(hot_allocs, 0);
     println!("AUDIO_OFFMAIN_EQUAL fixture={label} frames={frames} scalar_samples={samples} sha256={:x} new_hot_allocations={hot_allocs} submitted={} reused={} fallback={} host_only=true",hash.finalize(),c.submitted,c.reused,c.fallback);
+    } else {
+        assert_eq!(hot_allocs, 0);
+        println!("AUDIO_CENSUS_EQUAL fixture={label} frames={frames} scalar_samples={samples} sha256={:x} new_hot_allocations={hot_allocs}",hash.finalize());
+    }
 }
 #[test]
 fn synthetic_mixed_output_is_sample_exact_without_hot_allocations() {
@@ -296,6 +303,21 @@ fn paced_pcm_producer_preserves_audio_health() -> Result<()> {
         assert_eq!(c.fallback, 0);
         eprintln!("AUDIO_OFFMAIN_PACED_END map={name} callback_blocks={blocks} pcm_starvation_delta={} music_underrun_delta={} fallback={} host_only=true",rows[2].value-rows[0].value,rows[3].value-rows[1].value,c.fallback);
         audio.finish()?;
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires local LOOKING_GLASS_TEST_DATA; deterministic sample clock"]
+fn census_map_output_is_sample_exact() -> Result<()> {
+    let mut assets = Assets::open(&PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?))?;
+    for name in ["hedge3", "pandemonium"] {
+        let map = Bsp::parse(&assets.read(&format!("maps/{name}.bsp"))?)?;
+        let mut world = World::from_bsp(&map)?;
+        let (mut a,ma)=setup(false);let (mut b,mb)=setup(false);
+        a.load(&mut assets,name,&map);b.load(&mut assets,name,&map);
+        a.scene_presented();b.scene_presented();
+        compare(a,ma,b,mb,Some(&mut assets),&mut world,name,Vec3::ZERO,120);
     }
     Ok(())
 }

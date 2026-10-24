@@ -168,6 +168,7 @@ pub(super) fn camera(camera: &Camera3D) {
     }
 }
 pub(super) fn present() {
+    let _census = crate::phase_census::span(crate::phase_census::Region::Present);
     crate::render_tail::begin();
     let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Present);
     TARGET.with(|t| {

@@ -771,6 +771,8 @@ pub struct FixedClock {
 }
 impl FixedClock {
     pub fn advance(&mut self, seconds: f64, world: &World, player: &mut Player, input: Controls) {
+        let _owner = crate::phase_census::owner(crate::phase_census::Owner::Player);
+        let _census = crate::phase_census::span(crate::phase_census::Region::FixedPhysics);
         #[cfg(target_os = "vita")]
         let _fixed_clock_profile = crate::frame_profile::span("fixed_clock");
         #[cfg(target_os = "vita")]
@@ -801,6 +803,8 @@ impl FixedClock {
     /// Diagnostic replay resolves timestamped controls at each ordinary physics tick.
     #[cfg(feature="vita_renderer")]
     pub fn advance_route(&mut self,seconds:f64,world:&World,player:&mut Player,mut input:impl FnMut(&Player)->Controls) {
+        let _owner = crate::phase_census::owner(crate::phase_census::Owner::Player);
+        let _census = crate::phase_census::span(crate::phase_census::Region::FixedPhysics);
         #[cfg(target_os="vita")]
         let _span=crate::frame_profile::span("fixed_clock");
         #[cfg(target_os="vita")]

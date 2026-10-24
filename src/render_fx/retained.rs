@@ -1041,6 +1041,7 @@ pub(crate) fn finish_world(
     world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
+    let _census = crate::phase_census::span(crate::phase_census::Region::JointFinish);
     let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::Fx);
     let finish_started = MetricInstant::now();
     let mut world_ns = 0u64;
@@ -1180,6 +1181,7 @@ pub(crate) fn finish_world(
     count("vita_fx_sorted_triangles", 0);
     count("vita_fx_compacted_vertices", 0);
     let draw_group = |gpu: &mut Gpu, id: usize| {
+        let _census = crate::phase_census::span(if groups[id].passes.iter().all(|p| p.effect) {crate::phase_census::Region::FxSubmit} else {crate::phase_census::Region::ActorSubmit});
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent);

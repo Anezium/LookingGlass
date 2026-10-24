@@ -105,6 +105,8 @@ pub struct Config {
     pub fx_merge_in_place: bool,
     pub fx_worker_prep: bool,
     pub frame_phase_probe: bool,
+    /// Fixed-storage elapsed census; opt in only for a bounded benchmark.
+    pub phase_census: bool,
     pub mover_far_lazy: bool,
     pub mover_lazy_publish: bool,
     pub pickup_fx_cache: bool,
@@ -264,6 +266,7 @@ impl Default for Config {
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
+            phase_census: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
@@ -1349,6 +1352,8 @@ impl Renderer {
         count("vita_world_retransformed_vertices", 0);
         count("vita_world_rebuilt_indices", 0);
         count("vita_world_sorted_triangles", 0);
+        let _census_world = crate::phase_census::span(if alpha {crate::phase_census::Region::AlphaPrepare} else {crate::phase_census::Region::WorldOpaque});
+        let census_visibility = crate::phase_census::span(crate::phase_census::Region::WorldVisibility);
         let visibility_started = MetricInstant::now();
         let visibility_span = crate::frame_profile::span("vita_cluster_frustum");
         let projection = crate::render_fx::projection().expect("world camera projection");
@@ -1398,6 +1403,7 @@ impl Renderer {
             visibility_cpu_ns: visibility_started.elapsed().as_nanos() as u64, ..Default::default() });
         count("vita_world_visibility_cache_hits", hits);
         drop(visibility_span);
+        drop(census_visibility);
         if alpha && !config().world_alpha {self.alpha_order.clear();}
         if !alpha && config().opaque_order=="front_to_back" {self.alpha_order.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||a.1.cmp(&b.1)));}
         if alpha && config().sort_alpha && !crate::render_fx::retained_active() {
@@ -1410,6 +1416,7 @@ impl Renderer {
         }
         self.prepared.clear();
         {
+            let _census = crate::phase_census::span(crate::phase_census::Region::WorldParameters);
             let parameters_started = MetricInstant::now();
             let _parameters = crate::frame_profile::span("vita_world_parameters");
             let parameter_reuse = config().world_parameter_reuse;
@@ -1543,6 +1550,7 @@ impl Renderer {
         } }
         let mut previous_pipeline = None;
         let mut previous_texture = None;
+        let _census_submit = crate::phase_census::span(crate::phase_census::Region::WorldSubmit);
         let submit_span = crate::frame_profile::span("vita_world_submit");
         let mut totals = crate::frame_profile::Totals::<3>::new();
         // Lifetime is exactly this owned opaque pass: fresh AFTER sky/interop/
@@ -1700,6 +1708,7 @@ impl Renderer {
             .collect::<Vec<_>>();
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::new());
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id| {
+            let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
