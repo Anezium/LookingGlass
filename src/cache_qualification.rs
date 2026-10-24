@@ -17,12 +17,12 @@ struct Row {
 struct Window { id:u64, label:String, map:String, check_stride:u64, rows:Vec<Row>, overflow:bool, end_us:u64 }
 struct State {
     epoch:Instant, poll:Instant, command:u64, map:String, class:usize,
-    row:Row, windows:Vec<Window>, events:Vec<serde_json::Value>, recording:bool, hits:u64, gameplay:bool,
+    row:Row, windows:Vec<Window>, events:Vec<serde_json::Value>, recording:bool, hits:u64, gameplay:bool, heap_failed:bool,
 }
 impl State {
     fn new()->Self { Self { epoch:Instant::now(), poll:Instant::now(), command:0,
         map:String::new(), class:0, row:Row::default(), windows:Vec::new(),
-        events:Vec::new(), recording:false, hits:0, gameplay:false } }
+        events:Vec::new(), recording:false, hits:0, gameplay:false, heap_failed:false } }
     fn us(&self)->u64 { self.epoch.elapsed().as_micros() as u64 }
 }
 thread_local! { static STATE:RefCell<State> = RefCell::new(State::new()); }
@@ -91,16 +91,28 @@ pub(crate) fn export()->anyhow::Result<()> {
         anyhow::ensure!(!s.recording,"qualification requires a stopped window before export");
         let path=export_path();let tmp=path.with_extension("tmp");
         let mut out=std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        serde_json::to_writer(&mut out,&serde_json::json!({"schema":1,"capacity":CAPACITY,
-            "query_classes":["room","ambient","effects"],"cache_columns":["hit","miss","eviction"],
-            "windows":s.windows,"events":s.events,"clock":"monotonic microseconds since qualification state creation"}))?;
+        // Stream borrowed rows. Materializing a Value for thousands of rows
+        // would duplicate their data and can exhaust the device heap at export.
+        #[derive(Serialize)]
+        struct Export<'a> { schema:u32, capacity:usize, query_classes:[&'static str;3],
+            cache_columns:[&'static str;3], windows:&'a [Window], events:&'a [serde_json::Value],
+            heap_failed:bool, clock:&'static str }
+        serde_json::to_writer(&mut out,&Export{schema:1,capacity:CAPACITY,
+            query_classes:["room","ambient","effects"],cache_columns:["hit","miss","eviction"],
+            windows:&s.windows,events:&s.events,heap_failed:s.heap_failed,
+            clock:"monotonic microseconds since qualification state creation"})?;
         use std::io::Write;out.flush()?;drop(out);std::fs::rename(tmp,path)?;
         eprintln!("[lg/cache-qual] exported windows={} events={}",s.windows.len(),s.events.len());Ok(())
     })
 }
 pub(crate) fn frame(scene:usize, eye:Vec3) {
     if enabled() {STATE.with(|s| {let mut s=s.borrow_mut();
-        s.row=Row{us:s.us(),heap:heap(),scene,eye:eye.to_array(),..Row::default()};});}
+        let heap=heap();
+        if s.recording && heap>180*1048576 && !s.heap_failed {
+            s.heap_failed=true;
+            eprintln!("[lg/cache-qual] error=heap_limit heap_uordblks_bytes={heap}");
+        }
+        s.row=Row{us:s.us(),heap,scene,eye:eye.to_array(),..Row::default()};});}
 }
 pub(crate) fn gameplay(active:bool) {
     if enabled(){STATE.with(|s|s.borrow_mut().gameplay=active);}
@@ -119,6 +131,7 @@ pub(crate) fn should_check()->bool {
         stride>0 && (s.hits-1)%stride==0})
 }
 pub(crate) fn checked(equal:bool) {
+    if !equal {eprintln!("[lg/cache-qual] error=self_check_mismatch");}
     STATE.with(|s|{let mut s=s.borrow_mut();s.row.checks+=1;s.row.mismatches+=u64::from(!equal);});
 }
 pub(crate) struct AcousticSpan(Option<Instant>);
