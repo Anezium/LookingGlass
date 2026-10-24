@@ -51,9 +51,8 @@ pub(crate) async fn check(assets:&mut Assets,options:&crate::Options)->Result<()
             let hash=format!("{:x}",Sha256::digest(&image.bytes));
             crate::sim_maps::probe::end(frame,case,true,&(case,frame));
             println!("SKIN_EXACT_IMAGE {}",serde_json::json!({"case":case,"frame":frame,"sha256":hash}));
-            if [0,30,59,60,90,119,120,150,179].contains(&frame) {
-                crate::viewer::save_capture(std::path::Path::new(&format!("private/exact-frames/{case}-{frame}.png")))?;
-            }
+            // Persist every intermediate PNG as well as its raw framebuffer hash.
+            crate::viewer::save_capture(std::path::Path::new(&format!("private/exact-frames/{case}-{frame}.png")))?;
             next_frame().await;
         }
     }
