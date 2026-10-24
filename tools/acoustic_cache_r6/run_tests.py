@@ -15,7 +15,10 @@ for tag,selection,ignored in [('cache-maps','static_cache',True),('cache','stati
  (O/'proof/HOST-TESTS.json').write_text(json.dumps(results,indent=2)+'\n');print(tag,p.returncode,flush=True);assert p.returncode==0
 # The production baseline enables NPC-query culling and disables dynamic buckets.
 # Cover that completion policy explicitly, in addition to the default test policy.
-env.update(LOOKING_GLASS_TEST_SIM_SWITCHES='on',LOOKING_GLASS_TEST_NPC_THINK='on',LOOKING_GLASS_TEST_HEDGE3='off')
+env.update(LOOKING_GLASS_TEST_SIM_SWITCHES='on',LOOKING_GLASS_TEST_NPC_THINK='on')
+# The test-only bucket selector reads env on every call. Unset is false without
+# allocating a String; an explicit 'off' would measure test-control allocations.
+env.pop('LOOKING_GLASS_TEST_HEDGE3',None)
 cmd=['cargo','test','--release','--offline','--locked','--features','native_timing,frame_total_only,sim_maps_probe','static_cache','--','--nocapture','--test-threads=1','--ignored']
 t=time.monotonic();log=O/'logs/test-cache-maps-production.log'
 with log.open('w') as f:p=subprocess.run(cmd,cwd=R,env=env,stdout=f,stderr=subprocess.STDOUT)
