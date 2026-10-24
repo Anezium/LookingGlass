@@ -145,4 +145,3 @@ Require RESTORE-FINAL.json PASS_ORIGINAL_STATE_VERIFIED, both human SELF receipt
 ### Amendment r3-4 (orchestrator decision, after the world singles; not a console step in this brief)
 
 > If no single-world block returns FAIL_WALL_GATE, do not name a culprit. The next world cycle is a separately prepared and reviewed Pandemonium ABBA of the three-switch bundle on the new SELF (PL-world equivalent on 2fa379ab). It shows whether the +2.0 ms regression persists on the new SELF and is an interaction. Only then decide pairwise blocks. If exactly one switch fails, a bundle-minus-that-switch block is the cheaper follow-up.
-
