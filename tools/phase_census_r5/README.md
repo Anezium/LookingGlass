@@ -22,5 +22,8 @@ networking and real processes blocked; `--sealed-helpers
 OUT/proof/A1B-SEALED-HELPERS.zip` reproduces the original preservation failure.
 After committing and plain-pushing, run `reseal_a1b.py OUT` to verify protected
 artifacts, rerun before/after and focused checks, and regenerate the identity,
-ZIP, manifest, final validation and English A1B-FIX.md. The blocked original
-session directory remains evidence and must not be reused.
+ZIP, manifest, final validation and English A1B-FIX.md. Before admission the
+real OUT/session-s6-phase-census path must be absent; the e2e test rejects any
+existing entry there before creating its temporary synthetic package. Blocked
+attempts are archived under blocked-attempts/ and MOVE-RECEIPT.json records
+identical per-file hashes at the old and new paths. They must not be reused.

@@ -11,7 +11,15 @@ def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def write(path,value):path.write_text(json.dumps(value,indent=2)+'\n')
 def git(*args):return subprocess.check_output(['git',*args],cwd=R,text=True).strip()
 def check_protected():
- for name,digest in json.loads((O/'proof/A1B-PROTECTED-BEFORE.json').read_text()).items():assert sha(O/name)==digest,name
+ moved={}
+ if (O/'MOVE-RECEIPT.json').exists():
+  receipt=json.loads((O/'MOVE-RECEIPT.json').read_text())
+  assert receipt['status']=='PASS' and receipt['all_hashes_identical']
+  for record in receipt['files']:
+   assert record['before_sha256']==record['after_sha256']==sha(O/record['to']),record['to']
+   assert not (O/record['from']).exists(),record['from']
+   moved[record['from']]=record['to']
+ for name,digest in json.loads((O/'proof/A1B-PROTECTED-BEFORE.json').read_text()).items():assert sha(O/moved.get(name,name))==digest,name
  assert sha(O/'CONSOLE-BRIEF.md')==BRIEF
  for arm in ['baseline','census']:assert sha(O/'packages'/arm/'eboot.bin')=='50ac74a2ced3e4caf4ad239828df2dcbe1007f51be6b465471f00f5d3b918f69'
  for name,digest in json.loads((O/'proof/SOURCE-IDENTITY.json').read_text())['files'].items():assert sha(R/name)==digest,name
@@ -86,7 +94,7 @@ rows='\n'.join('| `'+name+'` | '+record['audit']+' |' for name,record in audit['
 old_output=(O/'logs/a1b-e2e-before.log').read_text().rstrip();new_output=(O/'logs/a1b-e2e-after.log').read_text().rstrip()
 report=f'''# A1B r5 console helper correction
 
-Mac-only correction, plain-pushed to `{branch}` at `{head}`. Engine/source revision remains `{ENGINE}`. No Vita or shot-driver contact, engine change, native rebuild, SELF change, config change, or brief edit occurred. The existing blocked `session-s6-phase-census` evidence is unchanged; it is not a runnable new session and must not be reused.
+Mac-only correction, plain-pushed to `{branch}` at `{head}`. Engine/source revision remains `{ENGINE}`. No Vita or shot-driver contact, engine change, native rebuild, SELF change, config change, or brief edit occurred. Blocked evidence is retained unchanged; MOVE-RECEIPT.json records any archival relocation. The real package session path must be absent before admission.
 
 The preservation main path now resolves exactly baseline/census from the r5 protocol, validates the package engine/source revision, and records the r5 package, both SELF hashes, engine/source revision, branch and sealed tooling HEAD in SESSION.json. PACKAGE-IDENTITY.json separates the tooling HEAD from the unchanged engine revision and is included in the operational ZIP. Current directory inventories are enumerated afresh, including nested save/cache/report directories, without depending on the old r4 inventory file. The shared cache index is copied before staging.
 

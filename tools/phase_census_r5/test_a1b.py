@@ -38,7 +38,7 @@ notes={
  'scripts/reseal_a1.py':'FIX: old A1-only reseal could omit r5 identity/validation. Compatibility entry delegates to A1B resealer.',
  'scripts/reseal_a1b.py':'ADD: helper-only reseal, protected-file check, remote branch verification, full offline regression, updated ZIP/manifest/validation and report.',
  'scripts/test_a1b.py':'ADD: every console/scripts helper individually accounted for; canonical regeneration, immutable artifacts and source hashes checked.',
- 'scripts/test_session_e2e.py':'ADD: identical before/after full-session regression with blocked sockets/processes, memory FTP and driver fake. Historical local SELF/save bytes and host census rows are fixture inputs only.',
+ 'scripts/test_session_e2e.py':'ADD: real package session path must be absent before synthetic admission; identical before/after full-session regression with blocked sockets/processes, memory FTP and driver fake. Historical local SELF/save bytes and host census rows are fixture inputs only.',
  'scripts/finalize.py':'FIX: new package identity must be created and included in ZIP; exclude hash-bearing fix reports from manifest circularity. Native build not executed.',
  'scripts/run_tests.py':'FIX: declared host rerun list had six selections while proof had seven; restore direct-resolver selection. Engine tests not rerun for helper-only change.',
  'scripts/census_report.py':'FIX: synchronize canonical amended census report.',
@@ -69,7 +69,15 @@ with contextlib.ExitStack() as stack:
   assert (Path(tmp)/'CONSOLE-PROTOCOL.json').read_bytes()==(O/'CONSOLE-PROTOCOL.json').read_bytes()
  print('PASS prepare regenerates every r5 helper and the unchanged eight-label protocol')
  protected=json.loads((O/'proof/A1B-PROTECTED-BEFORE.json').read_text())
- for name,digest in protected.items():assert sha(O/name)==digest,name
+ moved={}
+ if (O/'MOVE-RECEIPT.json').exists():
+  receipt=json.loads((O/'MOVE-RECEIPT.json').read_text())
+  assert receipt['status']=='PASS' and receipt['all_hashes_identical']
+  for record in receipt['files']:
+   assert record['before_sha256']==record['after_sha256']==sha(O/record['to']),record['to']
+   assert not (O/record['from']).exists(),record['from']
+   moved[record['from']]=record['to']
+ for name,digest in protected.items():assert sha(O/moved.get(name,name))==digest,name
  assert sha(O/'CONSOLE-BRIEF.md')=='48857506bc84cb02f322c1fa16603bcd94727cd5435dc96cab39a4fa1b2173c0'
  source=json.loads((O/'proof/SOURCE-IDENTITY.json').read_text())
  for name,digest in source['files'].items():assert sha(R/name)==digest,name

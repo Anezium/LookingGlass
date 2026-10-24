@@ -17,6 +17,12 @@ def deny(*args,**kwargs):raise AssertionError('OFFLINE BOUNDARY: real transport/
 def load(name,path):
  spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 
+def check_session_vacancy(package):
+ root=package/'session-s6-phase-census'
+ if os.path.lexists(root):
+  raise FileExistsError(f'Pre-admission package check: {root} already exists; archive blocked evidence before creating a fresh session')
+ print('PASS pre-admission package check: real session-s6-phase-census path is absent')
+
 def exercise(source,work,sealed=None,evidence=None):
  package=work/'package';root=package/'session-s6-phase-census';root.mkdir(parents=True)
  for name in ['CONSOLE-PROTOCOL.json','PACKAGE-IDENTITY.json']:
@@ -283,7 +289,9 @@ def main():
  parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--sealed-helpers',type=Path);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--evidence-dir',type=Path);args=parser.parse_args()
  result=None
  try:
+  check_session_vacancy(args.package.resolve())
   with tempfile.TemporaryDirectory(prefix='alice-r5-e2e-') as directory:result=exercise(args.package.resolve(),Path(directory),args.sealed_helpers,args.evidence_dir)
+  result['real_package_session_path_absent']=True
  except Exception as error:
   result=dict(status='FAIL',synthetic_offline_only=True,device_contact=False,driver_contact=False,error_type=type(error).__name__,error=str(error))
   print('FAIL full session main path:',type(error).__name__+':',error)
