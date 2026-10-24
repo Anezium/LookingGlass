@@ -1,0 +1,13 @@
+# r6 exact static acoustic cache
+
+One config boolean, audio_static_cache, defaults false. The baseline JSON bytes are the r5 A bytes. Census remains default off. Only the main audio acoustic path changes when the new switch is on.
+
+Cache storage is one startup allocation of a fixed array (128 sets, four entries each); lookup performs at most four full key comparisons. There is no per-frame allocation, resize, log, clock or lock in the cache itself. Census-off guards retain the existing cheap inactive census checks. Misses replace the next entry of a full set deterministically. Replacement loses performance only.
+
+The scene is the r4 shared Arc<StaticGeometry> allocation. Cache retains that Arc, checks pointer identity every query and at frame begin, and clears before switching to the new Arc. Audio load and finish explicitly reset it. Thus an allocator cannot recycle the old scene's pointer while it is still eligible. Entries contain nine float bits: ordered start/end and the fixed positive-zero half extents. This API accepts only the point acoustic operation, no ignored entity. The World constructor bakes its solid mask into the immutable scene hulls and BVH. There are no additional variable static trace parameters. No tolerance, endpoint sorting, hash-only equality or batch invalidation is used.
+
+Every hit AND miss calls the unchanged World::audio_complete, shared with r4 off-main work. It applies settled supports, current dynamic colliders, then current weapon obstacles in their original clipping order. Cache retains only the static Trace, including exact fraction, normal and start/all-solid flags. Live complete results are never cached. Existing off-main code is retained; the cache branch uses main when both switches are explicitly requested. The sealed protocol always disables off-main.
+
+Optional phase census gains per-frame room/ambient/effects hit, miss and eviction counters. The existing prepare_acoustics bracket encloses lookup, static miss and completion. Existing outer sweep counters count each completed acoustic query, including cache hits; use the new misses for static work executed. The old repeat-opportunity history is independent. Optional census runs are diagnostic and never enter the wall gate.
+
+Host proofs cover real-map sample bits, all Trace bits, moving mutable geometry, explicit reset and scene replacement, bounded replacement, independent changed rays and signed zero. A deterministic host workload measures room plus eight source rays; stationary endpoints are optimistic. Host times cannot predict Vita milliseconds. No console run is performed by these tools during preparation.
