@@ -45,7 +45,7 @@ for path in (T/'console').glob('*.py'):
     shutil.copyfile(path,O/'console'/path.name)
 for path in T.glob('*.py'):
     if path.name!='prepare.py':shutil.copyfile(path,O/'scripts'/path.name)
-for name in ['CONSOLE-BRIEF.md','DESIGN.md']+[p.name for p in T.glob('*AMENDMENT*.md')]:
+for name in ['CONSOLE-BRIEF.md','DESIGN.md','CONSOLE-REVIEW-PROCEDURE.md']+[p.name for p in T.glob('*AMENDMENT*.md')]:
     if (T/name).exists():shutil.copyfile(T/name,O/name)
 for arm in ['baseline','cache']:
     cfg=json.loads((OLD/'configs/PL-baseline.json').read_text())
@@ -59,8 +59,17 @@ seq=[dict(label=f's8-cache-qual-{i}-{arm}',arm=arm,package=pkg,config_arm=pkg,se
           map='hedge3',visit_key=None,entry='Chapters') for i,arm,pkg in [(1,'A','baseline'),(2,'B','cache')]]
 write(O/'CONSOLE-PROTOCOL.json',dict(schema=1,sequence=seq,optional_sequence=[],session_directory='session-s8-cache-qual',
     windows=['hedge3-move','hedge3-check','pandemonium-move','pandemonium-check','reload-post','transition-post'],
-    motion=dict(seconds=64,stick='left-stick',x=[64,192],y=128,pulse_seconds=2,repetitions=16),
+    motion=dict(seconds=64,stick='left-stick',x=[64,192],y=128,pulse_seconds=2,repetitions=16,
+        per_map={name:dict(axis='lateral',sequence=[[64,128,2],[192,128,2]]*16,
+            evidence='AMENDMENTS-REVIEW.md R2: retained r6 entry images cannot establish two-second clearance; keep lateral') for name in ['hedge3','pandemonium']}),
     reading_rules=dict(mismatches=0,underruns=0,heap_limit_MiB=180,paired_heap_limit_MiB=1,
+        event_absolute_heap='DESCRIPTIVE for transitions, loads and audio-load reset samples',
+        entry_pose_windows=['hedge3-move','pandemonium-move','reload-post','transition-post'],
+        check_stride={name:64 for name in ['hedge3-check','pandemonium-check','reload-post','transition-post']},
+        native_operation_order=['save-reload cross-map','save-reload pandemonium same-map','chapter-or-console to hedge3'],
+        load_interval_audio_gated=True,default_on_movement_mean_delta_limit_ms=.25,
+        movement_heap_runtime_drift='UNKNOWN; new matched pair under a new amendment',
+        require_inspected_modal_main_menu=True,require_title_closed_before_restore=True,
         require_warm_reset_at_every_load=True,hit_rates='DESCRIPTIVE',no_default_promotion_by_helpers=True)))
 remote='ux0:/data/alice/private/'
 for arm in ['baseline','cache']:

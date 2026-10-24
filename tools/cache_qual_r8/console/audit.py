@@ -4,6 +4,32 @@ import argparse, json, math, re, statistics
 from run_health import audio, window_text, entry_for_label, health_text
 MIB=1048576
 LABELS=['hedge3-move','hedge3-check','pandemonium-move','pandemonium-check','reload-post','transition-post']
+ENTRY_LABELS={'hedge3-move','pandemonium-move','reload-post','transition-post'}
+def movement(rows):
+    moving_us=0;path=0.;frames=0
+    for a,b in zip(rows,rows[1:]):
+        dt=b['us']-a['us'];assert 0<dt<=1_000_000,'gameplay discontinuity'
+        distance=math.dist(a['eye'],b['eye']);assert math.isfinite(distance)
+        path+=distance
+        if distance>.001:moving_us+=dt;frames+=1
+    return moving_us,path,frames
+def pulse_diagnostics(data,motion):
+    result={}
+    for w in data['windows']:
+        if not w['label'].endswith('-move'):continue
+        rows=w['rows'];pulses=motion[w['label']]['pulses'];first=pulses[0]['host_start_us']
+        intervals=[(a['us']-rows[0]['us'],b['us']-rows[0]['us'],math.dist(a['eye'],b['eye'])>.001)
+                   for a,b in zip(rows,rows[1:])] if rows else []
+        details=[]
+        for pulse in pulses:
+            start=pulse['host_start_us']-first;end=pulse['host_end_us']-first
+            moved=sum(max(0,min(b,end)-max(a,start)) for a,b,moving in intervals if moving)
+            sampled=sum(max(0,min(b,end)-max(a,start)) for a,b,_ in intervals)
+            details.append(dict(**pulse,estimated_moving_us=moved,estimated_stationary_us=sampled-moved,
+                rpc_envelope_us=end-start,rpc_excess_over_hold_us=max(0,end-start-pulse['seconds']*1_000_000)))
+        result[w['label']]=dict(pulses=details,native_moving_us=sum(max(0,b-a) for a,b,moving in intervals if moving),
+            alignment='DESCRIPTIVE estimate: first native row aligned to first host pulse request; clocks are not synchronized')
+    return result
 def stats(values):
     assert values
     a=sorted(values)
@@ -33,12 +59,7 @@ def validate(data,text,arm):
         if moving:
             assert w['check_stride']==0,'self-check must be off during movement measurements'
             assert times[-1]-times[0]>=60_000_000,'less than 60 seconds of actual gameplay rows'
-            moving_us=0;path=0.;moving_frames=0
-            for a,b in zip(rows,rows[1:]):
-                dt=b['us']-a['us'];assert dt<=1_000_000,'gameplay discontinuity'
-                distance=math.dist(a['eye'],b['eye']);assert math.isfinite(distance)
-                path+=distance
-                if distance>.001:moving_us+=dt;moving_frames+=1
+            moving_us,path,moving_frames=movement(rows)
             assert moving_us>=60_000_000 and path>=64,'listener did not move for 60 seconds'
         else:
             moving_us=path=moving_frames=None
@@ -47,6 +68,9 @@ def validate(data,text,arm):
         if label.endswith('-check'):
             assert w['check_stride']==64
             if arm=='B':assert checks>0,'no sampled cached hits checked'
+        elif label in {'reload-post','transition-post'}:
+            assert w['check_stride']==64
+            if arm=='B':assert checks>0,'no post-load sampled cached hits checked'
         else:assert w['check_stride']==0 and checks==0
         counts=[[sum(r['cache'][i][j] for r in rows) for j in range(3)] for i in range(3)]
         health=audio(window_text(text,label));assert health['status']=='PASS',health
@@ -67,9 +91,16 @@ def validate(data,text,arm):
     before=[e for e in transitions if e['stage']=='before-drop']
     after=[e for e in transitions if e['stage']=='after-drop']
     assert len(before)==len(after)>=3
-    assert any(e['from']!=e['to'] for e in before),'no map change'
-    assert any(e['from']==e['to']=='pandemonium' and e['operation']=='restore' for e in before),'no same-map native reload'
-    assert all(0<e['heap']<=180*MIB for e in events),'event heap budget'
+    cross=[e for e in before if e['operation']=='save-reload' and e['from']!=e['to']]
+    reload=[e for e in before if e['operation']=='save-reload' and e['from']==e['to']=='pandemonium']
+    chapter=[e for e in before if e['operation']=='chapter-or-console' and e['to']=='hedge3']
+    assert cross,'no cross-map native Auto load'
+    assert reload,'no same-map native reload'
+    assert any(x['us']<r['us']<c['us'] for x in cross for r in reload for c in chapter),'native load/reload/chapter order'
+    assert all(e['heap']>0 for e in events),'invalid event heap'
+    # Audio-load reset occupancy is sampled at the same load boundary.
+    assert all(e['heap']<=180*MIB for e in events if e['kind'] not in {'transition','load'}
+               and not (e['kind']=='reset' and e['reason']=='audio-load')),'non-load reset heap budget'
     resets=[e for e in events if e['kind']=='reset']
     if arm=='B':
         assert all(e['entries_after']==0 and e['pin_after'] is False for e in resets),'cache not empty after reset'
@@ -92,7 +123,9 @@ def validate(data,text,arm):
     else:assert not resets
     return dict(status='PASS',arm=arm,windows=result,events=events,audio_session=session_audio,
         outside_measurement_audio=dict(loading=audio(text[:begin],False),shutdown=audio(text[end:],False)),
-        hit_rate_rule='DESCRIPTIVE',performance_rule='DESCRIPTIVE; telemetry overhead included')
+        runtime_audio_memory=[line for line in text.splitlines() if line.startswith('[lg/audio-memory] ') and 'event=runtime:' in line],
+        event_heap_rule='transition/load and audio-load reset absolute heap descriptive; paired transition/load <=+1 MiB; gameplay <=180 MiB',
+        hit_rate_rule='DESCRIPTIVE',performance_rule='default-on also requires each movement B-A mean <=+0.25 ms; otherwise written human acceptance')
 def audit(root,label):
     run=root/label;entry=entry_for_label(label,root.parent/'CONSOLE-PROTOCOL.json')
     assert json.loads((run/'LOG-INTEGRITY.json').read_text())['status']=='PASS'
@@ -104,11 +137,19 @@ def audit(root,label):
     expected=json.loads((root.parent/'configs'/f"PL-{entry['package']}.json").read_text())
     assert configs and all({k:c.get(k) for k in expected}==expected for c in configs),'effective config mismatch'
     assert all(c['audio_cache_qualification'] and not c['phase_census'] and not c.get('audio_offmain',False) and c['audio_static_cache']==(entry['arm']=='B') for c in configs)
-    result=validate(json.loads(raw),text,entry['arm'])
+    data=json.loads(raw)
     motion=json.loads((run/'MOTION.json').read_text())
     assert set(motion)=={'hedge3-move','pandemonium-move'}
-    for v in motion.values():
-        assert v['sequence']==[[64,128,2],[192,128,2]]*16 and v['status']=='PASS'
+    protocol=json.loads((root.parent/'CONSOLE-PROTOCOL.json').read_text())
+    for label,v in motion.items():
+        axis=protocol['motion']['per_map'][label.removesuffix('-move')]
+        assert v['sequence']==axis['sequence'] and v['status']=='PASS' and len(v['pulses'])==32
+    diagnostics=pulse_diagnostics(data,motion)
+    try:result=validate(data,text,entry['arm'])
+    except AssertionError as error:
+        (run/'AUDIT.json').write_text(json.dumps(dict(status='FAIL',reason=str(error),per_pulse_motion=diagnostics),indent=2)+'\n')
+        raise
+    result['per_pulse_motion']=diagnostics
     result['motion']=motion
     (run/'AUDIT.json').write_text(json.dumps(result,indent=2)+'\n')
     return result
@@ -116,21 +157,35 @@ def report(root):
     seq=json.loads((root.parent/'CONSOLE-PROTOCOL.json').read_text())['sequence']
     results=[json.loads((root/e['label']/'AUDIT.json').read_text()) for e in seq]
     assert [r['arm'] for r in results]==['A','B'] and all(r['status']=='PASS' for r in results)
-    a,b=results;comparisons=[]
+    a,b=results;comparisons=[];unknown=[];performance=[]
     for wa,wb in zip(a['windows'],b['windows']):
         assert wa['label']==wb['label'] and wa['map']==wb['map']
-        assert math.dist(wa['first_eye'],wb['first_eye'])<=1,'entry/listener pose mismatch'
+        first_distance=math.dist(wa['first_eye'],wb['first_eye'])
+        if wa['label'] in ENTRY_LABELS:assert first_distance<=1,'entry/listener pose mismatch'
         delta=wb['heap_bytes']['maximum']-wa['heap_bytes']['maximum']
-        assert delta<=MIB,('window heap delta',wa['label'],delta)
+        runtime_differs=a['runtime_audio_memory']!=b['runtime_audio_memory']
+        noisy=wa['label'].endswith('-move') and delta>MIB and runtime_differs
+        if noisy:unknown.append(wa['label'])
+        else:assert delta<=MIB,('window heap delta',wa['label'],delta)
+        mean=wb['prepare_acoustics_ms']['mean']-wa['prepare_acoustics_ms']['mean']
+        if wa['label'].endswith('-move'):performance.append(mean<=.25)
         comparisons.append(dict(label=wa['label'],B_minus_A_heap_bytes=delta,
-            B_minus_A_prepare_mean_ms=wb['prepare_acoustics_ms']['mean']-wa['prepare_acoustics_ms']['mean']))
+            heap_status='UNKNOWN_RUNTIME_AUDIO_MEMORY_DIFFERS' if noisy else 'PASS',
+            first_eye_A=wa['first_eye'],first_eye_B=wb['first_eye'],last_eye_A=wa['last_eye'],last_eye_B=wb['last_eye'],
+            first_eye_AB_distance=first_distance,last_eye_AB_distance=math.dist(wa['last_eye'],wb['last_eye']),
+            pose_rule='GATED' if wa['label'] in ENTRY_LABELS else 'DESCRIPTIVE',
+            B_minus_A_prepare_mean_ms=mean,
+            B_minus_A_prepare_p95_ms=wb['prepare_acoustics_ms']['p95']-wa['prepare_acoustics_ms']['p95']))
     ea=[e for e in a['events'] if e['kind'] in ['transition','load']]
     eb=[e for e in b['events'] if e['kind'] in ['transition','load']]
     assert len(ea)==len(eb)
     for x,y in zip(ea,eb):
         assert {k:v for k,v in x.items() if k not in ['heap','us','cache_on']}=={k:v for k,v in y.items() if k not in ['heap','us','cache_on']}
         assert y['heap']-x['heap']<=MIB,('transition/load heap delta',x,y)
-    result=dict(status='PASS_GAMEPLAY_QUALIFICATION_PENDING_HUMAN_REVIEW',default_on=False,
+    result=dict(status='UNKNOWN_MATCHED_PAIR_REQUIRED' if unknown else 'PASS_GAMEPLAY_QUALIFICATION_PENDING_HUMAN_REVIEW',default_on=False,
+                unknown_movement_heap=unknown,new_pair_requires_new_amendment=bool(unknown),
+                default_on_performance_eligible=all(performance) and not unknown,
+                default_on_rule='each movement B-A mean <=+0.25 ms; otherwise written human acceptance of moving cost against r6 idle gain',
                 arms=results,comparisons=comparisons,reading_rules='sealed before console data',
                 BENCHMARK_LATE_CALLBACKS={r['arm']:r['audio_session']['BENCHMARK_LATE_CALLBACKS'] for r in results})
     (root/'RESULTS.json').write_text(json.dumps(result,indent=2)+'\n')

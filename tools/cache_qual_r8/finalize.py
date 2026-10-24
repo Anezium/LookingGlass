@@ -4,9 +4,18 @@ import argparse, ast, hashlib, json, os, shutil, subprocess, zipfile
 R=Path(__file__).resolve().parents[2]
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def write(p,v):p.write_text(json.dumps(v,indent=2)+'\n',encoding='utf-8')
+def manifest(o):
+    # The external fix report contains the final manifest/ZIP hashes. Keeping
+    # that receipt outside their inputs avoids a self-referential hash cycle.
+    write(o/'ARTIFACT-SHA256.json',{str(f.relative_to(o)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(o.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md','AMENDMENTS-FIX.md']})
 def main():
-    a=argparse.ArgumentParser(description=__doc__);a.add_argument('package',type=Path);a.add_argument('--clean',action='store_true');v=a.parse_args();o=v.package.resolve()
+    a=argparse.ArgumentParser(description=__doc__);a.add_argument('package',type=Path);a.add_argument('--clean',action='store_true');a.add_argument('--manifest-only',action='store_true');v=a.parse_args();o=v.package.resolve()
     assert not os.path.lexists(o/'session-s8-cache-qual')
+    if v.manifest_only:
+        verification=json.loads((o/'proof/PACKAGE-VERIFICATION.json').read_text())
+        assert sha(o/'CONSOLE-PACKAGE.zip')==verification['zip_sha256']
+        assert all(sha(o/name)==item['sha256'] for name,item in verification['members'].items())
+        manifest(o);print('Refreshed artifact manifest; sealed ZIP unchanged');return
     for f in (o/'console').glob('*.py'):ast.parse(f.read_text(),filename=str(f))
     head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip()
     build=json.loads((o/'proof/BUILD-COMMAND.json').read_text());assert build['exit_code']==0
@@ -25,8 +34,8 @@ def main():
         old=json.loads((o/'proof/CLEANUP.json').read_text()) if (o/'proof/CLEANUP.json').exists() else {}
         removed=old.get('removed',[])+removed
         write(o/'proof/CLEANUP.json',dict(removed=removed,removed_bytes=sum(r['bytes'] for r in removed),df_before=old.get('df_before',df_before),df_after=subprocess.check_output(['df','-h',str(o)],text=True),shared_host_target_retained=True))
-    members=['CONSOLE-BRIEF.md','DESIGN.md','CONSOLE-PROTOCOL.json','PACKAGE-IDENTITY.json','PACKAGE-MATRIX.json']
-    members += [p.name for p in sorted(o.glob('*AMENDMENT*.md'))]
+    members=['CONSOLE-BRIEF.md','DESIGN.md','CONSOLE-REVIEW-PROCEDURE.md','CONSOLE-PROTOCOL.json','PACKAGE-IDENTITY.json','PACKAGE-MATRIX.json']
+    members += [p.name for p in sorted(o.glob('*AMENDMENT*.md')) if p.name!='AMENDMENTS-FIX.md']
     for d in ['console','configs']:members += [str(f.relative_to(o)) for f in sorted((o/d).glob('*')) if f.is_file()]
     members += [p.name for p in sorted(o.glob('stage-*.json'))]
     for arm in ['baseline','cache']:
@@ -43,6 +52,6 @@ def main():
     write(o/'proof/PACKAGE-VERIFICATION.json',dict(status='PASS',session_directory='session-s8-cache-qual',session_directory_absent=True,zip_has_no_session_directory=True,
         common_self=sha(o/'packages/baseline/eboot.bin')==sha(o/'packages/cache/eboot.bin'),
         members={name:dict(bytes=(o/name).stat().st_size,sha256=sha(o/name)) for name in members},zip_sha256=sha(o/'CONSOLE-PACKAGE.zip')))
-    write(o/'ARTIFACT-SHA256.json',{str(f.relative_to(o)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(o.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md']})
+    manifest(o)
     print('Sealed',len(members),'members; exact session directory absent')
 if __name__=='__main__':main()

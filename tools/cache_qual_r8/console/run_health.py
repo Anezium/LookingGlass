@@ -51,6 +51,8 @@ def health_text(text,A=False):
     result=audio('\n'.join(lines),False)
     # Partial reporter writes are checked strictly after collection, not replayed.
     reasons += [r for r in result['reasons'] if not r.startswith('missing/corrupt')]
-    for n in re.findall(r'(?:newlib_uordblks|heap_uordblks_bytes)[\s:=]+(\d+)',text):
+    # Absolute heap at loads/transitions is descriptive (R1). Native recorder
+    # heap errors and collected gameplay rows remain the absolute stop.
+    for n in re.findall(r'^\[lg/cache-qual\].*heap_uordblks_bytes[\s:=]+(\d+)',text,re.M):
         if int(n)>180*1048576:reasons.append('heap >180MiB')
     return reasons

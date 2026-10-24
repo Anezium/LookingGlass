@@ -3,11 +3,13 @@ from pathlib import Path
 import json, subprocess, sys
 import pilot as p
 from run_health import entry_for_label
+from title_safety import require_closed, failure_restore
 ROOT=p.ROOT;PACKAGE=ROOT.parent
 PY='/Users/anezium/vita-j0/venv/bin/python';STAGER='/Users/anezium/vita-j0/bin/vita-stage'
 def stage_manifest(manifest,ledger):
     p.owner()
     m=json.loads(Path(manifest).read_text())
+    if any(v['kind']=='self' for v in m['files']):require_closed('stage SELF')
     allowed={p.A+'eboot.bin'}|{p.R+n for n in ['vita_renderer.json','vita_sim.json','native-timing-config.json','profile_mode','cache_qual_command.json']}
     assert all(v['remote'] in allowed and v['kind'] in ['small','self'] for v in m['files'])
     Path(str(ledger)+'.manifest.json').write_text(json.dumps(m,indent=2)+'\n')
@@ -17,7 +19,14 @@ def stage_manifest(manifest,ledger):
 def baseline():return json.loads((ROOT/'BASELINE.json').read_text())
 def saves(tag):
     p.B=ROOT
+    if failure_restore():require_closed('save restoration after stop/abort',final=True)
     base=baseline();orig={v['path']:v for v in base['manifest'] if '/saves/' in v['path'] or '/route-saves/' in v['path']}
+    settings=[p.R+'preferences.json',p.R+'audio-settings.txt']
+    expected={v['path']:v for v in base['manifest'] if v['path'] in settings}
+    assert set(expected)==set(settings),'settings baseline incomplete'
+    settings_a=p.snapshot(tag+'-settings',settings);settings_b=p.snapshot(tag+'-settings-independent',settings)
+    for rows in [settings_a,settings_b]:
+        assert all((v['present'],v.get('sha256'))==(expected[v['path']]['present'],expected[v['path']].get('sha256')) for v in rows),'Settings drift: preferences.json or audio-settings.txt changed; stop'
     paths=set(orig)
     with p.Session(timeout=30) as s:
         for d in base['inventories']:
@@ -42,10 +51,12 @@ def stage(label,arm,mode='full'):
     p.owner()
     if arm=='human-restore':
         assert label=='human-restore'
+        require_closed('session.py restore',final=True)
         for helper in ['restore-ledgers.py','verify-self.py','restore-files.py']:
             subprocess.run([PY,str(ROOT/helper)],check=True)
         return
     e=entry_for_label(label);assert e['arm']==arm and mode=='full'
+    require_closed('stage arm '+label)
     saves('saves-before-'+label)
     p.B=ROOT/label;p.B.mkdir(exist_ok=False)
     m=stage_manifest(PACKAGE/f"stage-{e['config_arm']}-full.json",p.B/'small-full-ledger.json')

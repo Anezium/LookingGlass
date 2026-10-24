@@ -4,7 +4,7 @@ ALL sockets/processes are blocked before helper imports. This is never device
 evidence. Uses locally retained human bytes only to prove exact restoration.
 """
 from pathlib import Path
-import argparse, contextlib, copy, hashlib, importlib.util, io, json, os, runpy, shutil, socket, subprocess, sys, tempfile, time, types, zipfile
+import argparse, contextlib, copy, hashlib, importlib.util, io, json, os, re, runpy, shutil, socket, subprocess, sys, tempfile, time, types, zipfile
 from unittest.mock import patch
 HUMAN_SELF=Path('/Users/anezium/vita-j0/resume-2026-10-22/alice-card-think/console-r4/restored-self-independent.bin')
 HUMAN_SAVE=Path('/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/session-s5-world-static-merge/originals/data/alice/private/saves/auto.json')
@@ -35,6 +35,7 @@ def exercise(source,work,replay):
     initial=dict(remote);directories={R,A,A+'sce_sys/',R+'saves/',R+'route-saves/',R+'frame_profile/'}
     log=work/'vita.log';log.write_bytes(b'OFFLINE SYNTHETIC\n');cache=work/'index.json';cache.write_bytes(b'{"original":true}\n');cache_before=cache.read_bytes()
     active=maximum=0;backups={};stages=[];driver_calls=[];ops=[];current=None;clock=0.;us=0;scene=10;mapname='gvillage';warm=False;data=None;pending=None;next_button=None
+    ui='closed';resumed=False;last_eye=0.;negative_results=[]
     seq=json.loads((package/'CONSOLE-PROTOCOL.json').read_text())['sequence']
     def append(line):
         with log.open('a') as f:f.write(line+'\n')
@@ -47,15 +48,16 @@ def exercise(source,work,replay):
             if name.startswith(d) and '/' not in name[len(d):]:rows[name[len(d):]]=dict(bytes=len(b),directory=False)
         return rows
     def snapshot_export():remote[R+'frame_profile/cache-qual.json']=(json.dumps(data)+'\n').encode()
-    def event(kind,**v):data['events'].append(dict(kind=kind,us=us,heap=150*1048576,**v))
+    def event(kind,**v):data['events'].append(dict(kind=kind,us=us,heap=(185 if kind in ['transition','load'] or v.get('reason')=='audio-load' else 150)*1048576,**v))
     def load_map(to,kind=None):
-        nonlocal us,scene,mapname,warm
+        nonlocal us,scene,mapname,warm,ui,last_eye
         if kind:
             event('transition',operation=kind,**{'from':mapname,'to':to},stage='before-drop');us+=10
             event('transition',operation=kind,**{'from':mapname,'to':to},stage='after-drop');us+=10
             append('[lg/transition-memory] '+json.dumps(dict(kind=kind,**{'from':mapname,'to':to})))
         if current['arm']=='B':event('reset',reason='audio-load',old_scene=scene,entries_before=512 if warm else 0,entries_after=0,pin_after=False,old_refs_before=1)
         scene+=1;mapname=to;warm=False;us+=10
+        ui='overlay' if kind=='save-reload' else 'running';last_eye=0.
         event('load',map=to,cache_on=current['arm']=='B');append('[lg/audio-load] level='+to+' elapsed_ms=1.000');us+=10
         # Exercise saves created by BOTH a transition and a later quit.
         if kind:
@@ -67,16 +69,18 @@ def exercise(source,work,replay):
             '[lg/audio-music] decode_ms=1 underrun_frames=0 chunks=1',
             '[cpal/vita] late_callbacks=1 underrun_estimates=0 callbacks=88 callback_p95_us=1 callback_max_us=1']
     def finish_window(c):
-        nonlocal us,warm
+        nonlocal us,warm,last_eye
         assert pending and c['label']==pending['label']
         moving=c['label'].endswith('-move');count=1281 if moving else 101
-        rows=[]
+        rows=[];origin=0. if moving else last_eye
         for i in range(count):
             cached=current['arm']=='B';counts=[[3,3,0],[2,1,0],[7,1,0]] if cached else [[0,6,0],[0,3,0],[0,8,0]]
             rows.append(dict(us=us+i*50000,prepare_ns=2500000,heap=150*1048576+(32000 if cached else 0),scene=scene,
-                eye=[float(i)*.1 if moving else 128.,0.,0.],queries=[6,3,8],cache=counts,
-                checks=int(cached and c['label'].endswith('-check')),mismatches=0))
-        us=rows[-1]['us']+10000
+                eye=[float(i)*(.1+(25./1280 if cached else 0)) if moving else origin,0.,0.],queries=[6,3,8],cache=counts,
+                checks=int(cached and pending['check_stride']==64),mismatches=0))
+        if not resumed:rows=[]
+        if rows:last_eye=rows[-1]['eye'][0]
+        us=(rows[-1]['us'] if rows else us+5_000_000)+10000
         data['windows'].append(dict(id=pending['id'],label=c['label'],map=mapname,check_stride=pending['check_stride'],rows=rows,overflow=False,end_us=us))
         for line in reporters():append(line)
         append(f"[lg/cache-qual] stop id={c['id']} label={c['label']}")
@@ -132,12 +136,15 @@ def exercise(source,work,replay):
             cache.write_bytes(b'{"synthetic_stager_mutation":true}\n')
         return subprocess.CompletedProcess(argv,0)
     def driver(name,args=None):
-        nonlocal data,us,scene,mapname,warm,next_button
+        nonlocal data,us,scene,mapname,warm,next_button,ui,resumed,clock
         assert active==0,'driver with FTP open';p.owner();args=args or {};driver_calls.append((name,args))
         if name=='vita_launch':
             data=dict(schema=1,capacity=8192,query_classes=['room','ambient','effects'],windows=[],events=[]);us=100;scene=10;mapname='gvillage';warm=False
             cfg=json.loads(remote[R+'vita_renderer.json']);append('[lg/vita-renderer] config '+json.dumps(cfg,separators=(',',':')))
             load_map('gvillage')
+        elif name=='vita_cmd' and args['raw']=='appstate ALICELG01':
+            return 'ALICELG01 running='+('false' if ui=='closed' else 'true')
+        elif name=='vita_quit':ui='closed'
         elif name=='vita_press' and next_button:
             kind,to=next_button;next_button=None
             if kind=='quit':
@@ -145,7 +152,15 @@ def exercise(source,work,replay):
                 append('Viewer closed cleanly. Data folder: OFFLINE')
                 if current['arm']=='B':event('reset',reason='audio-finish',old_scene=scene,entries_before=512,entries_after=0,pin_after=False,old_refs_before=2)
                 snapshot_export();append('[lg/cache-qual] exported windows=6 events='+str(len(data['events'])))
+                ui='closed'
             else:load_map(to,kind)
+        elif name=='vita_press':
+            sequence=args['sequence']
+            if sequence.startswith('press start;'):ui='running' if ui=='modal' else 'modal'
+            elif sequence.startswith('press circle;'):
+                if ui=='modal':ui='running';resumed=True
+                # Circle in the non-modal overlay does nothing.
+            if sequence.startswith('press left-stick '):clock+=2.02
         elif name=='vita_shot':return str(work/'fixture.png')
         else:assert name in ['vita_press','vita_cmd','vita_quit']
         return 'OFFLINE_FAKE_OK'
@@ -157,18 +172,32 @@ def exercise(source,work,replay):
         for obj,name in [(socket.socket,'connect'),(socket.socket,'connect_ex'),(socket.socket,'bind'),(socket,'create_connection'),(socket,'getaddrinfo'),(subprocess,'Popen'),(os,'system')]:stack.enter_context(patch.object(obj,name,deny))
         stack.enter_context(patch.object(subprocess,'run',fake_run));stack.enter_context(patch.object(os,'kill',lambda pid,sig:None if (pid,sig)==(4321,0) else deny()))
         stack.enter_context(patch.object(time,'sleep',lambda n:None));stack.enter_context(patch.object(time,'monotonic',monotonic))
+        stack.enter_context(patch.object(time,'monotonic_ns',lambda:int(clock*1_000_000_000)))
         stack.enter_context(patch.dict(sys.modules,{'vita_ftp':types.SimpleNamespace(Session=Transport)}));stack.enter_context(patch.object(sys,'path',[str(root)]+sys.path))
-        import pilot as p, session, audit, run_health
+        import pilot as p, session, audit, run_health, operate
         p.LOG=log;p.CACHE_INDEX=cache;stack.enter_context(patch.object(p,'request',driver))
         (work/'fixture.png').write_bytes(b'OFFLINE_FAKE_IMAGE')
         def call(name,*args):
             with patch.object(sys,'argv',[name,*map(str,args)]),contextlib.redirect_stdout(io.StringIO()):
                 try:runpy.run_path(str(root/name if (root/name).exists() else package/'scripts'/name),run_name='__main__')
                 except SystemExit as e:assert e.code in (None,0),(name,e.code)
+        def reject(name,action,contains=None):
+            try:action()
+            except (AssertionError,FileNotFoundError,ConnectionError) as error:
+                if contains:assert contains in str(error),(name,str(error))
+                negative_results.append(dict(fixture=name,status='REJECTED_AS_INTENDED',reason=str(error)))
+            else:raise AssertionError('negative fixture accepted: '+name)
+        def closure(label):
+            call('operate.py',label,'prove-closed');call('ack.py','--home','OFFLINE HOME inspected; title closed')
+        def reversed_operations(d):
+            reload=next(e for e in d['events'] if e.get('operation')=='save-reload' and e.get('from')==e.get('to'))
+            cross=next(e for e in d['events'] if e.get('operation')=='save-reload' and e.get('from')!=e.get('to') and e['stage']=='before-drop')
+            cross['us']=reload['us']+1
         call('bind_helpers.py','--root',root,'--package',package)
         ready=work/'driver-ready.json';write(ready,dict(pid=4321,started='2026-10-24T08:00:00+00:00',fixed_expiry='2026-10-24T20:00:00+00:00',lifetime_seconds=43200,auto_restart=False,ready=True))
         call('check-session-budget.py','--driver-ready',ready,'--admit',root/'DRIVER-ADMISSION.json','--session-start','2026-10-24T08:00:00+00:00','--now','2026-10-24T08:00:00+00:00','--launches','2','--pandemonium-launches','2','--preservation-minutes','64.5')
         call('admit.py','--sole-console-owner');call('verify-human-entry.py');call('preserve.py');call('baseline-r3.py');call('save-proof.py')
+        closure(seq[0]['label'])
         session.stage_manifest(package/'stage-baseline-self.json',root/'self-stage-ledger.json')
         for current in seq:
             number=seq.index(current)
@@ -176,22 +205,42 @@ def exercise(source,work,replay):
                 '--session-start','2026-10-24T08:00:00+00:00','--now',f'2026-10-24T08:{20+number*20:02d}:00+00:00',
                 '--launches',str(2-number),'--self-stages','0','--pandemonium-launches',str(2-number),'--preservation-minutes',str(44.5-number*20))
             label=current['label'];call('session.py','stage',label);call('verify-arm-self.py',label)
+            stale_home=(root/'TITLE-CLOSED.json').read_bytes()
             call('operate.py',label,'launch');call('ack.py','OFFLINE synthetic launch image')
+            # A running title, even with a stale HOME receipt, cannot be restored.
+            before_writes=list(ops)
+            reject('restore while running',lambda:call('session.py','restore'))
+            (root/'TITLE-CLOSED.json').write_bytes(stale_home)
+            for helper,args in [('session.py',['restore']),('restore-ledgers.py',[]),('restore-files.py',[]),('restore-arm.py',[label])]:
+                reject('stale HOME with running title '+helper,lambda:call(helper,*args),contains='still running')
+            write(root/'STOP.json',dict(reason='OFFLINE deliberate stop'))
+            reject('save restoration after stop while running',lambda:call('session.py','saves','stopped-negative'),contains='still running')
+            (root/'STOP.json').unlink();(root/'TITLE-CLOSED.json').unlink()
+            assert ops==before_writes and not (root/'RESTORATION-STARTED.json').exists()
             next_button=('chapter-or-console','hedge3');call('operate.py',label,'button','cross');call('ack.py','OFFLINE synthetic chapter entry')
             for label_window,action in [('hedge3-move','move'),('hedge3-check','check'),('pandemonium-move','move'),('pandemonium-check','check'),('reload-post','post'),('transition-post','post')]:
                 if label_window in ['pandemonium-move','reload-post','transition-post']:
                     call('session.py','saves','before-'+label+'-'+label_window)
-                    next_button=('chapter-or-console' if label_window=='transition-post' else 'restore','hedge3' if label_window=='transition-post' else 'pandemonium')
-                    call('operate.py',label,'button','cross');call('ack.py','OFFLINE synthetic native load confirmation')
-                call('operate.py',label,action,label_window,'circle');call('ack.py','OFFLINE synthetic stopped window')
+                    next_button=('chapter-or-console' if label_window=='transition-post' else 'save-reload','hedge3' if label_window=='transition-post' else 'pandemonium')
+                    call('operate.py',label,'button','cross')
+                    reject('load image is not modal Main '+label_window,lambda:call('ack.py','--main-menu','OFFLINE overlay must not qualify'),contains='Not a Start-menu image')
+                    call('ack.py','OFFLINE synthetic native load confirmation')
+                if not label_window.endswith('-check'):
+                    reject('window without inspected modal '+label_window,lambda:call('operate.py',label,action,label_window,'circle'))
+                    call('operate.py',label,'button','start');call('ack.py','--main-menu','OFFLINE Main menu; Circle Back/Resume visible')
+                resumed=False
+                call('operate.py',label,action,label_window,'circle');call('ack.py','--main-menu','OFFLINE stopped Main menu; Circle Back/Resume visible')
             next_button=('quit',None);call('operate.py',label,'button','cross');call('ack.py','OFFLINE synthetic quit')
             call('operate.py',label,'wait-exit');call('ack.py','OFFLINE synthetic HOME')
+            closure(label)
             call('session.py','collect',label);call('log-integrity.py',label,'--root',root);call('audit.py',label)
             checked=json.loads((root/label/'AUDIT.json').read_text());assert checked['status']=='PASS'
             assert checked['audio_session']['BENCHMARK_LATE_CALLBACKS']['total']==6
             # Deliberate failures verify fixed rules, independently of restoration.
             raw=(root/label/'runtime-log.txt').read_text();fixture=json.loads(remote[R+'frame_profile/cache-qual.json'])
             for name,mutate in [('underrun',lambda d,t:(d,t.replace('underrun_estimates=0','underrun_estimates=1'))),
+                ('OOM',lambda d,t:(d,t+'out of memory\n')),
+                ('producer p95 8 ms',lambda d,t:(d,t.replace('producer_mix_p95_ms=1','producer_mix_p95_ms=8'))),
                 ('missing counter',lambda d,t:(d,t.replace('producer_blocks=80 ','').replace('callbacks=88 ',''))),
                 ('short motion',lambda d,t:(dict(d,windows=[dict(d['windows'][0],rows=d['windows'][0]['rows'][:100])]+d['windows'][1:]),t)),
                 ('heap',lambda d,t:(dict(d,windows=[dict(d['windows'][0],rows=[dict(d['windows'][0]['rows'][0],heap=181*1048576)]+d['windows'][0]['rows'][1:])]+d['windows'][1:]),t))]:
@@ -199,41 +248,124 @@ def exercise(source,work,replay):
                 try:audit.validate(bad,txt,current['arm'])
                 except AssertionError:pass
                 else:raise AssertionError('bad '+name+' accepted')
+                negative_results.append(dict(fixture=name,arm=current['arm'],status='REJECTED_AS_INTENDED'))
+            for name,field in [('load starvation remains gated','pcm_starved_blocks=1'),('load producer p95 8 ms remains gated','producer_mix_p95_ms=8')]:
+                reporter=reporters()[0]
+                key=field.split('=')[0]
+                reporter=re.sub(r'\b'+key+r'=\S+',field,reporter)
+                txt=raw.replace('[lg/audio-load] level=pandemonium',reporter+'\n[lg/audio-load] level=pandemonium',1)
+                reject(name,lambda:audit.validate(fixture,txt,current['arm']))
+            for name,mutate in [
+                ('missing native reload',lambda d:[e.update(operation='restore') for e in d['events'] if e.get('operation')=='save-reload' and e.get('from')==e.get('to')]),
+                ('wrong operation order',reversed_operations),
+                ('post check stride disabled',lambda d:d['windows'][4].update(check_stride=0)),
+                ('heap failure flag',lambda d:d.update(heap_failed=True))]:
+                bad=copy.deepcopy(fixture);mutate(bad)
+                reject(name,lambda:audit.validate(bad,raw,current['arm']))
+            # Model the actual overlay behavior and exercise the real command,
+            # Circle resume and stop path with only the entry guard bypassed.
+            saved=(copy.deepcopy(data),pending,us,warm,last_eye,ui)
+            ui='overlay';resumed=False;p.B=root/label
+            operate.command('overlay-negative','start',0);p.button('circle')
+            operate.command('overlay-negative','stop',0)
+            assert data['windows'][-1]['rows']==[] and ui=='overlay'
+            bad=copy.deepcopy(fixture);bad['windows'][0]['rows']=data['windows'][-1]['rows']
+            reject('non-modal overlay Circle gives empty window',lambda:audit.validate(bad,raw,current['arm']))
+            data,pending,us,warm,last_eye,ui=saved;snapshot_export()
+            reject('unknown appstate',lambda:__import__('title_safety').closed_response('Error: Unknown command.'))
+            with patch.object(p,'cmd',side_effect=ConnectionError('OFFLINE fixture driver lost')):
+                count_writes=len([o for o in ops if o[0] in ['put','delete']])
+                reject('driver lost before restoration',lambda:call('session.py','restore'))
+                assert len([o for o in ops if o[0] in ['put','delete']])==count_writes
+            # Each setting is checked before any save put/delete, including absence.
+            for setting in ['preferences.json','audio-settings.txt']:
+                path=R+setting;previous=remote.get(path);remote[path]=b'fixture settings drift'
+                count_writes=len([o for o in ops if o[0] in ['put','delete']])
+                reject('settings drift '+setting,lambda:call('session.py','saves','settings-negative'),contains='Settings drift')
+                reject('stage settings drift '+setting,lambda:call('session.py','stage',label),contains='Settings drift')
+                assert len([o for o in ops if o[0] in ['put','delete']])==count_writes
+                if previous is None:remote.pop(path)
+                else:remote[path]=previous
             if current['arm']=='B':
                 for key,value in [('mismatches',1)]:
                     bad=copy.deepcopy(fixture);bad['windows'][1]['rows'][0][key]=value
                     try:audit.validate(bad,raw,'B')
                     except AssertionError:pass
                     else:raise AssertionError('mismatch accepted')
+                negative_results.append(dict(fixture='mismatch',status='REJECTED_AS_INTENDED'))
                 bad=copy.deepcopy(fixture);next(e for e in bad['events'] if e['kind']=='reset')['entries_after']=1
                 try:audit.validate(bad,raw,'B')
                 except AssertionError:pass
                 else:raise AssertionError('uncleared reset accepted')
+                negative_results.append(dict(fixture='uncleared reset',status='REJECTED_AS_INTENDED'))
                 bad=copy.deepcopy(fixture)
                 for row in bad['windows'][1]['rows']:row['checks']=0
                 try:audit.validate(bad,raw,'B')
                 except AssertionError:pass
                 else:raise AssertionError('zero sampled hits accepted')
+                negative_results.append(dict(fixture='zero sampled hits',status='REJECTED_AS_INTENDED'))
+                for index in [4,5]:
+                    bad=copy.deepcopy(fixture)
+                    for row in bad['windows'][index]['rows']:row['checks']=0
+                    reject('post-load zero sampled hits '+bad['windows'][index]['label'],lambda:audit.validate(bad,raw,'B'))
+            # A failed real audit main retains pulse diagnostics for a near-miss.
+            collect_path=root/label/'COLLECT.json';collected=collect_path.read_bytes()
+            receipt=json.loads(collected);export=Path(receipt['files'][0]['local']);good_export=export.read_bytes()
+            short=copy.deepcopy(fixture);short['windows'][0]['rows']=short['windows'][0]['rows'][:100]
+            export.write_text(json.dumps(short));receipt['files'][0]['sha256']=sha(export.read_bytes());write(collect_path,receipt)
+            reject('failed motion audit preserves per-pulse diagnostics',lambda:call('audit.py',label),contains='less than 60')
+            failed=json.loads((root/label/'AUDIT.json').read_text())
+            assert failed['status']=='FAIL' and len(failed['per_pulse_motion']['hedge3-move']['pulses'])==32
+            export.write_bytes(good_export);collect_path.write_bytes(collected);call('audit.py',label)
             for corruption in [raw+'orphan [lg/audio] tag\n',raw+' field=orphan\n']:
                 (root/label/'runtime-log.txt').write_text(corruption)
                 try:call('log-integrity.py',label,'--root',root)
                 except AssertionError:pass
                 else:raise AssertionError('corrupt log accepted')
+                negative_results.append(dict(fixture='corrupt log',status='REJECTED_AS_INTENDED'))
             (root/label/'runtime-log.txt').write_text(raw);call('log-integrity.py',label,'--root',root)
             call('restore-arm.py',label)
         call('audit.py','report');assert json.loads((root/'RESULTS.json').read_text())['default_on'] is False
         bpath=root/seq[1]['label']/'AUDIT.json';boriginal=bpath.read_bytes();altered=json.loads(boriginal)
         abase=json.loads((root/seq[0]['label']/'AUDIT.json').read_text())
+        assert math_distance(abase['windows'][1]['first_eye'],altered['windows'][1]['first_eye'])==25
+        altered['windows'][0]['first_eye'][0]+=2
+        write(bpath,altered);reject('entry pose >1 unit',lambda:call('audit.py','report'),contains='pose mismatch')
+        altered=json.loads(boriginal)
         altered['windows'][0]['heap_bytes']['maximum']=abase['windows'][0]['heap_bytes']['maximum']+1048577
         write(bpath,altered)
         try:call('audit.py','report')
         except AssertionError:pass
         else:raise AssertionError('paired heap above +1 MiB accepted')
+        negative_results.append(dict(fixture='paired heap >1MiB',status='REJECTED_AS_INTENDED'))
+        altered['runtime_audio_memory']=['[lg/audio-memory] event=runtime:fixture cache_bytes=10']
+        write(bpath,altered);call('audit.py','report')
+        assert json.loads((root/'RESULTS.json').read_text())['status']=='UNKNOWN_MATCHED_PAIR_REQUIRED'
+        altered=json.loads(boriginal)
+        altered['runtime_audio_memory']=['[lg/audio-memory] event=runtime:fixture cache_bytes=10']
+        for event in altered['events']:
+            if event['kind']=='transition':event['heap']+=1048577;break
+        write(bpath,altered);reject('transition paired heap strict',lambda:call('audit.py','report'))
+        altered=json.loads(boriginal)
+        altered['windows'][0]['prepare_acoustics_ms']['mean']+=.25
+        write(bpath,altered);call('audit.py','report')
+        assert json.loads((root/'RESULTS.json').read_text())['default_on_performance_eligible'] is True
+        altered=json.loads(boriginal)
+        altered['windows'][0]['prepare_acoustics_ms']['mean']+=.251
+        write(bpath,altered);call('audit.py','report')
+        assert json.loads((root/'RESULTS.json').read_text())['default_on_performance_eligible'] is False
+        altered=json.loads(boriginal)
         altered['windows'][0]['heap_bytes']['maximum']=abase['windows'][0]['heap_bytes']['maximum']+1048576
         write(bpath,altered);call('audit.py','report')
         bpath.write_bytes(boriginal);call('audit.py','report')
         call('session.py','restore')
+        reject('in-game Quit after restoration starts',lambda:call('operate.py',seq[-1]['label'],'button','cross'),contains='Restoration started')
         final=json.loads((root/'RESTORE-FINAL.json').read_text());assert final['status']=='PASS_ORIGINAL_STATE_VERIFIED'
+        assert final['human_auto']==dict(bytes=181900,sha256=sha(save),independent_readbacks=2)
+        assert final['human_self']==dict(bytes=37371674,sha256=sha(human)) and final['title_closed']
+        with patch.object(__import__('map_identity'),'HUMAN_AUTO','0'*64):
+            reject('final Auto literal mismatch',lambda:call('restore-files.py'),contains='Auto literal mismatch')
+        call('session.py','restore')
         assert remote==initial and cache.read_bytes()==cache_before and maximum==1 and active==0
         assert stages.count('stage-baseline-self.json')==1 and len([v for v in driver_calls if v[0]=='vita_launch'])==2
         assert all(json.loads(f.read_text()).get('restore_status')=='restored' for f in root.rglob('*ledger.json'))
@@ -244,9 +376,20 @@ def exercise(source,work,replay):
         return dict(status='PASS',synthetic_offline_only=True,device_contact=False,driver_contact=False,real_transport_imported=False,
             final_status=final['status'],full_restoration=True,launches=2,windows_per_arm=6,self_stages=1,
             serialized_fake_ftp_maximum=maximum,driver_fake_calls=len(driver_calls),late_callbacks_report_only=True,
-            negative_fixtures=['underrun','heap','missing counter','short motion','mismatch','uncleared reset','zero sampled hits','paired heap >1MiB','interleaved tag','orphan field'],real_package_session_path_absent=True,
+            negative_fixtures=negative_results,real_package_session_path_absent=True,
+            positive_rules=['185 MiB transition/load events descriptive; gameplay remains gated',
+                '25-unit movement endpoint/check pose difference accepted',
+                'reload-post and transition-post stride 64 with sampled B hits',
+                'per-pulse diagnostics retained on failed motion audit',
+                'runtime audio memory drift plus movement heap excess yields UNKNOWN',
+                'transition/load paired heap remains strict with runtime drift',
+                '+0.25 ms mean permits performance eligibility; +0.251 ms excludes it',
+                'RESTORE-FINAL restates exact human Auto and SELF literals'],
             helper_main_path=True,zip_replay=replay,tested_zip_sha256=sha((source/'CONSOLE-PACKAGE.zip').read_bytes()) if replay else None,
             created_saves_preserved_before_deletion=True)
+def math_distance(a,b):
+    import math
+    return math.dist(a,b)
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('package',type=Path);p.add_argument('--output',type=Path,required=True);p.add_argument('--zip',action='store_true');a=p.parse_args()
     assert not os.path.lexists(a.package/'session-s8-cache-qual'),'fresh real session path must be absent'

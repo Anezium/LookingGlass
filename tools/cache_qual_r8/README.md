@@ -27,3 +27,13 @@ no `session-s8-cache-qual` directory, even as a symlink.
 
 The console owner follows the sealed brief after an explicit ownership handoff.
 Changes after sealing require separate amendment files and both offline replays.
+
+For the adopted review fix, read AMENDMENTS-REVIEW.md and
+CONSOLE-REVIEW-PROCEDURE.md. Run prepare, host checks, proofs, and both main-path
+rehearsals; the rule-change path does not rebuild the engine or SELF. The fixture
+models native save-reload strings, modal versus overlay resume, divergent movement
+endpoints, and closed-title restoration. Negative receipts name every rejection.
+After committing and plain-pushing tools, seal with finalize, replay both paths,
+run finish_validation, and refresh only ARTIFACT-SHA256 with
+`finalize.py OUT --manifest-only`. AMENDMENTS-FIX.md is an external receipt of
+those final hashes and is excluded from ZIP/manifest inputs to avoid a hash cycle.
