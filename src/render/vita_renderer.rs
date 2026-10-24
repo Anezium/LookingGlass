@@ -2428,6 +2428,11 @@ mod tests {
             for value in field { *value = f32::from_bits(next); next += 1; }
         }
         assert_eq!(u.bits().to_vec(), (1..144).collect::<Vec<u32>>());
+        assert_eq!(u.bits_ref(), &u.bits());
+        for bits in [0, 0x80000000, 0x7fc00001, 0x7fc00002, 0xff800000] {
+            u.fog_b[3] = f32::from_bits(bits);
+            assert_eq!(u.bits_ref(), &u.bits());
+        }
     }
     #[test]
     fn story_film_bypass_is_explicit_and_default_off() {

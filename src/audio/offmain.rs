@@ -2,7 +2,7 @@
 //! One reusable bounded packet crosses SPSC queues. PCM demand wins before
 //! every trace; no game World, decoder, sink or lazy collider leaves main.
 use super::queue;
-use crate::collision::{AudioGeometry, Trace, World};
+use crate::collision::{StaticGeometry, Trace, World};
 use macroquad::prelude::Vec3;
 use std::{
     sync::{
@@ -24,7 +24,7 @@ impl Query {
     }
 }
 struct Batch {
-    geometry: Option<Arc<AudioGeometry>>,
+    geometry: Option<Arc<StaticGeometry>>,
     queries: [Query; CAP],
     results: [Trace; CAP],
     len: usize,
@@ -39,7 +39,7 @@ pub(super) struct Client {
     tx: queue::Sender<Box<Batch>>,
     rx: queue::Receiver<Box<Batch>>,
     batch: Option<Box<Batch>>,
-    geometry: Option<Arc<AudioGeometry>>,
+    geometry: Option<Arc<StaticGeometry>>,
     alive: Arc<AtomicBool>,
     stats: Arc<Stats>,
     count: usize,
@@ -100,6 +100,13 @@ pub(super) fn channel() -> (Client, Server) {
 impl Client {
     pub(super) fn reset(&mut self) {
         self.geometry = None;
+        if self.batch.is_none() {
+            self.batch = self.rx.pop();
+        }
+        if let Some(b) = &mut self.batch {
+            b.geometry = None;
+            b.valid = false;
+        }
         self.ready = false;
     }
     pub(super) fn begin(&mut self, world: &World) {
@@ -111,17 +118,15 @@ impl Client {
             self.batch = self.rx.pop();
         }
         if let Some(b) = &mut self.batch {
+            let new_scene = self.geometry.is_none();
             let geometry = self
                 .geometry
-                .get_or_insert_with(|| Arc::new(world.audio_geometry()));
-            if b.geometry
-                .as_ref()
-                .is_none_or(|g| !Arc::ptr_eq(g, geometry))
-            {
-                b.geometry = Some(geometry.clone());
+                .get_or_insert_with(|| world.audio_geometry());
+            if new_scene {
                 self.dirty = true;
                 b.valid = false;
             }
+            b.geometry = Some(geometry.clone());
         }
     }
     pub(super) fn query(&mut self, start: Vec3, end: Vec3) -> Trace {
@@ -227,6 +232,10 @@ impl Server {
         }
         if self.at == b.len {
             b.valid = true;
+            // Results remain reusable, but an idle/late returned packet must not
+            // retain an outgoing map. Main owns the scene identity and reattaches
+            // its shared backing before submitting another packet.
+            b.geometry = None;
             // One in-flight packet; client cannot submit again before reclaiming.
             assert!(self.tx.push(self.batch.take().unwrap()).is_ok());
         }
@@ -361,5 +370,39 @@ mod tests {
         assert!(client.ready);
         stop.store(true, Ordering::Release);
         worker.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+    #[test]
+    fn reset_and_late_return_release_outgoing_map_without_allocating() {
+        let world = World::fixture(&[(Vec3::splat(-5.), Vec3::splat(5.))]);
+        let backing = world.audio_geometry();
+        let weak = Arc::downgrade(&backing);
+        let (mut client, mut server) = channel();
+        client.begin(&world);
+        assert!(Arc::ptr_eq(client.geometry.as_ref().unwrap(), &backing));
+        assert!(Arc::ptr_eq(client.batch.as_ref().unwrap().geometry.as_ref().unwrap(), &backing));
+        drop(backing);
+        let mut packet = client.batch.take().unwrap();
+        packet.len = 2;
+        assert!(client.tx.push(packet).is_ok());
+        assert!(server.step()); // Reset while the producer still needs the map.
+        client.reset();
+        drop(world);
+        assert!(weak.upgrade().is_some());
+        assert!(server.step()); // Late return contains results, no map handle.
+        assert!(weak.upgrade().is_none());
+        client.reset();
+        assert!(client.batch.as_ref().unwrap().geometry.is_none());
+        assert!(!client.batch.as_ref().unwrap().valid);
+        let world = World::fixture(&[]);
+        let scope = crate::kernel_alloc::Scope::begin();
+        client.begin(&world);
+        assert_eq!(scope.finish(), 0);
+        client.reset();
+        assert_eq!(Arc::strong_count(&world.audio_geometry()), 2);
     }
 }

@@ -14,8 +14,7 @@ fn bits(t: Trace) -> [u32; 6] {
 fn colliders(phase: f32) -> Vec<Collider> {
     let map = crate::interaction::tests::fixture();
     let shape = model_shape::Template::brush_model(&map, 1).unwrap();
-    let planes = World::fixture(&[(vec3(-35., -17., -9.), vec3(35., 17., 9.))])
-        .hulls
+    let planes = World::box_hulls(&[(vec3(-35., -17., -9.), vec3(35., 17., 9.))])
         .remove(0)
         .planes;
     (0..25)
@@ -36,11 +35,10 @@ fn colliders(phase: f32) -> Vec<Collider> {
                     )
                 }
                 3 => Collider::from_hulls(
-                    World::fixture(&[
+                    World::box_hulls(&[
                         (origin - Vec3::splat(10.), origin + Vec3::splat(10.)),
                         (origin + vec3(40., -10., -10.), origin + vec3(60., 10., 10.)),
-                    ])
-                    .hulls,
+                    ]),
                 ),
                 _ => Collider::from_hulls(Vec::new()),
             }

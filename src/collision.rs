@@ -324,7 +324,7 @@ impl Collider {
     }
     /// An axis-aligned entity hull (model rotation does not rotate its bounds).
     pub fn box_bounds(min: Vec3, max: Vec3) -> Self {
-        Self::from_hulls(World::fixture(&[(min, max)]).hulls)
+        Self::from_hulls(World::box_hulls(&[(min, max)]))
     }
     fn from_hulls(hulls: Vec<Hull>) -> Self {
         let bounds = hulls.iter().map(|h| h.bounds).reduce(Bounds::union);
@@ -598,18 +598,18 @@ pub struct World {
     camera_obstacles: Vec<Collider>,
     liquids: Vec<(i32, Hull)>,
     dynamic_liquids: Vec<Liquid>,
-    hulls: Vec<Hull>,
-    tree: Option<Node>,
+    static_geometry: std::sync::Arc<StaticGeometry>,
     pub brush_count: usize,
     pub patch_count: usize,
     pub min: Vec3,
     pub max: Vec3,
 }
 
-/// Immutable copy made once per loaded audio scene. No game caches, lazy
-/// colliders, traversal state or profiler state cross the producer boundary.
-pub(crate) struct AudioGeometry { hulls: Vec<Hull>, tree: Option<Node> }
-impl AudioGeometry {
+/// Immutable backing shared by main-thread collision and acoustic packets.
+/// No caches, lazy colliders or traversal state cross the producer boundary.
+#[derive(Debug)]
+pub(crate) struct StaticGeometry { hulls: Vec<Hull>, tree: Option<Node> }
+impl StaticGeometry {
     pub(crate) fn sweep(&self, start: Vec3, end: Vec3) -> Trace {
         let query = SweepBounds::new(start, end, Vec3::ZERO);
         let mut result = Trace::default();
@@ -644,8 +644,8 @@ impl World {
         if cache.len() < 256 { cache.insert(key, trace); }
         trace
     }
-    pub(crate) fn audio_geometry(&self) -> AudioGeometry {
-        AudioGeometry { hulls: self.hulls.clone(), tree: self.tree.clone() }
+    pub(crate) fn audio_geometry(&self) -> std::sync::Arc<StaticGeometry> {
+        self.static_geometry.clone()
     }
     /// Complete the immutable static result against this frame's live geometry.
     /// Audio uses only fraction/start-solid; preserve the original clipping order.
@@ -792,8 +792,7 @@ impl World {
             camera_obstacles: Vec::new(),
             liquids,
             dynamic_liquids: Vec::new(),
-            hulls,
-            tree,
+            static_geometry: std::sync::Arc::new(StaticGeometry { hulls, tree }),
             brush_count,
             patch_count,
             min: map.world_min,
@@ -812,10 +811,10 @@ impl World {
         if cached.is_none() {
             let query = SweepBounds::new(eye, light, Vec3::ZERO);
             let mut trace = Trace::default();
-            if let Some(tree) = &self.tree {
+            if let Some(tree) = &self.static_geometry.tree {
                 tree.visit(&query, &mut |i| {
-                    if query.overlaps(self.hulls[i].bounds) {
-                        clip_hull(&self.hulls[i], eye, light, Vec3::ZERO, &mut trace);
+                    if query.overlaps(self.static_geometry.hulls[i].bounds) {
+                        clip_hull(&self.static_geometry.hulls[i], eye, light, Vec3::ZERO, &mut trace);
                     }
                 });
             }
@@ -884,7 +883,7 @@ impl World {
                 (
                     t.id,
                     Collider::from_hulls(
-                        Self::fixture(&[(t.center - t.half, t.center + t.half)]).hulls,
+                        Self::box_hulls(&[(t.center - t.half, t.center + t.half)]),
                     ),
                 )
             })
@@ -998,10 +997,10 @@ impl World {
         let (mut clipped, mut support_hulls) = (0u32, 0u32);
         let query = SweepBounds::new(start, end, half);
         let mut result = Trace::default();
-        if let Some(tree) = &self.tree {
+        if let Some(tree) = &self.static_geometry.tree {
             tree.visit(&query, &mut |index| {
                 if count_static { tested += 1; }
-                let hull = &self.hulls[index];
+                let hull = &self.static_geometry.hulls[index];
                 if query.overlaps(hull.bounds) {
                     #[cfg(target_os = "vita")]
                     {
@@ -1171,8 +1170,8 @@ impl World {
         None
     }
 
-    pub fn fixture(boxes: &[(Vec3, Vec3)]) -> Self {
-        let hulls = boxes
+    fn box_hulls(boxes: &[(Vec3, Vec3)]) -> Vec<Hull> {
+        boxes
             .iter()
             .map(|&(min, max)| {
                 let mut planes = Vec::new();
@@ -1193,7 +1192,11 @@ impl World {
                     bounds: Bounds { min, max },
                 }
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    pub fn fixture(boxes: &[(Vec3, Vec3)]) -> Self {
+        let hulls = Self::box_hulls(boxes);
         let tree = if hulls.is_empty() {
             None
         } else {
@@ -1223,15 +1226,14 @@ impl World {
             traversal: Default::default(),
             brush_count: hulls.len(),
             patch_count: 0,
-            hulls,
-            tree,
+            static_geometry: std::sync::Arc::new(StaticGeometry { hulls, tree }),
             min: Vec3::splat(-10000.),
             max: Vec3::splat(10000.),
         }
     }
     #[cfg(test)]
     pub fn add_liquid(&mut self, min: Vec3, max: Vec3, contents: i32, slope: Option<Plane>) {
-        let mut hull = Self::fixture(&[(min, max)]).hulls.remove(0);
+        let mut hull = Self::box_hulls(&[(min, max)]).remove(0);
         if let Some(p) = slope {
             hull.planes.push(p);
         }
@@ -1240,7 +1242,7 @@ impl World {
     #[cfg(test)]
     pub fn ramp_fixture() -> Self {
         let mut world = Self::fixture(&[(vec3(-200., -300., -1000.), vec3(500., 300., 1000.))]);
-        world.hulls[0].planes.push(Plane {
+        std::sync::Arc::get_mut(&mut world.static_geometry).unwrap().hulls[0].planes.push(Plane {
             normal: vec3(-0.5, 0., 1.).normalize(),
             distance: 0.,
         });
@@ -1367,7 +1369,7 @@ mod tests {
                 super::Vec3::new(100., 10., 10.),
             ),
         ]);
-        let collider = super::Collider::from_hulls(world.hulls);
+        let collider = super::Collider::from_hulls(std::sync::Arc::try_unwrap(world.static_geometry).unwrap().hulls);
         assert!(!collider.contains(super::Vec3::ZERO));
         assert!(collider.contains(collider.interior_point().unwrap()));
     }
@@ -1414,8 +1416,7 @@ mod tests {
         // Synthetic floor and oblique wall, reproducing the rounded tangent
         // contact encountered beside a school entrance pillar. No game assets.
         let mut world = World::fixture(&[(vec3(-2200., 1400., -600.), vec3(-1300., 2400., -512.))]);
-        let mut wall = World::fixture(&[(vec3(-1800., 1800., -600.), vec3(-1400., 2200., 0.))])
-            .hulls
+        let mut wall = World::box_hulls(&[(vec3(-1800., 1800., -600.), vec3(-1400., 2200., 0.))])
             .remove(0);
         wall.planes.push(Plane {
             normal: vec3(-0.65079135, 0.7592566, 0.),
@@ -1442,7 +1443,7 @@ mod tests {
         let source = World::fixture(&[(vec3(-4., -40., -4.), vec3(52., 40., 480.))]);
         for degrees in [0.1875_f32, 22.5, 45., -45.] {
             let hull = Hull::transformed(
-                &source.hulls[0].planes,
+                &source.static_geometry.hulls[0].planes,
                 vec3(100., 3000., 64.),
                 Quat::from_rotation_y(degrees.to_radians()),
             )

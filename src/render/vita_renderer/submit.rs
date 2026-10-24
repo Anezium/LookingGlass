@@ -69,6 +69,12 @@ impl Schedule {
     }
 }
 
+fn same_uniforms(a: &Prepared, b: &Prepared, p: usize, q: usize, parameters: &[Parameter]) -> bool {
+    if a.uniforms.is_none() && b.uniforms.is_none() && p == q { return true; }
+    a.uniforms.as_ref().map_or(&parameters[p].bits, shader::Uniforms::bits_ref)
+        == b.uniforms.as_ref().map_or(&parameters[q].bits, shader::Uniforms::bits_ref)
+}
+
 pub(super) fn merge(draws: &mut Vec<Prepared>, groups: &[Group], parameters: &[Parameter], projection: Mat4) {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     if std::env::var_os("LOOKING_GLASS_WORLD_PACK_ONLY").is_some() {return;}
@@ -84,8 +90,7 @@ pub(super) fn merge(draws: &mut Vec<Prepared>, groups: &[Group], parameters: &[P
                 && p.base_element+previous.indices==g.base_element
                 && p.recipe.stage.alpha_test==g.recipe.stage.alpha_test
                 && previous.texture==next.texture
-                && previous.uniforms.as_ref().map_or(parameters[p.parameter].bits,shader::Uniforms::bits)
-                    == next.uniforms.as_ref().map_or(parameters[g.parameter].bits,shader::Uniforms::bits)
+                && same_uniforms(previous, next, p.parameter, g.parameter, parameters)
         };
         // A draw boundary can affect equal-depth coverage/fragment derivatives
         // on the host driver even with identical uniform and vertex bits. Keep
@@ -97,7 +102,7 @@ pub(super) fn merge(draws: &mut Vec<Prepared>, groups: &[Group], parameters: &[P
         } else {None};
         if let Some(rect)=joined {
             draws[write-1].indices+=draws[read].indices; previous_rect=Some(rect);
-        } else { draws.swap(write,read); write+=1; previous_rect=None; }
+        } else { if write != read { draws.swap(write,read); } write+=1; previous_rect=None; }
 
     }
     count("vita_world_merged_draws", (draws.len()-write) as u64);

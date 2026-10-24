@@ -573,7 +573,7 @@ mod tests {
     }
     fn brush_map() -> Bsp {
         use crate::bsp::{MapBrush, Model, Shader};
-        let box_planes = |min, max| World::fixture(&[(min, max)]).hulls.remove(0).planes;
+        let box_planes = |min, max| World::box_hulls(&[(min, max)]).remove(0).planes;
         let shelf = box_planes(vec3(-80., -12., -5.), vec3(80., 12., 5.));
         let mut chamfered = box_planes(Vec3::splat(-24.), Vec3::splat(24.));
         for normal in [
@@ -1012,8 +1012,7 @@ mod tests {
     }
     #[test]
     fn cached_convex_keeps_separating_planes_after_rotation() {
-        let source = World::fixture(&[(vec3(-80., -12., -5.), vec3(80., 12., 5.))])
-            .hulls
+        let source = World::box_hulls(&[(vec3(-80., -12., -5.), vec3(80., 12., 5.))])
             .remove(0)
             .planes;
         let cached = Convex::new(&source).unwrap();
@@ -1051,8 +1050,7 @@ mod tests {
     }
     #[test]
     fn lazy_shapes_preserve_exact_sweeps_membership_and_clone_cache() {
-        let source = World::fixture(&[(vec3(-70., -15., -8.), vec3(70., 15., 8.))])
-            .hulls
+        let source = World::box_hulls(&[(vec3(-70., -15., -8.), vec3(70., 15., 8.))])
             .remove(0)
             .planes;
         let t = Template::from_parts(

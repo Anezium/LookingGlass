@@ -14,8 +14,8 @@ fn old_visit(node: &Node, query: Bounds, f: &mut impl FnMut(usize)) {
 fn original(w: &World, a: Vec3, b: Vec3, half: Vec3) -> Trace {
     let q=Bounds { min:a.min(b)-half-Vec3::splat(SKIN), max:a.max(b)+half+Vec3::splat(SKIN) };
     let mut t=Trace::default();
-    if let Some(tree)=&w.tree {
-        old_visit(tree,q,&mut |i| { let h=&w.hulls[i]; if h.bounds.overlaps(q) {clip_hull(h,a,b,half,&mut t);} });
+    if let Some(tree)=&w.static_geometry.tree {
+        old_visit(tree,q,&mut |i| { let h=&w.static_geometry.hulls[i]; if h.bounds.overlaps(q) {clip_hull(h,a,b,half,&mut t);} });
     }
     t
 }
@@ -33,7 +33,7 @@ fn compare(w: &World, count: usize) {
         assert_eq!((got.fraction,got.normal,got.start_solid,got.all_solid),
                    (expected.fraction,expected.normal,expected.start_solid,expected.all_solid),"trace {i}: {a:?} -> {b:?}");
     }
-    for h in w.hulls.iter().step_by(17) {
+    for h in w.static_geometry.hulls.iter().step_by(17) {
         let a=(h.bounds.min+h.bounds.max)*0.5;
         let b=a+Vec3::new(300.,-150.,60.);
         for half in [Vec3::ZERO,PLAYER_HALF] {
@@ -52,8 +52,8 @@ fn segment_broad_phase_preserves_collision_and_prunes_diagonal_queries() {
     compare(&w,10000);
     let q=SweepBounds::new(Vec3::new(-32.,-32.,20.),Vec3::new(2080.,2080.,20.),Vec3::splat(0.5));
     let mut old=0;let mut new=0;
-    old_visit(w.tree.as_ref().unwrap(),q.bounds,&mut |_|old+=1);
-    w.tree.as_ref().unwrap().visit(&q,&mut |_|new+=1);
+    old_visit(w.static_geometry.tree.as_ref().unwrap(),q.bounds,&mut |_|old+=1);
+    w.static_geometry.tree.as_ref().unwrap().visit(&q,&mut |_|new+=1);
     assert!(new*4<old,"candidates {old} -> {new}");
 }
 #[test]

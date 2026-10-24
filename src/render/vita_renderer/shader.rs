@@ -121,6 +121,12 @@ impl Uniforms {
         const { assert!(std::mem::size_of::<Uniforms>() == 143 * 4); }
         unsafe { &*(self as *const Self).cast::<[f32; 143]>() }
     }
+    /// Borrow the complete uniform words without materializing a stack copy.
+    /// `values` establishes the padding-free f32 layout; u32 has the same size
+    /// and alignment and accepts every f32 bit pattern, including NaN payloads.
+    pub fn bits_ref(&self) -> &[u32; 143] {
+        unsafe { &*(self.values() as *const [f32; 143]).cast::<[u32; 143]>() }
+    }
     // Field-wise, bit-exact comparison includes signed zero/NaN payloads and
     // avoids reading padding or depending on a Rust struct reinterpretation.
     pub fn bits(&self) -> [u32; 143] {
