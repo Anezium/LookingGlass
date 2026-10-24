@@ -957,8 +957,9 @@ fn merge_cached_options<'a>(
         }
         groups[target].passes[0].own_geometry();
         for &source in sources {
-            let mut source = groups[source].passes.pop().expect("merge plan source");
-            if source.model && !source.effect {super::actor_cache::recycle_empty(&mut groups[source].passes);}
+            let source_id = source;
+            let mut source = groups[source_id].passes.pop().expect("merge plan source");
+            if source.model && !source.effect {super::actor_cache::recycle_empty(&mut groups[source_id].passes);}
             source.own_geometry();
             let dest = &mut groups[target].passes[0].mesh;
             let offset = dest.vertices.len() as u16;
