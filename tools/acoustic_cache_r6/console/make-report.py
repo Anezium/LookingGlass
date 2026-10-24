@@ -33,8 +33,15 @@ def main():
   maps.append(row)
  promoted=maps[0]['wall_gate']['status']=='NONREGRESSION' and maps[1]['wall_gate']['status']=='BENEFIT' and all(m['heap_status']=='WITHIN_1_MIB' and m['loading_status']!='AUDIO_LOADING_REGRESSION' for m in maps)
  result=dict(status='BENEFIT_GATES_PASS' if promoted else 'NO_PROMOTION',reading_rule=protocol['pass_rule'],maps=maps,hardware_gameplay_correctness='Finite idle runs do not establish moving-gameplay hit rates or full NPC state equality.')
+ late={}
+ for root in [a.root]:
+  for entry in protocol['sequence']+protocol.get('optional_sequence',[]):
+   receipt=root/entry['label']/'STRICT-AUDIO.json'
+   if receipt.exists():late[entry['label']]=json.loads(receipt.read_text())['BENCHMARK_LATE_CALLBACKS']
+ result['BENCHMARK_LATE_CALLBACKS']=late
  a.output.write_text(json.dumps(result,indent=2)+'\n')
  text=['# Alice acoustic cache r6 console results','',result['status'],'',protocol['pass_rule'],'']
  for m in maps:text += [m['map']+': '+m['wall_gate']['status'],str(m['wall_gate']['oriented_pair_deltas_ms'])+' ms oriented B-A',str(m['heap_oriented_differences_MiB'])+' MiB sampled benchmark heap deltas; '+m['heap_status'],m['loading_status'],'Optional census: '+json.dumps(m['optional_census']),'']
+ text += ['BENCHMARK_LATE_CALLBACKS (report-only; sum of benchmark window counts):']+[label+': '+str(v['total'])+'; per window '+str(v['per_window']) for label,v in late.items()]
  a.output.with_suffix('.md').write_text('\n'.join(text)+'\n')
 if __name__=='__main__':main()

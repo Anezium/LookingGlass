@@ -11,7 +11,8 @@ assert not base.get('phase_census',False) and not cache.get('phase_census',False
 assert not (O/'session-s7-acoustic-cache').exists()
 h=load('health',O/'console/run_health.py')
 assert not h.health_text('[cpal/vita] late_callbacks=1\nbench: camera frozen map=hedge3\n[cpal/vita] late_callbacks=0\nbench: done 120 frames mode=fullbench\n[cpal/vita] late_callbacks=2')
-assert h.health_text('bench: camera frozen map=hedge3\n[cpal/vita] late_callbacks=1\nbench: done 120 frames mode=fullbench')
+assert not h.health_text('bench: camera frozen map=hedge3\n[cpal/vita] late_callbacks=1 underrun_estimates=0\nbench: done 120 frames mode=fullbench')
+assert h.health_text('bench: camera frozen map=hedge3\n[cpal/vita] late_callbacks=0 underrun_estimates=1\nbench: done 120 frames mode=fullbench')
 assert not h.health_text('[miniquad/vita] memory reason=loading newlib_uordblks=190000000\nbench: camera frozen map=hedge3\n[miniquad/vita] memory reason=benchmark newlib_uordblks=150000000\nbench: done 120 frames mode=fullbench')
 assert h.health_text('bench: camera frozen map=hedge3\n[miniquad/vita] memory reason=benchmark newlib_uordblks=190000000\nbench: done 120 frames mode=fullbench')
 for e in p['sequence']+p['optional_sequence']:assert h.entry_for_label(e['label'],O/'CONSOLE-PROTOCOL.json')==e

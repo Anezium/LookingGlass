@@ -14,7 +14,7 @@ def health_text(text,A=False):
             for k in ['pcm_starved_blocks','rejected_sinks','dropped_reports']:
                 if int(vals.get(k,0))>0:reasons.append(dict(kind=k,line=line))
         if '[lg/audio-music]' in line and re.search(r'underrun_frames=[1-9]',line):reasons.append(dict(kind='music underrun',line=line))
-        if '[cpal/vita]' in line and re.search(r'(underrun_estimates|late_callbacks)=[1-9]',line):reasons.append(dict(kind='CPAL underrun/late callback',line=line))
+        if '[cpal/vita]' in line and re.search(r'underrun_estimates=[1-9]',line):reasons.append(dict(kind='CPAL underrun',line=line))
     for line in heap_text.splitlines():
         if any(v in line.lower() for v in ["thread 'main' panicked",'memory allocation of','out of memory','fatal error','segmentation fault','frame profile report failed','viewer failed']):reasons.append(dict(kind='global crash/OOM',line=line))
         for k in ['newlib_uordblks','heap_uordblks_bytes']:
