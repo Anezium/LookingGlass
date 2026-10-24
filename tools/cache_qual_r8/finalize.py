@@ -7,7 +7,7 @@ def write(p,v):p.write_text(json.dumps(v,indent=2)+'\n',encoding='utf-8')
 def manifest(o):
     # The external fix report contains the final manifest/ZIP hashes. Keeping
     # that receipt outside their inputs avoids a self-referential hash cycle.
-    write(o/'ARTIFACT-SHA256.json',{str(f.relative_to(o)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(o.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md','AMENDMENTS-FIX.md']})
+    write(o/'ARTIFACT-SHA256.json',{str(f.relative_to(o)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(o.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md','AMENDMENTS-FIX.md','PROVE-CLOSED-FIX.md']})
 def main():
     a=argparse.ArgumentParser(description=__doc__);a.add_argument('package',type=Path);a.add_argument('--clean',action='store_true');a.add_argument('--manifest-only',action='store_true');v=a.parse_args();o=v.package.resolve()
     assert not os.path.lexists(o/'session-s8-cache-qual')
@@ -28,6 +28,7 @@ def main():
         df_before=subprocess.check_output(['df','-h',str(o)],text=True)
         for root in [o,R/'tools/cache_qual_r8']:
             for f in list(root.rglob('__pycache__')):
+                if 'blocked-attempts' in f.relative_to(root).parts:continue
                 removed.append(dict(path=str(f),bytes=sum(p.stat().st_size for p in f.rglob('*') if p.is_file())));shutil.rmtree(f)
         for f in [o/'target-vita',o/'tmp']:
             if f.exists():removed.append(dict(path=str(f),bytes=sum(p.stat().st_size for p in f.rglob('*') if p.is_file())));shutil.rmtree(f)

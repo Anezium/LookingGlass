@@ -23,13 +23,17 @@ displayed row 33, Labyrinthine Revenge. Repeat bounded navigation actions as nee
 from the inspected selection. There is no touch-helper dependency.
 
 Before initial SELF staging, before each arm's staging/restoration, and before
-final restoration, use `operate.py LABEL prove-closed`. This records
-`pilot.cmd('appstate ALICELG01')` and returns a HOME image only for an explicit
-not-running response. Inspect HOME and run `ack.py --home "HOME inspected; Alice closed"`.
-The restoration helpers recheck appstate immediately before writes. An unknown
-command, ambiguous response, driver loss, missing HOME inspection, or running
-title prevents restoration. Preserve evidence and ask the human to close ALICELG01
-from LiveArea if closure cannot be proven. Never infer closure from a clean Quit log.
+final restoration, read AMENDMENTS-M4B.md and use `operate.py LABEL prove-closed`.
+This records two `pilot.cmd('quit ALICELG01')` replies. The first must be `Quit.`
+or `Error: cannot quit the app. Is the TITLEID correct?`; the second must be
+exactly that cannot-quit error. This process kill writes no in-game autosave.
+Inspect the returned HOME/LiveArea image showing no running Alice and run
+`ack.py --home "HOME inspected; Alice closed"`.
+Restoration helpers recheck with two quits immediately before writes; both must
+report cannot-quit to retain the earlier image proof. A successful kill invalidates
+that image and requires a fresh proof and HOME acknowledgement. Any other reply,
+second `Quit.`, driver loss or missing HOME inspection leaves closure unproven:
+stop, write no saves or SELF, and preserve the evidence.
 
 On a stop or abort, release inputs and close the title with the authorized abort
 action or have the human close it from LiveArea. Prove closure and inspect HOME

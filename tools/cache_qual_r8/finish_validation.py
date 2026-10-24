@@ -15,12 +15,18 @@ for src,dest in [('/tmp/alice-r8-e2e-main-final.json','SESSION-E2E-MAIN.json'),(
         'non-modal overlay Circle gives empty window','driver lost before restoration',
         'save restoration after stop while running','in-game Quit after restoration starts',
         'post-load zero sampled hits reload-post','post-load zero sampled hits transition-post',
-        'failed motion audit preserves per-pulse diagnostics'}<=names
+        'failed motion audit preserves per-pulse diagnostics',
+        'closure Quit then Quit','closure Unknown command',
+        'closure Unknown command second','cannot-quit error on unrelated command'}<=names
+    closures={c['fixture']:c for c in v['closure_fixtures']}
+    assert all(closures[n]['status']=='PROVEN_AFTER_HOME_ACK' for n in ['Quit then error','error then error'])
+    assert all(closures[n]['status']=='UNPROVEN_NO_WRITES' for n in ['Quit then Quit','Unknown command','Unknown command second'])
+    assert v['process_kill_no_autosave']
     shutil.copyfile(src,O/'proof'/dest)
 if Path('/tmp/alice-r8-e2e-preseal.json').exists():shutil.copyfile('/tmp/alice-r8-e2e-preseal.json',O/'proof/SESSION-E2E-PRESEAL-IDENTITY-FAILURE.json')
 assert not os.path.lexists(O/'session-s8-cache-qual')
 for path in [O/'target-vita',O/'tmp',R/'target']:assert not path.exists(),path
-for root in [O,R]:assert not list(root.rglob('__pycache__'))
+for root in [O,R]:assert not [p for p in root.rglob('__pycache__') if 'blocked-attempts' not in p.relative_to(root).parts]
 identity=read(O/'PACKAGE-IDENTITY.json');verification=read(O/'proof/PACKAGE-VERIFICATION.json')
 assert identity['sealed_brief_sha256']==sha(O/'CONSOLE-BRIEF.md')==sha(R/'tools/cache_qual_r8/CONSOLE-BRIEF.md')
 assert read(O/'proof/SESSION-E2E-ZIP.json')['tested_zip_sha256']==sha(O/'CONSOLE-PACKAGE.zip')==verification['zip_sha256']
@@ -37,6 +43,12 @@ subprocess.run(['git','diff','--exit-code',identity['engine_source_revision'],'-
 review=(O/'REVIEW.md').read_text().split('## Amendments (text for a separate file, e.g. `AMENDMENTS-REVIEW.md`; the sealed brief stays unchanged)\n\n',1)[1].split('\n## Verified versus assumed',1)[0]
 assert review in (O/'AMENDMENTS-REVIEW.md').read_text()
 assert (O/'AMENDMENTS-REVIEW.md').read_bytes()==(R/'tools/cache_qual_r8/AMENDMENTS-REVIEW.md').read_bytes()
+assert (O/'AMENDMENTS-M4B.md').read_bytes()==(R/'tools/cache_qual_r8/AMENDMENTS-M4B.md').read_bytes()
+move=read(O/'blocked-attempts/attempt1-appstate-unknown/MOVE-RECEIPT.json')
+assert move['status']=='PASS' and move['before']==move['after']
+blocked=O/'blocked-attempts/attempt1-appstate-unknown'
+assert {str(p.relative_to(blocked)) for p in blocked.rglob('*') if p.is_file() and p.name!='MOVE-RECEIPT.json'}==set(move['before'])
+for name,item in move['before'].items():assert sha(blocked/name)==item['sha256'] and (blocked/name).stat().st_size==item['bytes']
 assert sha(O/'packages/baseline/eboot.bin')==sha(O/'packages/cache/eboot.bin')=='892d7680285ac9441f81fcb4321706e943dbe19c1fe4f0c349e8e09c949e8ef2'
 clean=read(O/'proof/CLEANUP.json');clean['df_after']=subprocess.check_output(['df','-h',str(O)],text=True);write(O/'proof/CLEANUP.json',clean)
 write(O/'proof/FINAL-VALIDATION.json',dict(status='PASS',time=datetime.datetime.now().astimezone().isoformat(),
@@ -47,6 +59,7 @@ write(O/'proof/FINAL-VALIDATION.json',dict(status='PASS',time=datetime.datetime.
     adopted_review_text_verbatim=True,review_evidence_sha256=sha(O/'proof/REVIEW-EVIDENCE.json'),engine_and_self_unchanged=True,
     negative_fixtures={name:len(read(O/'proof'/name)['negative_fixtures']) for name in ['SESSION-E2E-MAIN.json','SESSION-E2E-ZIP.json']},
     helper_bytes_match_zip=True,host_equality=True,final_native_storage=True,
+    m4b_closure_fixtures_verified=True,blocked_evidence_unchanged=True,blocked_evidence_files=move['file_count'],
     offline_main_path='PASS_ORIGINAL_STATE_VERIFIED',offline_zip_path='PASS_ORIGINAL_STATE_VERIFIED',
     log_integrity_fixtures=len(read(O/'proof/LOG-INTEGRITY-FIXTURES.json')['checks']),
     session_directory_absent=True,per_task_caches_absent=True,cache_default=False))

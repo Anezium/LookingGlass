@@ -35,7 +35,7 @@ def exercise(source,work,replay):
     initial=dict(remote);directories={R,A,A+'sce_sys/',R+'saves/',R+'route-saves/',R+'frame_profile/'}
     log=work/'vita.log';log.write_bytes(b'OFFLINE SYNTHETIC\n');cache=work/'index.json';cache.write_bytes(b'{"original":true}\n');cache_before=cache.read_bytes()
     active=maximum=0;backups={};stages=[];driver_calls=[];ops=[];current=None;clock=0.;us=0;scene=10;mapname='gvillage';warm=False;data=None;pending=None;next_button=None
-    ui='closed';resumed=False;last_eye=0.;negative_results=[]
+    ui='closed';resumed=False;last_eye=0.;negative_results=[];closure_fixtures=[]
     seq=json.loads((package/'CONSOLE-PROTOCOL.json').read_text())['sequence']
     def append(line):
         with log.open('a') as f:f.write(line+'\n')
@@ -142,8 +142,10 @@ def exercise(source,work,replay):
             data=dict(schema=1,capacity=8192,query_classes=['room','ambient','effects'],windows=[],events=[]);us=100;scene=10;mapname='gvillage';warm=False
             cfg=json.loads(remote[R+'vita_renderer.json']);append('[lg/vita-renderer] config '+json.dumps(cfg,separators=(',',':')))
             load_map('gvillage')
-        elif name=='vita_cmd' and args['raw']=='appstate ALICELG01':
-            return 'ALICELG01 running='+('false' if ui=='closed' else 'true')
+        elif name=='vita_cmd' and args['raw']=='quit ALICELG01':
+            reply='Error: cannot quit the app. Is the TITLEID correct?' if ui=='closed' else 'Quit.'
+            ui='closed'  # Process kill creates NO autosave or clean-exit log.
+            return reply
         elif name=='vita_quit':ui='closed'
         elif name=='vita_press' and next_button:
             kind,to=next_button;next_button=None
@@ -175,7 +177,7 @@ def exercise(source,work,replay):
         stack.enter_context(patch.object(time,'monotonic_ns',lambda:int(clock*1_000_000_000)))
         stack.enter_context(patch.dict(sys.modules,{'vita_ftp':types.SimpleNamespace(Session=Transport)}));stack.enter_context(patch.object(sys,'path',[str(root)]+sys.path))
         import pilot as p, session, audit, run_health, operate
-        p.LOG=log;p.CACHE_INDEX=cache;stack.enter_context(patch.object(p,'request',driver))
+        p.LOG=log;p.CACHE_INDEX=cache;real_request=p.request;stack.enter_context(patch.object(p,'request',driver))
         (work/'fixture.png').write_bytes(b'OFFLINE_FAKE_IMAGE')
         def call(name,*args):
             with patch.object(sys,'argv',[name,*map(str,args)]),contextlib.redirect_stdout(io.StringIO()):
@@ -197,7 +199,52 @@ def exercise(source,work,replay):
         ready=work/'driver-ready.json';write(ready,dict(pid=4321,started='2026-10-24T08:00:00+00:00',fixed_expiry='2026-10-24T20:00:00+00:00',lifetime_seconds=43200,auto_restart=False,ready=True))
         call('check-session-budget.py','--driver-ready',ready,'--admit',root/'DRIVER-ADMISSION.json','--session-start','2026-10-24T08:00:00+00:00','--now','2026-10-24T08:00:00+00:00','--launches','2','--pandemonium-launches','2','--preservation-minutes','64.5')
         call('admit.py','--sole-console-owner');call('verify-human-entry.py');call('preserve.py');call('baseline-r3.py');call('save-proof.py')
+        # Exercise real cmd/request error handling and prove-closed/ack mains,
+        # with only the subprocess response boundary replaced. Unknown command
+        # must remain an error; only the exact cannot-quit reply is permitted.
+        cannot='Error: cannot quit the app. Is the TITLEID correct?'
+        for name,replies,accepted in [
+            ('Quit then error',['Quit.\n',cannot+'\n'],True),
+            ('error then error',[cannot,cannot],True),
+            ('Quit then Quit',['Quit.','Quit.'],False),
+            ('Unknown command',['Error: Unknown command.'],False),
+            ('Unknown command second',['Quit.','Error: Unknown command.'],False),
+            ('ambiguous reply',['OFFLINE_FAKE_OK'],False),
+            ('other error',['Error: other failure'],False)]:
+            calls=[];before_remote=dict(remote);before_ops=list(ops)
+            def response(argv,**kwargs):
+                assert argv[-2]=='vita_cmd' and json.loads(argv[-1])==dict(raw='quit ALICELG01')
+                raw=replies[len(calls)];calls.append(raw)
+                return json.dumps(dict(result=dict(structuredContent=dict(result=raw))))
+            (root/'TITLE-CLOSED.json').write_text('{}')  # stale proof must be invalidated
+            def closure_request(name,args=None):
+                return real_request(name,args) if name=='vita_cmd' else driver(name,args)
+            with patch.object(p,'request',closure_request),patch.object(subprocess,'check_output',response):
+                action=lambda:call('operate.py',seq[0]['label'],'prove-closed')
+                if accepted:
+                    action()
+                    assert not (root/'TITLE-CLOSED.json').exists()
+                    reject('closure before HOME acknowledgement '+name,lambda:call('session.py','restore'))
+                    call('ack.py','--home','OFFLINE HOME/LiveArea inspected; no running Alice')
+                    receipt=json.loads((root/'TITLE-CLOSED.json').read_text())
+                    assert receipt['closure']['replies']==replies
+                else:
+                    reject('closure '+name,action)
+                    assert not (root/'TITLE-CLOSED.json').exists() and not (root/'PENDING-IMAGE.json').exists()
+                    failed=json.loads((root/'QUIT-CLOSURE.json').read_text())
+                    assert failed['status']=='UNPROVEN' and failed['failure']
+                    reject('restoration after unproven '+name,lambda:call('session.py','restore'))
+            assert calls==replies and remote==before_remote and ops==before_ops
+            closure_fixtures.append(dict(fixture=name,replies=replies,status='PROVEN_AFTER_HOME_ACK' if accepted else 'UNPROVEN_NO_WRITES',real_request_wrapper=True))
+            (root/'TITLE-CLOSED.json').unlink(missing_ok=True)
+        # The allowed error must not leak into other driver commands.
+        with patch.object(subprocess,'check_output',return_value=json.dumps(dict(result=dict(structuredContent=dict(result=cannot))))):
+            reject('cannot-quit error on unrelated command',lambda:real_request('vita_cmd',dict(raw='version')))
         closure(seq[0]['label'])
+        # The synthetic process kill models a running app and preserves every
+        # remote byte, including Auto, companions and exports.
+        ui='running';before_kill=dict(remote);closure(seq[0]['label'])
+        assert ui=='closed' and remote==before_kill
         session.stage_manifest(package/'stage-baseline-self.json',root/'self-stage-ledger.json')
         for current in seq:
             number=seq.index(current)
@@ -212,10 +259,13 @@ def exercise(source,work,replay):
             reject('restore while running',lambda:call('session.py','restore'))
             (root/'TITLE-CLOSED.json').write_bytes(stale_home)
             for helper,args in [('session.py',['restore']),('restore-ledgers.py',[]),('restore-files.py',[]),('restore-arm.py',[label])]:
+                ui='running';(root/'TITLE-CLOSED.json').write_bytes(stale_home)
                 reject('stale HOME with running title '+helper,lambda:call(helper,*args),contains='still running')
+                assert not (root/'TITLE-CLOSED.json').exists()
+            ui='running';(root/'TITLE-CLOSED.json').write_bytes(stale_home)
             write(root/'STOP.json',dict(reason='OFFLINE deliberate stop'))
             reject('save restoration after stop while running',lambda:call('session.py','saves','stopped-negative'),contains='still running')
-            (root/'STOP.json').unlink();(root/'TITLE-CLOSED.json').unlink()
+            (root/'STOP.json').unlink();(root/'TITLE-CLOSED.json').unlink(missing_ok=True);ui='running'
             assert ops==before_writes and not (root/'RESTORATION-STARTED.json').exists()
             next_button=('chapter-or-console','hedge3');call('operate.py',label,'button','cross');call('ack.py','OFFLINE synthetic chapter entry')
             for label_window,action in [('hedge3-move','move'),('hedge3-check','check'),('pandemonium-move','move'),('pandemonium-check','check'),('reload-post','post'),('transition-post','post')]:
@@ -272,11 +322,12 @@ def exercise(source,work,replay):
             bad=copy.deepcopy(fixture);bad['windows'][0]['rows']=data['windows'][-1]['rows']
             reject('non-modal overlay Circle gives empty window',lambda:audit.validate(bad,raw,current['arm']))
             data,pending,us,warm,last_eye,ui=saved;snapshot_export()
-            reject('unknown appstate',lambda:__import__('title_safety').closed_response('Error: Unknown command.'))
             with patch.object(p,'cmd',side_effect=ConnectionError('OFFLINE fixture driver lost')):
                 count_writes=len([o for o in ops if o[0] in ['put','delete']])
                 reject('driver lost before restoration',lambda:call('session.py','restore'))
                 assert len([o for o in ops if o[0] in ['put','delete']])==count_writes
+            assert not (root/'TITLE-CLOSED.json').exists()
+            closure(label)
             # Each setting is checked before any save put/delete, including absence.
             for setting in ['preferences.json','audio-settings.txt']:
                 path=R+setting;previous=remote.get(path);remote[path]=b'fixture settings drift'
@@ -376,7 +427,7 @@ def exercise(source,work,replay):
         return dict(status='PASS',synthetic_offline_only=True,device_contact=False,driver_contact=False,real_transport_imported=False,
             final_status=final['status'],full_restoration=True,launches=2,windows_per_arm=6,self_stages=1,
             serialized_fake_ftp_maximum=maximum,driver_fake_calls=len(driver_calls),late_callbacks_report_only=True,
-            negative_fixtures=negative_results,real_package_session_path_absent=True,
+            negative_fixtures=negative_results,closure_fixtures=closure_fixtures,process_kill_no_autosave=True,real_package_session_path_absent=True,
             positive_rules=['185 MiB transition/load events descriptive; gameplay remains gated',
                 '25-unit movement endpoint/check pose difference accepted',
                 'reload-post and transition-post stride 64 with sampled B hits',

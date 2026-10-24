@@ -29,7 +29,7 @@ The console owner follows the sealed brief after an explicit ownership handoff.
 Changes after sealing require separate amendment files and both offline replays.
 
 For the adopted review fix, read AMENDMENTS-REVIEW.md and
-CONSOLE-REVIEW-PROCEDURE.md. Run prepare, host checks, proofs, and both main-path
+AMENDMENTS-M4B.md with CONSOLE-REVIEW-PROCEDURE.md. Run host checks, proofs, and both main-path
 rehearsals; the rule-change path does not rebuild the engine or SELF. The fixture
 models native save-reload strings, modal versus overlay resume, divergent movement
 endpoints, and closed-title restoration. Negative receipts name every rejection.
@@ -37,3 +37,9 @@ After committing and plain-pushing tools, seal with finalize, replay both paths,
 run finish_validation, and refresh only ARTIFACT-SHA256 with
 `finalize.py OUT --manifest-only`. AMENDMENTS-FIX.md is an external receipt of
 those final hashes and is excluded from ZIP/manifest inputs to avoid a hash cycle.
+PROVE-CLOSED-FIX.md is likewise an external receipt, excluded from the manifest.
+M4B replaces only M4's closure mechanism with two process-kill replies and an
+inspected HOME/LiveArea image. Prior blocked evidence stays byte-identical under
+blocked-attempts; never reuse its helpers or modify it during preparation/cleanup.
+For a helper-only repair, copy changed helpers/scripts/documents directly from
+this directory; do not regenerate configs or rebuild the engine/SELF.

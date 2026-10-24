@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse, json, runpy, time
 import pilot as p
-from title_safety import closed_response, live_action
+from title_safety import record_closure, live_action
 from run_health import entry_for_label, health_text
 def text():
     offset=json.loads((p.B/'LAUNCH.json').read_text())['log_offset']
@@ -101,12 +101,11 @@ def main():
         p.rec('ABORT.json',dict(status='ABORTED_NOT_QUALIFIED'))
     elif v.action=='prove-closed':
         p.B=p.ROOT
-        raw=p.cmd('appstate ALICELG01')
-        p.rec('APPSTATE-CLOSURE.json',dict(command='appstate ALICELG01',raw=raw))
-        closed_response(raw)
+        p.owner()
+        closure=record_closure('prove-closed')
         image=p.shot('closure-home-'+str(time.monotonic_ns()))
         pending=json.loads((p.ROOT/'PENDING-IMAGE.json').read_text())
-        pending.update(state='home-candidate',appstate_command='appstate ALICELG01',appstate=raw)
+        pending.update(state='home-candidate',closure=closure)
         p.rec(str(p.ROOT/'PENDING-IMAGE.json'),pending)
         print(image);return
     if v.action=='button' and v.args==['start']:
