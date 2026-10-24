@@ -6,6 +6,8 @@ result=dict(scope='macOS host finite workload proofs; no console contact or Vita
 def write(): (O/'proof/HOST-RENDER.json').write_text(json.dumps(result,indent=2)+'\n')
 def run(mapname,arm,kind='entry',view=None,allocation=False):
  label=f'{mapname}-{kind}-{arm}';d=O/'host'/label;(d/'private').mkdir(parents=True,exist_ok=True)
+ for previous in [d/'frame.png',d/f'{mapname}-census-180.json']:
+  if previous.exists():previous.unlink()
  c=json.loads((O/'configs'/f'PL-{arm}.json').read_text());c.update(profiler='off' if allocation else 'full',profile_capture=False)
  (d/'private/vita_renderer.json').write_text(json.dumps(c,indent=2)+'\n')
  env={k:v for k,v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}

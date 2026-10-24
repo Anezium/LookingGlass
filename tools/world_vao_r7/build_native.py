@@ -8,7 +8,7 @@ cmd=['cargo','vita','build','vpk','--release','--offline','--locked','--features
 assert not subprocess.check_output(['git','status','--porcelain','--','src','Cargo.lock','Cargo.toml','build.rs','.cargo'],cwd=R)
 for n in ['Cargo.toml','Cargo.lock']:
  old=subprocess.check_output(['git','show',f'6270497:{n}'],cwd=R,text=True)
- current=(R/n).read_text().replace('2dbf0416118f5ffab6cdab482888f13cf3810d28','6f891804784bf4a5b39313ee6499344cb0d7e8b6')
+ current=(R/n).read_text().replace('0f43ead7da9a7902188b9505245024ae5a783bd2','6f891804784bf4a5b39313ee6499344cb0d7e8b6')
  assert old==current,'Only the explicit Miniquad rev may change'
 assert not subprocess.check_output(['git','diff','6270497','HEAD','--','build.rs','.cargo','src/logging.rs','src/render_direct.rs'],cwd=R)
 t=time.monotonic()

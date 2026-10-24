@@ -12,7 +12,7 @@ assert not git('diff',engine,'HEAD','--','src','Cargo.toml','Cargo.lock','build.
 for f in T.glob('*.py'):shutil.copy2(f,O/'scripts'/f.name)
 for n in ['CONSOLE-BRIEF.md','DESIGN.md','README.md']:shutil.copy2(T/n,O/n)
 write(O/'PACKAGE-IDENTITY.json',dict(package='alice-world-vao-r7',engine_source_revision=engine,branch='vita-world-vao-r7-20261024',branch_head=head))
-write(O/'proof/SOURCE-IDENTITY.json',dict(engine_revision=engine,tooling_head=head,base_branch='vita-phase-census-r5-20261024',base_engine='62704971576f7e3d30499962388b69bf2ed692d7',miniquad_revision='2dbf0416118f5ffab6cdab482888f13cf3810d28',files={str(f.relative_to(R)):sha(f) for f in sorted((R/'src').rglob('*.rs'))},host_binary_sha256=json.loads((O/'proof/HOST-RENDER.json').read_text())['binary_sha256']))
+write(O/'proof/SOURCE-IDENTITY.json',dict(engine_revision=engine,tooling_head=head,base_branch='vita-phase-census-r5-20261024',base_engine='62704971576f7e3d30499962388b69bf2ed692d7',miniquad_revision='0f43ead7da9a7902188b9505245024ae5a783bd2',files={str(f.relative_to(R)):sha(f) for f in sorted((R/'src').rglob('*.rs'))},host_binary_sha256=json.loads((O/'proof/HOST-RENDER.json').read_text())['binary_sha256']))
 # Remove Python caches before listing archive/manifest members.
 for root in [T,O]:
  for p in list(root.rglob('__pycache__')):shutil.rmtree(p)

@@ -1,6 +1,6 @@
 """Verify common native artifacts and record the four config arms. Mac only."""
 from pathlib import Path
-import hashlib,json,shutil,subprocess,sys,zipfile
+import hashlib,json,re,shutil,subprocess,sys,zipfile
 R=Path(__file__).resolve().parents[2];O=Path(sys.argv[1]).resolve();B=O/'packages/baseline';SDK=Path('/Users/anezium/vitasdk/bin')
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def git(*a):return subprocess.check_output(['git',*a],cwd=R,text=True).strip()
@@ -11,6 +11,19 @@ run('elf-margin.log',[sys.executable,str(O/'scripts/verify-elf-margin.py'),str(B
 run('process-params.log',[sys.executable,str(O/'scripts/verify-process-params.py'),str(B/'looking-glass.elf')])
 run('symbols.log',[str(SDK/'arm-vita-eabi-nm'),'-C',str(B/'looking-glass.elf')])
 symbols=(O/'logs/symbols.log').read_text();assert 'looking_glass::render_tail::hooks' not in symbols and 'looking_glass::world_input_proof' not in symbols
+sizes=run('native-vao-symbols.log',[str(SDK/'arm-vita-eabi-nm'),'-S','-C',str(B/'looking-glass.elf')])
+native_methods={}
+for method in ['new_vertex_input','apply_vertex_input','reset_vertex_input']:
+ line=next(l for l in sizes.splitlines() if l.endswith('::'+method) and '<miniquad::graphics::gl::GlContext as ' in l)
+ address,size,kind,name=line.split(maxsplit=3);start=int(address,16);length=int(size,16)
+ run(f'native-{method}.s',[str(SDK/'arm-vita-eabi-objdump'),'-d','-C',f'--start-address={start}',f'--stop-address={start+length}',str(B/'looking-glass.elf')])
+ native_methods[method]=dict(address=hex(start),bytes=length)
+source=Path('/Users/anezium/vita-work/miniquad-vao-r7/src/graphics/gl.rs').read_text()
+factory=source.split('    fn new_vertex_input(',1)[1].split('    fn delete_vertex_input(',1)[0]
+assert 'glGenVertexArrays' in factory and 'return None' not in factory and 'starts_with' not in factory
+version=run('vitaGL-version-string.log',[str(SDK/'arm-vita-eabi-strings'),'/Users/anezium/vitasdk/arm-vita-eabi/lib/libvitaGL.a'])
+assert 'OpenGL ES 2.0 VitaGL' in version
+(O/'proof/VITAGL-CAPABILITY.json').write_text(json.dumps(dict(status='PASS',installed_version_string='OpenGL ES 2.0 VitaGL',native_factory_version_rejection=False,factory_uses_existing_default_VAO_entrypoints=True,methods=native_methods),indent=2)+'\n')
 assert not git('diff','6270497',receipt['revision'],'--','build.rs','.cargo','src/logging.rs','src/render_direct.rs')
 run('regenerate-velf.log',[str(SDK/'vita-elf-create'),str(B/'looking-glass.elf'),str(B/'regenerated.velf')])
 run('regenerate-self.log',[str(SDK/'vita-make-fself'),'-s',str(B/'regenerated.velf'),str(B/'regenerated.self')])
@@ -28,7 +41,7 @@ for arm in ['baseline','vao','baseline-census','vao-census']:
  if arm.startswith('vao'):expected['world_vertex_input']=[False,True]
  if arm.endswith('census'):expected['phase_census']=[False,True]
  assert diff==expected
- v=dict(arm=arm,revision=receipt['revision'],source_revision=receipt['revision'],branch=git('branch','--show-current'),build_command=receipt['argv'],build_environment=receipt['environment'],self_sha256=sha(d/'eboot.bin'),self_bytes=(d/'eboot.bin').stat().st_size,elf_sha256=sha(B/'looking-glass.elf'),velf_sha256=sha(B/'looking-glass.velf'),vpk_sha256=sha(B/'looking-glass.vpk'),lock_sha256=sha(R/'Cargo.lock'),config_path=f'configs/PL-{arm}.json',config_sha256=sha(O/'configs'/f'PL-{arm}.json'),exact_effective_switch_diff=diff,common_binary=True,native_build_count=2,regenerated_self_byte_equal=True,regenerated_velf_byte_equal=True,elf_margin_pass=True,process_parameters_pass=True,zero_render_observer_hooks=True,console_access=False,runtime_performance='UNMEASURED',miniquad_revision='2dbf0416118f5ffab6cdab482888f13cf3810d28',vitaGL_sha256=sha(Path('/Users/anezium/vitasdk/arm-vita-eabi/lib/libvitaGL.a')))
+ v=dict(arm=arm,revision=receipt['revision'],source_revision=receipt['revision'],branch=git('branch','--show-current'),build_command=receipt['argv'],build_environment=receipt['environment'],self_sha256=sha(d/'eboot.bin'),self_bytes=(d/'eboot.bin').stat().st_size,elf_sha256=sha(B/'looking-glass.elf'),velf_sha256=sha(B/'looking-glass.velf'),vpk_sha256=sha(B/'looking-glass.vpk'),lock_sha256=sha(R/'Cargo.lock'),config_path=f'configs/PL-{arm}.json',config_sha256=sha(O/'configs'/f'PL-{arm}.json'),exact_effective_switch_diff=diff,common_binary=True,native_build_count=3,regenerated_self_byte_equal=True,regenerated_velf_byte_equal=True,elf_margin_pass=True,process_parameters_pass=True,zero_render_observer_hooks=True,console_access=False,runtime_performance='UNMEASURED',miniquad_revision='0f43ead7da9a7902188b9505245024ae5a783bd2',vitaGL_sha256=sha(Path('/Users/anezium/vitasdk/arm-vita-eabi/lib/libvitaGL.a')))
  (d/'VERIFICATION.json').write_text(json.dumps(v,indent=2)+'\n');rows.append(v)
 (O/'PACKAGE-MATRIX.json').write_text(json.dumps(dict(status='BUILT_CONSOLE_NOT_EXECUTED',packages=rows),indent=2)+'\n')
 print(json.dumps(rows[0],indent=2))
