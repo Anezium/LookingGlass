@@ -17,6 +17,7 @@ for name in ['log-integrity.py','test-log-integrity.py','verify-elf-margin.py','
   s=s.replace("real_a = a + '/runtime-log.txt'", "real_a = 's4-audio-pandemonium-1-A/runtime-log.txt'").replace("real_b = b + '/runtime-log.txt'", "real_b = 's4-audio-pandemonium-2-B/runtime-log.txt'")
   s=s.replace("protocol = json.loads((OUT / 'CONSOLE-PROTOCOL.json').read_text())", "protocol = json.loads((OUT / 'CONSOLE-PROTOCOL.json').read_text())\n    extra=dict(protocol['sequence'][0],label='fixture-isolated-1-A',session='fixture-independent');protocol['sequence'].append(extra)")
  (O/'scripts'/name).write_text(s)
+shutil.copy2(O/'scripts/log-integrity.py',O/'console/log-integrity.py')
 shutil.copytree(R/'tools/lever_matrix_r4/proof/log-integrity-fixtures',O/'proof/log-integrity-fixtures',dirs_exist_ok=True)
 protocol=json.loads((R/'tools/lever_matrix_r4/CONSOLE-PROTOCOL.json').read_text());seq=[];optional=[]
 for e in protocol['sequence'][:8]:

@@ -1,6 +1,6 @@
 # Alice exact skin consumers r9 — console handoff, NOT EXECUTED
 
-Mac-only preparation. Another agent owns the console. No Vita, shot driver, route lookup or console helper was contacted. This package does not admit ownership. All console measurements are PENDING.
+Mac-only preparation. Another agent owns the console. No Vita, shot driver, route lookup or console helper was contacted. This package does not admit ownership. All console measurements are PENDING. The archive includes the offline preflight scripts; fresh console copies include the whole-log integrity gate.
 
 OUT is /Users/anezium/vita-j0/resume-2026-10-24/alice-skin-exact-r9. PY is /Users/anezium/vita-j0/venv/bin/python. Use /opt/homebrew/bin/bash. Read SOL-REPORT.md, DESIGN.md, PACKAGE-MATRIX.json and CONSOLE-PROTOCOL.json before admission.
 

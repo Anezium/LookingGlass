@@ -34,6 +34,8 @@ if a.cleanup:
  write(O/'proof/CLEANUP.json',dict(removed=removed,removed_bytes=sum(v['bytes'] for v in removed),shared_host_target_retained='/Users/anezium/vita-j0/cargo-target-host',df=subprocess.check_output(['df','-h',str(O)],text=True)))
 files=[]
 for n in ['CONSOLE-BRIEF.md','CONSOLE-PROTOCOL.json','PACKAGE-MATRIX.json','PACKAGE-IDENTITY.json','DESIGN.md','README.md','VISUAL-QUALIFICATION.md','AMENDMENTS.md','AMENDMENTS-AUDIO.md','AMENDMENTS-INHERITED.md']:files.append(O/n)
+files.extend(O/'scripts'/n for n in ['bind_helpers.py','test_session_e2e.py','test_protocol.py','test_late_callbacks.py','log-integrity.py','test-log-integrity.py'])
+files.append(O/'proof/CHAPTER-REACHABILITY.json')
 files.extend(sorted(O.glob('stage-*.json')))
 for name in ['configs','console']:
  files.extend(sorted(f for f in (O/name).iterdir() if f.is_file()))
