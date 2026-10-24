@@ -12,8 +12,14 @@ fn pass_storage(limit: usize) -> Vec<Pass> {
 pub(super) fn recycle(passes: &mut Vec<Pass>) {
     if !passes.is_empty() && passes.iter().all(|p|p.model && !p.effect) && passes.capacity()<=64 {
         passes.clear();
-        PASS_STORAGE.with(|s| {
-            let mut s=s.borrow_mut();
+        recycle_empty(passes);
+    }
+}
+
+/// Only callers that already classified and consumed an actor recipe use this.
+pub(super) fn recycle_empty(passes:&mut Vec<Pass>) {
+    if passes.is_empty() && passes.capacity()>0 && passes.capacity()<=64 {
+        PASS_STORAGE.with(|s| {let mut s=s.borrow_mut();
             if s.len()<256 {s.push(std::mem::take(passes));}
         });
     }

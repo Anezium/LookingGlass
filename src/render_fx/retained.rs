@@ -875,7 +875,8 @@ fn merge_cached_options<'a>(
                 if versions.is_some() { groups[target].passes[0].geometry=Some(std::rc::Rc::new(cached)); }
                 else { groups[target].passes[0].geometry=None; groups[target].passes[0].mesh=cached.mesh; }
                 for &source in sources {
-                    groups[source].passes.clear();
+                    super::actor_cache::recycle(&mut groups[source].passes);
+                groups[source].passes.clear();
                 }
                 count("vita_fx_unchanged_merged_groups", 1);
                 cache.version_scratch.insert(target, version_storage);
@@ -940,6 +941,7 @@ fn merge_cached_options<'a>(
             groups[target].passes[0].mesh = dest;
             for &source in sources {
                 if !groups[source].passes[0].effect {count("vita_actor_batched_packets",1);}
+                super::actor_cache::recycle(&mut groups[source].passes);
                 groups[source].passes.clear();
             }
         } else {
@@ -956,6 +958,7 @@ fn merge_cached_options<'a>(
         groups[target].passes[0].own_geometry();
         for &source in sources {
             let mut source = groups[source].passes.pop().expect("merge plan source");
+            if source.model && !source.effect {super::actor_cache::recycle_empty(&mut groups[source].passes);}
             source.own_geometry();
             let dest = &mut groups[target].passes[0].mesh;
             let offset = dest.vertices.len() as u16;
