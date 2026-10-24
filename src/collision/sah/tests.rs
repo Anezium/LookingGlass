@@ -104,3 +104,43 @@ fn sah_real_maps_corpus_masks_and_load() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn sah_reorders_candidates_but_preserves_raw_enter_and_all_solid_normal() {
+    let mut world=accelerated(World::fixture(&[
+        (Vec3::new(0.,-10.,-10.),Vec3::new(1.,10.,10.)),
+        (Vec3::new(-10.,0.,-10.),Vec3::new(10.,1.,10.)),
+        (Vec3::splat(-2.),Vec3::splat(2.)),
+    ]));
+    let g=std::sync::Arc::get_mut(&mut world.static_geometry).unwrap();
+    // Force discovery in the opposite order. The required rank sort, rather
+    // than a coincidentally ordered tiny SAH leaf, must establish exactness.
+    g.sah.as_mut().unwrap().indices.reverse();
+    let a=Vec3::new(-1.,-1.,0.);let b=Vec3::new(1.,1.,0.);
+    let mut wrong=Trace::default();
+    for i in [1,0,2] {clip_hull(&g.hulls[i],a,b,Vec3::ZERO,&mut wrong);}
+    let expected=g.legacy_trace(a,b,Vec3::ZERO,&SweepBounds::new(a,b,Vec3::ZERO),&mut Counts::default());
+    assert_eq!(expected.fraction.to_bits(),0f32.to_bits());assert!(expected.all_solid);
+    assert_eq!(expected.normal,-Vec3::X);assert_eq!(wrong.normal,-Vec3::Y);
+    assert_ne!(bits(expected),bits(wrong));check(g,a,b,Vec3::ZERO);
+    let a=Vec3::new(-SKIN/2.,-SKIN/2.,0.);
+    let trace=g.legacy_trace(a,b,Vec3::ZERO,&SweepBounds::new(a,b,Vec3::ZERO),&mut Counts::default());
+    // Both negative raw enters compare below the already-clamped zero, so the
+    // second hull replaces the first normal. Comparing final fractions fails.
+    assert_eq!(trace.fraction.to_bits(),0f32.to_bits());assert_eq!(trace.normal,-Vec3::Y);
+    check(g,a,b,Vec3::ZERO);
+}
+
+#[cfg(feature="vita_renderer")]
+#[test]
+fn sah_config_is_one_strict_default_off_boolean() {
+    use crate::render::vita_renderer::Config;
+    for c in [Config::default(),serde_json::from_str("{}").unwrap()] {
+        assert!(!c.collision_sah);assert!(!c.audio_static_cache);assert!(!c.phase_census);
+    }
+    let c:Config=serde_json::from_str(r#"{"collision_sah":true}"#).unwrap();
+    assert!(c.collision_sah);assert!(!c.audio_static_cache);assert!(!c.phase_census);
+    for v in [serde_json::json!(1),serde_json::json!("on"),serde_json::Value::Null] {
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"collision_sah":v})).is_err());
+    }
+}
