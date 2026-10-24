@@ -48,7 +48,7 @@ lto = "thin"
 [patch.crates-io]
 cpal = { git = "https://github.com/Anezium/cpal", rev = "512acf2e66667059eda67b265ce9d80f68e02b3f" }
 # Branch vita-compact-buffers; Cargo allows only one of branch/tag/rev.
-miniquad = { git = "https://github.com/Anezium/miniquad", rev = "2dbf0416118f5ffab6cdab482888f13cf3810d28" }
+miniquad = { git = "https://github.com/Anezium/miniquad", rev = "0f43ead7da9a7902188b9505245024ae5a783bd2" }
 
 [package.metadata.vita]
 title_id = "ALICELG01"
