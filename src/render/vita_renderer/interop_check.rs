@@ -215,7 +215,7 @@ async fn vertex_input_check() -> Result<()> {
     let replacement=ctx.new_vertex_input(world.pipeline,&world.bindings).unwrap();
     ensure!(ctx.apply_vertex_input(replacement,&world.bindings),"reupload replacement invalid");ctx.reset_vertex_input();
     // Different resolved attributes must fall back even with identical buffers.
-    let mismatch=ctx.new_pipeline(&[BufferLayout{stride:52,..Default::default()}],&[VertexAttribute::new("position",VertexFormat::Float3)],world.shader,PipelineParams::default());
+    let mismatch=ctx.new_pipeline(&[BufferLayout{stride:56,..Default::default()}],&[VertexAttribute::new("position",VertexFormat::Float3),VertexAttribute::new("texcoord",VertexFormat::Float2),VertexAttribute::new("color0",VertexFormat::Byte4),VertexAttribute::new("lightmap",VertexFormat::Float4),VertexAttribute::new("normal",VertexFormat::Float3)],world.shader,PipelineParams::default());
     ctx.apply_pipeline(&mismatch);
     ensure!(!ctx.apply_vertex_input(replacement,&world.bindings),"changed shader layout accepted");
     ctx.delete_pipeline(mismatch);ctx.delete_vertex_input(input);ctx.delete_vertex_input(replacement);

@@ -85,10 +85,14 @@ pub unsafe fn command(name: &str, words: &[u64]) {
                     if words[p]!=0 {h.update(std::slice::from_raw_parts(words[p] as *const u8,len));}
                 }
                 static DETAIL: OnceLock<bool> = OnceLock::new();
-                if scope==1 && *DETAIL.get_or_init(||std::env::var_os("LOOKING_GLASS_WORLD_INPUT_TRACE_DETAIL").is_some()) {
+                if *DETAIL.get_or_init(||std::env::var_os("LOOKING_GLASS_WORLD_INPUT_TRACE_DETAIL").is_some()) {
                     let mut arguments=words.to_vec();
                     if let Some(p)=pointer {arguments[p]=0;}
-                    println!("WORLD_GL_EVENT {}",serde_json::json!({"name":name,"args":arguments,"prefix_sha256":format!("{:x}",h.clone().finalize())}));
+                    let payload=if name.starts_with("glUniform") && name!="glUniform1i" {
+                        let n=words[1] as usize*match name {"glUniform1fv"=>1,"glUniform2fv"=>2,"glUniform3fv"=>3,"glUniform4fv"=>4,_=>16};
+                        std::slice::from_raw_parts(*words.last().unwrap() as *const u32,n).to_vec()
+                    } else {Vec::new()};
+                    println!("WORLD_GL_EVENT {}",serde_json::json!({"scope":scope,"name":name,"args":arguments,"payload":payload,"prefix_sha256":format!("{:x}",h.clone().finalize())}));
                 }
             }
             if used>0 {for w in &input_words[..used] {t.draws[scope].update(w.to_le_bytes());}}

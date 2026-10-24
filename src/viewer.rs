@@ -35,6 +35,8 @@ pub fn config() -> macroquad::conf::Conf {
             window_width: width,
             window_height: height,
             high_dpi,
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            window_resizable: !crate::sim_maps::probe::enabled(),
             #[cfg(feature="vita_renderer")]
             sample_count: crate::render::vita_renderer::config().msaa_samples,
             #[cfg(not(feature="vita_renderer"))]
@@ -3498,6 +3500,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.gl("prepare-3d-returned"); }
         let world_camera = Camera3D {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            aspect: crate::sim_maps::probe::enabled().then_some(960. / 544.),
             #[cfg(feature="vita_renderer")]
             viewport: crate::render::vita_renderer::world_viewport(),
             position: camera,
@@ -4621,6 +4625,16 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
                 "phases":crate::light_profile::render_host_report(),
                 "counts":crate::render_fx::retained::host_report()}));
         }
+    }
+    // The world-input gate needs the saved scene/pose/HUD checks above. Keep
+    // the independent authored-steam visibility witness as the default suite.
+    if std::env::var_os("LOOKING_GLASS_WORLD_INPUT_SAVED_ONLY").is_some() {
+        std::fs::write("private/renderer-host/samples.json",serde_json::to_vec_pretty(&serde_json::json!({
+            "reference_feet":state.game.player.feet.to_array(),"camera":camera.to_array(),"target":target.to_array(),
+            "samples":samples,"console_access":false,"simulation_frozen":true,"clock_step":clock_step,
+            "warmup_frames":60,"steam_witness":"separate fixture not requested by world-input gate"}))?)?;
+        println!("PASS world-input saved scene: 240 frames, fourteen pose/HUD captures");
+        return Ok(());
     }
     // Draw one live, authored steam puff against an empty depth target as a
     // visibility witness. World occlusion/joint alpha remain covered above and
