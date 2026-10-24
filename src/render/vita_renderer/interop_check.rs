@@ -19,6 +19,7 @@ struct Plane {
     shader: ShaderId,
     pipeline: Pipeline,
     bindings: Bindings,
+    vertex_input: Option<VertexInputId>,
     uniforms: shader::Uniforms,
 }
 impl Plane {
@@ -108,6 +109,7 @@ impl Plane {
             _texture: white,
             shader,
             pipeline,
+            vertex_input: config().world_vertex_input.then(||ctx.new_vertex_input(pipeline,&bindings)).flatten(),
             bindings,
             uniforms,
         })
@@ -115,14 +117,18 @@ impl Plane {
     fn draw(&self) {
         let ctx = unsafe { get_internal_gl() }.quad_context;
         ctx.apply_pipeline(&self.pipeline);
-        ctx.apply_bindings(&self.bindings);
+        if self.vertex_input.is_some_and(|input|ctx.apply_vertex_input(input,&self.bindings)) {
+            ctx.apply_bindings_resources(&self.bindings);
+        } else {ctx.apply_bindings(&self.bindings);}
         ctx.apply_uniforms(UniformsSource::table(&self.uniforms));
         ctx.draw(0, 6, 1);
+        ctx.reset_vertex_input();
     }
 }
 impl Drop for Plane {
     fn drop(&mut self) {
         let ctx = unsafe { get_internal_gl() }.quad_context;
+        if let Some(input)=self.vertex_input {ctx.delete_vertex_input(input);}
         ctx.delete_buffer(self.bindings.vertex_buffers[0]);
         ctx.delete_buffer(self.bindings.index_buffer);
         ctx.delete_pipeline(self.pipeline);
@@ -160,7 +166,71 @@ fn check_color(expected: Vec3, label: &str) -> Result<()> {
     );
     Ok(())
 }
+async fn vertex_input_check() -> Result<()> {
+    let camera=Camera3D {position:Vec3::Z*10.,target:Vec3::ZERO,up:Vec3::Y,projection:Projection::Orthographics,fovy:4.,z_near:0.1,z_far:50.,..Default::default()};
+    let world=Plane::with_opaque(&camera,true)?;
+    let alpha=Plane::new(&camera)?;
+    let input=unsafe { get_internal_gl() }.quad_context.new_vertex_input(world.pipeline,&world.bindings).expect("host GL supports VAOs");
+    let target=render_target(64,64);
+    let draw_world=|cached:bool| {
+        let ctx=unsafe { get_internal_gl() }.quad_context;
+        ctx.apply_pipeline(&world.pipeline);
+        if cached {assert!(ctx.apply_vertex_input(input,&world.bindings));ctx.apply_bindings_resources(&world.bindings);}
+        else {ctx.apply_bindings(&world.bindings);}
+        ctx.apply_uniforms(UniformsSource::table(&world.uniforms));ctx.draw(0,6,1);ctx.reset_vertex_input();
+    };
+    for interruption in ["HUD","alpha","portal-target","reflection-target","shader"] {
+        let mut original=None;
+        for cached in [false,true] {
+            clear_background(BLUE);set_camera(&camera);unsafe {get_internal_gl().flush();}
+            draw_world(cached);
+            match interruption {
+                "HUD" => {set_default_camera();draw_rectangle(1.,1.,12.,12.,GREEN);unsafe {get_internal_gl().flush();}},
+                "alpha" => {alpha.draw();},
+                "portal-target"|"reflection-target" => {
+                    let mut other=Camera3D {position:camera.position,target:camera.target,up:camera.up,projection:camera.projection,fovy:camera.fovy,z_near:camera.z_near,z_far:camera.z_far,render_target:Some(target.clone()),..Default::default()};
+                    if interruption=="reflection-target" {other.position.x=-0.25;}
+                    set_camera(&other);clear_background(BLACK);unsafe {get_internal_gl().flush();}alpha.draw();
+                },
+                _ => {alpha.draw();},
+            }
+            set_camera(&camera);unsafe {get_internal_gl().flush();}
+            draw_world(cached);
+            let image=get_screen_data();
+            if let Some(bytes)=&original {ensure!(*bytes==image.bytes,"VAO interruption image differs: {interruption}");}
+            else {original=Some(image.bytes);}
+            next_frame().await;
+        }
+        println!("PASS VAO image equality after {interruption} interruption");
+    }
+    let ctx=unsafe { get_internal_gl() }.quad_context;
+    ctx.apply_pipeline(&world.pipeline);
+    // Cache activation and all repeated resource/draw calls allocate no Rust storage.
+    ctx.apply_vertex_input(input,&world.bindings);ctx.reset_vertex_input();
+    let scope=crate::kernel_alloc::Scope::begin();
+    for _ in 0..1000 {assert!(ctx.apply_vertex_input(input,&world.bindings));ctx.apply_bindings_resources(&world.bindings);ctx.draw(0,6,1);ctx.reset_vertex_input();}
+    ensure!(scope.finish()==0,"cached vertex input allocates");
+    ctx.buffer_update(world.bindings.vertex_buffers[0],BufferSource::slice::<WorldVertex>(&[]));
+    ensure!(!ctx.apply_vertex_input(input,&world.bindings),"reupload did not invalidate descriptor");
+    let replacement=ctx.new_vertex_input(world.pipeline,&world.bindings).unwrap();
+    ensure!(ctx.apply_vertex_input(replacement,&world.bindings),"reupload replacement invalid");ctx.reset_vertex_input();
+    // Different resolved attributes must fall back even with identical buffers.
+    let mismatch=ctx.new_pipeline(&[BufferLayout{stride:52,..Default::default()}],&[VertexAttribute::new("position",VertexFormat::Float3)],world.shader,PipelineParams::default());
+    ctx.apply_pipeline(&mismatch);
+    ensure!(!ctx.apply_vertex_input(replacement,&world.bindings),"changed shader layout accepted");
+    ctx.delete_pipeline(mismatch);ctx.delete_vertex_input(input);ctx.delete_vertex_input(replacement);
+    ctx.apply_pipeline(&world.pipeline);
+    ensure!(!ctx.apply_vertex_input(replacement,&world.bindings),"deleted descriptor accepted");
+    let buffer=ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable,BufferSource::empty::<WorldVertex>(4));
+    let bindings=Bindings {vertex_buffers:vec![buffer],index_buffer:world.bindings.index_buffer,images:world.bindings.images.clone()};
+    let deleted=ctx.new_vertex_input(world.pipeline,&bindings).unwrap();
+    ctx.delete_buffer(buffer);
+    ensure!(!ctx.apply_vertex_input(deleted,&bindings),"deleted buffer descriptor accepted");ctx.delete_vertex_input(deleted);
+    println!("PASS VAO reupload, changed layout, deletion, and 1000 allocation-free activations/draws");
+    Ok(())
+}
 pub async fn check() -> Result<()> {
+    vertex_input_check().await?;
     // Reproduce the milestone-2 weak-cache lifetime without a scene owner.
     crate::frame_profile::begin_creation_frame();
     for _ in 0..3 { drop(crate::render::world_material(12)?); }

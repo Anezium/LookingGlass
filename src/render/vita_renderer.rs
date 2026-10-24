@@ -67,6 +67,7 @@ pub struct Config {
     /// auto/on correct Vita's two-readback orientation; off restores J10.
     pub preview_flip: String,
     /// Experimental exact submission levers; independently default off.
+    pub world_vertex_input: bool,
     pub world_material_sort: bool,
     pub world_static_merge: bool,
     pub world_uniform_persist: bool,
@@ -249,6 +250,7 @@ impl Default for Config {
             clocks: Clocks::Max,
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
+            world_vertex_input: false,
             world_material_sort: false,
             world_static_merge: false,
             world_uniform_persist: false,
@@ -690,6 +692,7 @@ struct Group {
     material_order: usize,
     parameter: usize,
     bindings: Bindings,
+    vertex_input: [Option<VertexInputId>; 2],
     indices: i32,
     min: Vec3,
     max: Vec3,
@@ -845,6 +848,7 @@ pub struct Renderer {
     _game_thread: crate::game_thread::GameThread,
     groups: Vec<Group>,
     world_buffers: Vec<(BufferId,BufferId)>,
+    vertex_inputs: Vec<VertexInputId>,
     parameters: Vec<Parameter>,
     parameter_key: Option<[u32; 51]>,
     parameter_generation: u64,
@@ -893,12 +897,14 @@ struct ConstructionResources {
     shaders: Vec<ShaderId>,
     pipelines: Vec<Pipeline>,
     buffers: Vec<BufferId>,
+    vertex_inputs: Vec<VertexInputId>,
     committed: bool,
 }
 impl Drop for ConstructionResources {
     fn drop(&mut self) {
         if self.committed { return; }
         let ctx = unsafe { get_internal_gl() }.quad_context;
+        for id in self.vertex_inputs.drain(..) { ctx.delete_vertex_input(id); }
         for id in self.buffers.drain(..) { ctx.delete_buffer(id); }
         for id in self.pipelines.drain(..) { ctx.delete_pipeline(id); }
         for id in self.shaders.drain(..) { ctx.delete_shader(id); }
@@ -1189,6 +1195,7 @@ impl Renderer {
                     index_buffer: index,
                     images: vec![texture, atlas],
                 },
+                vertex_input: [None; 2],
                 indices,
                 min: p.geometry.min - extent,
                 max: p.geometry.max + extent,
@@ -1196,6 +1203,18 @@ impl Renderer {
                 recipe: p.recipe,
                 faces: p.geometry.faces,
             });
+        }
+        if c.world_vertex_input {
+            for g in &mut groups {
+                let pi = g.recipe.blend * 3 + g.recipe.cull;
+                g.vertex_input[0] = ctx.new_vertex_input(pipelines[pi], &g.bindings);
+                if !low_pipelines.is_empty() {
+                    g.vertex_input[1] = ctx.new_vertex_input(low_pipelines[g.recipe.cull], &g.bindings);
+                }
+                for input in g.vertex_input.iter().flatten() {
+                    if !resources.vertex_inputs.contains(input) { resources.vertex_inputs.push(*input); }
+                }
+            }
         }
         crate::frame_profile::shader_creation();
         let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
@@ -1323,6 +1342,7 @@ impl Renderer {
             visibility: vec![(0, None); groups.len()],
             models: vec![None; groups.len()],
             world_buffers: buffers,
+            vertex_inputs: std::mem::take(&mut resources.vertex_inputs),
             schedule: submit::Schedule::default(),
             groups,
             pvs,
@@ -1563,6 +1583,12 @@ impl Renderer {
         let mut applications = [0u64; 4];
         let mut uniform_traffic = [0u64; 3];
         let _submission = crate::render_tail::submission(config().world_binding_cache, config().world_gl_state_cache);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let allocation_scope = {
+            crate::world_input_proof::world(true);
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            (*ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_WORLD_INPUT_ALLOC").is_some())).then(crate::kernel_alloc::Scope::begin)
+        };
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
@@ -1585,13 +1611,27 @@ impl Renderer {
                 state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
             };
             let start = totals.start();
+            let state_census = crate::phase_census::span(crate::phase_census::Region::WorldStateBindings);
             if plan.pipeline { ctx.apply_pipeline(&pipeline); applications[0] += 1; }
             if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});} applications[1] += 1; }
             scale::log_depth(!alpha);
             if low { low_draws += 1; if !cache_enabled {count("vita_world_low_draws",1);} }
-            if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
+            drop(state_census);
+            let vertex_ready = if plan.bindings && config().world_vertex_input {
+                let _vertex_census = crate::phase_census::span(crate::phase_census::Region::WorldVertexInput);
+                g.vertex_input[usize::from(low)].is_some_and(|input| ctx.apply_vertex_input(input, &g.bindings))
+            } else { false };
+            {
+                let _state_census = crate::phase_census::span(crate::phase_census::Region::WorldStateBindings);
+                if plan.bindings { ctx.apply_bindings_resources(&g.bindings); applications[2] += 1; }
+            }
+            if plan.bindings && !vertex_ready {
+                let _vertex_census = crate::phase_census::span(crate::phase_census::Region::WorldVertexInput);
+                ctx.apply_bindings_vertices(&g.bindings);
+            }
             totals.add(0, start);
             let start = totals.start();
+            let uniform_census = crate::phase_census::span(crate::phase_census::Region::WorldUniformWrites);
             if plan.uniforms {
                 let traffic = self.field_uniforms[usize::from(low)].apply(ctx, u.values(), config().uniform_field_cache);
                 applications[3] += 1;
@@ -1599,13 +1639,17 @@ impl Renderer {
                 uniform_traffic[1] += traffic.bytes;
                 uniform_traffic[2] += traffic.calls;
             }
+            drop(uniform_census);
             totals.add(1, start);
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             if alpha || g.recipe.stage.blend != Blend::Opaque {
                 crate::sim_maps::probe::world_order(prepared.group, alpha);
             }
-            ctx.draw(g.base_element, prepared.indices, 1);
+            {
+                let _draw_census = crate::phase_census::span(crate::phase_census::Region::WorldDrawCalls);
+                ctx.draw(g.base_element, prepared.indices, 1);
+            }
             totals.add(2, start);
             if previous_pipeline != Some(pi) {
                 pipeline_changes += 1;
@@ -1650,6 +1694,12 @@ impl Renderer {
                     g.recipe.model.is_none(),
                 );
             }
+        }
+        if config().world_vertex_input { unsafe { get_internal_gl() }.quad_context.reset_vertex_input(); }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        {
+            crate::world_input_proof::world(false);
+            if let Some(scope)=allocation_scope { println!("WORLD_SUBMIT_ALLOCATIONS {}", scope.finish()); }
         }
         if cache_enabled {
             counts(&[
@@ -1769,6 +1819,7 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
+        for input in self.vertex_inputs.drain(..) { ctx.delete_vertex_input(input); }
         for &(vertex,index) in &self.world_buffers {
             ctx.delete_buffer(vertex); ctx.delete_buffer(index);
         }

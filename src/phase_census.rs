@@ -12,12 +12,13 @@ const DEPTH: usize = 32;
 pub(crate) enum Region { Npc, PlayerMovement, FixedPhysics, Movers, Objects, AudioPrepare,
     Acoustics, Lights, WorldOpaque, WorldVisibility, WorldParameters, WorldSubmit,
     AlphaPrepare, AlphaSubmit, ActorGather, ActorCollect, ActorPublication, ActorSubmit,
-    Fx, JointFinish, FxSubmit, Hud, Present, Swap, Other }
+    Fx, JointFinish, FxSubmit, Hud, Present, Swap, WorldVertexInput, WorldStateBindings, WorldUniformWrites, WorldDrawCalls, Other }
 const REGIONS: usize = Region::Other as usize;
 const NAMES: [&str; REGIONS] = ["npc_think_movement", "player_movement", "fixed_physics", "movers", "objects",
     "audio_prepare", "prepare_acoustics", "light_selection", "world_opaque", "world_visibility",
     "world_parameters", "world_submit", "alpha_prepare", "alpha_submit", "actor_gather", "actor_collect",
-    "actor_publication", "actor_submit", "fx_gather", "joint_finish", "fx_submit", "hud", "present", "swap"];
+    "actor_publication", "actor_submit", "fx_gather", "joint_finish", "fx_submit", "hud", "present", "swap",
+    "world_vertex_input", "world_state_bindings", "world_uniform_writes", "world_draw_calls"];
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub(crate) enum Owner { Audio, Player, Npc, Camera, Other }
@@ -201,6 +202,29 @@ pub(crate) fn test_begin(enabled:bool) {begin(enabled);}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn world_submission_children_close_without_allocating() {
+        begin(true);
+        let allocation=crate::kernel_alloc::Scope::begin();
+        {
+            let _parent=span(Region::WorldSubmit);
+            for _ in 0..465 {
+                for region in [Region::WorldVertexInput,Region::WorldStateBindings,Region::WorldUniformWrites,Region::WorldDrawCalls] {
+                    std::hint::black_box(span(region));
+                }
+            }
+        }
+        assert_eq!(allocation.finish(),0);
+        STATE.with(|s| {let s=s.borrow();
+            assert_eq!(s.current.errors,0);
+            assert_eq!(s.current.exclusive.iter().sum::<u64>(),s.current.coverage);
+            for region in [Region::WorldVertexInput,Region::WorldStateBindings,Region::WorldUniformWrites,Region::WorldDrawCalls] {
+                assert_eq!(s.current.parents[region as usize],1<<Region::WorldSubmit as usize);
+                assert_eq!(s.current.calls[region as usize],465);
+            }
+        });
+        begin(false);
+    }
     #[test]
     fn exact_keys_previous_windows_same_frame_scene_and_eviction() {
         let mut s=State::new();s.scene=1;s.sequence=1;s.query(0,[0;6]);s.query(0,[0;6]);

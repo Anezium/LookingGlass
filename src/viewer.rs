@@ -3427,6 +3427,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             .map_or(Vec3::ZERO, |p| p.quake_offset())
             + interactions.levels.iter().map(|s| s.ctl.quake_offset()).sum::<Vec3>();
         let (camera, target) = (view.eye + quake, view.target + quake);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let (camera, target) = crate::world_input_proof::view(camera, target, frame);
         #[cfg(target_os = "vita")]
         let (camera, target) = bench_camera.map_or((camera, target), |(eye, target, _)| (eye, target));
         let show_alice = !interactions.level_hides_player()

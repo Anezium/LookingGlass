@@ -132,6 +132,8 @@ mod native_timing;
 #[cfg_attr(feature="frame_total_only", path="render_direct.rs")]
 mod render_tail;
 mod kernel_alloc;
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+mod world_input_proof;
 #[cfg(feature="vita_renderer")]
 mod route_replay;
 mod vita_sim;

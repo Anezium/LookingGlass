@@ -171,13 +171,15 @@ mod hooks {
         glBufferData(t:u32,n:isize,p:*const c_void,u:u32); glBufferSubData(t:u32,o:isize,n:isize,p:*const c_void);
         glDrawElementsInstanced(t:u32,n:i32,k:u32,p:*const c_void,i:i32);
         glLinkProgram(p:u32); glDeleteProgram(p:u32);
-        glBindBuffer(t:u32,b:u32); glActiveTexture(t:u32);
+        glBindBuffer(t:u32,b:u32); glActiveTexture(t:u32); glBindVertexArray(v:u32);
         glVertexAttribPointer(i:u32,n:i32,t:u32,z:u8,s:i32,p:*const c_void);
         glEnableVertexAttribArray(i:u32); glDisableVertexAttribArray(i:u32); glVertexAttribDivisor(i:u32,d:u32)
     }
     macro_rules! wrap {
         ($($fn:ident => $real:ident($($arg:ident:$ty:ty),*) {$($before:tt)*});* $(;)?) => {$ (
-            unsafe extern "C" fn $fn($($arg:$ty),*) { $($before)* raw_call(concat!("world_gl_",stringify!($real))); api::$real($($arg),*); }
+            unsafe extern "C" fn $fn($($arg:$ty),*) { $($before)* #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                crate::world_input_proof::command(stringify!($real), &[$($arg as usize as u64),*]);
+                raw_call(concat!("world_gl_",stringify!($real))); api::$real($($arg),*); }
         )*};
     }
     wrap! {
@@ -190,6 +192,7 @@ mod hooks {
         uniform1 => glUniform1fv(l:i32,n:i32,p:*const f32) {uniform(n,1);}; uniform2 => glUniform2fv(l:i32,n:i32,p:*const f32) {uniform(n,2);};
         uniform3 => glUniform3fv(l:i32,n:i32,p:*const f32) {uniform(n,3);}; uniform4 => glUniform4fv(l:i32,n:i32,p:*const f32) {uniform(n,4);};
         uniform_matrix => glUniformMatrix4fv(l:i32,n:i32,t:u8,p:*const f32) {uniform(n,16);};
+        bind_vao => glBindVertexArray(v:u32) {};
         bind_buffer => glBindBuffer(t:u32,b:u32) {};
         active_texture => glActiveTexture(t:u32) {};
         attrib_pointer => glVertexAttribPointer(i:u32,n:i32,t:u32,z:u8,s:i32,p:*const c_void) {};
@@ -199,7 +202,9 @@ mod hooks {
         buffer_data => glBufferData(t:u32,n:isize,p:*const c_void,u:u32) {buffer(n,p);};
         buffer_sub => glBufferSubData(t:u32,o:isize,n:isize,p:*const c_void) {buffer(n,p);}
     }
-    unsafe extern "C" fn elements(t:u32,n:i32,k:u32,p:*const c_void,i:i32) {raw_call("world_gl_glDrawElementsInstanced");api::glDrawElementsInstanced(t,n,k,p,i);draw();}
+    unsafe extern "C" fn elements(t:u32,n:i32,k:u32,p:*const c_void,i:i32) {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        crate::world_input_proof::command("glDrawElementsInstanced", &[t as u64,n as u64,k as u64,p as usize as u64,i as u64]);raw_call("world_gl_glDrawElementsInstanced");api::glDrawElementsInstanced(t,n,k,p,i);draw();}
     #[cfg(target_os="macos")]
     unsafe extern "C" fn link(p:u32) {api::glLinkProgram(p);register(p,crate::shader_cache::name());}
     #[cfg(target_os="macos")]
@@ -216,6 +221,7 @@ mod hooks {
             b"glBufferData"=>buffer_data as *const () as _, b"glBufferSubData"=>buffer_sub as *const () as _, b"glDrawElementsInstanced"=>elements as *const () as _,
             #[cfg(target_os="macos")] b"glLinkProgram"=>link as *const () as _,
             #[cfg(target_os="macos")] b"glDeleteProgram"=>delete as *const () as _,
+            b"glBindVertexArray"=>bind_vao as *const () as _,
             b"glBindBuffer"=>bind_buffer as *const () as _, b"glActiveTexture"=>active_texture as *const () as _,
             b"glVertexAttribPointer"=>attrib_pointer as *const () as _, b"glEnableVertexAttribArray"=>enable_attrib as *const () as _,
             b"glDisableVertexAttribArray"=>disable_attrib as *const () as _, b"glVertexAttribDivisor"=>attrib_divisor as *const () as _,

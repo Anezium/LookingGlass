@@ -53,6 +53,7 @@ pub fn count(name: &'static str, n: u64) {
     }
 }
 pub fn begin() {
+    crate::world_input_proof::begin();
     if enabled() {
         JOINT_ORDER.with(|s|s.borrow_mut().clear());
         WORLD_ORDER.with(|s|s.borrow_mut().clear());
@@ -72,6 +73,7 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     let hash = format!("{:x}", Sha256::digest(&bytes));
     COUNTS.with(|c| println!("SIM_MAPS_FRAME {}", serde_json::json!({
         "frame": frame, "map": map, "active": active,
+        "vertex_input_proof": crate::world_input_proof::report(),
         "joint_alpha_order": JOINT_ORDER.with(|s|s.borrow().clone()),
         "blend_world_order": WORLD_ORDER.with(|s|s.borrow().clone()),
         "selected_lights_bits": crate::lighting::selected_bits(),
