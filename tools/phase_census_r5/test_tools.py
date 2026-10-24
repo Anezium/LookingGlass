@@ -46,7 +46,7 @@ with no_transport():
  for name,change in [('missing row',lambda d:d['rows'].pop()),('negative residual',lambda d:d['rows'][60].update(unbracketed_residual_ns=-1)),('hierarchy error',lambda d:d['rows'][60].update(hierarchy_errors=1)),('misalignment',lambda d:d['rows'][60].update(measured_frame=2)),('nested double sum',lambda d:d['rows'][60]['exclusive_ns'].__setitem__(0,10**10)),('invalid hits',lambda d:d['rows'][60]['static_queries_total_hit1_hit4_hit16'].__setitem__(0,[0,1,1,1]))]:
   wrong=copy.deepcopy(data);change(wrong);reject('census rejects '+name,lambda wrong=wrong:census.validate(wrong,'hedge3'))
  with tempfile.TemporaryDirectory(prefix='alice-census-offline-',dir=O/'proof') as tmp:
-  root=Path(tmp);(root/'BASELINE.json').write_text('{}')
+  root=Path(tmp);(root/'BASELINE.json').write_text('{"manifest":[]}')
   lightfile=root/'light.csv';doors=root/'doors.csv';cf=root/'census.json';cf.write_text(json.dumps(data))
   def write_light(value):
    with lightfile.open('w',newline='') as f:w=csv.writer(f);w.writerow(['frame','wall_us','frame_cpu_us','gl_observers']);w.writerows([[i,value,'','direct'] for i in range(1,121)])
@@ -63,9 +63,18 @@ with no_transport():
    (root/e['label']).mkdir()
    with patch.object(s,'ROOT',root),patch.object(s,'PACKAGE',O),patch.object(p,'ROOT',root),patch.object(p,'snapshot',snapshot),patch.object(s,'capture_log',lambda label:None),contextlib.redirect_stdout(io.StringIO()):s.collect(e['label'])
    assert len(seen[-1])==(3 if e['arm']=='B' else 2);ok('paired independent collect '+e['arm'])
-   write_light(60001)
+   write_light(60001+seq.index(e))
   e=seq[6];(root/e['label']).mkdir()
-  with patch.object(s,'ROOT',root),patch.object(s,'PACKAGE',O),patch.object(p,'ROOT',root),patch.object(p,'snapshot',snapshot),patch.object(s,'capture_log',lambda label:None):reject('stale census stops',lambda:s.collect(e['label']))
+  initial=dict(path=p.R+'frame_profile/hedge3-fullbench-census-180.json',present=True,sha256=p.sha(cf.read_bytes()))
+  with patch.object(s,'ROOT',root),patch.object(s,'PACKAGE',O),patch.object(p,'ROOT',root),patch.object(p,'snapshot',snapshot),patch.object(s,'capture_log',lambda label:None),patch.object(s,'baseline',lambda:dict(manifest=[initial])):
+   try:s.collect(e['label'])
+   except AssertionError as error:assert str(error)=='Census export equals preserved initial file';ok('preserved initial census rejected')
+   else:raise AssertionError('Accepted preserved initial census')
+  assert not (root/e['label']/'COLLECT.json').exists();ok('initial census rejection retains readbacks without PASS')
+  with patch.object(s,'ROOT',root),patch.object(s,'PACKAGE',O),patch.object(p,'ROOT',root),patch.object(p,'snapshot',snapshot),patch.object(s,'capture_log',lambda label:None):
+   try:s.collect(e['label'])
+   except AssertionError as error:assert str(error)=='Stale census export';ok('stale census stops')
+   else:raise AssertionError('Accepted stale census')
   # Real stage(), all transfer methods replaced. No transport bypass is possible.
   class FakeSession:
    def __init__(self,*a,**k):pass
@@ -80,6 +89,74 @@ with no_transport():
   with patch.object(s,'ROOT',root),patch.object(p,'ROOT',root),patch.object(s.subprocess,'run',lambda args,**kw:calls.append(Path(args[1]).name)):
    s.stage('human-restore','human-restore','full')
   assert calls==['restore-ledgers.py','verify-self.py','restore-files.py'];ok('restoration dispatch order')
+ # Execute the real baseline/restore helpers against an in-memory remote filesystem.
+ baseline_helper=load('offline_baseline_a1',O/'console/baseline-r3.py')
+ restore_helper=load('offline_restore_a1',O/'console/restore-files.py')
+ census_paths=[p.R+'frame_profile/'+m+'-fullbench-census-180.json' for m in ['hedge3','pandemonium']]
+ for case in ['recorded absence','preserved originals','new export cleanup','unrelated new file','disagreeing cleanup readbacks']:
+  with tempfile.TemporaryDirectory(prefix='alice-a1-restore-',dir=O/'proof') as tmp:
+   root=Path(tmp);remote={p.R+'profile_mode':b'full\n',p.A+'sce_sys/param.sfo':b'original SFO'};events=[]
+   if case=='preserved originals':remote.update({path:('original '+path).encode() for path in census_paths})
+   def listing(session,directory):
+    return {path[len(directory):]:dict(bytes=len(value),directory=False) for path,value in remote.items() if path.startswith(directory) and '/' not in path[len(directory):]}
+   inventories={d:listing(None,d) for d in [p.R,p.R+'frame_profile/']}
+   (root/'starting-inventories.json').write_text(json.dumps(inventories))
+   def snapshot(tag,paths):
+    rows=[]
+    for path in paths:
+     row=dict(path=path,present=path in remote)
+     if row['present']:
+      value=remote[path];local=root/tag/path.removeprefix('ux0:/');local.parent.mkdir(parents=True,exist_ok=True);local.write_bytes(value)
+      row.update(bytes=len(value),sha256=p.sha(value),local=str(local));events.append(('read',path,value,tag))
+      if case=='disagreeing cleanup readbacks' and tag=='new-exports-independent-readback' and path==census_paths[0]:row['sha256']='0'*64
+     rows.append(row)
+    return rows
+   class RestoreSession:
+    def __init__(self,*args,**kwargs):self.ftp=self
+    def __enter__(self):return self
+    def __exit__(self,*args):pass
+    def record(self,*args,**kwargs):pass
+    def execute(self,op,path,local):
+     assert op=='put';remote[path]=Path(local).read_bytes();events.append(('put',path))
+    def delete(self,path):
+     reads=[event for event in events if event[0]=='read' and event[1]==path and event[2]==remote[path]]
+     assert len(reads)>=2 and reads[-1][3]!=reads[-2][3],('Deletion lacks independent readbacks',path,reads)
+     events.append(('delete',path));del remote[path]
+   with patch.object(p,'ROOT',root),patch.object(p,'B',root),patch.object(p,'snapshot',snapshot),patch.object(p,'listing',listing),patch.object(p,'Session',RestoreSession),patch.object(sys,'argv',['baseline-r3.py']),contextlib.redirect_stdout(io.StringIO()):
+    baseline_helper.main()
+    baseline=json.loads((root/'BASELINE.json').read_text());by={v['path']:v for v in baseline['manifest']}
+    profile=json.loads((root/'PROFILE-BASELINE.json').read_text())['manifest']
+    for path in census_paths:
+     assert by[path] in profile
+     assert by[path]['present']==(case=='preserved originals')
+     if by[path]['present']:assert by[path]['bytes']==len(remote[path]) and by[path]['sha256']==p.sha(remote[path])
+     else:assert by[path]==dict(path=path,present=False)
+    ok('census baseline '+case)
+    original=dict(remote)
+    if case in ['new export cleanup','unrelated new file','disagreeing cleanup readbacks']:
+     # Also exercise the inventory cleanup branch used by inherited baselines.
+     baseline['manifest']=[v for v in baseline['manifest'] if v['path'] not in census_paths]
+     (root/'BASELINE.json').write_text(json.dumps(baseline))
+    remote.update({path:('new '+path).encode() for path in census_paths})
+    foreign=p.R+'frame_profile/unrelated-new-file.json'
+    if case=='unrelated new file':remote[foreign]=b'foreign evidence'
+    (root/'SELF-INDEPENDENT-VERIFY.json').write_text('{"status":"PASS"}')
+    if case in ['unrelated new file','disagreeing cleanup readbacks']:
+     try:restore_helper.main()
+     except AssertionError as error:
+      if case=='unrelated new file':assert error.args[0][0]=='UNEXPECTED NEW FILE: do not delete'
+     else:raise AssertionError('Unsafe restoration accepted: '+case)
+     assert not (root/'RESTORE-FINAL.json').exists()
+     assert not any(event[0]=='delete' for event in events)
+     if case=='unrelated new file':assert remote[foreign]==b'foreign evidence'
+     ok('restore rejects '+case)
+    else:
+     restore_helper.main()
+     result=json.loads((root/'RESTORE-FINAL.json').read_text())
+     assert result['status']=='PASS_ORIGINAL_STATE_VERIFIED' and remote==original
+     if case=='new export cleanup':assert set(result['new_exports_collected_removed'])==set(census_paths)
+     if case=='recorded absence':assert {event[1] for event in events if event[0]=='delete'}==set(census_paths)
+     ok('restore PASS_ORIGINAL_STATE_VERIFIED '+case)
  # Bind only a fresh helper-only session, with exact source hashes.
  binder=load('offline_binder',O/'scripts/bind_helpers.py')
  with tempfile.TemporaryDirectory(prefix='alice-bind-fixture-',dir=O/'proof') as tmp:
@@ -122,9 +199,14 @@ with no_transport():
     except SystemExit as ex:assert ex.code==0
   with patch.object(sys,'argv',['make-report.py','--root',str(root),'--package',str(O),'--output',str(root/'RESULTS.json')]):assembler.main()
   result=json.loads((root/'RESULTS.json').read_text());assert len(result['maps'])==2 and all(len(m['breakdowns'])==2 for m in result['maps']);ok('eight-run report assembly')
- # Immutable r4 transport, preservation and restoration contracts stay byte-identical.
+ # Only the exact amendment 1 transformations may differ from inherited r4 helpers.
  old=Path('/Users/anezium/vita-work/lg-phase-census-r5/tools/lever_matrix_r4/console')
  for name in ['pilot.py','preserve.py','baseline-r3.py','save-proof.py','verify-human-entry.py','verify-self.py','restore-files.py','restore-ledgers.py','restore-arm.py','verify-arm-self.py','map_identity.py','check-session-budget.py','ui.py','ack.py','strict-audio.py']:
-  assert (old/name).read_bytes()==(O/'console'/name).read_bytes();ok('inherited contract bytes '+name)
+  expected=(old/name).read_text()
+  if name in ['baseline-r3.py','restore-files.py']:
+   expected=expected.replace(r'(hedge3|hatter1|skool2|pandemonium)-(full|fullbench)-light-',r'(hedge3|hatter1|skool2|pandemonium)-(full|fullbench)-(light-|census-180\.json$)')
+  if name=='baseline-r3.py':
+   expected=expected.replace("    p.rec('baseline-paths.json',paths)","    for mapname in ['hedge3','pandemonium']:\n     path=p.R+'frame_profile/'+mapname+'-fullbench-census-180.json'\n     if path not in paths:paths.append(path)\n    p.rec('baseline-paths.json',paths)")
+  assert expected.encode()==(O/'console'/name).read_bytes();ok('inherited contract with exact A1 allowance '+name)
 result={'status':'PASS','offline_only':True,'transport_blocked':True,'checks':checks,'count':len(checks)}
 (O/'proof/CONSOLE-DRY-RUN.json').write_text(json.dumps(result,indent=2)+'\n');print(len(checks),'offline checks passed')
