@@ -836,6 +836,8 @@ impl Audio {
         });
     }
     pub fn new(disabled: bool, capture: Option<PathBuf>) -> Self {
+        #[cfg(all(feature="vita_renderer",not(test)))]
+        crate::cache_qualification::configure(crate::render::vita_renderer::config().audio_cache_qualification);
         let monitor = Arc::new(MonitorData::default());
         if capture.is_some() {
             monitor.samples.lock().unwrap().reserve(44100 * 2 * 30);
@@ -897,7 +899,7 @@ impl Audio {
         game_stage(5);
         let _stage=UpdateStage;
         self.stop_voice();
-        if let Some(cache) = &mut self.static_cache { cache.reset(); }
+        if let Some(cache) = &mut self.static_cache { cache.reset_for("audio-load"); }
         if let Some(client) = self.playback.as_mut().and_then(|p| p.mixer.acoustics.as_mut()) { client.reset(); }
         self.retire_music();
         self.scene_presented = false;
@@ -932,6 +934,7 @@ impl Audio {
         }
         audio_memory(&format!("level:{name}"), self.cache_samples);
         eprintln!("[lg/audio-load] level={name} elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.);
+        crate::cache_qualification::loaded(name,self.static_cache.is_some());
     }
     fn load_inner(&mut self, assets: &mut Assets, name: &str, map: &Bsp) -> Result<()> {
         let spec = level_spec(assets, name, map)?;
@@ -1263,6 +1266,7 @@ impl Audio {
         let _census = crate::phase_census::span(crate::phase_census::Region::AudioPrepare);
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Audio);
         crate::phase_census::scene(world.acoustic_scene_key());
+        crate::cache_qualification::frame(world.acoustic_scene_key(),listener);
         game_stage(4);
         let _stage=UpdateStage;
         if self.playback.is_none() {
@@ -1306,7 +1310,7 @@ impl Audio {
         // optional-client branch per trace, and never takes/restores client state.
         let offmain = self.playback.as_ref().is_some_and(|p| p._worker.is_some() && p.mixer.acoustics.is_some());
         if !offmain {
-            self.prepare_acoustics(listener, submerged, dt, |a,b| world.sweep(a,b,Vec3::ZERO));
+            self.prepare_acoustics(listener, submerged, dt, |a,b| { crate::cache_qualification::result(false,false); world.sweep(a,b,Vec3::ZERO) });
             return;
         }
         let mut client = self.playback.as_mut().and_then(|p| p.mixer.acoustics.take());
@@ -1341,15 +1345,16 @@ impl Audio {
     }
     fn prepare_acoustics(&mut self, listener:Vec3, submerged:bool, dt:f32,
         mut sweep: impl FnMut(Vec3,Vec3)->crate::collision::Trace) {
+        let _qual = crate::cache_qualification::acoustics();
         let _census = crate::phase_census::span(crate::phase_census::Region::Acoustics);
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Audio);
         self.acoustic_clock -= dt;
         if self.acoustic_clock <= 0. {
             self.acoustic_clock = 0.1;
-            self.room = acoustics::room_with(listener, |a,b| { crate::phase_census::query(0,a,b); sweep(a,b) });
+            self.room = acoustics::room_with(listener, |a,b| { crate::phase_census::query(0,a,b); crate::cache_qualification::class(0); sweep(a,b) });
             for e in &mut self.emitters {
                 let target = if e.spec.origin.distance(listener) < e.spec.radius * 4. {
-                    acoustics::obstruction_with(listener, e.spec.origin, |a,b| { crate::phase_census::query(1,a,b); sweep(a,b) })
+                    acoustics::obstruction_with(listener, e.spec.origin, |a,b| { crate::phase_census::query(1,a,b); crate::cache_qualification::class(1); sweep(a,b) })
                 } else {
                     0.
                 };
@@ -1367,7 +1372,7 @@ impl Audio {
         {
             let target = e
                 .origin
-                .map_or(0., |p| acoustics::obstruction_with(listener, p, |a,b| { crate::phase_census::query(2,a,b); sweep(a,b) }));
+                .map_or(0., |p| acoustics::obstruction_with(listener, p, |a,b| { crate::phase_census::query(2,a,b); crate::cache_qualification::class(2); sweep(a,b) }));
             e.obstruction += (target - e.obstruction) * (1. - (-dt * 12.).exp());
             e.acoustics.set(e.obstruction, submerged, self.room);
         }
@@ -1677,7 +1682,7 @@ impl Audio {
         true
     }
     pub fn finish(&mut self) -> Result<()> {
-        if let Some(cache) = &mut self.static_cache { cache.reset(); }
+        if let Some(cache) = &mut self.static_cache { cache.reset_for("audio-finish"); }
         self.stop_voice();
         self.music = None;
         self.retiring.clear();

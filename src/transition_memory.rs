@@ -45,9 +45,11 @@ pub(crate) fn replace<T>(old: &mut T, next: T, kind: &str, from: &str, to: &str)
     crate::frame_profile::exclude_transition_frame();
     let time_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default().as_millis();
+    crate::cache_qualification::transition(kind,from,to,"before-drop");
     let before_drop = sample();
     *old = next;
     let after_drop = sample();
+    crate::cache_qualification::transition(kind,from,to,"after-drop");
     #[derive(Serialize)]
     struct Record<'a> {
         time_ms: u128, kind: &'a str, from: &'a str, to: &'a str,

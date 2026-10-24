@@ -11,6 +11,7 @@ mod assets;
 mod startup;
 mod shader_cache;
 mod audio;
+mod cache_qualification;
 mod beyond;
 mod beyond_check;
 mod beyond_render;

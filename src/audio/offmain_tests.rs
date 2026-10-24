@@ -352,3 +352,24 @@ fn static_cache_map_output_is_sample_exact() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+#[ignore = "requires LOOKING_GLASS_TEST_DATA; qualification and sampled self-check"]
+fn static_cache_qualification_map_output_is_sample_exact() -> Result<()> {
+    assert!(!block::settings().music_thread);
+    let mut assets=Assets::open(&PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?))?;
+    for (name,eye) in [("hedge3",vec3(6168.,-7300.,280.15625)),("pandemonium",Vec3::ZERO)] {
+        let map=Bsp::parse(&assets.read(&format!("maps/{name}.bsp"))?)?;
+        let mut world=World::from_bsp(&map)?;
+        let (mut a,ma)=setup(false);let (mut b,mb)=setup(false);
+        a.static_cache=None;b.static_cache=Some(Box::new(static_cache::Cache::new()));
+        crate::cache_qualification::test_start(1);
+        a.load(&mut assets,name,&map);b.load(&mut assets,name,&map);
+        a.scene_presented();b.scene_presented();
+        compare(a,ma,b,mb,Some(&mut assets),&mut world,name,eye,120);
+        let (checks,mismatches)=crate::cache_qualification::test_finish();
+        assert!(checks>0);assert_eq!(mismatches,0);
+        println!("AUDIO_QUALIFICATION_EQUAL map={name} checks={checks} mismatches={mismatches}");
+    }
+    Ok(())
+}

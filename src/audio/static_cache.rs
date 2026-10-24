@@ -32,14 +32,23 @@ impl Cache {
         Self { geometry: None, entries: [[Entry::EMPTY;WAYS];SETS], next: [0;SETS],
             #[cfg(test)] hits: 0, #[cfg(test)] misses: 0 }
     }
-    pub(super) fn reset(&mut self) {
+    pub(super) fn reset(&mut self) { self.reset_for("explicit"); }
+    pub(super) fn reset_for(&mut self, reason:&str) {
+        let evidence=crate::cache_qualification::enabled().then(|| (
+            self.geometry.as_ref().map_or(0,|g|Arc::as_ptr(g) as usize),
+            self.entries.iter().flatten().filter(|e|e.valid).count(),
+            self.geometry.as_ref().map_or(0,Arc::strong_count)));
         self.entries.fill([Entry::EMPTY;WAYS]);
         self.next.fill(0);
         self.geometry = None;
+        if let Some((scene,before,refs))=evidence {
+            let after=self.entries.iter().flatten().filter(|e|e.valid).count();
+            crate::cache_qualification::reset(reason,scene,before,after,self.geometry.is_some(),refs);
+        }
     }
     pub(super) fn begin(&mut self, world: &World) {
         if self.geometry.as_ref().is_none_or(|g| Arc::as_ptr(g) as usize != world.acoustic_scene_key()) {
-            self.reset();
+            self.reset_for("scene-identity");
             self.geometry = Some(world.audio_geometry());
         }
     }
@@ -66,6 +75,11 @@ impl Cache {
         };
         #[cfg(test)] { if hit {self.hits+=1;} else {self.misses+=1;} }
         crate::phase_census::cache_result(hit,evicted);
+        crate::cache_qualification::result(hit,evicted);
+        if hit && crate::cache_qualification::should_check() {
+            let fresh=self.geometry.as_ref().unwrap().sweep(start,end);
+            crate::cache_qualification::checked(crate::cache_qualification::trace_equal(trace,fresh));
+        }
         world.audio_complete(trace,start,end)
     }
 }

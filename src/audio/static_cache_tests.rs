@@ -1,4 +1,18 @@
 use super::*;
+
+#[test]
+fn static_cache_native_self_check_detects_corruption_without_changing_the_hit() {
+    let world=World::fixture(&[]);
+    let mut cache=Cache::new();
+    let a=Vec3::ZERO;let b=Vec3::X;
+    crate::cache_qualification::test_start(1);
+    let expected=cache.sweep(&world,a,b);
+    assert!(crate::cache_qualification::trace_equal(expected,cache.sweep(&world,a,b)));
+    let entry=cache.entries.iter_mut().flatten().find(|e|e.valid).unwrap();
+    entry.trace.fraction=0.5;
+    assert_eq!(cache.sweep(&world,a,b).fraction.to_bits(),0.5f32.to_bits());
+    assert_eq!(crate::cache_qualification::test_finish(),(2,1));
+}
 use crate::{assets::Assets, bsp::Bsp};
 use macroquad::prelude::vec3;
 use std::{hint::black_box, path::PathBuf, time::Instant};

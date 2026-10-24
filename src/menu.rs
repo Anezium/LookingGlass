@@ -1322,6 +1322,9 @@ impl Menu {
         show_mouse(false);
         self.refresh_saves(store);
         loop {
+            if let Err(e)=crate::cache_qualification::poll(true) {
+                eprintln!("[lg/cache-qual] error={e:#}");
+            }
             let page = self.page.unwrap_or(Page::Main);
             let mut action = None;
             let focused = crate::look::window_focused();

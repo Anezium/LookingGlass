@@ -1140,6 +1140,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
     loop {
+        crate::cache_qualification::poll(paused || menu || inventory_menu)?;
         #[cfg(feature = "native_timing")]
         { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -3446,6 +3447,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
+        crate::cache_qualification::gameplay(active && !story.busy() && !interactions.scripted());
         audio.prepare(
             &mut assets,
             &scene.world,
@@ -4413,6 +4415,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         assets.base.display()
     );
     audio.finish()?;
+    crate::cache_qualification::export()?;
     Ok(())
 }
 

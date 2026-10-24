@@ -156,6 +156,9 @@ pub struct Config {
     pub audio_offmain: bool,
     /// Exact immutable acoustic traces on main; live geometry is always completed.
     pub audio_static_cache: bool,
+    /// Diagnostic gameplay recorder; absent from default serialized config.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub audio_cache_qualification: bool,
     pub audio_block_mix: bool,
     pub audio_preresample: bool,
     pub audio_block_parameters: bool,
@@ -295,6 +298,7 @@ impl Default for Config {
             audio_pcm_worker: false,
             audio_offmain: false,
             audio_static_cache: false,
+            audio_cache_qualification: false,
             audio_block_mix: false,
             audio_preresample: false,
             audio_block_parameters: false,
@@ -2210,6 +2214,8 @@ mod tests {
     #[test]
     fn audio_static_cache_is_opt_in() {
         assert!(!Config::default().audio_static_cache);
+        assert!(!Config::default().audio_cache_qualification);
+        assert!(serde_json::to_value(Config::default()).unwrap().get("audio_cache_qualification").is_none());
         assert!(serde_json::from_str::<Config>(r#"{"audio_static_cache":true}"#).unwrap().audio_static_cache);
         assert!(serde_json::from_str::<Config>(r#"{"audio_static_cache":"on"}"#).is_err());
     }
