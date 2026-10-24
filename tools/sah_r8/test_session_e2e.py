@@ -3,6 +3,8 @@
 This is a synthetic session, never hardware evidence. Real helper main functions
 produce every preservation, staging, collection, audit and restoration receipt.
 --sealed-helpers replays the identical test using the archived pre-fix sources.
+--main-admission requires completed real smokes and rehearses only the main
+session, using private copies of the verified smoke inputs.
 """
 from pathlib import Path
 import argparse,contextlib,copy,hashlib,importlib.util,io,json,os,runpy,shutil,socket,subprocess,sys,tempfile,time,types,zipfile
@@ -17,12 +19,28 @@ def deny(*args,**kwargs):raise AssertionError('OFFLINE BOUNDARY: real transport/
 def load(name,path):
  spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 
-def check_session_vacancy(package):
+def check_session_vacancy(package,main_admission=False):
  root=package/'session-s9-sah'
- if os.path.lexists(package/'session-s9-sah-load-smoke'):raise FileExistsError('Smoke session path already exists')
+ smoke=package/'session-s9-sah-load-smoke'
+ if not main_admission and os.path.lexists(smoke):raise FileExistsError('Smoke session path already exists')
  if os.path.lexists(root):
   raise FileExistsError(f'Pre-admission package check: {root} already exists; archive blocked evidence before creating a fresh session')
  print('PASS pre-admission package check: real session-s9-sah path is absent')
+ if main_admission:
+  if not smoke.is_dir():raise FileNotFoundError('Completed smoke session is required before main admission')
+  verifier=load('offline_smoke_admission',package/'console/smoke_admission.py')
+  receipt=verifier.inspect(package,smoke)
+  print('PASS real smoke admission: both B-only smokes, exact SELF/save hashes, PASS_ORIGINAL_STATE_VERIFIED')
+  return receipt
+
+def copy_smoke_inputs(receipt,source,destination):
+ """Copy only verified inputs; tamper fixtures must never write real evidence."""
+ destination.mkdir(parents=True)
+ for row in receipt['receipts']:
+  path=Path(row['path']);relative=path.relative_to(source.resolve())
+  target=destination/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target)
+  assert sha(target.read_bytes())==row['sha256'],'Smoke input changed while copying'
+ return destination
 
 def exercise(source,work,sealed=None,evidence=None,include_optional=False,smoke=False,smoke_root=None):
  package=work/'package';root=package/('session-s9-sah-load-smoke' if smoke else 'session-s9-sah');root.mkdir(parents=True)
@@ -294,14 +312,28 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,smoke=
    final_status=final['status'],full_restoration=True,engine_source_revision=receipt['engine_source_revision'],branch_head=receipt['branch_head'])
 
 def main():
- parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--include-optional',action='store_true',default=True,help='Legacy flag; both diagnostic census arms are always required');parser.add_argument('--sealed-helpers',type=Path);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--evidence-dir',type=Path);args=parser.parse_args()
+ parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--main-admission',action='store_true');parser.add_argument('--include-optional',action='store_true',default=True,help='Legacy flag; both diagnostic census arms are always required');parser.add_argument('--sealed-helpers',type=Path);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--evidence-dir',type=Path);args=parser.parse_args()
+ package=args.package.resolve()
+ for output in [args.output,args.evidence_dir]:
+  if output is not None and output.resolve().is_relative_to(package):parser.error('Output and evidence must stay outside the source package')
+ if args.main_admission and args.sealed_helpers:parser.error('--main-admission cannot replay obsolete sealed helpers')
  result=None
  try:
-  check_session_vacancy(args.package.resolve())
+  smoke_receipt=check_session_vacancy(package,args.main_admission)
   with tempfile.TemporaryDirectory(prefix='alice-r8-e2e-') as directory:
-   work=Path(directory);smoke_result=exercise(args.package.resolve(),work/'smoke',args.sealed_helpers,args.evidence_dir/'smoke' if args.evidence_dir else None,smoke=True)
-   result=exercise(args.package.resolve(),work/'main',args.sealed_helpers,args.evidence_dir,args.include_optional,smoke_root=Path(smoke_result['smoke_root']))
-   result['smoke_session']=smoke_result
+   work=Path(directory)
+   if args.main_admission:
+    smoke_root=copy_smoke_inputs(smoke_receipt,package/'session-s9-sah-load-smoke',work/'verified-smoke-copy')
+   else:
+    smoke_result=exercise(package,work/'smoke',args.sealed_helpers,args.evidence_dir/'smoke' if args.evidence_dir else None,smoke=True)
+    smoke_root=Path(smoke_result['smoke_root'])
+   result=exercise(package,work/'main',args.sealed_helpers,args.evidence_dir,args.include_optional,smoke_root=smoke_root)
+   if args.main_admission:result['real_smoke_admission']=smoke_receipt
+   else:result['smoke_session']=smoke_result
+  after=check_session_vacancy(package,args.main_admission)
+  assert after==smoke_receipt,'Real smoke evidence changed during offline rehearsal'
+  if args.main_admission:result['real_smoke_inputs_unchanged']=True
+  result['mode']='main-admission' if args.main_admission else 'full'
   result['real_package_session_path_absent']=True
  except Exception as error:
   result=dict(status='FAIL',synthetic_offline_only=True,device_contact=False,driver_contact=False,error_type=type(error).__name__,error=str(error))
