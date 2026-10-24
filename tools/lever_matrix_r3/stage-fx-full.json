@@ -1,0 +1,24 @@
+{
+  "files": [
+    {
+      "local": "/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/configs/PL-fx.json",
+      "remote": "ux0:/data/alice/private/vita_renderer.json",
+      "kind": "small"
+    },
+    {
+      "local": "/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/configs/vita-sim-all.json",
+      "remote": "ux0:/data/alice/private/vita_sim.json",
+      "kind": "small"
+    },
+    {
+      "local": "/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/configs/native-timing-disabled.json",
+      "remote": "ux0:/data/alice/private/native-timing-config.json",
+      "kind": "small"
+    },
+    {
+      "local": "/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/configs/profile_mode-full.txt",
+      "remote": "ux0:/data/alice/private/profile_mode",
+      "kind": "small"
+    }
+  ]
+}
