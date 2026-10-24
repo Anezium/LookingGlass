@@ -67,3 +67,15 @@ The production census adds overhead, as r5 measured; this run is not an end-to-e
 ## Final restoration and handback
 
 Call session.stage('human-restore','human-restore') ONLY after the final measured launch has naturally exited and HOME is inspected/acknowledged. Do not issue a redundant root close/quit: r5's post-run failure came from closing an already closed title. The ordered helpers restore all ledgers, verify human SELF, restore originals and independently verify the exhaustive file inventories. Require RESTORE-FINAL.json status PASS_ORIGINAL_STATE_VERIFIED. Preserve/restore human SELF 387ccf678251d4267b8ced53e207830358826f8e0642631a0459c6b0b9939990 and autosave ea4cd221d9f950e613188ccf3ecf2c1eabb1d34106f413125864320d364c8fa9 (181900 bytes), all companions, original census exports, configs, metadata, shared cache index and existing inventories. Restore prior census bytes or remove only newly created allowed exports. Independent readbacks are mandatory. Seal logs, inspect restored HOME, release inputs, record owner-returned.json and explicitly hand back ownership.
+
+
+## Orchestrator amendments (from REVIEW.md, appended verbatim)
+
+
+1. Host kernel timings (SOL-REPORT.md:34-35) are not evidence of Vita benefit and must not appear in RESULTS as a forecast. The host kernel uses 6 real Hedge3 room rays, 8 synthetic ~174-unit rays and no effect rays, against a BSP-only world with three test boxes. On r5 Hedge3, room plus ambient cost about 5.0-5.2 ms per firing (21 rays, every other frame) and about 5 repeated effect rays cost about 6.4 ms per frame. How that splits between static traversal and live completion is unmeasured. Only this ABBA decides.
+
+2. Prefer the 10-launch plan, so that both optional census runs happen, whenever admission has the entire 147-minute budget and the required expiry margin. Otherwise run exactly the eight wall launches. Do not invent a 9-launch variant: it was not covered by the offline e2e test.
+
+3. When the optional Hedge3 census run is valid, the orchestrator (not a helper) also computes, from its retained export over measured rows 61-180: the mean and median per-frame `acoustics_world_sweep_ns` and `acoustics_world_sweep_count`; the per-class hit, miss and eviction totals; and the same per-frame grouping by room, ambient and effect query counts as REVIEW.md section 2. Compare these descriptively with r5 hedge3-2-B and 3-B (7.57 ms per frame, 1,915 sweeps), labelled CROSS_SESSION_CROSS_SELF_DESCRIPTIVE. If misses are near zero, the remaining acoustic sweep time is live completion plus lookup. Record that figure as the input for the next acoustic lever. It never enters the wall gate.
+
+4. A BENEFIT result qualifies only this idle pose and the two maps. Promoting `audio_static_cache` to default-on additionally requires a console run with the cache on that covers at least one map transition and one death or reload. Sampled heap must stay within +1 MiB of the cache-off arm at the transition, with no audio gate failure. Moving-gameplay hit rates must also be reported. Until then the switch stays default-off.
