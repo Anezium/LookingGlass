@@ -9,5 +9,6 @@ for d in ['configs','console','scripts']:
  (O/d).mkdir(exist_ok=True)
  for f in (T/d).iterdir():
   if f.is_file():shutil.copy2(f,O/d/f.name)
+shutil.copytree(T/'proof/log-integrity-fixtures',O/'proof/log-integrity-fixtures',dirs_exist_ok=True)
 for f in (T/'manifests').glob('*.json'):(O/f.name).write_text(f.read_text().replace('@OUTPUT@',str(O)))
 print('Reviewed draft materialized; no console contact')

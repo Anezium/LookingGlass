@@ -1,0 +1,2 @@
+[lg/vita-renderer] config {"value":false}
+prefix [lg/audio-realtime] pcm_starved_blocks=0

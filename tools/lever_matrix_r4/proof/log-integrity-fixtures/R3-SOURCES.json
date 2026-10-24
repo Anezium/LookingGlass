@@ -1,0 +1,12 @@
+{
+  "s4-audio-pandemonium-1-A/runtime-log.txt": {
+    "source": "/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/session-s4-audio/s4-audio-pandemonium-1-A/runtime-log.txt",
+    "sha256": "8f6f20e0146f42b572376fd2f19e31b68b606a9b388fce5c794b99aa8deefc36",
+    "bytes": 375568
+  },
+  "s4-audio-pandemonium-2-B/runtime-log.txt": {
+    "source": "/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/session-s4-audio/s4-audio-pandemonium-2-B/runtime-log.txt",
+    "sha256": "81c53a5af03264ae84ac699828b17f25a7de126c105508537e68ff06b84025f3",
+    "bytes": 415858
+  }
+}

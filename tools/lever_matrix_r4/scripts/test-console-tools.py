@@ -1,4 +1,4 @@
-"""Synthetic pure-host fixtures only; never console evidence or game data."""
+"""Offline fixtures only; synthetic and historical logs are never r4 console evidence."""
 from pathlib import Path
 import sys,json,csv,subprocess,tempfile,shutil,importlib.util,argparse,hashlib
 def main():
@@ -110,6 +110,9 @@ def main():
     if artifact_seal.exists():
         expected=json.loads(artifact_seal.read_text())['proof/CONSOLE-TOOLS-TESTS.json']
         assert hashlib.sha256(sealed.read_bytes()).hexdigest()==expected
+    integrity=subprocess.run([sys.executable,str(O/'scripts/test-log-integrity.py')],capture_output=True,text=True,timeout=30)
+    assert integrity.returncode==0,integrity.stdout+integrity.stderr
     print(f'{len(results)} pure-host matrix tool checks passed.')
+    print(integrity.stdout,end='')
 
 if __name__=='__main__':main()
