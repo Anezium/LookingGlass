@@ -19,9 +19,10 @@ transport/driver responses, and executes the preservation, input/recording,
 collection, audit/report and complete restoration mains. The retained real human
 SELF/save bytes are read from local historical evidence and never shipped.
 
-Only after both variants pass, run `finalize.py OUT --clean` to delete per-task
-native and temporary conversion caches and record df. Retain native originals,
-proofs, logs and the shared host target. The source package and ZIP must contain
+After initial rehearsals pass, run `finalize.py OUT --clean` to delete per-task
+native and temporary conversion caches and record df, then replay both variants
+on those final bytes. `write_report.py` refreshes the artifact manifest without
+rebuilding the tested ZIP. Retain native originals, proofs, logs and the shared host target. The source package and ZIP must contain
 no `session-s8-cache-qual` directory, even as a symlink.
 
 The console owner follows the sealed brief after an explicit ownership handoff.

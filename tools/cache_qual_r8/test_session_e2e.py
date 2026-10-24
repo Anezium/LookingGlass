@@ -245,7 +245,8 @@ def exercise(source,work,replay):
             final_status=final['status'],full_restoration=True,launches=2,windows_per_arm=6,self_stages=1,
             serialized_fake_ftp_maximum=maximum,driver_fake_calls=len(driver_calls),late_callbacks_report_only=True,
             negative_fixtures=['underrun','heap','missing counter','short motion','mismatch','uncleared reset','zero sampled hits','paired heap >1MiB','interleaved tag','orphan field'],real_package_session_path_absent=True,
-            helper_main_path=True,zip_replay=replay,created_saves_preserved_before_deletion=True)
+            helper_main_path=True,zip_replay=replay,tested_zip_sha256=sha((source/'CONSOLE-PACKAGE.zip').read_bytes()) if replay else None,
+            created_saves_preserved_before_deletion=True)
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('package',type=Path);p.add_argument('--output',type=Path,required=True);p.add_argument('--zip',action='store_true');a=p.parse_args()
     assert not os.path.lexists(a.package/'session-s8-cache-qual'),'fresh real session path must be absent'

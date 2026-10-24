@@ -91,4 +91,6 @@ Final df:
 ```
 '''
 (O/'SOL-REPORT.md').write_text(report,encoding='utf-8')
+(O/'ARTIFACT-SHA256.json').write_text(json.dumps({str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f))
+    for f in sorted(O.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md']},indent=2)+'\n')
 print('Wrote',O/'SOL-REPORT.md')
