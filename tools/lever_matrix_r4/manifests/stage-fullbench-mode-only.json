@@ -1,0 +1,9 @@
+{
+  "files": [
+    {
+      "local": "@OUTPUT@/configs/profile_mode-fullbench.txt",
+      "remote": "ux0:/data/alice/private/profile_mode",
+      "kind": "small"
+    }
+  ]
+}

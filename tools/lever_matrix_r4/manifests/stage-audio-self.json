@@ -1,0 +1,9 @@
+{
+  "files": [
+    {
+      "local": "@OUTPUT@/packages/audio/eboot.bin",
+      "remote": "ux0:/app/ALICELG01/eboot.bin",
+      "kind": "self"
+    }
+  ]
+}

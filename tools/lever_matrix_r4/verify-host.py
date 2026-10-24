@@ -23,6 +23,7 @@ for label,ref in [('r3','881988ec1801a68a425d43c04c63d8998372e952'),('r4','HEAD'
  split=s.index('#[cfg(target_os = "vita")]');h=s[:split];v=s[split:]
  h=h.replace('count();\n            System.alloc(l)', 'count(l.size() as i64,true);\n            System.alloc(l)').replace('count();\n            System.alloc_zeroed(l)', 'count(l.size() as i64,true);\n            System.alloc_zeroed(l)').replace('count();\n            System.realloc(p, l, n)', 'count(n as i64-l.size() as i64,true);\n            System.realloc(p, l, n)').replace('            System.dealloc(p, l)', '            count(-(l.size() as i64),false);\n            System.dealloc(p, l)').replace('        CALLS.with(|n| n.set(0));','        CALLS.with(|n| n.set(0)); BYTES.with(|b|b.set(0)); GROSS.with(|b|b.set(0));')
  p.write_text(h+v+'\n#[cfg(not(target_os="vita"))]\npub(crate) fn census_begin(){imp::begin();}\n#[cfg(not(target_os="vita"))]\npub(crate) fn census_finish()->(u64,u64,i64){imp::census()}\n')
+ os.utime(S/'src/main.rs',None)
  rows={}
  for tag,args in [('comparison',['r4_','--','--nocapture','--test-threads=1']),('map-audio',['audio::offmain_tests::map_mixed_output_is_sample_exact','--','--ignored','--nocapture','--test-threads=1'])]:
   log=O/'logs'/f'{label}-{tag}.log';cmd=['cargo','test','--release','--offline','--locked','--features','native_timing,frame_total_only']+args

@@ -1,0 +1,232 @@
+{
+  "status": "NOT_EXECUTED",
+  "sessions": [
+    "s4-audio",
+    "s5-world-static-merge"
+  ],
+  "sequence": [
+    {
+      "session": "s4-audio",
+      "block": "s4-audio-pandemonium",
+      "label": "s4-audio-pandemonium-1-A",
+      "map": "pandemonium",
+      "visit_key": "pandemonium$first",
+      "chapter": null,
+      "entry": "Load Save",
+      "arm": "A",
+      "config_arm": "baseline",
+      "package": "baseline",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s4-audio",
+      "block": "s4-audio-pandemonium",
+      "label": "s4-audio-pandemonium-2-B",
+      "map": "pandemonium",
+      "visit_key": "pandemonium$first",
+      "chapter": null,
+      "entry": "Load Save",
+      "arm": "B",
+      "config_arm": "audio",
+      "package": "audio",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s4-audio",
+      "block": "s4-audio-pandemonium",
+      "label": "s4-audio-pandemonium-3-B",
+      "map": "pandemonium",
+      "visit_key": "pandemonium$first",
+      "chapter": null,
+      "entry": "Load Save",
+      "arm": "B",
+      "config_arm": "audio",
+      "package": "audio",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s4-audio",
+      "block": "s4-audio-pandemonium",
+      "label": "s4-audio-pandemonium-4-A",
+      "map": "pandemonium",
+      "visit_key": "pandemonium$first",
+      "chapter": null,
+      "entry": "Load Save",
+      "arm": "A",
+      "config_arm": "baseline",
+      "package": "baseline",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s4-audio",
+      "block": "s4-audio-hedge3",
+      "label": "s4-audio-hedge3-1-A",
+      "map": "hedge3",
+      "visit_key": null,
+      "chapter": 32,
+      "entry": "Chapters",
+      "arm": "A",
+      "config_arm": "baseline",
+      "package": "baseline",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s4-audio",
+      "block": "s4-audio-hedge3",
+      "label": "s4-audio-hedge3-2-B",
+      "map": "hedge3",
+      "visit_key": null,
+      "chapter": 32,
+      "entry": "Chapters",
+      "arm": "B",
+      "config_arm": "audio",
+      "package": "audio",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s4-audio",
+      "block": "s4-audio-hedge3",
+      "label": "s4-audio-hedge3-3-B",
+      "map": "hedge3",
+      "visit_key": null,
+      "chapter": 32,
+      "entry": "Chapters",
+      "arm": "B",
+      "config_arm": "audio",
+      "package": "audio",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s4-audio",
+      "block": "s4-audio-hedge3",
+      "label": "s4-audio-hedge3-4-A",
+      "map": "hedge3",
+      "visit_key": null,
+      "chapter": 32,
+      "entry": "Chapters",
+      "arm": "A",
+      "config_arm": "baseline",
+      "package": "baseline",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s5-world-static-merge",
+      "block": "s5-world-static-merge-pandemonium",
+      "label": "s5-world-static-merge-pandemonium-1-A",
+      "map": "pandemonium",
+      "visit_key": "pandemonium$first",
+      "chapter": null,
+      "entry": "Load Save",
+      "arm": "A",
+      "config_arm": "baseline",
+      "package": "baseline",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s5-world-static-merge",
+      "block": "s5-world-static-merge-pandemonium",
+      "label": "s5-world-static-merge-pandemonium-2-B",
+      "map": "pandemonium",
+      "visit_key": "pandemonium$first",
+      "chapter": null,
+      "entry": "Load Save",
+      "arm": "B",
+      "config_arm": "world-static-merge",
+      "package": "world-static-merge",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s5-world-static-merge",
+      "block": "s5-world-static-merge-pandemonium",
+      "label": "s5-world-static-merge-pandemonium-3-B",
+      "map": "pandemonium",
+      "visit_key": "pandemonium$first",
+      "chapter": null,
+      "entry": "Load Save",
+      "arm": "B",
+      "config_arm": "world-static-merge",
+      "package": "world-static-merge",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    },
+    {
+      "session": "s5-world-static-merge",
+      "block": "s5-world-static-merge-pandemonium",
+      "label": "s5-world-static-merge-pandemonium-4-A",
+      "map": "pandemonium",
+      "visit_key": "pandemonium$first",
+      "chapter": null,
+      "entry": "Load Save",
+      "arm": "A",
+      "config_arm": "baseline",
+      "package": "baseline",
+      "gl_observers": "direct",
+      "status": "PENDING",
+      "warmup_frames": 60,
+      "measured_frames": 120
+    }
+  ],
+  "measurement": "identical frame-total begin-to-begin wall_us only",
+  "threshold_ms": 1.0,
+  "human_self_sha256": "387ccf678251d4267b8ced53e207830358826f8e0642631a0459c6b0b9939990",
+  "human_autosave_sha256": "ea4cd221d9f950e613188ccf3ecf2c1eabb1d34106f413125864320d364c8fa9",
+  "roles": {
+    "A": "fresh candidate baseline",
+    "B": "single candidate treatment"
+  },
+  "config_changes": {
+    "baseline": [],
+    "fx": [
+      "fx_cpu_inline"
+    ],
+    "audio": [
+      "audio_offmain"
+    ],
+    "world-material-sort": [
+      "world_material_sort"
+    ],
+    "world-static-merge": [
+      "world_static_merge"
+    ],
+    "world-uniform-persist": [
+      "world_uniform_persist"
+    ]
+  },
+  "restore_target": "human-restore",
+  "pass_rule": "both oriented B-minus-A deltas <= +1ms; mean > +1ms fails; threshold straddle is inconclusive",
+  "new_self_requires_fresh_A_baselines": true,
+  "historical_runs_admitted": false,
+  "scope": "r4 draft, Mac prepared only; fresh common-SELF A baselines mandatory"
+}

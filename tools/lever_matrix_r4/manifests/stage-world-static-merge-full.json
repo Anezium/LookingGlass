@@ -1,0 +1,24 @@
+{
+  "files": [
+    {
+      "local": "@OUTPUT@/configs/PL-world-static-merge.json",
+      "remote": "ux0:/data/alice/private/vita_renderer.json",
+      "kind": "small"
+    },
+    {
+      "local": "@OUTPUT@/configs/vita-sim-all.json",
+      "remote": "ux0:/data/alice/private/vita_sim.json",
+      "kind": "small"
+    },
+    {
+      "local": "@OUTPUT@/configs/native-timing-disabled.json",
+      "remote": "ux0:/data/alice/private/native-timing-config.json",
+      "kind": "small"
+    },
+    {
+      "local": "@OUTPUT@/configs/profile_mode-full.txt",
+      "remote": "ux0:/data/alice/private/profile_mode",
+      "kind": "small"
+    }
+  ]
+}
