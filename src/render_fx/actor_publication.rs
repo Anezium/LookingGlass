@@ -12,7 +12,7 @@ const SURFACES:usize=2048;
 const VERTICES:usize=65536;
 const INDICES:usize=262144;
 #[derive(Default)]
-struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], alpha:[Option<bool>;2], epoch:[u64;2] }
+struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], alpha:[Option<bool>;2], epoch:[u64;2], instance:[Option<u64>;2] }
 #[derive(Default)]
 struct State {
     banks:Vec<Bank>, lookup:HashMap<Key,usize>,
@@ -43,7 +43,7 @@ impl State {
         self.banks.iter().enumerate().filter(|(_,b)|b.key.is_some() && b.last_used+1<self.epoch)
             .min_by_key(|(_,b)|b.last_used).map(|(id,_)|id)
     }
-    fn reserve_key(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,alpha:bool,key:Key)->Option<(usize,usize,usize)> {
+    fn reserve_key(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:bool,key:Key)->Option<(usize,usize,usize)> {
         let id=if let Some(&id)=self.lookup.get(&key) {id} else {
             let id=if let Some(id)=self.banks.iter().position(|b|b.key.is_none()) {id}
                 else if self.banks.len()<SURFACES {self.banks.push(Bank::default());self.banks.len()-1}
@@ -52,7 +52,7 @@ impl State {
         };
         self.banks[id].last_used=self.epoch;
         loop {
-            if let Some(result)=self.reserve_at(mesh,cpu.clone(),unchanged,alpha,id) {return Some(result);}
+            if let Some(result)=self.reserve_at(mesh,cpu.clone(),unchanged,instance,alpha,id) {return Some(result);}
             // Held slots cannot be reclaimed; evict only unrelated unused ids.
             if self.banks[id].slots.iter().enumerate().all(|(slot,g)|g.as_ref().is_some_and(|g|Rc::strong_count(g)>1 || self.banks[id].epoch[slot]==self.epoch)) {return None;}
             self.evict(self.oldest_unused()?);
@@ -61,9 +61,9 @@ impl State {
 
     #[cfg(test)]
     fn reserve(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,alpha:bool)->Option<(usize,usize,usize)> {
-        let id=self.cursor;self.cursor+=1;self.reserve_at(mesh,cpu,unchanged,alpha,id)
+        let id=self.cursor;self.cursor+=1;self.reserve_at(mesh,cpu,unchanged,0,alpha,id)
     }
-    fn reserve_at(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,alpha:bool,id:usize)->Option<(usize,usize,usize)> {
+    fn reserve_at(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:bool,id:usize)->Option<(usize,usize,usize)> {
         let s=self;
         if id>=SURFACES {return None;}
         while s.banks.len()<=id {s.banks.push(Bank::default());}
@@ -91,7 +91,8 @@ impl State {
             g.mesh.indices.clear();g.mesh.indices.reserve_exact(cpu.indices.len());
             g.mesh.indices.extend_from_slice(&cpu.indices);
         }
-        if !(unchanged && same_cpu && same_uv && bank.alpha[slot]==Some(alpha) && bank.epoch[slot]==s.epoch.saturating_sub(1)) {g.advance_owned(!same_cpu);}
+        if !(unchanged && bank.instance[slot]==Some(instance) && same_cpu && same_uv && bank.alpha[slot]==Some(alpha) && bank.epoch[slot]==s.epoch.saturating_sub(1)) {g.advance_owned(!same_cpu);}
+        bank.instance[slot]=Some(instance);
         bank.alpha[slot]=Some(alpha);bank.epoch[slot]=s.epoch;
         let output=g.mesh.vertices.as_mut_ptr() as usize;
         let new_capacity=(g.vertices.capacity(),g.indices.capacity());
@@ -124,7 +125,7 @@ pub(crate) fn end() {
 }
 /// This address is valid only between prepare and the fully drained collect. Banks
 /// cannot be mutated again while any old packet/view still owns their publication.
-pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,key:Key)->Option<(usize,bool)> {
+pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,key:Key)->Option<(usize,bool)> {
     let texture=mesh.texture.as_ref()?;
     let surface=SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade))?;
     if SKIN_OPACITY.with(Cell::get)!=1. {return None;}
@@ -133,7 +134,7 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,key:Key)->O
     let mut passes=Some(passes);
     let result=STATE.with(|s| {
         let mut s=s.borrow_mut();
-        let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,alpha,key)?;
+        let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,instance,alpha,key)?;
         let group=FRAME.with(|f| {
             let mut f=f.borrow_mut();let n=mesh.vertices.len()*passes.as_ref().unwrap().len();
             if f.vertices.saturating_add(n)>MAX_VERTICES {f.dropped+=1;return None;}
@@ -193,9 +194,9 @@ mod tests {
         // changes visitation, but the later NPC's immutable upload stamp stays warm.
         for first in [true,false,false,true,true,false] {
             state.next_frame();
-            if first {state.reserve_key(&mesh,cpu.clone(),true,false,key(actors[0],&cpu)).unwrap();}
-            if state.epoch==5 {state.reserve_key(&mesh,cpu.clone(),false,false,key(actors[2],&cpu)).unwrap();}
-            let (id,slot,ptr)=state.reserve_key(&mesh,cpu.clone(),true,false,key(actors[1],&cpu)).unwrap();
+            if first {state.reserve_key(&mesh,cpu.clone(),true,0,false,key(actors[0],&cpu)).unwrap();}
+            if state.epoch==5 {state.reserve_key(&mesh,cpu.clone(),false,0,false,key(actors[2],&cpu)).unwrap();}
+            let (id,slot,ptr)=state.reserve_key(&mesh,cpu.clone(),true,0,false,key(actors[1],&cpu)).unwrap();
             let stamp=state.banks[id].slots[slot].as_ref().unwrap().version;
             if let Some((old_id,old_ptr,old_stamp))=later {assert_eq!((id,ptr,stamp),(old_id,old_ptr,old_stamp));}
             later=Some((id,ptr,stamp));
@@ -203,27 +204,47 @@ mod tests {
         assert_eq!(state.lookup.len(),3);
     }
     #[test]
+    fn unchanged_shared_instance_moving_to_another_slot_advances_gpu_revision() {
+        let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
+        let key=key(ActorId::default(),&cpu);
+        let (id,a,_)=state.reserve_key(&mesh,cpu.clone(),false,11,false,key).unwrap();
+        let (_,b,_)=state.reserve_key(&mesh,cpu.clone(),false,22,false,key).unwrap();
+        assert_ne!(a,b);
+        let old_a=state.banks[id].slots[a].as_ref().unwrap().version;
+        // The first instance disappears. Instance 22 is bit-static but now gets
+        // slot A, whose last GPU upload belonged to instance 11.
+        state.next_frame();
+        let (_,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,22,false,key).unwrap();
+        assert_eq!(slot,a);
+        let moved=state.banks[id].slots[slot].as_ref().unwrap().version;
+        assert_ne!(moved.vertices,old_a.vertices,"different instance retained a stale GPU stamp");
+        state.next_frame();
+        state.reserve_key(&mesh,cpu,true,22,false,key).unwrap();
+        assert_eq!(state.banks[id].slots[a].as_ref().unwrap().version,moved,
+            "the same unchanged instance must retain its warm upload");
+    }
+    #[test]
     fn repeated_actor_surface_in_one_frame_uses_disjoint_destinations() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
         let key=key(ActorId::default(),&cpu);
-        let a=state.reserve_key(&mesh,cpu.clone(),false,false,key).unwrap();
-        let b=state.reserve_key(&mesh,cpu.clone(),false,false,key).unwrap();
-        assert_ne!(a.2,b.2);assert!(state.reserve_key(&mesh,cpu,false,false,key).is_none());
+        let a=state.reserve_key(&mesh,cpu.clone(),false,0,false,key).unwrap();
+        let b=state.reserve_key(&mesh,cpu.clone(),false,0,false,key).unwrap();
+        assert_ne!(a.2,b.2);assert!(state.reserve_key(&mesh,cpu,false,0,false,key).is_none());
     }
     #[test]
     fn unused_actor_ids_evict_at_age_and_under_capacity_pressure_without_touching_held_views() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
         let old_key=key(ActorId::default(),&cpu);
-        let (id,slot,_)=state.reserve_key(&mesh,cpu.clone(),false,false,old_key).unwrap();
+        let (id,slot,_)=state.reserve_key(&mesh,cpu.clone(),false,0,false,old_key).unwrap();
         let held=state.banks[id].slots[slot].as_ref().unwrap().clone();
         for _ in 0..=UNUSED_FRAMES {state.next_frame();}
         assert!(state.lookup.is_empty());assert_eq!(state.vertex_capacity,0);
         assert_eq!(held.indices,[0,1,2]);assert_eq!(Arc::strong_count(&cpu),1);
         // Slot-count pressure reuses an unused id, never grows the bounded table.
-        for _ in 0..SURFACES {state.reserve_key(&mesh,cpu.clone(),false,false,key(ActorId::default(),&cpu)).unwrap();}
-        assert!(state.reserve_key(&mesh,cpu.clone(),false,false,key(ActorId::default(),&cpu)).is_none());
+        for _ in 0..SURFACES {state.reserve_key(&mesh,cpu.clone(),false,0,false,key(ActorId::default(),&cpu)).unwrap();}
+        assert!(state.reserve_key(&mesh,cpu.clone(),false,0,false,key(ActorId::default(),&cpu)).is_none());
         state.next_frame();state.next_frame();
-        assert!(state.reserve_key(&mesh,cpu,false,false,Key {actor:ActorId::default(),surface:0}).is_some());
+        assert!(state.reserve_key(&mesh,cpu,false,0,false,Key {actor:ActorId::default(),surface:0}).is_some());
         assert_eq!(state.lookup.len(),SURFACES);assert_eq!(state.banks.len(),SURFACES);
     }
     #[test]
@@ -240,7 +261,7 @@ mod tests {
                 uv:Vec2::ONE,weights:vec![crate::skeletal::Weight {bone:0,amount:1.,offset:Vec3::ZERO}]}).collect(),vec![0,1,2]);
             let cpu=source.cpu();let mesh=Mesh {vertices:cpu.bind_vertices.clone(),indices:cpu.indices.clone(),texture:None};
             state.next_frame();
-            for _ in 0..5 {assert!(state.reserve_key(&mesh,cpu.clone(),false,false,key(ActorId::default(),&cpu)).is_some(),"unexpected serial fallback after map/reload");}
+            for _ in 0..5 {assert!(state.reserve_key(&mesh,cpu.clone(),false,0,false,key(ActorId::default(),&cpu)).is_some(),"unexpected serial fallback after map/reload");}
             let capacity=(state.vertex_capacity,state.index_capacity,state.lookup.len());
             if let Some(warm)=warm {assert_eq!(capacity,warm);} else {warm=Some(capacity);}
             held=state.banks[0].slots[0].clone();old_cpu=Some(Arc::downgrade(&cpu));
@@ -265,14 +286,30 @@ mod tests {
     #[test]
     fn reclaimed_old_view_cannot_reuse_a_newer_inputs_revision() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.epoch=1;
-        state.reserve_at(&mesh,cpu.clone(),false,false,0).unwrap();
+        state.reserve_at(&mesh,cpu.clone(),false,0,false,0).unwrap();
         let old=state.banks[0].slots[0].as_ref().unwrap().clone();let version=old.version;
-        state.epoch=2;state.reserve_at(&mesh,cpu.clone(),false,false,0).unwrap();
+        state.epoch=2;state.reserve_at(&mesh,cpu.clone(),false,0,false,0).unwrap();
         let second=state.banks[0].slots[1].as_ref().unwrap().clone();
         drop(old);state.epoch=3;
-        state.reserve_at(&mesh,cpu,true,false,0).unwrap();
+        state.reserve_at(&mesh,cpu,true,0,false,0).unwrap();
         assert_ne!(state.banks[0].slots[0].as_ref().unwrap().version.vertices,version.vertices);
         assert_eq!(second.vertices[0].uv,Vec2::ONE);
+    }
+    #[test]
+    fn cold_and_evicted_bank_transition_allocations_have_fixed_bounds() {
+        let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
+        let key=key(ActorId::default(),&cpu);
+        let cold=crate::kernel_alloc::Scope::begin();
+        state.reserve_key(&mesh,cpu.clone(),false,1,false,key).unwrap();
+        let cold=cold.finish();assert!(cold<=5,"cold metadata plus one slot: {cold}");
+        let warm=crate::kernel_alloc::Scope::begin();
+        for _ in 0..120 {state.next_frame();state.reserve_key(&mesh,cpu.clone(),true,1,false,key).unwrap();}
+        assert_eq!(warm.finish(),0);
+        for _ in 0..=UNUSED_FRAMES {state.next_frame();}
+        let reentry=crate::kernel_alloc::Scope::begin();
+        state.reserve_key(&mesh,cpu,false,2,false,key).unwrap();
+        let reentry=reentry.finish();assert!(reentry<=3,"one replacement slot: {reentry}");
+        println!("publication transition allocations: cold={cold}, warm=0, reentry={reentry}; max vertices={VERTICES}, indices={INDICES}, banks={SURFACES}, bank_bytes={}",std::mem::size_of::<Bank>());
     }
     #[test]
     fn warmed_storage_is_bounded_and_map_replacement_copies_new_topology() {

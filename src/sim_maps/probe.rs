@@ -128,9 +128,11 @@ pub fn record_skin(slot:usize,vertices:&[macroquad::prelude::Vertex],indices:&[u
     let hash=format!("{:x}",mesh_hash(vertices,indices).finalize());
     SKINS.with(|s|s.borrow_mut()[slot]["sha256"]=hash.into());
 }
-pub fn packet(vertices:&[macroquad::prelude::Vertex],indices:&[u16],uniforms:&[f32],policy:&[u32],texture:Option<&macroquad::prelude::Texture2D>) {
+pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indices:&[u16],vertices:&[macroquad::prelude::Vertex],indices:&[u16],uniforms:&[f32],policy:&[u32],texture:Option<&macroquad::prelude::Texture2D>) {
     if !skin_proof() {return;}
     let geometry=format!("{:x}",mesh_hash(vertices,indices).finalize());
+    let gpu_geometry=format!("{:x}",mesh_hash(gpu_vertices,gpu_indices).finalize());
+    assert_eq!(geometry,gpu_geometry,"stale GPU geometry at retained slot {gpu_slot}");
     let mut h=Sha256::new();for f in uniforms {h.update(f.to_bits().to_le_bytes());}
     let uniforms=format!("{:x}",h.finalize());
     let texture=texture.map(|t|TEXTURES.with(|cache| {let mut cache=cache.borrow_mut();
@@ -140,7 +142,7 @@ pub fn packet(vertices:&[macroquad::prelude::Vertex],indices:&[u16],uniforms:&[f
             format!("{:x}",h.finalize())
         }).clone()
     }));
-    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"geometry":geometry,"uniforms":uniforms,"policy":policy,"texture":texture})));
+    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"geometry":geometry,"gpu_geometry":gpu_geometry,"gpu_slot":gpu_slot,"vertices":vertices.len(),"indices":indices.len(),"uniforms":uniforms,"policy":policy,"texture":texture})));
 }
 /// Host-only view motion leaves simulation inputs untouched.
 pub fn moving_view(frame:u64,eye:glam::Vec3,target:glam::Vec3)->(glam::Vec3,glam::Vec3) {
@@ -181,4 +183,31 @@ pub fn prepare_checkpoint()->Option<u64> {
 pub fn prepare_allocations(start:Option<u64>,accepted:bool) {
     if let Some(start)=start {let calls=crate::kernel_alloc::Scope::calls_so_far()-start;
         PREPARE_ALLOC.with(|p|{let mut v=p.get();v[usize::from(!accepted)]+=calls;p.set(v);});}
+}
+
+/// Synchronous test-only readback. Native builds contain none of this observer.
+#[cfg(target_os="macos")]
+pub fn gpu_geometry(vertex_count:usize,index_count:usize)->(Vec<macroquad::prelude::Vertex>,Vec<u16>) {
+    use macroquad::prelude::*;
+    #[link(name="OpenGL",kind="framework")]
+    extern "C" {
+        fn glGetIntegerv(pname:u32,data:*mut i32);
+        fn glGetVertexAttribiv(index:u32,pname:u32,data:*mut i32);
+        fn glBindBuffer(target:u32,buffer:u32);
+        fn glGetBufferSubData(target:u32,offset:isize,size:isize,data:*mut std::ffi::c_void);
+    }
+    let mut vertices=vec![Vertex {position:Vec3::ZERO,uv:Vec2::ZERO,normal:Vec4::ZERO,color:[0;4]};vertex_count];
+    let mut indices=vec![0_u16;index_count];
+    unsafe {
+        let mut old_array=0;let mut attribute_buffer=0;let mut index_buffer=0;
+        glGetIntegerv(0x8894,&mut old_array); // ARRAY_BUFFER_BINDING
+        glGetVertexAttribiv(0,0x889F,&mut attribute_buffer); // ATTRIB_ARRAY_BUFFER_BINDING
+        glGetIntegerv(0x8895,&mut index_buffer); // ELEMENT_ARRAY_BUFFER_BINDING
+        assert!(attribute_buffer>0 && index_buffer>0,"GPU oracle requires GL vertex/index bindings");
+        glBindBuffer(0x8892,attribute_buffer as u32);
+        glGetBufferSubData(0x8892,0,(vertices.len()*std::mem::size_of::<Vertex>()) as isize,vertices.as_mut_ptr().cast());
+        glBindBuffer(0x8892,old_array as u32);
+        glGetBufferSubData(0x8893,0,(indices.len()*2) as isize,indices.as_mut_ptr().cast());
+    }
+    (vertices,indices)
 }

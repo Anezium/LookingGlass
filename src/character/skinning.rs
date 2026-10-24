@@ -50,7 +50,7 @@ pub(super) fn position(src: &SkinVertex, palette: &[(Mat3, Vec3)]) -> Vec3 {
 
 thread_local! { static MUTABLE_SKIN:std::cell::Cell<u32>=const {std::cell::Cell::new(0)}; }
 pub(super) fn mutable_reasons()->u32 {MUTABLE_SKIN.with(std::cell::Cell::get)}
-pub(super) fn mutable_required()->bool {mutable_reasons()!=0}
+pub(crate) fn mutable_required()->bool {mutable_reasons()!=0}
 pub(crate) fn actual_consumers()->bool {
     #[cfg(feature="vita_renderer")]
     {crate::render::vita_renderer::config().skin_actual_consumers}

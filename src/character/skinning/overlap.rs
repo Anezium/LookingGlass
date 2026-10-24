@@ -61,6 +61,7 @@ struct Surface {
     oracle:usize,
 }
 struct Draw {
+    instance: u64,
     actor: Option<super::identity::ActorId>,
     key: usize,
     pose: Range<usize>,
@@ -294,6 +295,7 @@ impl Store {
             return;
         }
         let draw = Draw {
+            instance: 0,
             actor: None,
             key: skeleton as *const Skeleton as usize,
             pose: i.pose.len()..i.pose.len() + p.pose.len(),
@@ -347,9 +349,11 @@ impl Store {
             && i.pose.len()+p.pose.len() <= BONES && i.scales.len()+p.scales.len() <= BONES
             && i.palette.len()+p.palette.len() <= BONES;
         let previous=self.previous_numeric.as_ref().and_then(|old|old.draws.iter().find(|d|
-            d.actor==actor && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
+            d.actor==actor && !i.draws.iter().any(|used|used.instance==d.instance)
+                && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
                 && d.scale.to_bits()==p.scale.to_bits() && d.flat==p.flat && d.fullbright==p.fullbright
                 && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
+        let instance=previous.map_or_else(super::identity::next_instance,|(_,d)|d.instance);
         let start = i.surfaces.len();
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };
@@ -372,7 +376,7 @@ impl Store {
                 // add J17's dual normalized-output comparison loop to the workers.
                 let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
                 let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
-                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged,
+                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged, instance,
                     crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize})
             } else { None };
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -400,7 +404,7 @@ impl Store {
             }
         }
         if i.surfaces.len() > start {
-            let d = Draw { actor, key:skeleton as *const Skeleton as usize,
+            let d = Draw { instance, actor, key:skeleton as *const Skeleton as usize,
                 pose:i.pose.len()..i.pose.len()+p.pose.len(), scales:i.scales.len()..i.scales.len()+p.scales.len(),
                 palette:i.palette.len()..i.palette.len()+p.palette.len(), surfaces:start..i.surfaces.len(),
                 transform:p.transform,scale:p.scale,flat:p.flat,fullbright:p.fullbright,alpha:p.alpha,visible };

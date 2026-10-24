@@ -4428,6 +4428,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
 /// ordering, both worker counts, frozen simulation and clean map replacement.
 #[cfg(feature="vita_renderer")]
 pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -> Result<()> {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if std::env::var_os("LOOKING_GLASS_SKIN_EXACT_FIXTURES").is_some() {
+        return crate::npc::skin_exact_check::check(assets,options).await;
+    }
     let mut comparisons=0;
     for name in ["gvillage","skool1","skool2","hedge1","wchess1","garden1"] {
         for workers in [1,2] {

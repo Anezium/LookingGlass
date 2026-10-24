@@ -11,6 +11,8 @@ pub mod opening_check;
 mod burrow_art;
 pub mod burrow_check;
 mod card_art;
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) mod skin_exact_check;
 mod card_check;
 pub mod chess_check;
 pub(crate) mod chess_spawns;
@@ -715,6 +717,8 @@ struct Model {
     // Keep the inherited Puppet visibility/lighting policy. The optional lever
     // replaces only its mutable-mesh capability guard with actual consumers.
     late_skin_overlays: bool,
+    afterimage_normals: bool,
+    live_skin_current: bool,
     bone_scales: Vec<(usize, f32)>,
     frozen: Option<std::rc::Rc<crate::frozen::Art>>,
     electric: Option<std::rc::Rc<crate::electric::Art>>,
@@ -742,6 +746,12 @@ pub struct Puppet(
     crate::facial::Watch,
 );
 impl Puppet {
+    /// Afterimages inherit the last normal draw's normals, including across frames.
+    /// Declare this at construction, before any normal draw can enter a worker bank.
+    pub(crate) fn with_afterimages(mut self) -> Self {
+        self.0.afterimage_normals = true;
+        self
+    }
     /// Declare a later electric draw before preparing its body. The guard also
     /// covers attachments; no mesh references or shared-model state are retained.
     pub(crate) fn electric_consumer(&self, remaining:f32)->crate::character::skinning::CullGuard {
@@ -876,6 +886,8 @@ impl Puppet {
         alpha: f32,
     ) {
         if crate::character::skinning::overlap::gather_only() { return; }
+        assert!(self.0.afterimage_normals, "afterimage consumer must be declared at construction");
+        self.0.require_live_skin();
         let d = &self.0.data;
         let Some(animation) = d.clips.get(clip) else {
             return;
@@ -1073,6 +1085,7 @@ impl Model {
             return;
         }
         if let Some(art) = &self.electric {
+            if self.visible.iter().any(|v|*v) { self.require_live_skin(); }
             for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
                 if *visible {
                     if let Some(mesh) = mesh {
@@ -1088,10 +1101,14 @@ impl Model {
             }
         }
     }
+    fn require_live_skin(&self) {
+        assert!(self.live_skin_current, "live skin read without a consumer declaration before body preparation");
+    }
     fn draw_frozen(&self) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
         if crate::character::skinning::overlap::gather_only() { return; }
         if let Some(art) = &self.frozen {
+            if self.visible.iter().any(|v|*v) { self.require_live_skin(); }
             for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
                 if *visible {
                     if let Some(mesh) = mesh {
@@ -1166,6 +1183,10 @@ impl Model {
         let _visibility = crate::character::skinning::CullGuard::visual_preserve(self.frozen.is_some() || self.late_skin_overlays);
         let _skin_guard = crate::character::skinning::CullGuard::reason(
             self.late_skin_overlays && !crate::character::skinning::actual_consumers(),crate::phase_census::PUPPET);
+        let _afterimage = crate::character::skinning::CullGuard::publication_reason(
+            self.afterimage_normals, crate::phase_census::MUTABLE);
+        self.live_skin_current = !crate::character::skinning::overlap::single_preparing()
+            || crate::character::skinning::mutable_required();
         let skin_visible = crate::character::draw_skin_scaled(
             &d.skeleton,
             &mut self.meshes,
@@ -1302,6 +1323,7 @@ impl Model {
         }
         if let Some(art) = &self.electric {
             if g.electric > 0. {
+                if self.visible.iter().any(|v|*v) { self.require_live_skin(); }
                 for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
                     if *visible {
                         if let Some(mesh) = mesh {
@@ -1563,6 +1585,8 @@ impl Model {
         Ok(Self {
             skin_identity: Default::default(),
             late_skin_overlays: false,
+            afterimage_normals: false,
+            live_skin_current: true,
             visible: vec![false; meshes.len()],
             bone_scales: Vec::new(),
             electric: Some(crate::electric::Art::load(assets, specs)?),

@@ -1233,7 +1233,7 @@ impl Art {
             pig: crate::weapons::Prop::load(a, "prj_pig_baby", &specs)?,
             essence: crate::loot_art::Art::load(a, &specs)?,
             material: crate::character::skin_material()?,
-            phase_model: crate::npc::Puppet::load(a, "fx_duchess_trail", &["run_away"], &specs)?,
+            phase_model: crate::npc::Puppet::load(a, "fx_duchess_trail", &["run_away"], &specs)?.with_afterimages(),
             trail: PhaseTrail::default(),
             effect_clock: None,
             bursts,
