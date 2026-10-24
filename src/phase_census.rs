@@ -67,9 +67,36 @@ struct State {
     table: [Entry;TABLE],
 }
 impl State {
+    #[cfg(test)]
     const fn new() -> Self { Self { rows:[Row::ZERO;CAPACITY],current:Row::ZERO,count:0,accepted:0,
         start:None,pending:false,overflow:false,sequence:0,owner:Owner::Other,sweep_depth:0,scene:0,
         stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE] } }
+    fn boxed() -> Box<Self> {
+        // Initialize bounded storage once, before gameplay. A full const State
+        // would embed the enlarged actor rows in the native ELF's initializer.
+        // Row/Entry and the integer arrays contain only zero-valid scalar fields;
+        // initialize Option<Instant> and Owner explicitly in their own layouts.
+        let mut storage=Box::<Self>::new_uninit();
+        let p=storage.as_mut_ptr();
+        unsafe {
+            std::ptr::addr_of_mut!((*p).rows).write_bytes(0,1);
+            std::ptr::addr_of_mut!((*p).current).write(Row::ZERO);
+            std::ptr::addr_of_mut!((*p).count).write(0);
+            std::ptr::addr_of_mut!((*p).accepted).write(0);
+            std::ptr::addr_of_mut!((*p).start).write(None);
+            std::ptr::addr_of_mut!((*p).pending).write(false);
+            std::ptr::addr_of_mut!((*p).overflow).write(false);
+            std::ptr::addr_of_mut!((*p).sequence).write(0);
+            std::ptr::addr_of_mut!((*p).owner).write(Owner::Other);
+            std::ptr::addr_of_mut!((*p).sweep_depth).write(0);
+            std::ptr::addr_of_mut!((*p).scene).write(0);
+            std::ptr::addr_of_mut!((*p).stack).write_bytes(0,1);
+            std::ptr::addr_of_mut!((*p).children).write_bytes(0,1);
+            std::ptr::addr_of_mut!((*p).depth).write(0);
+            std::ptr::addr_of_mut!((*p).table).write_bytes(0,1);
+            storage.assume_init()
+        }
+    }
     fn close(&mut self, now: Instant) {
         if let Some(start) = self.start {
             if self.pending {
@@ -106,7 +133,7 @@ impl State {
 }
 thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
-    static STATE: RefCell<State> = const { RefCell::new(State::new()) };
+    static STATE: RefCell<Box<State>> = RefCell::new(State::boxed());
 }
 pub(crate) fn active() -> bool {ACTIVE.with(Cell::get)}
 fn configured() -> bool {
