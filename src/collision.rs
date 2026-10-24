@@ -1,6 +1,9 @@
 //! Independent continuous box sweeps against static convex brush and patch hulls.
 //! No original executable or gameplay code is called by this module.
 pub mod model_shape;
+mod sah;
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) mod sah_probe;
 use crate::bsp::{Bsp, Plane};
 #[cfg(target_os = "vita")]
 use crate::frame_profile::{add_counter, Counter};
@@ -483,6 +486,13 @@ enum Node {
     },
 }
 impl Node {
+    fn visit_counted(&self,query:&SweepBounds,c:&mut sah::Counts,callback:&mut impl FnMut(usize,&mut sah::Counts)) {
+        c.nodes+=1;
+        match self {
+            Self::Leaf{bounds,hulls}=>if query.overlaps(*bounds) {for &h in hulls {callback(h,c);}},
+            Self::Branch{bounds,left,right}=>if query.overlaps(*bounds) {left.visit_counted(query,c,callback);right.visit_counted(query,c,callback);}
+        }
+    }
     fn build(hulls: &[Hull], indices: &mut [usize]) -> Self {
         let bounds = indices
             .iter()
@@ -608,19 +618,46 @@ pub struct World {
 /// Immutable backing shared by main-thread collision and acoustic packets.
 /// No caches, lazy colliders or traversal state cross the producer boundary.
 #[derive(Debug)]
-pub(crate) struct StaticGeometry { hulls: Vec<Hull>, tree: Option<Node> }
+pub(crate) struct StaticGeometry { hulls: Vec<Hull>, tree: Option<Node>, sah: Option<sah::Hierarchy> }
 impl StaticGeometry {
-    pub(crate) fn sweep(&self, start: Vec3, end: Vec3) -> Trace {
-        let query = SweepBounds::new(start, end, Vec3::ZERO);
-        let mut result = Trace::default();
-        if let Some(tree) = &self.tree {
-            tree.visit(&query, &mut |i| {
-                if query.overlaps(self.hulls[i].bounds) {
-                    clip_hull(&self.hulls[i], start, end, Vec3::ZERO, &mut result);
-                }
+    fn new(hulls: Vec<Hull>, tree: Option<Node>) -> Self {
+        #[cfg(feature="vita_renderer")]
+        let enabled = crate::render::vita_renderer::config().collision_sah;
+        #[cfg(not(feature="vita_renderer"))]
+        let enabled = false;
+        let sah = if enabled { tree.as_ref().map(|t| sah::Hierarchy::build(&hulls,t)) } else {None};
+        Self {hulls,tree,sah}
+    }
+    fn trace(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> (Trace,u32,u32) {
+        let mut counts = sah::Counts::default();
+        let timer = crate::phase_census::static_traversal();
+        let result = self.trace_inner(start,end,half,query,&mut counts);
+        timer.finish(counts.nodes,counts.tested,counts.clipped,counts.planes,counts.certificates,counts.fallbacks);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        sah_probe::record(self,start,end,half,result,counts);
+        (result,counts.tested as u32,counts.clipped as u32)
+    }
+    fn trace_inner(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds, counts: &mut sah::Counts) -> Trace {
+        if let Some(sah) = &self.sah {
+            if let Some(result) = sah.trace(self,start,end,half,query,counts) {return result;}
+            counts.fallbacks += 1;
+        }
+        self.legacy_trace(start,end,half,query,counts)
+    }
+    fn legacy_trace(&self,start:Vec3,end:Vec3,half:Vec3,query:&SweepBounds,counts:&mut sah::Counts)->Trace {
+        let mut result=Trace::default();
+        if let Some(tree)=&self.tree {
+            tree.visit_counted(query,counts,&mut |i,counts| {
+                counts.tested+=1;
+                let hull=&self.hulls[i];
+                if query.overlaps(hull.bounds) {counts.clipped+=1;clip_hull_counted(hull,start,end,half,&mut result,counts);}
             });
         }
         result
+    }
+    pub(crate) fn sweep(&self, start: Vec3, end: Vec3) -> Trace {
+        let query = SweepBounds::new(start, end, Vec3::ZERO);
+        self.trace(start,end,Vec3::ZERO,&query).0
     }
 }
 impl World {
@@ -793,7 +830,7 @@ impl World {
             camera_obstacles: Vec::new(),
             liquids,
             dynamic_liquids: Vec::new(),
-            static_geometry: std::sync::Arc::new(StaticGeometry { hulls, tree }),
+            static_geometry: std::sync::Arc::new(StaticGeometry::new(hulls, tree)),
             brush_count,
             patch_count,
             min: map.world_min,
@@ -811,14 +848,7 @@ impl World {
         if cached == Some(true) { return (false, true); }
         if cached.is_none() {
             let query = SweepBounds::new(eye, light, Vec3::ZERO);
-            let mut trace = Trace::default();
-            if let Some(tree) = &self.static_geometry.tree {
-                tree.visit(&query, &mut |i| {
-                    if query.overlaps(self.static_geometry.hulls[i].bounds) {
-                        clip_hull(&self.static_geometry.hulls[i], eye, light, Vec3::ZERO, &mut trace);
-                    }
-                });
-            }
+            let trace = self.static_geometry.trace(eye,light,Vec3::ZERO,&query).0;
             let blocked = trace.fraction < 0.995;
             crate::sim_maps::count("lights_certificate_builds", 1);
             let mut cache = self.light_certificates.borrow_mut();
@@ -997,25 +1027,10 @@ impl World {
         {
             add_counter(Counter::LedgeTraceCalls, 1);
         }
-        let count_static = cfg!(target_os = "vita") || self.npc_profile.active();
-        let mut tested = 0u32;
         #[cfg(target_os = "vita")]
-        let (mut clipped, mut support_hulls) = (0u32, 0u32);
+        let mut support_hulls = 0u32;
         let query = SweepBounds::new(start, end, half);
-        let mut result = Trace::default();
-        if let Some(tree) = &self.static_geometry.tree {
-            tree.visit(&query, &mut |index| {
-                if count_static { tested += 1; }
-                let hull = &self.static_geometry.hulls[index];
-                if query.overlaps(hull.bounds) {
-                    #[cfg(target_os = "vita")]
-                    {
-                        clipped += 1;
-                    }
-                    clip_hull(hull, start, end, half, &mut result);
-                }
-            });
-        }
+        let (mut result,tested,_clipped) = self.static_geometry.trace(start,end,half,&query);
         for c in &self.settled_supports {
             // Match dynamic collision's conservative broad phase, including SKIN.
             // Test the placement before asking a lazy template for its hulls.
@@ -1033,7 +1048,7 @@ impl World {
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::StaticHullsTested, tested);
-            add_counter(Counter::StaticHullsClipped, clipped);
+            add_counter(Counter::StaticHullsClipped, _clipped);
             add_counter(Counter::SettledHullsClipped, support_hulls);
         }
         self.npc_profile.hulls(tested as u64);
@@ -1232,7 +1247,7 @@ impl World {
             traversal: Default::default(),
             brush_count: hulls.len(),
             patch_count: 0,
-            static_geometry: std::sync::Arc::new(StaticGeometry { hulls, tree }),
+            static_geometry: std::sync::Arc::new(StaticGeometry::new(hulls, tree)),
             min: Vec3::splat(-10000.),
             max: Vec3::splat(10000.),
         }
@@ -1257,12 +1272,21 @@ impl World {
 }
 
 fn clip_hull(hull: &Hull, start: Vec3, end: Vec3, half: Vec3, result: &mut Trace) {
+    clip_hull_impl::<false>(hull,start,end,half,result,&mut sah::Counts::default());
+}
+fn clip_hull_counted(hull:&Hull,start:Vec3,end:Vec3,half:Vec3,result:&mut Trace,counts:&mut sah::Counts) {
+    if crate::phase_census::is_active() || cfg!(all(feature="sim_maps_probe",not(target_os="vita"))) {
+        clip_hull_impl::<true>(hull,start,end,half,result,counts);
+    } else {clip_hull_impl::<false>(hull,start,end,half,result,counts);}
+}
+fn clip_hull_impl<const COUNT:bool>(hull: &Hull, start: Vec3, end: Vec3, half: Vec3, result: &mut Trace, counts:&mut sah::Counts) {
     let mut enter = f32::NEG_INFINITY;
     let mut leave = 1.0f32;
     let mut normal = Vec3::ZERO;
     let mut starts_out = false;
     let mut ends_out = false;
     for p in &hull.planes {
+        if COUNT {counts.planes+=1;}
         let expanded = p.distance + p.normal.abs().dot(half);
         let a = p.normal.dot(start) - expanded;
         let b = p.normal.dot(end) - expanded;

@@ -812,6 +812,8 @@ pub struct Audio {
     jumps: u64,
     landings: u64,
 }
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+thread_local!{static SAH_MIXER:std::cell::RefCell<Option<output::Mixer>>=const{std::cell::RefCell::new(None)};}
 impl Audio {
     /// Binding observes only events AFTER activation. Playback may already be
     /// running; no earlier counter values or audio lifetime are reconstructed.
@@ -840,7 +842,14 @@ impl Audio {
         if capture.is_some() {
             monitor.samples.lock().unwrap().reserve(44100 * 2 * 30);
         }
-        let (playback, status) = if disabled {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let silent = if std::env::var_os("LOOKING_GLASS_SAH_SILENT_AUDIO").is_some() {
+            let (mixer,source)=output::mixer();SAH_MIXER.with(|s|*s.borrow_mut()=Some(source));
+            Some((Some(Playback{_stream:None,mixer,_worker:None}),"Silent deterministic collision probe".into()))
+        }else{None};
+        #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+        let silent:Option<(Option<Playback>,String)>=None;
+        let (playback, status) = if let Some(silent)=silent {silent} else if disabled {
             (None, "Sound disabled by launch option".into())
         } else {
             match Playback::open(monitor.clone(), capture.is_some()) {
@@ -1343,6 +1352,8 @@ impl Audio {
         mut sweep: impl FnMut(Vec3,Vec3)->crate::collision::Trace) {
         let _census = crate::phase_census::span(crate::phase_census::Region::Acoustics);
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Audio);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        SAH_MIXER.with(|s|{if let Some(s)=s.borrow_mut().as_mut(){for _ in 0..(dt*44100.*2.)as usize{let _=s.next();}}});
         self.acoustic_clock -= dt;
         if self.acoustic_clock <= 0. {
             self.acoustic_clock = 0.1;

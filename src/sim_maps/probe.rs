@@ -53,6 +53,7 @@ pub fn count(name: &'static str, n: u64) {
     }
 }
 pub fn begin() {
+    crate::collision::sah_probe::begin();
     if enabled() {
         JOINT_ORDER.with(|s|s.borrow_mut().clear());
         WORLD_ORDER.with(|s|s.borrow_mut().clear());
@@ -65,6 +66,7 @@ pub fn begin() {
 }
 pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     if !enabled() { return; }
+    crate::collision::sah_probe::end(frame,map);
     // Includes snapshot Value construction; excludes byte encoding, hashing and output.
     // Workload counters can be disabled independently for host ranking.
     let cpu_ms = START.with(|s| s.borrow().unwrap().elapsed().as_secs_f64() * 1000.);

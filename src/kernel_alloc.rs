@@ -14,24 +14,38 @@ mod imp {
             }
         });
     }
+    // Independent host load ledger. Sizes are allocator requests, plus the
+    // r3 disassembly-derived 32-bit newlib minimum chunk model. Realloc peaks
+    // conservatively retain old+new until the successful operation returns.
+    thread_local! {static HEAP:Cell<Option<[u64;5]>>=const{Cell::new(None)};}
+    fn heap_alloc(size:usize) {let _=HEAP.try_with(|h|if let Some(mut v)=h.get(){
+        let n=size as u64;let chunk=((n+11)&!7).max(16);
+        v[0]+=n;v[1]=v[1].max(v[0]);v[2]+=chunk;v[3]=v[3].max(v[2]);v[4]+=1;h.set(Some(v));
+    });}
+    fn heap_free(size:usize) {let _=HEAP.try_with(|h|if let Some(mut v)=h.get(){
+        let n=size as u64;v[0]=v[0].checked_sub(n).expect("load ledger freed pre-scope allocation");
+        v[2]-=((n+11)&!7).max(16);h.set(Some(v));
+    });}
+    pub fn heap_begin(){HEAP.with(|h|assert!(h.replace(Some([0;5])).is_none()));}
+    pub fn heap_finish()->[u64;5]{HEAP.with(|h|h.replace(None).unwrap())}
     struct Allocator;
     #[global_allocator]
     static ALLOCATOR: Allocator = Allocator;
     unsafe impl GlobalAlloc for Allocator {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
             count();
-            System.alloc(l)
+            let p=System.alloc(l);if !p.is_null(){heap_alloc(l.size());}p
         }
         unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
             count();
-            System.alloc_zeroed(l)
+            let p=System.alloc_zeroed(l);if !p.is_null(){heap_alloc(l.size());}p
         }
         unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
             count();
-            System.realloc(p, l, n)
+            let out=System.realloc(p,l,n);if !out.is_null(){heap_alloc(n);heap_free(l.size());}out
         }
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-            System.dealloc(p, l)
+            heap_free(l.size());System.dealloc(p, l)
         }
     }
     pub fn begin() {
@@ -87,6 +101,10 @@ mod imp {
         CALLS.load(Relaxed) as u64
     }
 }
+#[cfg(not(target_os="vita"))]
+pub(crate) fn heap_begin(){imp::heap_begin();}
+#[cfg(not(target_os="vita"))]
+pub(crate) fn heap_finish()->[u64;5]{imp::heap_finish()}
 pub(crate) struct Scope;
 impl Scope {
     pub(crate) fn begin() -> Self {

@@ -27,12 +27,14 @@ struct Row {
     sequence: u64, measured: bool, total: u64, coverage: u64,
     inclusive: [u64; REGIONS], exclusive: [u64; REGIONS], calls: [u32; REGIONS], parents: [u32; REGIONS],
     sweeps: [u32; 5], sweep_ns: [u64; 5], acoustic_sweeps: u32, acoustic_sweep_ns: u64,
+    static_ns:[u64;5], static_counts:[[u64;7];5],
     cache: [[u32; 3]; 3], queries: [[u32; 4]; 3], evictions: u32, errors: u32,
 }
 impl Row {
     const ZERO: Self = Self { sequence: 0, measured: false, total: 0, coverage: 0,
         inclusive: [0;REGIONS], exclusive: [0;REGIONS], calls: [0;REGIONS], parents: [0;REGIONS],
         sweeps:[0;5], sweep_ns:[0;5], acoustic_sweeps:0, acoustic_sweep_ns:0,
+        static_ns:[0;5],static_counts:[[0;7];5],
         cache:[[0;3];3], queries:[[0;4];3], evictions:0, errors:0 };
 }
 #[derive(Clone, Copy)]
@@ -88,6 +90,7 @@ thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     static STATE: RefCell<State> = const { RefCell::new(State::new()) };
 }
+pub(crate) fn is_active()->bool {active()}
 fn active() -> bool {ACTIVE.with(Cell::get)}
 fn configured() -> bool {
     #[cfg(feature="vita_renderer")]
@@ -96,7 +99,11 @@ fn configured() -> bool {
     {false}
 }
 pub(crate) fn initialize() {if configured() {STATE.with(|_|{});}}
-pub(crate) fn set_owner(owner:Owner) {if active(){STATE.with(|s|s.borrow_mut().owner=owner);}}
+pub(crate) fn set_owner(owner:Owner) {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    crate::collision::sah_probe::owner(owner as usize);
+    if active(){STATE.with(|s|s.borrow_mut().owner=owner);}
+}
 pub(crate) fn reset() {
     ACTIVE.with(|a|a.set(false));
     // Do not touch the large fixed table in the default-off arm.
@@ -141,11 +148,16 @@ impl Drop for Timer {
         });
     }}
 }
-pub(crate) struct OwnerScope(Option<Owner>);
+pub(crate) struct OwnerScope(Option<Owner>,
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))] usize);
 pub(crate) fn owner(owner:Owner) -> OwnerScope {
-    OwnerScope(if active() {Some(STATE.with(|s| {let mut s=s.borrow_mut();std::mem::replace(&mut s.owner,owner)}))} else {None})
+    OwnerScope(if active() {Some(STATE.with(|s| {let mut s=s.borrow_mut();std::mem::replace(&mut s.owner,owner)}))} else {None},
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))] crate::collision::sah_probe::owner(owner as usize))
 }
-impl Drop for OwnerScope {fn drop(&mut self){if let Some(owner)=self.0 {STATE.with(|s|s.borrow_mut().owner=owner);}}}
+impl Drop for OwnerScope {fn drop(&mut self){
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))] crate::collision::sah_probe::owner(self.1);
+    if let Some(owner)=self.0 {STATE.with(|s|s.borrow_mut().owner=owner);}
+}}
 pub(crate) struct Sweep {start:Option<Instant>, entered:bool, owner:usize, acoustic:bool}
 pub(crate) fn sweep() -> Sweep {
     let mut result=Sweep{start:None,entered:false,owner:0,acoustic:false};if !active(){return result;}
@@ -161,6 +173,23 @@ impl Drop for Sweep {fn drop(&mut self){if !self.entered{return;}let ns=self.sta
         if self.acoustic {s.current.acoustic_sweeps+=1;s.current.acoustic_sweep_ns+=ns;}
     }});
 }}
+/// Static misses only, before settled/dynamic/weapon completion. Cache hits do
+/// not enter this bracket. These nested times never add to root coverage.
+pub(crate) struct StaticTraversal {start:Option<Instant>,owner:usize}
+pub(crate) fn static_traversal()->StaticTraversal {
+    if !active(){return StaticTraversal{start:None,owner:0};}
+    StaticTraversal{start:Some(Instant::now()),owner:STATE.with(|s|s.borrow().owner as usize)}
+}
+impl StaticTraversal {
+    pub(crate) fn finish(self,nodes:u64,tested:u64,clipped:u64,planes:u64,certificates:u64,fallbacks:u64) {
+        if let Some(t)=self.start {let ns=t.elapsed().as_nanos() as u64;
+            STATE.with(|s|{let mut s=s.borrow_mut();s.current.static_ns[self.owner]+=ns;
+                let row=&mut s.current.static_counts[self.owner];
+                for (dst,src) in row.iter_mut().zip([1,nodes,tested,clipped,planes,certificates,fallbacks]){*dst+=src;}
+            });
+        }
+    }
+}
 pub(crate) fn scene(scene:usize) {if active(){STATE.with(|s|s.borrow_mut().scene=scene);}}
 pub(crate) fn query(class:usize,a:glam::Vec3,b:glam::Vec3) {
     if active(){STATE.with(|s|s.borrow_mut().query(class,[a.x.to_bits(),a.y.to_bits(),a.z.to_bits(),b.x.to_bits(),b.y.to_bits(),b.z.to_bits()]));}
@@ -180,12 +209,14 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "accepted_frame":i+1,"sequence":r.sequence,"measured_frame":if r.measured {Some(i-59)}else{None},
         "frame_total_ns":r.total,"bracket_union_ns":r.coverage,"unbracketed_residual_ns":r.total-r.coverage,
         "inclusive_ns":r.inclusive,"exclusive_ns":r.exclusive,"calls":r.calls,"parent_masks":r.parents,
+        "static_traversal_ns":r.static_ns,"static_traversal_counts":r.static_counts,
         "sweep_count":r.sweeps,"sweep_ns":r.sweep_ns,"acoustics_world_sweep_count":r.acoustic_sweeps,
         "acoustics_world_sweep_ns":r.acoustic_sweep_ns,"static_queries_total_hit1_hit4_hit16":r.queries,
         "static_cache_hit_miss_eviction":r.cache,
         "live_table_evictions":r.evictions,"hierarchy_errors":r.errors,
     })).collect();
     serde_json::to_writer(&mut *out,&serde_json::json!({"schema":1,"map":map,"regions":NAMES,"owners":OWNERS,
+        "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
         "parent_mask_frame_bit":REGIONS,"clock":"monotonic elapsed nanoseconds; includes preemption and API waits; no GPU timing",
         "residual":"frame_total minus union of root brackets; nested inclusive values must never be summed",

@@ -41,6 +41,8 @@ pub struct Config {
     pub lights_static_cache: bool,
     /// Spatial AABB buckets; preserve original dynamic contact order.
     pub sim_dynamic_buckets: bool,
+    /// Load an ordered static SAH hierarchy; experimental, default off.
+    pub collision_sah: bool,
     /// Exact round-two candidates; console acceptance is still pending.
     pub fx_merge_local_reuse: bool,
     /// Keep certified unchanged source ranges in a partially changing merge.
@@ -236,6 +238,7 @@ impl Default for Config {
             sim_npc_target_stack: true,
             lights_static_cache: true,
             sim_dynamic_buckets: false,
+            collision_sah: false,
             fx_merge_local_reuse: true,
             fx_merge_ranges: false,
             fx_cpu_inline: false,
