@@ -1,7 +1,9 @@
 //! Explicit host diagnostics. Run from a private working/save directory.
-use std::{cell::RefCell, collections::BTreeMap, sync::OnceLock, time::Instant};
+use std::{cell::{Cell,RefCell}, collections::BTreeMap, sync::OnceLock, time::Instant};
 use sha2::{Digest, Sha256};
 thread_local! {
+    static ALLOC_TRACKED:Cell<bool>=const {Cell::new(false)};
+    static PREPARE_ALLOC:Cell<[u64;2]>=const {Cell::new([0;2])};
     static SKINS: RefCell<Vec<serde_json::Value>> = RefCell::default();
     static TEXTURES: RefCell<BTreeMap<String,String>> = RefCell::default();
     static PACKETS: RefCell<Vec<serde_json::Value>> = RefCell::default();
@@ -152,11 +154,15 @@ pub struct NumericAlloc(Option<crate::kernel_alloc::Scope>);
 impl NumericAlloc {
     pub fn begin()->Self {
         static ON:OnceLock<bool>=OnceLock::new();
-        Self((enabled() && *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_ALLOC").is_some())).then(crate::kernel_alloc::Scope::begin))
+        let active=enabled() && *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_ALLOC").is_some());
+        ALLOC_TRACKED.with(|v|v.set(active));PREPARE_ALLOC.with(|v|v.set([0;2]));
+        Self(active.then(crate::kernel_alloc::Scope::begin))
     }
 }
 impl Drop for NumericAlloc { fn drop(&mut self) {if let Some(scope)=self.0.take() {
-    let calls=scope.finish();count("skin_numeric_allocation_calls",calls);count("skin_numeric_draws",1);
+    let calls=scope.finish();ALLOC_TRACKED.with(|v|v.set(false));
+    count("skin_numeric_allocation_calls",calls);count("skin_numeric_draws",1);
+    let p=PREPARE_ALLOC.with(Cell::get);count("skin_worker_prepare_allocation_calls",p[0]);count("skin_rejected_prepare_allocation_calls",p[1]);
 }}}
 
 /// Deterministic host-only damage witness; gameplay NPCs keep their production hit path.
@@ -167,4 +173,12 @@ pub fn script_hits(frame:u64,npcs:&mut crate::npc::Npcs) {
     let targets=npcs.targets();let mut accepted=0;
     for t in &targets {accepted+=usize::from(npcs.hit(crate::combat::Hit {id:t.id,damage,kind,knockback:glam::Vec3::ZERO}).is_some());}
     println!("SIM_SKIN_HITS {}",serde_json::json!({"frame":frame,"targets":targets.len(),"accepted":accepted,"kind":format!("{kind:?}")}));
+}
+
+pub fn prepare_checkpoint()->Option<u64> {
+    ALLOC_TRACKED.with(Cell::get).then(crate::kernel_alloc::Scope::calls_so_far)
+}
+pub fn prepare_allocations(start:Option<u64>,accepted:bool) {
+    if let Some(start)=start {let calls=crate::kernel_alloc::Scope::calls_so_far()-start;
+        PREPARE_ALLOC.with(|p|{let mut v=p.get();v[usize::from(!accepted)]+=calls;p.set(v);});}
 }

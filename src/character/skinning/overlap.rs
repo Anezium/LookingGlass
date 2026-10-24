@@ -364,6 +364,8 @@ impl Store {
                     reasons=crate::phase_census::TOPOLOGY;
                 }
             }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let prepare_alloc=crate::sim_maps::probe::prepare_checkpoint();
             let direct = if reasons==0 {
                 // A draw can animate unrelated bones while this surface is unchanged.
                 // Compare its exact numeric dependencies on the game thread; never
@@ -373,6 +375,8 @@ impl Store {
                 crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged,
                     crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize})
             } else { None };
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::prepare_allocations(prepare_alloc,direct.is_some());
             if let Some((output, alpha_variant)) = direct {
                 crate::phase_census::skin(actor,mesh.vertices.len(),0);
                 let vertices = self.output_len..self.output_len+mesh.vertices.len();

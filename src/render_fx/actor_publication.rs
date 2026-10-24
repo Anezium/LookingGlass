@@ -130,19 +130,23 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,key:Key)->O
     if SKIN_OPACITY.with(Cell::get)!=1. {return None;}
     let (time,appearance)=FRAME.with(|f| {let f=f.borrow();(f.time,f.appearance)});
     let (passes,alpha)=actor_cache::recipe(&surface,time,appearance)?;
-    STATE.with(|s| {
+    let mut passes=Some(passes);
+    let result=STATE.with(|s| {
         let mut s=s.borrow_mut();
         let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,alpha,key)?;
         let group=FRAME.with(|f| {
-            let mut f=f.borrow_mut();let n=mesh.vertices.len()*passes.len();
+            let mut f=f.borrow_mut();let n=mesh.vertices.len()*passes.as_ref().unwrap().len();
             if f.vertices.saturating_add(n)>MAX_VERTICES {f.dropped+=1;return None;}
             f.vertices+=n;let id=f.groups.len();
             let transparent=surface.transparent||f.depth_read_only;
-            f.groups.push(Group {passes,transparent});Some(id)
+            f.groups.push(Group {passes:passes.take().unwrap(),transparent});Some(id)
         })?;
         s.pending.push((group,id,slot));
         Some((output,alpha))
-    })
+    });
+    // Full/held banks and packet limits must not discard a reusable recipe.
+    if let Some(mut unused)=passes {actor_cache::recycle(&mut unused);}
+    result
 }
 /// Separate staging preserves world/actor and equal-depth packet barriers and ties.
 pub(crate) fn hold() {

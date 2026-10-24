@@ -38,6 +38,7 @@ mod imp {
         CALLS.with(|n| n.set(0));
         ACTIVE.with(|a| assert!(!a.replace(true)));
     }
+    pub fn calls() -> u64 { CALLS.with(Cell::get) }
     pub fn finish() -> u64 {
         ACTIVE.with(|a| a.set(false));
         CALLS.with(Cell::get)
@@ -89,6 +90,8 @@ mod imp {
 }
 pub(crate) struct Scope;
 impl Scope {
+    #[cfg(not(target_os="vita"))]
+    pub(crate) fn calls_so_far() -> u64 {imp::calls()}
     pub(crate) fn begin() -> Self {
         imp::begin();
         Self
