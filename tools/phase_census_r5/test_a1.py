@@ -9,14 +9,15 @@ def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def deny(*args,**kwargs):raise AssertionError('Offline check attempted transport or a subprocess')
 with contextlib.ExitStack() as stack:
  for obj,name in [(socket.socket,'connect'),(socket.socket,'connect_ex'),(socket.socket,'bind'),(socket,'create_connection'),(socket,'getaddrinfo'),(subprocess,'Popen'),(os,'system')]:stack.enter_context(patch.object(obj,name,deny))
- files=list((O/'console').glob('*.py'))+list((O/'scripts').glob('*.py'))+list(T.glob('*.py'))
+ files=list((O/'console').glob('*.py'))+list((O/'scripts').glob('*.py'))+list(T.rglob('*.py'))
  for path in files:compile(path.read_bytes(),str(path),'exec')
  print('PASS Python syntax for all package and clone helpers')
  with tempfile.TemporaryDirectory(prefix='alice-a1-regeneration-') as tmp:
   with patch.object(sys,'argv',['prepare.py',tmp]),contextlib.redirect_stdout(io.StringIO()):runpy.run_path(str(T/'prepare.py'),run_name='__main__')
   for path in (O/'console').glob('*.py'):assert path.read_bytes()==(Path(tmp)/'console'/path.name).read_bytes(),path
  print('PASS generated console helpers equal amended package helpers')
- for name in ['prepare.py','test_tools.py','test_a1.py','reseal_a1.py']:
+ for path in T.glob('*.py'):
+  name=path.name
   assert (T/name).read_bytes()==(O/'scripts'/name).read_bytes(),name
  print('PASS clone and package amendment tools match')
  assert sha(O/'CONSOLE-BRIEF.md')=='48857506bc84cb02f322c1fa16603bcd94727cd5435dc96cab39a4fa1b2173c0'

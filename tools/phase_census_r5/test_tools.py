@@ -187,7 +187,7 @@ with no_transport():
   for e in seq:
    run=root/e['label'];run.mkdir();(run/'STRICT-AUDIO.json').write_text('{"status":"PASS"}')
    (run/'ENTRY-STATE.json').write_text(json.dumps({'startup_camera_observations':[dict(camera_eye=[0,0,0],camera_target=[1,0,0],camera_up=[0,0,1],feet=[0,0,0])]}))
-   audit=dict(status='PASS',fields_ms={'wall_us':dict(n=120,median=60 if e['arm']=='A' else 60.2)},gl_observers='direct',observer_checks=dict(status='PASS',expected_mode='direct'),runtime_config_matches_readback=True,complete_benchmark=True,clean_exit=True,memory_samples=[dict(newlib_uordblks=100*1048576)],audio={which:{'raw':{'realtime':[dict(pcm_starved_blocks='0',rejected_sinks='0',dropped_reports='0')]}} for which in ['entry_loading_information_only','shutdown_information']})
+   audit=dict(status='PASS',fields_ms={'wall_us':dict(n=120,median=60 if e['arm']=='A' else 60.2)},gl_observers='direct',observer_checks=dict(status='PASS',expected_mode='direct'),runtime_config_matches_readback=True,complete_benchmark=True,clean_exit=True,memory_samples=[dict(newlib_uordblks=100*1048576)],heap_readout={window:dict(sampled_max_MiB=100) for window in ['benchmark','loading_preparation','post_export','whole_run']},audio={which:{'raw':{'realtime':[dict(pcm_starved_blocks='0',rejected_sinks='0',dropped_reports='0')]}} for which in ['entry_loading_information_only','shutdown_information']})
    (run/'AUDIT.json').write_text(json.dumps(audit))
    if e['map']=='pandemonium':(run/'SAVE-IDENTITY.json').write_text(json.dumps(receipt))
    if e['arm']=='B':
@@ -199,14 +199,7 @@ with no_transport():
     except SystemExit as ex:assert ex.code==0
   with patch.object(sys,'argv',['make-report.py','--root',str(root),'--package',str(O),'--output',str(root/'RESULTS.json')]):assembler.main()
   result=json.loads((root/'RESULTS.json').read_text());assert len(result['maps'])==2 and all(len(m['breakdowns'])==2 for m in result['maps']);ok('eight-run report assembly')
- # Only the exact amendment 1 transformations may differ from inherited r4 helpers.
- old=Path('/Users/anezium/vita-work/lg-phase-census-r5/tools/lever_matrix_r4/console')
- for name in ['pilot.py','preserve.py','baseline-r3.py','save-proof.py','verify-human-entry.py','verify-self.py','restore-files.py','restore-ledgers.py','restore-arm.py','verify-arm-self.py','map_identity.py','check-session-budget.py','ui.py','ack.py','strict-audio.py']:
-  expected=(old/name).read_text()
-  if name in ['baseline-r3.py','restore-files.py']:
-   expected=expected.replace(r'(hedge3|hatter1|skool2|pandemonium)-(full|fullbench)-light-',r'(hedge3|hatter1|skool2|pandemonium)-(full|fullbench)-(light-|census-180\.json$)')
-  if name=='baseline-r3.py':
-   expected=expected.replace("    p.rec('baseline-paths.json',paths)","    for mapname in ['hedge3','pandemonium']:\n     path=p.R+'frame_profile/'+mapname+'-fullbench-census-180.json'\n     if path not in paths:paths.append(path)\n    p.rec('baseline-paths.json',paths)")
-  assert expected.encode()==(O/'console'/name).read_bytes();ok('inherited contract with exact A1 allowance '+name)
+ for path in (O/'console').glob('*.py'):
+  assert path.read_bytes()==(Path('/Users/anezium/vita-work/lg-phase-census-r5/tools/phase_census_r5/console')/path.name).read_bytes();ok('canonical r5 helper '+path.name)
 result={'status':'PASS','offline_only':True,'transport_blocked':True,'checks':checks,'count':len(checks)}
 (O/'proof/CONSOLE-DRY-RUN.json').write_text(json.dumps(result,indent=2)+'\n');print(len(checks),'offline checks passed')

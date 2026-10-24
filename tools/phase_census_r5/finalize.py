@@ -7,6 +7,10 @@ def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 for f in T.glob('*.py'):shutil.copy2(f,O/'scripts'/f.name)
 for n in ['README.md','DESIGN.md','CONSOLE-BRIEF.md']:shutil.copy2(T/n,O/n)
 source={'revision':json.loads((O/'proof/BUILD-COMMAND.json').read_text())['revision'],'tooling_head_at_seal':subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip(),'r4_base':'81f3d1eb1fe4303ff955afee491ef10a7ceecb2a','files':{str(f.relative_to(R)):sha(f) for f in sorted((R/'src').rglob('*.rs'))},'host_binary_sha256':json.loads((O/'proof/HOST-RENDER.json').read_text())['binary_sha256'],'host_build_log':'logs/host-sealed-build.log'}
+branch=subprocess.check_output(['git','branch','--show-current'],cwd=R,text=True).strip()
+assert branch=='vita-phase-census-r5-20261024'
+identity=dict(package='alice-phase-census-r5',engine_source_revision=source['revision'],branch=branch,branch_head=source['tooling_head_at_seal'])
+(O/'PACKAGE-IDENTITY.json').write_text(json.dumps(identity,indent=2)+'\n')
 (O/'proof/SOURCE-IDENTITY.json').write_text(json.dumps(source,indent=2)+'\n')
 s=(O/'proof/native-census-tls.s').read_text();assert re.search(r'movw\s+r0, #2600',s) and re.search(r'movt\s+r0, #5',s) and '<__wrap_malloc>' in s
 (O/'proof/NATIVE-CENSUS-STORAGE.json').write_text(json.dumps({'tls_allocation_request_bytes':(5<<16)+2600,'scope':'B-only main-thread TLS initialized before gameplay; allocation request from sealed ARM ELF, not live newlib usage','evidence':'proof/native-census-tls.s','elf_sha256':sha(O/'packages/baseline/looking-glass.elf'),'host_State_bytes':330416},indent=2)+'\n')
@@ -27,7 +31,7 @@ after=subprocess.check_output(['df','-h',str(O)],text=True)
 (O/'proof/CLEANUP.json').write_text(json.dumps({'removed':removed,'removed_bytes':sum(r['bytes'] for r in removed),'shared_host_target_retained':'/Users/anezium/vita-j0/cargo-target-host','df_before':before,'df_after':after},indent=2)+'\n')
 # A compact console handoff includes SELF/configs/helpers only. Native build files stay local.
 with zipfile.ZipFile(O/'CONSOLE-PACKAGE.zip','w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:
- for n in ['CONSOLE-BRIEF.md','DESIGN.md','CONSOLE-PROTOCOL.json','PACKAGE-MATRIX.json']:
+ for n in ['CONSOLE-BRIEF.md','DESIGN.md','CONSOLE-PROTOCOL.json','PACKAGE-MATRIX.json','PACKAGE-IDENTITY.json']:
   z.write(O/n,n)
  for d in ['configs','console']:
   for f in sorted((O/d).glob('*')):
@@ -38,7 +42,7 @@ with zipfile.ZipFile(O/'CONSOLE-PACKAGE.zip','w',compression=zipfile.ZIP_DEFLATE
    f=O/'packages'/arm/n;z.write(f,str(f.relative_to(O)))
  for n in ['log-integrity.py','bind_helpers.py']:
   f=O/'scripts'/n;z.write(f,str(f.relative_to(O)))
-manifest={str(f.relative_to(O)):{'bytes':f.stat().st_size,'sha256':sha(f)} for f in sorted(O.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md']}
+manifest={str(f.relative_to(O)):{'bytes':f.stat().st_size,'sha256':sha(f)} for f in sorted(O.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md','A1-FIX.md','A1B-FIX.md']}
 (O/'ARTIFACT-SHA256.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print('Removed',sum(r['bytes'] for r in removed),'bytes; sealed',len(manifest),'artifacts')
 print(after)

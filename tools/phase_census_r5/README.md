@@ -14,3 +14,13 @@ Use `/opt/homebrew/bin/bash`, Python `/Users/anezium/vita-j0/venv/bin/python`, a
 6. Console-only later: a fresh `session-s6-phase-census` copies helper source files; `OUT/scripts/bind_helpers.py --root ROOT` verifies the fresh set and hashes without transport. After fully admitted measurements, compare each block and run make-report.py as described in the brief. Raw census JSON remains the authority.
 
 The build target, temporary conversion duplicates and copied host binary are removed after sealing; logs, hashes and proof data remain. The shared host target is deliberately retained. See SOL-REPORT.md for exact hashes, evidence scope and open risks.
+
+A1B helper-only correction: canonical operational helpers are in `console/`.
+`prepare.py` copies these exact r5 sources. `test_session_e2e.py OUT --output
+OUT/proof/A1B-E2E-AFTER.json` exercises the complete synthetic session with
+networking and real processes blocked; `--sealed-helpers
+OUT/proof/A1B-SEALED-HELPERS.zip` reproduces the original preservation failure.
+After committing and plain-pushing, run `reseal_a1b.py OUT` to verify protected
+artifacts, rerun before/after and focused checks, and regenerate the identity,
+ZIP, manifest, final validation and English A1B-FIX.md. The blocked original
+session directory remains evidence and must not be reused.
