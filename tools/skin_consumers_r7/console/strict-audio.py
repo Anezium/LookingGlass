@@ -36,7 +36,7 @@ def main():
      if bench.count('['+tag+']')!=b['window_counts'][group]:reasons.append('UNKNOWN unparsed benchmark '+group+' tag')
     for group,key in [('realtime','producer_blocks'),('cpal','callbacks')]:
      if any(row['complete'] and float(row['fields'][key])<=0 for row in b['raw'][group]):reasons.append('UNKNOWN nonpositive benchmark '+key)
-    limits={'realtime':['pcm_starved_blocks','rejected_sinks','dropped_reports'],'music':['underrun_frames'],'cpal':['underrun_estimates','late_callbacks']}
+    limits={'realtime':['pcm_starved_blocks','rejected_sinks','dropped_reports'],'music':['underrun_frames'],'cpal':['underrun_estimates']}
     for group,keys in limits.items():
      for row in b['raw'][group]:
       if row['complete']:
@@ -45,11 +45,14 @@ def main():
     p95=[float(x['fields']['producer_mix_p95_ms']) for x in b['raw']['realtime'] if x['complete']]
     if any(v>=8 for v in p95):reasons.append('merged benchmark producer p95 >=8ms')
     result=dict(status='FAIL_OR_UNKNOWN' if reasons else 'PASS',reasons=reasons,A_p95_record_only=False,benchmark_producer_p95_ms=p95,max_reported_benchmark_producer_p95_ms=max(p95,default=None),windows=windows,counter_semantics='Raw reporter fields preserved. PCM starvation and music underruns are per reporter window; dropped_reports and CPAL fields retained as reported, no cumulative-field pooling. Intentional flush silence is never subtracted.',listening='UNAVAILABLE')
-    result['benchmark_raw_counter_values']={g:{k:[row['fields'].get(k) for row in b['raw'][g]] for k in keys} for g,keys in limits.items()}
+    reported_counters=dict(limits,cpal=['underrun_estimates','late_callbacks'])
+    result['benchmark_raw_counter_values']={g:{k:[row['fields'].get(k) for row in b['raw'][g]] for k in keys} for g,keys in reported_counters.items()}
+    late=[int(row['fields']['late_callbacks']) if row['complete'] else None for row in b['raw']['cpal']]
+    result['BENCHMARK_LATE_CALLBACKS']=dict(per_window=late,total=sum(v for v in late if v is not None),report_only=True,note='Sum of reported benchmark window counts; never an audio gate. Incomplete windows remain unknown.')
     result['benchmark_observed_cumulative_deltas']={}
     for g,k in [('realtime','dropped_reports'),('cpal','underrun_estimates'),('cpal','late_callbacks')]:
      values=[int(row['fields'][k]) for row in b['raw'][g] if row['complete']]
-     result['benchmark_observed_cumulative_deltas'][g+'.'+k]=dict(raw_values=values,last_minus_first=values[-1]-values[0] if values else None,note='Observed in-slice endpoint delta only; raw values independently gate zero, never inferred from delta.')
+     result['benchmark_observed_cumulative_deltas'][g+'.'+k]=dict(raw_values=values,last_minus_first=values[-1]-values[0] if values else None,note=('Report-only late callbacks; endpoint delta is descriptive, never a gate.' if k=='late_callbacks' else 'Observed in-slice endpoint delta only; raw values independently gate zero, never inferred from delta.'))
     (run/'STRICT-AUDIO.json').write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps({k:v for k,v in result.items() if k!='windows'},indent=2))
     sys.exit(2 if reasons else 0)

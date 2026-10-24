@@ -60,6 +60,12 @@ def main():
  passed=passed and all(m['diagnostics_complete'] and m['heap_status']=='WITHIN_1_MIB' and m['loading_status']!='AUDIO_LOADING_REGRESSION' for m in maps)
  result=dict(status='BENEFIT_GATES_PASS' if passed else 'NO_PROMOTION',reading_rule=protocol['pass_rule'],maps=maps,
   hardware_gameplay_correctness='Finite idle runs do not establish all moving gameplay transitions.')
+ late={}
+ for root in a.root:
+  for entry in protocol['sequence']+protocol.get('optional_sequence',[]):
+   receipt=root/entry['label']/'STRICT-AUDIO.json'
+   if receipt.exists():late[entry['label']]=json.loads(receipt.read_text())['BENCHMARK_LATE_CALLBACKS']
+ result['BENCHMARK_LATE_CALLBACKS']=late
  a.output.write_text(json.dumps(result,indent=2)+'\n')
- a.output.with_suffix('.md').write_text('# Alice skin consumers r7 console results\n\n'+result['status']+'\n\n'+protocol['pass_rule']+'\n\n'+'\n'.join(m['map']+': '+m['wall_gate']['status']+'; B-A '+str(m['wall_gate']['oriented_pair_deltas_ms'])+' ms; diagnostics complete='+str(m['diagnostics_complete']) for m in maps)+'\n')
+ a.output.with_suffix('.md').write_text('# Alice skin consumers r7 console results\n\n'+result['status']+'\n\n'+protocol['pass_rule']+'\n\n'+'\n'.join(m['map']+': '+m['wall_gate']['status']+'; B-A '+str(m['wall_gate']['oriented_pair_deltas_ms'])+' ms; diagnostics complete='+str(m['diagnostics_complete']) for m in maps)+'\n\nBENCHMARK_LATE_CALLBACKS (report-only; sum of benchmark window counts):\n'+'\n'.join(label+': '+str(v['total'])+'; per window '+str(v['per_window']) for label,v in late.items())+'\n')
 if __name__=='__main__':main()

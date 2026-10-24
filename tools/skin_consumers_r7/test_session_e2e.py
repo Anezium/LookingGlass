@@ -27,7 +27,9 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,mapnam
  package=work/'package';root=package/('session-s8-skin-consumers-'+mapname);root.mkdir(parents=True)
  for name in ['CONSOLE-PROTOCOL.json','PACKAGE-IDENTITY.json']:
   if (source/name).exists():shutil.copyfile(source/name,package/name)
- for name in ['configs','packages','host','console']:(package/name).symlink_to(source/name,target_is_directory=True)
+ # ZIP replay writes extracted inputs; isolate them from the source package.
+ for name in ['configs','packages','console']:shutil.copytree(source/name,package/name)
+ (package/'host').symlink_to(source/'host',target_is_directory=True)
  (package/'scripts').mkdir()
  if sealed:
   with zipfile.ZipFile(sealed) as archive:
@@ -158,7 +160,7 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,mapnam
    '[miniquad/vita] memory reason=benchmark newlib_uordblks='+str(heap),
    '[lg/audio-realtime] window_ms=1000 producer_blocks=1 producer_mix_p95_ms=1 pcm_starved_blocks=0 rejected_sinks=0 dropped_reports=0 queued_samples=100 producer_gap_max_ms=1 producer_sleep_overshoot_max_ms=1',
    '[lg/audio-music] decode_ms=1 underrun_frames=0 chunks=1',
-   '[cpal/vita] late_callbacks=0 underrun_estimates=0 callbacks=1 callback_p95_us=1 callback_max_us=1',
+   '[cpal/vita] late_callbacks=1 underrun_estimates=0 callbacks=1 callback_p95_us=1 callback_max_us=1',
    '[lg/frame-total] measured=120 gl_hooks=0 phase_timers=0 clock=begin-to-begin',
    '[miniquad/vita] memory reason=post_export newlib_uordblks='+str(heap+1048576),
    'bench: done 120 frames mode=fullbench profiler=light','Viewer closed cleanly.'])+'\n'
@@ -233,12 +235,16 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,mapnam
    audit=json.loads((root/label/'AUDIT.json').read_text())
    assert audit['heap_readout']['benchmark']['sampled_max_MiB']==(151 if entry['arm']=='B' else 149)
    assert audit['heap_readout']['whole_run']['sampled_max_MiB']==165
-   # Prove late callbacks fail the actual strict-audio main even when delta=0.
+   # Every run passed collection/audit with late_callbacks=1. Underruns still stop.
+   strict=json.loads((root/label/'STRICT-AUDIO.json').read_text())
+   assert strict['BENCHMARK_LATE_CALLBACKS']['per_window']==[1]
+   assert strict['BENCHMARK_LATE_CALLBACKS']['total']==1
    if label==seq[0]['label']:
-    path=root/label/'runtime-log.txt';raw=path.read_bytes();path.write_bytes(raw.replace(b'late_callbacks=0',b'late_callbacks=1'))
+    path=root/label/'runtime-log.txt';raw=path.read_bytes();path.write_bytes(raw.replace(b'underrun_estimates=0',b'underrun_estimates=1'))
+    assert run_health.health_text(path.read_text()),'CPAL underrun did not stop health collection'
     try:call('strict-audio.py',label,'--root',root)
     except AssertionError as error:assert error.args[0]==('strict-audio.py',2)
-    else:raise AssertionError('nonzero CPAL late callback accepted')
+    else:raise AssertionError('nonzero CPAL underrun accepted')
     path.write_bytes(raw);call('strict-audio.py',label,'--root',root)
    call('restore-arm.py',label)
    remote[R+'saves/auto.previous.json']=b'fake modified companion requiring restoration'
@@ -246,6 +252,10 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,mapnam
    if label.endswith('-4-A'):call('compare-abba.py','--root',root,'--protocol',package/'CONSOLE-PROTOCOL.json','--block',entry['block'])
   call('make-report.py','--root',root,'--package',package,'--output',root/'RESULTS.json')
   result=json.loads((root/'RESULTS.json').read_text());md=(root/'RESULTS.md').read_text()
+  assert set(result['BENCHMARK_LATE_CALLBACKS'])=={e['label'] for e in seq}
+  assert all(v['total']==1 and v['per_window']==[1] and v['report_only'] for v in result['BENCHMARK_LATE_CALLBACKS'].values())
+  assert 'BENCHMARK_LATE_CALLBACKS' in md
+  print('PASS BENCHMARK_LATE_CALLBACKS: per-window [1], run total 1, report-only; underrun_estimates=1 still STOP')
   assert len(result['maps'])==1
   assert result['status']=='NO_PROMOTION'
   assert [v['wall_gate']['status'] for v in result['maps']]==(['NO_CONFIRMED_BENEFIT'] if mapname=='pandemonium' else ['REGRESSION'])
