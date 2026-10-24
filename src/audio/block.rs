@@ -5,6 +5,7 @@ use std::{cell::Cell, time::Instant};
 #[derive(Clone, Copy)]
 pub struct Settings {
     pub offmain: bool,
+    pub static_cache: bool,
     pub mix: bool,
     pub preresample: bool,
     pub parameters: bool,
@@ -35,6 +36,7 @@ pub fn settings() -> Settings {
         let c = crate::render::vita_renderer::config();
         Settings {
             offmain: c.audio_offmain && c.audio_pcm_worker,
+            static_cache: c.audio_static_cache,
             mix: c.audio_block_mix,
             preresample: c.audio_preresample,
             parameters: c.audio_block_parameters,
@@ -55,6 +57,7 @@ pub fn settings() -> Settings {
     {
         Settings {
             offmain: false,
+            static_cache: false,
             mix: false,
             preresample: false,
             parameters: false,

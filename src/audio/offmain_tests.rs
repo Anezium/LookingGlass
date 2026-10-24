@@ -67,7 +67,7 @@ fn compare(
         let submerged = (60..80).contains(&frame);
         world.set_dynamic(vec![test_box(ear + Vec3::X * 50., Vec3::splat(10.))]);
         for (arm, audio) in [&mut a, &mut b].into_iter().enumerate() {
-            crate::phase_census::test_begin(arm==1);
+            crate::phase_census::test_begin(arm==1 && audio.static_cache.is_none());
             crate::phase_census::scene(world.acoustic_scene_key());
             audio.settings.muted = (90..95).contains(&frame);
             if let Some(assets) = assets.as_deref_mut() {
@@ -92,7 +92,9 @@ fn compare(
                     }
                     c.execute();
                 }
-                if let Some(c) = client.as_mut() {
+                if audio.static_cache.is_some() {
+                    audio.prepare_cached_acoustics(world,ear,submerged,1. / 30.);
+                } else if let Some(c) = client.as_mut() {
                     audio.prepare_acoustics(ear, submerged, 1. / 30., |a,b| c.complete(world,a,b));
                 } else {
                     audio.prepare_acoustics(ear, submerged, 1. / 30., |a,b| world.sweep(a,b,Vec3::ZERO));
@@ -137,14 +139,22 @@ fn compare(
     println!("AUDIO_OFFMAIN_EQUAL fixture={label} frames={frames} scalar_samples={samples} sha256={:x} new_hot_allocations={hot_allocs} submitted={} reused={} fallback={} host_only=true",hash.finalize(),c.submitted,c.reused,c.fallback);
     } else {
         assert_eq!(hot_allocs, 0);
-        println!("AUDIO_CENSUS_EQUAL fixture={label} frames={frames} scalar_samples={samples} sha256={:x} new_hot_allocations={hot_allocs}",hash.finalize());
+        println!("AUDIO_MAIN_EQUAL fixture={label} frames={frames} scalar_samples={samples} sha256={:x} new_hot_allocations={hot_allocs}",hash.finalize());
     }
 }
 #[test]
 fn synthetic_mixed_output_is_sample_exact_without_hot_allocations() {
+    synthetic_compare(false);
+}
+#[test]
+fn static_cache_mixed_output_is_sample_exact_without_hot_allocations() {
+    synthetic_compare(true);
+}
+fn synthetic_compare(cached: bool) {
     let mut world = World::fixture(&[(vec3(-5., -100., -100.), vec3(5., 100., 100.))]);
     let (mut a, ma) = setup(false);
-    let (mut b, mb) = setup(true);
+    let (mut b, mb) = setup(!cached);
+    if cached { b.static_cache=Some(Box::new(static_cache::Cache::new())); }
     for audio in [&mut a, &mut b] {
         audio.scene_presented = true;
         for i in 0..8 {
@@ -318,6 +328,27 @@ fn census_map_output_is_sample_exact() -> Result<()> {
         a.load(&mut assets,name,&map);b.load(&mut assets,name,&map);
         a.scene_presented();b.scene_presented();
         compare(a,ma,b,mb,Some(&mut assets),&mut world,name,Vec3::ZERO,120);
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires LOOKING_GLASS_TEST_DATA; deterministic decode/sample clock"]
+fn static_cache_map_output_is_sample_exact() -> Result<()> {
+    assert!(!block::settings().music_thread);
+    let mut assets = Assets::open(&PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?))?;
+    for (name, eye) in [
+        ("hedge3", vec3(6168., -7300., 280.15625)),
+        ("gvillage", vec3(-4144., 6120., 280.)),
+        ("skool2", Vec3::ZERO), ("hatter1", Vec3::ZERO),
+    ] {
+        let map = Bsp::parse(&assets.read(&format!("maps/{name}.bsp"))?)?;
+        let mut world = World::from_bsp(&map)?;
+        let (mut a,ma)=setup(false);let (mut b,mb)=setup(false);
+        a.static_cache=None;b.static_cache=Some(Box::new(static_cache::Cache::new()));
+        a.load(&mut assets,name,&map);b.load(&mut assets,name,&map);
+        a.scene_presented();b.scene_presented();
+        compare(a,ma,b,mb,Some(&mut assets),&mut world,name,eye,120);
     }
     Ok(())
 }

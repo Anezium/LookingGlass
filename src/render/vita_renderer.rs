@@ -154,6 +154,8 @@ pub struct Config {
     pub audio_pcm_worker: bool,
     /// Exact static acoustic traces on the PCM producer, only while its cushion is full.
     pub audio_offmain: bool,
+    /// Exact immutable acoustic traces on main; live geometry is always completed.
+    pub audio_static_cache: bool,
     pub audio_block_mix: bool,
     pub audio_preresample: bool,
     pub audio_block_parameters: bool,
@@ -292,6 +294,7 @@ impl Default for Config {
             story_film_bypass: false,
             audio_pcm_worker: false,
             audio_offmain: false,
+            audio_static_cache: false,
             audio_block_mix: false,
             audio_preresample: false,
             audio_block_parameters: false,
@@ -2203,6 +2206,12 @@ mod tests {
                 input[field]=bad;assert!(serde_json::from_value::<Config>(input.clone()).is_err());
             }
         }
+    }
+    #[test]
+    fn audio_static_cache_is_opt_in() {
+        assert!(!Config::default().audio_static_cache);
+        assert!(serde_json::from_str::<Config>(r#"{"audio_static_cache":true}"#).unwrap().audio_static_cache);
+        assert!(serde_json::from_str::<Config>(r#"{"audio_static_cache":"on"}"#).is_err());
     }
     #[test]
     fn audio_offmain_is_opt_in_and_requires_the_pcm_producer() {

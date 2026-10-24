@@ -27,13 +27,13 @@ struct Row {
     sequence: u64, measured: bool, total: u64, coverage: u64,
     inclusive: [u64; REGIONS], exclusive: [u64; REGIONS], calls: [u32; REGIONS], parents: [u32; REGIONS],
     sweeps: [u32; 5], sweep_ns: [u64; 5], acoustic_sweeps: u32, acoustic_sweep_ns: u64,
-    queries: [[u32; 4]; 3], evictions: u32, errors: u32,
+    cache: [[u32; 3]; 3], queries: [[u32; 4]; 3], evictions: u32, errors: u32,
 }
 impl Row {
     const ZERO: Self = Self { sequence: 0, measured: false, total: 0, coverage: 0,
         inclusive: [0;REGIONS], exclusive: [0;REGIONS], calls: [0;REGIONS], parents: [0;REGIONS],
         sweeps:[0;5], sweep_ns:[0;5], acoustic_sweeps:0, acoustic_sweep_ns:0,
-        queries:[[0;4];3], evictions:0, errors:0 };
+        cache:[[0;3];3], queries:[[0;4];3], evictions:0, errors:0 };
 }
 #[derive(Clone, Copy)]
 struct Entry { scene: usize, bits: [u32;6], last: u64, prior: u64 }
@@ -41,13 +41,13 @@ impl Entry { const EMPTY: Self = Self {scene:0,bits:[0;6],last:0,prior:0}; }
 struct State {
     rows: [Row;CAPACITY], current: Row, count: usize, accepted: usize,
     start: Option<Instant>, pending: bool, overflow: bool, sequence: u64,
-    owner: Owner, sweep_depth: usize, scene: usize,
+    owner: Owner, sweep_depth: usize, scene: usize, query_class: usize,
     stack: [usize;DEPTH], children: [u64;DEPTH], depth: usize,
     table: [Entry;TABLE],
 }
 impl State {
     const fn new() -> Self { Self { rows:[Row::ZERO;CAPACITY],current:Row::ZERO,count:0,accepted:0,
-        start:None,pending:false,overflow:false,sequence:0,owner:Owner::Other,sweep_depth:0,scene:0,
+        start:None,pending:false,overflow:false,sequence:0,owner:Owner::Other,sweep_depth:0,scene:0,query_class:0,
         stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE] } }
     fn close(&mut self, now: Instant) {
         if let Some(start) = self.start {
@@ -60,6 +60,7 @@ impl State {
         self.pending=false;
     }
     fn query(&mut self, class:usize, bits:[u32;6]) {
+        self.query_class = class;
         let mut hash=(self.scene as u64).wrapping_mul(0x9e3779b97f4a7c15);
         for b in bits {hash=(hash ^ b as u64).wrapping_mul(0x100000001b3);}
         let first=(hash as usize) & (TABLE-1);
@@ -164,6 +165,12 @@ pub(crate) fn scene(scene:usize) {if active(){STATE.with(|s|s.borrow_mut().scene
 pub(crate) fn query(class:usize,a:glam::Vec3,b:glam::Vec3) {
     if active(){STATE.with(|s|s.borrow_mut().query(class,[a.x.to_bits(),a.y.to_bits(),a.z.to_bits(),b.x.to_bits(),b.y.to_bits(),b.z.to_bits()]));}
 }
+pub(crate) fn cache_result(hit: bool, evicted: bool) {
+    if active() { STATE.with(|s| { let mut s=s.borrow_mut(); let class=s.query_class;
+        s.current.cache[class][if hit {0} else {1}]+=1;
+        s.current.cache[class][2]+=u32::from(evicted);
+    }); }
+}
 fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
     anyhow::ensure!(!s.overflow && s.count==CAPACITY,"census requires exactly 60+120 accepted frames");
     anyhow::ensure!(s.rows[..60].iter().all(|r|!r.measured) && s.rows[60..].iter().all(|r|r.measured),"census warmup/measurement alignment");
@@ -175,6 +182,7 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "inclusive_ns":r.inclusive,"exclusive_ns":r.exclusive,"calls":r.calls,"parent_masks":r.parents,
         "sweep_count":r.sweeps,"sweep_ns":r.sweep_ns,"acoustics_world_sweep_count":r.acoustic_sweeps,
         "acoustics_world_sweep_ns":r.acoustic_sweep_ns,"static_queries_total_hit1_hit4_hit16":r.queries,
+        "static_cache_hit_miss_eviction":r.cache,
         "live_table_evictions":r.evictions,"hierarchy_errors":r.errors,
     })).collect();
     serde_json::to_writer(&mut *out,&serde_json::json!({"schema":1,"map":map,"regions":NAMES,"owners":OWNERS,

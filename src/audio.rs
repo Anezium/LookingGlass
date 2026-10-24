@@ -1,6 +1,7 @@
 //! Audio from the user's archives. No original DLL, executable, or script execution.
 mod acoustics;
 mod offmain;
+mod static_cache;
 mod queue;
 pub mod sink;
 mod output;
@@ -787,6 +788,7 @@ pub struct Audio {
     cues: BTreeMap<String, Music>,
     room: f32,
     acoustic_clock: f32,
+    static_cache: Option<Box<static_cache::Cache>>,
     submerged: bool,
     last_sanity: Option<f32>,
     reaction_gate: reaction::Gate,
@@ -864,6 +866,7 @@ impl Audio {
             cues: BTreeMap::new(),
             room: 0.,
             acoustic_clock: 0.,
+            static_cache: block::settings().static_cache.then(|| Box::new(static_cache::Cache::new())),
             submerged: false,
             last_sanity: None,
             reaction_gate: reaction::Gate::default(),
@@ -894,6 +897,7 @@ impl Audio {
         game_stage(5);
         let _stage=UpdateStage;
         self.stop_voice();
+        if let Some(cache) = &mut self.static_cache { cache.reset(); }
         if let Some(client) = self.playback.as_mut().and_then(|p| p.mixer.acoustics.as_mut()) { client.reset(); }
         self.retire_music();
         self.scene_presented = false;
@@ -1294,6 +1298,10 @@ impl Audio {
             }
         }
         self.pending = pending;
+        if self.static_cache.is_some() {
+            self.prepare_cached_acoustics(world, listener, submerged, dt);
+            return;
+        }
         // Decide once for this preparation pass. The synchronous kernel has no
         // optional-client branch per trace, and never takes/restores client state.
         let offmain = self.playback.as_ref().is_some_and(|p| p._worker.is_some() && p.mixer.acoustics.is_some());
@@ -1323,6 +1331,13 @@ impl Audio {
             self.prepare_acoustics(listener, submerged, dt, |a,b| world.sweep(a,b,Vec3::ZERO));
         }
         if let Some(p) = &mut self.playback { p.mixer.acoustics = client; }
+    }
+    fn prepare_cached_acoustics(&mut self, world: &World, listener: Vec3, submerged: bool, dt: f32) {
+        // Move ownership without allocating; the generic kernel keeps the same ray order.
+        let mut cache = self.static_cache.take().unwrap();
+        cache.begin(world);
+        self.prepare_acoustics(listener, submerged, dt, |a,b| cache.sweep(world,a,b));
+        self.static_cache = Some(cache);
     }
     fn prepare_acoustics(&mut self, listener:Vec3, submerged:bool, dt:f32,
         mut sweep: impl FnMut(Vec3,Vec3)->crate::collision::Trace) {
@@ -1662,6 +1677,7 @@ impl Audio {
         true
     }
     pub fn finish(&mut self) -> Result<()> {
+        if let Some(cache) = &mut self.static_cache { cache.reset(); }
         self.stop_voice();
         self.music = None;
         self.retiring.clear();
