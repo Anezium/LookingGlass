@@ -494,6 +494,7 @@ impl Art {
                     } else {
                         1.
                     };
+                    let electric_consumer = self.boojum.electric_consumer(b.electric);
                     self.boojum.draw(
                         clip,
                         time,
@@ -505,6 +506,7 @@ impl Art {
                         scale,
                         fullbright,
                     );
+                    drop(electric_consumer);
                     self.boojum.draw_electric(b.electric);
                 }
             }

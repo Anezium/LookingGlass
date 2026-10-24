@@ -712,8 +712,8 @@ fn family(def: &Definition, base: &str) -> Vec<String> {
 }
 struct Model {
     skin_identity: crate::character::skinning::identity::ActorId,
-    // Script puppets expose secondary draws in a later pass, after body visibility
-    // is decided. Keep their vertices and normals even without death_frozen.
+    // Keep the inherited Puppet visibility/lighting policy. The optional lever
+    // replaces only its mutable-mesh capability guard with actual consumers.
     late_skin_overlays: bool,
     bone_scales: Vec<(usize, f32)>,
     frozen: Option<std::rc::Rc<crate::frozen::Art>>,
@@ -742,6 +742,12 @@ pub struct Puppet(
     crate::facial::Watch,
 );
 impl Puppet {
+    /// Declare a later electric draw before preparing its body. The guard also
+    /// covers attachments; no mesh references or shared-model state are retained.
+    pub(crate) fn electric_consumer(&self, remaining:f32)->crate::character::skinning::CullGuard {
+        crate::character::skinning::CullGuard::publication_reason(
+            remaining>0. && self.0.electric.is_some(),crate::phase_census::ELECTRIC)
+    }
     pub fn draw_electric(&self, remaining: f32) {
         self.0.draw_electric(remaining);
         self.3.bind();
@@ -954,7 +960,7 @@ impl Puppet {
             animation.frame_time,
             looping,
         );
-        let _consumer = crate::character::skinning::CullGuard::publication_consumer(clip == "death_frozen");
+        let _consumer = crate::character::skinning::CullGuard::publication_reason(clip == "death_frozen",crate::phase_census::FROZEN);
         let material = self.3.clone();
         material.draw_dissolving(dissolve, || {
             self.0.draw_pose(
@@ -1061,6 +1067,7 @@ pub fn guard_timing(assets: &mut Assets) -> Result<Timing> {
 }
 impl Model {
     fn draw_electric(&self, remaining: f32) {
+        let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
         if crate::character::skinning::overlap::gather_only() { return; }
         if remaining <= 0. {
             return;
@@ -1082,6 +1089,7 @@ impl Model {
         }
     }
     fn draw_frozen(&self) {
+        let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
         if crate::character::skinning::overlap::gather_only() { return; }
         if let Some(art) = &self.frozen {
             for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
@@ -1120,7 +1128,8 @@ impl Model {
             local, mouth, &self.bone_scales, || {
                 let mut pose = self.face.pose(&d.skeleton, local, mouth);
                 let scales = if self.bone_scales.is_empty() { Vec::new() }
-                    else { crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.bone_scales) };
+                    else { let _census=crate::phase_census::span(crate::phase_census::Region::ActorScalesPalette);
+                        crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.bone_scales) };
                 (pose, scales)
             },
         );
@@ -1152,9 +1161,11 @@ impl Model {
                 removed.push((i, self.meshes[i].take()));
             }
         }
-        // Frozen shells and script-owned late overlays need the complete skin.
-        let _visibility = crate::character::skinning::CullGuard::visual_preserve(self.frozen.is_some());
-        let _skin_guard = crate::character::skinning::CullGuard::preserve(self.late_skin_overlays);
+        // Visibility/lighting remains identical even when owned worker publications
+        // replace the blanket mutable Puppet skin. Actual consumers guard callers.
+        let _visibility = crate::character::skinning::CullGuard::visual_preserve(self.frozen.is_some() || self.late_skin_overlays);
+        let _skin_guard = crate::character::skinning::CullGuard::reason(
+            self.late_skin_overlays && !crate::character::skinning::actual_consumers(),crate::phase_census::PUPPET);
         let skin_visible = crate::character::draw_skin_scaled(
             &d.skeleton,
             &mut self.meshes,
@@ -1164,6 +1175,7 @@ impl Model {
             fullbright,
             &scales,
         );
+        let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
         for (visible, mesh) in self.visible.iter_mut().zip(&self.meshes) {
             *visible = skin_visible && mesh.is_some();
         }
@@ -1215,8 +1227,8 @@ impl Model {
         atmosphere: &Atmosphere,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::publication_consumer(g.frozen || g.electric > 0.);
-        let _skin_guard = crate::character::skinning::CullGuard::preserve(g.electric > 0.);
+        let _consumer = crate::character::skinning::CullGuard::publication_reason(g.frozen,crate::phase_census::FROZEN);
+        let _skin_guard = crate::character::skinning::CullGuard::reason(g.electric > 0.,crate::phase_census::ELECTRIC);
         if let Some(state) = &g.burst {
             material.bind();
             if let Some(art) = &mut self.burst {
@@ -3486,8 +3498,8 @@ impl Npcs {
                 translation: actor.position(),
                 rotation: Quat::from_rotation_z(actor.yaw),
             };
-            let _consumer = crate::character::skinning::CullGuard::preserve(
-                crate::character::skinning::overlap::single_preparing() && decision == visual_lod::Decision::Refresh);
+            let _consumer = crate::character::skinning::CullGuard::reason(
+                crate::character::skinning::overlap::single_preparing() && decision == visual_lod::Decision::Refresh,crate::phase_census::AMBIENT);
             model.draw_pose(
                 &local,
                 actor.mouth,
@@ -4012,7 +4024,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
+        let _consumer = crate::character::skinning::CullGuard::publication_reason(piece.frozen,crate::phase_census::FROZEN);
         let Some(transform) = piece.visual(&self.data) else {
             return;
         };
@@ -4054,7 +4066,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
+        let _consumer = crate::character::skinning::CullGuard::publication_reason(piece.frozen,crate::phase_census::FROZEN);
         let scale = piece.visual_scale(&self.data);
         if scale <= 0. {
             return;
@@ -4099,7 +4111,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::publication_consumer(piece.frozen);
+        let _consumer = crate::character::skinning::CullGuard::publication_reason(piece.frozen,crate::phase_census::FROZEN);
         let scale = piece.visual_scale(&self.data);
         if scale <= 0. {
             return;
@@ -4144,7 +4156,7 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
-        let _consumer = crate::character::skinning::CullGuard::publication_consumer(ant.frozen || ant.electric > 0.);
+        let _consumer = crate::character::skinning::CullGuard::publication_reason(ant.frozen,crate::phase_census::FROZEN);
         let scale = ant.visual_scale(&self.data);
         if scale <= 0. {
             return;
@@ -4163,7 +4175,7 @@ impl Model {
             clip.frame_time,
             ant.loops(),
         );
-        let _skin_guard = crate::character::skinning::CullGuard::preserve(ant.electric > 0.);
+        let _skin_guard = crate::character::skinning::CullGuard::reason(ant.electric > 0.,crate::phase_census::ELECTRIC);
         material.bind();
         self.draw_pose(
             &local,

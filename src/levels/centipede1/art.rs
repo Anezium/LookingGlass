@@ -55,6 +55,7 @@ impl LevelArt for Art {
             let a = &s.ant;
             let moving =
                 o.saved.phase == Phase::Rush && o.data.runners.contains_key(&a.id) && a.health > 0.;
+            let electric_consumer = self.ant.electric_consumer(a.electric);
             self.ant.draw(
                 if moving { "walk_fast" } else { a.clip() },
                 a.time,
@@ -66,6 +67,7 @@ impl LevelArt for Art {
                 a.visual_scale(&o.data),
                 bright,
             );
+            drop(electric_consumer);
             self.ant.draw_electric(a.electric);
             for shot in &a.shots {
                 crate::ant::draw_shot(&mut self.shots, shot, bright);

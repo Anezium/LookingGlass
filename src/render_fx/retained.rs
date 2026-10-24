@@ -1184,6 +1184,15 @@ pub(crate) fn finish_world(
         let _census = crate::phase_census::span(if groups[id].passes.iter().all(|p| p.effect) {crate::phase_census::Region::FxSubmit} else {crate::phase_census::Region::ActorSubmit});
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if crate::sim_maps::probe::skin_proof() {
+                let p=&groups[*group].passes[*pass];let m=p.geometry();
+                crate::sim_maps::probe::packet(&m.vertices,&m.indices,u,
+                    &[p.effect as u32,p.blend_index as u32,p.depth_equal as u32,groups[id].transparent as u32,
+                        p.lit as u32,p.clamp as u32,p.cutout.to_bits(),p.cutout_reference.to_bits(),
+                        p.fog.to_bits(),p.model as u32,p.filter_fade.to_bits()],
+                    p.mesh.texture.as_ref());
+            }
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent);
         }
     };

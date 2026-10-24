@@ -13,6 +13,7 @@ fn palette_bone(bone: &Transform, scale: f32) -> (Mat3, Vec3) {
         bone.translation)
 }
 fn fill_palette(output: &mut Vec<(Mat3, Vec3)>, pose: &[Transform], scales: &[f32]) {
+    let _census=crate::phase_census::span(crate::phase_census::Region::ActorScalesPalette);
     output.clear();
     output.extend(pose.iter().enumerate().map(|(i, bone)| {
         palette_bone(bone, scales.get(i).copied().unwrap_or(1.))
@@ -47,21 +48,34 @@ pub(super) fn position(src: &SkinVertex, palette: &[(Mat3, Vec3)]) -> Vec3 {
     }).sum()
 }
 
-thread_local! { static MUTABLE_SKIN:std::cell::Cell<bool>=const {std::cell::Cell::new(false)}; }
-pub(super) fn mutable_required()->bool {MUTABLE_SKIN.with(std::cell::Cell::get)}
+thread_local! { static MUTABLE_SKIN:std::cell::Cell<u32>=const {std::cell::Cell::new(0)}; }
+pub(super) fn mutable_reasons()->u32 {MUTABLE_SKIN.with(std::cell::Cell::get)}
+pub(super) fn mutable_required()->bool {mutable_reasons()!=0}
+pub(crate) fn actual_consumers()->bool {
+    #[cfg(feature="vita_renderer")]
+    {crate::render::vita_renderer::config().skin_actual_consumers}
+    #[cfg(not(feature="vita_renderer"))]
+    {false}
+}
 thread_local! { static PRESERVE_SKIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// Expanding/normal-driven overlays need current vertices and rebuilt normals.
-pub(crate) struct CullGuard(Option<(bool,bool)>);
+pub(crate) struct CullGuard(Option<(bool,u32)>);
 impl CullGuard {
     pub(crate) fn preserve(required: bool) -> Self {
+        Self::reason(required,crate::phase_census::MUTABLE)
+    }
+    pub(crate) fn reason(required:bool,reason:u32)->Self {
         if !required { return Self(None); }
         Self(Some((PRESERVE_SKIN.with(|c| c.replace(true)),
-            MUTABLE_SKIN.with(|c|c.replace(true)))))
+            MUTABLE_SKIN.with(|c|c.replace(c.get()|reason)))))
     }
 }
 impl CullGuard {
     /// These extra mutable consumers belong only to single preparation. Preserve
     /// the inherited culling/lighting policy in the disabled and legacy arms.
+    pub(crate) fn publication_reason(required:bool,reason:u32)->Self {
+        Self::reason(required && overlap::single_frame(),reason)
+    }
     pub(crate) fn publication_consumer(required:bool)->Self {
         Self::preserve(required && overlap::single_frame())
     }
@@ -876,5 +890,22 @@ mod publication_consumer_tests {
           {let _consumer=CullGuard::publication_consumer(true);assert!(!culling_allowed());assert!(mutable_required());}
           assert!(!culling_allowed());assert!(mutable_required()); }
         assert!(culling_allowed());assert!(!mutable_required());
+    }
+}
+
+#[cfg(test)]
+mod actual_consumer_tests {
+    use super::*;
+    #[test]
+    fn nested_actual_consumers_restore_reason_and_visual_policy_on_unwind() {
+        let _visual=CullGuard::visual_preserve(true);
+        let allocation=crate::kernel_alloc::Scope::begin();
+        {let _frozen=CullGuard::reason(true,crate::phase_census::FROZEN);
+         {let _electric=CullGuard::reason(true,crate::phase_census::ELECTRIC);
+          assert_eq!(mutable_reasons(),crate::phase_census::FROZEN|crate::phase_census::ELECTRIC);}
+         assert_eq!(mutable_reasons(),crate::phase_census::FROZEN);}
+        assert_eq!(allocation.finish(),0);assert_eq!(mutable_reasons(),0);assert!(!culling_allowed());
+        let _=std::panic::catch_unwind(|| {let _guard=CullGuard::reason(true,crate::phase_census::ELECTRIC);panic!("fixture");});
+        assert_eq!(mutable_reasons(),0);assert!(!culling_allowed());
     }
 }

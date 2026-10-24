@@ -1192,7 +1192,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        crate::sim_maps::probe::begin();
+        {crate::sim_maps::probe::begin();crate::sim_maps::probe::script_hits(frame,&mut npcs);}
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let mut host_block = crate::frame_profile::span("frame_input");
         #[cfg(feature = "native_timing")]
@@ -3427,6 +3427,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             .map_or(Vec3::ZERO, |p| p.quake_offset())
             + interactions.levels.iter().map(|s| s.ctl.quake_offset()).sum::<Vec3>();
         let (camera, target) = (view.eye + quake, view.target + quake);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let (camera,target)=crate::sim_maps::probe::moving_view(frame,camera,target);
         #[cfg(target_os = "vita")]
         let (camera, target) = bench_camera.map_or((camera, target), |(eye, target, _)| (eye, target));
         let show_alice = !interactions.level_hides_player()
@@ -3496,6 +3498,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.gl("prepare-3d-returned"); }
         let world_camera = Camera3D {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            aspect:crate::sim_maps::probe::enabled().then_some(960./544.),
             #[cfg(feature="vita_renderer")]
             viewport: crate::render::vita_renderer::world_viewport(),
             position: camera,
@@ -3606,6 +3610,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             p.camera(&world_camera, player.feet, paused, skip_id);
             p.stage("skin-gather-begin");
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let host_gather=std::time::Instant::now();
         #[cfg(feature="vita_renderer")]
         let census_gather = crate::phase_census::span(crate::phase_census::Region::ActorGather);
         #[cfg(feature="vita_renderer")]
@@ -3645,6 +3651,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(p) = &load_probe { p.stage("world-begin"); }
         #[cfg(feature="vita_renderer")]
         drop(census_gather);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        crate::sim_maps::probe::span("actor_gather",host_gather.elapsed().as_secs_f64()*1000.);
         scene.draw(camera, environment_clock, fullbright, false, &transforms);
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &mut load_probe {
@@ -4498,8 +4506,13 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
                 let draw=|puppet:&mut crate::npc::Puppet,alice:&mut Character| {
                     if case==8 {alice.draw_first_person(bright);} else {alice.draw_ghost(Vec3::ZERO,bright,case==7);}
                     for (n,at) in [vec3(-28.,0.,0.),vec3(28.,0.,0.)].into_iter().enumerate() {
+                        let electric=if case>=10 {0.4} else {0.};
+                        let consumer=puppet.electric_consumer(electric);
+                        puppet.mouth((time+n as f32).sin().abs());
                         puppet.draw(if case==3 {"death_frozen"} else {"idle"},time+n as f32*0.19,true,
                             crate::skeletal::Transform {translation:at,rotation:Quat::from_rotation_z(time+n as f32)},1.,bright);
+                        drop(consumer);
+                        puppet.draw_electric(electric);
                     }
                 };
                 let mut frame=if overlapped {

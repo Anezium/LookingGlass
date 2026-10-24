@@ -12,6 +12,7 @@ impl Default for ActorId {
     }
 }
 impl ActorId {
+    pub(crate) fn census_id(self) -> u64 { self.0 }
     pub(crate) fn scope(self) -> Scope { Scope(CURRENT.with(|c| c.replace(Some(self)))) }
     pub(crate) fn scope_unless_set(self) -> Scope { current().unwrap_or(self).scope() }
 }
