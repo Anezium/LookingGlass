@@ -17,6 +17,8 @@ and an owned diagnostic target. Run for labels r11b/r11c/r11d, then run
 now requires an uninstrumented final executable, checks the final baseline,
 tests persistent screen/Enter/Escape/save integrity and reruns all earlier suites.
 Never extend E2 after failure. `--resume` is valid only for the identical binary.
+`future_layout.py OUTPUT` additionally emits compiler type layouts from isolated
+archives into the owned diagnostic target; `--parse-only` summarizes saved logs.
 
 Finalize with `finalize_r11c.py`, `clean_host_build.py`, `seal.py`, the loose/ZIP
 offline rehearsals without `python -I`, `package_lessons_r11d.py`,

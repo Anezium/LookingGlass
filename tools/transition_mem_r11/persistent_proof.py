@@ -74,7 +74,7 @@ def run(on, action, mode):
             # accepting a decorative menu backdrop as proof of the error screen.
             for top in [image.height-110, image.height-70]:
                 band = image.crop((0, top-12, image.width, top+28))
-                assert sum(1 for pixel in band.getdata() if max(pixel)>180) > 50
+                assert sum(count for count,pixel in band.getcolors(band.width*band.height) if max(pixel)>180) > 50
     states = [json.loads(s.split(' ', 1)[1]) for s in lines if s.startswith('TRANSITION_STATE ')]
     frames = [json.loads(s.split(' ', 1)[1]) for s in lines if s.startswith('SIM_MAPS_FRAME ')]
     return dict(directory=directory, states=states, frames=frames, events=events,

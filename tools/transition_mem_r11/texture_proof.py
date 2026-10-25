@@ -27,5 +27,8 @@ with tempfile.TemporaryDirectory(prefix='r11c-texture-') as temp:
   assert (p.returncode==0)==success,(name,p.returncode,log[-1000:])
   if not success:assert 'no entry found for key' in log or 'key not found' in log
   rows.append(dict(test=name,mode=mode,expected_success=success,exit_code=p.returncode,binary_sha256=hashlib.sha256(b.read_bytes()).hexdigest(),passed=True))
-  (O/'proof/TEXTURE-REGRESSIONS.json').write_text(json.dumps(dict(status='PASS',rows=rows),indent=2)+'\n')
+  (O/'proof/TEXTURE-REGRESSIONS.json').write_text(json.dumps(dict(status='PASS',
+      scope='Synthetic zero-sample ownership and explicit repeated-delete cases; LG uses sample_count=1 and no LG crash is demonstrated',
+      guard='defensive guard against deleting a possibly recycled GL name',
+      macroquad_ownership_change='correct but currently unused by LG',rows=rows),indent=2)+'\n')
   print('PASS texture regression',name,flush=True)

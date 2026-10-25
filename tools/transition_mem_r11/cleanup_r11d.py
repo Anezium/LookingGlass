@@ -8,7 +8,7 @@ receipt = O / 'proof/CLEANUP-R11D.json'
 prior = json.loads(receipt.read_text()) if receipt.exists() else {}
 removed = prior.get('removed', [])
 before = subprocess.check_output(['df','-h',str(O)],text=True)
-paths = [O/'target-vita', O/'target-diagnostic', O/'tmp']
+paths = [O/'target-vita', O/'target-diagnostic', O/'tmp', O/'baseline/final-comparison-bin', O/'proof/ENGINE-R11C-DIFF.patch']
 paths += list((O/'baseline').glob('*/diagnostic-bin'))
 for root in [R/'tools/transition_mem_r11', O]:
     paths += list(root.rglob('__pycache__'))

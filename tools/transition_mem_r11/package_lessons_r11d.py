@@ -24,7 +24,8 @@ assert not any(p.name.startswith('session-') for p in O.iterdir())
 with zipfile.ZipFile(O / 'CONSOLE-PACKAGE.zip') as z:
     assert all(z.read(n) == (O / n).read_bytes() for n in z.namelist())
     assert 'AMENDMENT-R11C-R3.md' in z.namelist() and 'AMENDMENT-R11D.md' in z.namelist()
-    assert not any('session-' in n or '__pycache__' in n or n.lower().endswith(('.pk3','.bsp','.wav','.tga','.ftx')) for n in z.namelist())
+    assert not any(n.startswith('session-') or any(part.startswith('session-') for part in Path(n).parts[:-1])
+                   or '__pycache__' in n or n.lower().endswith(('.pk3','.bsp','.wav','.tga','.ftx')) for n in z.namelist())
 (O / 'proof/PACKAGE-LESSONS-R11D.json').write_text(json.dumps(dict(status='PASS',
     r11c_original_all_files_unchanged=True, preserved=rows, zip_all_members_byte_equal=True,
     session_directories_absent=True, protocol_byte_equal=True,

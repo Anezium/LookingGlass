@@ -8,13 +8,14 @@ load = lambda name: json.loads((O/name).read_text())
 sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
 n = load('packages/baseline/VERIFICATION.json')
 attribution = load('proof/BASELINE-ATTRIBUTION.json')
+layout = load('proof/FUTURE-LAYOUT.json')
 final = load('proof/BASELINE-FINAL.json')
 validation = load('proof/R11D-VALIDATION.json')
 repeat = load('proof/REPEATED-TRANSITIONS.json')
 census = load('proof/HOST-CENSUS.json')
 persistent = load('proof/PERSISTENT-FAILURE.json')
 cleanup = load('proof/CLEANUP-R11D.json')
-assert all(v['status']=='PASS' for v in [attribution,final,validation,repeat,census,persistent])
+assert all(v['status']=='PASS' for v in [attribution,layout,final,validation,repeat,census,persistent])
 assert load('proof/FINAL-VERIFICATION.json')['status']=='PASS'
 head = subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip()
 baseline_table = '\n'.join(f"| {r['map']} | {'ON' if r['levers'] else 'OFF'} | {r['live']['r11b']:,} | {r['live']['r11c']:,} | {r['live']['r11d']:,} | {r['r11d_minus_r11b']:+,} |" for r in attribution['rows'])
@@ -51,6 +52,16 @@ layout increase. The frame-one allocation histogram proves that exactly one
 live allocation moved from **1,506,576 to 2,289,808 bytes** (+783,232).
 Every other live size bin is identical. No atlas or backend table allocation
 changed in this comparison; the fork pins are unchanged by r11d.
+
+The compiler's diagnostic `-Zprint-type-sizes` independently proves all three
+layouts in FUTURE-LAYOUT.json and baseline/*/type-layout.log. The macroquad wrapper
+stores both its `.future` capture and `.__awaitee`: 753,280 bytes each in r11b/r11d,
+1,144,896 each in r11c, plus a 16-byte state/alignment cost. The largest `run`
+variant changes from Suspend23 (752,927 bytes) to Suspend31 (1,144,543), with
+803,456 bytes of coroutine field-layout padding; r11d returns to 752,928 bytes
+total (Suspend24 is 752,919). This is reserved async frame storage, not a
+frame-one cache or map-resource leak. RUSTC_BOOTSTRAP was used only to print
+diagnostic compiler layouts in isolated archives; shipping build flags stay unchanged.
 
 The published +783,234-byte comparison also used output directory names
 `alice-transition-mem-r11` and `alice-transition-mem-r11c`. The extra character
@@ -95,6 +106,9 @@ rejected before census/E2. DIAGNOSTIC-CACHE-REJECTED.json preserves its receipt.
 The production executable was rebuilt, its diagnostic marker rejected explicitly,
 and all checks rerun. Future diagnostic builds use an owned target directory.
 Neither incident was a gameplay failure or a change to E2 duration/thresholds.
+PERSISTENT-CAPTURE-FIXTURE-FAILURE.json also retains the original test's mistaken
+fixed host resolution and after-swap readback. Readback now precedes presentation,
+and both text bands are checked on the actual host framebuffer dimensions.
 
 ## R3-M2: persistent failure and clean Quit
 
@@ -116,8 +130,10 @@ with matching begin/end kind/from/to and success=false, through the Transition
 drop guard (`src/transition_memory.rs:124`). No destination state is installed,
 and the normal end-of-game Auto writer is bypassed. Cursor capture is explicitly
 released at `src/viewer.rs:1255`. No save validation/migration is added to recovery.
-The fixture also proves a fault after Scene::load succeeds in the existing
-build-stage matrix, including the Npcs failure stage.
+The existing destination-build-stage matrix separately tests Npcs failure after
+Scene::load succeeds. Persistent recovery faults are injected before its builder;
+partial outgoing-rebuild failure remains code-inspected rather than separately
+fault-injected.
 
 Screens are retained under `persistent/*/screen-*.png`; PERSISTENT-FAILURE.json
 records all save identities, screen events and failed completion brackets.
