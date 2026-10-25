@@ -891,7 +891,7 @@ mod format12;
 mod tests {
     use super::*;
     #[test]
-    fn integrity_checked_decode_can_still_have_a_missing_current_level() {
+    fn integrity_checked_decode_rejects_a_missing_current_level() {
         let scratch = format12::Scratch::new("missing-current-load");
         let store = scratch.store();
         let game = format12::game(vec![format12::level("gvillage", None, serde_json::Value::Null)]);
@@ -901,8 +901,8 @@ mod tests {
         envelope.payload["current"] = "missing-current-fixture".into();
         envelope.checksum = format!("{:x}", Sha256::digest(serde_json::to_vec(&envelope.payload).unwrap()));
         fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
-        let loaded = store.read(Slot::Quick).unwrap();
-        assert_eq!(loaded.game.level().err().unwrap().to_string(), "Saved current level is missing");
+        let error = store.read(Slot::Quick).err().expect("invalid save must be refused");
+        assert!(format!("{error:#}").contains("Saved current level is missing"));
     }
     #[test]
     fn throttled_capture_for_save_persists_the_latest_decodable_menu_thumbnail() {
