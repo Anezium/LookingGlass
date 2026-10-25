@@ -1825,7 +1825,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         // A confirmed New Game owns this iteration. Discard simultaneous F9 or
         // Retry input; neither may overwrite its selected destination/checkpoint.
-        if new_campaign_memory.is_some() { load_requested = None; }
+        if new_campaign_memory.is_some() || pending_menu_newgame.is_some() { load_requested = None; }
         if let Some(slot) = load_requested {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
@@ -2027,7 +2027,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if inventory_menu && input.ui(KeyCode::Enter) {
             inventory_menu = false;
         }
-        if matches!(host_transition.as_str(), "retry" | "new-game+retry") && new_campaign_memory.is_none() { stats.damage(10000.); }
+        if matches!(host_transition.as_str(), "retry" | "new-game+retry")
+            && new_campaign_memory.is_none() && pending_menu_newgame.is_none() { stats.damage(10000.); }
         let recover = matches!(host_transition.as_str(), "retry" | "new-game+retry") || focused
             && !menu
             && !inventory_menu
@@ -2120,7 +2121,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         // A failed attempt must roll the entire world back with Alice. Do this
         // before the live transport guard: dying during a ride must remain retryable.
-        if new_campaign_memory.is_none() && saves_enabled && !stats.alive() && (recover || restart || console_restart) {
+        if new_campaign_memory.is_none() && pending_menu_newgame.is_none()
+            && saves_enabled && !stats.alive() && (recover || restart || console_restart) {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             let result = match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref())) {
