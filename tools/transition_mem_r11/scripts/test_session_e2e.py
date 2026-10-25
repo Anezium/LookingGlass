@@ -377,10 +377,10 @@ def exercise(source,work,replay):
             assert run_health.health_text(outside)
             # C1 labels supplement the unchanged A1 gates. An outside-bracket
             # audio sample can determine headroom even when transition peaks do not.
-            for peak,label in [(174*1048576,'PASS'),(175*1048576,'PASS_LOW_ARENA_HEADROOM'),(179*1048576-1,'PASS_LOW_ARENA_HEADROOM')]:
+            for peak,headroom_label in [(174*1048576,'PASS'),(175*1048576,'PASS_LOW_ARENA_HEADROOM'),(179*1048576-1,'PASS_LOW_ARENA_HEADROOM')]:
                 result=audit.validate(good+'[lg/audio-memory] heap_arena='+str(peak)+'\n')
                 assert result['arena_headroom_bytes']==187994112-peak
-                assert result['arena_headroom_label']==label
+                assert result['arena_headroom_label']==headroom_label
             for marker in ['key not found','panicked']:
                 reject('C2 fatal '+marker,lambda:audit.validate(good+marker))
                 assert run_health.health_text(good+marker)
