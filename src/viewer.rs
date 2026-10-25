@@ -1178,7 +1178,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let outgoing = unload_scene!();
             let outgoing_alice = if crate::transition_memory::legacy_overlap() { Some(alice) } else { drop(alice); None };
             crate::transition_memory::released().await;
-            memory.after_release();
+    memory.after_release();
             let result = match save::Restored::build(&mut assets, incoming) {
                 Ok(restored) => {
                     apply_loaded!(restored, $pause, $install);
@@ -1301,7 +1301,6 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let choice = level_choices.iter().find(|c| maps[c.map] == destination).context("probe destination")?;
             chapter_requested = Some(crate::campaign::LevelChoice { map: choice.map, entry: choice.entry, title: choice.title.clone() });
         }
-        if host_transition == "new-game" { new_game_requested = Some(options.difficulty); }
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
         if input.disconnected {
@@ -1334,7 +1333,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // before entering it, so thumbnails never capture the menu or old play.
         let opening_escape_menu = throttle_normal && escape_menu.page.is_some() && !escape_preview_ready;
         if opening_escape_menu { paused = true; clock.pause(); }
-        if (escape_menu.page.is_some() && (!throttle_normal || escape_preview_ready)) || host_transition == "native-load" {
+        if (escape_menu.page.is_some() && (!throttle_normal || escape_preview_ready)) || matches!(host_transition.as_str(), "native-load" | "new-game") {
             #[cfg(feature = "native_timing")]
             timing.with(|r| {
                 r.discontinuity(crate::native_timing::Milestone::ModalEnter, crate::native_timing::MODAL | crate::native_timing::PAUSED);
@@ -1351,7 +1350,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Consume Escape before entering the separate modal frame loop. No
             // physics, story, enemies, power-up timers or world clocks run there.
             next_frame().await;
-            let action = if host_transition == "native-load" { crate::menu::Action::Load(Slot::Auto) } else {
+            let action = if host_transition == "native-load" { crate::menu::Action::Load(Slot::Auto) }
+                else if host_transition == "new-game" { crate::menu::Action::NewGame(options.difficulty) } else {
                 escape_menu.run(&mut preferences, &mut audio, &store, pos, yaw, &mut input).await
             };
             #[cfg(feature = "native_timing")]
@@ -2221,7 +2221,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     if new_campaign_transition { "new-game" } else { "chapter-or-console" }, &maps[current], &maps[selected]);
                 let outgoing = unload_scene!();
                 crate::transition_memory::released().await;
-            memory.after_release();
+                memory.after_release();
                 match enter_level(
                     &mut assets,
                     &maps[selected],
@@ -2870,7 +2870,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let mut memory = crate::transition_memory::Transition::begin("natural-exit", &maps[current], &name);
             let outgoing = unload_scene!();
             crate::transition_memory::released().await;
-            memory.after_release();
+    memory.after_release();
             let arrived = enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options);
             match arrived {
                 Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {
@@ -4537,7 +4537,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let outgoing = unload_scene!();
     drop(alice);
     crate::transition_memory::released().await;
-            memory.after_release();
+    memory.after_release();
     audio.finish()?;
     drop(outgoing);
     memory.finish(true);
