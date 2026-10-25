@@ -833,8 +833,10 @@ impl Restored {
         let mut timing = crate::startup::Phase::new("save_restore");
         let (level, migrate) = prepare(assets, &mut game, true)?;
         timing.mark("prepare_migrate");
+        crate::transition_memory::fault("prepare")?;
         let mut scene = Scene::load(assets, &level.map)?;
         timing.mark("scene_ready");
+        crate::transition_memory::fault("scene")?;
         scene.map.difficulty = game.stats.difficulty;
         let Logic {
             interactions,
@@ -849,6 +851,7 @@ impl Restored {
             migrate,
         )?;
         timing.mark("logic_story_hints");
+        crate::transition_memory::fault("logic")?;
         let mut npcs = Npcs::load(
             assets,
             &scene.map,
@@ -859,21 +862,16 @@ impl Restored {
         )?;
         npcs.restore(&level.npcs)?;
         timing.mark("npc_models_restore");
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        {
-            static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if std::env::var_os("LOOKING_GLASS_TRANSITION_FAIL_BUILD").is_some()
-                && !FAILED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                anyhow::bail!("host transition fault after destination GPU/NPC construction");
-            }
-        }
+        crate::transition_memory::fault("npcs")?;
         let mut alice = Character::load(assets)?;
         alice.restore(&game.character)?;
         scene.world.set_weapon_obstacles(alice.ice_targets());
         alice.power_appearance(&game.stats);
         timing.mark("alice_models_restore");
+        crate::transition_memory::fault("alice")?;
         let steam = crate::particles::Steam::load(assets, &scene.map)?;
         timing.mark("steam_textures");
+        crate::transition_memory::fault("steam")?;
         Ok(Self {
             scene,
             interactions,
@@ -892,6 +890,20 @@ mod format12;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn integrity_checked_decode_can_still_have_a_missing_current_level() {
+        let scratch = format12::Scratch::new("missing-current-load");
+        let store = scratch.store();
+        let game = format12::game(vec![format12::level("gvillage", None, serde_json::Value::Null)]);
+        store.write(Slot::Quick, &game).unwrap();
+        let path = scratch.file(Slot::Quick);
+        let mut envelope: Envelope = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        envelope.payload["current"] = "missing-current-fixture".into();
+        envelope.checksum = format!("{:x}", Sha256::digest(serde_json::to_vec(&envelope.payload).unwrap()));
+        fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let loaded = store.read(Slot::Quick).unwrap();
+        assert_eq!(loaded.game.level().err().unwrap().to_string(), "Saved current level is missing");
+    }
     #[test]
     fn throttled_capture_for_save_persists_the_latest_decodable_menu_thumbnail() {
         let scratch = format12::Scratch::new("throttled-preview");

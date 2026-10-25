@@ -109,9 +109,15 @@ pub(crate) fn release_scene() {
         actor_cache::release_storage();
     }
     FRAME.with(|f| *f.borrow_mut() = Frame::default());
-    SURFACES.with(|s| s.borrow_mut().clear());
+    prune_surfaces();
+
+}
+/// Weak entries never own textures. Keep recipes for surviving common objects
+/// and prune dead scene headers after destruction, before the next build.
+pub(crate) fn prune_surfaces() {
+    SURFACES.with(|s| s.borrow_mut().retain(|(_, surface)| surface.strong_count() > 0));
     #[cfg(feature="vita_renderer")]
-    SURFACE_LOOKUP.with(|s| s.borrow_mut().clear());
+    SURFACE_LOOKUP.with(|s| s.borrow_mut().retain(|_, surface| surface.strong_count() > 0));
 }
 const MAX_VERTICES: usize = 1_000_000;
 pub fn copy_mesh(m: &Mesh) -> Mesh {

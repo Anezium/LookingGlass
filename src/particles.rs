@@ -499,6 +499,7 @@ impl PuffSweep {
         }
     }
 }
+#[derive(Clone)]
 struct Puff {
     sweep: PuffSweep,
     position: Vec3,
@@ -522,6 +523,11 @@ pub struct Steam {
     seed: u32,
     materials: Vec<std::rc::Rc<Material>>,
 }
+/// Live particle state without any texture, material, model or GPU reference.
+pub(crate) struct Runtime {
+    puffs: Vec<Puff>, seed: u32,
+    emitters: Vec<(Vec3, Quat, crate::skeletal::Transform, f32, f32, bool, Option<bool>)>,
+}
 fn random(seed: &mut u32) -> f32 {
     *seed ^= *seed << 13;
     *seed ^= *seed >> 17;
@@ -529,6 +535,19 @@ fn random(seed: &mut u32) -> f32 {
     (*seed >> 8) as f32 / 16777216.
 }
 impl Steam {
+    pub(crate) fn runtime(&self) -> Runtime {
+        Runtime { puffs: self.puffs.clone(), seed: self.seed,
+            emitters: self.emitters.iter().map(|e| (e.origin, e.rotation, e.local,
+                e.scale, e.carry, e.enabled, e.animation_enabled)).collect() }
+    }
+    pub(crate) fn restore_runtime(&mut self, runtime: Runtime) {
+        self.puffs = runtime.puffs; self.seed = runtime.seed;
+        for (e, (origin, rotation, local, scale, carry, enabled, animation_enabled))
+            in self.emitters.iter_mut().zip(runtime.emitters) {
+            e.origin = origin; e.rotation = rotation; e.local = local; e.scale = scale;
+            e.carry = carry; e.enabled = enabled; e.animation_enabled = animation_enabled;
+        }
+    }
     /// Emission and living puffs for a placed entity, used by mechanism checks.
     pub fn emission(&self, id: crate::entity::Id) -> Option<(bool, usize)> {
         self.emitters.iter().any(|e| e.id == id.0).then(|| {

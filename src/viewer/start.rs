@@ -21,14 +21,19 @@ pub async fn choose(
     menu.frontend = true;
     menu.open(Page::Main, preferences, audio.settings);
     loop {
-        match menu
-            .run(preferences, audio, store, Vec3::ZERO, 0., input)
-            .await
-        {
+        let probe = crate::transition_memory::host_start_chapter();
+        let action = if probe.is_some() { Action::Chapters } else {
+            menu.run(preferences, audio, store, Vec3::ZERO, 0., input).await
+        };
+        match action {
             Action::Chapters => {
                 let current = maps.iter().position(|m| m == "gvillage").unwrap_or(0);
-                match menu
-                    .choose_chapter(
+                let choice = if let Some(name) = &probe {
+                    let choices = crate::campaign::level_choices(maps);
+                    let choice = choices.into_iter().find(|c| &maps[c.map] == name)
+                        .expect("host startup chapter choice");
+                    crate::menu::ChapterChoice::Begin(choice)
+                } else { menu.choose_chapter(
                         maps,
                         current,
                         None,
@@ -37,8 +42,8 @@ pub async fn choose(
                         audio,
                         input,
                     )
-                    .await
-                {
+                    .await };
+                match choice {
                     crate::menu::ChapterChoice::Begin(choice) => {
                         options.map = maps[choice.map].clone();
                         options.entry = choice.entry.map(str::to_owned);
@@ -56,7 +61,10 @@ pub async fn choose(
                 options.new_game = true;
                 return Start::NewGame;
             }
-            Action::Load(slot) => match store.read(slot) {
+            Action::Load(slot) => match store.read(slot).and_then(|loaded| {
+                loaded.game.level()?;
+                Ok(loaded)
+            }) {
                 Ok(loaded) => return Start::Load(Box::new(loaded)),
                 Err(e) => menu.message = format!("Load failed: {e:#}"),
             },

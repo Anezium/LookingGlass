@@ -29,11 +29,26 @@ fn sample() -> Snapshot {
     Snapshot { heap_used: Some(crate::kernel_alloc::live_bytes()), heap_free: None, heap_arena: None,
         vgl_ram_free: None, vgl_vram_free: None, vgl_phycont_free: None }
 }
+// Allocation observers need only mallinfo. Query vitaGL's unsynchronized pool
+// counters at the main-thread boundary snapshots, never on allocating workers.
+#[cfg(target_os = "vita")]
+fn heap_sample() -> (usize, usize) {
+    #[repr(C)]
+    struct MallInfo { arena: usize, ordblks: usize, smblks: usize, hblks: usize,
+        hblkhd: usize, usmblks: usize, fsmblks: usize, uordblks: usize,
+        fordblks: usize, keepcost: usize }
+    extern "C" { fn mallinfo() -> MallInfo; }
+    let h = unsafe { mallinfo() };
+    (h.uordblks, h.arena)
+}
 pub(crate) fn observe() {
     if !ACTIVE.load(Relaxed) { return; }
-    let s = sample();
-    PEAK.fetch_max(s.heap_used.unwrap_or(0), Relaxed);
-    PEAK_ARENA.fetch_max(s.heap_arena.unwrap_or(0), Relaxed);
+    #[cfg(target_os = "vita")]
+    let (used, arena) = heap_sample();
+    #[cfg(not(target_os = "vita"))]
+    let (used, arena) = (crate::kernel_alloc::live_bytes(), 0);
+    PEAK.fetch_max(used, Relaxed);
+    PEAK_ARENA.fetch_max(arena, Relaxed);
 }
 /// One branch outside transitions. Bound mallinfo walks to one per 128 allocation
 /// calls during a load, plus every startup phase and the release/install boundaries.
@@ -46,14 +61,25 @@ pub(crate) fn allocation(size: usize) {
     let _ = size;
     if ACTIVE.load(Relaxed) { PEAK.fetch_max(crate::kernel_alloc::live_bytes(), Relaxed); }
 }
-pub(crate) struct Transition {
+struct Record {
     kind: String, from: String, to: String, before: Snapshot,
     released: Option<Snapshot>, finished: bool,
 }
+thread_local! {
+    static CURRENT: std::cell::RefCell<std::rc::Weak<std::cell::RefCell<Record>>> = Default::default();
+}
+pub(crate) struct Transition(std::rc::Rc<std::cell::RefCell<Record>>);
 impl Transition {
     pub fn begin(kind: &str, from: &str, to: &str) -> Self {
         crate::frame_profile::exclude_transition_frame();
-        assert!(!ACTIVE.load(Relaxed), "nested scene transition");
+        // A later operation supersedes an unfinished diagnostic bracket. Close
+        // it before resetting the counters; dropping its stale guard is harmless.
+        CURRENT.with(|slot| {
+            if let Some(previous) = slot.borrow().upgrade() {
+                previous.borrow_mut().finish(false);
+                eprintln!("[lg/transition] unfinished operation superseded by {kind}");
+            }
+        });
         let before = sample();
         PEAK.store(before.heap_used.unwrap_or(0), Relaxed);
         PEAK_ARENA.store(before.heap_arena.unwrap_or(0), Relaxed);
@@ -61,15 +87,20 @@ impl Transition {
         // A begin record survives a failure inside destination construction.
         eprintln!("[lg/transition-memory] {}", serde_json::json!({
             "event":"begin", "kind":kind,"from":from,"to":to,"before":before}));
-        let result = Self { kind: kind.into(), from: from.into(), to: to.into(), before,
-            released: None, finished: false };
+        let result = Self(std::rc::Rc::new(std::cell::RefCell::new(Record {
+            kind: kind.into(), from: from.into(), to: to.into(), before,
+            released: None, finished: false })));
+        CURRENT.with(|slot| *slot.borrow_mut() = std::rc::Rc::downgrade(&result.0));
         #[cfg(not(target_os="vita"))]
         crate::kernel_alloc::transition_begin();
         ACTIVE.store(true, Relaxed);
         result
     }
-    pub fn destination(&mut self, to: &str) { self.to = to.into(); }
-    pub fn after_release(&mut self) { observe(); self.released = Some(sample()); }
+    pub fn destination(&mut self, to: &str) { self.0.borrow_mut().to = to.into(); }
+    pub fn after_release(&mut self) { observe(); self.0.borrow_mut().released = Some(sample()); }
+    pub fn finish(&mut self, success: bool) { self.0.borrow_mut().finish(success); }
+}
+impl Record {
     pub fn finish(&mut self, success: bool) {
         if self.finished { return; }
         observe();
@@ -92,15 +123,20 @@ impl Drop for Transition { fn drop(&mut self) { self.finish(false); } }
 
 /// Drop resources first, then retire Macroquad's texture queue and vitaGL's
 /// four-frame deferred free ring. A fifth swap waits for its previous GC job.
-/// Draw only black here: no outgoing scene references or simulation advance.
+/// Draw without outgoing scene references or simulation advance. Natural exits
+/// preserve their original loading indicator throughout retirement and the build.
 pub(crate) async fn released() {
+    released_with(|| macroquad::prelude::clear_background(macroquad::prelude::BLACK)).await;
+}
+pub(crate) async fn released_with(mut draw: impl FnMut()) {
+    crate::render_fx::prune_surfaces();
     if legacy_overlap() { return; }
     #[cfg(target_os="vita")]
     let frames = 6;
     #[cfg(not(target_os="vita"))]
     let frames = 1;
     for _ in 0..frames {
-        macroquad::prelude::clear_background(macroquad::prelude::BLACK);
+        draw();
         macroquad::prelude::next_frame().await;
     }
     observe();
@@ -115,13 +151,23 @@ pub(crate) fn legacy_overlap() -> bool {
 }
 pub(crate) fn host_probe() -> bool {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-    { std::env::var_os("LOOKING_GLASS_TRANSITION_ACTION").is_some() }
+    { std::env::var_os("LOOKING_GLASS_TRANSITION_ACTION").is_some() || std::env::var_os("LOOKING_GLASS_TRANSITION_PLAN").is_some() }
     #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
     { false }
 }
 pub(crate) fn host_action(frame: u64) -> String {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     {
+        if let Ok(plan) = std::env::var("LOOKING_GLASS_TRANSITION_PLAN") {
+            static LAST_PLAN_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+            let plan: Vec<(u64, String, String)> = serde_json::from_str(&plan).expect("host transition plan");
+            if let Some((_, action, destination)) = plan.into_iter().find(|p| p.0 == frame) {
+                if LAST_PLAN_FRAME.swap(frame, Relaxed) == frame { return String::new(); }
+                std::env::set_var("LOOKING_GLASS_TRANSITION_DESTINATION", destination);
+                return action;
+            }
+            return String::new();
+        }
         static FIRED: AtomicBool = AtomicBool::new(false);
         if frame == 2 && !FIRED.swap(true, Relaxed) {
             return std::env::var("LOOKING_GLASS_TRANSITION_ACTION").unwrap_or_default();
@@ -130,11 +176,35 @@ pub(crate) fn host_action(frame: u64) -> String {
     let _ = frame;
     String::new()
 }
+/// One-shot failures in real builders, armed only after startup. Absent on Vita.
+pub(crate) fn fault(stage: &str) -> anyhow::Result<()> {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    {
+        static FAILED: AtomicBool = AtomicBool::new(false);
+        let requested = std::env::var("LOOKING_GLASS_TRANSITION_FAIL_BUILD").unwrap_or_default();
+        let live_operation = CURRENT.with(|slot| slot.borrow().upgrade().is_some_and(|r| {
+            let r = r.borrow(); !r.finished && r.kind != "startup-entry"
+        }));
+        if live_operation && (requested == stage || (requested == "1" && stage == "npcs"))
+            && !FAILED.swap(true, Relaxed) {
+            eprintln!("[lg/transition-fault] host transition fault at {stage}");
+            anyhow::bail!("host transition fault at {stage}");
+        }
+    }
+    let _ = stage;
+    Ok(())
+}
 pub(crate) fn host_destination() -> String {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     { std::env::var("LOOKING_GLASS_TRANSITION_DESTINATION").unwrap_or_default() }
     #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
     { String::new() }
+}
+pub(crate) fn host_start_chapter() -> Option<String> {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    { std::env::var("LOOKING_GLASS_START_CHAPTER").ok() }
+    #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+    { None }
 }
 pub(crate) fn phase(scope: &str, label: &str) {
     observe();
@@ -158,9 +228,22 @@ mod tests {
         assert!(PEAK.load(Relaxed) >= baseline + bytes.len());
         drop(bytes);
         t.after_release();
-        assert!(t.released.as_ref().unwrap().heap_used.unwrap() < PEAK.load(Relaxed));
+        assert!(t.0.borrow().released.as_ref().unwrap().heap_used.unwrap() < PEAK.load(Relaxed));
         t.finish(true);
         assert!(!ACTIVE.load(Relaxed));
         t.finish(true); // idempotent; Drop cannot emit another completion.
+    }
+    #[test]
+    fn superseded_guard_closes_once_and_cannot_close_its_successor() {
+        use super::*;
+        let mut outer = Transition::begin("new-game", "hedge3", "gvillage");
+        let mut inner = Transition::begin("death-retry", "hedge3", "hedge3");
+        assert!(outer.0.borrow().finished);
+        outer.finish(true);
+        drop(outer);
+        assert!(ACTIVE.load(Relaxed));
+        assert!(!inner.0.borrow().finished);
+        inner.finish(true);
+        assert!(!ACTIVE.load(Relaxed));
     }
 }

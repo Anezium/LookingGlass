@@ -46,6 +46,8 @@ opt-level = 1
 lto = "thin"
 
 [patch.crates-io]
+# Local 0.4.14 material destructor fix: release backend shader/pipeline storage.
+macroquad = { path = "vendor/macroquad" }
 cpal = { git = "https://github.com/Anezium/cpal", rev = "512acf2e66667059eda67b265ce9d80f68e02b3f" }
 # Branch vita-compact-buffers; Cargo allows only one of branch/tag/rev.
 miniquad = { git = "https://github.com/Anezium/miniquad", rev = "6f891804784bf4a5b39313ee6499344cb0d7e8b6" }

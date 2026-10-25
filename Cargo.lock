@@ -598,8 +598,6 @@ dependencies = [
 [[package]]
 name = "macroquad"
 version = "0.4.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2befbae373456143ef55aa93a73594d080adfb111dc32ec96a1123a3e4ff4ae"
 dependencies = [
  "fontdue",
  "glam",

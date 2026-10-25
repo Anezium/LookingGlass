@@ -812,9 +812,49 @@ pub struct Audio {
     jumps: u64,
     landings: u64,
 }
+pub(crate) struct TransitionCheckpoint {
+    fade_elapsed: f32, scene_presented: bool,
+    music_position: Option<Duration>,
+}
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
 thread_local!{static SAH_MIXER:std::cell::RefCell<Option<output::Mixer>>=const{std::cell::RefCell::new(None)};}
 impl Audio {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(crate) fn memory_counts(&self) -> [usize; 5] {
+        [self.cache_samples, self.world_clips.len(), self.retiring.len(), self.effects.len(), self.emitters.len()]
+    }
+    pub(crate) fn transition_checkpoint(&self) -> TransitionCheckpoint {
+        TransitionCheckpoint { fade_elapsed: self.fade_elapsed,
+            scene_presented: self.scene_presented,
+            music_position: self.music.as_ref().map(|(s, _)| s.get_pos()) }
+    }
+    /// Release decoded level PCM while retaining the bounded music sources.
+    /// Commit retires these at load(); rollback keeps their decoder and clock.
+    pub(crate) fn release_scene(&mut self) {
+        let music = self.music.take();
+        let fade = self.fade_elapsed;
+        if let Some((sink, _)) = &music { sink.pause(); }
+        self.release_level();
+        self.music = music;
+        self.fade_elapsed = fade;
+    }
+    pub(crate) fn restore_transition(&mut self, checkpoint: TransitionCheckpoint) {
+        self.fade_elapsed = checkpoint.fade_elapsed;
+        self.scene_presented = checkpoint.scene_presented;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        eprintln!("[lg/transition-audio] music_source_retained=true before_ns={:?} after_ns={:?}",
+            checkpoint.music_position.map(|p|p.as_nanos()), self.music.as_ref().map(|(s,_)|s.get_pos().as_nanos()));
+        let _ = checkpoint.music_position;
+    }
+    pub(crate) fn reload_failed_transition(&mut self, assets: &mut Assets, name: &str, map: &Bsp) {
+        let music = self.music.take();
+        let retiring = std::mem::take(&mut self.retiring);
+        let cues = std::mem::take(&mut self.cues);
+        self.load(assets, name, map);
+        self.music = music;
+        self.retiring = retiring;
+        self.cues = cues;
+    }
     /// Binding observes only events AFTER activation. Playback may already be
     /// running; no earlier counter values or audio lifetime are reconstructed.
     #[cfg(feature = "native_timing")]

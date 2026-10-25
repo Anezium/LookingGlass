@@ -280,6 +280,7 @@ fn enter_level(
     options: &Options,
     play_entry: bool,
 ) -> Result<Entered> {
+    crate::transition_memory::fault("level")?;
     let loaded =
         crate::campaign::load_visit(assets, name, entry, cached, options.difficulty, play_entry)?;
     finish_entered(assets, loaded, name, entry, cached, options)
@@ -304,6 +305,7 @@ fn finish_entered(
     let mut timing = crate::startup::Phase::new("entered_resources");
     let scene = Scene::from_parts(assets, name, map, world)?;
     timing.mark("scene");
+    crate::transition_memory::fault("scene")?;
     if options.npc_preview || options.combat_preview || options.larva_preview {
         interactions.encounters = None;
     }
@@ -322,13 +324,16 @@ fn finish_entered(
         npcs.restore(&saved.npcs)?;
     }
     timing.mark("npcs");
+    crate::transition_memory::fault("npcs")?;
     let steam = crate::particles::Steam::load(assets, &scene.map)?;
     timing.mark("steam");
+    crate::transition_memory::fault("steam")?;
     // Prepare the destination cast before replacing any live level state.
     // Tab, console maps and campaign exits must carry this exact scene/art pair.
     let mut art = LevelArt::default();
     art.prepare(assets, &scene, &interactions, true)?;
     timing.mark("level_art");
+    crate::transition_memory::fault("level_art")?;
     Ok(Entered {
         art,
         scene,
@@ -344,8 +349,7 @@ fn finish_entered(
 
 // Present before the synchronous resource work starts. This overlay remains
 // visible until the first destination frame; it does not claim animated progress.
-async fn present_transition_loading(name: &str) {
-    crate::frame_profile::exclude_transition_frame();
+fn draw_transition_loading(name: &str) {
     set_default_camera();
     clear_background(BLACK);
     let text = "Loading";
@@ -355,6 +359,10 @@ async fn present_transition_loading(name: &str) {
     let title = crate::campaign::level_title(name);
     let width = measure_text(title, None, 20, 1.).width;
     draw_text(title, (screen_width()-width)*0.5, screen_height()*0.58, 20., GRAY);
+}
+async fn present_transition_loading(name: &str) {
+    crate::frame_profile::exclude_transition_frame();
+    draw_transition_loading(name);
     #[cfg(not(target_os="vita"))]
     if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_CAPTURE") {
         save_capture(std::path::Path::new(&path)).expect("loading indicator capture");
@@ -367,6 +375,7 @@ fn enter_natural(
     assets: &mut Assets, stats: &mut Stats, campaign: &mut Campaign,
     leaving: Level, exit: &crate::campaign::Exit, options: &Options,
 ) -> Result<(Entered, crate::movement::Player, Vec3, f32)> {
+    crate::transition_memory::fault("level")?;
     let visit = crate::campaign::arrive(assets, stats, campaign, leaving, exit, false)?;
     let crate::campaign::NextVisit { map, entry, cached, loaded, player, eye, yaw, .. } = visit;
     let entered = finish_entered(assets, loaded, &map, entry.as_deref(), cached.as_ref(), options)?;
@@ -644,7 +653,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let route_resume:Option<save::Loaded>=None;
     let maps = assets.maps();
     let mut audio = Audio::new(options.no_audio, options.audio_capture.clone());
-    let mut startup_memory = crate::transition_memory::Transition::begin("startup-entry", "menu", &options.map);
+    let mut startup_memory: Option<crate::transition_memory::Transition> = None;
     #[cfg(target_os = "vita")]
     let mut bench_session = crate::frame_profile::startup_bench();
     #[cfg(target_os = "vita")]
@@ -655,12 +664,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Validate the complete restoration before bypassing the front end.
             // The scene built here is installed below; load_scene must not run again.
             println!("bench: loading auto save {}", loaded.game.current);
+            startup_memory = Some(crate::transition_memory::Transition::begin(
+                "startup-entry", "menu", &loaded.game.level()?.map));
             let restored = save::Restored::build(&mut assets, loaded.game.clone())?;
             bench_restored = Some(restored);
             Ok(loaded)
         }) {
             Ok(loaded) => Some(loaded),
             Err(e) => {
+                if let Some(mut memory) = startup_memory.take() { memory.finish(false); }
                 eprintln!("bench: no auto save ({e:#})");
                 None
             }
@@ -679,7 +691,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             "Save loading is unavailable in a staged preview"
         );
         Some(store.read(slot)?)
-    } else if saves_enabled && !options.new_game && !options.direct_map && options.frames.is_none()
+    } else if saves_enabled && !options.new_game && !options.direct_map
+        && (options.frames.is_none() || crate::transition_memory::host_start_chapter().is_some())
     {
         match start::choose(
             &mut options,
@@ -713,6 +726,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         options.entry = loaded.game.level()?.entry.clone();
         options.difficulty = loaded.game.stats.difficulty;
     }
+    let mut startup_memory = startup_memory.unwrap_or_else(||
+        crate::transition_memory::Transition::begin("startup-entry", "menu", &options.map));
     escape_menu.backdrop();
     ui.toast("Opening Wonderland...", screen_height() - 70.);
     next_frame().await;
@@ -1151,55 +1166,82 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let resources = (level_art, npcs, steam, scene);
             if crate::transition_memory::legacy_overlap() { Some(resources) } else {
                 drop(resources);
-                audio.release_level();
+                audio.release_scene();
                 None
             }
         }};
     }
     macro_rules! rollback_resources {
-        ($checkpoint:expr) => {{
-            // Keep the live controllers, clocks, ledger and view untouched on an
-            // unsuccessful operation; reacquire only resources that were released.
-            // A failed destination may have queued partial textures/buffers for
-            // deletion. Drain those too before uploading the outgoing resources.
-            crate::render_fx::release_scene();
-            crate::transition_memory::released().await;
-            let r = save::Restored::build(&mut assets, $checkpoint)?;
-            scene = r.scene;
-            npcs = r.npcs;
-            steam = r.steam;
-            level_art = LevelArt::default();
-            level_art.prepare(&mut assets, &scene, &interactions, true)?;
-            audio.load(&mut assets, &maps[current], &scene.map);
+        ($checkpoint:expr, $outgoing:expr, $particles:expr, $audio:expr) => {{
+            if let Some((art, cast, particles, world)) = $outgoing.take() {
+                level_art = art; npcs = cast; steam = particles; scene = world;
+            } else {
+                // This is a live resource checkpoint, not an external saved game.
+                // Dead, airborne and scripted frames must not pass save validators
+                // or migrate/reset their untouched live controllers and clocks.
+                crate::render_fx::release_scene();
+                crate::transition_memory::released().await;
+                let level = $checkpoint.level()?;
+                scene = Scene::load(&mut assets, &level.map)?;
+                scene.map.difficulty = stats.difficulty;
+                interactions.sync(&mut scene.world);
+                npcs = crate::npc::Npcs::load(&mut assets, &scene.map, &level.map,
+                    level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
+                npcs.restore(&level.npcs)?;
+                steam = crate::particles::Steam::load(&mut assets, &scene.map)?;
+                steam.restore_runtime($particles);
+                level_art = LevelArt::default();
+                level_art.prepare(&mut assets, &scene, &interactions, true)?;
+                audio.reload_failed_transition(&mut assets, &maps[current], &scene.map);
+                audio.restore_transition($audio);
+            }
         }};
     }
     macro_rules! restore_transition {
         ($game:expr, $kind:expr, $pause:expr, $install:ident) => {{
             let incoming = $game;
-            let checkpoint = game_snapshot!();
-            let destination = incoming.level()?.map.clone();
-            let mut memory = crate::transition_memory::Transition::begin($kind, &maps[current], &destination);
-            let outgoing = unload_scene!();
-            let outgoing_alice = if crate::transition_memory::legacy_overlap() { Some(alice) } else { drop(alice); None };
-            crate::transition_memory::released().await;
-    memory.after_release();
-            let result = match save::Restored::build(&mut assets, incoming) {
-                Ok(restored) => {
-                    apply_loaded!(restored, $pause, $install);
-                    Ok(())
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let incoming = {
+                let mut incoming = incoming;
+                if std::env::var("LOOKING_GLASS_TRANSITION_FAIL_BUILD").as_deref() == Ok("invalid-level") {
+                    incoming.current = "missing-live-load-fixture".into();
                 }
-                Err(error) => {
-                    let character = checkpoint.character.clone();
-                    rollback_resources!(checkpoint);
-                    alice = Character::load(&mut assets)?;
-                    alice.restore(&character)?;
-                    Err(error)
-                }
+                incoming
             };
-            drop(outgoing);
-            drop(outgoing_alice);
-            memory.finish(result.is_ok());
-            result
+            // Invalid level identities are ordinary load errors, before release.
+            match incoming.level().map(|level| level.map.clone()) {
+              Err(error) => Err(error),
+              Ok(destination) => {
+                let checkpoint = game_snapshot!();
+                let particles = steam.runtime();
+                let audio_checkpoint = audio.transition_checkpoint();
+                let mut memory = crate::transition_memory::Transition::begin($kind, &maps[current], &destination);
+                let mut outgoing = unload_scene!();
+                let outgoing_alice = if crate::transition_memory::legacy_overlap() { Some(alice) } else { drop(alice); None };
+                crate::transition_memory::released().await;
+                memory.after_release();
+                let result = match save::Restored::build(&mut assets, incoming) {
+                    Ok(restored) => {
+                        apply_loaded!(restored, $pause, $install);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let character = checkpoint.character.clone();
+                        rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint);
+                        alice = if let Some(alice) = outgoing_alice { alice } else {
+                            let mut alice = Character::load(&mut assets)?;
+                            alice.restore(&character)?;
+                            alice
+                        };
+                        scene.world.set_weapon_obstacles(alice.ice_targets());
+                        Err(error)
+                    }
+                };
+                drop(outgoing);
+                memory.finish(result.is_ok());
+                result
+              }
+            }
         }};
     }
     loop {
@@ -1294,6 +1336,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         preview_throttle.advance_frame();
         let host_transition = crate::transition_memory::host_action(frame);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if host_transition.is_empty() && std::env::var_os("LOOKING_GLASS_TRANSITION_RESUME").is_some() { paused = false; }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if frame == 1 {
             if let Ok(path) = std::env::var("LOOKING_GLASS_TRANSITION_SNAPSHOT") {
                 std::fs::write(path, serde_json::to_vec(&game_snapshot!())?)?;
@@ -1337,7 +1381,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // before entering it, so thumbnails never capture the menu or old play.
         let opening_escape_menu = throttle_normal && escape_menu.page.is_some() && !escape_preview_ready;
         if opening_escape_menu { paused = true; clock.pause(); }
-        if (escape_menu.page.is_some() && (!throttle_normal || escape_preview_ready)) || matches!(host_transition.as_str(), "native-load" | "new-game") {
+        if (escape_menu.page.is_some() && (!throttle_normal || escape_preview_ready)) || matches!(host_transition.as_str(), "native-load" | "new-game" | "new-game+retry" | "new-game+quick-load") {
             #[cfg(feature = "native_timing")]
             timing.with(|r| {
                 r.discontinuity(crate::native_timing::Milestone::ModalEnter, crate::native_timing::MODAL | crate::native_timing::PAUSED);
@@ -1355,7 +1399,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // physics, story, enemies, power-up timers or world clocks run there.
             next_frame().await;
             let action = if host_transition == "native-load" { crate::menu::Action::Load(Slot::Auto) }
-                else if host_transition == "new-game" { crate::menu::Action::NewGame(options.difficulty) } else {
+                else if host_transition.starts_with("new-game") { crate::menu::Action::NewGame(options.difficulty) } else {
                 escape_menu.run(&mut preferences, &mut audio, &store, pos, yaw, &mut input).await
             };
             #[cfg(feature = "native_timing")]
@@ -1424,7 +1468,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                                 escape_menu.close();
                                 hud.announce("Game restored / P or click to resume");
                               }
-                              Err(e) => { escape_menu.message = format!("Load failed: {e:#}"); }
+                              Err(e) => {
+                                #[cfg(feature = "native_timing")]
+                                timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
+                                escape_menu.message = format!("Load failed: {e:#}");
+                                eprintln!("Load failed: {e:#}");
+                              }
                             },
                             Err(e) => {
                                 #[cfg(feature = "native_timing")]
@@ -1559,6 +1608,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut load_requested =
             (focused && !console_input && input.key(&preferences, KeyCode::F9, true))
                 .then_some(Slot::Quick);
+        if matches!(host_transition.as_str(), "quick-load" | "new-game+quick-load") { load_requested = Some(Slot::Quick); }
         let mut autosave_requested = false;
         let mut finale_checkpoint_requested = None;
         if toggle_console || (console.open && focused && input.ui(KeyCode::Escape)) {
@@ -1773,6 +1823,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
         }
+        // A confirmed New Game owns this iteration. Discard simultaneous F9 or
+        // Retry input; neither may overwrite its selected destination/checkpoint.
+        if new_campaign_memory.is_some() { load_requested = None; }
         if let Some(slot) = load_requested {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
@@ -1974,8 +2027,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if inventory_menu && input.ui(KeyCode::Enter) {
             inventory_menu = false;
         }
-        if host_transition == "retry" { stats.damage(10000.); }
-        let recover = host_transition == "retry" || focused
+        if matches!(host_transition.as_str(), "retry" | "new-game+retry") && new_campaign_memory.is_none() { stats.damage(10000.); }
+        let recover = matches!(host_transition.as_str(), "retry" | "new-game+retry") || focused
             && !menu
             && !inventory_menu
             && !console_input
@@ -2067,7 +2120,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         // A failed attempt must roll the entire world back with Alice. Do this
         // before the live transport guard: dying during a ride must remain retryable.
-        if saves_enabled && !stats.alive() && (recover || restart || console_restart) {
+        if new_campaign_memory.is_none() && saves_enabled && !stats.alive() && (recover || restart || console_restart) {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             let result = match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref())) {
@@ -2225,10 +2278,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 #[cfg(feature = "native_timing")]
                 timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
                 let checkpoint = game_snapshot!();
+                let particles = steam.runtime();
+                let audio_checkpoint = audio.transition_checkpoint();
                 let mut memory = if let Some(memory) = new_campaign_memory.take() { memory } else {
                     crate::transition_memory::Transition::begin("chapter-or-console", &maps[current], &maps[selected])
                 };
-                let outgoing = unload_scene!();
+                let mut outgoing = unload_scene!();
                 crate::transition_memory::released().await;
                 memory.after_release();
                 match enter_level(
@@ -2297,7 +2352,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         memory.finish(true);
                     }
                     Err(e) => {
-                        rollback_resources!(checkpoint);
+                        rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint);
                         drop(outgoing);
                         memory.finish(false);
                         #[cfg(feature = "native_timing")]
@@ -2876,10 +2931,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             present_transition_loading(&name).await;
             let transition_started = std::time::Instant::now();
             let checkpoint = game_snapshot!();
+            let particles = steam.runtime();
+            let audio_checkpoint = audio.transition_checkpoint();
             let mut memory = crate::transition_memory::Transition::begin("natural-exit", &maps[current], &name);
-            let outgoing = unload_scene!();
-            crate::transition_memory::released().await;
-    memory.after_release();
+            let mut outgoing = unload_scene!();
+            crate::transition_memory::released_with(|| draw_transition_loading(&name)).await;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_BUILD_CAPTURE") {
+                save_capture(std::path::Path::new(&path))?;
+            }
+            memory.after_release();
             let arrived = enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options);
             match arrived {
                 Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {
@@ -2945,7 +3006,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     memory.finish(true);
                 }
                 Err(e) => {
-                    rollback_resources!(checkpoint);
+                    rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint);
                     drop(outgoing);
                     memory.finish(false);
                     interactions.transition_failed(&exit);
@@ -4468,6 +4529,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(p) = &presented_probe { p.finish(&maps[current], hud_submitted); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if crate::transition_memory::host_probe() {
+            println!("TRANSITION_STEADY {}", serde_json::json!({"frame":frame,"map":maps[current],"live_rust_request_bytes":crate::kernel_alloc::live_bytes(),"audio_cache_clips_retiring_effects_emitters":audio.memory_counts()}));
             use sha2::{Digest,Sha256};
             let value = game_snapshot!();
             println!("TRANSITION_STATE {}", serde_json::json!({"frame":frame,"map":maps[current],
@@ -4543,7 +4605,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         assets.base.display()
     );
     let mut memory = crate::transition_memory::Transition::begin("quit", &maps[current], "menu-or-exit");
-    let outgoing = unload_scene!();
+    let mut outgoing = unload_scene!();
     drop(alice);
     crate::transition_memory::released().await;
     memory.after_release();
