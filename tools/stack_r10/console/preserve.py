@@ -13,7 +13,7 @@ def main():
     engine=sealed['engine_source_revision']
     assert sealed['engine_source_revision']==engine
     assert all(v['source_revision']==engine and v['revision']==engine for v in identities.values())
-    assert sealed['branch']=='vita-stack-r10-20261025'
+    assert sealed['branch']=='vita-stack-r10b-20261025'
     assert len(sealed['branch_head'])==40 and all(c in '0123456789abcdef' for c in sealed['branch_head'])
     # Enumerate today's directories instead of importing an r4 session's inventory.
     inv={};pending=[p.R,p.A]
