@@ -228,12 +228,6 @@ pub(crate) fn host_recovery_screen(attempt: usize, frame: usize) {
     use macroquad::prelude::*;
     RECOVERY_KEY.with(|key| key.set(None));
     let Ok(mode) = std::env::var("LOOKING_GLASS_RECOVERY_UI") else { return; };
-    if frame == 1 {
-        if let Ok(directory) = std::env::var("LOOKING_GLASS_RECOVERY_CAPTURE") {
-            let path = std::path::Path::new(&directory).join(format!("screen-{attempt}.png"));
-            get_screen_data().export_png(path.to_str().unwrap());
-        }
-    }
     let action = if frame == 3 {
         match mode.as_str() {
             "retry" => {
@@ -250,6 +244,16 @@ pub(crate) fn host_recovery_screen(attempt: usize, frame: usize) {
     } else { "wait" };
     println!("TRANSITION_RECOVERY {}", serde_json::json!({"attempt":attempt,"screen_frame":frame,
         "action":action,"fault_armed":std::env::var("LOOKING_GLASS_TRANSITION_FAIL_RECOVERY").ok()}));
+}
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) fn host_recovery_capture(attempt: usize, frame: usize) {
+    // Read the submitted screen before swapping/clearing the framebuffer.
+    if frame == 1 {
+        if let Ok(directory) = std::env::var("LOOKING_GLASS_RECOVERY_CAPTURE") {
+            let path = std::path::Path::new(&directory).join(format!("screen-{attempt}.png"));
+            macroquad::prelude::get_screen_data().export_png(path.to_str().unwrap());
+        }
+    }
 }
 pub(crate) fn host_destination() -> String {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]

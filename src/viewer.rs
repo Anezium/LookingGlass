@@ -140,6 +140,8 @@ async fn rebuild_outgoing(
                     escape_menu.backdrop();
                     ui.toast("Could not restore the current map", screen_height() - 110.);
                     ui.toast("Enter / Cross: retry    Escape / Circle: quit", screen_height() - 70.);
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    crate::transition_memory::host_recovery_capture(attempts, screen_frame + 1);
                     next_frame().await;
                     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                     { screen_frame += 1; crate::transition_memory::host_recovery_screen(attempts, screen_frame); }
