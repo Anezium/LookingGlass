@@ -344,8 +344,14 @@ impl Scene {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     pub(crate) async fn show_transition_portal(&mut self, capture: &std::path::Path) -> Result<()> {
         let portal = self.camera_portals.iter().find(|p| p.model == 0)
-            .context("Host transition fixture needs a stationary portal")?;
-        let center = portal.center;
+            .or_else(|| self.camera_portals.first()).context("Host transition fixture needs a portal")?;
+        let transforms: Vec<_> = self.map.models.iter().enumerate().skip(1).map(|(model,_)| {
+            let origin = self.map.entities.iter().find(|e| e.get("model").is_some_and(|s| s==&format!("*{model}")))
+                .and_then(|e|e.get("origin")).and_then(|s|vector(s)).unwrap_or(Vec3::ZERO);
+            (model,origin,Quat::IDENTITY)
+        }).collect();
+        let (origin,rotation)=portal.transform(&transforms).context("Portal brush transform")?;
+        let center = origin + rotation * portal.center;
         let normal = portal.normal;
         let camera = Camera3D {
             position: center + normal * 200., target: center,
@@ -354,12 +360,12 @@ impl Scene {
         };
         set_camera(&camera);
         clear_background(BLACK);
-        self.prepare_camera_portals(&camera, 0., true, &[]);
+        self.prepare_camera_portals(&camera, 0., true, &transforms);
         let ready = self.camera_portals.iter().filter(|p| p.ready && p.target.is_some()).count();
         ensure!(ready > 0, "Host portal was not rendered");
         crate::render_fx::begin_view(&camera, 0., &self.atmosphere, true);
-        self.draw(camera.position, 0., true, false, &[]);
-        self.draw(camera.position, 0., true, true, &[]);
+        self.draw(camera.position, 0., true, false, &transforms);
+        self.draw(camera.position, 0., true, true, &transforms);
         crate::render_fx::finish();
         set_default_camera();
         crate::viewer::save_capture(capture)?;
