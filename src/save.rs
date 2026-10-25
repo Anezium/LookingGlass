@@ -859,6 +859,14 @@ impl Restored {
         )?;
         npcs.restore(&level.npcs)?;
         timing.mark("npc_models_restore");
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        {
+            static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if std::env::var_os("LOOKING_GLASS_TRANSITION_FAIL_BUILD").is_some()
+                && !FAILED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("host transition fault after destination GPU/NPC construction");
+            }
+        }
         let mut alice = Character::load(assets)?;
         alice.restore(&game.character)?;
         scene.world.set_weapon_obstacles(alice.ice_targets());

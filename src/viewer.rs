@@ -1160,6 +1160,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         ($checkpoint:expr) => {{
             // Keep the live controllers, clocks, ledger and view untouched on an
             // unsuccessful operation; reacquire only resources that were released.
+            // A failed destination may have queued partial textures/buffers for
+            // deletion. Drain those too before uploading the outgoing resources.
+            crate::render_fx::release_scene();
+            crate::transition_memory::released().await;
             let r = save::Restored::build(&mut assets, $checkpoint)?;
             scene = r.scene;
             npcs = r.npcs;
