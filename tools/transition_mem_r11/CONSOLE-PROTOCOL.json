@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "session_directory": "session-s11-transition-mem",
+  "optional_sequence": [],
+  "sequence": [
+    {
+      "label": "s11-transition-1-A",
+      "arm": "A",
+      "package": "baseline",
+      "config_arm": "baseline",
+      "session": "s11-transition-mem",
+      "map": "hedge3",
+      "visit_key": null,
+      "entry": "Chapters"
+    },
+    {
+      "label": "s11-transition-2-B",
+      "arm": "B",
+      "package": "stack",
+      "config_arm": "stack",
+      "session": "s11-transition-mem",
+      "map": "hedge3",
+      "visit_key": null,
+      "entry": "Chapters"
+    }
+  ],
+  "operations": [
+    "chapter-to-hedge3",
+    "native-load-human-auto-pandemonium",
+    "chapter-back-to-hedge3"
+  ],
+  "pass_rule": {
+    "fixed_before_console_data": true,
+    "no_crash": true,
+    "all_transitions_successful": true,
+    "peak_uordblks_exclusive_bytes": 178257920,
+    "required_transition_lines": true,
+    "required_before_peak_after": true,
+    "missing_samples": "FAIL_OR_UNKNOWN",
+    "peak_is_sampled": true
+  },
+  "qualification_recorder": false,
+  "recorder_reservation_MiB": 0,
+  "console_executed": false,
+  "integration_note": "The required r10b integration candidate has no audio_cache_qualification option; validated r10c three-lever configs are used. Always-on transition instrumentation supplies heap samples."
+}

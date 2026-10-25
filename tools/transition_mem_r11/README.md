@@ -1,0 +1,17 @@
+# r11 transition memory work
+
+Base: `vita-stack-r10b-20261025`, e19f73c (engine d882a69). Implementation: c011075; final engine with failed-destination GPU recovery: ef8608c (complete New Game bracket: 6faa690). Branch: `vita-transition-mem-r11-20261025`. No assets belong in this repository.
+
+The output lives at `/Users/anezium/vita-j0/resume-2026-10-24/alice-transition-mem-r11/`. Read SOL-REPORT.md there for the ownership trace, allocation bounds, validation and limitations. CONSOLE-BRIEF.md is for a future sole owner; no console or shot driver was used during implementation.
+
+`prepare.py OUTPUT` assembles local helpers, configs and manifests. `build_native.py OUTPUT` uses the locked/offline r10c recipe and verifies ELF/process parameters, regenerated VELF/SELF equality and minimal VPK contents. `seal.py OUTPUT` checks the local command grammar and emits the console ZIP. It never imports transport code. The output's real session directory must stay absent during preparation.
+
+Host target: `/Users/anezium/vita-j0/cargo-target-host`. Build with `cargo build --release --offline --locked --features native_timing,frame_total_only,sim_maps_probe`, stable, `RUSTFLAGS='--cfg observer_free_B'`. Atomically copy the executable to a unique owned path before running it on macOS; never overwrite an executable in use.
+
+`host_proof.py OUTPUT --binary BINARY` executes the actual viewer paths, comparing overlap-reference and release-first operations with all three levers off/on. The host-only reference flag is absent from console builds. It measures all Rust allocation requests, conservative realloc overlap and 32-bit newlib chunk upper bounds. It also checks native New Game preservation and clean Quit Auto payloads. `film_proof.py OUTPUT/film --binary BINARY` runs all 3,731 opening frames in four muted Mac callback processes. `failure_proof.py OUTPUT BINARY` injects a partial destination failure and checks exact recovery. `host_visual.py OUTPUT/visual --binary BINARY` repeats the scenarios with GPU readbacks, separately from the allocation census. `visual_audit.py OUTPUT` compares packets, state, uploaded geometry and reports exact raster differences.
+
+`run_stack_host.py OUTPUT` runs the existing 180-frame simulation suites. `tools/stack_r10/host_stack_oracle.py OUTPUT --binary BINARY` runs the existing packet/pixel oracle. `run_tests.py OUTPUT` requires a copied release test binary at OUTPUT/proof/test-bin and supplies the test suites' required fresh output and corpus environment. It refuses zero-test filters.
+
+Run `scripts/test_session_e2e.py PACKAGE --output /tmp/r11-loose.json`, then `--zip --output /tmp/r11-zip.json`, with the local lab venv and PYTHONDONTWRITEBYTECODE=1, without `-I`. The test blocks real sockets and process launches before helper imports and uses only retained local human bytes. It runs the main preservation/staging/navigation acknowledgement/audit/restoration helpers, M3 and M4B negative fixtures, serial fake FTP, exact original SELF/Auto/settings/companion restoration, and initial absences. Every synthetic tree carries SYNTHETIC-OFFLINE-ONLY. A synthetic PASS is not console evidence.
+
+AMENDMENT-R11.md records the absent r8 recorder in this integration branch and the fixed <170 MiB native sampled transition budget. Do not silently add its unsupported config key or claim its workload was tested. Any later protocol change must be a separate amendment file.
