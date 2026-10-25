@@ -317,7 +317,7 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,smoke=
    final_status=final['status'],full_restoration=True,engine_source_revision=receipt['engine_source_revision'],branch_head=receipt['branch_head'])
 
 def main():
- parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--main-admission',action='store_true');parser.add_argument('--include-optional',action='store_true',default=True,help='Legacy flag; both diagnostic census arms are always required');parser.add_argument('--sealed-helpers',type=Path);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--evidence-dir',type=Path);args=parser.parse_args()
+ parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--main-admission',action='store_true');parser.add_argument('--include-optional',action='store_true',default=True,help='Legacy flag; both diagnostic census arms are always required');parser.add_argument('--sealed-helpers',type=Path);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--evidence-dir',type=Path);parser.add_argument('--retain-smoke',type=Path);args=parser.parse_args()
  package=args.package.resolve()
  for output in [args.output,args.evidence_dir]:
   if output is not None and output.resolve().is_relative_to(package):parser.error('Output and evidence must stay outside the source package')
@@ -332,6 +332,10 @@ def main():
    else:
     smoke_result=exercise(package,work/'smoke',args.sealed_helpers,args.evidence_dir/'smoke' if args.evidence_dir else None,smoke=True)
     smoke_root=Path(smoke_result['smoke_root'])
+    if args.retain_smoke:
+     dest=args.retain_smoke.resolve()
+     if dest.is_relative_to(package) or dest.exists():parser.error('Smoke retain destination must be a new directory outside the package')
+     shutil.copytree(smoke_root,dest)
    result=exercise(package,work/'main',args.sealed_helpers,args.evidence_dir,args.include_optional,smoke_root=smoke_root)
    if args.main_admission:result['real_smoke_admission']=smoke_receipt
    else:result['smoke_session']=smoke_result
