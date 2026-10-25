@@ -1,6 +1,7 @@
 """Pure host qualification policy. No device imports."""
 import json, math, re
 from pathlib import Path
+from transition_policy import check_record, check_text_samples
 REQUIRED={
  'lg/audio-realtime':['window_ms','producer_blocks','producer_mix_p95_ms','pcm_starved_blocks','rejected_sinks','dropped_reports','queued_samples','producer_gap_max_ms','producer_sleep_overshoot_max_ms'],
  'lg/audio-music':['decode_ms','underrun_frames','chunks'],
@@ -40,6 +41,8 @@ def window_text(text,label):
     return text.split(start[0],1)[1].split(stop[0],1)[0]
 def health_text(text,A=False):
     reasons=[]
+    try:check_text_samples(text)
+    except AssertionError as error:reasons.append(str(error))
     if any(s in text.lower() for s in ["thread 'main' panicked",'out of memory','memory allocation of','fatal error','segmentation fault','viewer failed','[lg/cache-qual] error']):reasons.append('global failure')
     # Passive live stop checks use only opt-in windows, including check windows.
     lines=[]
@@ -58,5 +61,6 @@ def health_text(text,A=False):
     for line in text.splitlines():
         if line.startswith('[lg/transition-memory] '):
             row=json.loads(line.split('] ',1)[1])
-            if row.get('event')=='end' and (not row.get('success') or row.get('peak_heap_used',0)>=170*1048576):reasons.append('transition failure or 170 MiB budget')
+            try:check_record(row)
+            except (AssertionError,TypeError,KeyError) as error:reasons.append(str(error))
     return reasons

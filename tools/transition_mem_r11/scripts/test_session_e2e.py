@@ -74,7 +74,7 @@ def exercise(source,work,replay):
         R+'saves/auto.previous.json':b'fixture companion',R+'route-saves/human.json':b'fixture route save',
         R+'vita_renderer.json':b'original renderer',R+'vita_sim.json':b'original simulation',
         R+'native-timing-config.json':b'original timing',R+'profile_mode':b'full\n',
-        R+'preferences.json':b'original preferences',R+'cache_qual_command.json':b'original command',
+        R+'preferences.json':b'original preferences',R+'audio-settings.txt':b'original audio settings',R+'cache_qual_command.json':b'original command',
         R+'frame_profile/cache-qual.json':b'prior qualification export',
         R+'frame_profile/pandemonium-fullbench-census-180.json':b'prior census bytes'}
     initial=dict(remote);directories={R,A,A+'sce_sys/',R+'saves/',R+'route-saves/',R+'frame_profile/'}
@@ -89,6 +89,7 @@ def exercise(source,work,replay):
     fixed_budget=menu_io_budget('fixed')
     assert fixed_budget['counts']=={2:1} and fixed_budget['per_frame_io']==0 and fixed_budget['applied']==2 and fixed_budget['recording'] is False,fixed_budget
     seq=json.loads((package/'CONSOLE-PROTOCOL.json').read_text())['sequence']
+    formatter=json.loads((package/'scripts/transition-log-fixture.json').read_text())
     def append(line):
         with log.open('a') as f:f.write(line+'\n')
     def listing(d):
@@ -106,9 +107,21 @@ def exercise(source,work,replay):
         if kind:
             event('transition',operation=kind,**{'from':mapname,'to':to},stage='before-drop');us+=10
             event('transition',operation=kind,**{'from':mapname,'to':to},stage='after-drop');us+=10
-            snap=dict(heap_used=150*1048576,heap_arena=160*1048576,heap_free=10*1048576)
-            append('[lg/transition-memory] '+json.dumps(dict(event='begin',kind=kind,**{'from':mapname,'to':to},before=snap)))
-            append('[lg/transition-memory] '+json.dumps(dict(event='end',kind=kind,**{'from':mapname,'to':to},before=snap,released=snap,after=snap,peak_heap_used=165*1048576,peak_heap_arena=170*1048576,success=True)))
+            snap=dict(formatter['records'][0]['before'])
+            snap.update(heap_used=150*1048576,heap_arena=160*1048576,heap_free=10*1048576,
+                        vgl_ram_free=20*1048576,vgl_vram_free=10*1048576,vgl_phycont_free=4*1048576)
+            for name in ['begin','end']:
+                # Actual Rust formatter shape and identities, rather than a
+                # hand-invented pair that could conceal a startup mismatch.
+                row=copy.deepcopy(next(r for r in formatter['records'] if r['kind']==kind and r['event']==name))
+                row['from']='menu' if kind=='startup-entry' else mapname
+                assert row['to']==to,(kind,'engine formatter destination')
+                row['before']=snap
+                if name=='end':
+                    row.update(after=snap,released=None if kind=='startup-entry' else snap,
+                               peak_heap_used=165*1048576,peak_heap_arena=170*1048576,
+                               peak_kind='sampled-newlib',host_requests_and_newlib32_upper_bound=None)
+                append('[lg/transition-memory] '+json.dumps(row))
         if current['arm']=='B':event('reset',reason='audio-load',old_scene=scene,entries_before=512 if warm else 0,entries_after=0,pin_after=False,old_refs_before=1)
         scene+=1;mapname=to;warm=False;us+=10
         ui='overlay' if kind=='native-load' else 'running';last_eye=0.
@@ -335,10 +348,54 @@ def exercise(source,work,replay):
                 next_button=(kind,to)
                 call('operate.py',label,'button','cross');call('ack.py','OFFLINE selected native operation')
                 call('operate.py',label,'wait-transition',operation);call('ack.py','OFFLINE completed transition')
+            call('operate.py',label,'retry-unavailable')
             call('session.py','collect',label);call('audit.py',label)
             good=(root/label/'runtime-log.txt').read_text()
             rows=json.loads((root/label/'TRANSITIONS.json').read_text())
             assert len(rows)==3
+            log_before_timeout=log.read_bytes();transitions_path=root/label/'TRANSITIONS.json';consumed_before_timeout=transitions_path.read_bytes()
+            stop_path=root/label/'STOP.json';stop_before_timeout=stop_path.read_bytes() if stop_path.exists() else None
+            log.write_text('\n'.join(line for line in log.read_text().splitlines() if not (line.startswith('[lg/transition-memory] ') and json.loads(line.split('] ',1)[1])['event']=='end'))+'\n')
+            transitions_path.write_text('[]\n')
+            reject('100 second black loading deadline',lambda:call('operate.py',label,'wait-transition','chapter-to-hedge3'),'Missing native transition completion')
+            assert json.loads(stop_path.read_text())['loading_timeout_seconds']==100
+            log.write_bytes(log_before_timeout);transitions_path.write_bytes(consumed_before_timeout)
+            if stop_before_timeout is None:stop_path.unlink()
+            else:stop_path.write_bytes(stop_before_timeout)
+            # Key order comes from serde_json; use parsed records for the old
+            # pre-chooser fixture, requiring that only the begin destination changes.
+            oldlines=[]
+            for line in good.splitlines():
+                if line.startswith('[lg/transition-memory] '):
+                    row=json.loads(line.split('] ',1)[1])
+                    if row['kind']=='startup-entry' and row['event']=='begin':row['to']=formatter['old_startup_mismatch'][0]['to']
+                    line='[lg/transition-memory] '+json.dumps(row)
+                oldlines.append(line)
+            reject('old startup begin skool1 end hedge3 mismatch',lambda:audit.validate('\n'.join(oldlines)))
+            outside=good+'[lg/audio-memory] heap_used=150000000 heap_arena='+str(179*1048576)+'\n'
+            reject('179 MiB arena outside transition',lambda:audit.validate(outside))
+            assert run_health.health_text(outside)
+            for where in ['before','released','after','peak']:
+                bad=[]
+                for line in good.splitlines():
+                    if line.startswith('[lg/transition-memory] '):
+                        row=json.loads(line.split('] ',1)[1])
+                        if where=='peak' and row['event']=='end':row['peak_heap_arena']=179*1048576
+                        elif row.get(where):row[where]['heap_arena']=179*1048576
+                        line='[lg/transition-memory] '+json.dumps(row)
+                    bad.append(line)
+                raw='\n'.join(bad)
+                reject('179 MiB arena at '+where,lambda:audit.validate(raw))
+                assert run_health.health_text(raw),'Live health must stop on every arena sample/peak'
+            optional=good
+            for name in ['begin','end']:
+                row=copy.deepcopy(next(r for r in formatter['records'] if r['kind']=='death-retry' and r['event']==name))
+                row['before']=dict(formatter['records'][0]['before'])
+                row['before'].update(heap_used=150*1048576,heap_arena=160*1048576,heap_free=10*1048576,
+                                     vgl_ram_free=20*1048576,vgl_vram_free=10*1048576,vgl_phycont_free=4*1048576)
+                if name=='end':row.update(after=row['before'],released=row['before'],peak_heap_used=165*1048576,peak_heap_arena=170*1048576)
+                optional+='[lg/transition-memory] '+json.dumps(row)+'\n'
+            assert len(audit.validate(optional)['transitions'])==4
             for peak in [170*1048576,180*1048576]:
                 bad=good.replace('"peak_heap_used": 173015040','"peak_heap_used": '+str(peak))
                 (root/label/'runtime-log.txt').write_text(bad)

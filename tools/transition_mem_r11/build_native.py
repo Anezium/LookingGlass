@@ -10,11 +10,20 @@ def run(tag,argv):
 for n in ['logs','proof','tmp','packages/baseline']:(O/n).mkdir(parents=True,exist_ok=True)
 env=dict(os.environ,PATH=str(S)+':/Users/anezium/.cargo/bin:/opt/homebrew/bin:'+os.environ['PATH'],VITASDK='/Users/anezium/vitasdk',CARGO_NET_OFFLINE='true',CARGO_INCREMENTAL='0',CARGO_BUILD_JOBS='4',CARGO_TERM_COLOR='never',RUSTUP_TOOLCHAIN='nightly-2026-10-11',RUSTFLAGS='-C target-feature=-neon --cfg observer_free_B',CARGO_TARGET_DIR=str(O/'target-vita'),TMPDIR=str(O/'tmp'))
 cmd=['cargo','vita','build','vpk','--release','--offline','--locked','--features','native_timing,vita_renderer,frame_total_only']
-assert not subprocess.check_output(['git','status','--porcelain','--','src','Cargo.lock','Cargo.toml','build.rs','.cargo'],cwd=R)
-assert not subprocess.check_output(['git','diff','e19f73c','HEAD','--','Cargo.lock','Cargo.toml','build.rs','.cargo','src/logging.rs','src/render_direct.rs'],cwd=R)
+assert not subprocess.check_output(['git','status','--porcelain','--','src','vendor','Cargo.lock','Cargo.toml','build.rs','.cargo'],cwd=R)
+assert not subprocess.check_output(['git','diff','e19f73c','HEAD','--','build.rs','.cargo','src/logging.rs','src/render_direct.rs'],cwd=R)
+# r11b changes only Macroquad's source location, keeping every locked version.
+import tomllib
+old=tomllib.loads(subprocess.check_output(['git','show','e19f73c:Cargo.lock'],cwd=R,text=True))
+now=tomllib.loads((R/'Cargo.lock').read_text())
+assert [(p['name'],p['version']) for p in old['package']]==[(p['name'],p['version']) for p in now['package']]
+assert tomllib.loads((R/'Cargo.toml').read_text())['patch']['crates-io']['macroquad']=={'path':'vendor/macroquad'}
+assert tomllib.loads((R/'Cargo.toml').read_text())['patch']['crates-io']['miniquad']=={'path':'vendor/miniquad'}
+revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip()
 started=time.monotonic()
 with (O/'logs/native-build.log').open('w') as out:p=subprocess.run(cmd,cwd=R,env=env,stdout=out,stderr=subprocess.STDOUT)
-receipt=dict(argv=cmd,cwd=str(R),revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip(),exit_code=p.returncode,seconds=time.monotonic()-started,environment={k:env[k] for k in ['VITASDK','CARGO_NET_OFFLINE','CARGO_INCREMENTAL','CARGO_BUILD_JOBS','RUSTUP_TOOLCHAIN','RUSTFLAGS','CARGO_TARGET_DIR','TMPDIR']})
+assert not subprocess.check_output(['git','diff',revision,'--','src','vendor','Cargo.lock','Cargo.toml','build.rs','.cargo'],cwd=R),'Source changed during build'
+receipt=dict(argv=cmd,cwd=str(R),revision=revision,exit_code=p.returncode,seconds=time.monotonic()-started,environment={k:env[k] for k in ['VITASDK','CARGO_NET_OFFLINE','CARGO_INCREMENTAL','CARGO_BUILD_JOBS','RUSTUP_TOOLCHAIN','RUSTFLAGS','CARGO_TARGET_DIR','TMPDIR']})
 write(O/'proof/BUILD-COMMAND.json',receipt);assert p.returncode==0
 for name,dest in [('looking-glass.elf','looking-glass.elf'),('looking-glass.velf','looking-glass.velf'),('looking-glass.self','eboot.bin'),('looking-glass.vpk','looking-glass.vpk')]:
     found=list((O/'target-vita').rglob(name));assert len(found)==1,(name,found);shutil.copyfile(found[0],B/dest)

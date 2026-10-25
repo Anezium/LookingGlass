@@ -1,5 +1,24 @@
 # r11 transition memory work
 
+r11b supersedes the original preparation below. Its engine source is a937982,
+on the same branch. Read SOL-REPORT-R11B.md and AMENDMENT-R11B.md in the output
+directory for the final results and fixed console policy. The console remains
+unrun. CONSOLE-BRIEF.md is preserved byte-for-byte.
+
+`validate_r11b.py OUTPUT` builds one immutable host executable, checks New Game
+input precedence first, runs the original suites and expanded recovery matrix,
+then the full opening films. It measures Retry ×5, native Load ×5 and ten chapter
+round-trips. Allocation census mode disables retained host timing histories;
+per-frame counters and ordinary lever parity histories remain active.
+The local same-version Macroquad and Miniquad patches reclaim backend material
+resources and texture CPU metadata. Their origins and exact changes are recorded
+in vendor/*/PATCH.md and proof/DEPENDENCY-PATCHES.json.
+
+`finalize_receipts.py OUTPUT`, `seal.py OUTPUT`, the loose/ZIP rehearsals,
+`cleanup.py OUTPUT`, `verify.py OUTPUT` and `write_report_r11b.py OUTPUT` bind
+the final source and packages. SEAL-R11B.json covers the final report, inventory
+and console ZIP without a hash cycle. Session directories stay absent.
+
 Base: `vita-stack-r10b-20261025`, e19f73c (engine d882a69). Implementation: c011075; final engine with failed-destination GPU recovery: ef8608c (complete New Game bracket: 6faa690). Branch: `vita-transition-mem-r11-20261025`. No assets belong in this repository.
 
 The output lives at `/Users/anezium/vita-j0/resume-2026-10-24/alice-transition-mem-r11/`. Read SOL-REPORT.md there for the ownership trace, allocation bounds, validation and limitations. CONSOLE-BRIEF.md is for a future sole owner; no console or shot driver was used during implementation.

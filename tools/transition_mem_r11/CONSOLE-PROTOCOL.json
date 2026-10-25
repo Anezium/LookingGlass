@@ -37,10 +37,22 @@
     "required_transition_lines": true,
     "required_before_peak_after": true,
     "missing_samples": "FAIL_OR_UNKNOWN",
-    "peak_is_sampled": true
+    "peak_is_sampled": true,
+    "peak_arena_exclusive_bytes": 187695104,
+    "required_fordblks": true,
+    "required_arena_minus_uordblks": true,
+    "loading_timeout_seconds": 100,
+    "begin_end_exact_identity": true
   },
   "qualification_recorder": false,
   "recorder_reservation_MiB": 0,
   "console_executed": false,
-  "integration_note": "The required r10b integration candidate has no audio_cache_qualification option; validated r10c three-lever configs are used. Always-on transition instrumentation supplies heap samples."
+  "integration_note": "The required r10b integration candidate has no audio_cache_qualification option; validated r10c three-lever configs are used. Always-on transition instrumentation supplies heap samples.",
+  "optional_operations": [
+    "retry-hedge3"
+  ],
+  "retry_policy": "Only after an inspected natural death with existing safe inputs; otherwise record UNAVAILABLE_NO_VERIFIED_SAFE_DEATH_ROUTE",
+  "forbidden_native_commands": [
+    "reboot"
+  ]
 }

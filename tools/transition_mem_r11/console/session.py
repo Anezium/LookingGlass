@@ -10,7 +10,7 @@ def stage_manifest(manifest,ledger):
     p.owner()
     m=json.loads(Path(manifest).read_text())
     if any(v['kind']=='self' for v in m['files']):require_closed('stage SELF')
-    allowed={p.A+'eboot.bin'}|{p.R+n for n in ['vita_renderer.json','vita_sim.json','native-timing-config.json','profile_mode','cache_qual_command.json']}
+    allowed={p.A+'eboot.bin'}|{p.R+n for n in ['vita_renderer.json','vita_sim.json','native-timing-config.json','profile_mode']}
     assert all(v['remote'] in allowed and v['kind'] in ['small','self'] for v in m['files'])
     Path(str(ledger)+'.manifest.json').write_text(json.dumps(m,indent=2)+'\n')
     with Path(str(ledger)+'.log').open('w') as out:

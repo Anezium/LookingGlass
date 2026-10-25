@@ -7,7 +7,7 @@ def write(p,v):p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dump
 base=json.loads((R/'tools/lever_matrix_r4/configs/PL-baseline.json').read_text())
 base.update(phase_census=False,profile_capture=False,audio_music_thread=False,story_film_bypass=not a.film)
 env={k:v for k,v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
-env.update(LOOKING_GLASS_SIM_MAPS_PROBE='1',LOOKING_GLASS_SIM_MAPS_DT='0.05',LOOKING_GLASS_SAH_SILENT_AUDIO='1')
+env.update(LOOKING_GLASS_TRANSITION_CENSUS='1',LOOKING_GLASS_SIM_MAPS_PROBE='1',LOOKING_GLASS_SIM_MAPS_DT='0.05',LOOKING_GLASS_SAH_SILENT_AUDIO='1')
 data='/Users/anezium/vita-work/alice-data/Alice1/bin/base'
 human=Path('/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/session-s5-world-static-merge/originals/data/alice/private/saves/auto.json')
 assert hashlib.sha256(human.read_bytes()).hexdigest()=='ea4cd221d9f950e613188ccf3ecf2c1eabb1d34106f413125864320d364c8fa9'
@@ -21,6 +21,8 @@ def run(label,source,destination,action,levers=False,legacy=False,save=None,snap
  if action:e.update(LOOKING_GLASS_TRANSITION_ACTION=action,LOOKING_GLASS_TRANSITION_DESTINATION=destination)
  if snapshot:e['LOOKING_GLASS_TRANSITION_SNAPSHOT']=str(d/'game.json')
  if legacy:e['LOOKING_GLASS_TRANSITION_LEGACY']='1'
+ if action=='natural-exit' and e.get('LOOKING_GLASS_SKIN_PROOF'):
+  e.update(LOOKING_GLASS_LOADING_CAPTURE=str(d/'loading-presented.png'),LOOKING_GLASS_LOADING_BUILD_CAPTURE=str(d/'loading-build.png'))
  cmd=[str(B),'--data',data,'--map',source,'--save-dir',str(d/'private/saves')]
  if action!='quit':cmd+=['--frames','8']
  start=time.monotonic()

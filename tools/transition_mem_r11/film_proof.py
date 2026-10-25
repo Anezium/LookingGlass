@@ -15,6 +15,9 @@ for on in [False,True]:
 with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
  jobs=[pool.submit(run,f"film-{int(on)}-{'before' if legacy else 'after'}",'hedge3','gvillage','new-game',on,legacy) for on in [False,True] for legacy in [True,False]]
  rows=[f.result()[0] for f in jobs]
+# Publish once after all four workers have finished their per-run receipts.
+# This final ordered write cannot race the shared scenario driver's snapshots.
+(O/'proof/TRANSITION-RUNS.json').write_text(json.dumps(rows,indent=2)+'\n')
 result=[]
 for on in [False,True]:
  old=next(r for r in rows if r['levers']==on and r['legacy']);new=next(r for r in rows if r['levers']==on and not r['legacy'])
