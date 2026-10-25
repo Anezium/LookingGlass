@@ -13,7 +13,7 @@ def main():
     engine=sealed['engine_source_revision']
     assert sealed['engine_source_revision']==engine
     assert all(v['source_revision']==engine and v['revision']==engine for v in identities.values())
-    assert sealed['branch']=='vita-transition-mem-r11c-20261025'
+    assert sealed['branch']=='vita-transition-mem-r11d-20261025'
     assert len(sealed['branch_head'])==40 and all(c in '0123456789abcdef' for c in sealed['branch_head'])
     # Enumerate today's directories instead of importing an r4 session's inventory.
     inv={};pending=[p.R,p.A]
@@ -28,7 +28,7 @@ def main():
     p.B=p.ROOT
     p.rec('starting-inventories.json',inv)
     p.rec('SESSION.json',dict(start=p.now(),evidence=str(p.ROOT),os='Darwin',sole_console_owner=True,
-        package='alice-transition-mem-r11c',package_self_sha256={arm:v['self_sha256'] for arm,v in identities.items()},
+        package='alice-transition-mem-r11d',package_self_sha256={arm:v['self_sha256'] for arm,v in identities.items()},
         engine_source_revision=engine,branch=sealed['branch'],branch_head=sealed['branch_head'],
         driver='driver-v5',initial_state='fresh HOME inspected; no quit needed'))
     shutil.copy2(p.CACHE_INDEX,p.ROOT/'cache-index-before.json')

@@ -1,4 +1,8 @@
-"""Real GL regression: baseline must fail, each layer's fix is isolated."""
+"""Synthetic real-GL ownership and defensive-delete regressions.
+
+The zero-sample ownership fix is correct but unused by LG (all targets use 1).
+Repeated deletion is explicit here; these failures do not demonstrate an LG crash.
+"""
 from pathlib import Path
 import hashlib,io,json,os,shutil,subprocess,sys,tarfile,tempfile
 R=Path(__file__).resolve().parents[2];O=Path(sys.argv[1]).resolve();rows=[]

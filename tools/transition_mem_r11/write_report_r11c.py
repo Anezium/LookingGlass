@@ -51,8 +51,9 @@ retained-outgoing reference for eight Game states, ordered packets and final PNG
 10 double-failure pairs in DOUBLE-FAILURE-EQUALITY.json, plus all 58 earlier
 failure pairs. Audio decoder clocks remain equal. No save validation/migration
 is introduced into live recovery.
-The staged recovery result is boxed so a retry-screen await does not reserve
-additional full Scene/Npcs tuples in the live viewer's async frame.
+The staged recovery result is boxed, but round 3 later found that the enclosing
+recovery awaits still enlarged the live viewer future. R11d attributes and fixes
+that remaining frame-one regression; this historical r11c report predates it.
 
 Forks and byte identity:
 
@@ -77,9 +78,12 @@ LOCK-SOURCE-COMPARISON.json proves only the source field of macroquad/miniquad
 changed against aec5590; all other packages and every version are unchanged.
 No cargo update was used. vendor/ is deleted. Licences and notices are retained.
 
-The real-GL regressions fail on reviewed r11b: render-target deferred cleanup
-and a repeated delete after render-pass drop. Ownership-only and guard-only
-variants each pass independently. The final dependency unit tests cover 10,000
+The synthetic real-GL regressions fail on reviewed r11b: sample_count=0 deferred
+cleanup and an explicit repeated delete after render-pass drop. LG uses only
+sample_count=1 with a separate resolve texture, so these do not demonstrate an
+LG crash. The miniquad fix guards against deleting a possibly recycled GL name;
+the macroquad zero-sample ownership fix is correct but unused by LG.
+Ownership-only and guard-only variants each pass independently. The tests cover 10,000
 texture reloads, monotonic IDs, 30 large table retirements and 10,000 weak atlas
 candidate retirements. Isolated tests use exact fork library bytes with only
 example dev-dependencies/disabled optional subsystems omitted from their temporary

@@ -4,6 +4,9 @@ import argparse, hashlib, json, os, shutil, subprocess
 from trend import measure
 p=argparse.ArgumentParser();p.add_argument('output',type=Path);p.add_argument('binary',type=Path);a=p.parse_args()
 O=a.output.resolve();B=a.binary.resolve();R=Path(__file__).resolve().parents[2]
+fixed=json.loads((O/'proof/E2-FIXED-PLAN.json').read_text())
+assert fixed['fixed_before_execution'] and fixed['cycles_per_operation']==30
+assert fixed['frames_between_operations']==136 and fixed['sample_offset_frames']==126
 base=json.loads((R/'tools/lever_matrix_r4/configs/PL-baseline.json').read_text())
 base.update(phase_census=False,profile_capture=False,audio_music_thread=False,story_film_bypass=True)
 rows=[]
@@ -16,7 +19,7 @@ for on in [False,True]:
   # Hedge3's authored fade is five seconds. Resume loads and allow six seconds
   # of real silent-mixer/game clocks between operations before sampling steady.
   if action=='chapter':plan=[(2+i*136,'chapter','pandemonium' if i%2==0 else 'hedge3') for i in range(60)]
-  else:plan=[(2+i*136,action,'hedge3') for i in range(20)]
+  else:plan=[(2+i*136,action,'hedge3') for i in range(30)]
   env={k:v for k,v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
   env.update(LOOKING_GLASS_TRANSITION_CENSUS='1',LOOKING_GLASS_SIM_MAPS_PROBE='1',LOOKING_GLASS_SIM_MAPS_DT='0.05',LOOKING_GLASS_SAH_SILENT_AUDIO='1',LOOKING_GLASS_TRANSITION_RESUME='1',LOOKING_GLASS_TRANSITION_PLAN=json.dumps(plan))
   cmd=[str(B),'--data','/Users/anezium/vita-work/alice-data/Alice1/bin/base','--map','hedge3','--save-dir',str(d/'private/saves'),'--frames',str(plan[-1][0]+130)]
@@ -30,10 +33,10 @@ for on in [False,True]:
   checkpoints=[next(s for s in steady if s['frame']==1)]
   checkpoints += [next(s for s in steady if s['frame']==f+126) for f,_,dest in plan if dest=='hedge3']
   values=[s['live_rust_request_bytes'] for s in checkpoints]
-  assert len(values)==(31 if action=='chapter' else 21)
+  assert len(values)==31
   # Gate the full fixed post-warm-up population, not the final adjacent pair.
   growth=values[-1]-values[-2]
-  row=dict(levers=on,action=action,cycles=30 if action=='chapter' else 20,required_cycles=30 if action=='chapter' else 10,steady=checkpoints,
+  row=dict(levers=on,action=action,cycles=30,required_cycles=30,steady=checkpoints,
            first_rebuild_residue_bytes=values[1]-values[0],later_growth_bytes=growth,
            total_later_variation_bytes=max(values[1:])-min(values[1:]),
            records=ends,plateau_tolerance_bytes=16*1024,**measure(values))

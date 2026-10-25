@@ -5,6 +5,9 @@ R=Path(__file__).resolve().parents[2];O=Path(sys.argv[1]).resolve();S=Path('/Use
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 def write(p,v):p.write_text(json.dumps(v,indent=2)+'\n')
 native=json.loads((O/'packages/baseline/VERIFICATION.json').read_text());engine=native['source_revision']
+identity=json.loads((O/'PACKAGE-IDENTITY.json').read_text())
+identity.update(engine_source_revision=engine,branch=subprocess.check_output(['git','branch','--show-current'],cwd=R,text=True).strip())
+write(O/'PACKAGE-IDENTITY.json',identity)
 assert not subprocess.check_output(['git','diff',engine,'--','src','Cargo.toml','Cargo.lock','examples'],cwd=R)
 assert not (R/'vendor').exists()
 patches=tomllib.loads((R/'Cargo.toml').read_text())['patch']['crates-io']
@@ -22,8 +25,8 @@ write(O/'proof/LOCK-SOURCE-COMPARISON.json',dict(status='PASS',base='aec5590',on
 write(O/'proof/SOURCE-IDENTITY.json',dict(base='e19f73c8f99084f372b84e21bde41c122f96b765',branch=subprocess.check_output(['git','branch','--show-current'],cwd=R,text=True).strip(),engine_revision=engine,cargo_lock_sha256=sha(R/'Cargo.lock'),forks={n:patches[n] for n in ['macroquad','miniquad']},console_contact=False,shot_driver_contact=False,vendor_absent=True))
 with (O/'proof/vitagl-gc.s').open('w') as f:subprocess.run([str(S/'arm-vita-eabi-objdump'),'-d','--disassemble=garbage_collector',str(O/'packages/baseline/looking-glass.elf')],stdout=f,check=True)
 assert (O/'proof/vitagl-gc.s').read_text().count('#3')>=4
-write(O/'proof/GPU-LIFETIME.json',dict(status='ENGINE_ORDER_AND_LINKED_RING_VERIFIED',final_elf_sha256=native['elf_sha256'],linked_ring_modulus=4,texture_gc_and_vitagl_frames=6,material_backend_shader_and_pipeline_released=True,texture_cpu_metadata_released=True,managed_texture_deletion_idempotent=True,render_pass_attachment_single_owner=True,native_pool_reclamation_hardware_measured=False))
-(O/'proof/ENGINE-R11C-DIFF.patch').write_bytes(subprocess.check_output(['git','diff','aec5590',engine,'--','src','Cargo.toml','Cargo.lock','examples'],cwd=R))
+write(O/'proof/GPU-LIFETIME.json',dict(status='ENGINE_ORDER_AND_LINKED_RING_VERIFIED',final_elf_sha256=native['elf_sha256'],linked_ring_modulus=4,texture_gc_and_vitagl_frames=6,material_backend_shader_and_pipeline_released=True,texture_cpu_metadata_released=True,managed_texture_deletion_idempotent=True,render_pass_attachment_single_owner=True,lg_render_target_sample_count=1,zero_sample_ownership_fix_currently_unused_by_lg=True,delete_guard_purpose='defensive guard against deleting a possibly recycled GL name',native_pool_reclamation_hardware_measured=False))
+(O/'proof/ENGINE-R11D-DIFF.patch').write_bytes(subprocess.check_output(['git','diff','aec5590',engine,'--','src','Cargo.toml','Cargo.lock','examples'],cwd=R))
 for name in ['macroquad','miniquad']:
  folder=Path('/Users/anezium/vita-work')/('macroquad-material-r11c' if name=='macroquad' else 'miniquad-texture-r11c')
  rev=patches[name]['rev'];base='2c60f754' if name=='macroquad' else '6f89180'

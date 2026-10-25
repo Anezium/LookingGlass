@@ -1,5 +1,29 @@
 # r11 transition memory work
 
+r11d resolves the round-3 frame-one baseline and persistent-recovery blockers.
+The current branch is `vita-transition-mem-r11d-20261025`; output is the separate
+`alice-transition-mem-r11d` directory. R11c is read-only and its parked-console
+run stays unchanged. Read SOL-REPORT-R11D.md and AMENDMENT-R11D.md in the new output.
+The recovery loop is a boxed async helper allocated only on failure. Matched
+frame-one heap histograms on both maps/arms equal r11b exactly. The fork fixes
+remain: defensive deletion of possibly recycled GL names, and correct but
+currently unused zero-sample attachment ownership. LG uses sample_count=1.
+
+`setup_r11d.py OUTPUT` fingerprints r11c, copies historical documents with a
+visible correction, and fixes E2 at 30 cycles per operation/arm before execution.
+`baseline_proof.py OUTPUT --ref REV --label LABEL` uses an isolated source archive
+and an owned diagnostic target. Run for labels r11b/r11c/r11d, then run
+`path_length_control.py` and `compare_baselines.py`. `validate_r11b.py OUTPUT`
+now requires an uninstrumented final executable, checks the final baseline,
+tests persistent screen/Enter/Escape/save integrity and reruns all earlier suites.
+Never extend E2 after failure. `--resume` is valid only for the identical binary.
+
+Finalize with `finalize_r11c.py`, `clean_host_build.py`, `seal.py`, the loose/ZIP
+offline rehearsals without `python -I`, `package_lessons_r11d.py`,
+`cleanup_r11d.py`, `verify.py`, `write_report_r11d.py` and `verify_seal.py`.
+Session directories must remain absent. No console or shot-driver access is
+authorized during preparation. Older instructions below are historical.
+
 r11c supersedes r11b. The output is `alice-transition-mem-r11c` beside the
 original package. Read SOL-REPORT-R11C.md and AMENDMENT-R11C.md there. Source
 changes to Macroquad/Miniquad now live in pinned Anezium forks; vendor/ is gone.
