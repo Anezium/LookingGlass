@@ -1510,8 +1510,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             escape_menu.post_game = false;
             true
         } else { false };
-        let new_campaign_transition = new_game_requested.is_some();
+        let mut new_campaign_memory = None;
         if let Some(difficulty) = new_game_requested.take() {
+            // The opening movie belongs to this operation too. Keep its bounded
+            // decode/upload allocations inside the same before/peak/after bracket.
+            new_campaign_memory = Some(crate::transition_memory::Transition::begin(
+                "new-game", &maps[current], "gvillage"));
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningEnter, crate::native_timing::CINEMA));
             match crate::movie::play(
@@ -2217,8 +2221,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 #[cfg(feature = "native_timing")]
                 timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
                 let checkpoint = game_snapshot!();
-                let mut memory = crate::transition_memory::Transition::begin(
-                    if new_campaign_transition { "new-game" } else { "chapter-or-console" }, &maps[current], &maps[selected]);
+                let mut memory = if let Some(memory) = new_campaign_memory.take() { memory } else {
+                    crate::transition_memory::Transition::begin("chapter-or-console", &maps[current], &maps[selected])
+                };
                 let outgoing = unload_scene!();
                 crate::transition_memory::released().await;
                 memory.after_release();
