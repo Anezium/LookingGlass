@@ -1183,7 +1183,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 // Build into locals. A failed rebuild must not install partial
                 // resources or unwind the viewer and lose the live checkpoint.
                 let mut attempts = 0;
-                let (art, cast, mut particles, world, character) = loop {
+                // Keep the loop's Result small across its retry-screen await.
+                // Large Scene/Npcs values otherwise inflate the viewer future
+                // even during normal play, before recovery has ever run.
+                let rebuilt = loop {
                     crate::render_fx::release_scene();
                     crate::transition_memory::released().await;
                     let attempt = (|| -> Result<_> {
@@ -1203,7 +1206,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             character.restore(&$checkpoint.character)?;
                             Some(character)
                         } else { None };
-                        Ok((art, cast, particles, world, character))
+                        Ok(Box::new((art, cast, particles, world, character)))
                     })();
                     match attempt {
                         Ok(resources) => break resources,
@@ -1227,6 +1230,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         }
                     }
                 };
+                let (art, cast, mut particles, world, character) = *rebuilt;
                 particles.restore_runtime($particles);
                 level_art = art; npcs = cast; steam = particles; scene = world;
                 audio.reload_failed_transition(&mut assets, &maps[current], &scene.map);
