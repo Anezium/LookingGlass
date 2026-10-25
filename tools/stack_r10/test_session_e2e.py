@@ -3,8 +3,10 @@
 This is a synthetic session, never hardware evidence. Real helper main functions
 produce every preservation, staging, collection, audit and restoration receipt.
 --sealed-helpers replays the identical test using the archived pre-fix sources.
---main-admission requires completed real smokes and rehearses only the main
-session, using private copies of the verified smoke inputs.
+--main-admission rehearses only the main session. It takes --smoke-fixture,
+a real-shaped host fixture outside the package. Synthetic sessions are
+marked SYNTHETIC-OFFLINE-ONLY and smoke_admission refuses them. The fixture
+is not hardware evidence.
 """
 from pathlib import Path
 import argparse,contextlib,copy,hashlib,importlib.util,io,json,os,runpy,shutil,socket,subprocess,sys,tempfile,time,types,zipfile
@@ -22,16 +24,11 @@ def load(name,path):
 def check_session_vacancy(package,main_admission=False):
  root=package/'session-s10-stack'
  smoke=package/'session-s10-stack-load-smoke'
- if not main_admission and os.path.lexists(smoke):raise FileExistsError('Smoke session path already exists')
+ if os.path.lexists(smoke):raise FileExistsError('Smoke session path already exists')
  if os.path.lexists(root):
   raise FileExistsError(f'Pre-admission package check: {root} already exists; archive blocked evidence before creating a fresh session')
- print('PASS pre-admission package check: real session-s10-stack path is absent')
- if main_admission:
-  if not smoke.is_dir():raise FileNotFoundError('Completed smoke session is required before main admission')
-  verifier=load('offline_smoke_admission',package/'console/smoke_admission.py')
-  receipt=verifier.inspect(package,smoke)
-  print('PASS real smoke admission: both B-only smokes, exact SELF/save hashes, PASS_ORIGINAL_STATE_VERIFIED')
-  return receipt
+ print('PASS pre-admission package check: real session paths are absent')
+ return None
 
 def copy_smoke_inputs(receipt,source,destination):
  """Copy only verified inputs; tamper fixtures must never write real evidence."""
@@ -41,6 +38,43 @@ def copy_smoke_inputs(receipt,source,destination):
   target=destination/relative;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,target)
   assert sha(target.read_bytes())==row['sha256'],'Smoke input changed while copying'
  return destination
+
+def stamp_synthetic(root):
+ """Mark an offline session so smoke_admission cannot treat it as console evidence."""
+ root=Path(root)
+ (root/'SYNTHETIC-OFFLINE-ONLY').write_text('synthetic offline session; smoke_admission refuses this marker\n')
+ for path in [root/'SESSION.json',root/'RESTORE-FINAL.json',*sorted(root.glob('*/AUDIT.json'))]:
+  if path.is_file():
+   value=json.loads(path.read_text());value['synthetic_offline_only']=True;write(path,value)
+
+def shape_real_smoke(src,dest):
+ """Host fixture with the provenance a real admission records. Not hardware evidence."""
+ import uuid
+ src,dest=Path(src),Path(dest)
+ if dest.exists():shutil.rmtree(dest)
+ shutil.copytree(src,dest)
+ marker=dest/'SYNTHETIC-OFFLINE-ONLY'
+ if marker.exists():marker.unlink()
+ for path in [dest/'SESSION.json',dest/'RESTORE-FINAL.json',*sorted(dest.glob('*/AUDIT.json'))]:
+  if path.is_file():
+   value=json.loads(path.read_text());value.pop('synthetic_offline_only',None);write(path,value)
+ rows=[]
+ for n in range(2):
+  name='20261025-12000'+str(n)+'-'+str(uuid.uuid4())+'.json'
+  rows.append(dict(request_id=name,response_id=name,name='vita_launch'))
+ (dest/'driver-ids.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+ ledgers=[path for path in dest.rglob('*ledger.json') if path.is_file()]
+ assert ledgers,'shaped smoke has no FTP ledger'
+ for ledger in ledgers:
+  Path(str(ledger)+'.ftp.jsonl').write_text(json.dumps(dict(event='connected',host='192.168.1.23',port=1337))+'\n')
+ blob=b'real-shaped device inventory'
+ local=dest/'originals'/'device-inventory.bin';local.parent.mkdir(parents=True,exist_ok=True);local.write_bytes(blob)
+ write(dest/'originals'/'manifest.json',[dict(path='ux0:/data/alice/private/inventory',local='device-inventory.bin',sha256=sha(blob),bytes=len(blob))])
+ admitted=json.loads((dest/'DRIVER-ADMISSION.json').read_text())
+ ready=json.loads((dest/'DRIVER-READY.json').read_text()) if (dest/'DRIVER-READY.json').is_file() else {}
+ for key in ('pid','started','fixed_expiry'):ready[key]=admitted[key]
+ write(dest/'DRIVER-READY.json',ready)
+ return dest
 
 def exercise(source,work,sealed=None,evidence=None,include_optional=False,smoke=False,smoke_root=None):
  package=work/'package';root=package/('session-s10-stack-load-smoke' if smoke else 'session-s10-stack');root.mkdir(parents=True)
@@ -217,6 +251,7 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,smoke=
      assert error.code in (None,0),(name,error.code)
   call('bind_helpers.py','--root',root,'--package',package)
   assert json.loads((root/'HELPER-BINDING.json').read_text())['status']=='PASS'
+  (root/'SYNTHETIC-OFFLINE-ONLY').write_text('synthetic offline session; smoke_admission refuses this marker\n')
   call('verify-human-entry.py');call('preserve.py')
   if not smoke:
    assert smoke_root is not None
@@ -294,6 +329,8 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,smoke=
    assert len(result['maps'])==2
    assert result['status']=='NO_PROMOTION'
    assert [v['wall_gate']['status'] for v in result['maps']]==['REGRESSION','NO_CONFIRMED_BENEFIT']
+   pandemonium=next(v for v in result['maps'] if v['map']=='pandemonium')
+   assert pandemonium['wall_gate']['pandemonium_descriptive_below_minus_1ms']=='NOT_BOTH_BELOW_MINUS_1MS'
    assert all(v['heap_windows'][0]['benchmark']['sampled_max_MiB']==149 for v in result['maps'])
    assert [len(v['optional_census'])for v in result['maps']]==([0,2] if include_optional else [0,0])
    print('PASS both-map wall gate and benchmark heap report; census off in all gate runs')
@@ -311,37 +348,57 @@ def exercise(source,work,sealed=None,evidence=None,include_optional=False,smoke=
     value=json.loads((root/name).read_text());write(evidence/name,dict(synthetic_offline_only=True,real_device_evidence=False,receipt=value))
    if not smoke:(evidence/'RESULTS.md').write_text('# SYNTHETIC OFFLINE FIXTURE — NOT HARDWARE RESULTS\n\n'+md)
   print('PASS final restoration: PASS_ORIGINAL_STATE_VERIFIED; all ledgers, SELF, saves, configs, exports and inventories')
+  stamp_synthetic(root)
   return dict(smoke_root=str(root),status='PASS',synthetic_offline_only=True,real_transport_imported=False,device_contact=False,driver_contact=False,
    maps=sorted({e['map'] for e in seq}),labels=[e['label'] for e in seq],launches=expected_launches,self_stages=1,small_stages=len(stages)-1,
    serialized_fake_ftp_maximum=maximum,driver_fake_calls=len(driver_calls),fake_transfer_operations=len(transfers),
    final_status=final['status'],full_restoration=True,engine_source_revision=receipt['engine_source_revision'],branch_head=receipt['branch_head'])
 
 def main():
- parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--main-admission',action='store_true');parser.add_argument('--include-optional',action='store_true',default=True,help='Legacy flag; both diagnostic census arms are always required');parser.add_argument('--sealed-helpers',type=Path);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--evidence-dir',type=Path);parser.add_argument('--retain-smoke',type=Path);args=parser.parse_args()
+ parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--main-admission',action='store_true');parser.add_argument('--include-optional',action='store_true',default=True,help='Legacy flag; both diagnostic census arms are always required');parser.add_argument('--sealed-helpers',type=Path);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--evidence-dir',type=Path);parser.add_argument('--smoke-fixture',type=Path);parser.add_argument('--export-shaped-smoke',type=Path);args=parser.parse_args()
  package=args.package.resolve()
- for output in [args.output,args.evidence_dir]:
-  if output is not None and output.resolve().is_relative_to(package):parser.error('Output and evidence must stay outside the source package')
+ for output in [args.output,args.evidence_dir,args.export_shaped_smoke,args.smoke_fixture]:
+  if output is not None and output.resolve().is_relative_to(package):parser.error('Output, evidence and smoke fixtures must stay outside the source package')
  if args.main_admission and args.sealed_helpers:parser.error('--main-admission cannot replay obsolete sealed helpers')
+ if args.main_admission and args.smoke_fixture is None:parser.error('--main-admission requires --smoke-fixture outside the package')
  result=None
  try:
-  smoke_receipt=check_session_vacancy(package,args.main_admission)
+  check_session_vacancy(package,args.main_admission)
   with tempfile.TemporaryDirectory(prefix='alice-r8-e2e-') as directory:
    work=Path(directory)
+   verifier=load('offline_smoke_admission',package/'console/smoke_admission.py')
    if args.main_admission:
-    smoke_root=copy_smoke_inputs(smoke_receipt,package/'session-s10-stack-load-smoke',work/'verified-smoke-copy')
+    fixture=args.smoke_fixture.resolve()
+    if not fixture.is_dir():raise FileNotFoundError('Completed smoke fixture is required before main admission')
+    smoke_receipt=verifier.inspect(package,fixture)
+    smoke_root=copy_smoke_inputs(smoke_receipt,fixture,work/'verified-smoke-copy')
+    print('PASS smoke fixture admission: host fixture outside the package, not hardware evidence')
    else:
     smoke_result=exercise(package,work/'smoke',args.sealed_helpers,args.evidence_dir/'smoke' if args.evidence_dir else None,smoke=True)
-    smoke_root=Path(smoke_result['smoke_root'])
-    if args.retain_smoke:
-     dest=args.retain_smoke.resolve()
-     if dest.is_relative_to(package) or dest.exists():parser.error('Smoke retain destination must be a new directory outside the package')
-     shutil.copytree(smoke_root,dest)
+    try:verifier.inspect(package,smoke_result['smoke_root'])
+    except AssertionError as error:
+     assert 'synthetic' in str(error).lower(),error
+    else:raise AssertionError('synthetic smoke was admitted')
+    shaped=shape_real_smoke(smoke_result['smoke_root'],work/'real-shaped-smoke')
+    smoke_receipt=verifier.inspect(package,shaped)
+    assert smoke_receipt['synthetic_offline_only'] is False and smoke_receipt['pandemonium_benchmark_heap_is_smoke_gate'] is False
+    assert isinstance(smoke_receipt['heap_benchmark_plateau_MiB']['hedge3'],(int,float))
+    if args.export_shaped_smoke:
+     dest=args.export_shaped_smoke.resolve()
+     if dest.exists():parser.error('Shaped smoke export must be a new directory')
+     shutil.copytree(shaped,dest)
+    smoke_root=shaped
+    print('PASS synthetic smoke refused; real-shaped host fixture admitted outside the package')
    result=exercise(package,work/'main',args.sealed_helpers,args.evidence_dir,args.include_optional,smoke_root=smoke_root)
-   if args.main_admission:result['real_smoke_admission']=smoke_receipt
+   result['smoke_fixture_admission']=smoke_receipt
+   result['hardware_smoke']=False
+   result['smoke_fixture']='real-shaped host fixture outside the package; not a console session'
+   result['r10_real_smoke_admission_was_synthetic']=True
+   if args.main_admission:result['real_smoke_inputs_unchanged']=True
    else:result['smoke_session']=smoke_result
+   assert 'real_smoke_admission' not in result
   after=check_session_vacancy(package,args.main_admission)
-  assert after==smoke_receipt,'Real smoke evidence changed during offline rehearsal'
-  if args.main_admission:result['real_smoke_inputs_unchanged']=True
+  assert after is None
   result['mode']='main-admission' if args.main_admission else 'full'
   result['real_package_session_path_absent']=True
  except Exception as error:

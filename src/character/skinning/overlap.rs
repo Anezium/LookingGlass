@@ -53,9 +53,17 @@ static SERIAL_FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 pub(crate) fn note_serial_fallback() -> u64 {
     SERIAL_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
-#[cfg(test)]
 pub(crate) fn serial_fallbacks() -> u64 {
     SERIAL_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+#[derive(Clone)]
+pub(crate) struct OwnedSkin {
+    pub pose: Vec<Transform>,
+    pub scales: Vec<f32>,
+    pub transform: Transform,
+    pub scale: f32,
+    pub fullbright: bool,
+    pub alpha: f32,
 }
 /// Replay this skeleton's last gathered draw through the serial kernel.
 /// That kernel is the reference a missed consumer declaration was protecting.
@@ -92,6 +100,63 @@ pub(crate) fn restore_serial_live(skeleton: &Skeleton, meshes: &mut [Option<Mesh
         }
         restored
     })
+}
+/// Serial kernel for one pose. Used when this frame gathered no draw for the model.
+pub(crate) fn serial_skin_current(
+    skeleton: &Skeleton,
+    meshes: &mut [Option<Mesh>],
+    pose: &[Transform],
+    scales: &[f32],
+    transform: Transform,
+    scale: f32,
+    fullbright: bool,
+    alpha: f32,
+) -> bool {
+    #[cfg(feature = "vita_renderer")]
+    let use_palette = crate::render::vita_renderer::config().bone_palette;
+    #[cfg(not(feature = "vita_renderer"))]
+    let use_palette = false;
+    #[cfg(feature = "vita_renderer")]
+    let flat_cfg = crate::render::vita_renderer::config().flat_actor_light;
+    #[cfg(not(feature = "vita_renderer"))]
+    let flat_cfg = false;
+    let (_cull, flat) = super::visual_options(false, flat_cfg, meshes);
+    let mut wrote = false;
+    super::with_palette(use_palette, pose, scales, |palette| {
+        let params = super::Params {
+            pose, scales, palette, transform, scale, flat, fullbright, alpha,
+        };
+        for (surface, mesh) in skeleton.surfaces.iter().zip(meshes.iter_mut()) {
+            let Some(mesh) = mesh else { continue };
+            super::kernel(&mut super::Job {
+                input: &surface.vertices,
+                vertices: &mut mesh.vertices,
+                indices: &mesh.indices,
+            }, params);
+            wrote = true;
+        }
+    });
+    wrote
+}
+/// Release path for an undeclared live read. Replays this frame's gathered draw
+/// when one exists, otherwise skins the supplied current pose. Either way the
+/// mesh is the serial kernel's output, and the counter moves by one.
+pub(crate) fn release_serial_fallback(
+    skeleton: &Skeleton,
+    meshes: &mut [Option<Mesh>],
+    current: &OwnedSkin,
+) -> bool {
+    let gathered = restore_serial_live(skeleton, meshes);
+    let restored = if gathered {
+        true
+    } else {
+        serial_skin_current(skeleton, meshes, &current.pose, &current.scales,
+            current.transform, current.scale, current.fullbright, current.alpha)
+    };
+    let count = note_serial_fallback();
+    let source = if gathered { "gathered_draw" } else { "current_pose" };
+    eprintln!("[lg/skin] serial fallback count={count} restored={restored} source={source} reason=live skin read without a consumer declaration before body preparation");
+    restored
 }
 #[derive(Clone)]
 struct Surface {
@@ -1309,5 +1374,86 @@ mod tests {
         let before = serial_fallbacks();
         let after = note_serial_fallback();
         assert!(after > before);
+    }
+    #[test]
+    fn release_fallback_skins_the_current_pose_when_no_draw_was_gathered() {
+        let (skeleton, mut meshes, pose) = fixture();
+        let p = params(&pose);
+        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh {
+            vertices: mesh.vertices.clone(),
+            indices: mesh.indices.clone(),
+            texture: None,
+        })).collect();
+        for (surface, mesh) in skeleton.surfaces.iter().zip(reference.iter_mut().flatten()) {
+            super::super::kernel(&mut super::super::Job {
+                input: &surface.vertices,
+                vertices: &mut mesh.vertices,
+                indices: &mesh.indices,
+            }, p);
+        }
+        for mesh in meshes.iter_mut().flatten() {
+            for vertex in &mut mesh.vertices {
+                vertex.position = Vec3::splat(99.);
+                vertex.normal = Vec4::ZERO;
+                vertex.color = [0; 4];
+            }
+        }
+        assert!(!gathering());
+        assert!(!restore_serial_live(&skeleton, &mut meshes));
+        let current = OwnedSkin {
+            pose: pose.clone(),
+            scales: Vec::new(),
+            transform: p.transform,
+            scale: p.scale,
+            fullbright: p.fullbright,
+            alpha: p.alpha,
+        };
+        let before = serial_fallbacks();
+        assert!(release_serial_fallback(&skeleton, &mut meshes, &current));
+        assert!(serial_fallbacks() > before);
+        for (expected, actual) in reference.iter().flatten().zip(meshes.iter().flatten()) {
+            for (left, right) in expected.vertices.iter().zip(&actual.vertices) {
+                assert_eq!(left.position.to_array().map(f32::to_bits), right.position.to_array().map(f32::to_bits));
+                assert_eq!(left.normal.to_array().map(f32::to_bits), right.normal.to_array().map(f32::to_bits));
+                assert_eq!(left.color, right.color);
+            }
+        }
+    }
+    #[test]
+    fn release_fallback_prefers_this_frames_gathered_draw() {
+        let (skeleton, mut meshes, pose) = fixture();
+        let gathered = params(&pose);
+        let other = Transform { translation: vec3(4., 5., 6.), rotation: Quat::from_rotation_z(1.2) };
+        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh {
+            vertices: mesh.vertices.clone(), indices: mesh.indices.clone(), texture: None,
+        })).collect();
+        for (surface, mesh) in skeleton.surfaces.iter().zip(reference.iter_mut().flatten()) {
+            super::super::kernel(&mut super::super::Job {
+                input: &surface.vertices, vertices: &mut mesh.vertices, indices: &mesh.indices,
+            }, gathered);
+        }
+        for mesh in meshes.iter_mut().flatten() {
+            for vertex in &mut mesh.vertices { vertex.position = Vec3::splat(99.); }
+        }
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                PHASE.with(|phase| phase.set(Phase::Idle));
+                STORE.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _guard = Guard;
+        PHASE.with(|phase| phase.set(Phase::Gather));
+        STORE.with(|slot| *slot.borrow_mut() = Some(Store::new(1, false)));
+        STORE.with(|slot| slot.borrow_mut().as_mut().unwrap().capture(&skeleton, &meshes, gathered, true));
+        let current = OwnedSkin {
+            pose: vec![other], scales: Vec::new(), transform: other, scale: 3., fullbright: true, alpha: 0.2,
+        };
+        assert!(release_serial_fallback(&skeleton, &mut meshes, &current));
+        for (expected, actual) in reference.iter().flatten().zip(meshes.iter().flatten()) {
+            for (left, right) in expected.vertices.iter().zip(&actual.vertices) {
+                assert_eq!(left.position.to_array().map(f32::to_bits), right.position.to_array().map(f32::to_bits));
+            }
+        }
     }
 }

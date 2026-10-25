@@ -175,7 +175,8 @@ pub(crate) fn export(map: &str) -> anyhow::Result<()> {
             writeln!(doors,"frame_first,frame_last,frames,hatter_door_world_traces,hatter_door_own_traces,hatter_door_trace_pairs_deferred")?;
             writeln!(doors,"1,60,60,,,")?; writeln!(doors,"61,120,60,,,")?; doors.flush()?;
             crate::phase_census::export(map)?;
-            println!("[lg/frame-total] measured=120 gl_hooks=0 phase_timers=0 clock=begin-to-begin");
+            let serial_fallbacks=crate::character::skinning::overlap::serial_fallbacks();
+            println!("[lg/frame-total] measured=120 gl_hooks=0 phase_timers=0 clock=begin-to-begin serial_fallbacks={serial_fallbacks}");
             Ok(())
     }
     #[cfg(not(target_os="vita"))]

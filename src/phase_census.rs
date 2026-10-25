@@ -49,6 +49,7 @@ struct Row {
     sweeps: [u32; 5], sweep_ns: [u64; 5], acoustic_sweeps: u32, acoustic_sweep_ns: u64,
     static_ns:[u64;5], static_counts:[[u64;7];5],
     cache: [[u32; 3]; 3], queries: [[u32; 4]; 3], evictions: u32, errors: u32,
+    serial_fallbacks: u64,
 }
 impl Row {
     const ZERO: Self = Self { sequence: 0, measured: false, total: 0, coverage: 0,
@@ -56,7 +57,7 @@ impl Row {
         inclusive: [0;REGIONS], exclusive: [0;REGIONS], calls: [0;REGIONS], parents: [0;REGIONS],
         sweeps:[0;5], sweep_ns:[0;5], acoustic_sweeps:0, acoustic_sweep_ns:0,
         static_ns:[0;5],static_counts:[[0;7];5],
-        cache:[[0;3];3], queries:[[0;4];3], evictions:0, errors:0 };
+        cache:[[0;3];3], queries:[[0;4];3], evictions:0, errors:0, serial_fallbacks:0 };
 }
 #[derive(Clone, Copy)]
 struct Entry { scene: usize, bits: [u32;6], last: u64, prior: u64 }
@@ -67,12 +68,13 @@ struct State {
     owner: Owner, sweep_depth: usize, scene: usize, query_class: usize,
     stack: [usize;DEPTH], children: [u64;DEPTH], depth: usize,
     table: [Entry;TABLE],
+    serial_fallback_base: u64,
 }
 impl State {
     #[cfg(test)]
     const fn new() -> Self { Self { rows:[Row::ZERO;CAPACITY],current:Row::ZERO,count:0,accepted:0,
         start:None,pending:false,overflow:false,sequence:0,owner:Owner::Other,sweep_depth:0,scene:0,query_class:0,
-        stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE] } }
+        stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE],serial_fallback_base:0 } }
     fn boxed() -> Box<Self> {
         // Initialize bounded storage once, before gameplay. A full const State
         // would embed the enlarged actor rows in the native ELF's initializer.
@@ -97,6 +99,7 @@ impl State {
             std::ptr::addr_of_mut!((*p).children).write_bytes(0,1);
             std::ptr::addr_of_mut!((*p).depth).write(0);
             std::ptr::addr_of_mut!((*p).table).write_bytes(0,1);
+            std::ptr::addr_of_mut!((*p).serial_fallback_base).write(0);
             storage.assume_init()
         }
     }
@@ -104,6 +107,8 @@ impl State {
         if let Some(start) = self.start {
             if self.pending {
                 self.current.total=now.duration_since(start).as_nanos() as u64;
+                self.current.serial_fallbacks=crate::character::skinning::overlap::serial_fallbacks()
+                    .saturating_sub(self.serial_fallback_base);
                 if self.depth != 0 || self.sweep_depth != 0 { self.current.errors += 1; }
                 if self.count < CAPACITY {self.rows[self.count]=self.current;self.count+=1;} else {self.overflow=true;}
             }
@@ -166,7 +171,8 @@ fn begin(enabled:bool) {
     let now=Instant::now();
     STATE.with(|s| {let mut s=s.borrow_mut();s.close(now);s.sequence+=1;
         s.current=Row{sequence:s.sequence,..Row::ZERO};s.start=Some(now);s.owner=Owner::Other;
-        s.depth=0;s.sweep_depth=0;});
+        s.depth=0;s.sweep_depth=0;
+        s.serial_fallback_base=crate::character::skinning::overlap::serial_fallbacks();});
 }
 pub(crate) fn accept(accepted:bool,measured:bool) {
     if !active() {return;}
@@ -283,12 +289,15 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "static_cache_hit_miss_eviction":r.cache,
         "live_table_evictions":r.evictions,"hierarchy_errors":r.errors,
         "actors":&r.actors[..r.actor_count],"worker_skin_ns":r.worker_skin_ns,
+        "serial_fallbacks":r.serial_fallbacks,
     })).collect();
+    let serial_fallbacks:u64=s.rows[..s.count].iter().map(|r|r.serial_fallbacks).sum();
     let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
     serde_json::to_writer(&mut *out,&serde_json::json!({"schema":3,"actor_capacity":ACTORS,"serial_reasons":REASONS,
         "audio_static_cache":audio_static_cache,"map":map,"regions":NAMES,"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
+        "serial_fallbacks":serial_fallbacks,
         "parent_mask_frame_bit":REGIONS,"clock":"monotonic elapsed nanoseconds; includes preemption and API waits; no GPU timing",
         "residual":"frame_total minus union of root brackets; nested inclusive values must never be summed",
         "query_rule":"exact scene and endpoint bits; previous 1/4/16 attempted frames, excluding same-frame-only repeats; live evictions make hit opportunity a lower bound",
@@ -351,6 +360,7 @@ mod tests {
             let v:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["rows"][60]["measured_frame"],1);assert_eq!(v["rows"][179]["measured_frame"],120);
             assert_eq!(v["schema"],3);assert_eq!(v["audio_static_cache"],false);
+            assert_eq!(v["serial_fallbacks"],0);assert_eq!(v["rows"][0]["serial_fallbacks"],0);
             assert_eq!(v["regions"].as_array().unwrap().len(),NAMES.len());
             assert_eq!(v["actor_capacity"],ACTORS);assert!(v.get("static_count_columns").is_some());
             s.overflow=true;assert!(write(&s,"fixture",&mut Vec::new()).is_err());});begin(false);

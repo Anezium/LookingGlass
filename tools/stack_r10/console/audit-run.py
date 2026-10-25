@@ -97,13 +97,18 @@ def audit(label,root=r,package=None,protocol=None):
  doors=list(csv.DictReader(Path(coll['files'][1]['local']).open()))
  assert [(d['frame_first'],d['frame_last'],d['frames']) for d in doors]==[('1','60','60'),('61','120','60')]
  assert all(d[k]=='' for d in doors for k in ('hatter_door_world_traces','hatter_door_own_traces','hatter_door_trace_pairs_deferred'))
+ fallback_lines=[line for line in t.splitlines() if '[lg/skin] serial fallback' in line or 'afterimage consumer must be declared' in line]
+ assert not fallback_lines, fallback_lines
+ for line in t.splitlines():
+  if line.startswith('[lg/frame-total]') and 'serial_fallbacks=' in line:
+   assert int(line.split('serial_fallbacks=',1)[1].split()[0])==0, line
  reasons=health_text(t,A=arm_for_label(label,protocol)=='A');assert not reasons,reasons
  audio_bench=audio(bench)
  assert all(v>0 for v in audio_bench['window_counts'].values()),'Missing benchmark audio counters'
  phases=[k+'_cpu_us' for k in ['world_opaque','world_alpha','actors','fx','hud','present']]
  offmain=[l for l in t.splitlines() if '[lg/audio-offmain]' in l]
  offmain_audit=audit_offmain(t,entry)
- result=dict(status='PASS',observer_checks=observer_checks,gl_observers=availability['gl_observers'],unavailable_fields=availability['unavailable_fields'],timing_gate_field='wall_us',map=mapname,runtime_config_matches_readback=True,actual_config=configs[0],actual_clocks_MHz=[444,222,222,166],retained=True,complete_benchmark=True,clean_exit=True,fields_ms={k:stats(None if x[k] is None else x[k]/1000 for x in rows) for k in rows[0] if k.endswith('_us')},six_render_phases_ms=stats(None if any(x[k] is None for k in phases) else sum(x[k] for k in phases)/1000 for x in rows),counter_stats={k:stats(x[k] for x in rows) for k in rows[0] if not k.endswith('_us') and k not in ['frame','gl_observers']},doors=list(csv.DictReader(Path(coll['files'][1]['local']).open())),audio=dict(entry_loading_information_only=audio(before),benchmark_including_warmup=audio_bench,shutdown_information=audio(after)),offmain_lines=offmain,offmain_audit=offmain_audit,memory_samples=[kv(l) for l in t.splitlines() if '[miniquad/vita] memory reason=' in l],heap_readout=heap_readout(run),camera_lines=[l for l in t.splitlines() if 'camera_eye=' in l or 'bench: camera frozen' in l],world_age='unavailable',complete_NPC_state='unavailable',listening='unavailable',continuous_loading_peak='not measured; sampled receipts only')
+ result=dict(status='PASS',serial_fallbacks=0,observer_checks=observer_checks,gl_observers=availability['gl_observers'],unavailable_fields=availability['unavailable_fields'],timing_gate_field='wall_us',map=mapname,runtime_config_matches_readback=True,actual_config=configs[0],actual_clocks_MHz=[444,222,222,166],retained=True,complete_benchmark=True,clean_exit=True,fields_ms={k:stats(None if x[k] is None else x[k]/1000 for x in rows) for k in rows[0] if k.endswith('_us')},six_render_phases_ms=stats(None if any(x[k] is None for k in phases) else sum(x[k] for k in phases)/1000 for x in rows),counter_stats={k:stats(x[k] for x in rows) for k in rows[0] if not k.endswith('_us') and k not in ['frame','gl_observers']},doors=list(csv.DictReader(Path(coll['files'][1]['local']).open())),audio=dict(entry_loading_information_only=audio(before),benchmark_including_warmup=audio_bench,shutdown_information=audio(after)),offmain_lines=offmain,offmain_audit=offmain_audit,memory_samples=[kv(l) for l in t.splitlines() if '[miniquad/vita] memory reason=' in l],heap_readout=heap_readout(run),camera_lines=[l for l in t.splitlines() if 'camera_eye=' in l or 'bench: camera frozen' in l],world_age='unavailable',complete_NPC_state='unavailable',listening='unavailable',continuous_loading_peak='not measured; sampled receipts only')
  (run/'AUDIT.json').write_text(json.dumps(result,indent=2)+'\n')
  print(label,'PASS wall ms',result['fields_ms']['wall_us'])
  return result

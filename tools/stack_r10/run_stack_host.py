@@ -10,22 +10,34 @@ with (O/'logs/host-build.log').open('w') as f:subprocess.run(cmd,cwd=R,env=env,s
 binary=O/'host/probe-bin';binary.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(Path(env['CARGO_TARGET_DIR'])/'release/looking-glass',binary)
 base=json.loads((R/'tools/lever_matrix_r4/configs/PL-baseline.json').read_text())
 base.update(audio_music_thread=False,phase_census=False,profile_capture=False,audio_static_cache=False,collision_sah=False,skin_actual_consumers=False)
+
+def refuse_fallback(log, where):
+    bad=[line for line in log.splitlines() if '[lg/skin] serial fallback' in line or 'afterimage consumer must be declared' in line]
+    assert not bad, (where, bad[:3])
 keys=['state_sha256','selected_lights_bits','joint_alpha_order','blend_world_order','npc_decisions']
 proof={};receipts=[]
 for name,dt,frames in [('hedge3','0.060',1),('hedge3','0.060',180),('pandemonium','0.04184',180)]:
     rows=[]
     for arm,on in [('A',False),('B',True)]:
         run=O/'host'/f'{name}-{frames}-{arm}';(run/'private').mkdir(parents=True,exist_ok=True)
-        cfg=dict(base,audio_static_cache=on,collision_sah=on,skin_actual_consumers=on)
+        cfg=dict(base,audio_static_cache=on,collision_sah=on,skin_actual_consumers=on,phase_census=frames>1)
         write(run/'private/vita_renderer.json',cfg)
-        e=dict(env,LOOKING_GLASS_SIM_MAPS_PROBE='1',LOOKING_GLASS_SIM_MAPS_DT=dt)
-        argv=[str(binary),'--data','/Users/anezium/vita-work/alice-data/Alice1/bin/base','--map',name,'--no-audio','--frames',str(frames),'--save-dir',str(run/'private/saves')]
+        e=dict(env,LOOKING_GLASS_SIM_MAPS_PROBE='1',LOOKING_GLASS_SIM_MAPS_DT=dt,LOOKING_GLASS_SAH_SILENT_AUDIO='1')
+        argv=[str(binary),'--data','/Users/anezium/vita-work/alice-data/Alice1/bin/base','--map',name,'--frames',str(frames),'--save-dir',str(run/'private/saves')]
         if frames>1:argv+=['--capture',str(run/'frame.png')]
         start=time.monotonic()
         with (run/'run.log').open('w') as f:result=subprocess.run(argv,cwd=run,env=e,stdout=f,stderr=subprocess.STDOUT,timeout=900)
         log=(run/'run.log').read_text(errors='replace')
+        refuse_fallback(log,(name,arm,frames))
         loads=[line for line in log.splitlines() if line.startswith('COLLISION_SAH_LOAD ')]
-        receipts.append(dict(map=name,frames=frames,arm=arm,exit_code=result.returncode,seconds=time.monotonic()-start,sah_loads=loads,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest()))
+        cache_totals=None
+        if frames>1:
+            census=json.loads((run/f'{name}-census-180.json').read_text())
+            cache_totals=sum(n for row in census['rows'] for triple in row['static_cache_hit_miss_eviction'] for n in triple)
+            assert census.get('serial_fallbacks',0)==0,(name,arm,census.get('serial_fallbacks'))
+            if on:assert cache_totals>0,(name,'acoustic cache was not exercised')
+            else:assert cache_totals==0,(name,cache_totals)
+        receipts.append(dict(map=name,frames=frames,arm=arm,exit_code=result.returncode,seconds=time.monotonic()-start,sah_loads=loads,serial_fallbacks=0,static_cache_hit_miss_eviction=cache_totals,audio='LOOKING_GLASS_SAH_SILENT_AUDIO',binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest()))
         write(O/'proof/HOST-STACK-RUNS.json',receipts)
         assert result.returncode==0,(name,arm,frames)
         if on:
@@ -43,6 +55,6 @@ for name,dt,frames in [('hedge3','0.060',1),('hedge3','0.060',180),('pandemonium
         print(name,frames,arm,'PASS',loads,flush=True)
     if frames==180:
         assert all(all(a[k]==b[k] for k in keys) for a,b in zip(*rows)),name
-        proof[name]=dict(frames=180,all_equal=True,fields=keys,switches=['audio_static_cache','collision_sah','skin_actual_consumers'])
+        proof[name]=dict(frames=180,all_equal=True,fields=keys,switches=['audio_static_cache','collision_sah','skin_actual_consumers'],audio='LOOKING_GLASS_SAH_SILENT_AUDIO',serial_fallbacks=0)
         write(O/'proof/STACK-SIMULATION-EQUALITY.json',proof)
 print('PASS all-on versus all-off simulation hashes and a single Hedge3 SAH build')

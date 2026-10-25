@@ -46,6 +46,6 @@ for arm in ['baseline','stack','baseline-census','stack-census']:
         for f in m['files']:f['local']=f['local'].replace('@OUTPUT@',str(O)).replace('/packages/baseline/',f'/packages/{arm}/').replace('/PL-baseline.json',f'/PL-{arm}.json')
         (O/f'stage-{arm}-{mode}.json').write_text(json.dumps(m,indent=2)+'\n')
 (O/'stage-fullbench-mode-only.json').write_text((R/'tools/lever_matrix_r4/manifests/stage-fullbench-mode-only.json').read_text().replace('@OUTPUT@',str(O)))
-for name in ['CONTRACT.md','READING-RULES.md','CONSOLE-BRIEF.md','AMENDMENTS.md','AMENDMENTS-3.md','AMENDMENTS-R10.md','MEASUREMENT-LIMITS.md','README.md']:
+for name in ['CONTRACT.md','READING-RULES.md','CONSOLE-BRIEF.md','AMENDMENTS.md','AMENDMENTS-3.md','AMENDMENTS-R10.md','AMENDMENTS-R10C.md','REVIEW-AMENDMENTS.md','MEASUREMENT-LIMITS.md','README.md']:
     shutil.copy2(T/name,O/name)
 print('Prepared package, no session directory or transport action')

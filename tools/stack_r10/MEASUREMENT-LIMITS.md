@@ -1,5 +1,7 @@
 # Measurement limits
 
+r10c note: where this r8 text disagrees with `AMENDMENTS-R10.md` or `READING-RULES.md`, those later files win. Pandemonium heap is not a smoke gate. A missing benchmark sample is `HEAP_NOT_CONFIRMED` and does not crash the report. The smoke's 165 MiB plateau applies to Hedge3 only.
+
 The native toolchain uses IEEE scalar floating point with NEON disabled, as r6.
 Compact heap array layouts contain only f32 bounds and u32 fields: SpatialNode
 32 bytes, Certificate 28 bytes, Original 8 bytes and index 4 bytes. They contain

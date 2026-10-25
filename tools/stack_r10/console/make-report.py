@@ -3,9 +3,14 @@ from pathlib import Path
 import argparse,hashlib,json
 
 def heap_status(name,heaps):
- assert len(heaps)==4 and all(h is not None and 0<h<=180 for h in heaps)
+ """A missing benchmark sample is HEAP_NOT_CONFIRMED. It is not an assertion."""
+ if len(heaps)!=4 or any(h is None or not (0<h<=180) for h in heaps):return 'HEAP_NOT_CONFIRMED'
  delta=[heaps[1]-heaps[0],heaps[2]-heaps[3]]
  return 'HEAP_NOT_CONFIRMED' if any(d>8 for d in delta) or (name=='hedge3' and any(h>=165 for h in heaps)) else 'WITHIN_SAH_BUDGET'
+
+def heap_deltas(heaps):
+ if len(heaps)!=4 or any(h is None for h in heaps):return None
+ return [heaps[1]-heaps[0],heaps[2]-heaps[3]]
 
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--root',type=Path,required=True);p.add_argument('--package',type=Path);p.add_argument('--output',type=Path,required=True);a=p.parse_args();package=a.package or a.root.parent
@@ -18,8 +23,7 @@ def main():
   assert all(v['status']=='PASS' for v in audits)
   for e in seq:assert json.loads((a.root/e['label']/'STRICT-AUDIO.json').read_text())['status']=='PASS'
   windows=[v['heap_readout'] for v in audits];heaps=[v['benchmark']['sampled_max_MiB'] for v in windows]
-  assert all(h is not None and 0<h<=180 for h in heaps)
-  hd=[heaps[1]-heaps[0],heaps[2]-heaps[3]]
+  hd=heap_deltas(heaps)
   fields=['pcm_starved_blocks','rejected_sinks','dropped_reports','underrun_frames','underrun_estimates','underrun_estimates']
   flags={w:[any(float(row.get(k,0))>0 for rows in v['audio'][w]['raw'].values() for row in rows for k in fields) for v in audits] for w in ['entry_loading_information_only','shutdown_information']}
   regression=any((f[1] or f[2]) and not f[0] and not f[3] for f in flags.values())
@@ -50,7 +54,10 @@ def main():
  result['BENCHMARK_LATE_CALLBACKS']=late
  a.output.write_text(json.dumps(result,indent=2)+'\n')
  text=['# Alice static SAH r8 console results','',result['status'],'',protocol['pass_rule'],'']
- for m in maps:text += [m['map']+': '+m['wall_gate']['status'],str(m['wall_gate']['oriented_pair_deltas_ms'])+' ms oriented B-A',str(m['heap_oriented_differences_MiB'])+' MiB sampled benchmark heap deltas; '+m['heap_status'],m['loading_status'],'Optional census: '+json.dumps(m['optional_census']),'']
+ for m in maps:
+  text += [m['map']+': '+m['wall_gate']['status'],str(m['wall_gate']['oriented_pair_deltas_ms'])+' ms oriented B-A',str(m['heap_oriented_differences_MiB'])+' MiB sampled benchmark heap deltas; '+m['heap_status'],m['loading_status']]
+  if m['map']=='pandemonium':text.append('Pandemonium descriptive label, both deltas below -1 ms: '+str(m['wall_gate'].get('pandemonium_descriptive_below_minus_1ms')))
+  text += ['Optional census: '+json.dumps(m['optional_census']),'']
  text += ['BENCHMARK_LATE_CALLBACKS (report-only; sum of benchmark window counts):']+[label+': '+str(v['total'])+'; per window '+str(v['per_window']) for label,v in late.items()]
  a.output.with_suffix('.md').write_text('\n'.join(text)+'\n')
 if __name__=='__main__':main()

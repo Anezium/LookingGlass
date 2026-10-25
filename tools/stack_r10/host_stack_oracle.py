@@ -12,18 +12,22 @@ for m in (args.maps or ['hedge3','pandemonium']):
   cfg=dict(base,audio_static_cache=arm,collision_sah=arm,skin_actual_consumers=arm,phase_census=True)
   (d/'private/vita_renderer.json').write_text(json.dumps(cfg))
   env={k:v for k,v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
-  env.update(LOOKING_GLASS_SIM_MAPS_PROBE='1',LOOKING_GLASS_SIM_MAPS_DT=dt,LOOKING_GLASS_SIM_MAPS_COUNTERS='0',LOOKING_GLASS_SKIN_PROOF='1',LOOKING_GLASS_SKIN_MOVING_VIEW='1',LOOKING_GLASS_SKIN_DEATHS='1')
-  cmd=[str(B),'--data','/Users/anezium/vita-work/alice-data/Alice1/bin/base','--no-audio','--map',m,'--frames','180','--capture',str(d/'final.png'),'--save-dir',str(d/'private/saves')]
+  env.update(LOOKING_GLASS_SIM_MAPS_PROBE='1',LOOKING_GLASS_SIM_MAPS_DT=dt,LOOKING_GLASS_SIM_MAPS_COUNTERS='0',LOOKING_GLASS_SKIN_PROOF='1',LOOKING_GLASS_SKIN_MOVING_VIEW='1',LOOKING_GLASS_SKIN_DEATHS='1',LOOKING_GLASS_SAH_SILENT_AUDIO='1')
+  cmd=[str(B),'--data','/Users/anezium/vita-work/alice-data/Alice1/bin/base','--map',m,'--frames','180','--capture',str(d/'final.png'),'--save-dir',str(d/'private/saves')]
   with (d/'run.log').open('w') as f:proc=subprocess.run(cmd,cwd=d,env=env,stdout=f,stderr=subprocess.STDOUT,timeout=900)
   assert proc.returncode==0,(m,arm,proc.returncode)
   lines=(d/'run.log').read_text().splitlines()
+  fallback=[l for l in lines if '[lg/skin] serial fallback' in l or 'afterimage consumer must be declared' in l]
+  assert not fallback,(m,arm,fallback[:3])
   frames=[json.loads(l.split(' ',1)[1]) for l in lines if l.startswith('SIM_MAPS_FRAME ')]
   images=[json.loads(l.split(' ',1)[1]) for l in lines if l.startswith('SKIN_EXACT_IMAGE ')]
   assert len(frames)==180,(m,arm,len(frames))
   assert all(all(p['geometry']==p['gpu_geometry'] for p in f['submitted_packets']) for f in frames)
   loads=[l for l in lines if l.startswith('COLLISION_SAH_LOAD ')]
   assert loads==[] if not arm else len(loads)==1
-  row={'map':m,'arm':arm,'frames':len(frames),'images':images,'gpu_draw_readbacks':sum(len(f['submitted_packets']) for f in frames),'final_png_sha256':hashlib.sha256((d/'final.png').read_bytes()).hexdigest(),'packet_frames':frames}
+  census=json.loads((d/f'{m}-census-180.json').read_text())
+  assert census.get('serial_fallbacks',0)==0,(m,arm)
+  row={'map':m,'arm':arm,'frames':len(frames),'serial_fallbacks':0,'images':images,'gpu_draw_readbacks':sum(len(f['submitted_packets']) for f in frames),'final_png_sha256':hashlib.sha256((d/'final.png').read_bytes()).hexdigest(),'packet_frames':frames}
   arms.append(row);result['runs'].append({k:v for k,v in row.items() if k!='packet_frames'})
   print('DONE',m,arm,row['gpu_draw_readbacks'],flush=True)
  for n,(a,b) in enumerate(zip(arms[0]['packet_frames'],arms[1]['packet_frames'])):

@@ -63,6 +63,8 @@ def main():
         admitted=json.loads(a.admitted.read_text()) if a.admitted else None)
     if a.admit and not result['reasons']:
         with a.admit.open('x',encoding='utf-8') as out:out.write(json.dumps(result['driver_identity'],indent=2)+'\n')
+        ready_copy=a.admit.with_name('DRIVER-READY.json')
+        if not ready_copy.exists():ready_copy.write_text(a.driver_ready.read_text())
     print(json.dumps(result,indent=2))
     return 2 if result['reasons'] else 0
 

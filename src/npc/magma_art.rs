@@ -99,6 +99,11 @@ impl Model {
         let _skin_guard = crate::character::skinning::CullGuard::preserve(g.frozen);
         self.live_skin_current = !crate::character::skinning::overlap::single_preparing()
             || crate::character::skinning::mutable_required();
+        self.remember_skin(&pose, &[], crate::skeletal::Transform {
+            translation: g.feet, rotation: Quat::from_rotation_z(g.yaw),
+        }, self.data.def.scale * scale, fullbright, if g.form < 2 {
+            (g.cooling / 6. - g.form as f32).clamp(0., 1.)
+        } else { 1. });
         let skin_visible = crate::character::draw_skin_alpha(
             &self.data.skeleton,
             &mut self.meshes,

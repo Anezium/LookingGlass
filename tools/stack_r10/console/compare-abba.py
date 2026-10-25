@@ -38,7 +38,9 @@ def main():
     mean=sum(delta)/2
     status=classify(seq[0]['map'],delta)
     benefit=status
-    result=dict(status=status,benefit=benefit,block=args.block,map=seq[0]['map'],diagnostic=seq[1]['config_arm'],threshold_ms=1.0,arm_medians_us=values,
+    descriptive='BOTH_BELOW_MINUS_1MS' if all(d < -1000 for d in delta) else 'NOT_BOTH_BELOW_MINUS_1MS'
+    result=dict(status=status,benefit=benefit,block=args.block,map=seq[0]['map'],diagnostic=seq[1]['config_arm'],threshold_ms=1.0,
+        pandemonium_descriptive_below_minus_1ms=descriptive if seq[0]['map']=='pandemonium' else None,arm_medians_us=values,
         arm_wall_stats_ms=[x['fields_ms']['wall_us'] for x in audits],
         oriented_pair_deltas_ms=[v/1000 for v in delta],average_pair_delta_ms=mean/1000,
         oriented_pair_percent=[100*delta[0]/values[0],100*delta[1]/values[3]],

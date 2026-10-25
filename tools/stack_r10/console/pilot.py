@@ -18,6 +18,15 @@ def owner():
  assert not (ROOT/'PENDING-IMAGE.json').exists(),'Inspect and acknowledge returned image before another device action'
  assert not (ROOT/'owner-returned.json').exists(),'ROOT OWNERSHIP RETURNED'
  assert not (B/'owner-returned.json').exists(),'OWNERSHIP RETURNED: NO PORTS'
+def driver_request_file(name,args,wall_started):
+ driver=Path('/Users/anezium/vita-j0/resume-2026-10-21/timing-and-exit-followup/driver-v5')
+ candidates=[]
+ for f in driver.joinpath('driver-requests').glob('*.json'):
+  if f.stat().st_mtime<wall_started-.1:continue
+  req=json.loads(f.read_text())
+  if req.get('name')==name and req.get('arguments',{})==args:candidates.append(f)
+ assert len(candidates)==1,('driver request id is missing or ambiguous',[str(p) for p in candidates])
+ return candidates[0]
 def request(name,args={}):
  assert name in {"vita_shot","vita_cmd","vita_press","vita_launch","vita_quit"}, ("Driver-disallowed tool",name)
  owner()
@@ -29,21 +38,19 @@ def request(name,args={}):
  except json.JSONDecodeError:
   # The driver publishes a response path before its write completes. Recover
   # that exact completed request; never replay an input after an empty read.
-  driver=Path('/Users/anezium/vita-j0/resume-2026-10-21/timing-and-exit-followup/driver-v5')
-  candidates=[]
-  for f in driver.joinpath('driver-requests').glob('*.json'):
-   if f.stat().st_mtime<wall_started-.1:continue
-   req=json.loads(f.read_text())
-   if req['name']==name and req.get('arguments',{})==args:candidates.append(f)
-  assert len(candidates)==1,('Ambiguous response recovery',candidates)
-  response=driver/'driver-responses'/candidates[0].name
+  request_file=driver_request_file(name,args,wall_started)
+  response=request_file.parent.parent/'driver-responses'/request_file.name
   deadline=time.monotonic()+2
   while True:
    try:v=json.loads(response.read_text());break
    except (FileNotFoundError,json.JSONDecodeError):
     if time.monotonic()>deadline:raise
     time.sleep(.05)
-  event('response-recovery.jsonl',dict(request=str(candidates[0]),response=str(response),no_replay=True))
+  event('response-recovery.jsonl',dict(request=str(request_file),response=str(response),no_replay=True))
+ else:request_file=driver_request_file(name,args,wall_started)
+ request_id=request_file.name
+ v=dict(v,request_id=request_id,response_id=request_id)
+ event('driver-ids.jsonl',dict(request_id=request_id,response_id=request_id,name=name))
  rec('driver-responses/'+datetime.datetime.now().strftime('%H%M%S-%f')+'.json',v)
  assert not v.get('exception') and not v['result'].get('isError'),v
  event('commands.jsonl',dict(name=name,args=args,started=v.get('started'),ended=v.get('ended'),host_pre_us=pre,host_post_us=post))

@@ -719,6 +719,7 @@ struct Model {
     late_skin_overlays: bool,
     afterimage_normals: bool,
     live_skin_current: bool,
+    current_skin: Option<crate::character::skinning::overlap::OwnedSkin>,
     bone_scales: Vec<(usize, f32)>,
     frozen: Option<std::rc::Rc<crate::frozen::Art>>,
     electric: Option<std::rc::Rc<crate::electric::Art>>,
@@ -758,7 +759,7 @@ impl Puppet {
         crate::character::skinning::CullGuard::publication_reason(
             remaining>0. && self.0.electric.is_some(),crate::phase_census::ELECTRIC)
     }
-    pub fn draw_electric(&self, remaining: f32) {
+    pub fn draw_electric(&mut self, remaining: f32) {
         self.0.draw_electric(remaining);
         self.3.bind();
     }
@@ -892,19 +893,30 @@ impl Puppet {
         if !self.0.afterimage_normals {
             eprintln!("[lg/skin] afterimage consumer must be declared at construction; serial fallback supplies the live mesh");
         }
+        let (pose, scale) = {
+            let model = &self.0;
+            let Some(animation) = model.data.clips.get(clip) else { return; };
+            (model.data.skeleton.global_pose(&animation.sample(time, true)), model.data.def.scale)
+        };
+        if !self.0.live_skin_current {
+            self.0.current_skin = Some(crate::character::skinning::overlap::OwnedSkin {
+                pose: pose.clone(),
+                scales: Vec::new(),
+                transform,
+                scale,
+                fullbright: false,
+                alpha: 1.,
+            });
+        }
         self.0.require_live_skin();
         let d = &self.0.data;
-        let Some(animation) = d.clips.get(clip) else {
-            return;
-        };
-        let pose = d.skeleton.global_pose(&animation.sample(time, true));
         for (surface, mesh) in d.skeleton.surfaces.iter().zip(&mut self.0.meshes) {
             if surface.name.starts_with("cap_") {
                 continue;
             }
             let Some(mesh) = mesh else { continue };
             for (src, dst) in surface.vertices.iter().zip(&mut mesh.vertices) {
-                dst.position = transform.point(src.position(&pose) * d.def.scale);
+                dst.position = transform.point(src.position(&pose) * scale);
                 dst.color = [255, 255, 255, (alpha.clamp(0., 1.) * 255.) as u8];
             }
             crate::render_fx::effect(mesh, crate::materials::Blend::Alpha);
@@ -1083,14 +1095,14 @@ pub fn guard_timing(assets: &mut Assets) -> Result<Timing> {
         .context("Missing club guard clips")
 }
 impl Model {
-    fn draw_electric(&self, remaining: f32) {
+    fn draw_electric(&mut self, remaining: f32) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
         if crate::character::skinning::overlap::gather_only() { return; }
         if remaining <= 0. {
             return;
         }
+        if self.electric.is_some() && self.visible.iter().any(|v|*v) { self.require_live_skin(); }
         if let Some(art) = &self.electric {
-            if self.visible.iter().any(|v|*v) { self.require_live_skin(); }
             for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
                 if *visible {
                     if let Some(mesh) = mesh {
@@ -1106,28 +1118,45 @@ impl Model {
             }
         }
     }
-    fn require_live_skin(&self) {
+    fn remember_skin(&mut self, pose: &[crate::skeletal::Transform], scales: &[f32], transform: crate::skeletal::Transform, scale: f32, fullbright: bool, alpha: f32) {
+        if self.live_skin_current { return; }
+        self.current_skin = Some(crate::character::skinning::overlap::OwnedSkin {
+            pose: pose.to_vec(), scales: scales.to_vec(), transform, scale, fullbright, alpha,
+        });
+    }
+    #[cfg_attr(test, allow(dead_code))]
+    fn current_or_rest_skin(&self) -> crate::character::skinning::overlap::OwnedSkin {
+        if let Some(skin) = &self.current_skin { return skin.clone(); }
+        let locals = vec![crate::skeletal::Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY }; self.data.skeleton.bones.len()];
+        crate::character::skinning::overlap::OwnedSkin {
+            pose: self.data.skeleton.global_pose(&locals),
+            scales: Vec::new(),
+            transform: crate::skeletal::Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY },
+            scale: self.data.def.scale,
+            fullbright: false,
+            alpha: 1.,
+        }
+    }
+    fn require_live_skin(&mut self) {
         if self.live_skin_current { return; }
         #[cfg(any(debug_assertions, test))]
         assert_live_declared(self.live_skin_current);
         #[cfg(not(any(debug_assertions, test)))]
-        {
-            // Callers hold this shared borrow and have not yet borrowed meshes.
-            // The reskin runs on the game thread, then the caller reads the mesh.
-            #[allow(invalid_reference_casting)]
-            let model = unsafe { &mut *(self as *const Model as *mut Model) };
-            let restored = crate::character::skinning::overlap::restore_serial_live(
-                &model.data.skeleton, &mut model.meshes);
-            model.live_skin_current = restored;
-            let count = crate::character::skinning::overlap::note_serial_fallback();
-            eprintln!("[lg/skin] serial fallback count={count} restored={restored} reason=live skin read without a consumer declaration before body preparation");
-        }
+        self.release_live_fallback();
     }
-    fn draw_frozen(&self) {
+    #[cfg_attr(test, allow(dead_code))]
+    fn release_live_fallback(&mut self) {
+        let skin = self.current_or_rest_skin();
+        let restored = crate::character::skinning::overlap::release_serial_fallback(
+            &self.data.skeleton, &mut self.meshes, &skin);
+        self.live_skin_current = true;
+        let _ = restored;
+    }
+    fn draw_frozen(&mut self) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
         if crate::character::skinning::overlap::gather_only() { return; }
+        if self.frozen.is_some() && self.visible.iter().any(|v|*v) { self.require_live_skin(); }
         if let Some(art) = &self.frozen {
-            if self.visible.iter().any(|v|*v) { self.require_live_skin(); }
             for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
                 if *visible {
                     if let Some(mesh) = mesh {
@@ -1206,12 +1235,15 @@ impl Model {
             self.afterimage_normals, crate::phase_census::MUTABLE);
         self.live_skin_current = !crate::character::skinning::overlap::single_preparing()
             || crate::character::skinning::mutable_required();
+        let skin_scale = d.def.scale * scale;
+        self.remember_skin(pose, scales, transform, skin_scale, fullbright, 1.);
+        let d = &self.data;
         let skin_visible = crate::character::draw_skin_scaled(
             &d.skeleton,
             &mut self.meshes,
             &pose,
             transform,
-            d.def.scale * scale,
+            skin_scale,
             fullbright,
             &scales,
         );
@@ -1340,9 +1372,11 @@ impl Model {
         if g.frozen {
             self.draw_frozen();
         }
+        if self.electric.is_some() && g.electric > 0. && self.visible.iter().any(|v|*v) {
+            self.require_live_skin();
+        }
         if let Some(art) = &self.electric {
             if g.electric > 0. {
-                if self.visible.iter().any(|v|*v) { self.require_live_skin(); }
                 for (mesh, visible) in self.meshes.iter().zip(&self.visible) {
                     if *visible {
                         if let Some(mesh) = mesh {
@@ -1606,6 +1640,7 @@ impl Model {
             late_skin_overlays: false,
             afterimage_normals: false,
             live_skin_current: true,
+            current_skin: None,
             visible: vec![false; meshes.len()],
             bone_scales: Vec::new(),
             electric: Some(crate::electric::Art::load(assets, specs)?),

@@ -1,5 +1,7 @@
 # Static collision SAH contract
 
+r10c note: where this r8 text disagrees with `AMENDMENTS-R10.md` or `READING-RULES.md`, those later files win. `AMENDMENTS.md` is left unchanged; the same supersession is recorded in `AMENDMENTS-R10C.md`.
+
 `collision_sah=false` is the default. The option is sampled at World creation.
 The original tree and all hulls/plane slices remain immutable and unchanged.
 Enabled Worlds additionally own four compact arrays built during map load.

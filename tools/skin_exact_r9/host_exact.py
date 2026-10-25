@@ -23,13 +23,20 @@ for m,dt in work:
   with (d/'run.log').open('w') as f:proc=subprocess.run(cmd,cwd=d,env=env,stdout=f,stderr=subprocess.STDOUT,timeout=900)
   assert proc.returncode==0,(m,arm,proc.returncode,str(d/'run.log'))
   lines=(d/'run.log').read_text().splitlines()
+  fallback=[l for l in lines if '[lg/skin] serial fallback' in l or 'afterimage consumer must be declared' in l]
+  assert not fallback,(m,arm,fallback[:3])
   frames=[json.loads(l.split(' ',1)[1]) for l in lines if l.startswith('SIM_MAPS_FRAME ')]
   images=[json.loads(l.split(' ',1)[1]) for l in lines if l.startswith('SKIN_EXACT_IMAGE ')]
   assert len(frames)==(900 if args.fixtures_only else 180),(m,arm,len(frames))
   assert all(all(p['geometry']==p['gpu_geometry'] for p in f['submitted_packets']) for f in frames)
   pngs={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((d/'private/exact-frames').glob('*.png'))} if args.fixtures_only else {}
   if args.fixtures_only:assert len(pngs)==900
-  row={'png_sha256':pngs,'map':m,'arm':arm,'frames':frames,'images':images,'gpu_draw_readbacks':sum(len(f['submitted_packets']) for f in frames),'gpu_slots':sorted({p['gpu_slot'] for f in frames for p in f['submitted_packets']})}
+  row={'png_sha256':pngs,'map':m,'arm':arm,'serial_fallbacks':0,'frames':frames,'images':images,'gpu_draw_readbacks':sum(len(f['submitted_packets']) for f in frames),'gpu_slots':sorted({p['gpu_slot'] for f in frames for p in f['submitted_packets']})}
+  if not args.fixtures_only:
+   census_path=d/f'{m}-census-180.json'
+   if census_path.is_file():
+    census=json.loads(census_path.read_text())
+    if 'serial_fallbacks' in census:assert census['serial_fallbacks']==0,(m,arm)
   if not args.fixtures_only:
    census=json.loads((d/f'{m}-census-180.json').read_text());rs=census['rows'][60:]
    row['serial_vertices']=sum(a['serial_vertices'] for r in rs for a in r['actors'])/120

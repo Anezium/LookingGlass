@@ -43,7 +43,7 @@ impl Cache {
         self.ticks = 0;
         self.meshes.clear();
     }
-    pub fn capture(&mut self, model: &Model) {
+    pub fn capture(&mut self, model: &mut Model) {
         model.require_live_skin();
         if !model.visible.iter().any(|v| *v) {
             self.invalidate();
