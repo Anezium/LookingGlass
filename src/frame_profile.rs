@@ -73,8 +73,17 @@ pub(crate) fn begin_creation_frame() {
     #[cfg(feature="vita_renderer")]
     { ROUTE_PUFFS.store(0,Ordering::Relaxed); ROUTE_FX_DRAWS.store(0,Ordering::Relaxed); ROUTE_SKIN_TOTAL.store(0,Ordering::Relaxed); ROUTE_SKIN_CULLED.store(0,Ordering::Relaxed); for c in &ROUTE_GPU_STATES { c.store(0,Ordering::Relaxed); } }
 }
+/// Transition allocation censuses keep per-frame counters but do not retain
+/// timing histories: their growing Vec capacities are observer storage, not
+/// level residue. Ordinary 180-frame parity/performance probes retain history.
+#[cfg(not(target_os="vita"))]
+fn retain_host_history() -> bool {
+    static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *KEEP.get_or_init(|| std::env::var_os("LOOKING_GLASS_TRANSITION_CENSUS").is_none())
+}
 #[cfg(not(target_os="vita"))]
 pub(crate) fn end_creation_frame() {
+    if !retain_host_history() { return; }
     CREATIONS.with(|c| { let mut c=c.borrow_mut(); let current=c.current; c.frames.push(current); });
 }
 #[cfg(not(target_os="vita"))]
@@ -298,8 +307,10 @@ fn aggregate_leaves(labels: &[&'static str], values: &[f64]) {
         for (&label, &value) in labels.iter().zip(values) {
             #[cfg(feature="sim_maps_probe")]
             crate::sim_maps::probe::span(label, value);
-            let v = s.entry(label).or_default();
-            if v.len() < 10000 { v.push(value); }
+            if retain_host_history() {
+                let v = s.entry(label).or_default();
+                if v.len() < 10000 { v.push(value); }
+            }
         }
     });
 }
@@ -372,13 +383,13 @@ impl Drop for Span {
             #[cfg(target_os = "vita")]
             vita::record(self.label, self.category, self.token, ms);
             #[cfg(not(target_os = "vita"))]
-            SAMPLES.with(|s| {
+            if retain_host_history() { SAMPLES.with(|s| {
                 let mut s = s.borrow_mut();
                 let v = s.entry(self.label).or_default();
                 if v.len() < 10000 {
                     v.push(ms);
                 }
-            });
+            }); }
         }
     }
 }
