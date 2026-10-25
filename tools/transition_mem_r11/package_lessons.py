@@ -7,8 +7,11 @@ names=['CONSOLE-BRIEF.md','SOL-REPORT.md','AMENDMENT-R11.md','AMENDMENT-R11B.md'
 names += [f'configs/{n}' for n in ['PL-baseline.json','PL-stack.json','vita-sim-all.json','native-timing-disabled.json','profile_mode-full.txt']]
 names += [f'console/{n}.py' for n in ['title_safety','restore-files','restore-ledgers','restore-arm','verify-self','ack','baseline-r3','save-proof','pilot','verify-human-entry','map_identity','session','preserve','admit','operate','check-session-budget','host-log-receiver','verify-arm-self']]
 for name in names:
- before=(old/name).read_bytes();after=(O/name).read_bytes();assert before==after,name
- rows.append(dict(file=name,sha256=sha(after),byte_equal=True))
+ before=(old/name).read_bytes();after=(O/name).read_bytes()
+ if name=='console/preserve.py':
+  before=before.replace(b'vita-transition-mem-r11-20261025',b'vita-transition-mem-r11c-20261025').replace(b"package='alice-transition-mem-r11'",b"package='alice-transition-mem-r11c'")
+ assert before==after,name
+ rows.append(dict(file=name,sha256=sha(after),byte_equal_after_identity_adaptation=True,identity_only_adaptation=name=='console/preserve.py'))
 def subset(a,b,path=''):
  if isinstance(a,dict):
   for k,v in a.items():assert k in b,(path,k);subset(v,b[k],path+'/'+k)
