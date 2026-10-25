@@ -38,7 +38,9 @@ def main():
             if line.startswith('[lg/transition-memory] '):
                 try:rows.append(json.loads(line.split('] ',1)[1]))
                 except ValueError:pass
-        try:headroom=arena_headroom(text,rows)
+        try:
+            headroom=arena_headroom(text,rows)
+            headroom['arena_headroom_label']='FAIL_OR_UNKNOWN'
         except (AssertionError,KeyError,TypeError):headroom=dict(arena_headroom_bytes=None,arena_headroom_label='UNKNOWN_MISSING_EVIDENCE')
         q.rec('AUDIT-FAILURE.json',dict(status='FAIL_OR_UNKNOWN',reason=str(error),**headroom))
         raise

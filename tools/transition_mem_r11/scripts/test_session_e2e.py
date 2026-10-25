@@ -409,6 +409,9 @@ def exercise(source,work,replay):
                 bad=good.replace('"peak_heap_used": 173015040','"peak_heap_used": '+str(peak))
                 (root/label/'runtime-log.txt').write_text(bad)
                 reject('fixed transition heap budget '+str(peak),lambda:call('audit.py',label))
+                failed=json.loads((root/label/'AUDIT-FAILURE.json').read_text())
+                assert failed['status']=='FAIL_OR_UNKNOWN' and failed['arena_headroom_label']=='FAIL_OR_UNKNOWN'
+                assert isinstance(failed['arena_headroom_bytes'],int)
             (root/label/'runtime-log.txt').write_text(good.replace('"event": "end"','"event": "missing"'))
             reject('missing transition samples',lambda:call('audit.py',label))
             (root/label/'runtime-log.txt').write_text(good+'memory allocation of 3668 bytes failed\n')
