@@ -1,6 +1,8 @@
 //! Explicitly enabled gameplay qualification. No input or simulation changes.
 //! Bounded RAM recording; JSON encoding and file IO occur outside windows.
 use std::{cell::RefCell, sync::atomic::{AtomicBool, Ordering::Relaxed}, time::Instant};
+#[cfg(test)]
+use std::cell::Cell;
 use macroquad::prelude::Vec3;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +28,22 @@ impl State {
     fn us(&self)->u64 { self.epoch.elapsed().as_micros() as u64 }
 }
 thread_local! { static STATE:RefCell<State> = RefCell::new(State::new()); }
+#[cfg(test)]
+thread_local! {
+    static EXPORT_ATTEMPTS: Cell<u64> = const { Cell::new(0) };
+    static TEST_POLL_PERIOD: Cell<f32> = const { Cell::new(0.5) };
+    static TEST_IO_DIR: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+#[cfg(test)]
+fn test_io(name:&str)->Option<std::path::PathBuf> {
+    TEST_IO_DIR.with(|d| d.borrow().as_ref().map(|dir| dir.join(name)))
+}
+fn poll_period()->f32 {
+    #[cfg(test)]
+    { TEST_POLL_PERIOD.with(|p| p.get()) }
+    #[cfg(not(test))]
+    { 0.5 }
+}
 pub(crate) fn heap()->u64 {
     #[cfg(target_os="vita")]
     { #[repr(C)] struct Info { values:[usize;10] }
@@ -37,10 +55,14 @@ pub(crate) fn heap()->u64 {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Command { id:u64, action:String, label:String, #[serde(default)] check_stride:u64 }
 fn command_path()->std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(path)=test_io("cache_qual_command.json") { return path; }
     #[cfg(target_os="vita")] { "ux0:data/alice/private/cache_qual_command.json".into() }
     #[cfg(not(target_os="vita"))] { "cache_qual_command.json".into() }
 }
 fn export_path()->std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(path)=test_io("cache-qual.json") { return path; }
     #[cfg(target_os="vita")] { "ux0:data/alice/private/frame_profile/cache-qual.json".into() }
     #[cfg(not(target_os="vita"))] { "cache-qual.json".into() }
 }
@@ -49,7 +71,7 @@ fn export_path()->std::path::PathBuf {
 pub(crate) fn poll(paused:bool)->anyhow::Result<()> {
     if !enabled() || !paused { return Ok(()); }
     let due=STATE.with(|s| { let mut s=s.borrow_mut();
-        if s.poll.elapsed().as_secs_f32()<0.5 {false} else {s.poll=Instant::now();true} });
+        if s.poll.elapsed().as_secs_f32()<poll_period() {false} else {s.poll=Instant::now();true} });
     if !due {return Ok(());}
     let Ok(bytes)=std::fs::read(command_path()) else {return Ok(());};
     // An in-flight serial FTP upload may briefly expose incomplete JSON.
@@ -58,9 +80,10 @@ pub(crate) fn poll(paused:bool)->anyhow::Result<()> {
     Ok(())
 }
 fn apply(c:Command)->anyhow::Result<()> {
-    let stop=c.action=="stop";
-    STATE.with(|s|->anyhow::Result<()> { let mut s=s.borrow_mut();
-        if c.id<=s.command {return Ok(());}
+    // Decide the export only after the id check. A stale id, including the
+    // inert {"id":0,"action":"stop"} file, must not touch state or the export.
+    let stop=STATE.with(|s|->anyhow::Result<bool> { let mut s=s.borrow_mut();
+        if c.id<=s.command {return Ok(false);}
         anyhow::ensure!(c.label.len()<=64 && c.label.bytes().all(|b|b.is_ascii_alphanumeric() || b==b'-'),"invalid qualification label");
         anyhow::ensure!(s.windows.len()<16,"qualification window limit");
         match c.action.as_str() {
@@ -81,12 +104,14 @@ fn apply(c:Command)->anyhow::Result<()> {
             },
             _=>anyhow::bail!("unknown qualification action"),
         }
-        s.command=c.id; Ok(())
+        s.command=c.id; Ok(c.action=="stop")
     })?;
     if stop {export()} else {Ok(())}
 }
 pub(crate) fn export()->anyhow::Result<()> {
     if !enabled() {return Ok(());}
+    #[cfg(test)]
+    EXPORT_ATTEMPTS.with(|n| n.set(n.get().saturating_add(1)));
     STATE.with(|s|->anyhow::Result<()> {let s=s.borrow();
         anyhow::ensure!(!s.recording,"qualification requires a stopped window before export");
         let path=export_path();let tmp=path.with_extension("tmp");
@@ -180,8 +205,44 @@ pub(crate) fn test_finish()->(u64,u64) {
 }
 
 #[cfg(test)]
+fn qualification_fingerprint()->String {
+    STATE.with(|s| {
+        let s=s.borrow();
+        let windows:Vec<_>=s.windows.iter().map(|w| format!("{}:{}:{}:{}:{}",w.id,w.label,w.end_us,w.rows.len(),u8::from(w.overflow))).collect();
+        format!("command={} recording={} hits={} gameplay={} heap_failed={} map={} class={} events={} windows=[{}]",
+            s.command,s.recording,s.hits,s.gameplay,s.heap_failed,s.map,s.class,s.events.len(),windows.join(","))
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    struct Isolated(std::path::PathBuf);
+    impl Drop for Isolated {
+        fn drop(&mut self) {
+            configure(false);
+            EXPORT_ATTEMPTS.with(|n| n.set(0));
+            TEST_POLL_PERIOD.with(|p| p.set(0.5));
+            TEST_IO_DIR.with(|d| *d.borrow_mut()=None);
+            STATE.with(|s| *s.borrow_mut()=State::new());
+            let _=std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn isolate(name:&str)->Isolated {
+        let dir=std::env::temp_dir().join(format!("alice-cache-qual-{name}-{}-{}",std::process::id(),EXPORT_ATTEMPTS.with(|n| n.get())));
+        let _=std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        TEST_IO_DIR.with(|d| *d.borrow_mut()=Some(dir.clone()));
+        TEST_POLL_PERIOD.with(|p| p.set(0.0));
+        EXPORT_ATTEMPTS.with(|n| n.set(0));
+        configure(true);
+        STATE.with(|s| *s.borrow_mut()=State::new());
+        Isolated(dir)
+    }
+    fn write_command(body:&str) {
+        std::fs::write(command_path(),body.as_bytes()).unwrap();
+    }
+    fn attempts()->u64 { EXPORT_ATTEMPTS.with(|n| n.get()) }
     #[test]
     fn cache_qualification_checks_bits_and_stays_opt_in() {
         assert!(!enabled());
@@ -190,5 +251,41 @@ mod tests {
         b=a;b.start_solid=true;assert!(!trace_equal(a,b));
         let c:Command=serde_json::from_str(r#"{"id":1,"action":"start","label":"hedge3-move"}"#).unwrap();
         assert_eq!(c.check_stride,0);
+    }
+    #[test]
+    fn cache_qualification_repeated_poll_same_id_is_noop() {
+        let _guard=isolate("stale");
+        write_command(r#"{"id":0,"action":"stop","label":"inactive"}"#);
+        let before=qualification_fingerprint();
+        for _ in 0..5 {
+            poll(true).unwrap();
+            assert_eq!(attempts(),0,"already-applied stop id exported cache-qual.json");
+            assert_eq!(qualification_fingerprint(),before,"already-applied command id changed qualification state");
+            assert!(!export_path().exists(),"already-applied stop id wrote the export");
+        }
+    }
+    #[test]
+    fn cache_qualification_new_command_id_exports_once() {
+        let _guard=isolate("once");
+        write_command(r#"{"id":1,"action":"start","label":"hedge3-move"}"#);
+        poll(true).unwrap();
+        assert_eq!(attempts(),0,"start exported");
+        let started=qualification_fingerprint();
+        for _ in 0..4 {
+            poll(true).unwrap();
+            assert_eq!(attempts(),0,"repeated start id exported");
+            assert_eq!(qualification_fingerprint(),started,"repeated start id changed qualification state");
+        }
+        write_command(r#"{"id":2,"action":"stop","label":"hedge3-move"}"#);
+        poll(true).unwrap();
+        assert_eq!(attempts(),1,"new stop id must export exactly once");
+        assert!(export_path().exists());
+        let stopped=qualification_fingerprint();
+        assert_ne!(stopped,started);
+        for _ in 0..4 {
+            poll(true).unwrap();
+            assert_eq!(attempts(),1,"repeated stop id exported again");
+            assert_eq!(qualification_fingerprint(),stopped,"repeated stop id changed qualification state");
+        }
     }
 }

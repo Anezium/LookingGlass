@@ -10,6 +10,51 @@ HUMAN_SELF=Path('/Users/anezium/vita-j0/resume-2026-10-22/alice-card-think/conso
 HUMAN_SAVE=Path('/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r3/session-s5-world-static-merge/originals/data/alice/private/saves/auto.json')
 def sha(b):return hashlib.sha256(b).hexdigest()
 def write(p,v):p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dumps(v,indent=2)+'\n')
+def fresh_qualification():return dict(applied=0,recording=False,windows=0,exports_by_id={})
+def poll_command(state,command,model):
+    """One due poll. Fixed model: an already-applied id does not change state or export.
+    Old model: every stop exports, including a repeated id. A per-frame caller is rejected separately."""
+    if model not in ('old','fixed'):raise AssertionError('unknown recorder model '+model)
+    stop=command.get('action')=='stop'
+    cid=int(command['id']);stale=cid<=int(state['applied'])
+    if stale:
+        if model=='old' and stop:
+            new=copy.deepcopy(state);new['exports_by_id'][cid]=new['exports_by_id'].get(cid,0)+1
+            return new,True
+        return state,False
+    if command.get('action') not in ('start','stop'):raise AssertionError('unknown qualification action')
+    new=copy.deepcopy(state);new['applied']=cid
+    if command['action']=='start':
+        if state['recording']:raise AssertionError('qualification already recording')
+        new['recording']=True;new['windows']=state['windows']+1
+        return new,False
+    if not state['recording']:raise AssertionError('qualification is not recording')
+    new['recording']=False;new['exports_by_id'][cid]=new['exports_by_id'].get(cid,0)+1
+    return new,True
+def menu_io_budget(model):
+    """Menu frames between due polls must not touch the export. Each command id exports at most once."""
+    state=fresh_qualification();writes=[];per_frame_io=0
+    def dwell(command,due_polls,undue_frames):
+        nonlocal state,per_frame_io
+        for _ in range(due_polls):
+            for _frame in range(undue_frames):
+                if model=='per-frame' and command.get('action')=='stop':
+                    per_frame_io+=1;writes.append(int(command['id']))
+            use='old' if model=='per-frame' else model
+            state,wrote=poll_command(state,command,use)
+            if wrote:writes.append(int(command['id']))
+    dwell(dict(id=0,action='stop',label='inactive'),3,8)
+    dwell(dict(id=1,action='start',label='hedge3-move'),2,4)
+    dwell(dict(id=2,action='stop',label='hedge3-move'),3,8)
+    counts={}
+    for cid in writes:counts[cid]=counts.get(cid,0)+1
+    problems=[]
+    if per_frame_io:problems.append(f'per-frame file I/O in menus across {per_frame_io} frames')
+    for cid,n in sorted(counts.items()):
+        if n>1:problems.append(f'repeated export for command id {cid}: {n}')
+    if model=='fixed' and counts.get(0,0):problems.append('export of already-applied command id 0')
+    if problems:raise AssertionError('; '.join(problems))
+    return dict(writes=writes,counts=counts,per_frame_io=per_frame_io,applied=state['applied'],recording=state['recording'])
 def deny(*a,**kw):raise AssertionError('OFFLINE BOUNDARY: real process/network denied')
 def exercise(source,work,replay):
     package=work/'package';package.mkdir()
@@ -36,6 +81,13 @@ def exercise(source,work,replay):
     log=work/'vita.log';log.write_bytes(b'OFFLINE SYNTHETIC\n');cache=work/'index.json';cache.write_bytes(b'{"original":true}\n');cache_before=cache.read_bytes()
     active=maximum=0;backups={};stages=[];driver_calls=[];ops=[];current=None;clock=0.;us=0;scene=10;mapname='gvillage';warm=False;data=None;pending=None;next_button=None
     ui='closed';resumed=False;last_eye=0.;negative_results=[];closure_fixtures=[]
+    applied_id=0;recording=False;process_exports={};final_exports=0
+    for model in ('old','per-frame'):
+        try:menu_io_budget(model)
+        except AssertionError as error:negative_results.append(dict(fixture='recorder '+model+' menu reexport',status='REJECTED_AS_INTENDED',reason=str(error)))
+        else:raise AssertionError('recorder model accepted: '+model)
+    fixed_budget=menu_io_budget('fixed')
+    assert fixed_budget['counts']=={2:1} and fixed_budget['per_frame_io']==0 and fixed_budget['applied']==2 and fixed_budget['recording'] is False,fixed_budget
     seq=json.loads((package/'CONSOLE-PROTOCOL.json').read_text())['sequence']
     def append(line):
         with log.open('a') as f:f.write(line+'\n')
@@ -84,7 +136,9 @@ def exercise(source,work,replay):
         data['windows'].append(dict(id=pending['id'],label=c['label'],map=mapname,check_stride=pending['check_stride'],rows=rows,overflow=False,end_us=us))
         for line in reporters():append(line)
         append(f"[lg/cache-qual] stop id={c['id']} label={c['label']}")
-        snapshot_export();warm=True;us+=10000
+        snapshot_export();process_exports[c['id']]=process_exports.get(c['id'],0)+1
+        if process_exports[c['id']]>1:raise AssertionError(f"repeated export for command id {c['id']}")
+        warm=True;us+=10000
     class Transport:
         def __init__(self,*a,**kw):self.ftp=self
         def __enter__(self):
@@ -96,7 +150,7 @@ def exercise(source,work,replay):
         def record(self,*a,**kw):pass
         def voidcmd(self,c):assert c=='TYPE I'
         def execute(self,op,path,local=None):
-            nonlocal pending
+            nonlocal pending,applied_id,recording
             assert active==1;ops.append((op,path))
             if op=='list':return '\n'.join(('d' if v['directory'] else '-')+'rwxr-xr-x 1 vita vita '+str(v['bytes'])+' Oct 24 00:00 '+n for n,v in listing(path).items())
             if op=='size':return len(remote[path])
@@ -106,9 +160,14 @@ def exercise(source,work,replay):
                 if path==R+'cache_qual_command.json':
                     try:c=json.loads(remote[path])
                     except json.JSONDecodeError:return
-                    if c['id'] and c['action']=='start':
-                        pending=c;append(f"[lg/cache-qual] start id={c['id']} label={c['label']} check_stride={c['check_stride']}")
-                    elif c['id']:finish_window(c)
+                    # The file is only stored here. A repeated id is the engine no-op:
+                    # no second window and no second export. Id 0 is the inert stop.
+                    if c.get('id') and c['id']>applied_id:
+                        if c['action']=='start':
+                            pending=c;applied_id=c['id'];recording=True
+                            append(f"[lg/cache-qual] start id={c['id']} label={c['label']} check_stride={c['check_stride']}")
+                        else:
+                            finish_window(c);applied_id=c['id'];recording=False
                 return
             raise AssertionError(('unallowed FTP operation',op))
         def delete(self,path):assert active==1;ops.append(('delete',path));del remote[path]
@@ -136,9 +195,10 @@ def exercise(source,work,replay):
             cache.write_bytes(b'{"synthetic_stager_mutation":true}\n')
         return subprocess.CompletedProcess(argv,0)
     def driver(name,args=None):
-        nonlocal data,us,scene,mapname,warm,next_button,ui,resumed,clock
+        nonlocal data,us,scene,mapname,warm,next_button,ui,resumed,clock,applied_id,recording,process_exports,final_exports
         assert active==0,'driver with FTP open';p.owner();args=args or {};driver_calls.append((name,args))
         if name=='vita_launch':
+            applied_id=0;recording=False;process_exports={}
             data=dict(schema=1,capacity=8192,query_classes=['room','ambient','effects'],windows=[],events=[]);us=100;scene=10;mapname='gvillage';warm=False
             cfg=json.loads(remote[R+'vita_renderer.json']);append('[lg/vita-renderer] config '+json.dumps(cfg,separators=(',',':')))
             load_map('gvillage')
@@ -153,7 +213,8 @@ def exercise(source,work,replay):
                 remote[R+'saves/auto.json']=b'synthetic quit autosave';remote[R+'saves/quit-created.json']=b'synthetic quit companion'
                 append('Viewer closed cleanly. Data folder: OFFLINE')
                 if current['arm']=='B':event('reset',reason='audio-finish',old_scene=scene,entries_before=512,entries_after=0,pin_after=False,old_refs_before=2)
-                snapshot_export();append('[lg/cache-qual] exported windows=6 events='+str(len(data['events'])))
+                snapshot_export();final_exports+=1
+                append('[lg/cache-qual] exported windows=6 events='+str(len(data['events'])))
                 ui='closed'
             else:load_map(to,kind)
         elif name=='vita_press':
@@ -166,6 +227,19 @@ def exercise(source,work,replay):
         elif name=='vita_shot':return str(work/'fixture.png')
         else:assert name in ['vita_press','vita_cmd','vita_quit']
         return 'OFFLINE_FAKE_OK'
+    def dwell_live(name):
+        raw=remote.get(R+'cache_qual_command.json',b'')
+        try:command=json.loads(raw)
+        except (json.JSONDecodeError,UnicodeDecodeError,TypeError):return
+        if not isinstance(command,dict) or 'id' not in command or 'action' not in command:return
+        state=dict(applied=applied_id,recording=recording,windows=0,exports_by_id={})
+        before=(applied_id,recording)
+        for _ in range(3):
+            for _frame in range(8):
+                pass
+            state,wrote=poll_command(state,command,'fixed')
+            if wrote or (state['applied'],state['recording'])!=before:
+                raise AssertionError(f'repeated export or per-frame file I/O in menu {name} for command id {command["id"]}')
     def monotonic():
         nonlocal clock
         clock+=.25;return clock
@@ -253,7 +327,7 @@ def exercise(source,work,replay):
                 '--launches',str(2-number),'--self-stages','0','--pandemonium-launches',str(2-number),'--preservation-minutes',str(44.5-number*20))
             label=current['label'];call('session.py','stage',label);call('verify-arm-self.py',label)
             stale_home=(root/'TITLE-CLOSED.json').read_bytes()
-            call('operate.py',label,'launch');call('ack.py','OFFLINE synthetic launch image')
+            call('operate.py',label,'launch');call('ack.py','OFFLINE synthetic launch image');dwell_live('title')
             # A running title, even with a stale HOME receipt, cannot be restored.
             before_writes=list(ops)
             reject('restore while running',lambda:call('session.py','restore'))
@@ -272,14 +346,15 @@ def exercise(source,work,replay):
                 if label_window in ['pandemonium-move','reload-post','transition-post']:
                     call('session.py','saves','before-'+label+'-'+label_window)
                     next_button=('chapter-or-console' if label_window=='transition-post' else 'save-reload','hedge3' if label_window=='transition-post' else 'pandemonium')
-                    call('operate.py',label,'button','cross')
+                    call('operate.py',label,'button','cross');dwell_live('load-save-'+label_window)
                     reject('load image is not modal Main '+label_window,lambda:call('ack.py','--main-menu','OFFLINE overlay must not qualify'),contains='Not a Start-menu image')
                     call('ack.py','OFFLINE synthetic native load confirmation')
                 if not label_window.endswith('-check'):
                     reject('window without inspected modal '+label_window,lambda:call('operate.py',label,action,label_window,'circle'))
-                    call('operate.py',label,'button','start');call('ack.py','--main-menu','OFFLINE Main menu; Circle Back/Resume visible')
+                    call('operate.py',label,'button','start');call('ack.py','--main-menu','OFFLINE Main menu; Circle Back/Resume visible');dwell_live('main-'+label_window)
                 resumed=False
-                call('operate.py',label,action,label_window,'circle');call('ack.py','--main-menu','OFFLINE stopped Main menu; Circle Back/Resume visible')
+                call('operate.py',label,action,label_window,'circle');call('ack.py','--main-menu','OFFLINE stopped Main menu; Circle Back/Resume visible');dwell_live('stopped-'+label_window)
+            dwell_live('quit')
             next_button=('quit',None);call('operate.py',label,'button','cross');call('ack.py','OFFLINE synthetic quit')
             call('operate.py',label,'wait-exit');call('ack.py','OFFLINE synthetic HOME')
             closure(label)
@@ -419,6 +494,7 @@ def exercise(source,work,replay):
         call('session.py','restore')
         assert remote==initial and cache.read_bytes()==cache_before and maximum==1 and active==0
         assert stages.count('stage-baseline-self.json')==1 and len([v for v in driver_calls if v[0]=='vita_launch'])==2
+        assert final_exports==2 and all(n==1 for n in process_exports.values())
         assert all(json.loads(f.read_text()).get('restore_status')=='restored' for f in root.rglob('*ledger.json'))
         assert any('transition-created.json' in path and op=='get' for op,path in ops)
         assert any('quit-created.json' in path and op=='get' for op,path in ops)

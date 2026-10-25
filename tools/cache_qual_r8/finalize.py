@@ -7,7 +7,7 @@ def write(p,v):p.write_text(json.dumps(v,indent=2)+'\n',encoding='utf-8')
 def manifest(o):
     # The external fix report contains the final manifest/ZIP hashes. Keeping
     # that receipt outside their inputs avoids a self-referential hash cycle.
-    write(o/'ARTIFACT-SHA256.json',{str(f.relative_to(o)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(o.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md','AMENDMENTS-FIX.md','PROVE-CLOSED-FIX.md']})
+    write(o/'ARTIFACT-SHA256.json',{str(f.relative_to(o)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(o.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md','AMENDMENTS-FIX.md','PROVE-CLOSED-FIX.md','RECORDER-FIX.md']})
 def main():
     a=argparse.ArgumentParser(description=__doc__);a.add_argument('package',type=Path);a.add_argument('--clean',action='store_true');a.add_argument('--manifest-only',action='store_true');v=a.parse_args();o=v.package.resolve()
     assert not os.path.lexists(o/'session-s8-cache-qual')

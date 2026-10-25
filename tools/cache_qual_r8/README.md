@@ -43,3 +43,6 @@ inspected HOME/LiveArea image. Prior blocked evidence stays byte-identical under
 blocked-attempts; never reuse its helpers or modify it during preparation/cleanup.
 For a helper-only repair, copy changed helpers/scripts/documents directly from
 this directory; do not regenerate configs or rebuild the engine/SELF.
+The recorder export fix is an engine change: rebuild the SELF, copy it over
+both package arms, and seal AMENDMENTS-RECORDER.md with the new hash. A command
+id already applied, including the inert id 0 stop, must not export again.
