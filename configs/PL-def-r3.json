@@ -39,6 +39,7 @@
   "fx_worker_prep": true,
   "frame_phase_probe": false,
   "phase_census": false,
+  "skin_actual_consumers": false,
   "mover_far_lazy": true,
   "mover_lazy_publish": true,
   "pickup_fx_cache": true,

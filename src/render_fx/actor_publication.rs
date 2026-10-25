@@ -101,6 +101,18 @@ impl State {
         s.index_capacity=s.index_capacity-old_capacity.1+new_capacity.1;
         Some((id,slot,output))
     }
+    /// The frame vertex budget can reject a surface after reserve_at has stored
+    /// its instance token. Clear that token and keep the epoch, so this frame
+    /// does not reuse the slot and the next frame cannot skip a stale upload.
+    fn release_unsubmitted_token(&mut self, id: usize, slot: usize) {
+        self.banks[id].instance[slot] = None;
+    }
+    fn frame_budget_rejects(&mut self, id: usize, slot: usize, used: usize, n: usize) -> bool {
+        if used.saturating_add(n) > MAX_VERTICES {
+            self.release_unsubmitted_token(id, slot);
+            true
+        } else { false }
+    }
 }
 thread_local! {
     static ACTIVE:Cell<bool>=const {Cell::new(false)};
@@ -135,9 +147,14 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
     let result=STATE.with(|s| {
         let mut s=s.borrow_mut();
         let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,instance,alpha,key)?;
+        let n=mesh.vertices.len()*passes.as_ref().unwrap().len();
+        let used=FRAME.with(|f|f.borrow().vertices);
+        if s.frame_budget_rejects(id,slot,used,n) {
+            FRAME.with(|f|f.borrow_mut().dropped+=1);
+            return None;
+        }
         let group=FRAME.with(|f| {
-            let mut f=f.borrow_mut();let n=mesh.vertices.len()*passes.as_ref().unwrap().len();
-            if f.vertices.saturating_add(n)>MAX_VERTICES {f.dropped+=1;return None;}
+            let mut f=f.borrow_mut();
             f.vertices+=n;let id=f.groups.len();
             let transparent=surface.transparent||f.depth_read_only;
             f.groups.push(Group {passes:passes.take().unwrap(),transparent});Some(id)
@@ -329,5 +346,30 @@ mod tests {
         state.cursor=0;state.vertex_capacity=VERTICES;
         let mut larger=mesh;larger.vertices.push(Vertex::new(0.,0.,0.,0.,0.,WHITE));
         assert!(state.reserve(&larger,cpu,false,false).is_none());
+    }
+    #[test]
+    fn identical_transform_token_dropped_by_the_frame_vertex_limit_cannot_skip_a_stale_slot() {
+        let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
+        let key=key(ActorId::default(),&cpu);
+        // Previous frame: token 11 owns slot 0 and its GPU revision.
+        let (id,slot0,_)=state.reserve_key(&mesh,cpu.clone(),false,11,false,key).unwrap();
+        let stale=state.banks[id].slots[slot0].as_ref().unwrap().version;
+        state.next_frame();
+        // First identical-transform instance claims token 11 and would skip.
+        // The frame vertex limit then drops the reserved surface.
+        let (id,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,11,false,key).unwrap();
+        assert_eq!(slot,slot0);
+        assert_eq!(state.banks[id].slots[slot].as_ref().unwrap().version,stale);
+        assert!(state.frame_budget_rejects(id,slot,MAX_VERTICES,1),"one more vertex overflows the frame");
+        assert!(state.banks[id].instance[slot].is_none());
+        assert_eq!(state.banks[id].epoch[slot],state.epoch,"the dropped slot stays reserved for this frame");
+        // The dropped draw was not recorded, so the second instance claims token 11 again.
+        let (_,other,_)=state.reserve_key(&mesh,cpu.clone(),false,11,false,key).unwrap();
+        assert_ne!(other,slot0);
+        state.next_frame();
+        let (_,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,11,false,key).unwrap();
+        assert_eq!(slot,slot0);
+        assert_ne!(state.banks[id].slots[slot].as_ref().unwrap().version.vertices,stale.vertices,
+            "the shared token must upload over the other instance's slot");
     }
 }

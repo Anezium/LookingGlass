@@ -75,6 +75,13 @@ pub fn destination(s: &str) -> Option<(String, Option<String>)> {
     Some((map.into(), spawn.map(str::to_owned)))
 }
 pub fn spawn(map: &Bsp, name: Option<&str>) -> (Vec3, f32) {
+    spawn_with_static(map, name, None)
+}
+pub fn spawn_with_static(
+    map: &Bsp,
+    name: Option<&str>,
+    shared: Option<std::sync::Arc<crate::collision::StaticGeometry>>,
+) -> (Vec3, f32) {
     // This visit has no arrival performance. Settle its elevated editor start
     // before drawing Alice, including when entering through the chapter chooser.
     if name.is_none() || name == Some("hedge3_start1") {
@@ -83,7 +90,7 @@ pub fn spawn(map: &Bsp, name: Option<&str>) -> (Vec3, f32) {
                 && e.get("targetname").is_some_and(|s| s == "hedge3_start1")
         }) {
             if let Some(at) = e.get("origin").and_then(|s| vector(s)) {
-                if let Some(feet) = World::from_bsp(map)
+                if let Some(feet) = World::footing(map, shared)
                     .ok()
                     .and_then(|w| w.actor_footing(at, PLAYER_CENTER, PLAYER_HALF, 64.))
                 {

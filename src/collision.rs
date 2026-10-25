@@ -619,13 +619,28 @@ pub struct World {
 /// No caches, lazy colliders or traversal state cross the producer boundary.
 #[derive(Debug)]
 pub(crate) struct StaticGeometry { hulls: Vec<Hull>, tree: Option<Node>, sah: Option<sah::Hierarchy> }
+#[cfg(test)]
+thread_local! {
+    static SAH_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn set_sah_enabled_for_test(enabled: Option<bool>) {
+    SAH_OVERRIDE.with(|cell| cell.set(enabled));
+}
+fn sah_switch() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = SAH_OVERRIDE.with(|cell| cell.get()) { return enabled; }
+    #[cfg(feature="vita_renderer")]
+    { crate::render::vita_renderer::config().collision_sah }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
 impl StaticGeometry {
     fn new(hulls: Vec<Hull>, tree: Option<Node>) -> Self {
-        #[cfg(feature="vita_renderer")]
-        let enabled = crate::render::vita_renderer::config().collision_sah;
-        #[cfg(not(feature="vita_renderer"))]
-        let enabled = false;
-        let sah = if enabled { tree.as_ref().map(|t| sah::Hierarchy::build(&hulls,t)) } else {None};
+        Self::with_acceleration(hulls, tree, true)
+    }
+    fn with_acceleration(hulls: Vec<Hull>, tree: Option<Node>, accelerate: bool) -> Self {
+        let sah = if accelerate && sah_switch() { tree.as_ref().map(|t| sah::Hierarchy::build(&hulls,t)) } else {None};
         Self {hulls,tree,sah}
     }
     fn trace(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> (Trace,u32,u32) {
@@ -685,6 +700,48 @@ impl World {
     pub(crate) fn audio_geometry(&self) -> std::sync::Arc<StaticGeometry> {
         self.static_geometry.clone()
     }
+    /// One actor_footing query, then this world is dropped. Share the main
+    /// world's immutable static geometry when the caller already built it.
+    /// Callers without a world get the legacy tree only, so a second SAH is
+    /// never constructed for a shell that does not survive the query.
+    pub(crate) fn footing_shared(shared: std::sync::Arc<StaticGeometry>, min: Vec3, max: Vec3) -> Self {
+        eprintln!("[lg/collision] footing source=shared_static");
+        Self::empty_shell(shared, 0, min, max)
+    }
+    pub(crate) fn footing(map: &Bsp, shared: Option<std::sync::Arc<StaticGeometry>>) -> Result<Self> {
+        if let Some(static_geometry) = shared {
+            return Ok(Self::footing_shared(static_geometry, map.world_min, map.world_max));
+        }
+        eprintln!("[lg/collision] footing source=legacy_tree");
+        Self::from_bsp_mask(map, PLAYER_MASK, false)
+    }
+    fn empty_shell(static_geometry: std::sync::Arc<StaticGeometry>, brush_count: usize, min: Vec3, max: Vec3) -> Self {
+        Self {
+            npc_sight_cache: std::cell::RefCell::default(),
+            query_cache: std::cell::RefCell::default(),
+            query_cache_active: std::cell::Cell::new(false),
+            dynamic: Vec::new(),
+            dynamic_bounds: None,
+            dynamic_buckets: std::sync::Arc::default(),
+            light_certificates: std::cell::RefCell::default(),
+            npc_profile: Default::default(),
+            #[cfg(test)]
+            legacy_dynamic_sweeps: false,
+            #[cfg(test)]
+            dynamic_publications: None,
+            settled_supports: Vec::new(),
+            weapon_obstacles: Vec::new(),
+            camera_obstacles: Vec::new(),
+            liquids: Vec::new(),
+            dynamic_liquids: Vec::new(),
+            traversal: Default::default(),
+            brush_count,
+            patch_count: 0,
+            static_geometry,
+            min,
+            max,
+        }
+    }
     /// Complete the immutable static result against this frame's live geometry.
     /// Audio uses only fraction/start-solid; preserve the original clipping order.
     pub(crate) fn audio_complete(&self, mut result: Trace, start: Vec3, end: Vec3) -> Trace {
@@ -732,13 +789,13 @@ impl World {
         key
     }
     pub fn from_bsp(map: &Bsp) -> Result<Self> {
-        Self::from_bsp_mask(map, PLAYER_MASK)
+        Self::from_bsp_mask(map, PLAYER_MASK, true)
     }
     /// Scripted actors use solid and monster-clip, not Alice's player-only clips.
     pub fn actor_world(map: &Bsp) -> Result<Self> {
-        Self::from_bsp_mask(map, 1 | 0x20000)
+        Self::from_bsp_mask(map, 1 | 0x20000, true)
     }
-    fn from_bsp_mask(map: &Bsp, mask: i32) -> Result<Self> {
+    fn from_bsp_mask(map: &Bsp, mask: i32, accelerate: bool) -> Result<Self> {
         let mut hulls = Vec::new();
         let mut liquids = Vec::new();
         for index in map.world_brushes.clone() {
@@ -830,7 +887,7 @@ impl World {
             camera_obstacles: Vec::new(),
             liquids,
             dynamic_liquids: Vec::new(),
-            static_geometry: std::sync::Arc::new(StaticGeometry::new(hulls, tree)),
+            static_geometry: std::sync::Arc::new(StaticGeometry::with_acceleration(hulls, tree, accelerate)),
             brush_count,
             patch_count,
             min: map.world_min,
@@ -1251,6 +1308,18 @@ impl World {
             min: Vec3::splat(-10000.),
             max: Vec3::splat(10000.),
         }
+    }
+    #[cfg(test)]
+    pub fn fixture_unaccelerated(boxes: &[(Vec3, Vec3)]) -> Self {
+        let hulls = Self::box_hulls(boxes);
+        let tree = if hulls.is_empty() { None } else {
+            Some(Node::build(&hulls, &mut (0..hulls.len()).collect::<Vec<_>>()))
+        };
+        let brush_count = hulls.len();
+        let mut world = Self::fixture(&[]);
+        world.static_geometry = std::sync::Arc::new(StaticGeometry::with_acceleration(hulls, tree, false));
+        world.brush_count = brush_count;
+        world
     }
     #[cfg(test)]
     pub fn add_liquid(&mut self, min: Vec3, max: Vec3, contents: i32, slope: Option<Plane>) {

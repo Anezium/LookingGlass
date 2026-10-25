@@ -440,7 +440,7 @@ pub async fn check_level_swaps(assets: &mut Assets, options: &Options) -> Result
             active = next;
             std::mem::swap(&mut alice, &mut next_alice);
             drop(next_alice);
-            let (eye, yaw) = interaction::spawn(&active.scene.map, entry);
+            let (eye, yaw) = interaction::spawn_with_static(&active.scene.map, entry, Some(active.scene.world.audio_geometry()));
             let player = Player::spawn(&active.scene.world, eye)
                 .unwrap_or_else(|| Player::new(eye - Vec3::Z * EYE_HEIGHT));
             alice.reset(&player, yaw);
@@ -1009,7 +1009,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         } else if options.start_at.is_none() && !options.fly && !options.shelf_preview {
             interactions.entry_story(&mut story);
         }
-        (pos, yaw) = interaction::spawn(&scene.map, entry_spawn.as_deref());
+        (pos, yaw) = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(scene.world.audio_geometry()));
         if let Some(feet) = options.start_at {
             pos = feet + Vec3::Z * EYE_HEIGHT;
         }
@@ -2013,7 +2013,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if (recover || restart || console_restart) && !in_transport {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::Recovery, crate::native_timing::OPERATION));
-            let entry = interaction::spawn(&scene.map, entry_spawn.as_deref());
+            let entry = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(scene.world.audio_geometry()));
             let entry = if options.larva_preview && maps[current] == "centipede1" {
                 npcs.larva_preview_start(&scene.world)?
             } else {
@@ -2180,7 +2180,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             entry_spawn.as_deref(),
                             &catalog,
                         );
-                        (pos, yaw) = interaction::spawn(&scene.map, entry_spawn.as_deref());
+                        (pos, yaw) = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(scene.world.audio_geometry()));
                         let spawn = Player::spawn(&scene.world, pos);
                         flying = options.fly || spawn.is_none();
                         spawn_landing = true;
@@ -4439,7 +4439,7 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
             for overlapped in [false,true] {
                 let mut active=enter_level(assets,name,None,None,options,true)?;
                 let mut alice=Character::load(assets)?;
-                let (eye,yaw)=interaction::spawn(&active.scene.map,None);
+                let (eye,yaw)=interaction::spawn_with_static(&active.scene.map,None,Some(active.scene.world.audio_geometry()));
                 let player=Player::spawn(&active.scene.world,eye).unwrap_or_else(||Player::new(eye-Vec3::Z*EYE_HEIGHT));
                 alice.reset(&player,yaw);
                 let direction=vec3(yaw.cos(),yaw.sin(),0.);
