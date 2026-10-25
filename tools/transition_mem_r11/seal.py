@@ -5,7 +5,8 @@ R=Path(__file__).resolve().parents[2];T=Path(__file__).resolve().parent;O=Path(s
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def write(p,v):p.write_text(json.dumps(v,indent=2)+'\n',encoding='utf-8')
 for directory in ['console','scripts']:
- for source in (T/directory).glob('*.py'):shutil.copyfile(source,O/directory/source.name)
+ for source in (T/directory).glob('*'):
+  if source.is_file() and source.suffix in {'.py','.json'}:shutil.copyfile(source,O/directory/source.name)
 assert (T/'CONSOLE-BRIEF.md').read_bytes()==(O/'CONSOLE-BRIEF.md').read_bytes(), 'Never edit the sealed brief'
 for name in ['AMENDMENT-R11.md','AMENDMENT-R11B.md','AMENDMENT-R11C.md','AMENDMENT-R11C-R3.md','AMENDMENT-R11D.md']:shutil.copyfile(T/name,O/name)
 assert all(not (O/n).exists() for n in ['session-s11-transition-mem','session-s11-transition-mem-smoke','session-s8-cache-qual','session-s10-stack'])

@@ -237,6 +237,9 @@ and the limited meaning of PASS. All OFF and all ON retain exactly:
 Hedge3 -> native human Auto Load (Pandemonium) -> chapter Hedge3.
 The C1 union headroom label and all A1-A4/B1/M3/M4B, fixed budget, serial-FTP,
 no-MKD, independent readbacks and exact human restoration rules survive.
+The offline formatter fixture is regenerated from the final engine's real records
+and copied into the sealed package; synthetic native allocator substitutions
+remain confined to the offline transport boundary.
 
 No verified safe death route is available using the existing inspected inputs
 inside the sealed maps. Retry memory is **UNAVAILABLE_NO_VERIFIED_SAFE_DEATH_ROUTE**.
