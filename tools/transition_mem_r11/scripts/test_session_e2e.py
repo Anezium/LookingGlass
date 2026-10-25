@@ -375,6 +375,15 @@ def exercise(source,work,replay):
             outside=good+'[lg/audio-memory] heap_used=150000000 heap_arena='+str(179*1048576)+'\n'
             reject('179 MiB arena outside transition',lambda:audit.validate(outside))
             assert run_health.health_text(outside)
+            # C1 labels supplement the unchanged A1 gates. An outside-bracket
+            # audio sample can determine headroom even when transition peaks do not.
+            for peak,label in [(174*1048576,'PASS'),(175*1048576,'PASS_LOW_ARENA_HEADROOM'),(179*1048576-1,'PASS_LOW_ARENA_HEADROOM')]:
+                result=audit.validate(good+'[lg/audio-memory] heap_arena='+str(peak)+'\n')
+                assert result['arena_headroom_bytes']==187994112-peak
+                assert result['arena_headroom_label']==label
+            for marker in ['key not found','panicked']:
+                reject('C2 fatal '+marker,lambda:audit.validate(good+marker))
+                assert run_health.health_text(good+marker)
             for where in ['before','released','after','peak']:
                 bad=[]
                 for line in good.splitlines():

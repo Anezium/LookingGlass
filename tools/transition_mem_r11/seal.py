@@ -7,7 +7,7 @@ def write(p,v):p.write_text(json.dumps(v,indent=2)+'\n',encoding='utf-8')
 for directory in ['console','scripts']:
  for source in (T/directory).glob('*.py'):shutil.copyfile(source,O/directory/source.name)
 assert (T/'CONSOLE-BRIEF.md').read_bytes()==(O/'CONSOLE-BRIEF.md').read_bytes(), 'Never edit the sealed brief'
-for name in ['AMENDMENT-R11.md','AMENDMENT-R11B.md']:shutil.copyfile(T/name,O/name)
+for name in ['AMENDMENT-R11.md','AMENDMENT-R11B.md','AMENDMENT-R11C.md']:shutil.copyfile(T/name,O/name)
 assert all(not (O/n).exists() for n in ['session-s11-transition-mem','session-s11-transition-mem-smoke','session-s8-cache-qual','session-s10-stack'])
 identity=json.loads((O/'PACKAGE-IDENTITY.json').read_text());identity['branch_head']=subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip();write(O/'PACKAGE-IDENTITY.json',identity)
 rows=[json.loads((O/'packages'/arm/'VERIFICATION.json').read_text()) for arm in ['baseline','stack']]
@@ -23,7 +23,7 @@ for name in commands:
  assert f'.name = "{name}"' in s,name
 assert 'Error: cannot quit the app. Is the TITLEID correct?' in s and 'strcpy(res_msg, "Quit.\\n")' in s
 write(O/'proof/COMMAND-GRAMMAR.json',dict(status='PASS',source=str(cmd),source_sha256=sha(cmd),native_commands=commands,wait_is_native_command=True,wait_also_accepted_by_driver_sequencer=True,forbidden_native_commands=['reboot'],console_contact=False))
-members=['CONSOLE-BRIEF.md','AMENDMENT-R11.md','AMENDMENT-R11B.md','CONSOLE-PROTOCOL.json','PACKAGE-IDENTITY.json','PACKAGE-MATRIX.json']
+members=['CONSOLE-BRIEF.md','AMENDMENT-R11.md','AMENDMENT-R11B.md','AMENDMENT-R11C.md','CONSOLE-PROTOCOL.json','PACKAGE-IDENTITY.json','PACKAGE-MATRIX.json']
 members += [str(f.relative_to(O)) for directory in ['console','configs','scripts'] for f in sorted((O/directory).glob('*')) if f.is_file()]
 members += [p.name for p in sorted(O.glob('stage-*.json'))]
 members += [f'packages/{arm}/{n}' for arm in ['baseline','stack'] for n in ['eboot.bin','VERIFICATION.json']]

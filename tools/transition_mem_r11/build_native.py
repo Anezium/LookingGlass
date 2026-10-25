@@ -12,13 +12,20 @@ env=dict(os.environ,PATH=str(S)+':/Users/anezium/.cargo/bin:/opt/homebrew/bin:'+
 cmd=['cargo','vita','build','vpk','--release','--offline','--locked','--features','native_timing,vita_renderer,frame_total_only']
 assert not subprocess.check_output(['git','status','--porcelain','--','src','vendor','Cargo.lock','Cargo.toml','build.rs','.cargo'],cwd=R)
 assert not subprocess.check_output(['git','diff','e19f73c','HEAD','--','build.rs','.cargo','src/logging.rs','src/render_direct.rs'],cwd=R)
-# r11b changes only Macroquad's source location, keeping every locked version.
+# Fork relocation changes only the two sources, keeping every locked version.
 import tomllib
 old=tomllib.loads(subprocess.check_output(['git','show','e19f73c:Cargo.lock'],cwd=R,text=True))
 now=tomllib.loads((R/'Cargo.lock').read_text())
 assert [(p['name'],p['version']) for p in old['package']]==[(p['name'],p['version']) for p in now['package']]
-assert tomllib.loads((R/'Cargo.toml').read_text())['patch']['crates-io']['macroquad']=={'path':'vendor/macroquad'}
-assert tomllib.loads((R/'Cargo.toml').read_text())['patch']['crates-io']['miniquad']=={'path':'vendor/miniquad'}
+patches=tomllib.loads((R/'Cargo.toml').read_text())['patch']['crates-io']
+for name in ['macroquad','miniquad']:
+    assert patches[name]['git']==f'https://github.com/Anezium/{name}'
+    assert len(patches[name]['rev'])==40 and set(patches[name])=={'git','rev'}
+    locked=next(p for p in now['package'] if p['name']==name)
+    assert locked['source']==f"git+{patches[name]['git']}?rev={patches[name]['rev']}#{patches[name]['rev']}"
+for a,b in zip(old['package'],now['package']):
+    if a['name'] not in ['macroquad','miniquad']:assert a==b,a['name']
+assert not (R/'vendor').exists()
 revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip()
 started=time.monotonic()
 with (O/'logs/native-build.log').open('w') as out:p=subprocess.run(cmd,cwd=R,env=env,stdout=out,stderr=subprocess.STDOUT)
@@ -42,7 +49,7 @@ rows=[]
 for arm in ['baseline','stack']:
     d=O/'packages'/arm
     if arm!='baseline':shutil.copyfile(B/'eboot.bin',d/'eboot.bin')
-    v=dict(arm=arm,revision=receipt['revision'],source_revision=receipt['revision'],branch='vita-transition-mem-r11-20261025',
+    v=dict(arm=arm,revision=receipt['revision'],source_revision=receipt['revision'],branch=subprocess.check_output(['git','branch','--show-current'],cwd=R,text=True).strip(),
         build_command=cmd,build_environment=receipt['environment'],self_sha256=sha(d/'eboot.bin'),self_bytes=(d/'eboot.bin').stat().st_size,
         elf_sha256=sha(B/'looking-glass.elf'),velf_sha256=sha(B/'looking-glass.velf'),vpk_sha256=sha(B/'looking-glass.vpk'),
         lock_sha256=sha(R/'Cargo.lock'),config_sha256=sha(O/'configs'/f'PL-{arm}.json'),common_binary=True,

@@ -1,5 +1,18 @@
 # r11 transition memory work
 
+r11c supersedes r11b. The output is `alice-transition-mem-r11c` beside the
+original package. Read SOL-REPORT-R11C.md and AMENDMENT-R11C.md there. Source
+changes to Macroquad/Miniquad now live in pinned Anezium forks; vendor/ is gone.
+`dependency_proof.py` verifies the published crate and every consumed fork source
+file. `texture_proof.py` requires r11b failures and isolates each layer's fix.
+`validate_r11b.py OUTPUT` now also draws portals before real viewer transitions,
+forces destination + outgoing-rebuild failures, and gates 30 chapter round trips
+and 20 Retry/Load cycles per lever arm on a fixed full post-warm-up trend.
+`--resume` retains completed checks against the identical immutable executable.
+`finalize_r11c.py` replaces the older vendor-specific receipt writer. Seal and
+offline rehearsals include C1 headroom labels and the unchanged sealed-map rule.
+Console access remains forbidden during preparation.
+
 r11b supersedes the original preparation below. Its engine source is a937982,
 on the same branch. Read SOL-REPORT-R11B.md and AMENDMENT-R11B.md in the output
 directory for the final results and fixed console policy. The console remains

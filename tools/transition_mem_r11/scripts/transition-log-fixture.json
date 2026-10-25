@@ -1,12 +1,12 @@
 {
   "source": "actual host engine stderr formatter; native allocator values substituted only at the offline transport boundary",
-  "formatter_sha256": "0a59c0ba700b7ac79a3cdd8fc9f8739975866a403db9362cee1c3310d5c2b116",
+  "formatter_sha256": "5dcae3b3fdbf9a4aa83aa4204980e6c2ed6ba1ec78d619756e0bc6973ddea16d",
   "records": [
     {
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 21980520,
+        "heap_used": 22763754,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -20,7 +20,7 @@
       "after": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 159103269,
+        "heap_used": 159886503,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -28,7 +28,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 21980520,
+        "heap_used": 22763754,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -36,14 +36,14 @@
       "event": "end",
       "from": "menu",
       "host_requests_and_newlib32_upper_bound": [
-        159103269,
-        159618947,
-        161611320,
-        162127024
+        159886503,
+        160402181,
+        162394568,
+        162910272
       ],
       "kind": "startup-entry",
       "peak_heap_arena": 0,
-      "peak_heap_used": 159618947,
+      "peak_heap_used": 160402181,
       "peak_kind": "host-rust-requests",
       "released": null,
       "success": true,
@@ -53,7 +53,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 161653478,
+        "heap_used": 162436712,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -67,7 +67,7 @@
       "after": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 117945361,
+        "heap_used": 118259667,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -75,7 +75,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 161653478,
+        "heap_used": 162436712,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -83,19 +83,19 @@
       "event": "end",
       "from": "hedge3",
       "host_requests_and_newlib32_upper_bound": [
-        117945361,
-        161653802,
-        119210536,
-        164190272
+        118259667,
+        162437036,
+        119524840,
+        164973504
       ],
       "kind": "native-load",
       "peak_heap_arena": 0,
-      "peak_heap_used": 161653478,
+      "peak_heap_used": 162436712,
       "peak_kind": "host-rust-requests",
       "released": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 42845544,
+        "heap_used": 43038138,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -107,7 +107,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 101536656,
+        "heap_used": 102319890,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -121,7 +121,7 @@
       "after": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 171533121,
+        "heap_used": 172252931,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -129,7 +129,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 101536656,
+        "heap_used": 102319890,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -137,19 +137,19 @@
       "event": "end",
       "from": "pandemonium",
       "host_requests_and_newlib32_upper_bound": [
-        171533121,
-        174480060,
-        174052488,
-        177243544
+        172252931,
+        175216254,
+        174772312,
+        177979752
       ],
       "kind": "chapter-or-console",
       "peak_heap_arena": 0,
-      "peak_heap_used": 174480060,
+      "peak_heap_used": 175216254,
       "peak_kind": "host-rust-requests",
       "released": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 65531665,
+        "heap_used": 65994595,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -161,7 +161,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 161706052,
+        "heap_used": 162489286,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -175,7 +175,7 @@
       "after": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 177197459,
+        "heap_used": 177915189,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -183,7 +183,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 161706052,
+        "heap_used": 162489286,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -191,19 +191,19 @@
       "event": "end",
       "from": "hedge3",
       "host_requests_and_newlib32_upper_bound": [
-        177197459,
-        177381046,
-        179729496,
-        179920440
+        177915189,
+        178098776,
+        180447224,
+        180638168
       ],
       "kind": "death-retry",
       "peak_heap_arena": 0,
-      "peak_heap_used": 177381046,
+      "peak_heap_used": 178098776,
       "peak_kind": "host-rust-requests",
       "released": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 42898113,
+        "heap_used": 43090707,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -217,7 +217,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 21980520,
+        "heap_used": 22763754,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -231,7 +231,7 @@
       "after": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 159103269,
+        "heap_used": 159886503,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -239,7 +239,7 @@
       "before": {
         "heap_arena": null,
         "heap_free": null,
-        "heap_used": 21980520,
+        "heap_used": 22763754,
         "vgl_phycont_free": null,
         "vgl_ram_free": null,
         "vgl_vram_free": null
@@ -247,14 +247,14 @@
       "event": "end",
       "from": "menu",
       "host_requests_and_newlib32_upper_bound": [
-        159103269,
-        159618947,
-        161611320,
-        162127024
+        159886503,
+        160402181,
+        162394568,
+        162910272
       ],
       "kind": "startup-entry",
       "peak_heap_arena": 0,
-      "peak_heap_used": 159618947,
+      "peak_heap_used": 160402181,
       "peak_kind": "host-rust-requests",
       "released": null,
       "success": true,

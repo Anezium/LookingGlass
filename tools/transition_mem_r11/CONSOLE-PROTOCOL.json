@@ -42,7 +42,13 @@
     "required_fordblks": true,
     "required_arena_minus_uordblks": true,
     "loading_timeout_seconds": 100,
-    "begin_end_exact_identity": true
+    "begin_end_exact_identity": true,
+    "arena_failure_reference_bytes": 187994112,
+    "low_arena_headroom_bytes": 4299008,
+    "arena_headroom_required_per_arm": true,
+    "low_arena_headroom_label": "PASS_LOW_ARENA_HEADROOM",
+    "low_arena_peak_bytes": 183500800,
+    "headroom_label_policy": "headroom <4299008 OR peak arena >=175 MiB; conservative union of the review boundaries"
   },
   "qualification_recorder": false,
   "recorder_reservation_MiB": 0,
@@ -54,5 +60,10 @@
   "retry_policy": "Only after an inspected natural death with existing safe inputs; otherwise record UNAVAILABLE_NO_VERIFIED_SAFE_DEATH_ROUTE",
   "forbidden_native_commands": [
     "reboot"
-  ]
+  ],
+  "sealed_maps": [
+    "hedge3",
+    "pandemonium"
+  ],
+  "panic_policy": "FAIL; stop; do not retry"
 }

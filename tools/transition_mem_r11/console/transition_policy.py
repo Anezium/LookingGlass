@@ -3,9 +3,28 @@ import re
 MIB = 1048576
 USED_LIMIT = 170 * MIB
 ARENA_LIMIT = 179 * MIB
+OBSERVED_ARENA_FAILURE = 187994112
+LOW_HEADROOM_BYTES = 4299008
+LOW_ARENA_PEAK = 175 * MIB
 LOAD_TIMEOUT_SECONDS = 100
 EXPECTED = [('startup-entry', 'hedge3'), ('native-load', 'pandemonium'),
             ('chapter-or-console', 'hedge3')]
+
+def arena_headroom(text, rows):
+    peaks = [int(v) for v in re.findall(r'\bheap_arena=(\d+)', text)]
+    for row in rows:
+        if row.get('peak_heap_arena') is not None:
+            peaks.append(row['peak_heap_arena'])
+        peaks.extend(row[k]['heap_arena'] for k in ['before','released','after']
+                     if isinstance(row.get(k), dict) and 'heap_arena' in row[k])
+    assert peaks, 'Missing arena evidence'
+    peak = max(peaks)
+    headroom = OBSERVED_ARENA_FAILURE - peak
+    return dict(max_observed_heap_arena=peak, arena_headroom_bytes=headroom,
+                # The review's byte threshold and its 175 MiB parenthetical
+                # are not arithmetically equivalent. Honour both conservatively.
+                arena_headroom_label='PASS_LOW_ARENA_HEADROOM' if headroom < LOW_HEADROOM_BYTES or peak >= LOW_ARENA_PEAK else 'PASS',
+                arena_failure_reference_bytes=OBSERVED_ARENA_FAILURE)
 
 def check_text_samples(text):
     # Native audio-memory ticks occur outside brackets too. An observed arena

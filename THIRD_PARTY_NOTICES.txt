@@ -6366,6 +6366,7 @@ DEALINGS IN THE SOFTWARE.
 macroquad-0.4.14
 Declared license: MIT OR Apache-2.0
 Source: https://github.com/not-fl3/macroquad
+Modified fork: https://github.com/Anezium/macroquad (revision pinned in Cargo.toml)
 
 
 --- licenses/macroquad-0.4.14/LICENSE-APACHE ---
@@ -6903,6 +6904,7 @@ For more information, please refer to <http://unlicense.org/>
 miniquad-0.4.8
 Declared license: MIT OR Apache-2.0
 Source: https://github.com/not-fl3/miniquad
+Modified fork: https://github.com/Anezium/miniquad (revision pinned in Cargo.toml)
 
 
 --- licenses/miniquad-0.4.8/LICENSE-APACHE ---

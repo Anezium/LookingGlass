@@ -43,7 +43,7 @@ def health_text(text,A=False):
     reasons=[]
     try:check_text_samples(text)
     except AssertionError as error:reasons.append(str(error))
-    if any(s in text.lower() for s in ["thread 'main' panicked",'out of memory','memory allocation of','fatal error','segmentation fault','viewer failed','[lg/cache-qual] error']):reasons.append('global failure')
+    if any(s in text.lower() for s in ['panicked','key not found','out of memory','memory allocation of','fatal error','segmentation fault','viewer failed','[lg/cache-qual] error']):reasons.append('global failure')
     # Passive live stop checks use only opt-in windows, including check windows.
     lines=[]
     if '[lg/cache-qual] start ' in text:
