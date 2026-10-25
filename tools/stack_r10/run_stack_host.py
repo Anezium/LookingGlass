@@ -7,7 +7,7 @@ env={k:v for k,v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
 env.update(PATH='/Users/anezium/.cargo/bin:/opt/homebrew/bin:'+env['PATH'],RUSTUP_TOOLCHAIN='stable',CARGO_TARGET_DIR='/Users/anezium/vita-j0/cargo-target-host',RUSTFLAGS='--cfg observer_free_B',CARGO_INCREMENTAL='0',CARGO_NET_OFFLINE='true')
 cmd=['cargo','build','--release','--offline','--locked','--features','native_timing,frame_total_only,sim_maps_probe']
 with (O/'logs/host-build.log').open('w') as f:subprocess.run(cmd,cwd=R,env=env,stdout=f,stderr=subprocess.STDOUT,check=True)
-binary=O/'host/probe-bin';shutil.copy2(Path(env['CARGO_TARGET_DIR'])/'release/looking-glass',binary)
+binary=O/'host/probe-bin';binary.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(Path(env['CARGO_TARGET_DIR'])/'release/looking-glass',binary)
 base=json.loads((R/'tools/lever_matrix_r4/configs/PL-baseline.json').read_text())
 base.update(audio_music_thread=False,phase_census=False,profile_capture=False,audio_static_cache=False,collision_sah=False,skin_actual_consumers=False)
 keys=['state_sha256','selected_lights_bits','joint_alpha_order','blend_world_order','npc_decisions']
