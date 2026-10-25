@@ -154,3 +154,5 @@ pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(V
     }
     Some((passes,alpha))
 }
+
+pub(super) fn release_storage() { PASS_STORAGE.with(|s| *s.borrow_mut() = Vec::new()); }

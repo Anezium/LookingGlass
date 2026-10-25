@@ -28,24 +28,40 @@ mod imp {
     });}
     pub fn heap_begin(){HEAP.with(|h|assert!(h.replace(Some([0;5])).is_none()));}
     pub fn heap_finish()->[u64;5]{HEAP.with(|h|h.replace(None).unwrap())}
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    static LIVE: AtomicUsize = AtomicUsize::new(0);
+    static CHUNKS: AtomicUsize = AtomicUsize::new(0);
+    static HIGH: AtomicUsize = AtomicUsize::new(0);
+    static CHUNK_HIGH: AtomicUsize = AtomicUsize::new(0);
+    fn chunk(n: usize) -> usize { ((n + 11) & !7).max(16) }
+    fn live_alloc(n: usize) {
+        let live = LIVE.fetch_add(n, Relaxed) + n;
+        let chunks = CHUNKS.fetch_add(chunk(n), Relaxed) + chunk(n);
+        HIGH.fetch_max(live, Relaxed); CHUNK_HIGH.fetch_max(chunks, Relaxed);
+        crate::transition_memory::allocation(n);
+    }
+    fn live_free(n: usize) { LIVE.fetch_sub(n, Relaxed); CHUNKS.fetch_sub(chunk(n), Relaxed); }
+    pub fn live_bytes() -> usize { LIVE.load(Relaxed) }
+    pub fn transition_begin() { HIGH.store(live_bytes(), Relaxed); CHUNK_HIGH.store(CHUNKS.load(Relaxed), Relaxed); }
+    pub fn transition_finish() -> [usize;4] { [LIVE.load(Relaxed), HIGH.load(Relaxed), CHUNKS.load(Relaxed), CHUNK_HIGH.load(Relaxed)] }
     struct Allocator;
     #[global_allocator]
     static ALLOCATOR: Allocator = Allocator;
     unsafe impl GlobalAlloc for Allocator {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
             count();
-            let p=System.alloc(l);if !p.is_null(){heap_alloc(l.size());}p
+            let p=System.alloc(l);if !p.is_null(){heap_alloc(l.size());live_alloc(l.size());}p
         }
         unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
             count();
-            let p=System.alloc_zeroed(l);if !p.is_null(){heap_alloc(l.size());}p
+            let p=System.alloc_zeroed(l);if !p.is_null(){heap_alloc(l.size());live_alloc(l.size());}p
         }
         unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
             count();
-            let out=System.realloc(p,l,n);if !out.is_null(){heap_alloc(n);heap_free(l.size());}out
+            let out=System.realloc(p,l,n);if !out.is_null(){heap_alloc(n);live_alloc(n);heap_free(l.size());live_free(l.size());}out
         }
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-            heap_free(l.size());System.dealloc(p, l)
+            heap_free(l.size());live_free(l.size());System.dealloc(p, l)
         }
     }
     pub fn begin() {
@@ -78,12 +94,16 @@ mod imp {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_malloc(size: usize) -> *mut core::ffi::c_void {
         count();
-        __real_malloc(size)
+        let out = __real_malloc(size);
+        crate::transition_memory::allocation(size);
+        out
     }
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_calloc(n: usize, size: usize) -> *mut core::ffi::c_void {
         count();
-        __real_calloc(n, size)
+        let out = __real_calloc(n, size);
+        crate::transition_memory::allocation(n.saturating_mul(size));
+        out
     }
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_realloc(
@@ -91,7 +111,9 @@ mod imp {
         size: usize,
     ) -> *mut core::ffi::c_void {
         count();
-        __real_realloc(p, size)
+        let out = __real_realloc(p, size);
+        crate::transition_memory::allocation(size);
+        out
     }
     pub fn begin() {
         CALLS.store(0, Relaxed);
@@ -136,3 +158,6 @@ mod tests {
         assert_eq!(super::Scope::begin().finish(), 0);
     }
 }
+
+#[cfg(not(target_os="vita"))]
+pub(crate) use imp::{live_bytes,transition_begin,transition_finish};

@@ -644,6 +644,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let route_resume:Option<save::Loaded>=None;
     let maps = assets.maps();
     let mut audio = Audio::new(options.no_audio, options.audio_capture.clone());
+    let mut startup_memory = crate::transition_memory::Transition::begin("startup-entry", "menu", &options.map);
     #[cfg(target_os = "vita")]
     let mut bench_session = crate::frame_profile::startup_bench();
     #[cfg(target_os = "vita")]
@@ -800,7 +801,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         (initial, $next:expr, $from:expr, $to:expr) => { scene = $next; };
         (retry, $next:expr, $from:expr, $to:expr) => { install_loaded_scene!(replace, $next, $from, $to); };
         (replace, $next:expr, $from:expr, $to:expr) => {
-            crate::transition_memory::replace(&mut scene, $next, "save-reload", $from, $to);
+            scene = $next;
         };
     }
     macro_rules! apply_loaded {
@@ -1136,9 +1137,67 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     {
         hud.announce("A saved game could not be read. F9 retries quick load.");
     }
+    startup_memory.destination(&maps[current]);
+    startup_memory.finish(true);
     retry.remember(game_snapshot!());
     #[cfg(target_os = "vita")]
     let mut profile_report_due = false;
+    // A transition owns only a compact gameplay checkpoint while constructing its
+    // destination. In particular no outgoing World/SAH, scene buffers, NPC models,
+    // level art, particles or decoded level PCM survive into the build.
+    macro_rules! unload_scene {
+        () => {{
+            crate::render_fx::release_scene();
+            let resources = (level_art, npcs, steam, scene);
+            if crate::transition_memory::legacy_overlap() { Some(resources) } else {
+                drop(resources);
+                audio.release_level();
+                None
+            }
+        }};
+    }
+    macro_rules! rollback_resources {
+        ($checkpoint:expr) => {{
+            // Keep the live controllers, clocks, ledger and view untouched on an
+            // unsuccessful operation; reacquire only resources that were released.
+            let r = save::Restored::build(&mut assets, $checkpoint)?;
+            scene = r.scene;
+            npcs = r.npcs;
+            steam = r.steam;
+            level_art = LevelArt::default();
+            level_art.prepare(&mut assets, &scene, &interactions, true)?;
+            audio.load(&mut assets, &maps[current], &scene.map);
+        }};
+    }
+    macro_rules! restore_transition {
+        ($game:expr, $kind:expr, $pause:expr, $install:ident) => {{
+            let incoming = $game;
+            let checkpoint = game_snapshot!();
+            let destination = incoming.level()?.map.clone();
+            let mut memory = crate::transition_memory::Transition::begin($kind, &maps[current], &destination);
+            let outgoing = unload_scene!();
+            let outgoing_alice = if crate::transition_memory::legacy_overlap() { Some(alice) } else { drop(alice); None };
+            crate::transition_memory::released().await;
+            memory.after_release();
+            let result = match save::Restored::build(&mut assets, incoming) {
+                Ok(restored) => {
+                    apply_loaded!(restored, $pause, $install);
+                    Ok(())
+                }
+                Err(error) => {
+                    let character = checkpoint.character.clone();
+                    rollback_resources!(checkpoint);
+                    alice = Character::load(&mut assets)?;
+                    alice.restore(&character)?;
+                    Err(error)
+                }
+            };
+            drop(outgoing);
+            drop(outgoing_alice);
+            memory.finish(result.is_ok());
+            result
+        }};
+    }
     loop {
         #[cfg(feature = "native_timing")]
         { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
@@ -1229,6 +1288,20 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature="native_timing")]
         timing.with(|r| {if r.schedule.is_some(){r.schedule_input(input.diagnostic_activity());}});
         preview_throttle.advance_frame();
+        let host_transition = crate::transition_memory::host_action(frame);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if frame == 1 {
+            if let Ok(path) = std::env::var("LOOKING_GLASS_TRANSITION_SNAPSHOT") {
+                std::fs::write(path, serde_json::to_vec(&game_snapshot!())?)?;
+                store.write(Slot::Quick, &game_snapshot!())?;
+            }
+        }
+        if host_transition == "chapter" {
+            let destination = crate::transition_memory::host_destination();
+            let choice = level_choices.iter().find(|c| maps[c.map] == destination).context("probe destination")?;
+            chapter_requested = Some(crate::campaign::LevelChoice { map: choice.map, entry: choice.entry, title: choice.title.clone() });
+        }
+        if host_transition == "new-game" { new_game_requested = Some(options.difficulty); }
         let overlay_before = menu || inventory_menu || console.open || paused;
         let context_before = (menu, inventory_menu, console.open, paused);
         if input.disconnected {
@@ -1243,6 +1316,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(target_os = "vita")]
         let throttle_normal = throttle_normal && crate::frame_profile::mode() == crate::frame_profile::Mode::Full;
         let mut quit_after_frame = is_quit_requested();
+        quit_after_frame |= host_transition == "quit";
         if quit_after_frame && !throttle_normal { break; }
         if window_focused() && !console.open && !bench {
             if (is_key_pressed(KeyCode::Escape) || input.pad_pressed("Start"))
@@ -1260,7 +1334,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // before entering it, so thumbnails never capture the menu or old play.
         let opening_escape_menu = throttle_normal && escape_menu.page.is_some() && !escape_preview_ready;
         if opening_escape_menu { paused = true; clock.pause(); }
-        if escape_menu.page.is_some() && (!throttle_normal || escape_preview_ready) {
+        if (escape_menu.page.is_some() && (!throttle_normal || escape_preview_ready)) || host_transition == "native-load" {
             #[cfg(feature = "native_timing")]
             timing.with(|r| {
                 r.discontinuity(crate::native_timing::Milestone::ModalEnter, crate::native_timing::MODAL | crate::native_timing::PAUSED);
@@ -1277,9 +1351,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Consume Escape before entering the separate modal frame loop. No
             // physics, story, enemies, power-up timers or world clocks run there.
             next_frame().await;
-            let action = escape_menu
-                .run(&mut preferences, &mut audio, &store, pos, yaw, &mut input)
-                .await;
+            let action = if host_transition == "native-load" { crate::menu::Action::Load(Slot::Auto) } else {
+                escape_menu.run(&mut preferences, &mut audio, &store, pos, yaw, &mut input).await
+            };
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::ModalExit, crate::native_timing::MODAL));
             use crate::menu::Action;
@@ -1339,13 +1413,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     if saves_enabled {
                         match store
                             .read(slot)
-                            .and_then(|loaded| save::Restored::build(&mut assets, loaded.game))
+                            .map(|loaded| loaded.game)
                         {
-                            Ok(restored) => {
-                                apply_loaded!(restored);
+                            Ok(game) => match restore_transition!(game, "native-load", true, replace) {
+                              Ok(()) => {
                                 escape_menu.close();
                                 hud.announce("Game restored / P or click to resume");
-                            }
+                              }
+                              Err(e) => { escape_menu.message = format!("Load failed: {e:#}"); }
+                            },
                             Err(e) => {
                                 #[cfg(feature = "native_timing")]
                                 timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
@@ -1434,6 +1510,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             escape_menu.post_game = false;
             true
         } else { false };
+        let new_campaign_transition = new_game_requested.is_some();
         if let Some(difficulty) = new_game_requested.take() {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningEnter, crate::native_timing::CINEMA));
@@ -1692,12 +1769,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             if saves_enabled {
-                match store.read(slot).and_then(|loaded| {
-                    let backup = loaded.backup;
-                    save::Restored::build(&mut assets, loaded.game).map(|r| (r, backup))
-                }) {
-                    Ok((restored, backup)) => {
-                        apply_loaded!(restored);
+                let result = match store.read(slot) {
+                    Ok(loaded) => {
+                        let backup = loaded.backup;
+                        restore_transition!(loaded.game, "quick-or-console-load", true, replace).map(|()| backup)
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(backup) => {
                         let message = if backup {
                             "Previous save restored / P or click to resume"
                         } else {
@@ -1886,7 +1966,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if inventory_menu && input.ui(KeyCode::Enter) {
             inventory_menu = false;
         }
-        let recover = focused
+        if host_transition == "retry" { stats.damage(10000.); }
+        let recover = host_transition == "retry" || focused
             && !menu
             && !inventory_menu
             && !console_input
@@ -1981,11 +2062,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if saves_enabled && !stats.alive() && (recover || restart || console_restart) {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
-            match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref()))
-                .and_then(|game| save::Restored::build(&mut assets, game))
-            {
-                Ok(restored) => {
-                    apply_loaded!(restored, false, retry);
+            let result = match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref())) {
+                Ok(game) => restore_transition!(game, "death-retry", false, retry),
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => {
                     weapon_buttons.block();
                     hud.announce("Checkpoint restored");
                     println!("Death retry: restored complete checkpoint for {}", maps[current]);
@@ -2134,6 +2216,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 { load_probe = Some(crate::restore_diagnostic::Probe::new("chapter-or-console")); }
                 #[cfg(feature = "native_timing")]
                 timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
+                let checkpoint = game_snapshot!();
+                let mut memory = crate::transition_memory::Transition::begin(
+                    if new_campaign_transition { "new-game" } else { "chapter-or-console" }, &maps[current], &maps[selected]);
+                let outgoing = unload_scene!();
+                crate::transition_memory::released().await;
+            memory.after_release();
                 match enter_level(
                     &mut assets,
                     &maps[selected],
@@ -2145,7 +2233,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     Ok(next) => {
                         #[cfg(feature = "native_timing")]
                         timing.with(|r| r.before_install());
-                        crate::transition_memory::replace(&mut scene, next.scene, "chapter-or-console", &maps[current], &maps[selected]);
+                        scene = next.scene;
                         level_art = next.art;
                         skip_scene = crate::cinematic::Skip::default();
                         hints = next.hints;
@@ -2196,8 +2284,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         retry.remember(game_snapshot!());
                         #[cfg(feature = "native_timing")]
                         timing_ready!(crate::native_timing::Reason::ChapterOrConsole);
+                        drop(outgoing);
+                        memory.finish(true);
                     }
                     Err(e) => {
+                        rollback_resources!(checkpoint);
+                        drop(outgoing);
+                        memory.finish(false);
                         #[cfg(feature = "native_timing")]
                         timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
                         notice = format!("Could not open level: {e:#}");
@@ -2754,6 +2847,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if story_active {
             pending_transition = interactions.take_story_exit(&mut story);
         }
+        if host_transition == "natural-exit" {
+            pending_transition = Some((crate::transition_memory::host_destination(), None));
+        }
         if let Some(exit) = pending_transition {
             options.difficulty = stats.difficulty;
             let (name, target_spawn) = exit.clone();
@@ -2770,12 +2866,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::TransitionBegin, crate::native_timing::TRANSITION));
             present_transition_loading(&name).await;
             let transition_started = std::time::Instant::now();
+            let checkpoint = game_snapshot!();
+            let mut memory = crate::transition_memory::Transition::begin("natural-exit", &maps[current], &name);
+            let outgoing = unload_scene!();
+            crate::transition_memory::released().await;
+            memory.after_release();
             let arrived = enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options);
             match arrived {
                 Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {
                     #[cfg(feature = "native_timing")]
                     timing.with(|r| r.before_install());
-                    crate::transition_memory::replace(&mut scene, next.scene, "natural-exit", &maps[current], &name);
+                    scene = next.scene;
                     stats = next_stats;
                     campaign = next_campaign;
                     hints = next.hints;
@@ -2831,8 +2932,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     hud.announce(&level_choices[visit].title);
                     #[cfg(feature = "native_timing")]
                     timing_ready!(crate::native_timing::Reason::Natural);
+                    drop(outgoing);
+                    memory.finish(true);
                 }
                 Err(e) => {
+                    rollback_resources!(checkpoint);
+                    drop(outgoing);
+                    memory.finish(false);
                     interactions.transition_failed(&exit);
                     #[cfg(feature = "native_timing")]
                     timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::TRANSITION));
@@ -4351,6 +4457,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let presented_probe = load_probe.take();
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &presented_probe { p.finish(&maps[current], hud_submitted); }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::transition_memory::host_probe() {
+            use sha2::{Digest,Sha256};
+            let value = game_snapshot!();
+            println!("TRANSITION_STATE {}", serde_json::json!({"frame":frame,"map":maps[current],
+                "state_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&value)?))}));
+        }
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(
@@ -4420,7 +4533,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         "Viewer closed cleanly. Data folder: {}",
         assets.base.display()
     );
+    let mut memory = crate::transition_memory::Transition::begin("quit", &maps[current], "menu-or-exit");
+    let outgoing = unload_scene!();
+    drop(alice);
+    crate::transition_memory::released().await;
+            memory.after_release();
     audio.finish()?;
+    drop(outgoing);
+    memory.finish(true);
     Ok(())
 }
 

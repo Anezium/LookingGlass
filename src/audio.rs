@@ -903,6 +903,22 @@ impl Audio {
         }
     }
     pub fn load(&mut self, assets: &mut Assets, name: &str, map: &Bsp) {
+        self.release_level();
+        let started = std::time::Instant::now();
+        if self.playback.is_none() {
+            audio_memory(&format!("level:{name}:disabled"), self.cache_samples);
+            return;
+        }
+        if let Err(e) = self.load_inner(assets, name, map) {
+            eprintln!("Audio level error in {name}: {e:#}");
+            self.status = "Some level audio could not be loaded".into();
+        }
+        audio_memory(&format!("level:{name}"), self.cache_samples);
+        eprintln!("[lg/audio-load] level={name} elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.);
+    }
+    /// The same level boundary as load(), before destination scene construction.
+    /// Keep the output/mixer, settings and paused retiring music for the normal fade.
+    pub(crate) fn release_level(&mut self) {
         game_stage(5);
         let _stage=UpdateStage;
         self.stop_voice();
@@ -930,17 +946,6 @@ impl Audio {
         self.stride = 0.;
         self.fade_elapsed = 0.;
         self.swim_clock = 0.;
-        let started = std::time::Instant::now();
-        if self.playback.is_none() {
-            audio_memory(&format!("level:{name}:disabled"), self.cache_samples);
-            return;
-        }
-        if let Err(e) = self.load_inner(assets, name, map) {
-            eprintln!("Audio level error in {name}: {e:#}");
-            self.status = "Some level audio could not be loaded".into();
-        }
-        audio_memory(&format!("level:{name}"), self.cache_samples);
-        eprintln!("[lg/audio-load] level={name} elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.);
     }
     fn load_inner(&mut self, assets: &mut Assets, name: &str, map: &Bsp) -> Result<()> {
         let spec = level_spec(assets, name, map)?;

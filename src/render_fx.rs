@@ -101,6 +101,18 @@ thread_local! {
     #[cfg(feature="vita_renderer")]
     static SURFACE_LOOKUP:RefCell<std::collections::HashMap<macroquad::miniquad::TextureId,Weak<Surface>>>=RefCell::default();
 }
+/// Called between fully presented frames, before any scene is destroyed.
+pub(crate) fn release_scene() {
+    #[cfg(feature="vita_renderer")]
+    {
+        crate::character::skinning::overlap::reset_publications();
+        actor_cache::release_storage();
+    }
+    FRAME.with(|f| *f.borrow_mut() = Frame::default());
+    SURFACES.with(|s| s.borrow_mut().clear());
+    #[cfg(feature="vita_renderer")]
+    SURFACE_LOOKUP.with(|s| s.borrow_mut().clear());
+}
 const MAX_VERTICES: usize = 1_000_000;
 pub fn copy_mesh(m: &Mesh) -> Mesh {
     Mesh {
