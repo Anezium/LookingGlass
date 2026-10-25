@@ -94,7 +94,7 @@ fn sah_real_maps_corpus_masks_and_load() -> anyhow::Result<()> {
         masks.extend(map.shaders.iter().map(|s|s.contents));masks.sort_unstable();masks.dedup();
         let mut checked=0;
         for mask in masks.iter().copied(){
-            let w=accelerated(World::from_bsp_mask(&map,mask)?);
+            let w=accelerated(World::from_bsp_mask(&map,mask,true)?);
             for (_,a,b,h) in queries.iter().step_by((queries.len()/200).max(1)) {check(&w.static_geometry,*a,*b,*h);checked+=1;}
             for hull in w.static_geometry.hulls.iter().step_by(100) {
                 let p=hull.bounds.min;for h in [Vec3::ZERO,PLAYER_HALF] {check(&w.static_geometry,p,p,h);check(&w.static_geometry,p+Vec3::Z*1000000.,p-Vec3::Z*1000000.,h);checked+=2;}
@@ -136,11 +136,37 @@ fn sah_reorders_candidates_but_preserves_raw_enter_and_all_solid_normal() {
 fn sah_config_is_one_strict_default_off_boolean() {
     use crate::render::vita_renderer::Config;
     for c in [Config::default(),serde_json::from_str("{}").unwrap()] {
-        assert!(!c.collision_sah);assert!(!c.audio_static_cache);assert!(!c.phase_census);
+        assert!(!c.collision_sah);assert!(!c.audio_static_cache);assert!(!c.phase_census);assert!(!c.skin_actual_consumers);
     }
     let c:Config=serde_json::from_str(r#"{"collision_sah":true}"#).unwrap();
-    assert!(c.collision_sah);assert!(!c.audio_static_cache);assert!(!c.phase_census);
+    assert!(c.collision_sah);assert!(!c.audio_static_cache);assert!(!c.phase_census);assert!(!c.skin_actual_consumers);
     for v in [serde_json::json!(1),serde_json::json!("on"),serde_json::Value::Null] {
         assert!(serde_json::from_value::<Config>(serde_json::json!({"collision_sah":v})).is_err());
     }
+}
+
+#[test]
+fn shared_footing_matches_legacy_and_builds_sah_once() {
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) { crate::collision::set_sah_enabled_for_test(None); } }
+    let _reset = Reset;
+    let boxes = [(Vec3::new(-100., -100., -2.), Vec3::new(100., 100., 0.))];
+    let origin = Vec3::new(0., 0., 10.);
+    let bits = |p: Option<Vec3>| p.map(|v| v.to_array().map(f32::to_bits));
+    crate::collision::set_sah_enabled_for_test(Some(true));
+    let before = builds();
+    let main = World::fixture(&boxes);
+    assert_eq!(builds(), before + 1, "the main world builds one hierarchy");
+    assert!(main.static_geometry.sah.is_some());
+    let shared_at = builds();
+    let foot = World::footing_shared(main.audio_geometry(), main.min, main.max);
+    assert_eq!(builds(), shared_at, "sharing the immutable hierarchy must not build again");
+    assert!(std::sync::Arc::ptr_eq(&foot.static_geometry, &main.static_geometry));
+    let legacy = World::fixture_unaccelerated(&boxes);
+    assert_eq!(builds(), shared_at, "accelerate=false skips the hierarchy even when the switch is on");
+    assert!(legacy.static_geometry.sah.is_none());
+    let landed = main.actor_footing(origin, PLAYER_CENTER, PLAYER_HALF, 64.);
+    assert!(landed.is_some());
+    assert_eq!(bits(landed), bits(foot.actor_footing(origin, PLAYER_CENTER, PLAYER_HALF, 64.)));
+    assert_eq!(bits(landed), bits(legacy.actor_footing(origin, PLAYER_CENTER, PLAYER_HALF, 64.)));
 }

@@ -49,6 +49,50 @@ pub(crate) fn single_frame() -> bool {
 pub(crate) fn ready() -> bool {
     PHASE.with(|p| p.get() == Phase::Ready)
 }
+static SERIAL_FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) fn note_serial_fallback() -> u64 {
+    SERIAL_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+#[cfg(test)]
+pub(crate) fn serial_fallbacks() -> u64 {
+    SERIAL_FALLBACKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Replay this skeleton's last gathered draw through the serial kernel.
+/// That kernel is the reference a missed consumer declaration was protecting.
+pub(crate) fn restore_serial_live(skeleton: &Skeleton, meshes: &mut [Option<Mesh>]) -> bool {
+    if !gathering() { return false; }
+    let key = skeleton as *const Skeleton as usize;
+    STORE.with(|slot| {
+        let store = slot.borrow();
+        let Some(store) = store.as_ref() else { return false; };
+        let input = unsafe { &*store.input.get() };
+        let Some(draw) = input.draws.iter().rev().find(|draw| draw.visible && draw.key == key) else { return false; };
+        let params = Params {
+            pose: &input.pose[draw.pose.clone()],
+            scales: &input.scales[draw.scales.clone()],
+            palette: &input.palette[draw.palette.clone()],
+            transform: draw.transform,
+            scale: draw.scale,
+            flat: draw.flat,
+            fullbright: draw.fullbright,
+            alpha: draw.alpha,
+        };
+        let surfaces = draw.surfaces.clone();
+        let mut restored = false;
+        for surface_index in surfaces {
+            let mesh_id = input.surfaces[surface_index].mesh;
+            let Some(cpu) = skeleton.surfaces.get(mesh_id) else { continue; };
+            let Some(mesh) = meshes.get_mut(mesh_id).and_then(Option::as_mut) else { continue; };
+            super::kernel(&mut super::Job {
+                input: &cpu.vertices,
+                vertices: &mut mesh.vertices,
+                indices: &mesh.indices,
+            }, params);
+            restored = true;
+        }
+        restored
+    })
+}
 #[derive(Clone)]
 struct Surface {
     mesh: usize,
@@ -1216,5 +1260,54 @@ mod tests {
         frame.collect();
         assert_eq!(handle(&s, &mut meshes, params(&pose), true), Some(true));
         drop(frame);
+    }
+    #[test]
+    fn serial_fallback_matches_the_reference_kernel() {
+        let (skeleton, mut meshes, pose) = fixture();
+        let p = params(&pose);
+        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh {
+            vertices: mesh.vertices.clone(),
+            indices: mesh.indices.clone(),
+            texture: None,
+        })).collect();
+        for (surface, mesh) in skeleton.surfaces.iter().zip(reference.iter_mut().flatten()) {
+            super::super::kernel(&mut super::super::Job {
+                input: &surface.vertices,
+                vertices: &mut mesh.vertices,
+                indices: &mesh.indices,
+            }, p);
+        }
+        for mesh in meshes.iter_mut().flatten() {
+            for vertex in &mut mesh.vertices {
+                vertex.position = Vec3::splat(99.);
+                vertex.normal = Vec4::ZERO;
+                vertex.color = [0; 4];
+            }
+        }
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                PHASE.with(|phase| phase.set(Phase::Idle));
+                STORE.with(|slot| *slot.borrow_mut() = None);
+            }
+        }
+        let _guard = Guard;
+        PHASE.with(|phase| phase.set(Phase::Gather));
+        STORE.with(|slot| *slot.borrow_mut() = Some(Store::new(1, false)));
+        STORE.with(|slot| slot.borrow_mut().as_mut().unwrap().capture(&skeleton, &meshes, p, true));
+        assert!(restore_serial_live(&skeleton, &mut meshes));
+        for (expected, actual) in reference.iter().flatten().zip(meshes.iter().flatten()) {
+            assert_eq!(expected.vertices.len(), actual.vertices.len());
+            for (left, right) in expected.vertices.iter().zip(&actual.vertices) {
+                assert_eq!(left.position.to_array().map(f32::to_bits), right.position.to_array().map(f32::to_bits));
+                assert_eq!(left.normal.to_array().map(f32::to_bits), right.normal.to_array().map(f32::to_bits));
+                assert_eq!(left.color, right.color);
+                assert_eq!(left.uv.to_array().map(f32::to_bits), right.uv.to_array().map(f32::to_bits));
+            }
+            assert_eq!(expected.indices, actual.indices);
+        }
+        let before = serial_fallbacks();
+        let after = note_serial_fallback();
+        assert!(after > before);
     }
 }

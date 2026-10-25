@@ -1,5 +1,8 @@
 //! Ordered static SAH. See tools/sah_r8/CONTRACT.md for the pruning proof.
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+static BUILDS: AtomicU64 = AtomicU64::new(0);
+pub(super) fn builds() -> u64 { BUILDS.load(Ordering::Relaxed) }
 const LEAF: u32 = 1 << 31;
 const NONE: u32 = u32::MAX;
 const CANDIDATES: usize = 256;
@@ -26,6 +29,7 @@ pub(super) struct Hierarchy {
 }
 impl Hierarchy {
     pub fn build(hulls:&[Hull],tree:&Node)->Self {
+        BUILDS.fetch_add(1, Ordering::Relaxed);
         let start=std::time::Instant::now();
         assert!(hulls.len()<(LEAF as usize)/2);
         let mut legacy=Vec::new();let mut order=Vec::with_capacity(hulls.len());

@@ -886,7 +886,12 @@ impl Puppet {
         alpha: f32,
     ) {
         if crate::character::skinning::overlap::gather_only() { return; }
-        assert!(self.0.afterimage_normals, "afterimage consumer must be declared at construction");
+        #[cfg(any(debug_assertions, test))]
+        assert_afterimage_declared(self.0.afterimage_normals);
+        #[cfg(not(any(debug_assertions, test)))]
+        if !self.0.afterimage_normals {
+            eprintln!("[lg/skin] afterimage consumer must be declared at construction; serial fallback supplies the live mesh");
+        }
         self.0.require_live_skin();
         let d = &self.0.data;
         let Some(animation) = d.clips.get(clip) else {
@@ -1102,7 +1107,20 @@ impl Model {
         }
     }
     fn require_live_skin(&self) {
-        assert!(self.live_skin_current, "live skin read without a consumer declaration before body preparation");
+        if self.live_skin_current { return; }
+        #[cfg(any(debug_assertions, test))]
+        assert_live_declared(self.live_skin_current);
+        #[cfg(not(any(debug_assertions, test)))]
+        {
+            // Callers hold this shared borrow and have not yet borrowed meshes.
+            // The reskin runs on the game thread, then the caller reads the mesh.
+            let model = unsafe { &mut *(self as *const Model as *mut Model) };
+            let restored = crate::character::skinning::overlap::restore_serial_live(
+                &model.data.skeleton, &mut model.meshes);
+            model.live_skin_current = restored;
+            let count = crate::character::skinning::overlap::note_serial_fallback();
+            eprintln!("[lg/skin] serial fallback count={count} restored={restored} reason=live skin read without a consumer declaration before body preparation");
+        }
     }
     fn draw_frozen(&self) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
@@ -4658,4 +4676,26 @@ pub(crate) fn check_overlap_snapshots(assets: &mut Assets) -> Result<()> {
     }
     println!("PASS real NPC overlap total={total} workers=1/2");
     Ok(())
+}
+#[cfg(any(debug_assertions, test))]
+fn assert_live_declared(current: bool) {
+    assert!(current, "live skin read without a consumer declaration before body preparation");
+}
+#[cfg(any(debug_assertions, test))]
+fn assert_afterimage_declared(declared: bool) {
+    assert!(declared, "afterimage consumer must be declared at construction");
+}
+#[cfg(test)]
+mod freshness {
+    #[test]
+    #[should_panic(expected = "live skin read without a consumer declaration before body preparation")]
+    fn undeclared_live_reader_panics() { super::assert_live_declared(false); }
+    #[test]
+    #[should_panic(expected = "afterimage consumer must be declared at construction")]
+    fn undeclared_afterimage_panics() { super::assert_afterimage_declared(false); }
+    #[test]
+    fn declared_readers_do_not_panic() {
+        super::assert_live_declared(true);
+        super::assert_afterimage_declared(true);
+    }
 }
