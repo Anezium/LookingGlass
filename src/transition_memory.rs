@@ -76,8 +76,10 @@ impl Transition {
         // it before resetting the counters; dropping its stale guard is harmless.
         CURRENT.with(|slot| {
             if let Some(previous) = slot.borrow().upgrade() {
-                previous.borrow_mut().finish(false);
-                eprintln!("[lg/transition] unfinished operation superseded by {kind}");
+                if !previous.borrow().finished {
+                    previous.borrow_mut().finish(false);
+                    eprintln!("[lg/transition] unfinished operation superseded by {kind}");
+                }
             }
         });
         let before = sample();
