@@ -1,4 +1,5 @@
-//! Host regression for camera-portal/scaled-view render-target retirement.
+//! Synthetic ownership/defensive-delete regression. LG always uses sample_count=1;
+//! its resolved targets do not reach the sample_count=0 ownership defect.
 use macroquad::prelude::*;
 
 #[macroquad::main("Render target lifetime regression")]
@@ -20,7 +21,7 @@ async fn main() {
                 next_frame().await;
             }
         }
-        println!("PASS portal/render-target drop and deferred cleanup");
+        println!("PASS synthetic sample_count=0 and resolved sample_count=1 target cleanup");
     }
     if mode != "ownership" {
         let ctx = unsafe { get_internal_gl() }.quad_context;
@@ -29,6 +30,6 @@ async fn main() {
         ctx.delete_render_pass(pass);
         ctx.delete_texture(texture);
         ctx.delete_texture(texture);
-        println!("PASS repeated deletion of render-pass-owned managed texture");
+        println!("PASS defensive guard avoids a second delete of a possibly recycled GL name");
     }
 }

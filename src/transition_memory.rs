@@ -210,6 +210,47 @@ pub(crate) fn recovery_fault() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+thread_local! {
+    static RECOVERY_KEY: std::cell::Cell<Option<macroquad::prelude::KeyCode>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) fn host_recovery_key() -> Option<macroquad::prelude::KeyCode> {
+    RECOVERY_KEY.with(std::cell::Cell::get)
+}
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) fn host_recovery_clear_key() { RECOVERY_KEY.with(|key| key.set(None)); }
+/// Host-only scripted UI edges, consumed through the real Input::ui path.
+/// The permanently failing builder remains armed through the first Enter.
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) fn host_recovery_screen(attempt: usize, frame: usize) {
+    use macroquad::prelude::*;
+    RECOVERY_KEY.with(|key| key.set(None));
+    let Ok(mode) = std::env::var("LOOKING_GLASS_RECOVERY_UI") else { return; };
+    if frame == 1 {
+        if let Ok(directory) = std::env::var("LOOKING_GLASS_RECOVERY_CAPTURE") {
+            let path = std::path::Path::new(&directory).join(format!("screen-{attempt}.png"));
+            get_screen_data().export_png(path.to_str().unwrap());
+        }
+    }
+    let action = if frame == 3 {
+        match mode.as_str() {
+            "retry" => {
+                if attempt >= 3 { std::env::remove_var("LOOKING_GLASS_TRANSITION_FAIL_RECOVERY"); }
+                RECOVERY_KEY.with(|key| key.set(Some(KeyCode::Enter)));
+                "enter"
+            }
+            "quit" => {
+                RECOVERY_KEY.with(|key| key.set(Some(KeyCode::Escape)));
+                "escape"
+            }
+            _ => panic!("unknown host recovery UI mode"),
+        }
+    } else { "wait" };
+    println!("TRANSITION_RECOVERY {}", serde_json::json!({"attempt":attempt,"screen_frame":frame,
+        "action":action,"fault_armed":std::env::var("LOOKING_GLASS_TRANSITION_FAIL_RECOVERY").ok()}));
+}
 pub(crate) fn host_destination() -> String {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     { std::env::var("LOOKING_GLASS_TRANSITION_DESTINATION").unwrap_or_default() }

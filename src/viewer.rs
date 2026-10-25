@@ -85,6 +85,73 @@ struct LevelArt {
     /// Registered controllers' art, aligned with `Interactions::levels` (`None`: no art).
     levels: Vec<Option<Box<dyn crate::level::LevelArt>>>,
 }
+
+type RebuiltScene = (LevelArt, crate::npc::Npcs, crate::particles::Steam, Scene, Option<Character>);
+
+/// Allocate recovery state only after a failed transition. Keeping these awaits
+/// inside `run` reserves their live checkpoint/temporaries in every viewer frame.
+async fn rebuild_outgoing(
+    assets: &mut Assets,
+    checkpoint: &Game,
+    interactions: &Interactions,
+    difficulty: crate::powerups::Difficulty,
+    options: &Options,
+    reload_alice: bool,
+    escape_menu: &mut crate::menu::Menu,
+    ui: &crate::ui::Ui,
+    preferences: &crate::preferences::Preferences,
+) -> Option<Box<RebuiltScene>> {
+    let mut attempts = 0;
+    loop {
+        crate::render_fx::release_scene();
+        crate::transition_memory::released().await;
+        // Partial resources drop together on error, before the next retirement.
+        let attempt = (|| -> Result<_> {
+            crate::transition_memory::recovery_fault()?;
+            let level = checkpoint.level()?;
+            let mut world = Scene::load(assets, &level.map)?;
+            world.map.difficulty = difficulty;
+            interactions.sync(&mut world.world);
+            let mut cast = crate::npc::Npcs::load(assets, &world.map, &level.map,
+                level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
+            cast.restore(&level.npcs)?;
+            let particles = crate::particles::Steam::load(assets, &world.map)?;
+            let mut art = LevelArt::default();
+            art.prepare(assets, &world, interactions, true)?;
+            let character = if reload_alice {
+                let mut character = Character::load(assets)?;
+                character.restore(&checkpoint.character)?;
+                Some(character)
+            } else { None };
+            Ok(Box::new((art, cast, particles, world, character)))
+        })();
+        match attempt {
+            Ok(resources) => return Some(resources),
+            Err(error) => {
+                attempts += 1;
+                eprintln!("[lg/transition-recovery] outgoing rebuild failed attempt={attempts}: {error:#}");
+                if attempts == 1 { continue; }
+                // A persistent failure retains the untouched live checkpoint;
+                // quitting returns directly, without the normal Auto-save path.
+                let mut recovery_input = crate::input::Input::default();
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                let mut screen_frame = 0;
+                loop {
+                    escape_menu.backdrop();
+                    ui.toast("Could not restore the current map", screen_height() - 110.);
+                    ui.toast("Enter / Cross: retry    Escape / Circle: quit", screen_height() - 70.);
+                    next_frame().await;
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    { screen_frame += 1; crate::transition_memory::host_recovery_screen(attempts, screen_frame); }
+                    recovery_input.update(preferences, window_focused());
+                    if recovery_input.ui(KeyCode::Escape) || is_quit_requested() { return None; }
+                    if recovery_input.ui(KeyCode::Enter) { break; }
+                }
+            }
+        }
+    }
+}
+
 impl LevelArt {
     fn handoff_pose(&self) -> Option<&crate::cinematic::ActorPose> {
         self.village
@@ -1180,55 +1247,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 // This is a live resource checkpoint, not an external saved game.
                 // Dead, airborne and scripted frames must not pass save validators
                 // or migrate/reset their untouched live controllers and clocks.
-                // Build into locals. A failed rebuild must not install partial
-                // resources or unwind the viewer and lose the live checkpoint.
-                let mut attempts = 0;
-                // Keep the loop's Result small across its retry-screen await.
-                // Large Scene/Npcs values otherwise inflate the viewer future
-                // even during normal play, before recovery has ever run.
-                let rebuilt = loop {
-                    crate::render_fx::release_scene();
-                    crate::transition_memory::released().await;
-                    let attempt = (|| -> Result<_> {
-                        crate::transition_memory::recovery_fault()?;
-                        let level = $checkpoint.level()?;
-                        let mut world = Scene::load(&mut assets, &level.map)?;
-                        world.map.difficulty = stats.difficulty;
-                        interactions.sync(&mut world.world);
-                        let mut cast = crate::npc::Npcs::load(&mut assets, &world.map, &level.map,
-                            level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
-                        cast.restore(&level.npcs)?;
-                        let particles = crate::particles::Steam::load(&mut assets, &world.map)?;
-                        let mut art = LevelArt::default();
-                        art.prepare(&mut assets, &world, &interactions, true)?;
-                        let character = if $reload_alice {
-                            let mut character = Character::load(&mut assets)?;
-                            character.restore(&$checkpoint.character)?;
-                            Some(character)
-                        } else { None };
-                        Ok(Box::new((art, cast, particles, world, character)))
-                    })();
-                    match attempt {
-                        Ok(resources) => break resources,
-                        Err(error) => {
-                            attempts += 1;
-                            eprintln!("[lg/transition-recovery] outgoing rebuild failed attempt={attempts}: {error:#}");
-                            if attempts == 1 { continue; } // One bounded transient retry.
-                            // Persistent storage failure cannot recreate a dropped
-                            // world. Keep controllers/checkpoint in this frame and
-                            // offer an explicit retry, without writing any save.
-                            let mut recovery_input = crate::input::Input::default();
-                            loop {
-                                escape_menu.backdrop();
-                                ui.toast("Could not restore the current map", screen_height() - 110.);
-                                ui.toast("Enter / Cross: retry    Escape / Circle: quit", screen_height() - 70.);
-                                next_frame().await;
-                                recovery_input.update(&preferences, window_focused());
-                                if recovery_input.ui(KeyCode::Escape) || is_quit_requested() { return Ok(()); }
-                                if recovery_input.ui(KeyCode::Enter) { break; }
-                            }
-                        }
-                    }
+                let Some(rebuilt) = Box::pin(rebuild_outgoing(&mut assets, &$checkpoint,
+                    &interactions, stats.difficulty, &options, $reload_alice,
+                    &mut escape_menu, &ui, &preferences)).await else {
+                    mouse_look.release();
+                    // Transition's drop guard closes this operation as failed.
+                    return Ok(());
                 };
                 let (art, cast, mut particles, world, character) = *rebuilt;
                 particles.restore_runtime($particles);

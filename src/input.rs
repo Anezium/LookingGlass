@@ -440,6 +440,11 @@ impl Input {
         self.focused && self.pad.down & pad_mask(name) != 0
     }
     pub fn ui(&self, key: KeyCode) -> bool {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::transition_memory::host_recovery_key() == Some(key) {
+            crate::transition_memory::host_recovery_clear_key();
+            return true;
+        }
         let mask = match key {
             KeyCode::Up => 1,
             KeyCode::Down => 2,
