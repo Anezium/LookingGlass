@@ -198,7 +198,7 @@ impl Art {
         let m = crate::texture::read_materials(a)?;
         Ok(Self {
             faces: super::faces::Art::load(a, &m)?,
-            cat: Puppet::load(a, "c_cheshire", CAT, &m)?,
+            cat: Puppet::load(a, "c_cheshire", CAT, &m)?.with_afterimages(),
             alice: Puppet::load(a, "alice", &["idle_stand"], &m)?,
         })
     }

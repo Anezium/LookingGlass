@@ -44,6 +44,7 @@ impl Cache {
         self.meshes.clear();
     }
     pub fn capture(&mut self, model: &Model) {
+        model.require_live_skin();
         if !model.visible.iter().any(|v| *v) {
             self.invalidate();
             return;

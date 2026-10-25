@@ -12,19 +12,39 @@ const DEPTH: usize = 32;
 pub(crate) enum Region { Npc, PlayerMovement, FixedPhysics, Movers, Objects, AudioPrepare,
     Acoustics, Lights, WorldOpaque, WorldVisibility, WorldParameters, WorldSubmit,
     AlphaPrepare, AlphaSubmit, ActorGather, ActorCollect, ActorPublication, ActorSubmit,
-    Fx, JointFinish, FxSubmit, Hud, Present, Swap, Other }
+    Fx, JointFinish, FxSubmit, Hud, Present, Swap, ActorPose, ActorScalesPalette, ActorNumeric,
+    ActorSerial, ActorWorkerDispatch, ActorConsumers, Other }
 const REGIONS: usize = Region::Other as usize;
 const NAMES: [&str; REGIONS] = ["npc_think_movement", "player_movement", "fixed_physics", "movers", "objects",
     "audio_prepare", "prepare_acoustics", "light_selection", "world_opaque", "world_visibility",
     "world_parameters", "world_submit", "alpha_prepare", "alpha_submit", "actor_gather", "actor_collect",
-    "actor_publication", "actor_submit", "fx_gather", "joint_finish", "fx_submit", "hud", "present", "swap"];
+    "actor_publication", "actor_submit", "fx_gather", "joint_finish", "fx_submit", "hud", "present", "swap", "actor_pose", "actor_scales_palette",
+    "actor_numeric_capture", "actor_serial_skin", "actor_worker_dispatch", "actor_consumers_publication"];
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub(crate) enum Owner { Audio, Player, Npc, Camera, Other }
 const OWNERS: [&str; 5] = ["audio", "player", "npc", "camera", "other"];
+const ACTORS: usize = 128;
+pub(crate) const MUTABLE: u32 = 1;
+pub(crate) const PUPPET: u32 = 2;
+pub(crate) const FROZEN: u32 = 4;
+pub(crate) const ELECTRIC: u32 = 8;
+pub(crate) const AMBIENT: u32 = 16;
+pub(crate) const BOUNDS: u32 = 32;
+pub(crate) const TOPOLOGY: u32 = 64;
+pub(crate) const PUBLICATION: u32 = 128;
+const REASONS: [&str;8] = ["mutable", "puppet_capability", "frozen", "electric", "ambient_refresh",
+    "arena_or_identity", "topology", "publication_fallback"];
+#[derive(Clone, Copy, serde::Serialize)]
+struct Actor {
+    id: u64, serial_vertices: u32, worker_vertices: u32, serial_reasons: u32,
+    reason_vertices: [u32;8],
+}
+impl Actor { const ZERO: Self = Self { id:0,serial_vertices:0,worker_vertices:0,serial_reasons:0,reason_vertices:[0;8] }; }
 #[derive(Clone, Copy)]
 struct Row {
     sequence: u64, measured: bool, total: u64, coverage: u64,
+    actors: [Actor;ACTORS], actor_count: usize, worker_skin_ns: [u64;2],
     inclusive: [u64; REGIONS], exclusive: [u64; REGIONS], calls: [u32; REGIONS], parents: [u32; REGIONS],
     sweeps: [u32; 5], sweep_ns: [u64; 5], acoustic_sweeps: u32, acoustic_sweep_ns: u64,
     static_ns:[u64;5], static_counts:[[u64;7];5],
@@ -32,6 +52,7 @@ struct Row {
 }
 impl Row {
     const ZERO: Self = Self { sequence: 0, measured: false, total: 0, coverage: 0,
+        actors:[Actor::ZERO;ACTORS], actor_count:0, worker_skin_ns:[0;2],
         inclusive: [0;REGIONS], exclusive: [0;REGIONS], calls: [0;REGIONS], parents: [0;REGIONS],
         sweeps:[0;5], sweep_ns:[0;5], acoustic_sweeps:0, acoustic_sweep_ns:0,
         static_ns:[0;5],static_counts:[[0;7];5],
@@ -48,9 +69,37 @@ struct State {
     table: [Entry;TABLE],
 }
 impl State {
+    #[cfg(test)]
     const fn new() -> Self { Self { rows:[Row::ZERO;CAPACITY],current:Row::ZERO,count:0,accepted:0,
         start:None,pending:false,overflow:false,sequence:0,owner:Owner::Other,sweep_depth:0,scene:0,query_class:0,
         stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE] } }
+    fn boxed() -> Box<Self> {
+        // Initialize bounded storage once, before gameplay. A full const State
+        // would embed the enlarged actor rows in the native ELF's initializer.
+        // Row/Entry and the integer arrays contain only zero-valid scalar fields;
+        // initialize Option<Instant> and Owner explicitly in their own layouts.
+        let mut storage=Box::<Self>::new_uninit();
+        let p=storage.as_mut_ptr();
+        unsafe {
+            std::ptr::addr_of_mut!((*p).rows).write_bytes(0,1);
+            std::ptr::addr_of_mut!((*p).current).write(Row::ZERO);
+            std::ptr::addr_of_mut!((*p).count).write(0);
+            std::ptr::addr_of_mut!((*p).accepted).write(0);
+            std::ptr::addr_of_mut!((*p).start).write(None);
+            std::ptr::addr_of_mut!((*p).pending).write(false);
+            std::ptr::addr_of_mut!((*p).overflow).write(false);
+            std::ptr::addr_of_mut!((*p).sequence).write(0);
+            std::ptr::addr_of_mut!((*p).owner).write(Owner::Other);
+            std::ptr::addr_of_mut!((*p).sweep_depth).write(0);
+            std::ptr::addr_of_mut!((*p).scene).write(0);
+            std::ptr::addr_of_mut!((*p).query_class).write(0);
+            std::ptr::addr_of_mut!((*p).stack).write_bytes(0,1);
+            std::ptr::addr_of_mut!((*p).children).write_bytes(0,1);
+            std::ptr::addr_of_mut!((*p).depth).write(0);
+            std::ptr::addr_of_mut!((*p).table).write_bytes(0,1);
+            storage.assume_init()
+        }
+    }
     fn close(&mut self, now: Instant) {
         if let Some(start) = self.start {
             if self.pending {
@@ -88,10 +137,10 @@ impl State {
 }
 thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
-    static STATE: RefCell<State> = const { RefCell::new(State::new()) };
+    static STATE: RefCell<Box<State>> = RefCell::new(State::boxed());
 }
+pub(crate) fn active() -> bool {ACTIVE.with(Cell::get)}
 pub(crate) fn is_active()->bool {active()}
-fn active() -> bool {ACTIVE.with(Cell::get)}
 fn configured() -> bool {
     #[cfg(feature="vita_renderer")]
     {crate::render::vita_renderer::config().phase_census}
@@ -129,6 +178,8 @@ pub(crate) fn span(region:Region) -> Timer {
     let mut timer=Timer{start:None,region:region as usize,level:0};
     if region==Region::Other || !active() {return timer;}
     STATE.with(|s| {let mut s=s.borrow_mut();
+        // These are actor_gather subdivisions, not whole-frame pose/FX totals.
+        if region as usize>=Region::ActorPose as usize && !s.stack[..s.depth].contains(&(Region::ActorGather as usize)) {return;}
         if s.depth==DEPTH {s.current.errors+=1;return;}
         timer.level=s.depth;let d=s.depth;s.stack[d]=region as usize;s.children[d]=0;s.depth+=1;
         let parent=if d==0 {REGIONS} else {s.stack[d-1]};s.current.parents[region as usize]|=1<<parent;
@@ -200,6 +251,23 @@ pub(crate) fn cache_result(hit: bool, evicted: bool) {
         s.current.cache[class][2]+=u32::from(evicted);
     }); }
 }
+/// Main-thread counters only. Unknown identities use 0; overflow invalidates export.
+pub(crate) fn skin(actor:Option<crate::character::skinning::identity::ActorId>,vertices:usize,reasons:u32) {
+    if !active() { return; }
+    STATE.with(|s| { let mut s=s.borrow_mut(); let r=&mut s.current;
+        let id=actor.map_or(0,|a|a.census_id());
+        let index=if let Some(i)=r.actors[..r.actor_count].iter().position(|a|a.id==id) {i}
+        else {if r.actor_count==ACTORS {r.errors+=1;return;} let i=r.actor_count;r.actor_count+=1;r.actors[i].id=id;i};
+        let a=&mut r.actors[index];
+        if reasons==0 {a.worker_vertices+=vertices as u32;} else {
+            a.serial_vertices+=vertices as u32;a.serial_reasons|=reasons;
+            for i in 0..8 {if reasons&(1<<i)!=0 {a.reason_vertices[i]+=vertices as u32;}}
+        }
+    });
+}
+pub(crate) fn worker_skin(index:usize,ns:u64) {
+    if active() { STATE.with(|s|s.borrow_mut().current.worker_skin_ns[index]+=ns); }
+}
 fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
     anyhow::ensure!(!s.overflow && s.count==CAPACITY,"census requires exactly 60+120 accepted frames");
     anyhow::ensure!(s.rows[..60].iter().all(|r|!r.measured) && s.rows[60..].iter().all(|r|r.measured),"census warmup/measurement alignment");
@@ -214,8 +282,11 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "acoustics_world_sweep_ns":r.acoustic_sweep_ns,"static_queries_total_hit1_hit4_hit16":r.queries,
         "static_cache_hit_miss_eviction":r.cache,
         "live_table_evictions":r.evictions,"hierarchy_errors":r.errors,
+        "actors":&r.actors[..r.actor_count],"worker_skin_ns":r.worker_skin_ns,
     })).collect();
-    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":1,"map":map,"regions":NAMES,"owners":OWNERS,
+    let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
+    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":3,"actor_capacity":ACTORS,"serial_reasons":REASONS,
+        "audio_static_cache":audio_static_cache,"map":map,"regions":NAMES,"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
         "parent_mask_frame_bit":REGIONS,"clock":"monotonic elapsed nanoseconds; includes preemption and API waits; no GPU timing",
@@ -279,6 +350,9 @@ mod tests {
             let mut bytes=Vec::new();write(&s,"fixture",&mut bytes).unwrap();
             let v:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["rows"][60]["measured_frame"],1);assert_eq!(v["rows"][179]["measured_frame"],120);
+            assert_eq!(v["schema"],3);assert_eq!(v["audio_static_cache"],false);
+            assert_eq!(v["regions"].as_array().unwrap().len(),NAMES.len());
+            assert_eq!(v["actor_capacity"],ACTORS);assert!(v.get("static_count_columns").is_some());
             s.overflow=true;assert!(write(&s,"fixture",&mut Vec::new()).is_err());});begin(false);
     }
     #[test]

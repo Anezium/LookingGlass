@@ -97,6 +97,8 @@ impl Model {
         }
         material.bind();
         let _skin_guard = crate::character::skinning::CullGuard::preserve(g.frozen);
+        self.live_skin_current = !crate::character::skinning::overlap::single_preparing()
+            || crate::character::skinning::mutable_required();
         let skin_visible = crate::character::draw_skin_alpha(
             &self.data.skeleton,
             &mut self.meshes,

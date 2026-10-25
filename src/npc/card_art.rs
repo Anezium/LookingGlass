@@ -148,6 +148,8 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
+        let _frozen_consumer = crate::character::skinning::CullGuard::publication_reason(
+            g.frozen, crate::phase_census::FROZEN);
         let time = g.sample_time(&self.data);
         let fade = g.fade(&self.data);
         let clip = &self.data.clips[g.clip()];

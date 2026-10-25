@@ -113,6 +113,7 @@ impl LevelArt for Art {
                 .unwrap()
                 .1;
             let i = SUITS.iter().position(|s| s == group).unwrap_or(3);
+            let electric_consumer = self.guards[i].electric_consumer(a.electric);
             match &a.guard {
                 guards::Body::Basic(g) => {
                     self.guards[i].draw_guard(g, bright, camera, atmo);
@@ -146,6 +147,7 @@ impl LevelArt for Art {
                     }
                 }
             }
+            drop(electric_consumer);
             self.guards[i].draw_electric(a.electric);
         }
         if let Some(i) = k.saved.smashed.filter(|_| k.saved.win_time < 1.5) {

@@ -855,6 +855,7 @@ impl Art {
         let (clip, time, looping) = b.clip(timing);
         let scale = b.visual_scale();
         self.actor.show_attachments(b.carrying);
+        let electric_consumer = self.actor.electric_consumer(b.electric);
         self.actor.draw(
             clip,
             time,
@@ -866,6 +867,7 @@ impl Art {
             scale,
             fullbright,
         );
+        drop(electric_consumer);
         self.actor.draw_electric(b.electric);
         for p in &b.acorns {
             self.acorn.draw_frame(

@@ -17,7 +17,7 @@ impl Art {
             alice: Puppet::load(a, "alice", ALICE, &specs)?,
             rabbit: Puppet::load(a, "c_whiterabbit", RABBIT, &specs)?,
             hatter: Puppet::load(a, "c_madhatter", HATTER, &specs)?,
-            cat: Puppet::load(a, "c_cheshire", CAT, &specs)?,
+            cat: Puppet::load(a, "c_cheshire", CAT, &specs)?.with_afterimages(),
             dead: Prop::load(a, "c_whiterabbit_stomped", &specs)?,
             ants: [
                 Puppet::load(a, "c_armyant", crate::ant::REGULAR, &specs)?,

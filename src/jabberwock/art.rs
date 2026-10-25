@@ -26,7 +26,7 @@ impl Art {
                     name,
                     &r.clips.keys().map(String::as_str).collect::<Vec<_>>(),
                     &specs,
-                )?,
+                ).map(|p| if name == "c_cheshire" { p.with_afterimages() } else { p })?,
             );
         }
         Ok(Self {

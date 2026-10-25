@@ -128,6 +128,7 @@ pub(crate) fn sample(
     looping: bool,
     prepare: impl FnOnce() -> Vec<Transform>,
 ) -> Vec<Transform> {
+    let _census=crate::phase_census::span(crate::phase_census::Region::ActorPose);
     if !overlap::gathering() && !overlap::ready() {
         return prepare();
     }
@@ -158,6 +159,7 @@ pub(crate) fn pose(
     roots: &[(usize, f32)],
     prepare: impl FnOnce() -> (Vec<Transform>, Vec<f32>),
 ) -> PoseHandle {
+    let _census=crate::phase_census::span(crate::phase_census::Region::ActorPose);
     if !overlap::gathering() && !overlap::ready() {
         let (pose, scales) = prepare();
         return PoseHandle::Owned(Pose {
