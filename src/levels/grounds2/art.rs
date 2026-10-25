@@ -116,7 +116,9 @@ impl LevelArt for Art {
             if !a.spawned {
                 continue;
             }
+            let electric_consumer = self.guards.electric_consumer(a.electric);
             self.guards.draw_card(&a.body, bright, camera, atmo);
+            drop(electric_consumer);
             self.guards.draw_electric(a.electric);
             for s in &a.body.shots {
                 self.bolt.draw_frame(

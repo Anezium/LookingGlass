@@ -112,6 +112,7 @@ impl LevelArt for Art {
             hare.translation.z -= motion::dunk(s.age - t);
         }
         self.hare.atmosphere(atmo, camera);
+        let electric_consumer = self.hare.electric_consumer(o.saved.hare.map_or(0., |t| { let phase=(o.saved.age-t).rem_euclid(8.); if (3. ..4.).contains(&phase) { 4. - phase } else { 0. } }));
         self.hare.draw(
             if matches!(line, Some(0 | 5 | 7 | 10)) {
                 "talk02"
@@ -126,7 +127,9 @@ impl LevelArt for Art {
             1.5,
             bright,
         );
+        drop(electric_consumer);
         self.mouse.atmosphere(atmo, camera);
+        let electric_consumer = self.mouse.electric_consumer(o.saved.hare.map_or(0., |t| { let phase=(o.saved.age-t).rem_euclid(8.); if phase < 1. { 1. - phase } else { 0. } }));
         self.mouse.draw(
             if matches!(line, Some(1 | 9)) {
                 "giveustea"
@@ -141,6 +144,7 @@ impl LevelArt for Art {
             1.,
             bright,
         );
+        drop(electric_consumer);
         self.gryphon.atmosphere(atmo, camera);
         let idle = self.gryphon.idle_clip().to_owned();
         self.gryphon

@@ -57,8 +57,11 @@ struct Surface {
     revision: Revision,
     output: usize,
     alpha_variant: bool,
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    oracle:usize,
 }
 struct Draw {
+    instance: u64,
     actor: Option<super::identity::ActorId>,
     key: usize,
     pose: Range<usize>,
@@ -85,10 +88,13 @@ struct Task {
     draws: Range<usize>,
     layers: usize,
     dirty: usize,
+    census: bool,
+    census_ns: u64,
 }
 impl Task {
     unsafe fn run(address: usize) {
-        let task = &*(address as *const Task);
+        let task = &mut *(address as *mut Task);
+        let started=task.census.then(std::time::Instant::now);
         let input = &*(task.input as *const Inputs);
         for draw in &input.draws[task.draws.clone()] {
             let pose = &input.pose[draw.pose.clone()];
@@ -162,6 +168,7 @@ impl Task {
             }
         }
 
+        task.census_ns=started.map_or(0,|t|t.elapsed().as_nanos() as u64);
     }
 }
 struct Store {
@@ -204,7 +211,7 @@ impl Store {
                 UnsafeCell::new(Task {
                     input: 0,
                     output: 0,
-                    draws: 0..0, layers: 0, dirty: 0,
+                    draws: 0..0, layers: 0, dirty: 0, census:false, census_ns:0,
                 })
             }),
             input: Box::new(UnsafeCell::new(Inputs {
@@ -288,6 +295,7 @@ impl Store {
             return;
         }
         let draw = Draw {
+            instance: 0,
             actor: None,
             key: skeleton as *const Skeleton as usize,
             pose: i.pose.len()..i.pose.len() + p.pose.len(),
@@ -319,7 +327,8 @@ impl Store {
                     else {self.previous.get(i.surfaces.len())
                         .filter(|old| old.vertices == vertices && Arc::ptr_eq(&old.cpu, &cpu))
                         .map_or_else(Revision::new, |old| old.revision)};
-                i.surfaces.push(Surface { mesh, vertices, cpu, revision, output: 0, alpha_variant: false });
+                i.surfaces.push(Surface { mesh, vertices, cpu, revision, output: 0, alpha_variant: false,
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))] oracle:usize::MAX });
             }
         }
 
@@ -327,6 +336,9 @@ impl Store {
     }
     #[cfg(feature="vita_renderer")]
     fn capture_single(&mut self, skeleton: &Skeleton, meshes: &mut [Option<Mesh>], p: Params<'_>, visible: bool) -> bool {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let _alloc=crate::sim_maps::probe::NumericAlloc::begin();
+        let _census=crate::phase_census::span(crate::phase_census::Region::ActorNumeric);
         crate::frame_profile::skinned_draw(!visible);
 
         let actor=super::identity::current();
@@ -337,39 +349,62 @@ impl Store {
             && i.pose.len()+p.pose.len() <= BONES && i.scales.len()+p.scales.len() <= BONES
             && i.palette.len()+p.palette.len() <= BONES;
         let previous=self.previous_numeric.as_ref().and_then(|old|old.draws.iter().find(|d|
-            d.actor==actor && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
+            d.actor==actor && !i.draws.iter().any(|used|used.instance==d.instance)
+                && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
                 && d.scale.to_bits()==p.scale.to_bits() && d.flat==p.flat && d.fullbright==p.fullbright
                 && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
+        let instance=previous.map_or_else(super::identity::next_instance,|(_,d)|d.instance);
         let start = i.surfaces.len();
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let oracle=crate::sim_maps::probe::reserve_skin(actor,mesh_id);
             // Explicit consumers require live mutable fields now. Untracked topology,
             // layers and exhausted banks use the original exact serial kernel.
-            let direct = if bounded && !super::mutable_required() && surface.vertices.len()==mesh.vertices.len()
-                && surface.indices == mesh.indices {
+            let mut reasons=super::mutable_reasons();
+            if reasons==0 {
+                if !bounded { reasons=crate::phase_census::BOUNDS; }
+                else if surface.vertices.len()!=mesh.vertices.len() || surface.indices!=mesh.indices {
+                    reasons=crate::phase_census::TOPOLOGY;
+                }
+            }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let prepare_alloc=crate::sim_maps::probe::prepare_checkpoint();
+            let direct = if reasons==0 {
                 // A draw can animate unrelated bones while this surface is unchanged.
                 // Compare its exact numeric dependencies on the game thread; never
                 // add J17's dual normalized-output comparison loop to the workers.
                 let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
-                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged,
+                let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
+                crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged, instance,
                     crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize})
             } else { None };
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::prepare_allocations(prepare_alloc,direct.is_some());
             if let Some((output, alpha_variant)) = direct {
+                crate::phase_census::skin(actor,mesh.vertices.len(),0);
                 let vertices = self.output_len..self.output_len+mesh.vertices.len();
                 self.output_len = vertices.end;
                 i.surfaces.push(Surface { mesh:mesh_id, vertices, cpu:surface.cpu(),
-                    revision:Revision {identity:0,vertices:[0;2]}, output, alpha_variant });
+                    revision:Revision {identity:0,vertices:[0;2]}, output, alpha_variant,
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))] oracle });
                 #[cfg(feature="actor_diagnostics")]
                 crate::render_fx::retained::count("actor_direct_surfaces",1);
             } else {
-                super::kernel(&mut super::Job { input:&surface.vertices, vertices:&mut mesh.vertices, indices:&mesh.indices },p);
+                if reasons==0 {reasons=crate::phase_census::PUBLICATION;}
+                crate::phase_census::skin(actor,mesh.vertices.len(),reasons);
+                { let _census=crate::phase_census::span(crate::phase_census::Region::ActorSerial);
+                  super::kernel(&mut super::Job { input:&surface.vertices, vertices:&mut mesh.vertices, indices:&mesh.indices },p); }
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                crate::sim_maps::probe::record_skin(oracle,&mesh.vertices,&mesh.indices);
+                let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
                 crate::render_fx::skin(mesh);
                 #[cfg(feature="actor_diagnostics")]
                 crate::render_fx::retained::count("actor_mutable_consumer_surfaces",1);
             }
         }
         if i.surfaces.len() > start {
-            let d = Draw { actor, key:skeleton as *const Skeleton as usize,
+            let d = Draw { instance, actor, key:skeleton as *const Skeleton as usize,
                 pose:i.pose.len()..i.pose.len()+p.pose.len(), scales:i.scales.len()..i.scales.len()+p.scales.len(),
                 palette:i.palette.len()..i.palette.len()+p.palette.len(), surfaces:start..i.surfaces.len(),
                 transform:p.transform,scale:p.scale,flat:p.flat,fullbright:p.fullbright,alpha:p.alpha,visible };
@@ -380,6 +415,7 @@ impl Store {
         true
     }
     fn dispatch(&mut self) {
+        let _census=crate::phase_census::span(crate::phase_census::Region::ActorWorkerDispatch);
         assert_eq!(self.pending, 0);
         let i = unsafe { &*self.input.get() };
         let draws = i.draws.len();
@@ -410,6 +446,7 @@ impl Store {
                     draws: range,
                     layers: if self.layers.is_empty() {0} else {self.layers.as_mut_ptr() as usize},
                     dirty: self.dirty.as_mut_ptr() as usize,
+                    census:crate::phase_census::active(), census_ns:0,
                 };
             }
             // Store is boxed before this call, and cannot be moved/reset/read until drain.
@@ -434,6 +471,19 @@ impl Store {
             }
         }
 
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if panic.is_none() && single_frame() {
+            let input=unsafe {&*self.input.get()};
+            for s in &input.surfaces {
+                if s.oracle!=usize::MAX {
+                    let vertices=unsafe {std::slice::from_raw_parts(s.output as *const Vertex,s.vertices.len())};
+                    crate::sim_maps::probe::record_skin(s.oracle,vertices,&s.cpu.indices);
+                }
+            }
+        }
+        for index in 0..self.pending {
+            crate::phase_census::worker_skin(index,unsafe {(*self.tasks[index].get()).census_ns});
+        }
         self.pending = 0;
         if completed && !self.layers.is_empty() {
             let input = unsafe { &mut *self.input.get() };

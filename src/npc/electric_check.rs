@@ -78,10 +78,12 @@ async fn late_shell_near_plane(p: &mut Puppet, name: &str, clip: &str) -> Result
     ensure!(crate::render::outside_bounds(lo, hi), "{name}: body box was not rejected");
     ensure!(!crate::render::outside_bounds(shell, shell), "{name}: shell point was not visible");
     p.atmosphere(&Atmosphere::default(), eye);
+    let electric_consumer=p.electric_consumer(crate::electric::LIFE-age);
     p.draw(clip, 0.2, true, Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY }, 1., true);
     ensure!(p.0.visible.iter().any(|v| *v), "{name}: near-plane skin was lost");
     ensure!(p.0.meshes.iter().flatten().flat_map(|m| &m.vertices)
         .any(|v| v.normal.truncate().length_squared() > 0.), "{name}: near-plane normals collapsed");
+    drop(electric_consumer);
     p.draw_electric(crate::electric::LIFE - age);
     capture(&format!("{name}-late-near-plane")).await?;
     println!("PASS late electrical near-plane {name}: rejected body bounds, retained visible shell and normals");
@@ -114,6 +116,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
         let mut frames = Vec::new();
         for (label, remaining, clock) in [("off", 0., 7.), ("on", 0.4, 7.), ("paused", 0.4, 901.)] {
             start(clock);
+            let electric_consumer=p.electric_consumer(remaining);
             p.draw(
                 &clip,
                 0.2,
@@ -125,6 +128,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
                 1.,
                 true,
             );
+            drop(electric_consumer);
             p.draw_electric(remaining);
             ensure!(p.0.visible.iter().any(|v| *v), "{name}: late shell lost its base skin");
             ensure!(p.0.meshes.iter().flatten().flat_map(|m| &m.vertices)
@@ -163,6 +167,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
         }
         if name == "cardguard_club" {
             start(7.);
+            let electric_consumer=p.electric_consumer(0.4);
             p.draw(
                 &clip,
                 0.2,
@@ -176,6 +181,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             );
             ensure!(!p.0.electric_attachments.is_empty(), "Guard staff missing");
             p.0.electric_attachments.clear();
+            drop(electric_consumer);
             p.draw_electric(0.4);
             let body_only = capture("club-without-staff-electric").await?;
             ensure!(
@@ -184,6 +190,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             );
             p.show_attachments(false);
             start(7.);
+            let electric_consumer=p.electric_consumer(0.4);
             p.draw(
                 &clip,
                 0.2,
@@ -199,6 +206,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
                 p.0.electric_attachments.is_empty(),
                 "Hidden staff retained shock geometry"
             );
+            drop(electric_consumer);
             p.draw_electric(0.4);
             capture("club-hidden-staff").await?;
         }

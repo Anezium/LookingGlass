@@ -669,6 +669,8 @@ impl Resident {
         } else {
             1.
         };
+        let _frozen_consumer = crate::character::skinning::CullGuard::publication_reason(
+            frozen, crate::phase_census::FROZEN);
         let _skin_guard = crate::character::skinning::CullGuard::preserve(match &self.body {
             Body::Diamond(b) => b.electric > 0., Body::Boojum(b) => b.electric > 0.,
             Body::Ladybug(b) => b.electric > 0., _ => false,

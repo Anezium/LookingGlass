@@ -203,7 +203,7 @@ impl Art {
     pub fn load(a: &mut Assets) -> Result<Self> {
         let m = crate::texture::read_materials(a)?;
         Ok(Self {
-            cat: Puppet::load(a, "c_cheshire", CAT, &m)?,
+            cat: Puppet::load(a, "c_cheshire", CAT, &m)?.with_afterimages(),
             alice: Puppet::load(a, "alice", &["idle_stand"], &m)?,
         })
     }

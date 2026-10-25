@@ -533,6 +533,15 @@ impl Gpu {
             self.stats.uniform_bytes += traffic.bytes;
         }
         if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
+        #[cfg(all(feature="sim_maps_probe",target_os="macos"))]
+        if crate::sim_maps::probe::skin_proof() {
+            let m=p.geometry();
+            let (vertices,indices)=crate::sim_maps::probe::gpu_geometry(m.vertices.len(),m.indices.len());
+            crate::sim_maps::probe::packet(slot,&vertices,&indices,&m.vertices,&m.indices,u,
+                &[p.effect as u32,p.blend_index as u32,p.depth_equal as u32,(!depth_write) as u32,
+                    p.lit as u32,p.clamp as u32,p.cutout.to_bits(),p.cutout_reference.to_bits(),
+                    p.fog.to_bits(),p.model as u32,p.filter_fade.to_bits()],p.mesh.texture.as_ref());
+        }
         ctx.draw(0, p.geometry().indices.len() as i32, 1);
         self.stats.draws += 1;
         self.stats.triangles += p.geometry().indices.len() as u64 / 3;
@@ -875,7 +884,8 @@ fn merge_cached_options<'a>(
                 if versions.is_some() { groups[target].passes[0].geometry=Some(std::rc::Rc::new(cached)); }
                 else { groups[target].passes[0].geometry=None; groups[target].passes[0].mesh=cached.mesh; }
                 for &source in sources {
-                    groups[source].passes.clear();
+                    super::actor_cache::recycle(&mut groups[source].passes);
+                groups[source].passes.clear();
                 }
                 count("vita_fx_unchanged_merged_groups", 1);
                 cache.version_scratch.insert(target, version_storage);
@@ -940,6 +950,7 @@ fn merge_cached_options<'a>(
             groups[target].passes[0].mesh = dest;
             for &source in sources {
                 if !groups[source].passes[0].effect {count("vita_actor_batched_packets",1);}
+                super::actor_cache::recycle(&mut groups[source].passes);
                 groups[source].passes.clear();
             }
         } else {
@@ -955,7 +966,9 @@ fn merge_cached_options<'a>(
         }
         groups[target].passes[0].own_geometry();
         for &source in sources {
-            let mut source = groups[source].passes.pop().expect("merge plan source");
+            let source_id = source;
+            let mut source = groups[source_id].passes.pop().expect("merge plan source");
+            if source.model && !source.effect {super::actor_cache::recycle_empty(&mut groups[source_id].passes);}
             source.own_geometry();
             let dest = &mut groups[target].passes[0].mesh;
             let offset = dest.vertices.len() as u16;

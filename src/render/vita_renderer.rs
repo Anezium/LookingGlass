@@ -109,6 +109,8 @@ pub struct Config {
     pub frame_phase_probe: bool,
     /// Fixed-storage elapsed census; opt in only for a bounded benchmark.
     pub phase_census: bool,
+    /// Select mutable skin from actual frame consumers; keep inherited visual policy.
+    pub skin_actual_consumers: bool,
     pub mover_far_lazy: bool,
     pub mover_lazy_publish: bool,
     pub pickup_fx_cache: bool,
@@ -272,6 +274,7 @@ impl Default for Config {
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             phase_census: false,
+            skin_actual_consumers: false,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,

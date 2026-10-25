@@ -21,7 +21,7 @@ impl Art {
                     n,
                     &r.clips.keys().map(String::as_str).collect::<Vec<_>>(),
                     &materials,
-                )?,
+                )?.with_afterimages(),
             );
         }
         for (name, actor) in &mut actors {

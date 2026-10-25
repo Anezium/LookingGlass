@@ -4,7 +4,11 @@ use std::cell::Cell;
 pub(crate) struct ActorId(u64);
 thread_local! {
     static NEXT: Cell<u64> = const { Cell::new(1) };
+    static NEXT_INSTANCE: Cell<u64> = const { Cell::new(1) };
     static CURRENT: Cell<Option<ActorId>> = const { Cell::new(None) };
+}
+pub(crate) fn next_instance() -> u64 {
+    NEXT_INSTANCE.with(|n| {let id=n.get();n.set(id.checked_add(1).expect("skin instance overflow"));id})
 }
 impl Default for ActorId {
     fn default() -> Self {
@@ -12,6 +16,7 @@ impl Default for ActorId {
     }
 }
 impl ActorId {
+    pub(crate) fn census_id(self) -> u64 { self.0 }
     pub(crate) fn scope(self) -> Scope { Scope(CURRENT.with(|c| c.replace(Some(self)))) }
     pub(crate) fn scope_unless_set(self) -> Scope { current().unwrap_or(self).scope() }
 }

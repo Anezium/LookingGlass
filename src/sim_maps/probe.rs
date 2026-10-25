@@ -1,7 +1,12 @@
 //! Explicit host diagnostics. Run from a private working/save directory.
-use std::{cell::RefCell, collections::BTreeMap, sync::OnceLock, time::Instant};
+use std::{cell::{Cell,RefCell}, collections::BTreeMap, sync::OnceLock, time::Instant};
 use sha2::{Digest, Sha256};
 thread_local! {
+    static ALLOC_TRACKED:Cell<bool>=const {Cell::new(false)};
+    static PREPARE_ALLOC:Cell<[u64;2]>=const {Cell::new([0;2])};
+    static SKINS: RefCell<Vec<serde_json::Value>> = RefCell::default();
+    static TEXTURES: RefCell<BTreeMap<String,String>> = RefCell::default();
+    static PACKETS: RefCell<Vec<serde_json::Value>> = RefCell::default();
     static JOINT_ORDER: RefCell<Vec<(u8,usize,u32)>> = RefCell::default();
     static WORLD_ORDER: RefCell<Vec<(usize,bool)>> = RefCell::default();
     static COUNTS: RefCell<BTreeMap<&'static str, u64>> = RefCell::default();
@@ -55,6 +60,8 @@ pub fn count(name: &'static str, n: u64) {
 pub fn begin() {
     crate::collision::sah_probe::begin();
     if enabled() {
+        SKINS.with(|s|s.borrow_mut().clear());
+        PACKETS.with(|s|s.borrow_mut().clear());
         JOINT_ORDER.with(|s|s.borrow_mut().clear());
         WORLD_ORDER.with(|s|s.borrow_mut().clear());
         COUNTS.with(|c| c.borrow_mut().clear());
@@ -73,6 +80,8 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     let bytes = serde_json::to_vec(state).expect("serializable simulation state");
     let hash = format!("{:x}", Sha256::digest(&bytes));
     COUNTS.with(|c| println!("SIM_MAPS_FRAME {}", serde_json::json!({
+        "actor_skin":SKINS.with(|s|s.borrow().clone()),
+        "submitted_packets":PACKETS.with(|s|s.borrow().clone()),
         "frame": frame, "map": map, "active": active,
         "joint_alpha_order": JOINT_ORDER.with(|s|s.borrow().clone()),
         "blend_world_order": WORLD_ORDER.with(|s|s.borrow().clone()),
@@ -97,4 +106,110 @@ pub fn world_order(id: usize, alpha: bool) {
 
 pub fn joint_order(kind: u8, id: usize, depth: f32) {
     if enabled() {JOINT_ORDER.with(|s|s.borrow_mut().push((kind,id,depth.to_bits())));}
+}
+
+pub fn skin_proof() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_PROOF").is_some())
+}
+pub fn reserve_skin(actor:Option<crate::character::skinning::identity::ActorId>,surface:usize)->usize {
+    if !skin_proof() {return usize::MAX;}
+    SKINS.with(|s| {let mut s=s.borrow_mut();let id=s.len();
+        s.push(serde_json::json!({"actor":actor.map(|a|a.census_id()),"surface":surface}));id})
+}
+fn mesh_hash(vertices:&[macroquad::prelude::Vertex],indices:&[u16])->Sha256 {
+    let mut h=Sha256::new();h.update((vertices.len() as u64).to_le_bytes());
+    for v in vertices {
+        for f in v.position.to_array().into_iter().chain(v.uv.to_array()).chain(v.normal.to_array()) {h.update(f.to_bits().to_le_bytes());}
+        h.update(v.color);
+    }
+    h.update((indices.len() as u64).to_le_bytes());for i in indices {h.update(i.to_le_bytes());}h
+}
+pub fn record_skin(slot:usize,vertices:&[macroquad::prelude::Vertex],indices:&[u16]) {
+    if slot==usize::MAX {return;}
+    let hash=format!("{:x}",mesh_hash(vertices,indices).finalize());
+    SKINS.with(|s|s.borrow_mut()[slot]["sha256"]=hash.into());
+}
+pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indices:&[u16],vertices:&[macroquad::prelude::Vertex],indices:&[u16],uniforms:&[f32],policy:&[u32],texture:Option<&macroquad::prelude::Texture2D>) {
+    if !skin_proof() {return;}
+    let geometry=format!("{:x}",mesh_hash(vertices,indices).finalize());
+    let gpu_geometry=format!("{:x}",mesh_hash(gpu_vertices,gpu_indices).finalize());
+    assert_eq!(geometry,gpu_geometry,"stale GPU geometry at retained slot {gpu_slot}");
+    let mut h=Sha256::new();for f in uniforms {h.update(f.to_bits().to_le_bytes());}
+    let uniforms=format!("{:x}",h.finalize());
+    let texture=texture.map(|t|TEXTURES.with(|cache| {let mut cache=cache.borrow_mut();
+        cache.entry(format!("{:?}",t.raw_miniquad_id())).or_insert_with(|| {
+            let image=t.get_texture_data();let mut h=Sha256::new();
+            h.update(image.width.to_le_bytes());h.update(image.height.to_le_bytes());h.update(&image.bytes);
+            format!("{:x}",h.finalize())
+        }).clone()
+    }));
+    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"geometry":geometry,"gpu_geometry":gpu_geometry,"gpu_slot":gpu_slot,"vertices":vertices.len(),"indices":indices.len(),"uniforms":uniforms,"policy":policy,"texture":texture})));
+}
+/// Host-only view motion leaves simulation inputs untouched.
+pub fn moving_view(frame:u64,eye:glam::Vec3,target:glam::Vec3)->(glam::Vec3,glam::Vec3) {
+    static ON:OnceLock<bool>=OnceLock::new();
+    if !enabled() || !*ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_MOVING_VIEW").is_some()) {return (eye,target);}
+    let t=frame as f32*0.037;let offset=glam::vec3(t.sin()*28.,t.cos()*21.,(t*0.7).sin()*12.);
+    (eye+offset,target+glam::vec3((t*0.6).sin()*35.,(t*0.5).cos()*24.,0.))
+}
+
+pub struct NumericAlloc(Option<crate::kernel_alloc::Scope>);
+impl NumericAlloc {
+    pub fn begin()->Self {
+        static ON:OnceLock<bool>=OnceLock::new();
+        let active=enabled() && *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_ALLOC").is_some());
+        ALLOC_TRACKED.with(|v|v.set(active));PREPARE_ALLOC.with(|v|v.set([0;2]));
+        Self(active.then(crate::kernel_alloc::Scope::begin))
+    }
+}
+impl Drop for NumericAlloc { fn drop(&mut self) {if let Some(scope)=self.0.take() {
+    let calls=scope.finish();ALLOC_TRACKED.with(|v|v.set(false));
+    count("skin_numeric_allocation_calls",calls);count("skin_numeric_draws",1);
+    let p=PREPARE_ALLOC.with(Cell::get);count("skin_worker_prepare_allocation_calls",p[0]);count("skin_rejected_prepare_allocation_calls",p[1]);
+}}}
+
+/// Deterministic host-only damage witness; gameplay NPCs keep their production hit path.
+pub fn script_hits(frame:u64,npcs:&mut crate::npc::Npcs) {
+    static ON:OnceLock<bool>=OnceLock::new();
+    if !enabled() || !*ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_DEATHS").is_some()) {return;}
+    let (damage,kind)=match frame {70=>(1.,crate::combat::DamageKind::Electric),100=>(10000.,crate::combat::DamageKind::Ice),130=>(10000.,crate::combat::DamageKind::Other),_=>return};
+    let targets=npcs.targets();let mut accepted=0;
+    for t in &targets {accepted+=usize::from(npcs.hit(crate::combat::Hit {id:t.id,damage,kind,knockback:glam::Vec3::ZERO}).is_some());}
+    println!("SIM_SKIN_HITS {}",serde_json::json!({"frame":frame,"targets":targets.len(),"accepted":accepted,"kind":format!("{kind:?}")}));
+}
+
+pub fn prepare_checkpoint()->Option<u64> {
+    ALLOC_TRACKED.with(Cell::get).then(crate::kernel_alloc::Scope::calls_so_far)
+}
+pub fn prepare_allocations(start:Option<u64>,accepted:bool) {
+    if let Some(start)=start {let calls=crate::kernel_alloc::Scope::calls_so_far()-start;
+        PREPARE_ALLOC.with(|p|{let mut v=p.get();v[usize::from(!accepted)]+=calls;p.set(v);});}
+}
+
+/// Synchronous test-only readback. Native builds contain none of this observer.
+#[cfg(target_os="macos")]
+pub fn gpu_geometry(vertex_count:usize,index_count:usize)->(Vec<macroquad::prelude::Vertex>,Vec<u16>) {
+    use macroquad::prelude::*;
+    #[link(name="OpenGL",kind="framework")]
+    extern "C" {
+        fn glGetIntegerv(pname:u32,data:*mut i32);
+        fn glGetVertexAttribiv(index:u32,pname:u32,data:*mut i32);
+        fn glBindBuffer(target:u32,buffer:u32);
+        fn glGetBufferSubData(target:u32,offset:isize,size:isize,data:*mut std::ffi::c_void);
+    }
+    let mut vertices=vec![Vertex {position:Vec3::ZERO,uv:Vec2::ZERO,normal:Vec4::ZERO,color:[0;4]};vertex_count];
+    let mut indices=vec![0_u16;index_count];
+    unsafe {
+        let mut old_array=0;let mut attribute_buffer=0;let mut index_buffer=0;
+        glGetIntegerv(0x8894,&mut old_array); // ARRAY_BUFFER_BINDING
+        glGetVertexAttribiv(0,0x889F,&mut attribute_buffer); // ATTRIB_ARRAY_BUFFER_BINDING
+        glGetIntegerv(0x8895,&mut index_buffer); // ELEMENT_ARRAY_BUFFER_BINDING
+        assert!(attribute_buffer>0 && index_buffer>0,"GPU oracle requires GL vertex/index bindings");
+        glBindBuffer(0x8892,attribute_buffer as u32);
+        glGetBufferSubData(0x8892,0,(vertices.len()*std::mem::size_of::<Vertex>()) as isize,vertices.as_mut_ptr().cast());
+        glBindBuffer(0x8892,old_array as u32);
+        glGetBufferSubData(0x8893,0,(indices.len()*2) as isize,indices.as_mut_ptr().cast());
+    }
+    (vertices,indices)
 }
