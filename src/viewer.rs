@@ -1172,28 +1172,66 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }};
     }
     macro_rules! rollback_resources {
-        ($checkpoint:expr, $outgoing:expr, $particles:expr, $audio:expr) => {{
+        ($checkpoint:expr, $outgoing:expr, $particles:expr, $audio:expr, $reload_alice:expr) => {{
             if let Some((art, cast, particles, world)) = $outgoing.take() {
                 level_art = art; npcs = cast; steam = particles; scene = world;
+                None
             } else {
                 // This is a live resource checkpoint, not an external saved game.
                 // Dead, airborne and scripted frames must not pass save validators
                 // or migrate/reset their untouched live controllers and clocks.
-                crate::render_fx::release_scene();
-                crate::transition_memory::released().await;
-                let level = $checkpoint.level()?;
-                scene = Scene::load(&mut assets, &level.map)?;
-                scene.map.difficulty = stats.difficulty;
-                interactions.sync(&mut scene.world);
-                npcs = crate::npc::Npcs::load(&mut assets, &scene.map, &level.map,
-                    level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
-                npcs.restore(&level.npcs)?;
-                steam = crate::particles::Steam::load(&mut assets, &scene.map)?;
-                steam.restore_runtime($particles);
-                level_art = LevelArt::default();
-                level_art.prepare(&mut assets, &scene, &interactions, true)?;
+                // Build into locals. A failed rebuild must not install partial
+                // resources or unwind the viewer and lose the live checkpoint.
+                let mut attempts = 0;
+                let (art, cast, mut particles, world, character) = loop {
+                    crate::render_fx::release_scene();
+                    crate::transition_memory::released().await;
+                    let attempt = (|| -> Result<_> {
+                        crate::transition_memory::recovery_fault()?;
+                        let level = $checkpoint.level()?;
+                        let mut world = Scene::load(&mut assets, &level.map)?;
+                        world.map.difficulty = stats.difficulty;
+                        interactions.sync(&mut world.world);
+                        let mut cast = crate::npc::Npcs::load(&mut assets, &world.map, &level.map,
+                            level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
+                        cast.restore(&level.npcs)?;
+                        let particles = crate::particles::Steam::load(&mut assets, &world.map)?;
+                        let mut art = LevelArt::default();
+                        art.prepare(&mut assets, &world, &interactions, true)?;
+                        let character = if $reload_alice {
+                            let mut character = Character::load(&mut assets)?;
+                            character.restore(&$checkpoint.character)?;
+                            Some(character)
+                        } else { None };
+                        Ok((art, cast, particles, world, character))
+                    })();
+                    match attempt {
+                        Ok(resources) => break resources,
+                        Err(error) => {
+                            attempts += 1;
+                            eprintln!("[lg/transition-recovery] outgoing rebuild failed attempt={attempts}: {error:#}");
+                            if attempts == 1 { continue; } // One bounded transient retry.
+                            // Persistent storage failure cannot recreate a dropped
+                            // world. Keep controllers/checkpoint in this frame and
+                            // offer an explicit retry, without writing any save.
+                            let mut recovery_input = crate::input::Input::default();
+                            loop {
+                                escape_menu.backdrop();
+                                ui.toast("Could not restore the current map", screen_height() - 110.);
+                                ui.toast("Enter / Cross: retry    Escape / Circle: quit", screen_height() - 70.);
+                                next_frame().await;
+                                recovery_input.update(&preferences, window_focused());
+                                if recovery_input.ui(KeyCode::Escape) || is_quit_requested() { return Ok(()); }
+                                if recovery_input.ui(KeyCode::Enter) { break; }
+                            }
+                        }
+                    }
+                };
+                particles.restore_runtime($particles);
+                level_art = art; npcs = cast; steam = particles; scene = world;
                 audio.reload_failed_transition(&mut assets, &maps[current], &scene.map);
                 audio.restore_transition($audio);
+                character
             }
         }};
     }
@@ -1226,12 +1264,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         Ok(())
                     }
                     Err(error) => {
-                        let character = checkpoint.character.clone();
-                        rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint);
+                        let character = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, true);
                         alice = if let Some(alice) = outgoing_alice { alice } else {
-                            let mut alice = Character::load(&mut assets)?;
-                            alice.restore(&character)?;
-                            alice
+                            character.expect("successful outgoing rebuild includes Alice")
                         };
                         scene.world.set_weapon_obstacles(alice.ice_targets());
                         Err(error)
@@ -1339,6 +1374,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if host_transition.is_empty() && std::env::var_os("LOOKING_GLASS_TRANSITION_RESUME").is_some() { paused = false; }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if frame == 1 {
+            if let Some(path) = std::env::var_os("LOOKING_GLASS_TRANSITION_PORTAL_CAPTURE") {
+                scene.show_transition_portal(std::path::Path::new(&path)).await?;
+            }
             if let Ok(path) = std::env::var("LOOKING_GLASS_TRANSITION_SNAPSHOT") {
                 std::fs::write(path, serde_json::to_vec(&game_snapshot!())?)?;
                 store.write(Slot::Quick, &game_snapshot!())?;
@@ -2360,7 +2398,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         memory.finish(true);
                     }
                     Err(e) => {
-                        rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint);
+                        let _ = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, false);
                         drop(outgoing);
                         memory.finish(false);
                         #[cfg(feature = "native_timing")]
@@ -3024,7 +3062,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     memory.finish(true);
                 }
                 Err(e) => {
-                    rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint);
+                    let _ = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, false);
                     drop(outgoing);
                     memory.finish(false);
                     interactions.transition_failed(&exit);

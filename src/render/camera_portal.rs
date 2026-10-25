@@ -341,6 +341,32 @@ impl Portal {
 }
 
 impl Scene {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(crate) async fn show_transition_portal(&mut self, capture: &std::path::Path) -> Result<()> {
+        let portal = self.camera_portals.iter().find(|p| p.model == 0)
+            .context("Host transition fixture needs a stationary portal")?;
+        let center = portal.center;
+        let normal = portal.normal;
+        let camera = Camera3D {
+            position: center + normal * 200., target: center,
+            up: if normal.dot(Vec3::Z).abs() > 0.95 { Vec3::Y } else { Vec3::Z },
+            fovy: 60_f32.to_radians(), z_near: 0.1, z_far: 30000., ..Default::default()
+        };
+        set_camera(&camera);
+        clear_background(BLACK);
+        self.prepare_camera_portals(&camera, 0., true, &[]);
+        let ready = self.camera_portals.iter().filter(|p| p.ready && p.target.is_some()).count();
+        ensure!(ready > 0, "Host portal was not rendered");
+        crate::render_fx::begin_view(&camera, 0., &self.atmosphere, true);
+        self.draw(camera.position, 0., true, false, &[]);
+        self.draw(camera.position, 0., true, true, &[]);
+        crate::render_fx::finish();
+        set_default_camera();
+        crate::viewer::save_capture(capture)?;
+        next_frame().await;
+        println!("TRANSITION_PORTAL_ON_SCREEN ready={ready}");
+        Ok(())
+    }
     pub(crate) fn check_reflection_culled(&self) -> Result<()> {
         ensure!(self.camera_portals.iter().all(|p| !p.mirror || !p.ready),
             "Hidden mirror still prepared a reflection");

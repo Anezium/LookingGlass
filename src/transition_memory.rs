@@ -196,6 +196,20 @@ pub(crate) fn fault(stage: &str) -> anyhow::Result<()> {
     let _ = stage;
     Ok(())
 }
+/// A separate fault proves destination failure followed by recovery failure.
+/// Neither this hook nor its environment controls exist in the console build.
+pub(crate) fn recovery_fault() -> anyhow::Result<()> {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    {
+        static FAILED: AtomicBool = AtomicBool::new(false);
+        let requested = std::env::var("LOOKING_GLASS_TRANSITION_FAIL_RECOVERY").unwrap_or_default();
+        if requested == "always" || (requested == "once" && !FAILED.swap(true, Relaxed)) {
+            eprintln!("[lg/transition-fault] host outgoing recovery fault");
+            anyhow::bail!("host outgoing recovery fault");
+        }
+    }
+    Ok(())
+}
 pub(crate) fn host_destination() -> String {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     { std::env::var("LOOKING_GLASS_TRANSITION_DESTINATION").unwrap_or_default() }

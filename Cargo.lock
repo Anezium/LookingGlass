@@ -598,6 +598,7 @@ dependencies = [
 [[package]]
 name = "macroquad"
 version = "0.4.14"
+source = "git+https://github.com/Anezium/macroquad?rev=90f0fe456c40f0b9751c30307feca066ae177db7#90f0fe456c40f0b9751c30307feca066ae177db7"
 dependencies = [
  "fontdue",
  "glam",
@@ -637,6 +638,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "miniquad"
 version = "0.4.8"
+source = "git+https://github.com/Anezium/miniquad?rev=198dfa41f01c6ea7ab3a49ded127b320c403c572#198dfa41f01c6ea7ab3a49ded127b320c403c572"
 dependencies = [
  "libc",
  "ndk-sys 0.2.2",
