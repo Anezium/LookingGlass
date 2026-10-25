@@ -2037,6 +2037,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 || (!paused && pressed(KeyCode::R)));
         let restart =
             focused && !menu && !inventory_menu && !console_input && pressed(KeyCode::Home);
+        // Discard recovery input as well as the dead-player Retry branch. A
+        // queued New Game must not move/reset the outgoing live frame either.
+        let new_game_owns_input = new_campaign_memory.is_some() || pending_menu_newgame.is_some();
+        let recover = recover && !new_game_owns_input;
+        let restart = restart && !new_game_owns_input;
+        let console_restart = console_restart && !new_game_owns_input;
         if simulate {
             if let Some(s) = &mut interactions.school {
                 s.sync_inventory(&mut stats);
