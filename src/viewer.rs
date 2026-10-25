@@ -2935,10 +2935,20 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let audio_checkpoint = audio.transition_checkpoint();
             let mut memory = crate::transition_memory::Transition::begin("natural-exit", &maps[current], &name);
             let mut outgoing = unload_scene!();
-            crate::transition_memory::released_with(|| draw_transition_loading(&name)).await;
+            crate::transition_memory::released_with(|| {
+                draw_transition_loading(&name);
+                // Inspect the submitted loading frame before the swap. Reading
+                // the next back buffer after next_frame only sees its clear.
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_BUILD_CAPTURE") {
+                    save_capture(std::path::Path::new(&path)).expect("last loading frame before build");
+                }
+            }).await;
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_BUILD_CAPTURE") {
-                save_capture(std::path::Path::new(&path))?;
+            if crate::transition_memory::legacy_overlap() {
+                if let (Some(source), Some(target)) = (std::env::var_os("LOOKING_GLASS_LOADING_CAPTURE"), std::env::var_os("LOOKING_GLASS_LOADING_BUILD_CAPTURE")) {
+                    std::fs::copy(source, target)?;
+                }
             }
             memory.after_release();
             let arrived = enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options);
