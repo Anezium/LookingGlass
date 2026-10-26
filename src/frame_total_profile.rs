@@ -166,6 +166,14 @@ pub(crate) fn export(map: &str) -> anyhow::Result<()> {
         if !capture_enabled() { return Ok(()); }
         let r=RING.0.lock().unwrap();
         if !r.report_due(crate::frame_profile::mode())? { return Ok(()); }
+        // The final begin closed frame 120; sample before export allocations.
+        #[repr(C)]
+        struct MallInfo { arena: usize, ordblks: usize, smblks: usize, hblks: usize,
+            hblkhd: usize, usmblks: usize, fsmblks: usize, uordblks: usize,
+            fordblks: usize, keepcost: usize }
+        extern "C" { fn mallinfo() -> MallInfo; }
+        let heap_uordblks_bytes = unsafe { mallinfo() }.uordblks;
+        println!("[lg/frame-total-heap] heap_uordblks_bytes={heap_uordblks_bytes}");
             let dir=Path::new("ux0:data/alice/private/frame_profile");
             anyhow::ensure!(dir.is_dir(), "existing frame_profile directory required");
             let stem=format!("{map}-{}-light-{}", crate::frame_profile::mode().name(), r.count);
