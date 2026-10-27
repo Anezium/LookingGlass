@@ -675,10 +675,14 @@ fn starting_stats(options: &Options, map: &str, entry: Option<&str>) -> Stats {
 mod start;
 
 pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
+    #[cfg(target_os = "vita")]
+    let mut allmaps_sweep = crate::allmaps_sweep::Sweep::open(&mut options)?;
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     let physical_input = !crate::sim_maps::probe::enabled();
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let physical_input = true;
+    #[cfg(target_os = "vita")]
+    let physical_input = physical_input && allmaps_sweep.is_none();
     let startup=std::time::Instant::now();
     eprintln!("[lg/startup] viewer begin; UI begin");
     // Release cursor/audio before Miniquad destroys its native request queue.
@@ -707,6 +711,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         || options.shelf_preview
         || options.start_at.is_some()
         || options.story_preview.is_some());
+    #[cfg(target_os = "vita")]
+    let saves_enabled = saves_enabled && allmaps_sweep.is_none();
     #[cfg(feature="vita_renderer")]
     let mut route_session=crate::route_replay::Session::open(&mut options)?;
     eprintln!("[lg/startup] route options ready; save store begin");
@@ -1390,7 +1396,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         let saves_writable = saves_enabled;
         #[cfg(target_os = "vita")]
-        let simulate = !crate::frame_profile::simulation_frozen();
+        let simulate = !crate::frame_profile::simulation_frozen() && !allmaps_sweep.as_ref().is_some_and(|s| s.done);
         #[cfg(not(target_os = "vita"))]
         let simulate = true;
         // The frontend remains interactive if the reference save could not load.
@@ -1433,7 +1439,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut quit_after_frame = is_quit_requested();
         quit_after_frame |= host_transition == "quit";
         if quit_after_frame && !throttle_normal { break; }
-        if window_focused() && !console.open && !bench {
+        if physical_input && window_focused() && !console.open && !bench {
             if (is_key_pressed(KeyCode::Escape) || input.pad_pressed("Start"))
                 && !menu
                 && !inventory_menu
@@ -4652,6 +4658,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }
         audio.scene_presented();
+        #[cfg(target_os = "vita")]
+        if let Some(sweep) = &mut allmaps_sweep { sweep.presented(&maps[current], stats.alive(), active && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none() && !story.busy() && !interactions.school.as_ref().is_some_and(|s| s.cinematic()))?; }
     }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);

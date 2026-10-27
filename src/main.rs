@@ -2,6 +2,8 @@
 // formatted engine record, including its newline, in one serialized operation.
 #[macro_use]
 mod logging;
+#[cfg(any(target_os = "vita", test))]
+mod allmaps_sweep;
 mod sim_maps;
 mod acting;
 mod ambient_animation;
