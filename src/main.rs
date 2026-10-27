@@ -1556,8 +1556,10 @@ fn run() -> Result<()> {
         println!("Map: {}\nFormat: FAKK 42\nArchives: {}\nVertices: {}\nSurfaces: {} (world: {})\nEntities: {}\nLightmaps: {}\nSpawn: {:?}",o.map,assets.pack_count(),map.vertices.len(),map.surfaces.len(),map.world_surfaces.len(),map.entities.len(),map.lightmaps.len()/49152,map.spawn());
         return Ok(());
     }
+    // Box before Macroquad captures the future to avoid duplicate viewer storage.
+    let viewer_future = Box::pin(viewer::run(assets, o));
     macroquad::Window::from_config(viewer::config(), async move {
-        if let Err(e) = viewer::run(assets, o).await {
+        if let Err(e) = viewer_future.await {
             eprintln!("Viewer failed: {e:#}");
             std::process::exit(1);
         }
