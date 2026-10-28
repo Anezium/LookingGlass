@@ -174,6 +174,11 @@ pub(crate) mod peak {
     pub fn fallbacks()->usize {FALLBACKS.load(Relaxed)}
     pub struct Guard {active:bool, sample:bool, nested:bool}
     impl Guard {
+        // Keep the complete observer visible at each C allocator boundary,
+        // including calloc's saturated-overflow branch. An outlined Rust call
+        // can retain an unwind landing pad even when its body cannot panic.
+        // The strict linked-ELF closure gate must still qualify every callee.
+        #[inline(always)]
         pub fn enter(request:usize,alignment:usize,allocation:bool)->Self {
             if !enabled(){return Self{active:false,sample:false,nested:false};}
             extern "C" {fn sceKernelGetThreadId()->i32;}
