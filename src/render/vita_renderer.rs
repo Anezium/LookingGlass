@@ -31,6 +31,10 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(remote = "Self", default, deny_unknown_fields)]
 pub struct Config {
+    /// Miniquad timing report cadence; null, 0 or omitted disables it.
+    pub log_frame_time_every: Option<u32>,
+    /// Build trigger facts once per trigger pass and rebuild after each fire.
+    pub sim_trigger_facts_reuse: bool,
     /// Exact NPC sight predicates, publication-scoped trace reuse and stack targets.
     pub sim_npc_sight_candidates: bool,
     pub sim_npc_sight_cache: bool,
@@ -234,6 +238,8 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 impl Default for Config {
     fn default() -> Self {
         Self {
+            log_frame_time_every: None,
+            sim_trigger_facts_reuse: false,
             sim_hatter_door_candidates: false,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
@@ -413,6 +419,22 @@ impl Config {
         Ok(())
     }
 }
+/// Reject a malformed report cadence without discarding unrelated flags.
+fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let rejected = if let Some(object) = value.as_object_mut() {
+        if let Some(raw) = object.get("log_frame_time_every") {
+            if serde_json::from_value::<Option<u32>>(raw.clone()).is_err() {
+                let message = format!("log_frame_time_every={raw}: expected null or u32; rejecting key, effective value=off; preserving other config keys");
+                object.remove("log_frame_time_every");
+                Some(message)
+            } else { None }
+        } else { None }
+    } else { None };
+    let config: Config = serde_json::from_value(value)?;
+    config.validate()?;
+    Ok((config, rejected))
+}
 #[cfg(target_os = "vita")]
 const CONFIG_PATH: &str = "ux0:data/alice/private/vita_renderer.json";
 #[cfg(not(target_os = "vita"))]
@@ -443,7 +465,10 @@ pub fn config() -> &'static Config {
                 Err(e) => return Err(e.into()),
             };
             eprintln!("[lg/startup] renderer_config read done bytes={} elapsed_ms={:.3}; parse begin",bytes.len(),start.elapsed().as_secs_f64()*1000.);
-            let c: Config = serde_json::from_slice(&bytes)?;
+            let (c, rejected) = parse_runtime_config(&bytes)?;
+            if let Some(message) = rejected {
+                eprintln!("[lg/vita-renderer] invalid config key {CONFIG_PATH}: {message}");
+            }
             eprintln!("[lg/startup] renderer_config parse done elapsed_ms={:.3}; validate begin",start.elapsed().as_secs_f64()*1000.);
             c.validate()?;
             eprintln!("[lg/startup] renderer_config validate done elapsed_ms={:.3}",start.elapsed().as_secs_f64()*1000.);
@@ -454,8 +479,9 @@ pub fn config() -> &'static Config {
             Config::default()
         });
         println!(
-            "[lg/vita-renderer] config {}",
-            serde_json::to_string(&c).unwrap()
+            "[lg/vita-renderer] config {} effective_log_frame_time_every={}",
+            serde_json::to_string(&c).unwrap_or_else(|e| format!("serialization_error={e}")),
+            c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string())
         );
         println!("[lg/vita-renderer] actor_single_prepare active={}", c.actor_single_prepare_active());
         #[cfg(target_os = "vita")]
@@ -2126,6 +2152,52 @@ mod tests {
                     assert_eq!(actual[other], if other == name { enabled } else { other != "sim_dynamic_buckets" });
                 }
             }
+        }
+    }
+    #[test]
+    fn backend_report_interval_defaults_off_and_strict_types() {
+        for (raw,want) in [("{}",None),(r#"{"log_frame_time_every":10}"#,Some(10)),(r#"{"log_frame_time_every":1}"#,Some(1)),(r#"{"log_frame_time_every":0}"#,None),(r#"{"log_frame_time_every":null}"#,None)] {
+            let c:Config=serde_json::from_str(raw).unwrap();
+            assert_eq!(c.log_frame_time_every.filter(|&n|n>0),want);
+        }
+        assert_eq!(Config::default().log_frame_time_every, None);
+        for value in [serde_json::json!(-1),serde_json::json!(1.5),serde_json::json!(true),serde_json::json!("off"),serde_json::json!(4294967296u64)] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({"log_frame_time_every":value})).is_err());
+        }
+    }
+    #[test]
+    fn runtime_report_interval_rejects_only_bad_key_and_preserves_flags() {
+        for (raw, want) in [("10", Some(10)), ("1", Some(1)), ("0", None), ("null", None)] {
+            let bytes = format!(r#"{{"log_frame_time_every":{raw},"world_state_cache":false,"skin_overlap":true,"audio_static_cache":false,"sim_trigger_facts_reuse":true}}"#);
+            let (c, rejected) = parse_runtime_config(bytes.as_bytes()).unwrap();
+            assert!(rejected.is_none());
+            assert_eq!(c.log_frame_time_every.filter(|&n| n > 0), want);
+            assert!(!c.world_state_cache && c.skin_overlap && !c.audio_static_cache && c.sim_trigger_facts_reuse);
+        }
+        for raw in [r#""0""#, "-1", "1.5", "true", "4294967296"] {
+            let bytes = format!(r#"{{"log_frame_time_every":{raw},"world_state_cache":false,"skin_overlap":true,"audio_static_cache":false,"sim_trigger_facts_reuse":true}}"#);
+            let (c, rejected) = parse_runtime_config(bytes.as_bytes()).unwrap();
+            assert!(rejected.unwrap().contains("rejecting key, effective value=off"));
+            assert_eq!(c.log_frame_time_every, None);
+            assert!(!c.world_state_cache && c.skin_overlap && !c.audio_static_cache && c.sim_trigger_facts_reuse);
+        }
+        let (c, rejected) = parse_runtime_config(b"{}").unwrap();
+        assert!(rejected.is_none() && c.log_frame_time_every.is_none() && !c.sim_trigger_facts_reuse);
+        assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","typo":true}"#).is_err());
+        assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","world_state_cache":"bad"}"#).is_err());
+    }
+    #[test]
+    fn trigger_facts_reuse_defaults_off_and_requires_a_boolean() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.sim_trigger_facts_reuse);
+        }
+        for enabled in [false, true] {
+            let c: Config = serde_json::from_value(serde_json::json!({"sim_trigger_facts_reuse": enabled})).unwrap();
+            c.validate().unwrap(); assert_eq!(c.sim_trigger_facts_reuse, enabled);
+            assert_eq!(serde_json::to_value(&c).unwrap()["sim_trigger_facts_reuse"], enabled);
+        }
+        for json in [r#"{"sim_trigger_facts_reuse":1}"#, r#"{"sim_trigger_facts_reuse":"on"}"#, r#"{"sim_trigger_facts_reuse":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
         }
     }
     #[test]

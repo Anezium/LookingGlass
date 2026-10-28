@@ -227,7 +227,13 @@ fn app_main() {
         use macroquad::miniquad::KeyCode;
         set_config(VitaConfig {
             compact_stream_buffers: true,
-            log_frame_time_every: Some(10),
+            // Off unless the runtime config asks for it: the report adds 3-5 ms to p95 (r15b).
+            log_frame_time_every: {
+                #[cfg(feature="vita_renderer")]
+                { render::vita_renderer::config().log_frame_time_every.filter(|&n|n>0) }
+                #[cfg(not(feature="vita_renderer"))]
+                { None }
+            },
             input: InputConfig {
                 left_stick: LeftStickMode::Keys {
                     up: KeyCode::W,
