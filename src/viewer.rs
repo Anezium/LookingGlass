@@ -675,15 +675,19 @@ fn starting_stats(options: &Options, map: &str, entry: Option<&str>) -> Stats {
 mod start;
 
 pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
+    #[cfg(target_os="vita")]
+    let mut r13_survey = crate::r13_survey::Survey::open(&mut options)?;
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     let physical_input = !crate::sim_maps::probe::enabled();
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let physical_input = true;
+    #[cfg(target_os="vita")]
+    let physical_input = physical_input && r13_survey.is_none();
     let startup=std::time::Instant::now();
     eprintln!("[lg/startup] viewer begin; UI begin");
     // Release cursor/audio before Miniquad destroys its native request queue.
     prevent_quit();
-    let ui = crate::ui::Ui::load(&mut assets)?;
+    let ui = {let _r13=crate::allocation_census::Scope::new(9);crate::ui::Ui::load(&mut assets)?};
     eprintln!("[lg/startup] UI done elapsed_ms={:.3}; menu begin",startup.elapsed().as_secs_f64()*1000.);
     // Explicit native layout diagnostic; never opens or modifies player saves.
     if options.frames.is_some() && std::env::var_os("LOOKING_GLASS_PRESENTATION_CHECK").is_some() {
@@ -707,6 +711,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         || options.shelf_preview
         || options.start_at.is_some()
         || options.story_preview.is_some());
+    #[cfg(target_os="vita")]
+    let saves_enabled=saves_enabled && r13_survey.is_none();
     #[cfg(feature="vita_renderer")]
     let mut route_session=crate::route_replay::Session::open(&mut options)?;
     eprintln!("[lg/startup] route options ready; save store begin");
@@ -1390,7 +1396,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         let saves_writable = saves_enabled;
         #[cfg(target_os = "vita")]
-        let simulate = !crate::frame_profile::simulation_frozen();
+        let simulate = !crate::frame_profile::simulation_frozen() && !r13_survey.as_ref().is_some_and(|s|s.done);
         #[cfg(not(target_os = "vita"))]
         let simulate = true;
         // The frontend remains interactive if the reference save could not load.
@@ -1433,7 +1439,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut quit_after_frame = is_quit_requested();
         quit_after_frame |= host_transition == "quit";
         if quit_after_frame && !throttle_normal { break; }
-        if window_focused() && !console.open && !bench {
+        if physical_input && window_focused() && !console.open && !bench {
             if (is_key_pressed(KeyCode::Escape) || input.pad_pressed("Start"))
                 && !menu
                 && !inventory_menu
@@ -4597,6 +4603,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Report at the next begin_frame, once the wall sample is complete.
             profile_report_due = report_due;
         }
+        #[cfg(target_os="vita")]
+        if let Some(s)=&mut r13_survey {s.accept(active && stats.alive() && !paused && !menu && !inventory_menu && !console.open
+            && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none() && !story.busy()
+            && !interactions.school.as_ref().is_some_and(|s|s.cinematic()));}
         #[cfg(not(target_os="vita"))]
         if !route_running {crate::frame_profile::end_creation_frame();}
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -4652,6 +4662,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }
         audio.scene_presented();
+        #[cfg(target_os="vita")]
+        if let Some(s)=&mut r13_survey {
+            s.presented(&maps[current],stats.alive(),is_key_pressed(KeyCode::Tab))?;
+            if s.take_snapshot() {
+                crate::allocation_census::snapshot("gameplay");
+                if crate::allocation_census::enabled() {
+                    crate::allocation_census::payload("live_collision",scene.world.census_payload());
+                    crate::allocation_census::payload("live_audio",audio.census_payload());
+                }
+            }
+        }
     }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);

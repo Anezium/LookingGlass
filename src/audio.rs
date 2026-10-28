@@ -483,6 +483,7 @@ struct Clip {
     rate: u32,
 }
 fn decode_clip(data: Vec<u8>) -> Result<Clip> {
+        let _r13_memory = crate::allocation_census::Scope::new(7);
     let decoder = Decoder::new(Cursor::new(data))?;
     let channels = decoder.channels() as usize;
     let rate = decoder.sample_rate();
@@ -819,6 +820,13 @@ pub(crate) struct TransitionCheckpoint {
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
 thread_local!{static SAH_MIXER:std::cell::RefCell<Option<output::Mixer>>=const{std::cell::RefCell::new(None)};}
 impl Audio {
+    pub(crate) fn census_payload(&self)->serde_json::Value {
+        serde_json::json!({"cache_pcm_bytes":self.cache_samples*4,"cache_limit_bytes":CACHE_SAMPLES*4,
+            "world_clips":self.world_clips.len(),"retiring_sinks":self.retiring.len(),
+            "effects":self.effects.len(),"ambient_emitters":self.emitters.len(),
+            "scope":"PCM sample payload, not sinks/DSP/decoder overhead; audio constructor/load exclusive-net brackets include those"})
+    }
+
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     pub(crate) fn memory_counts(&self) -> [usize; 5] {
         [self.cache_samples, self.world_clips.len(), self.retiring.len(), self.effects.len(), self.emitters.len()]
@@ -878,6 +886,7 @@ impl Audio {
         });
     }
     pub fn new(disabled: bool, capture: Option<PathBuf>) -> Self {
+        let _r13_memory = crate::allocation_census::Scope::new(6);
         let monitor = Arc::new(MonitorData::default());
         if capture.is_some() {
             monitor.samples.lock().unwrap().reserve(44100 * 2 * 30);
@@ -943,6 +952,7 @@ impl Audio {
         }
     }
     pub fn load(&mut self, assets: &mut Assets, name: &str, map: &Bsp) {
+        let _r13_memory = crate::allocation_census::Scope::new(6);
         self.release_level();
         let started = std::time::Instant::now();
         if self.playback.is_none() {

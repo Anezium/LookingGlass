@@ -2372,6 +2372,7 @@ impl Npcs {
         preview: bool,
         combat_preview: bool,
     ) -> Result<Self> {
+        let _r13_memory = crate::allocation_census::Scope::new(4);
         let spawns = if combat_preview && name == "skool1" && entry.is_none() {
             vec![Spawn {
                 resident_spawn: None,

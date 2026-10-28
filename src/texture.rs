@@ -36,6 +36,7 @@ fn upload_cap(immutable: bool, requested: Option<u16>, native: bool) -> Option<u
 }
 
 fn upload_pixels(width: u16, height: u16, pixels: &[u8], immutable: bool) -> Texture2D {
+        let _r13_memory = crate::allocation_census::Scope::new(2);
     // Vita's synchronous Texture2D upload includes backend DXT5 conversion
     // when called through upload_rgba8 (or reads its cached result); this reports
     // that combined cost.
@@ -191,6 +192,7 @@ pub struct MaterialSpec {
 }
 
 pub fn read_materials(assets: &mut Assets) -> Result<std::rc::Rc<BTreeMap<String, MaterialSpec>>> {
+        let _r13_memory = crate::allocation_census::Scope::new(2);
     #[cfg(not(target_os="vita"))]
     let reuse = std::env::var_os("LOOKING_GLASS_MATERIAL_CACHE_OFF").is_none();
     #[cfg(target_os="vita")]
@@ -248,6 +250,7 @@ pub fn resolve(
 }
 
 pub fn decode(assets: &mut Assets, name: &str) -> Result<RgbaImage> {
+        let _r13_memory = crate::allocation_census::Scope::new(2);
     let read_timing = crate::startup::WorkTimer::new(crate::startup::Work::TextureRead);
     let bytes = assets.read(name)?;
     drop(read_timing);

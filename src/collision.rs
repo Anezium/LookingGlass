@@ -676,6 +676,21 @@ impl StaticGeometry {
     }
 }
 impl World {
+    pub(crate) fn census_payload(&self)->serde_json::Value {
+        fn tree(n:&Node)->usize {match n {
+            Node::Leaf{hulls,..}=>hulls.capacity()*std::mem::size_of::<usize>(),
+            Node::Branch{left,right,..}=>2*std::mem::size_of::<Node>()+tree(left)+tree(right),
+        }}
+        let g=&self.static_geometry;
+        serde_json::json!({"geometry_identity":std::sync::Arc::as_ptr(g) as usize,
+            "geometry_arc_owners":std::sync::Arc::strong_count(g),
+            "hulls_planes_capacity_bytes":g.hulls.capacity()*std::mem::size_of::<Hull>()
+                +g.hulls.iter().map(|h|h.planes.capacity()*std::mem::size_of::<crate::bsp::Plane>()).sum::<usize>(),
+            "legacy_tree_capacity_bytes":g.tree.as_ref().map_or(0,tree),
+            "sah_capacity_bytes":g.sah.as_ref().map_or(0,|h|h.storage_bytes()),
+            "scope":"one live static geometry; Arc aliases share it; excludes dynamic colliders and allocator metadata"})
+    }
+
     fn invalidate_npc_sight(&mut self) {
         self.npc_sight_cache.get_mut().clear();
     }
@@ -796,6 +811,7 @@ impl World {
         Self::from_bsp_mask(map, 1 | 0x20000, true)
     }
     fn from_bsp_mask(map: &Bsp, mask: i32, accelerate: bool) -> Result<Self> {
+        let _r13_memory = crate::allocation_census::Scope::new(3);
         let mut hulls = Vec::new();
         let mut liquids = Vec::new();
         for index in map.world_brushes.clone() {

@@ -1287,6 +1287,10 @@ impl Renderer {
                 m
             }).values().sum();
         let staging_bytes = groups.len() * std::mem::size_of::<Prepared>();
+        if crate::allocation_census::enabled() {crate::allocation_census::payload("retained_world",serde_json::json!({
+            "gpu_geometry_payload_bytes":bytes,"unique_pvs_capacity_bytes":pvs_with_unknown_bytes,
+            "uniform_staging_capacity_bytes":staging_bytes,"construction_geometry_capacity_bound":construction_geometry_peak_bytes,
+            "scope":"GPU payload is separate from newlib; CPU capacities exclude metadata"}));}
         let construction_buffer_peak_bytes = construction_geometry_peak_bytes.max(
             old_scene_geometry_capacity_bytes + bytes + pvs_with_unknown_bytes + staging_bytes);
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,

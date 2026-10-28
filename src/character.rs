@@ -594,6 +594,7 @@ impl Character {
         }
     }
     pub fn load(assets: &mut Assets) -> Result<Self> {
+        let _r13=crate::allocation_census::Scope::new(4);
         let def = Definition::alice(assets)?;
         let skeleton = Skeleton::parse(&assets.read(&format!("{}/{}", def.path, def.model))?)?;
         let mut clips = Vec::new();

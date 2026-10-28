@@ -81,6 +81,7 @@ impl Video {
     /// First pass: validate the stream and count frames without retaining chunk payloads.
     /// Reopen the same entry and pass that reader to next for the sequential decode.
     pub fn new(mut reader: impl Read) -> Result<Self> {
+        let _r13=crate::allocation_census::Scope::new(8);
         let fps = header(&mut reader)?;
         let (mut width, mut height, mut frames, mut total) = (0, 0, 0, 8);
         while let Some((kind, size, _)) = chunk(&mut reader)? {
@@ -203,6 +204,7 @@ impl Video {
         Ok(())
     }
     pub fn next(&mut self, reader: &mut impl Read) -> Result<bool> {
+        let _r13=crate::allocation_census::Scope::new(8);
         self.last_convert = Duration::ZERO;
         if !self.started {
             ensure!(

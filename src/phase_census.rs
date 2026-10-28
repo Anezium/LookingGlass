@@ -165,7 +165,23 @@ pub(crate) fn reset() {
         s.pending=false;s.overflow=false;s.sequence=0;s.depth=0;s.sweep_depth=0;s.owner=Owner::Other;
         s.table.fill(Entry::EMPTY);}); }
 }
-pub(crate) fn begin_configured() { begin(configured()); }
+pub(crate) fn begin_configured() {
+    #[cfg(target_os="vita")]
+    let enabled = configured() || crate::r13_survey::census_active();
+    #[cfg(not(target_os="vita"))]
+    let enabled = configured();
+    begin(enabled);
+}
+#[cfg(target_os="vita")]
+pub(crate) fn initialize_survey() { STATE.with(|_|{}); }
+#[cfg(target_os="vita")]
+pub(crate) fn export_survey(map:&str)->anyhow::Result<()> {
+    STATE.with(|s|s.borrow_mut().close(Instant::now()));
+    let path=format!("ux0:data/alice/private/frame_profile/{map}-r13-census.json");
+    STATE.with(|s|->anyhow::Result<()> {let s=s.borrow();let mut out=std::io::BufWriter::new(std::fs::File::create(path)?);
+        write(&s,map,&mut out)?;out.flush()?;Ok(())})?;
+    ACTIVE.with(|a|a.set(false));Ok(())
+}
 fn begin(enabled:bool) {
     ACTIVE.with(|a|a.set(enabled));if !enabled {return;}
     let now=Instant::now();

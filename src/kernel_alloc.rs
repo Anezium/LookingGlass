@@ -94,6 +94,7 @@ mod imp {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_malloc(size: usize) -> *mut core::ffi::c_void {
         count();
+        let _r13 = crate::allocation_census::peak::Guard::enter(size,0,true);
         let out = __real_malloc(size);
         crate::transition_memory::allocation(size);
         out
@@ -101,6 +102,7 @@ mod imp {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_calloc(n: usize, size: usize) -> *mut core::ffi::c_void {
         count();
+        let _r13 = crate::allocation_census::peak::Guard::enter(n.saturating_mul(size),0,true);
         let out = __real_calloc(n, size);
         crate::transition_memory::allocation(n.saturating_mul(size));
         out
@@ -111,9 +113,24 @@ mod imp {
         size: usize,
     ) -> *mut core::ffi::c_void {
         count();
+        let _r13 = crate::allocation_census::peak::Guard::enter(size,0,true);
         let out = __real_realloc(p, size);
         crate::transition_memory::allocation(size);
         out
+    }
+    extern "C" {
+        fn __real_free(p:*mut core::ffi::c_void);
+        fn __real_memalign(alignment:usize,size:usize)->*mut core::ffi::c_void;
+    }
+    #[no_mangle]
+    pub unsafe extern "C" fn __wrap_free(p:*mut core::ffi::c_void) {
+        let _r13=crate::allocation_census::peak::Guard::enter(0,0,false);
+        __real_free(p);
+    }
+    #[no_mangle]
+    pub unsafe extern "C" fn __wrap_memalign(alignment:usize,size:usize)->*mut core::ffi::c_void {
+        let _r13=crate::allocation_census::peak::Guard::enter(size,alignment,true);
+        __real_memalign(alignment,size)
     }
     pub fn begin() {
         CALLS.store(0, Relaxed);

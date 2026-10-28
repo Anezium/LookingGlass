@@ -1542,6 +1542,7 @@ impl Scene {
         difficulty: crate::powerups::Difficulty,
     ) -> Result<Self> {
         let mut timing = crate::startup::Phase::new("map_load");
+        let _r13_memory = crate::allocation_census::Scope::new(0);
         eprintln!("[lg/startup] map_load map={name}");
         let bytes = assets.read(&format!("maps/{name}.bsp"))?;
         timing.mark("bsp_read");
@@ -1561,6 +1562,7 @@ impl Scene {
         Self::from_parts_selected(assets, name, map, world, true)
     }
     fn from_parts_selected(assets: &mut Assets, name: &str, map: Bsp, world: World, allow_retained: bool) -> Result<Self> {
+        let _r13_memory = crate::allocation_census::Scope::new(1);
         #[cfg(not(feature = "vita_renderer"))]
         let _ = allow_retained;
         #[cfg(feature="vita_renderer")]

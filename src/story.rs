@@ -425,6 +425,7 @@ impl Story {
         Ok(())
     }
     pub fn load(assets: &mut Assets, map: &str) -> Self {
+        let _r13_memory = crate::allocation_census::Scope::new(5);
         let mut s = Self {
             map: map.into(),
             ..Self::default()
