@@ -42,6 +42,8 @@ pub struct Config {
     pub sim_npc_target_stack: bool,
     /// Defer Clockwork door traces until their exact range/facing predicates pass.
     pub sim_hatter_door_candidates: bool,
+    /// Reuse bit-identical Ant sight traces within one immutable Ant update.
+    pub sim_sight_query_reuse: bool,
     /// Exact static occlusion certificates for unchanged eye/light positions.
     pub lights_static_cache: bool,
     /// Spatial AABB buckets; preserve original dynamic contact order.
@@ -242,6 +244,7 @@ impl Default for Config {
             log_frame_time_every: Some(10),
             sim_trigger_facts_reuse: false,
             sim_hatter_door_candidates: false,
+            sim_sight_query_reuse: false,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
             sim_npc_target_stack: true,
@@ -2233,6 +2236,19 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"sim_hatter_door_candidates":true}"#).unwrap();
         c.validate().unwrap(); assert!(c.sim_hatter_door_candidates);
         for json in [r#"{"sim_hatter_door_candidates":1}"#, r#"{"sim_hatter_door_candidates":"on"}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+    }
+    #[test]
+    fn sight_query_reuse_defaults_off_and_requires_a_boolean() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.sim_sight_query_reuse);
+        }
+        let c: Config = serde_json::from_str(r#"{"sim_sight_query_reuse":true}"#).unwrap();
+        c.validate().unwrap(); assert!(c.sim_sight_query_reuse);
+        assert_eq!(serde_json::to_value(&c).unwrap()["sim_sight_query_reuse"], true);
+        for json in [r#"{"sim_sight_query_reuse":1}"#, r#"{"sim_sight_query_reuse":"on"}"#,
+                     r#"{"sim_sight_query_reuse":null}"#] {
             assert!(serde_json::from_str::<Config>(json).is_err());
         }
     }

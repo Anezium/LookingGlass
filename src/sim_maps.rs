@@ -143,6 +143,29 @@ pub fn trigger_facts_reuse() -> bool {
     #[cfg(all(not(test), not(feature="vita_renderer")))]
     { false }
 }
+// Default-off pending a console A/B. A whole-suite arm is chosen before startup;
+// tests override it per thread, so off/on comparisons share one process.
+pub fn sight_query_reuse() -> bool {
+    #[cfg(test)]
+    { SIGHT_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_SIGHT_REUSE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => false,
+        Ok("on") => true,
+        _ => panic!("LOOKING_GLASS_TEST_SIGHT_REUSE must be off or on"),
+    }) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().sim_sight_query_reuse }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
+#[cfg(test)]
+thread_local! { static SIGHT_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn with_sight_query_reuse<T>(enabled: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset { fn drop(&mut self) { SIGHT_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(SIGHT_TEST.with(|s| s.replace(Some(enabled))));
+    run()
+}
 
 // Independent light-cache and dynamic-bucket controls; runtime defaults live in Config.
 macro_rules! hedge_switch {
