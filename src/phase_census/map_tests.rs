@@ -2,8 +2,17 @@
 //! profiler or Totals active. Wall timestamps are synthetic, not performance data.
 use super::*;
 use glam::Vec3;
+fn path_span(region:Region)->Timer {
+    let timer=span(region);
+    // Model nonempty coarse work without extra clock reads. An empty fixture
+    // can legitimately round to zero at the host clock's resolution.
+    let mut value=1u64;
+    for _ in 0..256 {value=std::hint::black_box(value.wrapping_mul(6364136223846793005).wrapping_add(1));}
+    std::hint::black_box(value);
+    timer
+}
 fn world_draws() {
-    let _world=span(Region::WorldSubmit);
+    let _world=path_span(Region::WorldSubmit);
     let mut totals=crate::frame_profile::Totals::<3>::new();
     for _ in 0..507 {let mut at=totals.start();for i in 0..3 {totals.lap(i,&mut at);}}
     let (ns,calls)=totals.census_values().expect("production census gate");
@@ -11,8 +20,8 @@ fn world_draws() {
 }
 fn npc_path(world:&crate::collision::World) {
     for levels in [false,true] {
-        let _npc=span(Region::Npc);let _owner=owner(Owner::Npc);
-        let _path=span(if levels {Region::NpcLevels}else{Region::NpcGeneric});
+        let _npc=path_span(Region::Npc);let _owner=owner(Owner::Npc);
+        let _path=path_span(if levels {Region::NpcLevels}else{Region::NpcGeneric});
         let _controller=npc_controller(levels);
         for category in [QueryCategory::GravityRecoil,QueryCategory::Navigation,QueryCategory::Sight,QueryCategory::Spawn,QueryCategory::Other] {
             let _category=query_category(category);
@@ -21,30 +30,30 @@ fn npc_path(world:&crate::collision::World) {
     }
 }
 fn fx_path() {
-    let _fx=span(Region::Fx);
-    {let _world=span(Region::FxWorld);path_count(Counter::WorldSets,1);path_count(Counter::WorldLive,64);
-     {let _quad=span(Region::FxQuadBuild);path_count(Counter::QuadSets,1);
-      let _pair=span(Region::FxPairWait);path_count(Counter::PairJobs,1);}
-     let _register=span(Region::FxRegistration);path_count(Counter::Registrations,1);}
-    {let _sample=span(Region::FxAttachedSample);path_count(Counter::AttachedSamples,1);path_count(Counter::AttachedLive,128);path_count(Counter::AttachedNew,2);}
-    {let _quad=span(Region::FxQuadBuild);path_count(Counter::QuadSets,1);
-     let _pair=span(Region::FxPairWait);path_count(Counter::PairJobs,1);}
-    let _register=span(Region::FxRegistration);path_count(Counter::Registrations,1);
+    let _fx=path_span(Region::Fx);
+    {let _world=path_span(Region::FxWorld);path_count(Counter::WorldSets,1);path_count(Counter::WorldLive,64);
+     {let _quad=path_span(Region::FxQuadBuild);path_count(Counter::QuadSets,1);
+      let _pair=path_span(Region::FxPairWait);path_count(Counter::PairJobs,1);}
+     let _register=path_span(Region::FxRegistration);path_count(Counter::Registrations,1);}
+    {let _sample=path_span(Region::FxAttachedSample);path_count(Counter::AttachedSamples,1);path_count(Counter::AttachedLive,128);path_count(Counter::AttachedNew,2);}
+    {let _quad=path_span(Region::FxQuadBuild);path_count(Counter::QuadSets,1);
+     let _pair=path_span(Region::FxPairWait);path_count(Counter::PairJobs,1);}
+    let _register=path_span(Region::FxRegistration);path_count(Counter::Registrations,1);
 }
 fn player_path() {
-    let _player=span(Region::PlayerMovement);
-    {let _prepare=span(Region::PlayerPrepare);path_count(Counter::PlayerPrepare,1);
-     for _ in 0..2 {let _hook=span(Region::PlayerHooks);path_count(Counter::PlayerHooks,1);}}
-    {let _hook=span(Region::PlayerHooks);path_count(Counter::PlayerHooks,1);}
-    {let _fixed=span(Region::FixedPhysics);path_count(Counter::PlayerTicks,8);}
-    let _checks=span(Region::PlayerChecks);path_count(Counter::TriggerVisits,10);path_count(Counter::TriggerEligible,8);path_count(Counter::FactBuilds,9);
+    let _player=path_span(Region::PlayerMovement);
+    {let _prepare=path_span(Region::PlayerPrepare);path_count(Counter::PlayerPrepare,1);
+     for _ in 0..2 {let _hook=path_span(Region::PlayerHooks);path_count(Counter::PlayerHooks,1);}}
+    {let _hook=path_span(Region::PlayerHooks);path_count(Counter::PlayerHooks,1);}
+    {let _fixed=path_span(Region::FixedPhysics);path_count(Counter::PlayerTicks,8);}
+    let _checks=path_span(Region::PlayerChecks);path_count(Counter::TriggerVisits,10);path_count(Counter::TriggerEligible,8);path_count(Counter::FactBuilds,9);
 }
 fn hud_path() {
-    let _hud=span(Region::Hud);
-    {let _draw=span(Region::HudDraw);path_count(Counter::HudDraw,1);}
-    {let _search=span(Region::HudSearch);path_count(Counter::HudSearch,1);}
-    {let _draw=span(Region::HudDraw);path_count(Counter::HudDraw,1);
-     let _menu=span(Region::HudMenus);path_count(Counter::HudMenus,1);}
+    let _hud=path_span(Region::Hud);
+    {let _draw=path_span(Region::HudDraw);path_count(Counter::HudDraw,1);}
+    {let _search=path_span(Region::HudSearch);path_count(Counter::HudSearch,1);}
+    {let _draw=path_span(Region::HudDraw);path_count(Counter::HudDraw,1);
+     let _menu=path_span(Region::HudMenus);path_count(Counter::HudMenus,1);}
 }
 #[test]
 #[cfg(feature="frame_total_only")]
@@ -58,7 +67,7 @@ fn r15_four_map_paths_record_every_leaf_without_test_activation() {
         for frame in 0..180 {
             world_draws();
             match map {"centipede1"=>npc_path(&world),"utemple"=>fx_path(),"wchess2"=>player_path(),_=>hud_path()}
-            {let _tail=span(Region::FrameworkTail);drop(span(Region::TailSave));drop(span(Region::TailProfiler));}
+            {let _tail=path_span(Region::FrameworkTail);drop(path_span(Region::TailSave));drop(path_span(Region::TailProfiler));}
             accept(true,frame>=60);now+=std::time::Duration::from_secs(1);survey_presented(now,frame==179);
         }
         assert_eq!(allocations.finish(),0,"census/query observer hot path allocated");
@@ -78,7 +87,7 @@ fn r15_four_map_paths_record_every_leaf_without_test_activation() {
     assert!(seen[52..].iter().all(|&s|s),"a new leaf has no feature-exact proof");
     println!("R15_STORAGE_BYTES state={} row={}",std::mem::size_of::<State>(),std::mem::size_of::<Row>());
     begin(false);
-    for region in [Region::Fx,Region::FxWorld,Region::PlayerPrepare,Region::HudDraw] {let timer=span(region);assert!(timer.start.is_none());}
+    for region in [Region::Fx,Region::FxWorld,Region::PlayerPrepare,Region::HudDraw] {let timer=path_span(region);assert!(timer.start.is_none());}
 }
 
 #[test]
@@ -92,12 +101,12 @@ fn r15_real_cpu_paths_keep_outputs_and_record_work() {
     let reference=attached.output_bits(Vec3::Z*100.);
     crate::character::skinning::overlap::startup(2,false);
     begin_survey(Instant::now());
-    {let _fx=span(Region::Fx);attached.sample(0.3,1.,pose,|_,_,_|true);census_quad_fixture(&mut attached);}
+    {let _fx=path_span(Region::Fx);attached.sample(0.3,1.,pose,|_,_,_|true);census_quad_fixture(&mut attached);}
     assert_eq!(reference,attached.output_bits(Vec3::Z*100.));
     let mut interactions=crate::interaction::Interactions::empty();
     let mut stats=crate::inventory::Stats::default();let mut player=crate::movement::Player::new(Vec3::Z*10.);
-    {let _player=span(Region::PlayerMovement);
-     {let _prepare=span(Region::PlayerPrepare);interactions.prepare_player(&mut stats,&mut player);interactions.filter_level_controls(&mut crate::movement::Controls::default());}
+    {let _player=path_span(Region::PlayerMovement);
+     {let _prepare=path_span(Region::PlayerPrepare);interactions.prepare_player(&mut stats,&mut player);interactions.filter_level_controls(&mut crate::movement::Controls::default());}
      let mut clock=crate::movement::FixedClock::default();clock.advance(1./60.,&world,&mut player,crate::movement::Controls::default());
      interactions.triggers(1./60.,player.feet,player.feet);}
     STATE.with(|s|{let s=s.borrow();for region in [Region::FxAttachedSample,Region::FxQuadBuild,Region::FxPairWait,Region::PlayerPrepare,Region::PlayerHooks,Region::FixedPhysics,Region::PlayerChecks] {
