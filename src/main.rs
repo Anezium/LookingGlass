@@ -230,7 +230,14 @@ fn app_main() {
         use macroquad::miniquad::KeyCode;
         set_config(VitaConfig {
             compact_stream_buffers: true,
-            log_frame_time_every: Some(10),
+            log_frame_time_every: {
+                #[cfg(feature="vita_renderer")]
+                { render::vita_renderer::config().log_frame_time_every.filter(|&n|n>0) }
+                #[cfg(not(feature="vita_renderer"))]
+                { Some(10) }
+            },
+            diagnostic_active: Some(phase_census::active),
+            diagnostic_report: Some(phase_census::backend_report),
             input: InputConfig {
                 left_stick: LeftStickMode::Keys {
                     up: KeyCode::W,

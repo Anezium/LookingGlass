@@ -249,16 +249,18 @@ fn make_buffers(
     } else {
         BufferUsage::Stream
     };
-    let vertex = ctx.new_buffer(
+    let vertex = {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
+        ctx.new_buffer(
         BufferType::VertexBuffer,
         usage,
         BufferSource::empty::<Vertex>(vc),
-    );
-    let index = ctx.new_buffer(
+    )};
+    let index = {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
+        ctx.new_buffer(
         BufferType::IndexBuffer,
         usage,
         BufferSource::empty::<u16>(ic),
-    );
+    )};
     Buffers {
         vertex,
         index,
@@ -411,8 +413,8 @@ impl Gpu {
         if self.buffers[slot].vertex_capacity < vc || self.buffers[slot].index_capacity < ic {
             let replacement = make_buffers(ctx, vc, ic, ring, white);
             let old = std::mem::replace(&mut self.buffers[slot], replacement);
-            ctx.delete_buffer(old.vertex);
-            ctx.delete_buffer(old.index);
+            {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
+             ctx.delete_buffer(old.vertex);ctx.delete_buffer(old.index);}
             self.stats.growths += 1;
         }
         let b = &mut self.buffers[slot];
@@ -434,20 +436,23 @@ impl Gpu {
             self.stats.identical_uploads += u64::from(same_vertex) + u64::from(same_index);
         }
         let plan = UploadPlan::new(c.fx_upload_cache || version.is_some(), c.gpu_index_dedupe || version.is_some(), same_vertex, same_index);
-        if plan.full_hit { self.stats.upload_hits += 1; }
+        if plan.full_hit { self.stats.upload_hits += 1;crate::phase_census::count(1,1); }
+        crate::phase_census::count(2,u64::from(plan.vertex)*(mesh.vertices.len()*40) as u64+u64::from(plan.index)*(mesh.indices.len()*2) as u64);
         let gl_started = MetricInstant::now();
         let metrics = &mut self.stats.render[usize::from(p.effect)];
         metrics.buffer_updates += u64::from(plan.vertex) + u64::from(plan.index);
         metrics.buffer_bytes += u64::from(plan.vertex) * (mesh.vertices.len() * 40) as u64
             + u64::from(plan.index) * (mesh.indices.len() * 2) as u64;
         if plan.vertex {
-            ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));
+            {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
+             ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));}
             self.stats.upload_bytes += (mesh.vertices.len() * 40) as u64;
             self.stats.vertex_updates[usize::from(p.effect)] += 1;
             self.stats.uploaded_vertices[usize::from(p.effect)] += mesh.vertices.len() as u64;
         }
         if plan.index {
-            ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));
+            {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
+             ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));}
             self.stats.upload_bytes += (mesh.indices.len() * 2) as u64;
             self.stats.index_updates[usize::from(p.effect)] += 1;
             self.stats.uploaded_indices[usize::from(p.effect)] += mesh.indices.len() as u64;
@@ -1087,6 +1092,7 @@ pub(crate) fn finish_world(
     let preparation_span = crate::frame_profile::span("fx_finish_prepare");
     let mut list = {
         let _span = crate::frame_profile::span("vita_joint_alpha_sort");
+        let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishSort);
         let mut list = std::mem::take(&mut gpu.alpha_storage); list.clear();
         list.extend(world.iter().map(|&(d,id)| (d,Source::World(id))));
         let mut next_puff = 0;
@@ -1103,6 +1109,7 @@ pub(crate) fn finish_world(
         debug_assert_eq!(next_puff, puffs.len());
         order(list, crate::render::vita_renderer::config().sort_alpha)
     };
+    let merge_leaf=crate::phase_census::span(crate::phase_census::Region::FinishMergePack);
     if !puffs.is_empty() {
         gpu.puff_batches[gpu.ring_phase].build(&mut groups, &puffs, &mut list,
             crate::render::vita_renderer::config().fx_batching == "material");
@@ -1142,10 +1149,12 @@ pub(crate) fn finish_world(
         }
         opaque.clear(); gpu.opaque_storage = opaque;
     }
+    drop(merge_leaf);
     let mut packets = std::mem::take(&mut gpu.packet_storage); packets.clear();
     let mut ranges = std::mem::take(&mut gpu.range_storage); ranges.clear();
     let mut invalid = 0;
     {
+        let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadCpu);
         let upload_started = MetricInstant::now();
         let _span = crate::frame_profile::span("vita_fx_upload");
         let mut uniform_templates=[None;4];
@@ -1156,14 +1165,17 @@ pub(crate) fn finish_world(
                 if p.geometry().indices.is_empty() {
                     continue;
                 }
+                crate::phase_census::count(0,1);
                 let shared=p.geometry.as_ref().map(|m|std::rc::Rc::as_ptr(m) as usize);
                 let previous=shared.and_then(|id|shared_uploads.get(&id).copied());
-                let upload=if let Some(b)=previous {count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p)};
+                let upload=if let Some(b)=previous {crate::phase_census::count(1,1);count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p)};
                 match upload {
                     Ok(b) => {
                         if let Some(id)=shared {shared_uploads.insert(id,b);}
+                        let uniform_leaf=crate::phase_census::span(crate::phase_census::Region::FinishUniforms);
                         let u = if c.fx_prepare_cache { prepared_uniforms(p, &mut uniform_templates) }
                             else { FRAME.with(|f| uniforms(p, &f.borrow())) };
+                        drop(uniform_leaf);
                         packets.push((group_id, pass_id, b, u));
                     }
                     Err(e) => {
@@ -1200,10 +1212,12 @@ pub(crate) fn finish_world(
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent);
         }
     };
+    let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     unsafe {
         crate::render::vita_renderer::begin_3d_pass(PassAction::Nothing);
         macroquad::miniquad::gl::glDepthMask(1);
     }
+    drop(pass_leaf);
     {
         let _span = crate::frame_profile::span("vita_fx_opaque_submit");
         for (id, g) in groups.iter().enumerate().filter(|(_, g)| !g.transparent) {
@@ -1211,12 +1225,14 @@ pub(crate) fn finish_world(
             draw_group(gpu, id);
         }
     }
+    let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     count("vita_joint_alpha_groups", list.len() as u64);
     gpu.field_uniforms.interrupt();
     gpu.submit_cache.interrupt(); // External depth-mask change at the alpha boundary.
     unsafe {
         macroquad::miniquad::gl::glDepthMask(0);
     }
+    drop(pass_leaf);
     {
         let _span = crate::frame_profile::span("vita_joint_alpha_submit");
         let mut world_ms = 0.;
@@ -1244,6 +1260,7 @@ pub(crate) fn finish_world(
                 ["vita_world_alpha_state_bindings", "vita_world_alpha_uniforms", "vita_world_alpha_draws"]);
         }
     }
+    let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     crate::render::vita_renderer::finish_depth_sentinel(flush);
     unsafe {
         macroquad::miniquad::gl::glDepthMask(1);
@@ -1256,6 +1273,8 @@ pub(crate) fn finish_world(
         f.retained.clear();
     });
     gl_use_default_material();
+    drop(pass_leaf);
+    let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishRecycle);
     let _recycle_timer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::FinishRecycle);
     gpu.submit_cache.interrupt();
     gpu.uniform_cache.interrupt();

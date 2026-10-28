@@ -47,15 +47,22 @@ impl State {
         let id=if let Some(&id)=self.lookup.get(&key) {id} else {
             let id=if let Some(id)=self.banks.iter().position(|b|b.key.is_none()) {id}
                 else if self.banks.len()<SURFACES {self.banks.push(Bank::default());self.banks.len()-1}
-                else {let id=self.oldest_unused()?;self.evict(id);id};
+                else {let id=self.oldest_unused().or_else(||{crate::phase_census::rejection(6);None})?;self.evict(id);id};
             self.banks[id].key=Some(key); self.lookup.insert(key,id); id
         };
         self.banks[id].last_used=self.epoch;
         loop {
             if let Some(result)=self.reserve_at(mesh,cpu.clone(),unchanged,instance,alpha,id) {return Some(result);}
             // Held slots cannot be reclaimed; evict only unrelated unused ids.
-            if self.banks[id].slots.iter().enumerate().all(|(slot,g)|g.as_ref().is_some_and(|g|Rc::strong_count(g)>1 || self.banks[id].epoch[slot]==self.epoch)) {return None;}
-            self.evict(self.oldest_unused()?);
+            if self.banks[id].slots.iter().enumerate().all(|(slot,g)|g.as_ref().is_some_and(|g|Rc::strong_count(g)>1 || self.banks[id].epoch[slot]==self.epoch)) {crate::phase_census::rejection(7);return None;}
+            self.evict(self.oldest_unused().or_else(||{
+                if crate::phase_census::active() {
+                    let slot=self.banks[id].slots.iter().enumerate().position(|(slot,g)|g.as_ref().is_none_or(|g|Rc::strong_count(g)==1 && (self.epoch==0 || self.banks[id].epoch[slot]!=self.epoch))).unwrap();
+                    let old=self.banks[id].slots[slot].as_ref().map_or(0,|g|g.vertices.capacity());
+                    crate::phase_census::rejection(if self.vertex_capacity-old+old.max(mesh.vertices.len())>VERTICES {8}else{9});
+                }
+                None
+            })?);
         }
     }
 
@@ -138,9 +145,9 @@ pub(crate) fn end() {
 /// This address is valid only between prepare and the fully drained collect. Banks
 /// cannot be mutated again while any old packet/view still owns their publication.
 pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,key:Key)->Option<(usize,bool)> {
-    let texture=mesh.texture.as_ref()?;
-    let surface=SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade))?;
-    if SKIN_OPACITY.with(Cell::get)!=1. {return None;}
+    let texture=mesh.texture.as_ref().or_else(||{crate::phase_census::rejection(0);None})?;
+    let surface=SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade)).or_else(||{crate::phase_census::rejection(1);None})?;
+    if SKIN_OPACITY.with(Cell::get)!=1. {crate::phase_census::rejection(2);return None;}
     let (time,appearance)=FRAME.with(|f| {let f=f.borrow();(f.time,f.appearance)});
     let (passes,alpha)=actor_cache::recipe(&surface,time,appearance)?;
     let mut passes=Some(passes);
@@ -150,6 +157,7 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
         let n=mesh.vertices.len()*passes.as_ref().unwrap().len();
         let used=FRAME.with(|f|f.borrow().vertices);
         if s.frame_budget_rejects(id,slot,used,n) {
+            crate::phase_census::rejection(10);
             FRAME.with(|f|f.borrow_mut().dropped+=1);
             return None;
         }

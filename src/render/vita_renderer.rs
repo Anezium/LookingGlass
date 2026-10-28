@@ -31,6 +31,8 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(remote = "Self", default, deny_unknown_fields)]
 pub struct Config {
+    /// Miniquad timing report cadence; null/0 disables, omitted preserves 10.
+    pub log_frame_time_every: Option<u32>,
     /// Exact NPC sight predicates, publication-scoped trace reuse and stack targets.
     pub sim_npc_sight_candidates: bool,
     pub sim_npc_sight_cache: bool,
@@ -234,6 +236,7 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 impl Default for Config {
     fn default() -> Self {
         Self {
+            log_frame_time_every: Some(10),
             sim_hatter_door_candidates: false,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
@@ -1564,8 +1567,11 @@ impl Renderer {
         let mut previous_pipeline = None;
         let mut previous_texture = None;
         let _census_submit = crate::phase_census::span(crate::phase_census::Region::WorldSubmit);
+        #[cfg(target_os="vita")]
+        let _commands=crate::phase_census::world_commands();
         let submit_span = crate::frame_profile::span("vita_world_submit");
         let mut totals = crate::frame_profile::Totals::<3>::new();
+        let mut leaves=crate::phase_census::world_leaves();
         // Lifetime is exactly this owned opaque pass: fresh AFTER sky/interop/
         // target setup, discarded BEFORE any alpha callbacks, actors or HUD.
         let cache_enabled = !alpha && config().world_state_cache;
@@ -1597,6 +1603,7 @@ impl Renderer {
             } else {
                 state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
             };
+            let leaf=leaves.start();
             let start = totals.start();
             if plan.pipeline { ctx.apply_pipeline(&pipeline); applications[0] += 1; }
             if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});} applications[1] += 1; }
@@ -1604,6 +1611,8 @@ impl Renderer {
             if low { low_draws += 1; if !cache_enabled {count("vita_world_low_draws",1);} }
             if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
             totals.add(0, start);
+            leaves.add(0,leaf);
+            let leaf=leaves.start();
             let start = totals.start();
             if plan.uniforms {
                 let traffic = self.field_uniforms[usize::from(low)].apply(ctx, u.values(), config().uniform_field_cache);
@@ -1613,6 +1622,8 @@ impl Renderer {
                 uniform_traffic[2] += traffic.calls;
             }
             totals.add(1, start);
+            leaves.add(1,leaf);
+            let leaf=leaves.start();
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             if alpha || g.recipe.stage.blend != Blend::Opaque {
@@ -1620,6 +1631,7 @@ impl Renderer {
             }
             ctx.draw(g.base_element, prepared.indices, 1);
             totals.add(2, start);
+            leaves.add(2,leaf);
             if previous_pipeline != Some(pi) {
                 pipeline_changes += 1;
                 if !cache_enabled { count("vita_world_pipeline_changes", 1); }
@@ -1664,6 +1676,7 @@ impl Renderer {
                 );
             }
         }
+        drop(leaves);
         if cache_enabled {
             counts(&[
                 ("vita_world_low_draws", low_draws),
@@ -2109,6 +2122,16 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backend_report_interval_default_zero_null_and_strict_types() {
+        for (raw,want) in [("{}",Some(10)),(r#"{"log_frame_time_every":10}"#,Some(10)),(r#"{"log_frame_time_every":1}"#,Some(1)),(r#"{"log_frame_time_every":0}"#,None),(r#"{"log_frame_time_every":null}"#,None)] {
+            let c:Config=serde_json::from_str(raw).unwrap();
+            assert_eq!(c.log_frame_time_every.filter(|&n|n>0),want);
+        }
+        for value in [serde_json::json!(-1),serde_json::json!(1.5),serde_json::json!(true),serde_json::json!("off"),serde_json::json!(4294967296u64)] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({"log_frame_time_every":value})).is_err());
+        }
+    }
     #[test]
     fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {
         let fields = ["lights_static_cache", "sim_npc_sight_candidates",
