@@ -176,15 +176,33 @@ pub(crate) fn begin_configured() {
 pub(crate) fn initialize_survey() { STATE.with(|_|{}); }
 #[cfg(target_os="vita")]
 pub(crate) fn export_survey(map:&str)->anyhow::Result<()> {
-    STATE.with(|s|s.borrow_mut().close(Instant::now()));
     let path=format!("ux0:data/alice/private/frame_profile/{map}-r13b-census.json");
     STATE.with(|s|->anyhow::Result<()> {let s=s.borrow();let mut out=std::io::BufWriter::new(std::fs::File::create(path)?);
         write(&s,map,&mut out)?;out.flush()?;Ok(())})?;
     ACTIVE.with(|a|a.set(false));Ok(())
 }
+// The explicit survey runs in Full mode, where the benchmark clock is inert.
+// Its presentation timestamp owns BOTH the CSV interval and the census row.
+#[cfg(any(target_os="vita",test))]
+pub(crate) fn begin_survey(now:Instant) {
+    STATE.with(|s| {let mut s=s.borrow_mut();s.count=0;s.accepted=0;s.start=None;
+        s.pending=false;s.overflow=false;s.sequence=0;s.depth=0;s.sweep_depth=0;
+        s.table.fill(Entry::EMPTY);});
+    begin_at(true,now);
+}
+#[cfg(any(target_os="vita",test))]
+pub(crate) fn survey_presented(now:Instant,finished:bool) {
+    if finished {
+        STATE.with(|s|s.borrow_mut().close(now));
+        ACTIVE.with(|a|a.set(false));
+    } else {begin_at(true,now);}
+}
 fn begin(enabled:bool) {
+    if !enabled {ACTIVE.with(|a|a.set(false));return;}
+    begin_at(enabled,Instant::now());
+}
+fn begin_at(enabled:bool,now:Instant) {
     ACTIVE.with(|a|a.set(enabled));if !enabled {return;}
-    let now=Instant::now();
     STATE.with(|s| {let mut s=s.borrow_mut();s.close(now);s.sequence+=1;
         s.current=Row{sequence:s.sequence,..Row::ZERO};s.start=Some(now);s.owner=Owner::Other;
         s.depth=0;s.sweep_depth=0;
@@ -192,8 +210,12 @@ fn begin(enabled:bool) {
 }
 pub(crate) fn accept(accepted:bool,measured:bool) {
     if !active() {return;}
-    STATE.with(|s|{let mut s=s.borrow_mut();s.pending=accepted;s.current.measured=measured;
-        if accepted {s.accepted+=1;}});
+    STATE.with(|s|{let mut s=s.borrow_mut();
+        // The generic profiler can nominate a frame before the survey supplies
+        // its final attempted-frame decision. Count that frame only once.
+        if accepted && !s.pending {s.accepted+=1;}
+        if !accepted && s.pending {s.accepted-=1;}
+        s.pending=accepted;s.current.measured=measured;});
 }
 pub(crate) struct Timer {start:Option<Instant>, region:usize, level:usize}
 pub(crate) fn span(region:Region) -> Timer {
@@ -334,6 +356,12 @@ pub(crate) fn host_finish(map:&str)->anyhow::Result<()> {if active(){STATE.with(
 #[cfg(test)]
 pub(crate) fn test_begin(enabled:bool) {begin(enabled);}
 #[cfg(test)]
+pub(crate) fn test_survey_json()->anyhow::Result<serde_json::Value> {
+    STATE.with(|s| {let s=s.borrow();assert_eq!(s.accepted,s.count);
+        let mut bytes=Vec::new();write(&s,"fixture",&mut bytes)?;
+        Ok(serde_json::from_slice(&bytes)?)})
+}
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -380,6 +408,20 @@ mod tests {
             assert_eq!(v["regions"].as_array().unwrap().len(),NAMES.len());
             assert_eq!(v["actor_capacity"],ACTORS);assert!(v.get("static_count_columns").is_some());
             s.overflow=true;assert!(write(&s,"fixture",&mut Vec::new()).is_err());});begin(false);
+    }
+    #[test]
+    fn survey_validation_still_rejects_count_alignment_and_hierarchy_errors() {
+        let mut s=State::boxed();
+        for (i,r) in s.rows.iter_mut().enumerate() {*r=Row{total:10,measured:i>=60,..Row::ZERO};}
+        s.count=CAPACITY;
+        assert!(write(&s,"fixture",&mut Vec::new()).is_ok());
+        s.count=179;assert!(write(&s,"fixture",&mut Vec::new()).is_err());s.count=CAPACITY;
+        s.overflow=true;assert!(write(&s,"fixture",&mut Vec::new()).is_err());s.overflow=false;
+        s.rows[59].measured=true;assert!(write(&s,"fixture",&mut Vec::new()).is_err());s.rows[59].measured=false;
+        s.rows[60].measured=false;assert!(write(&s,"fixture",&mut Vec::new()).is_err());s.rows[60].measured=true;
+        s.rows[0].errors=1;assert!(write(&s,"fixture",&mut Vec::new()).is_err());s.rows[0].errors=0;
+        s.rows[0].coverage=11;assert!(write(&s,"fixture",&mut Vec::new()).is_err());s.rows[0].coverage=0;
+        s.rows[0].total=0;assert!(write(&s,"fixture",&mut Vec::new()).is_err());
     }
     #[test]
     fn observer_cost_microbenchmark() {
