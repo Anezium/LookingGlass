@@ -120,6 +120,30 @@ pub fn hatter_door_candidates() -> bool {
     { false }
 }
 
+#[cfg(test)]
+thread_local! { static TRIGGER_FACTS_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn with_trigger_facts_reuse<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset { fn drop(&mut self) { TRIGGER_FACTS_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(TRIGGER_FACTS_TEST.with(|s| s.replace(Some(on))));
+    run()
+}
+// Default off pending console acceptance. Tests: a scoped override, else
+// LOOKING_GLASS_TEST_TRIGGER_FACTS=on runs the whole suite with reuse on.
+pub fn trigger_facts_reuse() -> bool {
+    #[cfg(test)]
+    { TRIGGER_FACTS_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_TRIGGER_FACTS").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => false,
+        Ok("on") => true,
+        _ => panic!("LOOKING_GLASS_TEST_TRIGGER_FACTS must be off or on"),
+    }) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().sim_trigger_facts_reuse }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
+
 // Independent light-cache and dynamic-bucket controls; runtime defaults live in Config.
 macro_rules! hedge_switch {
     ($name:ident, $field:ident) => {

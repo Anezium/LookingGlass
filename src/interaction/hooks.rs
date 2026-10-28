@@ -1059,4 +1059,237 @@ mod tests {
         assert_eq!(served.touched, 1);
         assert!(log.borrow().iter().any(|l| l == "event probe_thread"));
     }
+
+    /// A controller whose script threads flip the derived fact that gates other triggers, so
+    /// a fire changes the facts the rest of the same trigger pass must see.
+    struct Latch {
+        log: Log,
+        opened: bool,
+        fires: u32,
+        scene: bool,
+    }
+    impl LevelController for Latch {
+        fn id(&self) -> &'static str {
+            "garden2"
+        }
+        fn facts(&self) -> Facts {
+            let mut f = Facts::default();
+            f.flag("garden2.opened", self.opened);
+            f.flag("garden2.many", self.fires >= 3);
+            f
+        }
+        fn gate(&self, t: &crate::level::TriggerInfo<'_>) -> Option<Condition> {
+            match t.thread {
+                "gated_thread" => Some(Condition::flag("garden2.opened")),
+                "shut_thread" => Some(Condition::flag("garden2.opened").not()),
+                "many_thread" => Some(Condition::flag("garden2.many")),
+                _ => None,
+            }
+        }
+        fn event(&mut self, thread: &str) -> Option<Events> {
+            self.log.borrow_mut().push(thread.to_owned());
+            match thread {
+                "open_thread" => self.opened = true,
+                "close_thread" => self.opened = false,
+                "scene_thread" => self.scene = true,
+                "gated_thread" | "shut_thread" | "many_thread" => {}
+                _ => return None,
+            }
+            self.fires += 1;
+            Some(Events {
+                message: Some(format!("{thread} {}", self.fires)),
+                ..Default::default()
+            })
+        }
+        fn scripted(&self) -> bool {
+            self.scene
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+    fn latch_map(threads: &[(&str, &str)]) -> Bsp {
+        let mut map = fixture();
+        map.entities.clear();
+        for (class, thread) in threads {
+            let mut e = Entity::from([
+                ("classname".into(), class.to_string()),
+                ("model".into(), "*1".into()),
+                ("origin".into(), "0 100 0".into()),
+            ]);
+            if class.starts_with("trigger_once") || class.starts_with("trigger_multiple") {
+                e.insert("thread".into(), thread.to_string());
+            } else if *class == "trigger_hurt" {
+                e.insert("damage".into(), "5".into());
+            }
+            map.entities.push(e);
+        }
+        map
+    }
+    fn latch(map: &Bsp) -> (Interactions, Log) {
+        let log = Log::default();
+        let mut i = Interactions::load(map).unwrap();
+        i.levels.push(Slot {
+            reg: &REG,
+            ctl: Box::new(Latch {
+                log: log.clone(),
+                opened: false,
+                fires: 0,
+                scene: false,
+            }),
+        });
+        i.configure_events(map).unwrap();
+        (i, log)
+    }
+    type Observed = (
+        Vec<String>,
+        Option<String>,
+        Option<String>,
+        Option<(String, Option<String>)>,
+        Option<(Vec3, f32)>,
+        u32,
+        Vec<(bool, u32, bool, bool)>,
+    );
+    /// Everything a trigger pass can change: its events, the per-trigger state and (as JSON)
+    /// the saved event world, controller and trigger flags.
+    fn observe(i: &Interactions, e: Events) -> (Observed, serde_json::Value) {
+        let triggers = i
+            .triggers
+            .iter()
+            .map(|t| (t.inside, t.cooldown.to_bits(), t.fired, t.reported))
+            .collect();
+        (
+            (e.story, e.message, e.sound, e.transition, e.teleport, e.damage.to_bits(), triggers),
+            serde_json::to_value(i.snapshot()).unwrap(),
+        )
+    }
+    /// A deterministic pass sequence over outside, inside and far positions with zero,
+    /// short and long steps, so contacts, re-entries and cooldowns all occur.
+    fn passes(n: usize) -> Vec<(f32, Vec3, Vec3)> {
+        let spots = [vec3(32., 40., 0.), vec3(32., 100., 0.), vec3(32., 160., 0.), vec3(32., -200., 0.)];
+        let steps = [0.1, 0.05, 0., 2., 0.1, 0.5];
+        let mut x = 0x9e37_79b9_u32;
+        let mut at = 0;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                let next = (x as usize >> 3) % spots.len();
+                let step = (spots[at], spots[next], steps[(x as usize >> 8) % steps.len()]);
+                at = next;
+                (step.2, step.0, step.1)
+            })
+            .collect()
+    }
+    fn run_arm(map: &Bsp, reuse: bool, steps: &[(f32, Vec3, Vec3)], clear_scene: bool) -> (Vec<(Observed, serde_json::Value)>, Vec<String>) {
+        let (mut i, log) = latch(map);
+        let mut seen = Vec::new();
+        for (k, &(dt, before, after)) in steps.iter().enumerate() {
+            if k % 37 == 36 {
+                i.reset_contacts();
+            }
+            let e = i.triggers_with(dt, before, after, reuse);
+            seen.push(observe(&i, e));
+            if clear_scene {
+                i.levels[0].ctl.downcast_mut::<Latch>().unwrap().scene = false;
+            }
+        }
+        let fired = log.borrow().clone();
+        (seen, fired)
+    }
+    #[test]
+    fn trigger_fact_reuse_sees_a_fire_that_flips_a_later_gate_in_the_same_pass() {
+        // 0 gated, 1 opens, 2 gated, 3 closes, 4 gated, 5 shut, 6 gated once.
+        let map = latch_map(&[
+            ("trigger_multiple", "gated_thread"),
+            ("trigger_multiple", "open_thread"),
+            ("trigger_multiple", "gated_thread"),
+            ("trigger_multiple", "close_thread"),
+            ("trigger_multiple", "gated_thread"),
+            ("trigger_multiple", "shut_thread"),
+            ("trigger_once", "open_thread"),
+            ("trigger_multiple", "gated_thread"),
+        ]);
+        let enter = [(0.1, vec3(32., 40., 0.), vec3(32., 100., 0.))];
+        let mut want = None;
+        for reuse in [false, true] {
+            let (seen, fired) = run_arm(&map, reuse, &enter, false);
+            // Index 2 is allowed only because index 1 fired earlier in this pass, index 4 is
+            // shut again by index 3, and index 7 is opened by the once trigger at index 6.
+            assert_eq!(
+                fired,
+                ["open_thread", "gated_thread", "close_thread", "shut_thread", "open_thread", "gated_thread"],
+                "reuse {reuse}"
+            );
+            let inside: Vec<bool> = seen[0].0 .6.iter().map(|t| t.0).collect();
+            assert_eq!(inside, [false, true, true, true, false, true, true, true], "reuse {reuse}");
+            match &want {
+                None => want = Some((seen, fired)),
+                Some(w) => assert_eq!(w, &(seen, fired)),
+            }
+        }
+    }
+    #[test]
+    fn trigger_fact_reuse_matches_fresh_facts_over_synthetic_pass_sequences() {
+        let maps = [
+            latch_map(&[
+                ("trigger_multiple", "gated_thread"),
+                ("trigger_multiple", "open_thread"),
+                ("trigger_multiple", "gated_thread"),
+                ("trigger_hurt", ""),
+                ("trigger_multiple", "many_thread"),
+                ("trigger_multiple", "close_thread"),
+                ("trigger_multiple", "shut_thread"),
+                ("trigger_once", "gated_thread"),
+                ("trigger_multiple", "many_thread"),
+            ]),
+            latch_map(&[
+                ("trigger_multiple", "shut_thread"),
+                ("trigger_once", "open_thread"),
+                ("trigger_multiple", "gated_thread"),
+                ("trigger_multiple", "scene_thread"),
+                ("trigger_multiple", "gated_thread"),
+                ("trigger_multiple", "close_thread"),
+            ]),
+        ];
+        let steps = passes(300);
+        for (m, map) in maps.iter().enumerate() {
+            for clear_scene in [false, true] {
+                let off = run_arm(map, false, &steps, clear_scene);
+                let on = run_arm(map, true, &steps, clear_scene);
+                assert!(off.1.len() > 20 || m == 1 && !clear_scene, "map {m}: only {} fires", off.1.len());
+                assert_eq!(off.0.len(), on.0.len());
+                for (k, (a, b)) in off.0.iter().zip(&on.0).enumerate() {
+                    assert_eq!(a, b, "map {m} scene {clear_scene} pass {k}");
+                }
+                assert_eq!(off.1, on.1, "map {m} scene {clear_scene} fired sequence");
+            }
+        }
+    }
+    #[test]
+    fn trigger_fact_reuse_follows_the_scene_break_and_the_config_switch() {
+        let map = latch_map(&[
+            ("trigger_multiple", "open_thread"),
+            ("trigger_multiple", "scene_thread"),
+            ("trigger_multiple", "gated_thread"),
+        ]);
+        let enter = [(0.1, vec3(32., 40., 0.), vec3(32., 100., 0.)), (0.1, vec3(32., 100., 0.), vec3(32., 40., 0.)), (0.1, vec3(32., 40., 0.), vec3(32., 100., 0.))];
+        for reuse in [false, true] {
+            let (seen, fired) = run_arm(&map, reuse, &enter, false);
+            // The scene starts at index 1 and stops the pass before index 2 and every later pass.
+            assert_eq!(fired, ["open_thread", "scene_thread"], "reuse {reuse}");
+            assert!(seen[1..].iter().all(|s| s.0 .6.iter().map(|t| t.0).eq([true, true, false])));
+        }
+        // `triggers` reads the runtime switch.
+        for on in [false, true] {
+            assert_eq!(crate::sim_maps::with_trigger_facts_reuse(on, crate::sim_maps::trigger_facts_reuse), on);
+            let (mut i, log) = latch(&map);
+            crate::sim_maps::with_trigger_facts_reuse(on, || i.triggers(0.1, enter[0].1, enter[0].2));
+            assert_eq!(*log.borrow(), ["open_thread", "scene_thread"]);
+        }
+    }
 }
