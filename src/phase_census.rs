@@ -222,11 +222,11 @@ pub(crate) fn accept(accepted:bool,measured:bool) {
         s.pending=accepted;s.current.measured=measured;});
 }
 pub(crate) struct Timer {start:Option<Instant>, region:usize, level:usize}
-/// Publish disjoint existing Totals intervals; no census clock reads per draw.
-pub(crate) fn world_publish(ns:&[u64;3], calls:&[u32;3]) {
+/// Publish disjoint Totals intervals. Only the full profiler owns reused reads.
+pub(crate) fn world_publish(ns:&[u64;3], calls:&[u32;3], reused:bool) {
     publish_leaves(Region::WorldSubmit,
         [Region::WorldStateBindings,Region::WorldUniforms,Region::WorldDraws], ns, calls,
-        calls.iter().map(|&n|u64::from(n)).sum());
+        if reused {calls.iter().map(|&n|u64::from(n)).sum()} else {0});
 }
 fn publish_leaves<const N:usize>(parent:Region, regions:[Region;N], ns:&[u64;N], calls:&[u32;N], reused:u64) {
     if !active() {return;}
@@ -442,10 +442,11 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
         "serial_fallbacks":serial_fallbacks,
+        "world_clocks_reused":crate::frame_profile::enabled(),"world_clock_reads_per_draw":4,
         "parent_mask_frame_bit":REGIONS,"clock":"monotonic elapsed nanoseconds; includes preemption and API waits; no GPU timing",
         "residual":"frame_total minus union of root brackets; nested inclusive values must never be summed",
         "query_rule":"exact scene and endpoint bits; previous 1/4/16 attempted frames, excluding same-frame-only repeats; live evictions make hit opportunity a lower bound",
-        "schema_notes":"World leaves reuse Totals clocks, so their calls are reused_brackets, not added_brackets. Finish API/uniform leaves accumulate locally. With frame_total_only, old MetricInstant reads are inactive: upload API and uniform clocks are added. Otherwise buffer-update block reuses its existing MetricInstant pair. joint_upload_cpu exclusive and joint_uniform_prep are upper bounds including observer overhead. actor_npc_overlays includes electric/frozen entry and visibility restoration; overlay_calls counts these entries under actor_gather. Empty-bracket calibration measures the inactive span path, not active bookkeeping; clock samples include amortized outer reads. No automatic bias subtraction.",
+        "schema_notes":"World leaves use census-enabled Totals with four shared boundary reads per draw. With frame_total_only the full profiler is off, so world calls are added_brackets; reused_brackets applies only when the full profiler owns the clocks. Finish API/uniform leaves accumulate locally. With frame_total_only, old MetricInstant reads are inactive: upload API and uniform clocks are added. Otherwise buffer-update block reuses its existing MetricInstant pair. joint_upload_cpu exclusive and joint_uniform_prep are upper bounds including observer overhead. actor_npc_overlays includes electric/frozen entry and visibility restoration; overlay_calls counts these entries under actor_gather. Empty-bracket calibration measures the inactive span path, not active bookkeeping; clock samples include amortized outer reads. No automatic bias subtraction.",
         "observer_threshold_ms":1.0}))?;writeln!(out)?;Ok(())
 }
 fn write_csv(s:&State,out:&mut impl Write)->anyhow::Result<()> {
@@ -491,6 +492,30 @@ pub(crate) fn test_survey_json()->anyhow::Result<serde_json::Value> {
 mod tests {
     use super::*;
     #[test]
+    #[cfg(feature="frame_total_only")]
+    fn r14c_console_features_world_clocks_follow_census() {
+        assert!(!crate::light_profile::full());
+        begin(false);
+        let mut off=crate::frame_profile::Totals::<3>::new();
+        let mut start=off.start();assert!(start.is_none());
+        for i in 0..3 {off.lap(i,&mut start);}
+        assert!(off.census_values().is_none());
+        begin_survey(Instant::now());
+        {let _world=span(Region::WorldSubmit);
+         let mut totals=crate::frame_profile::Totals::<3>::new();
+         assert!(!totals.profile_active());
+         for _ in 0..507 {let mut start=totals.start();for i in 0..3 {totals.lap(i,&mut start);}}
+         let (ns,calls)=totals.census_values().expect("production clocks must run with census");
+         assert_eq!(*calls,[507;3]);assert!(ns.iter().all(|&v|v>0));
+         world_publish(ns,calls,totals.profile_active());}
+        STATE.with(|s|{let s=s.borrow();
+            assert_eq!(&s.current.calls[40..43],&[507;3]);
+            assert!(s.current.inclusive[40..43].iter().all(|&ns|ns>0));
+            assert_eq!(s.current.reused_brackets,0);assert_eq!(s.current.errors,0);
+        });
+        begin(false);
+    }
+    #[test]
     fn r14b_calibration_is_gated_off_and_does_not_allocate() {
         begin(false);
         let scope=crate::kernel_alloc::Scope::begin();
@@ -528,13 +553,13 @@ mod tests {
              for i in 0..2 {let start=leaves.start();leaves.add(i,start);}
              leaves.publish();}
             {let _root=span(Region::WorldSubmit);
-             let mut totals=crate::frame_profile::Totals::<3>::test_active();
-             for _ in 0..507 {for i in 0..3 {let start=totals.start();totals.add(i,start);}}
-             let (ns,calls)=totals.census_values().unwrap();world_publish(ns,calls);}
+             let mut totals=crate::frame_profile::Totals::<3>::new();
+             for _ in 0..507 {let mut start=totals.start();for i in 0..3 {totals.lap(i,&mut start);}}
+             let (ns,calls)=totals.census_values().unwrap();world_publish(ns,calls,totals.profile_active());}
             for leaf in [Region::Input,Region::StoryWeapons,Region::Particles,Region::CameraScene,Region::RenderSetup,Region::FirstPerson,Region::FrameworkTail] {drop(span(leaf));}
             backend_report(7);
             for i in 0..11 {rejection(i);}
-            for i in 0..7 {count(i,1);}
+            for i in 0..7 {count(i,if i==3 {507}else{1});}
             accept(true,frame>=60);now+=std::time::Duration::from_secs(1);
             survey_presented(now,frame==179);
         }
@@ -544,8 +569,8 @@ mod tests {
         for row in v["rows"].as_array().unwrap() {
             let sum:u64=row["exclusive_ns"].as_array().unwrap().iter().map(|n|n.as_u64().unwrap()).sum();
             assert_eq!(sum+row["unbracketed_residual_ns"].as_u64().unwrap(),row["frame_total_ns"].as_u64().unwrap());
-            assert_eq!(row["added_brackets"],19);
-            assert_eq!(row["reused_brackets"],1521);
+            assert_eq!(row["added_brackets"],1540);
+            assert_eq!(row["reused_brackets"],0);
             for i in 30..REGIONS {assert_eq!(row["calls"][i],if (40..43).contains(&i) {507}else{1});}
             assert_eq!(row["diagnostic_counters"][7],1);
         }

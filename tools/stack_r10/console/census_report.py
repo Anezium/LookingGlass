@@ -39,12 +39,14 @@ def validate(data,mapname):
   assert not any(m & (1<<n) for m in r['parent_masks'][24:33]), 'Actor subdivisions escaped actor_gather'
   if data['schema']>=4:
    if data['schema']==5:
-    assert isinstance(r['reused_brackets'],int) and sum(r['calls'][40:43])<=r['reused_brackets']<=sum(r['calls'][40:43])+r['calls'][36]
+    assert isinstance(r['reused_brackets'],int) and (sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0)<=r['reused_brackets']<=(sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0)+r['calls'][36]
     assert r['added_brackets']+r['reused_brackets']==sum(r['calls'][30:])
    else:assert r['added_brackets']==sum(r['calls'][30:])
    for field,width in [('publication_rejections',11),('diagnostic_counters',8 if data['schema']==5 else 7)]:
     assert len(r[field])==width and all(isinstance(v,int) and v>=0 for v in r[field])
    assert r['diagnostic_counters'][1]<=r['diagnostic_counters'][0]
+   if r['diagnostic_counters'][3]>0:
+    assert r['calls'][40]==r['calls'][41]==r['calls'][42]==r['diagnostic_counters'][3], 'world work without matching leaves'
    # Every new leaf has a declared immediate parent. The old actor buckets
    # may self-nest via recursive NPC attachments; exclusive closure still holds.
    allowed={30:[29],31:[29],32:[29],33:[19],34:[19],35:[19],36:[35],37:[35],38:[19],39:[19],40:[11],41:[11],42:[11]}
@@ -85,8 +87,8 @@ def report(data,wall_delta_ms=None,observer_status=None):
  rows=validate(data,data['map']);names=data['regions'];n=len(names)
  def observer_calls(r,i):
   if data['schema']==5:
-   if 40<=i<43:return 0
-   if i==36:return r['calls'][i]-(r['reused_brackets']-sum(r['calls'][40:43]))
+   if 40<=i<43:return 0 if data.get('world_clocks_reused',True) else r['calls'][i]
+   if i==36:return r['calls'][i]-(r['reused_brackets']-(sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0))
   return r['calls'][i]
  result={'map':data['map'],'frames':120,'frame_total_ms':stats([r['frame_total_ns']/1e6 for r in rows]),'residual_ms':stats([r['unbracketed_residual_ns']/1e6 for r in rows]),'regions':[],'collision':[],'acoustic_opportunity':[]}
  for i,name in enumerate(names):

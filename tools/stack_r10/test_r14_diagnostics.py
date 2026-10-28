@@ -6,7 +6,7 @@ mod=old.mod
 def document():
  d=old.document(False,[[0,0,0]]*3);d.update(schema=4,regions=mod.R14_REGIONS.copy(),parent_mask_frame_bit=51,publication_rejection_columns=mod.R14_REJECTIONS,diagnostic_counter_columns=mod.R14_COUNTERS)
  for r in d['rows']:
-  r.update(inclusive_ns=[0]*51,exclusive_ns=[0]*51,calls=[0]*51,parent_masks=[0]*51,publication_rejections=[1]*11,diagnostic_counters=[20,10,1234,507,31,812,222],added_brackets=21)
+  r.update(inclusive_ns=[0]*51,exclusive_ns=[0]*51,calls=[0]*51,parent_masks=[0]*51,publication_rejections=[1]*11,diagnostic_counters=[20,10,1234,1,31,812,222],added_brackets=21)
   parents={14:51,29:14,11:51,19:51,30:29,31:29,32:29,33:19,34:19,35:19,36:35,37:35,38:19,39:19,40:11,41:11,42:11}
   parents.update({i:51 for i in range(43,51)})
   for i,parent in parents.items():

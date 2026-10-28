@@ -64,3 +64,17 @@ necessary on the console. All 180 rows require exact integer closure:
 `sum(exclusive_ns) + unbracketed_residual_ns == frame_total_ns`.
 The offline validator retains schemas 3 and 4 and validates schema 5 names,
 parents, counters, and reused/added accounting. Run all three closure fixtures.
+
+## r14c correction (first r15 commit)
+
+The r14b frame_total_only package had no world leaves: light_profile::full()
+is always false with that feature. The old test_active fixture did not prove
+the shipped path. Totals::new now starts when the census OR full profiler is
+active. The prepared world loop shares adjacent boundaries: four reads per
+draw with census on and zero with census off in frame_total_only. Publication
+marks intervals reused only if the full profiler owns its clocks. Thus 507
+draws contribute 1,521 added intervals and 2,028 added reads, zero reused
+world intervals. The previous "1,521 reused" and "zero added world reads"
+claims above describe the broken r14b fixture, not this corrected build.
+The non-GL regression uses production Totals::new and lap, in the exact
+native_timing,vita_renderer,frame_total_only feature configuration.
