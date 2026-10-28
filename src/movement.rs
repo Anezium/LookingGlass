@@ -775,7 +775,6 @@ impl FixedClock {
         let _census = crate::phase_census::span(crate::phase_census::Region::FixedPhysics);
         #[cfg(target_os = "vita")]
         let _fixed_clock_profile = crate::frame_profile::span("fixed_clock");
-        #[cfg(target_os = "vita")]
         let ticks_before = self.ticks;
         self.accumulator += if seconds.is_finite() {
             seconds.clamp(0., 0.25)
@@ -797,6 +796,7 @@ impl FixedClock {
             self.accumulator -= STEP;
             self.ticks += 1;
         }
+        crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::PlayerTicks,self.ticks-ticks_before);
         #[cfg(target_os = "vita")]
         crate::frame_profile::counts(&[("fixed_clock_ticks", (self.ticks - ticks_before) as u64)]);
     }
@@ -807,7 +807,6 @@ impl FixedClock {
         let _census = crate::phase_census::span(crate::phase_census::Region::FixedPhysics);
         #[cfg(target_os="vita")]
         let _span=crate::frame_profile::span("fixed_clock");
-        #[cfg(target_os="vita")]
         let before=self.ticks;
         self.accumulator+=if seconds.is_finite(){seconds.clamp(0.,0.25)}else{0.};
         const STEP:f64=1./120.;
@@ -815,6 +814,7 @@ impl FixedClock {
             let controls=input(player);player.tick(world,controls);
             self.accumulator-=STEP;self.ticks+=1;
         }
+        crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::PlayerTicks,self.ticks-before);
         self.jump_pending=false;self.use_pending=false;
         #[cfg(target_os="vita")]
         crate::frame_profile::counts(&[("fixed_clock_ticks",self.ticks-before)]);

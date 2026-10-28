@@ -1459,8 +1459,13 @@ impl Scene {
                 if !vita_renderer::world_only() {
                     let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
                     let _render_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Fx);
+                    let _world_particles=crate::phase_census::span(crate::phase_census::Region::FxWorld);
+                    crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::WorldSets,1);
+                    crate::phase_census::path_count(crate::phase_census::Counter::WorldLive,particles.live_puffs());
                     particles.prepare_draw(camera, &self.atmosphere);
                     particles.prepare_quads(camera, Some(direction));
+                    let _registration=crate::phase_census::span(crate::phase_census::Region::FxRegistration);
+                    crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::Registrations,1);
                     for (i, _) in particles.depths(camera, direction) { particles.draw_one(i, camera, direction); }
                 }
                 return;

@@ -291,16 +291,21 @@ impl Ant {
         if !self.enabled || !dt.is_finite() || dt <= 0. {
             return;
         }
+        let mut diagnostic_steps=0u64;
         self.accumulator += dt.min(0.1);
         while self.accumulator + 0.000001 >= 1. / 120. {
             self.accumulator = (self.accumulator - 1. / 120.).max(0.);
             self.step(world, eye, data, out);
+            diagnostic_steps+=1;
         }
+        crate::phase_census::path_count(crate::phase_census::Counter::AntUpdates,1);
+        crate::phase_census::path_count(crate::phase_census::Counter::AntSubsteps,diagnostic_steps);
     }
     fn step(&mut self, world: &World, player_eye: Vec3, data: &impl Timing, out: &mut Feedback) {
         self.electric = (self.electric - 1. / 120.).max(0.);
         let dt = 1. / 120.;
         let _npc_gravity = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
+        let _gravity_category=crate::phase_census::query_category(crate::phase_census::QueryCategory::GravityRecoil);
         let half = HALF * self.scale;
         self.feet += self.recoil.step(dt, world, self.target(0));
         self.time += dt;
@@ -314,6 +319,7 @@ impl Ant {
             self.falling = 0.;
         }
         drop(_npc_gravity);
+        drop(_gravity_category);
         let _npc_section = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
         let bodies = self.opponents.bodies(player_eye);
         self.blasts.retain_mut(|b| {
@@ -355,6 +361,7 @@ impl Ant {
                     .push(("sound/character/army_ant_corp/grenade.wav", b.at));
                 for body in &bodies {
                     let distance = body.center.distance(b.at);
+                    let _sight_category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Sight);
                     let sight = world.sweep(b.at, body.center, Vec3::splat(0.5));
                     if distance < 160. && !sight.start_solid && sight.fraction == 1. {
                         let direction = (body.center - b.at).normalize_or_zero();
@@ -387,6 +394,7 @@ impl Ant {
             }
             // Keep the existing ambient look response without starting an encounter.
             let delta = player_eye - self.target(0).center;
+            let _sight_category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Sight);
             let sight = world.sweep(self.target(0).center, player_eye, Vec3::splat(0.5));
             if self.phase == Phase::Idle
                 && delta.length() < 400.
@@ -400,6 +408,7 @@ impl Ant {
             }
             return;
         }
+        let _sight_category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Sight);
         let (eye, notarget, victim) = self.opponents.aim(
             world,
             self.target(0).center,
@@ -410,6 +419,7 @@ impl Ant {
         let mut delta = eye - self.target(0).center;
         let distance = delta.truncate().length();
         let sight = world.sweep(self.target(0).center, eye, Vec3::splat(0.5));
+        drop(_sight_category);
         let visible = !notarget
             && delta.length() < self.sight_range.unwrap_or(if self.corporal { 1200. } else { 1000. })
             && !sight.start_solid

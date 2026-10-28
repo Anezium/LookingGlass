@@ -2714,6 +2714,8 @@ impl Npcs {
     pub fn update(&mut self, dt: f32, world: &World, eye: Vec3) -> combat::Feedback {
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Npc);
         let _census = crate::phase_census::span(crate::phase_census::Region::Npc);
+        let _path=crate::phase_census::span(crate::phase_census::Region::NpcGeneric);
+        let _controller=crate::phase_census::npc_controller(false);
         let mut _profile = crate::frame_profile::span("npcs");
         if dt <= 0. { _profile.cancel(); }
         let _detail = profile::frame(dt);

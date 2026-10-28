@@ -718,16 +718,19 @@ impl World {
     }
 
     fn invalidate_npc_sight(&mut self) {
+        crate::phase_census::solid_publication();
         self.npc_sight_cache.get_mut().clear();
     }
     /// Full trace reuse, including dynamic/settled/weapon geometry. Keys use
     /// float bits (no tolerance), and never escape the owning collision world.
     pub(crate) fn npc_sight(&self, start: Vec3, end: Vec3) -> Trace {
+        let _category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Sight);
         if !crate::sim_maps::npc_sight_cache() {
             return self.sweep(start, end, Vec3::splat(0.5));
         }
         let key = Self::query_key(start, end, Vec3::splat(0.5));
         if let Some(trace) = self.npc_sight_cache.borrow().get(&key).copied() {
+            crate::phase_census::query_key(self,start,end,Vec3::splat(0.5),1,None);
             crate::sim_maps::count("npc_sight_cache_hits", 1);
             return trace;
         }
@@ -757,6 +760,7 @@ impl World {
         Self::from_bsp_mask(map, PLAYER_MASK, false)
     }
     fn empty_shell(static_geometry: std::sync::Arc<StaticGeometry>, brush_count: usize, min: Vec3, max: Vec3) -> Self {
+        crate::phase_census::solid_publication();
         Self {
             npc_sight_cache: std::cell::RefCell::default(),
             query_cache: std::cell::RefCell::default(),
@@ -837,6 +841,7 @@ impl World {
         Self::from_bsp_mask(map, 1 | 0x20000, true)
     }
     fn from_bsp_mask(map: &Bsp, mask: i32, accelerate: bool) -> Result<Self> {
+        crate::phase_census::solid_publication();
         let _r13_memory = crate::allocation_census::Scope::new(3);
         let mut hulls = Vec::new();
         let mut liquids = Vec::new();
@@ -960,7 +965,7 @@ impl World {
 
     /// Trace a box centre from start to end. Zero extents give a point trace.
     pub fn sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
-        let _census = crate::phase_census::sweep();
+        let _census = crate::phase_census::query_sweep(self,start,end,half,1,None);
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::SweepCalls, 1);
@@ -970,7 +975,7 @@ impl World {
     /// Damage traces may contact a destructible obstacle itself, but must still
     /// respect every other obstacle. Movement never supplies an exception.
     pub fn sweep_except(&self, start: Vec3, end: Vec3, half: Vec3, ignore: Option<usize>) -> Trace {
-        let _census = crate::phase_census::sweep();
+        let _census = crate::phase_census::query_sweep(self,start,end,half,1,ignore);
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::SweepExceptCalls, 1);
@@ -988,11 +993,12 @@ impl World {
     }
     /// Visible scenery can block the view without changing player or weapon collision.
     pub fn set_camera_obstacles(&mut self, obstacles: Vec<Collider>) {
+        crate::phase_census::solid_publication();
         self.camera_obstacles = obstacles;
     }
     pub fn camera_sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Camera);
-        let _census = crate::phase_census::sweep();
+        let _census = crate::phase_census::query_sweep(self,start,end,half,3,None);
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::CameraSweepCalls, 1);
@@ -1024,7 +1030,7 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
-        let _census = crate::phase_census::sweep();
+        let _census = crate::phase_census::query_sweep(self,start,end,half,2,None);
         self.npc_profile.sweep();
         crate::sim_maps::count("world_sweeps", 1);
         #[cfg(test)]
@@ -1316,6 +1322,7 @@ impl World {
     }
 
     pub fn fixture(boxes: &[(Vec3, Vec3)]) -> Self {
+        crate::phase_census::solid_publication();
         let hulls = Self::box_hulls(boxes);
         let tree = if hulls.is_empty() {
             None

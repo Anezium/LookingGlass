@@ -167,6 +167,8 @@ impl Flora {
         self.spawn_wave(w, p.feet + Vec3::Z * 32.);
     }
     fn spawn_wave(&mut self, w: &World, eye: Vec3) {
+        let _category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Spawn);
+        crate::phase_census::path_count(crate::phase_census::Counter::SpawnWaves,1);
         if self.saved.wave >= 4 {
             return;
         }

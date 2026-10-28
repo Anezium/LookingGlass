@@ -9,18 +9,53 @@ R14_COUNTERS=['upload_requests', 'upload_hits', 'upload_bytes', 'world_draws', '
 R14B_REGIONS=R14_REGIONS+['actor_npc_overlays']
 R14B_COUNTERS=R14_COUNTERS+['actor_npc_overlay_calls']
 
+R15_REGIONS=R14B_REGIONS+['npc_generic_update', 'npc_levels_step', 'fx_world_particles', 'fx_attached_sample_birth', 'fx_quad_build', 'fx_registration', 'fx_worker_pair_wait', 'player_input_prepare', 'player_trigger_checks', 'player_map_hooks', 'hud_drawing', 'hud_prompt_search', 'hud_menus', 'tail_save', 'tail_profiler']
+R15_COUNTERS=R14B_COUNTERS+['ant_updates', 'ant_substeps', 'navigation_walks', 'navigation_plans', 'spawn_wave_calls', 'world_live_particles', 'world_new_particles', 'attached_live_particles', 'attached_new_birth_poses', 'attached_sample_calls', 'particle_quad_sets', 'particle_pair_jobs', 'trigger_visits', 'trigger_eligible', 'trigger_fires', 'event_fact_builds', 'player_prepare_calls', 'player_map_hook_calls', 'player_fixed_ticks', 'hud_search_calls', 'hud_draw_calls', 'hud_menu_calls', 'particle_registration_sets', 'world_particle_sets']
+NPC_COLUMNS=['queries','static_queries','nodes','hulls_tested','hulls_clipped','planes','legacy_certificates','fallbacks','sweep_ns','static_ns','repeat_keys','table_evictions']
+def parent_masks(data,row):
+ if data['schema']<6:return row['parent_masks']
+ lo=row['parent_masks'];hi=row['parent_masks_hi'];n=len(data['regions'])
+ assert len(lo)==len(hi)==n
+ assert all(isinstance(v,int) and 0<=v<1<<64 for v in lo+hi)
+ return [a|(b<<64) for a,b in zip(lo,hi)]
+
+def validate6(data,row):
+ assert data['parent_mask_words']==2
+ assert data['npc_query_controllers']==['generic','levels','other']
+ assert data['npc_query_categories']==['gravity_recoil','navigation_detour','sight_visibility','spawn_wave','other']
+ assert data['npc_query_columns']==NPC_COLUMNS
+ assert isinstance(data['world_clocks_reused'],bool) and data['world_clock_reads_per_draw']==4
+ q=row['npc_query_categories'];assert len(q)==15
+ assert all(len(b)==12 and all(isinstance(v,int) and v>=0 for v in b) for b in q)
+ assert all(b[10]<=b[0] and b[11]<=b[0]-b[10] for b in q)
+ assert sum(b[8] for b in q)==row['sweep_ns'][2]
+ assert sum(b[9] for b in q)==row['static_traversal_ns'][2]
+ assert [sum(b[j] for b in q) for j in range(1,8)]==row['static_traversal_counts'][2]
+ c=row['diagnostic_counters'];calls=row['calls'];inc=row['inclusive_ns']
+ # Fail even when missing leaves have been moved to the parent's exclusive
+ # budget and all timing/parent closure is otherwise valid.
+ for counter,leaf,parent in [(17,55,18),(18,56,18),(19,58,18),(24,59,1),(25,61,1),(27,63,21),(28,62,21),(29,64,21),(30,57,18),(31,54,18)]:
+  if inc[parent]>0:assert calls[leaf]==c[counter], (data['regions'][leaf],'work/call mismatch')
+ if inc[18]>0 and c[13]+c[15]>0:assert calls[57]>0, 'live particles without registration'
+ if inc[1]>0 and c[26]>0:assert calls[2]>0, 'fixed ticks without fixed physics'
+ if inc[1]>0 and c[20]>0:assert calls[60]>0, 'trigger visits without checks'
+ if inc[0]>0:
+  for controller,leaf in [(0,52),(1,53)]:
+   if any(b[0] or b[1] for b in q[controller*5:controller*5+5]):assert calls[leaf]>0, 'NPC queries without controller leaf'
+ assert c[22]<=c[21]<=c[20]
+
 def stats(v):
  v=sorted(v);assert v
  return {'n':len(v),'median':v[len(v)//2],'p95':v[len(v)*95//100],'mean':sum(v)/len(v),'min':v[0],'max':v[-1],'sum':sum(v)}
 
 def validate(data,mapname):
- assert data['schema'] in (3,4,5) and data['map']==mapname and data['capacity']==180
+ assert data['schema'] in (3,4,5,6) and data['map']==mapname and data['capacity']==180
  assert isinstance(data['audio_static_cache'], bool)
- names=data['regions'];n=len(names);assert n==({3:30,4:51,5:52}[data["schema"]]) and len(set(names))==n
+ names=data['regions'];n=len(names);assert n==({3:30,4:51,5:52,6:67}[data["schema"]]) and len(set(names))==n
  if data["schema"]>=4:
-  assert names==(R14B_REGIONS if data["schema"]==5 else R14_REGIONS)
+  assert names==(R15_REGIONS if data["schema"]==6 else R14B_REGIONS if data["schema"]==5 else R14_REGIONS)
   assert data["publication_rejection_columns"]==R14_REJECTIONS
-  assert data["diagnostic_counter_columns"]==(R14B_COUNTERS if data["schema"]==5 else R14_COUNTERS)
+  assert data["diagnostic_counter_columns"]==(R15_COUNTERS if data["schema"]==6 else R14B_COUNTERS if data["schema"]==5 else R14_COUNTERS)
  assert data['query_classes']==['room','ambient','effects'] and data['table_entries']==4096 and data['table_probes']==16
  assert data['parent_mask_frame_bit']==n and data['owners']==['audio','player','npc','camera','other']
  rows=data['rows'];assert len(rows)==180
@@ -28,6 +63,7 @@ def validate(data,mapname):
  assert [r['measured_frame'] for r in rows]==[None]*60+list(range(1,121))
  assert all(a['sequence']<b['sequence'] for a,b in zip(rows,rows[1:]))
  for r in rows:
+  if data['schema']==6:validate6(data,r)
   assert r['hierarchy_errors']==0 and r['frame_total_ns']>0
   assert r['frame_total_ns']==r['bracket_union_ns']+r['unbracketed_residual_ns']
   assert r['unbracketed_residual_ns']>=0
@@ -35,14 +71,14 @@ def validate(data,mapname):
   assert all(isinstance(v,int) and v>=0 for field in ['inclusive_ns','exclusive_ns','calls','parent_masks','sweep_count','sweep_ns'] for v in r[field])
   assert sum(r['exclusive_ns'])==r['bracket_union_ns']
   assert all(0<=e<=i for e,i in zip(r['exclusive_ns'],r['inclusive_ns']))
-  assert all((m & ~((1<<(n+1))-1))==0 for i,m in enumerate(r['parent_masks']))
-  assert not any(m & (1<<n) for m in r['parent_masks'][24:33]), 'Actor subdivisions escaped actor_gather'
+  assert all((m & ~((1<<(n+1))-1))==0 for i,m in enumerate(parent_masks(data,r)))
+  assert not any(m & (1<<n) for m in parent_masks(data,r)[24:33]), 'Actor subdivisions escaped actor_gather'
   if data['schema']>=4:
-   if data['schema']==5:
+   if data['schema']>=5:
     assert isinstance(r['reused_brackets'],int) and (sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0)<=r['reused_brackets']<=(sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0)+r['calls'][36]
     assert r['added_brackets']+r['reused_brackets']==sum(r['calls'][30:])
    else:assert r['added_brackets']==sum(r['calls'][30:])
-   for field,width in [('publication_rejections',11),('diagnostic_counters',8 if data['schema']==5 else 7)]:
+   for field,width in [('publication_rejections',11),('diagnostic_counters',32 if data['schema']==6 else 8 if data['schema']==5 else 7)]:
     assert len(r[field])==width and all(isinstance(v,int) and v>=0 for v in r[field])
    assert r['diagnostic_counters'][1]<=r['diagnostic_counters'][0]
    if r['diagnostic_counters'][3]>0:
@@ -51,13 +87,15 @@ def validate(data,mapname):
    # may self-nest via recursive NPC attachments; exclusive closure still holds.
    allowed={30:[29],31:[29],32:[29],33:[19],34:[19],35:[19],36:[35],37:[35],38:[19],39:[19],40:[11],41:[11],42:[11]}
    allowed.update({i:[n] for i in range(43,51)})
-   if data['schema']==5:
+   if data['schema']>=5:
     allowed[51]=[29]
     assert r['diagnostic_counters'][7]==r['calls'][51]
+   if data['schema']==6:
+    allowed.update({52:[0],53:[0],54:[18],55:[18],56:[18,54],57:[18,54],58:[56],59:[1],60:[1],61:[1,59],62:[21],63:[21],64:[62],65:[49],66:[49]})
    for i,parents in allowed.items():
-    mask=r['parent_masks'][i]
+    mask=parent_masks(data,r)[i]
     assert mask & ~sum(1<<j for j in parents)==0, (names[i],mask,parents)
-   for i,(calls,inc,exc,mask) in enumerate(zip(r['calls'],r['inclusive_ns'],r['exclusive_ns'],r['parent_masks'])):
+   for i,(calls,inc,exc,mask) in enumerate(zip(r['calls'],r['inclusive_ns'],r['exclusive_ns'],parent_masks(data,r))):
     assert bool(calls)==bool(mask), (names[i],'call/parent presence')
     if calls==0:assert inc==exc==0
   assert len(r['sweep_count'])==len(r['sweep_ns'])==5
@@ -86,16 +124,16 @@ def validate(data,mapname):
 def report(data,wall_delta_ms=None,observer_status=None):
  rows=validate(data,data['map']);names=data['regions'];n=len(names)
  def observer_calls(r,i):
-  if data['schema']==5:
+  if data['schema']>=5:
    if 40<=i<43:return 0 if data.get('world_clocks_reused',True) else r['calls'][i]
    if i==36:return r['calls'][i]-(r['reused_brackets']-(sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0))
   return r['calls'][i]
  result={'map':data['map'],'frames':120,'frame_total_ms':stats([r['frame_total_ns']/1e6 for r in rows]),'residual_ms':stats([r['unbracketed_residual_ns']/1e6 for r in rows]),'regions':[],'collision':[],'acoustic_opportunity':[]}
  for i,name in enumerate(names):
   mask=0
-  for r in rows:mask|=r['parent_masks'][i]
+  for r in rows:mask|=parent_masks(data,r)[i]
   parents=[names[j] if j<n else 'frame_total' for j in range(n+1) if mask&(1<<j)]
-  children=[names[j] for j in range(n) if any(r['parent_masks'][j]&(1<<i) for r in rows)]
+  children=[names[j] for j in range(n) if any(parent_masks(data,r)[j]&(1<<i) for r in rows)]
   nested=name in parents
   result['regions'].append({'region':name,'parents':parents,'children':children,'nesting':'SELF_NESTED' if nested else 'ordinary',
    'inclusive_ms':None if nested else stats([r['inclusive_ns'][i]/1e6 for r in rows]),
@@ -116,13 +154,13 @@ def report(data,wall_delta_ms=None,observer_status=None):
  exact_roots=[v['region'] for v in result['regions'] if v['parents']==['frame_total']]
  mixed=[v['region'] for v in result['regions'] if 'frame_total' in v['parents'] and v['parents']!=['frame_total']]
  usable=[i for i,row in enumerate(result['regions']) if row['nesting']!='SELF_NESTED']
- closing=[r for r in rows if sum(r['inclusive_ns'][i] for i in usable if r['parent_masks'][i]==root_bit)==r['bracket_union_ns']]
+ closing=[r for r in rows if sum(r['inclusive_ns'][i] for i in usable if parent_masks(data,r)[i]==root_bit)==r['bracket_union_ns']]
  root_rows=[]
  if closing:
   for i in usable:
    name=names[i]
-   if any(r['parent_masks'][i]==root_bit for r in closing):
-    root_rows.append(dict(region=name,root_inclusive_mean_ms=sum(r['inclusive_ns'][i] if r['parent_masks'][i]==root_bit else 0 for r in closing)/len(closing)/1e6))
+   if any(parent_masks(data,r)[i]==root_bit for r in closing):
+    root_rows.append(dict(region=name,root_inclusive_mean_ms=sum(r['inclusive_ns'][i] if parent_masks(data,r)[i]==root_bit else 0 for r in closing)/len(closing)/1e6))
  result['root_partition']={'exact_root_regions':exact_roots,'mixed_root_and_nested_regions':mixed,'frames':len(closing),
   'rows':root_rows,'residual_mean_ms':sum(r['unbracketed_residual_ns'] for r in closing)/len(closing)/1e6 if closing else None,
   'frame_total_mean_ms':sum(r['frame_total_ns'] for r in closing)/len(closing)/1e6 if closing else None,
@@ -151,6 +189,10 @@ def report(data,wall_delta_ms=None,observer_status=None):
  result['residual_reading']={'fraction_of_frame_mean':fraction,'label':'RESIDUAL_UNATTRIBUTED' if fraction>0.15 else 'WITHIN_15_PERCENT',
   'known_contents':'Input and pre-object viewer work, story, stats, particle simulation, camera, power-art, first person and capture, save tail, profiler bookkeeping, and next_frame except vglSwapBuffers (assumed to include macroquad HUD batch flush). Never assign to a subsystem.',
   'follow_up':'Name existing Region::Other intervals in src/viewer.rs at 2576, 3288, 3713, 3811, 4197 in a later build.'}
+ if data['schema']==6:
+  result['npc_query_categories']=[dict(controller=data['npc_query_controllers'][i//5],category=data['npc_query_categories'][i%5],totals=dict(zip(NPC_COLUMNS,[sum(r['npc_query_categories'][i][j] for r in rows) for j in range(12)]))) for i in range(15)]
+  result['npc_repeat_rule']=data['npc_repeat_rule']
+  result['diagnostic_counters']={name:stats([r['diagnostic_counters'][i] for r in rows]) for i,name in enumerate(data['diagnostic_counter_columns'])}
  result['warning']='Inclusive rows overlap; collision/acoustic sweeps are nested views, never added to the frame partition. All elapsed times include scheduling/API waits. GPU attribution is unavailable.'
  return result
 

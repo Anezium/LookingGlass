@@ -58,6 +58,8 @@ impl Interactions {
         for slot in &mut self.levels { slot.ctl.actor_contacts(actors); }
     }
     pub fn prepare_player(&mut self, stats: &mut crate::inventory::Stats, player: &mut Player) {
+        let _hook=crate::phase_census::span(crate::phase_census::Region::PlayerHooks);
+        crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::PlayerHooks,1);
         stats.minimum_sanity = 0.;
         for s in &mut self.levels {
             s.ctl.prepare_player(stats, player);
@@ -70,6 +72,8 @@ impl Interactions {
         }
     }
     pub fn filter_level_controls(&self, controls: &mut crate::movement::Controls) {
+        let _hook=crate::phase_census::span(crate::phase_census::Region::PlayerHooks);
+        crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::PlayerHooks,1);
         for s in &self.levels { s.ctl.filter_controls(controls); }
     }
     pub fn level_hides_player(&self) -> bool { self.levels.iter().any(|s| s.ctl.hides_player()) }
@@ -417,6 +421,8 @@ impl Interactions {
     pub fn levels_step(&mut self, combat: &mut Combat<'_>) -> Feedback {
         let _census = crate::phase_census::span(crate::phase_census::Region::Npc);
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Npc);
+        let _path=crate::phase_census::span(crate::phase_census::Region::NpcLevels);
+        let _controller=crate::phase_census::npc_controller(true);
         let mut out = level::step_controllers(&mut self.levels, combat);
         if let Some(p) = &mut self.pool {
             let f = p.combat(combat);
