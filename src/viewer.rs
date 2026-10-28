@@ -4666,7 +4666,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(s)=&mut r13_survey {
             s.presented(&maps[current],stats.alive(),is_key_pressed(KeyCode::Tab))?;
             if s.take_snapshot() {
-                crate::allocation_census::snapshot("gameplay");
+                crate::allocation_census::snapshot("presented");
                 if crate::allocation_census::enabled() {
                     crate::allocation_census::payload("live_collision",scene.world.census_payload());
                     crate::allocation_census::payload("live_audio",audio.census_payload());
