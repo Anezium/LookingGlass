@@ -12,9 +12,10 @@ thread_local! {static STATE:RefCell<State>=RefCell::new(State::default());}
 pub(crate) fn enabled()->bool { ENABLED.load(Relaxed) }
 pub(crate) fn used()->usize {
     #[cfg(target_os="vita")] {
-        #[repr(C)] struct MallInfo { fields:[usize;10] }
+        #[repr(C)] struct MallInfo { arena:usize,ordblks:usize,smblks:usize,hblks:usize,hblkhd:usize,
+            usmblks:usize,fsmblks:usize,uordblks:usize,fordblks:usize,keepcost:usize }
         extern "C" {fn mallinfo()->MallInfo;}
-        unsafe { mallinfo().fields[7] }
+        unsafe { mallinfo().uordblks }
     }
     #[cfg(not(target_os="vita"))] {crate::kernel_alloc::live_bytes()}
 }
@@ -64,6 +65,7 @@ fn peak_bounds()->[usize;2] {
 /// memalign additionally reserves its full alignment. Realloc retains old+new.
 #[cfg(target_os="vita")]
 pub(crate) mod peak {
+    thread_local! {static DEPTH:std::cell::Cell<usize>=const{std::cell::Cell::new(0)};}
     use super::*;
     use std::sync::atomic::AtomicUsize;
     static LOCK:AtomicBool=AtomicBool::new(false);
@@ -74,10 +76,12 @@ pub(crate) mod peak {
     static UPPER:AtomicUsize=AtomicUsize::new(0);
     pub fn start(){let u=used();BASE.store(u,Relaxed);LOWER.store(u,Relaxed);UPPER.store(u,Relaxed);}
     pub fn bounds()->[usize;2] {[LOWER.load(Relaxed),UPPER.load(Relaxed).min(192*1024*1024)]}
-    pub struct Guard {active:bool, sample:bool}
+    pub struct Guard {active:bool, sample:bool, nested:bool}
     impl Guard {
         pub fn enter(request:usize,alignment:usize,allocation:bool)->Self {
-            if !enabled(){return Self{active:false,sample:false};}
+            if !enabled(){return Self{active:false,sample:false,nested:false};}
+            let nested=DEPTH.with(|d|{let previous=d.get();d.set(previous+1);previous>0});
+            if nested{return Self{active:false,sample:false,nested:true};}
             while LOCK.compare_exchange(false,true,std::sync::atomic::Ordering::Acquire,Relaxed).is_err(){std::hint::spin_loop();}
             let sample=allocation && (request>=65536 || CALLS.fetch_add(1,Relaxed)%128==0);
             if allocation {
@@ -85,11 +89,14 @@ pub(crate) mod peak {
                 let growth=GROWTH.fetch_add(n,Relaxed).saturating_add(n);
                 UPPER.fetch_max(BASE.load(Relaxed).saturating_add(growth),Relaxed);
             }
-            Self{active:true,sample}
+            Self{active:true,sample,nested:false}
         }
     }
-    impl Drop for Guard {fn drop(&mut self){if self.active {
+    impl Drop for Guard {fn drop(&mut self){
+        if self.nested {DEPTH.with(|d|d.set(d.get()-1));return;}
+        if self.active {
         if self.sample {let u=used();LOWER.fetch_max(u,Relaxed);UPPER.fetch_max(u,Relaxed);BASE.store(u,Relaxed);GROWTH.store(0,Relaxed);}
+        DEPTH.with(|d|d.set(0));
         LOCK.store(false,std::sync::atomic::Ordering::Release);
     }}}
 }

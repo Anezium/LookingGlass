@@ -132,6 +132,31 @@ mod imp {
         let _r13=crate::allocation_census::peak::Guard::enter(size,alignment,true);
         __real_memalign(alignment,size)
     }
+    // libc stdio and pthread helpers call the reentrant entry points directly.
+    // The depth guard accounts only the outer allocator request, avoiding double
+    // charging and recursive locking inside realloc/memalign.
+    extern "C" {
+        fn __real__malloc_r(r:*mut core::ffi::c_void,n:usize)->*mut core::ffi::c_void;
+        fn __real__calloc_r(r:*mut core::ffi::c_void,n:usize,s:usize)->*mut core::ffi::c_void;
+        fn __real__realloc_r(r:*mut core::ffi::c_void,p:*mut core::ffi::c_void,n:usize)->*mut core::ffi::c_void;
+        fn __real__memalign_r(r:*mut core::ffi::c_void,a:usize,n:usize)->*mut core::ffi::c_void;
+        fn __real__free_r(r:*mut core::ffi::c_void,p:*mut core::ffi::c_void);
+    }
+    #[no_mangle] pub unsafe extern "C" fn __wrap__malloc_r(r:*mut core::ffi::c_void,n:usize)->*mut core::ffi::c_void {
+        let _g=crate::allocation_census::peak::Guard::enter(n,0,true);__real__malloc_r(r,n)
+    }
+    #[no_mangle] pub unsafe extern "C" fn __wrap__calloc_r(r:*mut core::ffi::c_void,n:usize,s:usize)->*mut core::ffi::c_void {
+        let _g=crate::allocation_census::peak::Guard::enter(n.saturating_mul(s),0,true);__real__calloc_r(r,n,s)
+    }
+    #[no_mangle] pub unsafe extern "C" fn __wrap__realloc_r(r:*mut core::ffi::c_void,p:*mut core::ffi::c_void,n:usize)->*mut core::ffi::c_void {
+        let _g=crate::allocation_census::peak::Guard::enter(n,0,true);__real__realloc_r(r,p,n)
+    }
+    #[no_mangle] pub unsafe extern "C" fn __wrap__memalign_r(r:*mut core::ffi::c_void,a:usize,n:usize)->*mut core::ffi::c_void {
+        let _g=crate::allocation_census::peak::Guard::enter(n,a,true);__real__memalign_r(r,a,n)
+    }
+    #[no_mangle] pub unsafe extern "C" fn __wrap__free_r(r:*mut core::ffi::c_void,p:*mut core::ffi::c_void) {
+        let _g=crate::allocation_census::peak::Guard::enter(0,0,false);__real__free_r(r,p)
+    }
     pub fn begin() {
         CALLS.store(0, Relaxed);
         assert_eq!(THREAD.swap(unsafe { sceKernelGetThreadId() }, Relaxed), -1);
