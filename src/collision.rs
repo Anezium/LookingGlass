@@ -1510,7 +1510,7 @@ mod tests {
                 super::Vec3::new(100., 10., 10.),
             ),
         ]);
-        let collider = super::Collider::from_hulls(std::sync::Arc::try_unwrap(world.static_geometry).unwrap().hulls);
+        let collider = super::Collider::from_hulls(std::sync::Arc::try_unwrap(world.static_geometry).unwrap().hulls.clone());
         assert!(!collider.contains(super::Vec3::ZERO));
         assert!(collider.contains(collider.interior_point().unwrap()));
     }
