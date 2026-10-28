@@ -292,10 +292,14 @@ impl Ant {
             return;
         }
         self.accumulator += dt.min(0.1);
-        while self.accumulator + 0.000001 >= 1. / 120. {
-            self.accumulator = (self.accumulator - 1. / 120.).max(0.);
-            self.step(world, eye, data, out);
-        }
+        // `world` stays shared-borrowed across every substep, so identical sight
+        // traces inside this update are reused exactly (sim_sight_query_reuse).
+        world.with_sight_reuse(|| {
+            while self.accumulator + 0.000001 >= 1. / 120. {
+                self.accumulator = (self.accumulator - 1. / 120.).max(0.);
+                self.step(world, eye, data, out);
+            }
+        });
     }
     fn step(&mut self, world: &World, player_eye: Vec3, data: &impl Timing, out: &mut Feedback) {
         self.electric = (self.electric - 1. / 120.).max(0.);
@@ -355,7 +359,7 @@ impl Ant {
                     .push(("sound/character/army_ant_corp/grenade.wav", b.at));
                 for body in &bodies {
                     let distance = body.center.distance(b.at);
-                    let sight = world.sweep(b.at, body.center, Vec3::splat(0.5));
+                    let sight = world.sight_sweep(b.at, body.center, Vec3::splat(0.5));
                     if distance < 160. && !sight.start_solid && sight.fraction == 1. {
                         let direction = (body.center - b.at).normalize_or_zero();
                         out.strike(
@@ -387,7 +391,7 @@ impl Ant {
             }
             // Keep the existing ambient look response without starting an encounter.
             let delta = player_eye - self.target(0).center;
-            let sight = world.sweep(self.target(0).center, player_eye, Vec3::splat(0.5));
+            let sight = world.sight_sweep(self.target(0).center, player_eye, Vec3::splat(0.5));
             if self.phase == Phase::Idle
                 && delta.length() < 400.
                 && !sight.start_solid
@@ -409,7 +413,7 @@ impl Ant {
         );
         let mut delta = eye - self.target(0).center;
         let distance = delta.truncate().length();
-        let sight = world.sweep(self.target(0).center, eye, Vec3::splat(0.5));
+        let sight = world.sight_sweep(self.target(0).center, eye, Vec3::splat(0.5));
         let visible = !notarget
             && delta.length() < self.sight_range.unwrap_or(if self.corporal { 1200. } else { 1000. })
             && !sight.start_solid
@@ -677,6 +681,81 @@ mod tests {
         assert!(script_wait("centipede2", "ant_guard2"));
         assert!(script_wait("garden1", "ant_nearstart1"));
         assert!(!script_wait("potears2", "antguards"));
+    }
+    /// Centipede1-like run: idle scripted runners and chasing ants stepping at
+    /// 1/120 s under uneven frame times, a door sliding through their lines of
+    /// sight, a destructible obstacle, a mid-run wave spawn and a removal.
+    fn centipede_run(reuse: bool) -> (Vec<crate::collision::sight_log::Record>, Vec<String>, u64) {
+        crate::sim_maps::with_sight_query_reuse(reuse, || {
+            let mut world = World::fixture(&[
+                (vec3(-2000., -2000., -20.), vec3(2000., 2000., 0.)),
+                (vec3(300., -400., 0.), vec3(320., -40., 200.)),
+            ]);
+            let mut ants = Vec::new();
+            for (n, y) in [-300., -150., 150.].into_iter().enumerate() {
+                let mut a = Ant::new(n, false, vec3(600., y, 0.1), std::f32::consts::PI);
+                a.script_wait = true;
+                ants.push(a);
+            }
+            for (n, y) in [(3, -250.), (4, 250.)] {
+                let mut a = Ant::new(n, n == 4, vec3(900., y, 0.1), std::f32::consts::PI);
+                a.phase = Phase::Chase;
+                ants.push(a);
+            }
+            let frames = [1. / 20., 1. / 17., 0.07, 1. / 60., 0.12, 1. / 30., 0.051];
+            let mut states = Vec::new();
+            let (_, log) = crate::collision::sight_log::capture(|| {
+                for frame in 0..240usize {
+                    let t = frame as f32 / 20.;
+                    // A mover crossing the ants' sight lines, published like a door.
+                    let door = vec3(450., -350. + 140. * (t * 0.8).sin().abs() * 5., 0.);
+                    world.set_dynamic(vec![crate::collision::Collider::box_bounds(door, door + vec3(20., 60., 160.))]);
+                    // A destructible crate that appears and breaks, as weapon obstacles do.
+                    world.set_weapon_obstacles(if (frame / 25) % 3 == 1 {
+                        vec![Target { id: 77, center: vec3(500., 120., 50.), half: Vec3::splat(40.) }]
+                    } else { vec![] });
+                    if frame == 90 {
+                        let mut a = Ant::new(1000, false, vec3(700., 0., 0.1), std::f32::consts::PI);
+                        a.phase = Phase::Chase;
+                        ants.push(a);
+                    }
+                    if frame == 160 { ants[0].script_wait = false; }
+                    // Alice stands still for stretches (exact repeats), then strafes.
+                    let eye = if (frame / 40) % 2 == 0 { vec3(0., 0., 48.) }
+                        else { vec3(40. * (t * 1.3).cos(), 120. * (t * 0.7).sin(), 48.) };
+                    let mut out = Feedback::default();
+                    let dt = frames[frame % frames.len()];
+                    for a in &mut ants { a.update(dt, &world, eye, &Clips, &mut out); }
+                    if frame == 200 { ants.retain(|a| a.id != 3); }
+                    states.push(serde_json::to_string(&(&ants, &out)).unwrap());
+                }
+            });
+            (log, states, world.sight_memo_state().2)
+        })
+    }
+    #[test]
+    fn sight_reuse_matches_uncached_traces_and_game_state_exactly() {
+        let (off_log, off_states, off_hits) = centipede_run(false);
+        let (on_log, on_states, on_hits) = centipede_run(true);
+        assert_eq!(off_hits, 0);
+        assert_eq!(off_log.len(), on_log.len());
+        for (n, (a, b)) in off_log.iter().zip(&on_log).enumerate() {
+            assert_eq!(a, b, "sight query {n}");
+            assert_eq!(b.returned, b.fresh, "reused trace {n} differs from an uncached sweep");
+        }
+        for (frame, (a, b)) in off_states.iter().zip(&on_states).enumerate() {
+            assert_eq!(a, b, "game state after frame {frame}");
+        }
+        // The fixture must exercise the reuse, and repeat keys whose answer
+        // changes between frames, or it would not catch stale reuse.
+        assert!(on_hits * 2 > on_log.len() as u64, "{on_hits} hits of {}", on_log.len());
+        let mut answers = std::collections::HashMap::new();
+        let changed = on_log.iter().filter(|r| *answers.entry(r.key).or_insert(r.returned) != r.returned).count();
+        assert!(changed > 0, "no repeated key changed its answer across frames");
+        for phase in ["\"Ready\"", "\"Fire\"", "\"Chase\""] {
+            assert!(on_states.iter().any(|s| s.contains(phase)), "no ant reached {phase}");
+        }
+        assert!(on_states.iter().any(|s| s.contains("\"grenade\":true")), "no grenade in flight");
     }
     fn hit(damage: f32, kind: DamageKind) -> Hit {
         Hit {

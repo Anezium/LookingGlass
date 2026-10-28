@@ -593,6 +593,7 @@ pub struct World {
     npc_sight_cache: std::cell::RefCell<std::collections::HashMap<[u32; 9], Trace>>,
     query_cache: std::cell::RefCell<std::collections::HashMap<[u32; 9], Trace>>,
     query_cache_active: std::cell::Cell<bool>,
+    sight_memo: std::cell::RefCell<SightMemo>,
     pub traversal: crate::traversal::Traversal,
     dynamic: Vec<Collider>,
     dynamic_bounds: Option<Bounds>,
@@ -613,6 +614,19 @@ pub struct World {
     pub patch_count: usize,
     pub min: Vec3,
     pub max: Vec3,
+}
+
+/// Sight traces reused inside one `with_sight_reuse` scope. The scope holds a
+/// shared borrow of its World, so no geometry can be published while entries
+/// exist; they are cleared on exit and by every solid mutation. The capacity is
+/// reserved once and kept, so steady-state frames do not allocate.
+const SIGHT_MEMO_ENTRIES: usize = 32;
+#[derive(Debug, Default)]
+struct SightMemo {
+    active: bool,
+    entries: Vec<([u32; 9], Trace)>,
+    #[cfg(test)]
+    hits: u64,
 }
 
 /// Immutable backing shared by main-thread collision and acoustic packets.
@@ -678,6 +692,69 @@ impl StaticGeometry {
 impl World {
     fn invalidate_npc_sight(&mut self) {
         self.npc_sight_cache.get_mut().clear();
+        // Unreachable while a reuse scope is open (it borrows self); kept so a
+        // mutation can never leave an entry behind, whatever the call order.
+        self.sight_memo.get_mut().entries.clear();
+    }
+    /// Run `run` with exact sight-trace reuse when `sim_sight_query_reuse` is on.
+    /// `&self` is borrowed for the whole call, so the solid geometry that
+    /// `sweep` reads (static, settled, dynamic, weapon obstacles) cannot change
+    /// until the entries are dropped. Nested scopes share the outer one.
+    pub fn with_sight_reuse<T>(&self, run: impl FnOnce() -> T) -> T {
+        if !crate::sim_maps::sight_query_reuse() { return run(); }
+        struct Reset<'a>(&'a World);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                let mut memo = self.0.sight_memo.borrow_mut();
+                memo.entries.clear();
+                memo.active = false;
+            }
+        }
+        {
+            let mut memo = self.sight_memo.borrow_mut();
+            if memo.active { drop(memo); return run(); }
+            debug_assert!(memo.entries.is_empty());
+            memo.active = true;
+        }
+        let _reset = Reset(self);
+        run()
+    }
+    /// `sweep`, returning a stored trace for bit-identical endpoints and extents
+    /// inside a reuse scope. Outside one this is exactly `sweep`.
+    pub fn sight_sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        let trace = self.sight_sweep_memo(start, end, half);
+        #[cfg(test)]
+        sight_log::record(Self::query_key(start, end, half), trace, || self.sweep(start, end, half));
+        trace
+    }
+    fn sight_sweep_memo(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        if !self.sight_memo.borrow().active {
+            return self.sweep(start, end, half);
+        }
+        let key = Self::query_key(start, end, half);
+        {
+            #[cfg_attr(not(test), allow(unused_mut))]
+            let mut memo = self.sight_memo.borrow_mut();
+            if let Some(trace) = memo.entries.iter().find(|(k, _)| *k == key).map(|(_, t)| *t) {
+                #[cfg(test)]
+                { memo.hits += 1; }
+                crate::sim_maps::count("sight_reuse_hits", 1);
+                return trace;
+            }
+        }
+        crate::sim_maps::count("sight_reuse_misses", 1);
+        let trace = self.sweep(start, end, half);
+        let mut memo = self.sight_memo.borrow_mut();
+        if memo.entries.len() < SIGHT_MEMO_ENTRIES {
+            if memo.entries.capacity() == 0 { memo.entries.reserve_exact(SIGHT_MEMO_ENTRIES); }
+            memo.entries.push((key, trace));
+        }
+        trace
+    }
+    #[cfg(test)]
+    pub(crate) fn sight_memo_state(&self) -> (bool, usize, u64) {
+        let memo = self.sight_memo.borrow();
+        (memo.active, memo.entries.len(), memo.hits)
     }
     /// Full trace reuse, including dynamic/settled/weapon geometry. Keys use
     /// float bits (no tolerance), and never escape the owning collision world.
@@ -720,6 +797,7 @@ impl World {
             npc_sight_cache: std::cell::RefCell::default(),
             query_cache: std::cell::RefCell::default(),
             query_cache_active: std::cell::Cell::new(false),
+            sight_memo: std::cell::RefCell::default(),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
@@ -873,6 +951,7 @@ impl World {
             npc_sight_cache: std::cell::RefCell::default(),
             query_cache: std::cell::RefCell::default(),
             query_cache_active: std::cell::Cell::new(false),
+            sight_memo: std::cell::RefCell::default(),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
@@ -1287,6 +1366,7 @@ impl World {
             npc_sight_cache: std::cell::RefCell::default(),
             query_cache: std::cell::RefCell::default(),
             query_cache_active: std::cell::Cell::new(false),
+            sight_memo: std::cell::RefCell::default(),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
@@ -1743,6 +1823,156 @@ mod sim_query_tests {
         crate::sim_maps::with_test_switches([false,false,true,false], || {
             assert_eq!(world.ledge_trace(Vec3::ZERO,Vec3::Z,PLAYER_HALF).fraction, 1.);
             assert!(c.lazy.as_ref().unwrap().pending());
+        });
+    }
+}
+
+/// Test recorder: every `sight_sweep` call with its returned trace and an
+/// independent uncached sweep of the same query at the same moment.
+#[cfg(test)]
+pub(crate) mod sight_log {
+    use super::Trace;
+    pub(crate) type Bits = (u32, [u32; 3], bool, bool);
+    pub(crate) fn bits(t: Trace) -> Bits {
+        (t.fraction.to_bits(), t.normal.to_array().map(f32::to_bits), t.start_solid, t.all_solid)
+    }
+    #[derive(Clone, Debug, PartialEq)]
+    pub(crate) struct Record { pub key: [u32; 9], pub returned: Bits, pub fresh: Bits }
+    thread_local! { static LOG: std::cell::RefCell<Option<Vec<Record>>> = const { std::cell::RefCell::new(None) }; }
+    pub(super) fn record(key: [u32; 9], returned: Trace, fresh: impl FnOnce() -> Trace) {
+        if LOG.with(|l| l.borrow().is_none()) { return; }
+        let record = Record { key, returned: bits(returned), fresh: bits(fresh()) };
+        LOG.with(|l| l.borrow_mut().as_mut().unwrap().push(record));
+    }
+    pub(crate) fn capture<T>(run: impl FnOnce() -> T) -> (T, Vec<Record>) {
+        let outer = LOG.with(|l| l.borrow_mut().replace(Vec::new()));
+        let value = run();
+        let log = LOG.with(|l| std::mem::replace(&mut *l.borrow_mut(), outer)).unwrap();
+        (value, log)
+    }
+}
+
+#[cfg(test)]
+mod sight_reuse_tests {
+    use super::*;
+    use super::sight_log::bits;
+    const HALF_SIGHT: Vec3 = Vec3::splat(0.5);
+    fn wall() -> Collider { Collider::fixture(vec3(40., -10., -10.), vec3(50., 10., 10.)) }
+    #[test]
+    fn flag_off_never_opens_a_scope_or_stores_a_trace() {
+        crate::sim_maps::with_sight_query_reuse(false, || {
+            let world = World::fixture(&[]);
+            world.with_sight_reuse(|| {
+                for _ in 0..3 { world.sight_sweep(Vec3::ZERO, Vec3::X * 100., HALF_SIGHT); }
+                assert_eq!(world.sight_memo_state(), (false, 0, 0));
+            });
+        });
+    }
+    #[test]
+    fn repeats_inside_a_scope_are_bit_identical_and_keys_are_exact_bits() {
+        crate::sim_maps::with_sight_query_reuse(true, || {
+            let mut world = World::fixture(&[(vec3(60., -10., -10.), vec3(70., 10., 10.))]);
+            world.set_dynamic(vec![Collider::fixture(vec3(20., 5., -10.), vec3(30., 15., 10.))]);
+            let (start, end) = (Vec3::ZERO, Vec3::X * 100.);
+            let expected = bits(world.sweep(start, end, HALF_SIGHT));
+            assert!(world.sweep(start, end, HALF_SIGHT).fraction < 1.);
+            world.with_sight_reuse(|| {
+                for _ in 0..5 { assert_eq!(bits(world.sight_sweep(start, end, HALF_SIGHT)), expected); }
+                assert_eq!(world.sight_memo_state(), (true, 1, 4));
+                // -0.0, a one-ulp end and a different extent are different queries.
+                world.sight_sweep(vec3(-0., 0., 0.), end, HALF_SIGHT);
+                world.sight_sweep(start, vec3(f32::from_bits(100f32.to_bits() + 1), 0., 0.), HALF_SIGHT);
+                world.sight_sweep(start, end, Vec3::splat(0.25));
+                assert_eq!(world.sight_memo_state(), (true, 4, 4));
+            });
+            assert_eq!(world.sight_memo_state(), (false, 0, 4));
+        });
+    }
+    #[test]
+    fn every_solid_mutation_between_identical_queries_yields_the_new_trace() {
+        crate::sim_maps::with_sight_query_reuse(true, || {
+            let mut world = World::fixture(&[]);
+            let (start, end) = (Vec3::ZERO, Vec3::X * 100.);
+            // Query twice in a scope (second is a hit), mutate, then repeat.
+            let probe = |w: &World| w.with_sight_reuse(|| {
+                let first = bits(w.sight_sweep(start, end, HALF_SIGHT));
+                assert_eq!(bits(w.sight_sweep(start, end, HALF_SIGHT)), first);
+                first
+            });
+            let open = probe(&world);
+            assert_eq!(open, bits(Trace::default()));
+            let check = |w: &World, blocked: bool| {
+                assert_eq!(w.sight_memo_state().1, 0, "no entry survives a scope or a mutation");
+                let got = probe(w);
+                assert_eq!(got, bits(w.sweep(start, end, HALF_SIGHT)));
+                assert_eq!(got != open, blocked);
+            };
+            world.set_dynamic(vec![wall()]); check(&world, true);
+            world.set_dynamic(vec![]); check(&world, false);
+            world.set_settled_supports(vec![wall()]); check(&world, true);
+            world.set_settled_supports(vec![]); check(&world, false);
+            world.set_weapon_obstacles(vec![crate::combat::Target { id: 7, center: Vec3::X * 45., half: Vec3::splat(5.) }]);
+            check(&world, true);
+            world.set_weapon_obstacles(vec![]); check(&world, false);
+            let mut blocker = World::fixture(&[]);
+            blocker.set_dynamic(vec![wall()]);
+            world.copy_dynamic_from(&blocker); check(&world, true);
+            world.copy_dynamic_from(&World::fixture(&[])); check(&world, false);
+        });
+    }
+    #[test]
+    fn invalidation_clears_entries_even_if_a_mutation_could_follow_a_query() {
+        // Not reachable through the public API (a scope borrows the world); this
+        // drives the private state directly to prove the second line of defence.
+        crate::sim_maps::with_sight_query_reuse(true, || {
+            let mut world = World::fixture(&[]);
+            let (start, end) = (Vec3::ZERO, Vec3::X * 100.);
+            world.sight_memo.get_mut().active = true;
+            assert_eq!(world.sight_sweep(start, end, HALF_SIGHT).fraction, 1.);
+            assert_eq!(world.sight_memo_state().1, 1);
+            world.set_dynamic(vec![wall()]);
+            assert_eq!(world.sight_memo_state().1, 0);
+            assert!(world.sight_sweep(start, end, HALF_SIGHT).fraction < 1.);
+            for mutate in [
+                (|w: &mut World| w.set_settled_supports(vec![])) as fn(&mut World),
+                |w| w.set_weapon_obstacles(vec![]),
+                |w| w.copy_dynamic_from(&World::fixture(&[])),
+                |w| w.set_dynamic(vec![]),
+            ] {
+                world.sight_sweep(start, end, HALF_SIGHT);
+                assert_eq!(world.sight_memo_state().1, 1);
+                mutate(&mut world);
+                assert_eq!(world.sight_memo_state().1, 0);
+            }
+        });
+    }
+    #[test]
+    fn capacity_is_bounded_nesting_shares_and_unwinding_resets() {
+        crate::sim_maps::with_sight_query_reuse(true, || {
+            let world = World::fixture(&[(vec3(60., -10., -10.), vec3(70., 10., 10.))]);
+            let end = Vec3::X * 100.;
+            world.with_sight_reuse(|| {
+                for n in 0..100 {
+                    let start = Vec3::Z * n as f32;
+                    assert_eq!(bits(world.sight_sweep(start, end, HALF_SIGHT)), bits(world.sweep(start, end, HALF_SIGHT)));
+                }
+                assert_eq!(world.sight_memo_state().1, SIGHT_MEMO_ENTRIES);
+                assert_eq!(world.sight_memo.borrow().entries.capacity(), SIGHT_MEMO_ENTRIES);
+                // Past the cap, queries are still exact and simply not stored.
+                let late = Vec3::Z * 99.;
+                assert_eq!(bits(world.sight_sweep(late, end, HALF_SIGHT)), bits(world.sweep(late, end, HALF_SIGHT)));
+                world.with_sight_reuse(|| assert_eq!(world.sight_memo_state().1, SIGHT_MEMO_ENTRIES));
+                assert_eq!(world.sight_memo_state().0, true);
+            });
+            assert_eq!(world.sight_memo_state().1, 0);
+            assert_eq!(world.sight_memo.borrow().entries.capacity(), SIGHT_MEMO_ENTRIES);
+            let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| world.with_sight_reuse(|| {
+                world.sight_sweep(Vec3::ZERO, end, HALF_SIGHT);
+                panic!("unwind through the scope");
+            })));
+            assert!(unwound.is_err());
+            assert_eq!(world.sight_memo_state().0, false);
+            assert_eq!(world.sight_memo_state().1, 0);
         });
     }
 }

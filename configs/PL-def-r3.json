@@ -108,6 +108,7 @@
   "profile_capture": false,
   "attached_puff_batches": true,
   "sim_hatter_door_candidates": false,
+  "sim_sight_query_reuse": false,
   "lights_static_cache": true,
   "sim_dynamic_buckets": false,
   "collision_sah": false,
