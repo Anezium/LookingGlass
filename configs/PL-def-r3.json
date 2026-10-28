@@ -118,5 +118,7 @@
   "world_static_merge": false,
   "world_uniform_persist": false,
   "world_binding_cache": false,
-  "world_gl_state_cache": false
+  "world_gl_state_cache": false,
+  "log_frame_time_every": null,
+  "sim_trigger_facts_reuse": false
 }
