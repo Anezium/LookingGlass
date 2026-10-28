@@ -83,6 +83,11 @@ def validate(data,mapname):
 
 def report(data,wall_delta_ms=None,observer_status=None):
  rows=validate(data,data['map']);names=data['regions'];n=len(names)
+ def observer_calls(r,i):
+  if data['schema']==5:
+   if 40<=i<43:return 0
+   if i==36:return r['calls'][i]-(r['reused_brackets']-sum(r['calls'][40:43]))
+  return r['calls'][i]
  result={'map':data['map'],'frames':120,'frame_total_ms':stats([r['frame_total_ns']/1e6 for r in rows]),'residual_ms':stats([r['unbracketed_residual_ns']/1e6 for r in rows]),'regions':[],'collision':[],'acoustic_opportunity':[]}
  for i,name in enumerate(names):
   mask=0
@@ -120,14 +125,14 @@ def report(data,wall_delta_ms=None,observer_status=None):
   'rows':root_rows,'residual_mean_ms':sum(r['unbracketed_residual_ns'] for r in closing)/len(closing)/1e6 if closing else None,
   'frame_total_mean_ms':sum(r['frame_total_ns'] for r in closing)/len(closing)/1e6 if closing else None,
   'per_frame_integer_closure':True,'scope':'Only frames whose usable root inclusive sum equals bracket_union_ns; SELF_NESTED inclusive values are excluded entirely and non-root occurrences contribute zero'}
- events=[sum(r['calls'])+sum(r['sweep_count']) for r in rows]
+ events=[sum(observer_calls(r,i) for i in range(n))+sum(r['sweep_count']) for r in rows]
  epf=sum(events)/120
  cost=wall_delta_ms/epf if wall_delta_ms is not None and epf else None
  result['observer_bias']={'assumption':'ASSUMED_UNIFORM','events_per_frame':stats(events),'implied_signed_ms_per_event':cost,
   'mean_oriented_wall_delta_ms':wall_delta_ms,'note':'Longer B frames add physics ticks (dt feedback). No observer cost is subtracted. Bounds use the absolute implied cost.'}
  owner={'npc_think_movement':2,'player_movement':1,'audio_prepare':0}
- for row in result['regions']:
-  attributable=row['calls_per_frame']+(sum(r['sweep_count'][owner[row['region']]] for r in rows)/120 if row['region'] in owner else 0)
+ for i,row in enumerate(result['regions']):
+  attributable=sum(observer_calls(r,i) for r in rows)/120+(sum(r['sweep_count'][owner[row['region']]] for r in rows)/120 if row['region'] in owner else 0)
   bound=attributable*abs(cost) if cost is not None else None
   blocked=observer_status=='OBSERVER_PERTURBED' and bound is not None and bound>0.2*row['exclusive_ms']['mean']
   row.update(attributable_events_per_frame=attributable,assumed_uniform_bias_bound_ms=bound,

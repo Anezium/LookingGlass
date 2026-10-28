@@ -22,6 +22,9 @@ def rejected(change):
  raise AssertionError('accepted invalid r14b frame')
 def main():
  d=document();assert len(mod.validate(d,'hedge3'))==120
+ result=mod.report(d,wall_delta_ms=1.0)
+ for i in range(40,43):assert result['regions'][i]['attributable_events_per_frame']==0
+ assert result['regions'][36]['attributable_events_per_frame']==1
  rejected(lambda d:d['rows'][0].__setitem__('reused_brackets',0))
  rejected(lambda d:d['rows'][0].__setitem__('added_brackets',1540))
  rejected(lambda d:d['rows'][0]['parent_masks'].__setitem__(51,1<<52))
