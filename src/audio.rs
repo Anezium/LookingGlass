@@ -824,6 +824,9 @@ impl Audio {
         serde_json::json!({"cache_pcm_bytes":self.cache_samples*4,"cache_limit_bytes":CACHE_SAMPLES*4,
             "world_clips":self.world_clips.len(),"retiring_sinks":self.retiring.len(),
             "effects":self.effects.len(),"ambient_emitters":self.emitters.len(),
+            "music_streams_sampled":music::STATS.streams.load(std::sync::atomic::Ordering::Relaxed),
+            "music_ring_bytes_per_stream":65536*4,"music_worker_stack_bytes":1024*1024,
+            "worker_inventory":output::census_payload(),
             "scope":"PCM sample payload, not sinks/DSP/decoder overhead; audio constructor/load exclusive-net brackets include those"})
     }
 

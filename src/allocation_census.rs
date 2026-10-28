@@ -42,7 +42,7 @@ pub(crate) fn snapshot(label:&str) {
     let attributed:i64=s.net.iter().sum();
     println!("[lg/r13-memory] {}",serde_json::json!({"event":"partition","label":label,
         "heap_used":used,"baseline_bytes":s.baseline,"categories":NAMES,"exclusive_net_bytes":s.net,
-        "calls":s.calls,"residual_bytes":used as i64-s.baseline as i64-attributed,
+        "calls":s.calls,"open_bracket_depth":s.depth,"residual_bytes":used as i64-s.baseline as i64-attributed,
         "scope":"signed net process-heap bracket deltas; concurrent worker drift included; not live object ownership",
         "peak_bounds":peak_bounds(),"heap_hard_upper_bound_bytes":192*1024*1024,"transient_peak":"transition allocator/phase samples are LOWER bounds; 192 MiB fixed newlib heap is the unconditional upper bound"}));
 }
@@ -82,7 +82,10 @@ pub(crate) mod peak {
             if !enabled(){return Self{active:false,sample:false,nested:false};}
             let nested=DEPTH.with(|d|{let previous=d.get();d.set(previous+1);previous>0});
             if nested{return Self{active:false,sample:false,nested:true};}
-            while LOCK.compare_exchange(false,true,std::sync::atomic::Ordering::Acquire,Relaxed).is_err(){std::hint::spin_loop();}
+            while LOCK.compare_exchange(false,true,std::sync::atomic::Ordering::Acquire,Relaxed).is_err(){// Yield so a higher-priority allocator client cannot starve the lock owner.
+                extern "C" {fn sceKernelDelayThread(us:u32)->i32;}
+                unsafe {sceKernelDelayThread(50);}
+            }
             let sample=allocation && (request>=65536 || CALLS.fetch_add(1,Relaxed)%128==0);
             if allocation {
                 let n=request.saturating_add(alignment).saturating_add(64);

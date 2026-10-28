@@ -1209,3 +1209,17 @@ impl PcmSource for rodio::buffer::SamplesBuffer<f32> {
 impl PcmSource for rodio::source::Zero<f32> {
     fn pcm_block(&mut self, epoch: u32) -> Block { Block::silence(epoch) }
 }
+
+/// Existing bounded storage cross-check. No new diagnostic allocations when OFF.
+pub(crate) fn census_payload()->serde_json::Value {
+    #[cfg(feature="native_timing")]
+    let queues=queue::allocation_bytes::<Block>(READY_SLOTS)+queue::allocation_bytes::<Report>(8)
+        +queue::allocation_bytes::<Output>(128);
+    #[cfg(not(feature="native_timing"))]
+    let queues=0usize;
+    serde_json::json!({"queue_request_bytes":queues,"mixer_inline_bytes":std::mem::size_of::<Mixer>(),
+        "source_vector_initial_capacity":128,"source_inline_bytes":std::mem::size_of::<Output>(),
+        "producer_stack_bytes":1024*1024,"reporter_stack_bytes":256*1024,
+        "timing_vectors_initial_bytes":8*128*8,
+        "scope":"existing request capacities; stack allocations are a separate allocator layer; excludes decoder/source graphs and thread runtime overhead"})
+}
