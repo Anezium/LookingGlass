@@ -33,6 +33,8 @@ pub enum Clocks {
 pub struct Config {
     /// Miniquad timing report cadence; null/0 disables, omitted preserves 10.
     pub log_frame_time_every: Option<u32>,
+    /// Build trigger facts once per trigger pass and rebuild after each fire.
+    pub sim_trigger_facts_reuse: bool,
     /// Exact NPC sight predicates, publication-scoped trace reuse and stack targets.
     pub sim_npc_sight_candidates: bool,
     pub sim_npc_sight_cache: bool,
@@ -237,6 +239,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             log_frame_time_every: Some(10),
+            sim_trigger_facts_reuse: false,
             sim_hatter_door_candidates: false,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
@@ -2186,6 +2189,28 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn trigger_facts_reuse_defaults_off_and_requires_a_boolean() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.sim_trigger_facts_reuse);
+        }
+        for enabled in [false, true] {
+            let c: Config = serde_json::from_value(serde_json::json!({"sim_trigger_facts_reuse": enabled})).unwrap();
+            c.validate().unwrap(); assert_eq!(c.sim_trigger_facts_reuse, enabled);
+            assert_eq!(serde_json::to_value(&c).unwrap()["sim_trigger_facts_reuse"], enabled);
+        }
+        for json in [r#"{"sim_trigger_facts_reuse":1}"#, r#"{"sim_trigger_facts_reuse":"on"}"#, r#"{"sim_trigger_facts_reuse":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+        // A rejected report cadence keeps the lever value.
+        for raw in [r#""0""#, "-1", "1.5"] {
+            let bytes = format!(r#"{{"log_frame_time_every":{raw},"sim_trigger_facts_reuse":true}}"#);
+            let (c, rejected) = parse_runtime_config(bytes.as_bytes()).unwrap();
+            assert!(rejected.is_some() && c.sim_trigger_facts_reuse);
+        }
+        let (c, rejected) = parse_runtime_config(br#"{"log_frame_time_every":0,"sim_trigger_facts_reuse":true}"#).unwrap();
+        assert!(rejected.is_none() && c.log_frame_time_every.filter(|&n| n > 0).is_none() && c.sim_trigger_facts_reuse);
     }
     #[test]
     fn hatter_door_candidates_default_off_and_require_a_boolean() {
