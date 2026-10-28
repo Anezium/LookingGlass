@@ -250,7 +250,6 @@ pub fn resolve(
 }
 
 pub fn decode(assets: &mut Assets, name: &str) -> Result<RgbaImage> {
-        let _r13_memory = crate::allocation_census::Scope::new(2);
     let read_timing = crate::startup::WorkTimer::new(crate::startup::Work::TextureRead);
     let bytes = assets.read(name)?;
     drop(read_timing);

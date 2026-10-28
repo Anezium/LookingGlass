@@ -363,6 +363,7 @@ pub async fn play(
     preferences: &Preferences,
     name: &str,
 ) -> Result<bool> {
+    let _r13=crate::allocation_census::Scope::new(8);
     let mut skip = crate::cinematic::Skip::film(name, input.film_skip_label(preferences));
     ensure!(matches!(name, "opening" | "ending"), "Unknown story movie");
     // Bench, renderbench and fullbench restore a save. They must not open a film.
