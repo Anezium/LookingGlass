@@ -243,24 +243,29 @@ fn make_buffers(
     ic: usize,
     ring: bool,
     white: TextureId,
+    leaves: &mut crate::phase_census::FinishLeaves,
 ) -> Buffers {
     let usage = if ring {
         BufferUsage::Dynamic
     } else {
         BufferUsage::Stream
     };
-    let vertex = {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
+    let start = leaves.start();
+    let vertex = {
         ctx.new_buffer(
         BufferType::VertexBuffer,
         usage,
         BufferSource::empty::<Vertex>(vc),
     )};
-    let index = {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
+    leaves.add(0, start);
+    let start = leaves.start();
+    let index = {
         ctx.new_buffer(
         BufferType::IndexBuffer,
         usage,
         BufferSource::empty::<u16>(ic),
     )};
+    leaves.add(0, start);
     Buffers {
         vertex,
         index,
@@ -378,7 +383,7 @@ impl Gpu {
         );
         Ok(gpu)
     }
-    fn upload(&mut self, slot: usize, p: &Pass) -> Result<usize> {
+    fn upload(&mut self, slot: usize, p: &Pass, leaves: &mut crate::phase_census::FinishLeaves) -> Result<usize> {
         crate::game_thread::assert_current();
         let mesh=p.geometry();
         ensure!(
@@ -407,14 +412,15 @@ impl Gpu {
         let vc = mesh.vertices.len().next_power_of_two();
         let ic = mesh.indices.len().next_power_of_two();
         while self.buffers.len() <= slot {
-            self.buffers.push(make_buffers(ctx, vc, ic, ring, white));
+            self.buffers.push(make_buffers(ctx, vc, ic, ring, white, leaves));
             self.stats.growths += 1;
         }
         if self.buffers[slot].vertex_capacity < vc || self.buffers[slot].index_capacity < ic {
-            let replacement = make_buffers(ctx, vc, ic, ring, white);
+            let replacement = make_buffers(ctx, vc, ic, ring, white, leaves);
             let old = std::mem::replace(&mut self.buffers[slot], replacement);
-            {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
-             ctx.delete_buffer(old.vertex);ctx.delete_buffer(old.index);}
+            let start = leaves.start();
+            ctx.delete_buffer(old.vertex);ctx.delete_buffer(old.index);
+            leaves.add(0, start);
             self.stats.growths += 1;
         }
         let b = &mut self.buffers[slot];
@@ -439,27 +445,32 @@ impl Gpu {
         if plan.full_hit { self.stats.upload_hits += 1;crate::phase_census::count(1,1); }
         crate::phase_census::count(2,u64::from(plan.vertex)*(mesh.vertices.len()*40) as u64+u64::from(plan.index)*(mesh.indices.len()*2) as u64);
         let gl_started = MetricInstant::now();
+        #[cfg(feature="frame_total_only")]
+        let gl_leaf = if plan.vertex || plan.index {leaves.start()} else {None};
         let metrics = &mut self.stats.render[usize::from(p.effect)];
         metrics.buffer_updates += u64::from(plan.vertex) + u64::from(plan.index);
         metrics.buffer_bytes += u64::from(plan.vertex) * (mesh.vertices.len() * 40) as u64
             + u64::from(plan.index) * (mesh.indices.len() * 2) as u64;
         if plan.vertex {
-            {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
-             ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));}
+            ctx.buffer_update(b.vertex, BufferSource::slice(&mesh.vertices));
             self.stats.upload_bytes += (mesh.vertices.len() * 40) as u64;
             self.stats.vertex_updates[usize::from(p.effect)] += 1;
             self.stats.uploaded_vertices[usize::from(p.effect)] += mesh.vertices.len() as u64;
         }
         if plan.index {
-            {let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadGl);
-             ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));}
+            ctx.buffer_update(b.index, BufferSource::slice(&mesh.indices));
             self.stats.upload_bytes += (mesh.indices.len() * 2) as u64;
             self.stats.index_updates[usize::from(p.effect)] += 1;
             self.stats.uploaded_indices[usize::from(p.effect)] += mesh.indices.len() as u64;
         } else if !plan.full_hit { self.stats.index_skips += 1; }
         if plan.vertex || plan.index {
             self.stats.uploads += 1;
-            let us = gl_started.elapsed().as_micros() as u64;
+            let elapsed = gl_started.elapsed();
+            #[cfg(not(feature="frame_total_only"))]
+            leaves.add_duration(0, elapsed, true);
+            #[cfg(feature="frame_total_only")]
+            leaves.add(0, gl_leaf);
+            let us = elapsed.as_micros() as u64;
             self.stats.upload_gl_us += us;
             count("vita_fx_upload_gl_us", us);
         }
@@ -1155,6 +1166,7 @@ pub(crate) fn finish_world(
     let mut invalid = 0;
     {
         let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishUploadCpu);
+        let mut leaves = crate::phase_census::FinishLeaves::new();
         let upload_started = MetricInstant::now();
         let _span = crate::frame_profile::span("vita_fx_upload");
         let mut uniform_templates=[None;4];
@@ -1168,14 +1180,14 @@ pub(crate) fn finish_world(
                 crate::phase_census::count(0,1);
                 let shared=p.geometry.as_ref().map(|m|std::rc::Rc::as_ptr(m) as usize);
                 let previous=shared.and_then(|id|shared_uploads.get(&id).copied());
-                let upload=if let Some(b)=previous {crate::phase_census::count(1,1);count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p)};
+                let upload=if let Some(b)=previous {crate::phase_census::count(1,1);count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p,&mut leaves)};
                 match upload {
                     Ok(b) => {
                         if let Some(id)=shared {shared_uploads.insert(id,b);}
-                        let uniform_leaf=crate::phase_census::span(crate::phase_census::Region::FinishUniforms);
+                        let uniform_leaf=leaves.start();
                         let u = if c.fx_prepare_cache { prepared_uniforms(p, &mut uniform_templates) }
                             else { FRAME.with(|f| uniforms(p, &f.borrow())) };
-                        drop(uniform_leaf);
+                        leaves.add(1,uniform_leaf);
                         packets.push((group_id, pass_id, b, u));
                     }
                     Err(e) => {
@@ -1186,6 +1198,7 @@ pub(crate) fn finish_world(
             }
             ranges.push(start..packets.len());
         }
+        leaves.publish();
         gpu.shared_storage = shared_uploads;
         let cpu_us = (upload_started.elapsed().as_micros() as u64).saturating_sub(gpu.stats.upload_gl_us);
         crate::light_profile::fx_add(crate::light_profile::FxMetric::UploadCpu, cpu_us);

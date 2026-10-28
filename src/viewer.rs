@@ -3893,7 +3893,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let host_gather=std::time::Instant::now();
         #[cfg(feature="vita_renderer")]
-        drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Other);
+        {drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Other);}
+        #[cfg(feature="vita_renderer")]
         let census_gather = crate::phase_census::span(crate::phase_census::Region::ActorGather);
         #[cfg(feature="vita_renderer")]
         let mut skin_frame = if crate::render::vita_renderer::config().skin_overlap && !world_only {

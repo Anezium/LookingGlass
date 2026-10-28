@@ -13,13 +13,13 @@ pub(crate) enum Region { Npc, PlayerMovement, FixedPhysics, Movers, Objects, Aud
     Acoustics, Lights, WorldOpaque, WorldVisibility, WorldParameters, WorldSubmit,
     AlphaPrepare, AlphaSubmit, ActorGather, ActorCollect, ActorPublication, ActorSubmit,
     Fx, JointFinish, FxSubmit, Hud, Present, Swap, ActorPose, ActorScalesPalette, ActorNumeric,
-    ActorSerial, ActorWorkerDispatch, ActorConsumers, ActorDirect, ActorFallback, ActorAttachments, FinishSort, FinishMergePack, FinishUploadCpu, FinishUploadGl, FinishUniforms, FinishPass, FinishRecycle, WorldStateBindings, WorldUniforms, WorldDraws, Input, StoryWeapons, Particles, CameraScene, RenderSetup, FirstPerson, FrameworkTail, BackendReport, Other }
+    ActorSerial, ActorWorkerDispatch, ActorConsumers, ActorDirect, ActorFallback, ActorAttachments, FinishSort, FinishMergePack, FinishUploadCpu, FinishUploadGl, FinishUniforms, FinishPass, FinishRecycle, WorldStateBindings, WorldUniforms, WorldDraws, Input, StoryWeapons, Particles, CameraScene, RenderSetup, FirstPerson, FrameworkTail, BackendReport, ActorNpcOverlays, Other }
 const REGIONS: usize = Region::Other as usize;
 const NAMES: [&str; REGIONS] = ["npc_think_movement", "player_movement", "fixed_physics", "movers", "objects",
     "audio_prepare", "prepare_acoustics", "light_selection", "world_opaque", "world_visibility",
     "world_parameters", "world_submit", "alpha_prepare", "alpha_submit", "actor_gather", "actor_collect",
     "actor_publication", "actor_submit", "fx_gather", "joint_finish", "fx_submit", "hud", "present", "swap", "actor_pose", "actor_scales_palette",
-    "actor_numeric_capture", "actor_serial_skin", "actor_worker_dispatch", "actor_consumers_publication", "actor_direct_prepare", "actor_fallback_skin_layers", "actor_npc_attachments", "joint_sort", "joint_merge_pack", "joint_upload_cpu", "joint_upload_gl", "joint_uniform_prep", "joint_pass_setup_end", "joint_recycle", "world_state_bindings", "world_uniforms", "world_draws", "input", "story_weapons", "particles", "camera_scene", "render_setup", "first_person", "framework_tail", "backend_timing_report"];
+    "actor_numeric_capture", "actor_serial_skin", "actor_worker_dispatch", "actor_consumers_publication", "actor_direct_prepare", "actor_fallback_skin_layers", "actor_npc_attachments", "joint_sort", "joint_merge_pack", "joint_upload_cpu", "joint_upload_gl", "joint_uniform_prep", "joint_pass_setup_end", "joint_recycle", "world_state_bindings", "world_uniforms", "world_draws", "input", "story_weapons", "particles", "camera_scene", "render_setup", "first_person", "framework_tail", "backend_timing_report", "actor_npc_overlays"];
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub(crate) enum Owner { Audio, Player, Npc, Camera, Other }
@@ -42,7 +42,7 @@ struct Actor {
 }
 impl Actor { const ZERO: Self = Self { id:0,serial_vertices:0,worker_vertices:0,serial_reasons:0,reason_vertices:[0;8] }; }
 pub(crate) const PUBLICATION_REJECTIONS: [&str;11] = ["missing_texture", "unregistered_surface", "opacity", "empty_recipe", "unsupported_recipe", "mixed_alpha", "bank_surface_capacity", "bank_held", "bank_vertex_capacity", "bank_index_capacity", "frame_vertex_budget"];
-pub(crate) const COUNTERS: [&str;7] = ["upload_requests", "upload_hits", "upload_bytes", "world_draws", "world_texture_binds", "world_sampler_uniform_sets", "world_vbo_layout_changes"];
+pub(crate) const COUNTERS: [&str;8] = ["upload_requests", "upload_hits", "upload_bytes", "world_draws", "world_texture_binds", "world_sampler_uniform_sets", "world_vbo_layout_changes", "actor_npc_overlay_calls"];
 #[derive(Clone, Copy)]
 struct Row {
     sequence: u64, measured: bool, total: u64, coverage: u64,
@@ -51,7 +51,7 @@ struct Row {
     sweeps: [u32; 5], sweep_ns: [u64; 5], acoustic_sweeps: u32, acoustic_sweep_ns: u64,
     static_ns:[u64;5], static_counts:[[u64;7];5],
     cache: [[u32; 3]; 3], queries: [[u32; 4]; 3], evictions: u32, errors: u32,
-    serial_fallbacks: u64, rejections:[u64;11], counters:[u64;7],
+    serial_fallbacks: u64, rejections:[u64;11], counters:[u64;8], reused_brackets:u64,
 }
 impl Row {
     const ZERO: Self = Self { sequence: 0, measured: false, total: 0, coverage: 0,
@@ -59,7 +59,7 @@ impl Row {
         inclusive: [0;REGIONS], exclusive: [0;REGIONS], calls: [0;REGIONS], parents: [0;REGIONS],
         sweeps:[0;5], sweep_ns:[0;5], acoustic_sweeps:0, acoustic_sweep_ns:0,
         static_ns:[0;5],static_counts:[[0;7];5],
-        cache:[[0;3];3], queries:[[0;4];3], evictions:0, errors:0, serial_fallbacks:0, rejections:[0;11], counters:[0;7] };
+        cache:[[0;3];3], queries:[[0;4];3], evictions:0, errors:0, serial_fallbacks:0, rejections:[0;11], counters:[0;8], reused_brackets:0 };
 }
 #[derive(Clone, Copy)]
 struct Entry { scene: usize, bits: [u32;6], last: u64, prior: u64 }
@@ -222,38 +222,73 @@ pub(crate) fn accept(accepted:bool,measured:bool) {
         s.pending=accepted;s.current.measured=measured;});
 }
 pub(crate) struct Timer {start:Option<Instant>, region:usize, level:usize}
-/// Hot world-loop leaves accumulate locally: two clocks per interval, one TLS
-/// publication per pass, no stack/RefCell traffic per draw. The parent owns all
-/// intervals; they must be disjoint and publish before its guard is dropped.
-pub(crate) struct WorldLeaves {enabled:bool,level:usize,ns:[u64;3],calls:[u32;3]}
-pub(crate) fn world_leaves()->WorldLeaves {
-    let mut result=WorldLeaves{enabled:active(),level:0,ns:[0;3],calls:[0;3]};
-    if result.enabled {STATE.with(|s| {let s=s.borrow();result.level=s.depth;});}
-    result
+/// Publish disjoint existing Totals intervals; no census clock reads per draw.
+pub(crate) fn world_publish(ns:&[u64;3], calls:&[u32;3]) {
+    publish_leaves(Region::WorldSubmit,
+        [Region::WorldStateBindings,Region::WorldUniforms,Region::WorldDraws], ns, calls,
+        calls.iter().map(|&n|u64::from(n)).sum());
 }
-impl WorldLeaves {
+fn publish_leaves<const N:usize>(parent:Region, regions:[Region;N], ns:&[u64;N], calls:&[u32;N], reused:u64) {
+    if !active() {return;}
+    STATE.with(|s| {let mut s=s.borrow_mut();let d=s.depth;
+        if d==0 || s.stack[d-1]!=parent as usize {s.current.errors+=1;return;}
+        for (j,region) in regions.into_iter().enumerate() {
+            let i=region as usize;s.current.inclusive[i]+=ns[j];s.current.exclusive[i]+=ns[j];
+            s.current.calls[i]+=calls[j];if calls[j]>0 {s.current.parents[i]|=1u64<<(parent as usize);}
+            s.children[d-1]+=ns[j];
+        }
+        s.current.reused_brackets+=reused;
+    });
+}
+/// Finish API/uniform leaves: fixed local accumulation, one TLS publication.
+pub(crate) struct FinishLeaves {enabled:bool,ns:[u64;2],calls:[u32;2],reused:u64}
+impl FinishLeaves {
+    pub(crate) fn new()->Self {Self{enabled:active(),ns:[0;2],calls:[0;2],reused:0}}
     pub(crate) fn start(&self)->Option<Instant> {self.enabled.then(Instant::now)}
     pub(crate) fn add(&mut self,index:usize,start:Option<Instant>) {
-        if let Some(start)=start {self.ns[index]+=start.elapsed().as_nanos() as u64;self.calls[index]+=1;}
+        if let Some(start)=start {self.add_duration(index,start.elapsed(),false);}
+    }
+    pub(crate) fn add_duration(&mut self,index:usize,elapsed:std::time::Duration,reused:bool) {
+        if self.enabled {self.ns[index]+=elapsed.as_nanos() as u64;self.calls[index]+=1;self.reused+=u64::from(reused);}
+    }
+    pub(crate) fn publish(&self) {
+        if self.enabled {publish_leaves(Region::FinishUploadCpu,
+            [Region::FinishUploadGl,Region::FinishUniforms],&self.ns,&self.calls,self.reused);}
     }
 }
-impl Drop for WorldLeaves {fn drop(&mut self) {
-    if !self.enabled {return;}
-    STATE.with(|s| {let mut s=s.borrow_mut();let d=self.level;
-        if s.depth!=d || d==0 || s.stack[d-1]!=Region::WorldSubmit as usize {s.current.errors+=1;return;}
-        for (j,region) in [Region::WorldStateBindings,Region::WorldUniforms,Region::WorldDraws].into_iter().enumerate() {
-            let i=region as usize;s.current.inclusive[i]+=self.ns[j];s.current.exclusive[i]+=self.ns[j];
-            s.current.calls[i]+=self.calls[j];if self.calls[j]>0 {s.current.parents[i]|=1u64<<(Region::WorldSubmit as usize);}
-            s.children[d-1]+=self.ns[j];
-        }
-    });
-}}
+/// One calibration per arm, with fixed scratch and the census gated off.
+/// Batched samples amortize the outer read pair; each sample is ns per operation.
+#[cfg(any(target_os="vita",test))]
+fn calibration_samples() -> [u64;4] {
+    const N:usize=1024;
+    const BATCH:usize=16;
+    let mut clock=[0u64;N];let mut bracket=[0u64;N];
+    for sample in &mut clock {
+        let start=Instant::now();
+        for _ in 0..BATCH {std::hint::black_box(Instant::now());}
+        *sample=start.elapsed().as_nanos() as u64/BATCH as u64;
+    }
+    for sample in &mut bracket {
+        let start=Instant::now();
+        for _ in 0..BATCH {drop(std::hint::black_box(span(Region::Input)));}
+        *sample=start.elapsed().as_nanos() as u64/BATCH as u64;
+    }
+    clock.sort_unstable();bracket.sort_unstable();
+    [clock[N/2],clock[N*95/100],bracket[N/2],bracket[N*95/100]]
+}
+#[cfg(any(target_os="vita",test))]
+pub(crate) fn calibrate() {
+    if active() {return;}
+    let [clock_median,clock_p95,span_median,span_p95]=calibration_samples();
+    // Logging is outside the sample loop and before the initial wall timestamp.
+    println!("[lg/phase-census] calibration clock_read_ns_median={clock_median} clock_read_ns_p95={clock_p95} empty_bracket_ns_median={span_median} empty_bracket_ns_p95={span_p95} samples=1024 batch=16 repetitions=16384 span_active=false scope=before_window includes_outer_clock_pair=true");
+}
 pub(crate) fn span(region:Region) -> Timer {
     let mut timer=Timer{start:None,region:region as usize,level:0};
     if region==Region::Other || !active() {return timer;}
     STATE.with(|s| {let mut s=s.borrow_mut();
         // These are actor_gather subdivisions, not whole-frame pose/FX totals.
-        if (Region::ActorPose as usize..=Region::ActorAttachments as usize).contains(&(region as usize)) && !s.stack[..s.depth].contains(&(Region::ActorGather as usize)) {return;}
+        if ((Region::ActorPose as usize..=Region::ActorAttachments as usize).contains(&(region as usize)) || region==Region::ActorNpcOverlays) && !s.stack[..s.depth].contains(&(Region::ActorGather as usize)) {return;}
         if s.depth==DEPTH {s.current.errors+=1;return;}
         timer.level=s.depth;let d=s.depth;s.stack[d]=region as usize;s.children[d]=0;s.depth+=1;
         let parent=if d==0 {REGIONS} else {s.stack[d-1]};s.current.parents[region as usize]|=1<<parent;
@@ -345,6 +380,11 @@ pub(crate) fn worker_skin(index:usize,ns:u64) {
 pub(crate) fn rejection(reason:usize) {
     if active() { STATE.with(|s|s.borrow_mut().current.rejections[reason]+=1); }
 }
+pub(crate) fn overlay_call() {
+    if active() {STATE.with(|s| {let mut s=s.borrow_mut();
+        if s.stack[..s.depth].contains(&(Region::ActorGather as usize)) {s.current.counters[7]+=1;}
+    });}
+}
 pub(crate) fn count(index:usize,value:u64) {
     if active() { STATE.with(|s|s.borrow_mut().current.counters[index]+=value); }
 }
@@ -389,14 +429,15 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "live_table_evictions":r.evictions,"hierarchy_errors":r.errors,
         "actors":&r.actors[..r.actor_count],"worker_skin_ns":r.worker_skin_ns,
         "serial_fallbacks":r.serial_fallbacks,"publication_rejections":r.rejections,"diagnostic_counters":r.counters,
-        "added_brackets":r.calls[30..].iter().map(|&n|n as u64).sum::<u64>(),
+        "added_brackets":r.calls[30..].iter().map(|&n|n as u64).sum::<u64>()-r.reused_brackets,
+        "reused_brackets":r.reused_brackets,
     })).collect();
     let serial_fallbacks:u64=s.rows[..s.count].iter().map(|r|r.serial_fallbacks).sum();
     #[cfg(feature="vita_renderer")]
     let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
     #[cfg(not(feature="vita_renderer"))]
     let audio_static_cache=false;
-    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":4,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":COUNTERS,"actor_capacity":ACTORS,"serial_reasons":REASONS,
+    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":5,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":COUNTERS,"actor_capacity":ACTORS,"serial_reasons":REASONS,
         "audio_static_cache":audio_static_cache,"map":map,"regions":&NAMES[..],"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
@@ -404,16 +445,17 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "parent_mask_frame_bit":REGIONS,"clock":"monotonic elapsed nanoseconds; includes preemption and API waits; no GPU timing",
         "residual":"frame_total minus union of root brackets; nested inclusive values must never be summed",
         "query_rule":"exact scene and endpoint bits; previous 1/4/16 attempted frames, excluding same-frame-only repeats; live evictions make hit opportunity a lower bound",
+        "schema_notes":"World leaves reuse Totals clocks, so their calls are reused_brackets, not added_brackets. Finish API/uniform leaves accumulate locally. With frame_total_only, old MetricInstant reads are inactive: upload API and uniform clocks are added. Otherwise buffer-update block reuses its existing MetricInstant pair. joint_upload_cpu exclusive and joint_uniform_prep are upper bounds including observer overhead. actor_npc_overlays includes electric/frozen entry and visibility restoration; overlay_calls counts these entries under actor_gather. Empty-bracket calibration measures the inactive span path, not active bookkeeping; clock samples include amortized outer reads. No automatic bias subtraction.",
         "observer_threshold_ms":1.0}))?;writeln!(out)?;Ok(())
 }
 fn write_csv(s:&State,out:&mut impl Write)->anyhow::Result<()> {
-    write!(out,"accepted_frame,sequence,measured,frame_total_ns,bracket_union_ns,unbracketed_residual_ns,added_brackets")?;
+    write!(out,"accepted_frame,sequence,measured,frame_total_ns,bracket_union_ns,unbracketed_residual_ns,added_brackets,reused_brackets")?;
     for suffix in ["inclusive_ns","exclusive_ns","calls","parent_mask"] {for name in NAMES {write!(out,",{name}_{suffix}")?;}}
     for name in PUBLICATION_REJECTIONS {write!(out,",publication_reject_{name}")?;}
     for name in COUNTERS {write!(out,",{name}")?;}
     writeln!(out)?;
     for (i,r) in s.rows.iter().enumerate() {
-        write!(out,"{},{},{},{},{},{},{}",i+1,r.sequence,r.measured,r.total,r.coverage,r.total-r.coverage,r.calls[30..].iter().map(|&n|n as u64).sum::<u64>())?;
+        write!(out,"{},{},{},{},{},{},{},{}",i+1,r.sequence,r.measured,r.total,r.coverage,r.total-r.coverage,r.calls[30..].iter().map(|&n|n as u64).sum::<u64>()-r.reused_brackets,r.reused_brackets)?;
         for values in [&r.inclusive[..],&r.exclusive[..]] {for n in values {write!(out,",{n}")?;}}
         for n in r.calls {write!(out,",{n}")?;}
         for n in r.parents {write!(out,",{n}")?;}
@@ -449,20 +491,46 @@ pub(crate) fn test_survey_json()->anyhow::Result<serde_json::Value> {
 mod tests {
     use super::*;
     #[test]
+    fn r14b_calibration_is_gated_off_and_does_not_allocate() {
+        begin(false);
+        let scope=crate::kernel_alloc::Scope::begin();
+        let samples=calibration_samples();
+        assert_eq!(scope.finish(),0);
+        assert!(samples[1]>=samples[0] && samples[3]>=samples[2]);
+        calibrate();
+        assert!(!active());
+    }
+    #[test]
+    fn r14b_reused_finish_intervals_do_not_count_as_added_brackets() {
+        begin_survey(Instant::now());
+        {let _cpu=span(Region::FinishUploadCpu);
+         let mut leaves=FinishLeaves::new();
+         let start=Instant::now();let elapsed=start.elapsed();
+         leaves.add_duration(0,elapsed,true);leaves.publish();}
+        STATE.with(|s| {let s=s.borrow();assert_eq!(s.current.reused_brackets,1);
+            assert_eq!(s.current.calls[Region::FinishUploadGl as usize],1);
+            assert_eq!(s.current.errors,0);});
+        begin(false);
+    }
+    #[test]
     fn r14_all_new_leaves_and_csv_close_with_real_timer_bodies() {
         let mut now=Instant::now();begin_survey(now);
         let allocation_scope=crate::kernel_alloc::Scope::begin();
         for frame in 0..180 {
             {let _root=span(Region::ActorGather);
              let _consumer=span(Region::ActorConsumers);
-             for leaf in [Region::ActorDirect,Region::ActorFallback,Region::ActorAttachments] {drop(span(leaf));}}
+             for leaf in [Region::ActorDirect,Region::ActorFallback,Region::ActorAttachments,Region::ActorNpcOverlays] {drop(span(leaf));}
+             overlay_call();}
             {let _root=span(Region::JointFinish);
              for leaf in [Region::FinishSort,Region::FinishMergePack,Region::FinishPass,Region::FinishRecycle] {drop(span(leaf));}
              let _cpu=span(Region::FinishUploadCpu);
-             drop(span(Region::FinishUploadGl));drop(span(Region::FinishUniforms));}
+             let mut leaves=FinishLeaves::new();
+             for i in 0..2 {let start=leaves.start();leaves.add(i,start);}
+             leaves.publish();}
             {let _root=span(Region::WorldSubmit);
-             let mut leaves=world_leaves();
-             for i in 0..3 {let start=leaves.start();leaves.add(i,start);}}
+             let mut totals=crate::frame_profile::Totals::<3>::test_active();
+             for _ in 0..507 {for i in 0..3 {let start=totals.start();totals.add(i,start);}}
+             let (ns,calls)=totals.census_values().unwrap();world_publish(ns,calls);}
             for leaf in [Region::Input,Region::StoryWeapons,Region::Particles,Region::CameraScene,Region::RenderSetup,Region::FirstPerson,Region::FrameworkTail] {drop(span(leaf));}
             backend_report(7);
             for i in 0..11 {rejection(i);}
@@ -476,19 +544,21 @@ mod tests {
         for row in v["rows"].as_array().unwrap() {
             let sum:u64=row["exclusive_ns"].as_array().unwrap().iter().map(|n|n.as_u64().unwrap()).sum();
             assert_eq!(sum+row["unbracketed_residual_ns"].as_u64().unwrap(),row["frame_total_ns"].as_u64().unwrap());
-            assert_eq!(row["added_brackets"],21);
-            for i in 30..REGIONS {assert_eq!(row["calls"][i],1);}
+            assert_eq!(row["added_brackets"],19);
+            assert_eq!(row["reused_brackets"],1521);
+            for i in 30..REGIONS {assert_eq!(row["calls"][i],if (40..43).contains(&i) {507}else{1});}
+            assert_eq!(row["diagnostic_counters"][7],1);
         }
         STATE.with(|s| {
             let s=s.borrow();let mut bytes=Vec::new();write_csv(&s,&mut bytes).unwrap();
             let csv=std::str::from_utf8(&bytes).unwrap();let mut lines=csv.lines();
             let header:Vec<_>=lines.next().unwrap().split(',').collect();
-            assert_eq!(header.len(),7+4*REGIONS+11+7);
+            assert_eq!(header.len(),8+4*REGIONS+11+8);
             for (i,line) in lines.enumerate() {
                 let values:Vec<_>=line.split(',').collect();assert_eq!(values.len(),header.len());
                 let row=&v["rows"][i];
-                for (field,index) in [("frame_total_ns",3),("bracket_union_ns",4),("unbracketed_residual_ns",5),("added_brackets",6)] {assert_eq!(values[index].parse::<u64>().unwrap(),row[field].as_u64().unwrap());}
-                for (field,base) in [("inclusive_ns",7),("exclusive_ns",7+REGIONS),("calls",7+2*REGIONS),("parent_masks",7+3*REGIONS),("publication_rejections",7+4*REGIONS),("diagnostic_counters",18+4*REGIONS)] {
+                for (field,index) in [("frame_total_ns",3),("bracket_union_ns",4),("unbracketed_residual_ns",5),("added_brackets",6),("reused_brackets",7)] {assert_eq!(values[index].parse::<u64>().unwrap(),row[field].as_u64().unwrap());}
+                for (field,base) in [("inclusive_ns",8),("exclusive_ns",8+REGIONS),("calls",8+2*REGIONS),("parent_masks",8+3*REGIONS),("publication_rejections",8+4*REGIONS),("diagnostic_counters",19+4*REGIONS)] {
                     for (j,n) in row[field].as_array().unwrap().iter().enumerate() {assert_eq!(values[base+j].parse::<u64>().unwrap(),n.as_u64().unwrap());}
                 }
             }
@@ -548,7 +618,7 @@ mod tests {
             let mut bytes=Vec::new();write(&s,"fixture",&mut bytes).unwrap();
             let v:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["rows"][60]["measured_frame"],1);assert_eq!(v["rows"][179]["measured_frame"],120);
-            assert_eq!(v["schema"],4);assert_eq!(v["audio_static_cache"],false);
+            assert_eq!(v["schema"],5);assert_eq!(v["audio_static_cache"],false);
             assert_eq!(v["serial_fallbacks"],0);assert_eq!(v["rows"][0]["serial_fallbacks"],0);
             assert_eq!(v["regions"].as_array().unwrap().len(),NAMES.len());
             assert_eq!(v["actor_capacity"],ACTORS);assert!(v.get("static_count_columns").is_some());

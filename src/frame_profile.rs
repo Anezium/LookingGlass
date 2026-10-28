@@ -258,13 +258,23 @@ pub(crate) fn heap_used_bytes()->Option<u64> {
 /// A few accumulated leaf durations, published once under the enclosing span.
 /// Accumulation needs no stack entry, map update or per-draw span.
 #[cfg(feature = "vita_renderer")]
-pub(crate) struct Totals<const N: usize> { values: [f64; N], active: bool }
+pub(crate) struct Totals<const N: usize> { values: [f64; N], ns: [u64; N], calls: [u32; N], active: bool }
 #[cfg(feature = "vita_renderer")]
 impl<const N: usize> Totals<N> {
-    pub(crate) fn new() -> Self { Self { values: [0.; N], active: enabled() } }
+    pub(crate) fn new() -> Self { Self { values: [0.; N], ns: [0; N], calls: [0; N], active: enabled() } }
+    #[cfg(test)]
+    pub(crate) fn test_active() -> Self { Self { values: [0.; N], ns: [0; N], calls: [0; N], active: true } }
     pub(crate) fn start(&self) -> Option<Instant> { self.active.then(Instant::now) }
     pub(crate) fn add(&mut self, index: usize, start: Option<Instant>) {
-        if let Some(start) = start { self.values[index] += start.elapsed().as_secs_f64() * 1000.; }
+        if let Some(start) = start {
+            let elapsed = start.elapsed(); // One existing end read feeds both profilers.
+            self.values[index] += elapsed.as_secs_f64() * 1000.;
+            self.ns[index] += elapsed.as_nanos() as u64;
+            self.calls[index] += 1;
+        }
+    }
+    pub(crate) fn census_values(&self) -> Option<(&[u64; N], &[u32; N])> {
+        self.active.then_some((&self.ns, &self.calls))
     }
     pub(crate) fn publish_under(&self, label: &'static str, total: f64, labels: [&'static str; N]) {
         if !self.active { return; }

@@ -6,18 +6,21 @@ R14_REGIONS=['npc_think_movement', 'player_movement', 'fixed_physics', 'movers',
 R14_REJECTIONS=['missing_texture', 'unregistered_surface', 'opacity', 'empty_recipe', 'unsupported_recipe', 'mixed_alpha', 'bank_surface_capacity', 'bank_held', 'bank_vertex_capacity', 'bank_index_capacity', 'frame_vertex_budget']
 R14_COUNTERS=['upload_requests', 'upload_hits', 'upload_bytes', 'world_draws', 'world_texture_binds', 'world_sampler_uniform_sets', 'world_vbo_layout_changes']
 
+R14B_REGIONS=R14_REGIONS+['actor_npc_overlays']
+R14B_COUNTERS=R14_COUNTERS+['actor_npc_overlay_calls']
+
 def stats(v):
  v=sorted(v);assert v
  return {'n':len(v),'median':v[len(v)//2],'p95':v[len(v)*95//100],'mean':sum(v)/len(v),'min':v[0],'max':v[-1],'sum':sum(v)}
 
 def validate(data,mapname):
- assert data['schema'] in (3,4) and data['map']==mapname and data['capacity']==180
+ assert data['schema'] in (3,4,5) and data['map']==mapname and data['capacity']==180
  assert isinstance(data['audio_static_cache'], bool)
- names=data['regions'];n=len(names);assert n==(51 if data["schema"]==4 else 30) and len(set(names))==n
- if data["schema"]==4:
-  assert names==R14_REGIONS
+ names=data['regions'];n=len(names);assert n==({3:30,4:51,5:52}[data["schema"]]) and len(set(names))==n
+ if data["schema"]>=4:
+  assert names==(R14B_REGIONS if data["schema"]==5 else R14_REGIONS)
   assert data["publication_rejection_columns"]==R14_REJECTIONS
-  assert data["diagnostic_counter_columns"]==R14_COUNTERS
+  assert data["diagnostic_counter_columns"]==(R14B_COUNTERS if data["schema"]==5 else R14_COUNTERS)
  assert data['query_classes']==['room','ambient','effects'] and data['table_entries']==4096 and data['table_probes']==16
  assert data['parent_mask_frame_bit']==n and data['owners']==['audio','player','npc','camera','other']
  rows=data['rows'];assert len(rows)==180
@@ -34,15 +37,21 @@ def validate(data,mapname):
   assert all(0<=e<=i for e,i in zip(r['exclusive_ns'],r['inclusive_ns']))
   assert all((m & ~((1<<(n+1))-1))==0 for i,m in enumerate(r['parent_masks']))
   assert not any(m & (1<<n) for m in r['parent_masks'][24:33]), 'Actor subdivisions escaped actor_gather'
-  if data['schema']==4:
-   assert r['added_brackets']==sum(r['calls'][30:])
-   for field,width in [('publication_rejections',11),('diagnostic_counters',7)]:
+  if data['schema']>=4:
+   if data['schema']==5:
+    assert isinstance(r['reused_brackets'],int) and sum(r['calls'][40:43])<=r['reused_brackets']<=sum(r['calls'][40:43])+r['calls'][36]
+    assert r['added_brackets']+r['reused_brackets']==sum(r['calls'][30:])
+   else:assert r['added_brackets']==sum(r['calls'][30:])
+   for field,width in [('publication_rejections',11),('diagnostic_counters',8 if data['schema']==5 else 7)]:
     assert len(r[field])==width and all(isinstance(v,int) and v>=0 for v in r[field])
    assert r['diagnostic_counters'][1]<=r['diagnostic_counters'][0]
    # Every new leaf has a declared immediate parent. The old actor buckets
    # may self-nest via recursive NPC attachments; exclusive closure still holds.
    allowed={30:[29],31:[29],32:[29],33:[19],34:[19],35:[19],36:[35],37:[35],38:[19],39:[19],40:[11],41:[11],42:[11]}
    allowed.update({i:[n] for i in range(43,51)})
+   if data['schema']==5:
+    allowed[51]=[29]
+    assert r['diagnostic_counters'][7]==r['calls'][51]
    for i,parents in allowed.items():
     mask=r['parent_masks'][i]
     assert mask & ~sum(1<<j for j in parents)==0, (names[i],mask,parents)

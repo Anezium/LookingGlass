@@ -57,9 +57,11 @@ impl State {
             if self.banks[id].slots.iter().enumerate().all(|(slot,g)|g.as_ref().is_some_and(|g|Rc::strong_count(g)>1 || self.banks[id].epoch[slot]==self.epoch)) {crate::phase_census::rejection(7);return None;}
             self.evict(self.oldest_unused().or_else(||{
                 if crate::phase_census::active() {
-                    let slot=self.banks[id].slots.iter().enumerate().position(|(slot,g)|g.as_ref().is_none_or(|g|Rc::strong_count(g)==1 && (self.epoch==0 || self.banks[id].epoch[slot]!=self.epoch))).unwrap();
-                    let old=self.banks[id].slots[slot].as_ref().map_or(0,|g|g.vertices.capacity());
-                    crate::phase_census::rejection(if self.vertex_capacity-old+old.max(mesh.vertices.len())>VERTICES {8}else{9});
+                    let reason=self.banks[id].slots.iter().enumerate().position(|(slot,g)|g.as_ref().is_none_or(|g|Rc::strong_count(g)==1 && (self.epoch==0 || self.banks[id].epoch[slot]!=self.epoch))).map_or(9, |slot| {
+                        let old=self.banks[id].slots[slot].as_ref().map_or(0,|g|g.vertices.capacity());
+                        if self.vertex_capacity-old+old.max(mesh.vertices.len())>VERTICES {8}else{9}
+                    });
+                    crate::phase_census::rejection(reason);
                 }
                 None
             })?);

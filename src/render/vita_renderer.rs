@@ -416,6 +416,22 @@ impl Config {
         Ok(())
     }
 }
+/// Reject a malformed diagnostic cadence without discarding unrelated flags.
+fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let rejected = if let Some(object) = value.as_object_mut() {
+        if let Some(raw) = object.get("log_frame_time_every") {
+            if serde_json::from_value::<Option<u32>>(raw.clone()).is_err() {
+                let message = format!("log_frame_time_every={raw}: expected null or u32; rejecting key, effective value=10; preserving other config keys");
+                object.remove("log_frame_time_every");
+                Some(message)
+            } else { None }
+        } else { None }
+    } else { None };
+    let config: Config = serde_json::from_value(value)?;
+    config.validate()?;
+    Ok((config, rejected))
+}
 #[cfg(target_os = "vita")]
 const CONFIG_PATH: &str = "ux0:data/alice/private/vita_renderer.json";
 #[cfg(not(target_os = "vita"))]
@@ -446,7 +462,10 @@ pub fn config() -> &'static Config {
                 Err(e) => return Err(e.into()),
             };
             eprintln!("[lg/startup] renderer_config read done bytes={} elapsed_ms={:.3}; parse begin",bytes.len(),start.elapsed().as_secs_f64()*1000.);
-            let c: Config = serde_json::from_slice(&bytes)?;
+            let (c, rejected) = parse_runtime_config(&bytes)?;
+            if let Some(message) = rejected {
+                eprintln!("[lg/vita-renderer] invalid config key {CONFIG_PATH}: {message}");
+            }
             eprintln!("[lg/startup] renderer_config parse done elapsed_ms={:.3}; validate begin",start.elapsed().as_secs_f64()*1000.);
             c.validate()?;
             eprintln!("[lg/startup] renderer_config validate done elapsed_ms={:.3}",start.elapsed().as_secs_f64()*1000.);
@@ -457,8 +476,9 @@ pub fn config() -> &'static Config {
             Config::default()
         });
         println!(
-            "[lg/vita-renderer] config {}",
-            serde_json::to_string(&c).unwrap()
+            "[lg/vita-renderer] config {} effective_log_frame_time_every={}",
+            serde_json::to_string(&c).unwrap_or_else(|e| format!("serialization_error={e}")),
+            c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string())
         );
         println!("[lg/vita-renderer] actor_single_prepare active={}", c.actor_single_prepare_active());
         #[cfg(target_os = "vita")]
@@ -1571,7 +1591,6 @@ impl Renderer {
         let _commands=crate::phase_census::world_commands();
         let submit_span = crate::frame_profile::span("vita_world_submit");
         let mut totals = crate::frame_profile::Totals::<3>::new();
-        let mut leaves=crate::phase_census::world_leaves();
         // Lifetime is exactly this owned opaque pass: fresh AFTER sky/interop/
         // target setup, discarded BEFORE any alpha callbacks, actors or HUD.
         let cache_enabled = !alpha && config().world_state_cache;
@@ -1603,7 +1622,6 @@ impl Renderer {
             } else {
                 state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
             };
-            let leaf=leaves.start();
             let start = totals.start();
             if plan.pipeline { ctx.apply_pipeline(&pipeline); applications[0] += 1; }
             if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});} applications[1] += 1; }
@@ -1611,8 +1629,6 @@ impl Renderer {
             if low { low_draws += 1; if !cache_enabled {count("vita_world_low_draws",1);} }
             if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
             totals.add(0, start);
-            leaves.add(0,leaf);
-            let leaf=leaves.start();
             let start = totals.start();
             if plan.uniforms {
                 let traffic = self.field_uniforms[usize::from(low)].apply(ctx, u.values(), config().uniform_field_cache);
@@ -1622,8 +1638,6 @@ impl Renderer {
                 uniform_traffic[2] += traffic.calls;
             }
             totals.add(1, start);
-            leaves.add(1,leaf);
-            let leaf=leaves.start();
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             if alpha || g.recipe.stage.blend != Blend::Opaque {
@@ -1631,7 +1645,6 @@ impl Renderer {
             }
             ctx.draw(g.base_element, prepared.indices, 1);
             totals.add(2, start);
-            leaves.add(2,leaf);
             if previous_pipeline != Some(pi) {
                 pipeline_changes += 1;
                 if !cache_enabled { count("vita_world_pipeline_changes", 1); }
@@ -1676,7 +1689,9 @@ impl Renderer {
                 );
             }
         }
-        drop(leaves);
+        if let Some((ns, calls)) = totals.census_values() {
+            crate::phase_census::world_publish(ns, calls);
+        }
         if cache_enabled {
             counts(&[
                 ("vita_world_low_draws", low_draws),
@@ -2131,6 +2146,25 @@ mod tests {
         for value in [serde_json::json!(-1),serde_json::json!(1.5),serde_json::json!(true),serde_json::json!("off"),serde_json::json!(4294967296u64)] {
             assert!(serde_json::from_value::<Config>(serde_json::json!({"log_frame_time_every":value})).is_err());
         }
+    }
+    #[test]
+    fn runtime_report_interval_rejects_only_bad_key_and_preserves_flags() {
+        for (raw, want) in [("10", Some(10)), ("1", Some(1)), ("0", None), ("null", None)] {
+            let bytes = format!(r#"{{"log_frame_time_every":{raw},"world_state_cache":false,"skin_overlap":true,"audio_static_cache":false}}"#);
+            let (c, rejected) = parse_runtime_config(bytes.as_bytes()).unwrap();
+            assert!(rejected.is_none());
+            assert_eq!(c.log_frame_time_every.filter(|&n| n > 0), want);
+            assert!(!c.world_state_cache && c.skin_overlap && !c.audio_static_cache);
+        }
+        for raw in [r#""0""#, "-1", "1.5", "true", "4294967296"] {
+            let bytes = format!(r#"{{"log_frame_time_every":{raw},"world_state_cache":false,"skin_overlap":true,"audio_static_cache":false}}"#);
+            let (c, rejected) = parse_runtime_config(bytes.as_bytes()).unwrap();
+            assert!(rejected.unwrap().contains("rejecting key"));
+            assert_eq!(c.log_frame_time_every, Some(10));
+            assert!(!c.world_state_cache && c.skin_overlap && !c.audio_static_cache);
+        }
+        assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","typo":true}"#).is_err());
+        assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","world_state_cache":"bad"}"#).is_err());
     }
     #[test]
     fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {

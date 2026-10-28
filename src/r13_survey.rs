@@ -44,7 +44,6 @@ impl Survey {
     #[cfg(target_os="vita")]
     pub(crate) fn presented(&mut self,map:&str,alive:bool,arm:bool)->anyhow::Result<()> {
         if !self.presented_at(map,alive,arm,Instant::now())? {return Ok(());}
-        if self.config.census {crate::phase_census::export_survey(map)?;}
         CENSUS.store(false,Relaxed);
         self.snapshot=true;
         println!("[lg/r13b-survey] window_state map={map} all_gameplay={}",self.all_gameplay);
@@ -53,6 +52,7 @@ impl Survey {
         let dir=std::path::Path::new("ux0:data/alice/private/frame_profile");anyhow::ensure!(dir.is_dir(),"existing frame_profile required");
         let mut out=std::io::BufWriter::new(std::fs::File::create(dir.join(format!("{map}-r13b-{}.csv",self.config.tag)))?);
         self.write_samples(&mut out)?;out.flush()?;
+        if self.config.census {crate::phase_census::export_survey(map)?;}
         println!("[lg/r13b-survey] done map={map} samples={} warmup_frames=60 measured_frames={} died={}",self.rows.len(),self.rows.len()-60,!alive);
         self.done=true;Ok(())
     }
@@ -67,6 +67,10 @@ impl Survey {
             if self.pending_gameplay && !self.ready {self.ready=true;
                 println!("[lg/r13b-survey] ready map={map} gameplay=true select_to_arm=true");}
             if self.ready && self.pending_gameplay && arm {
+                crate::phase_census::calibrate();
+                // Calibration/printing must not enter even the first warmup wall.
+                #[cfg(target_os="vita")]
+                let now=Instant::now();
                 self.armed=true;self.previous=Some(now);self.arm_time=Some(now);
                 CENSUS.store(self.config.census,Relaxed);
                 if self.config.census {crate::phase_census::begin_survey(now);}

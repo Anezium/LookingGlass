@@ -1097,7 +1097,8 @@ pub fn guard_timing(assets: &mut Assets) -> Result<Timing> {
 impl Model {
     fn draw_electric(&mut self, remaining: f32) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
-        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorFallback);
+        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorNpcOverlays);
+        crate::phase_census::overlay_call();
         if crate::character::skinning::overlap::gather_only() { return; }
         if remaining <= 0. {
             return;
@@ -1155,7 +1156,8 @@ impl Model {
     }
     fn draw_frozen(&mut self) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
-        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorFallback);
+        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorNpcOverlays);
+        crate::phase_census::overlay_call();
         if crate::character::skinning::overlap::gather_only() { return; }
         if self.frozen.is_some() && self.visible.iter().any(|v|*v) { self.require_live_skin(); }
         if let Some(art) = &self.frozen {
@@ -1250,7 +1252,8 @@ impl Model {
             &scales,
         );
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
-        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorFallback);
+        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorNpcOverlays);
+        crate::phase_census::overlay_call();
         for (visible, mesh) in self.visible.iter_mut().zip(&self.meshes) {
             *visible = skin_visible && mesh.is_some();
         }
