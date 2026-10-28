@@ -635,13 +635,30 @@ fn sah_switch() -> bool {
     #[cfg(not(feature="vita_renderer"))]
     { false }
 }
+static R13_GEOMETRIES:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
+static R13_GEOMETRY_BYTES:[std::sync::atomic::AtomicUsize;3]=[const{std::sync::atomic::AtomicUsize::new(0)};3];
 impl StaticGeometry {
+    fn census_capacities(&self)->[usize;3] {
+        fn tree(n:&Node)->usize {match n {
+            Node::Leaf{hulls,..}=>hulls.capacity()*std::mem::size_of::<usize>(),
+            Node::Branch{left,right,..}=>2*std::mem::size_of::<Node>()+tree(left)+tree(right),
+        }}
+        [self.hulls.capacity()*std::mem::size_of::<Hull>()
+            +self.hulls.iter().map(|h|h.planes.capacity()*std::mem::size_of::<crate::bsp::Plane>()).sum::<usize>(),
+            self.tree.as_ref().map_or(0,tree),self.sah.as_ref().map_or(0,|h|h.storage_bytes())]
+    }
     fn new(hulls: Vec<Hull>, tree: Option<Node>) -> Self {
         Self::with_acceleration(hulls, tree, true)
     }
     fn with_acceleration(hulls: Vec<Hull>, tree: Option<Node>, accelerate: bool) -> Self {
         let sah = if accelerate && sah_switch() { tree.as_ref().map(|t| sah::Hierarchy::build(&hulls,t)) } else {None};
-        Self {hulls,tree,sah}
+        let out=Self {hulls,tree,sah};
+        if crate::allocation_census::enabled(){
+            use std::sync::atomic::Ordering::Relaxed;
+            for (counter,n) in R13_GEOMETRY_BYTES.iter().zip(out.census_capacities()){counter.fetch_add(n,Relaxed);}
+            R13_GEOMETRIES.fetch_add(1,Relaxed);
+        }
+        out
     }
     fn trace(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> (Trace,u32,u32) {
         let mut counts = sah::Counts::default();
@@ -675,6 +692,13 @@ impl StaticGeometry {
         self.trace(start,end,Vec3::ZERO,&query).0
     }
 }
+impl Drop for StaticGeometry {fn drop(&mut self){
+    if crate::allocation_census::enabled(){
+        use std::sync::atomic::Ordering::Relaxed;
+        for (counter,n) in R13_GEOMETRY_BYTES.iter().zip(self.census_capacities()){counter.fetch_sub(n,Relaxed);}
+        R13_GEOMETRIES.fetch_sub(1,Relaxed);
+    }
+}}
 impl World {
     pub(crate) fn census_payload(&self)->serde_json::Value {
         fn tree(n:&Node)->usize {match n {
@@ -684,6 +708,8 @@ impl World {
         let g=&self.static_geometry;
         serde_json::json!({"geometry_identity":std::sync::Arc::as_ptr(g) as usize,
             "geometry_arc_owners":std::sync::Arc::strong_count(g),
+            "all_live_unique_static_geometries":R13_GEOMETRIES.load(std::sync::atomic::Ordering::Relaxed),
+            "all_live_hulls_tree_sah_capacity_bytes":R13_GEOMETRY_BYTES.each_ref().map(|v|v.load(std::sync::atomic::Ordering::Relaxed)),
             "hulls_planes_capacity_bytes":g.hulls.capacity()*std::mem::size_of::<Hull>()
                 +g.hulls.iter().map(|h|h.planes.capacity()*std::mem::size_of::<crate::bsp::Plane>()).sum::<usize>(),
             "legacy_tree_capacity_bytes":g.tree.as_ref().map_or(0,tree),
