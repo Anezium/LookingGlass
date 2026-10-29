@@ -227,7 +227,8 @@ fn app_main() {
         use macroquad::miniquad::KeyCode;
         set_config(VitaConfig {
             compact_stream_buffers: true,
-            // Off unless the runtime config asks for it: the report adds 3-5 ms to p95 (r15b).
+            // Every 10 frames unless the runtime config says otherwise. The r12c-era runners use
+            // these lines as a hang heartbeat; measurement configs set 0 (r15b: +3-5 ms p95).
             log_frame_time_every: {
                 #[cfg(feature="vita_renderer")]
                 { render::vita_renderer::config().log_frame_time_every.filter(|&n|n>0) }

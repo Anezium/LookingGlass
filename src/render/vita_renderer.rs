@@ -31,7 +31,8 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(remote = "Self", default, deny_unknown_fields)]
 pub struct Config {
-    /// Miniquad timing report cadence; null, 0 or omitted disables it.
+    /// Miniquad timing report cadence in frames; omitted keeps the historical 10, null or 0
+    /// disables it. Measurement runs set 0: the report adds 3-5 ms to p95 (r15b).
     pub log_frame_time_every: Option<u32>,
     /// Build trigger facts once per trigger pass and rebuild after each fire.
     pub sim_trigger_facts_reuse: bool,
@@ -238,7 +239,7 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 impl Default for Config {
     fn default() -> Self {
         Self {
-            log_frame_time_every: None,
+            log_frame_time_every: Some(10),
             sim_trigger_facts_reuse: false,
             sim_hatter_door_candidates: false,
             sim_npc_sight_candidates: true,
@@ -419,13 +420,25 @@ impl Config {
         Ok(())
     }
 }
+/// The effective miniquad report cadence, as printed: `off` or a frame count.
+fn report_cadence(c: &Config) -> String {
+    c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string())
+}
+/// The two startup records. The config record stays one JSON document after its tag, because
+/// the console auditors `json.loads` everything after `[lg/vita-renderer] config `.
+fn config_log_lines(c: &Config) -> [String; 2] {
+    [
+        format!("[lg/vita-renderer] config {}", serde_json::to_string(c).unwrap_or_else(|e| format!("serialization_error={e}"))),
+        format!("[lg/vita-renderer] report_cadence effective_log_frame_time_every={}", report_cadence(c)),
+    ]
+}
 /// Reject a malformed report cadence without discarding unrelated flags.
 fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
     let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
     let rejected = if let Some(object) = value.as_object_mut() {
         if let Some(raw) = object.get("log_frame_time_every") {
             if serde_json::from_value::<Option<u32>>(raw.clone()).is_err() {
-                let message = format!("log_frame_time_every={raw}: expected null or u32; rejecting key, effective value=off; preserving other config keys");
+                let message = format!("log_frame_time_every={raw}: expected null or u32; rejecting key, effective value={}; preserving other config keys", report_cadence(&Config::default()));
                 object.remove("log_frame_time_every");
                 Some(message)
             } else { None }
@@ -478,11 +491,9 @@ pub fn config() -> &'static Config {
             eprintln!("[lg/vita-renderer] invalid config {CONFIG_PATH}: {e:#}; using defaults");
             Config::default()
         });
-        println!(
-            "[lg/vita-renderer] config {} effective_log_frame_time_every={}",
-            serde_json::to_string(&c).unwrap_or_else(|e| format!("serialization_error={e}")),
-            c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string())
-        );
+        for line in config_log_lines(&c) {
+            println!("{line}");
+        }
         println!("[lg/vita-renderer] actor_single_prepare active={}", c.actor_single_prepare_active());
         #[cfg(target_os = "vita")]
         apply_startup_clocks(c.clocks);
@@ -2155,12 +2166,12 @@ mod tests {
         }
     }
     #[test]
-    fn backend_report_interval_defaults_off_and_strict_types() {
-        for (raw,want) in [("{}",None),(r#"{"log_frame_time_every":10}"#,Some(10)),(r#"{"log_frame_time_every":1}"#,Some(1)),(r#"{"log_frame_time_every":0}"#,None),(r#"{"log_frame_time_every":null}"#,None)] {
+    fn backend_report_interval_defaults_to_ten_and_strict_types() {
+        for (raw,want) in [("{}",Some(10)),(r#"{"log_frame_time_every":10}"#,Some(10)),(r#"{"log_frame_time_every":1}"#,Some(1)),(r#"{"log_frame_time_every":0}"#,None),(r#"{"log_frame_time_every":null}"#,None)] {
             let c:Config=serde_json::from_str(raw).unwrap();
             assert_eq!(c.log_frame_time_every.filter(|&n|n>0),want);
         }
-        assert_eq!(Config::default().log_frame_time_every, None);
+        assert_eq!(Config::default().log_frame_time_every, Some(10));
         for value in [serde_json::json!(-1),serde_json::json!(1.5),serde_json::json!(true),serde_json::json!("off"),serde_json::json!(4294967296u64)] {
             assert!(serde_json::from_value::<Config>(serde_json::json!({"log_frame_time_every":value})).is_err());
         }
@@ -2177,14 +2188,28 @@ mod tests {
         for raw in [r#""0""#, "-1", "1.5", "true", "4294967296"] {
             let bytes = format!(r#"{{"log_frame_time_every":{raw},"world_state_cache":false,"skin_overlap":true,"audio_static_cache":false,"sim_trigger_facts_reuse":true}}"#);
             let (c, rejected) = parse_runtime_config(bytes.as_bytes()).unwrap();
-            assert!(rejected.unwrap().contains("rejecting key, effective value=off"));
-            assert_eq!(c.log_frame_time_every, None);
+            assert!(rejected.unwrap().contains("rejecting key, effective value=10;"));
+            assert_eq!(c.log_frame_time_every, Some(10));
             assert!(!c.world_state_cache && c.skin_overlap && !c.audio_static_cache && c.sim_trigger_facts_reuse);
         }
         let (c, rejected) = parse_runtime_config(b"{}").unwrap();
-        assert!(rejected.is_none() && c.log_frame_time_every.is_none() && !c.sim_trigger_facts_reuse);
+        assert!(rejected.is_none() && c.log_frame_time_every == Some(10) && !c.sim_trigger_facts_reuse);
         assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","typo":true}"#).is_err());
         assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","world_state_cache":"bad"}"#).is_err());
+    }
+    #[test]
+    fn config_record_stays_one_json_document_and_cadence_has_its_own_record() {
+        let tag = "[lg/vita-renderer] config ";
+        for (raw, cadence) in [("{}", "10"), (r#"{"log_frame_time_every":0}"#, "off"), (r#"{"log_frame_time_every":null}"#, "off"), (r#"{"log_frame_time_every":3,"sim_trigger_facts_reuse":true}"#, "3")] {
+            let (c, _) = parse_runtime_config(raw.as_bytes()).unwrap();
+            let [config, report] = config_log_lines(&c);
+            // The auditors' parser: everything after the tag is one JSON document.
+            let (_, rest) = config.split_once(tag).unwrap();
+            let printed: serde_json::Value = serde_json::from_str(rest).unwrap();
+            assert_eq!(printed, serde_json::to_value(&c).unwrap());
+            assert!(!report.contains(tag) && !report.contains('{'));
+            assert_eq!(report, format!("[lg/vita-renderer] report_cadence effective_log_frame_time_every={cadence}"));
+        }
     }
     #[test]
     fn trigger_facts_reuse_defaults_off_and_requires_a_boolean() {
