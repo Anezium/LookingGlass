@@ -757,6 +757,47 @@ mod tests {
         }
         assert!(on_states.iter().any(|s| s.contains("\"grenade\":true")), "no grenade in flight");
     }
+    /// Release-mode check that entries end with their update. Nothing is
+    /// published between the two updates, so a memo kept past the first one
+    /// would answer the second update's first query from the first update.
+    /// In release `with_sight_reuse` has no debug_assert to trip, so this
+    /// counts executed sweeps instead of inspecting memo state.
+    #[test]
+    fn identical_sight_query_in_the_next_update_runs_a_fresh_sweep() {
+        crate::sim_maps::with_sight_query_reuse(true, || {
+            let world = World::fixture(&[(vec3(-2000., -2000., -20.), vec3(2000., 2000., 0.))]);
+            let mut ant = Ant::new(0, false, vec3(600., 0., 0.1), std::f32::consts::PI);
+            ant.script_wait = true;
+            let eye = vec3(0., 0., 48.);
+            let mut update = || {
+                let before = world.sight_memo_counts();
+                let (_, log) = crate::collision::sight_log::capture(|| {
+                    ant.update(3. / 120., &world, eye, &Clips, &mut Feedback::default());
+                });
+                let after = world.sight_memo_counts();
+                (log, after.0 - before.0, after.1 - before.1)
+            };
+            let keys = |log: &[crate::collision::sight_log::Record]| log.iter().map(|r| r.key).collect::<Vec<_>>();
+            // Let the ant land and settle until two consecutive updates issue
+            // the same sight queries; those two updates are the test.
+            let (mut first, mut first_hits, mut first_misses) = update();
+            let mut settled = None;
+            for _ in 0..240 {
+                let next = update();
+                if keys(&next.0) == keys(&first) { settled = Some(next); break; }
+                (first, first_hits, first_misses) = next;
+            }
+            let (second, second_hits, second_misses) = settled.expect("ant never settled");
+            assert!(first.len() >= 2, "{} sight queries in one update", first.len());
+            let distinct = keys(&first).into_iter().collect::<std::collections::HashSet<_>>().len() as u64;
+            assert!(distinct < first.len() as u64, "no repeat inside an update, so reuse is not exercised");
+            for (hits, misses) in [(first_hits, first_misses), (second_hits, second_misses)] {
+                assert_eq!(misses, distinct, "each distinct query runs one fresh sweep per update");
+                assert_eq!(hits + misses, first.len() as u64);
+            }
+            for r in &second { assert_eq!(r.returned, r.fresh); }
+        });
+    }
     fn hit(damage: f32, kind: DamageKind) -> Hit {
         Hit {
             id: 0,

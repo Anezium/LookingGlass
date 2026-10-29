@@ -627,6 +627,8 @@ struct SightMemo {
     entries: Vec<([u32; 9], Trace)>,
     #[cfg(test)]
     hits: u64,
+    #[cfg(test)]
+    misses: u64,
 }
 
 /// Immutable backing shared by main-thread collision and acoustic packets.
@@ -745,6 +747,8 @@ impl World {
         crate::sim_maps::count("sight_reuse_misses", 1);
         let trace = self.sweep(start, end, half);
         let mut memo = self.sight_memo.borrow_mut();
+        #[cfg(test)]
+        { memo.misses += 1; }
         if memo.entries.len() < SIGHT_MEMO_ENTRIES {
             if memo.entries.capacity() == 0 { memo.entries.reserve_exact(SIGHT_MEMO_ENTRIES); }
             memo.entries.push((key, trace));
@@ -755,6 +759,12 @@ impl World {
     pub(crate) fn sight_memo_state(&self) -> (bool, usize, u64) {
         let memo = self.sight_memo.borrow();
         (memo.active, memo.entries.len(), memo.hits)
+    }
+    /// (hits, misses) inside reuse scopes; a miss runs a fresh `sweep`.
+    #[cfg(test)]
+    pub(crate) fn sight_memo_counts(&self) -> (u64, u64) {
+        let memo = self.sight_memo.borrow();
+        (memo.hits, memo.misses)
     }
     /// Full trace reuse, including dynamic/settled/weapon geometry. Keys use
     /// float bits (no tolerance), and never escape the owning collision world.
