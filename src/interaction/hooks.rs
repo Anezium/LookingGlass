@@ -1098,6 +1098,10 @@ mod tests {
         fn scripted(&self) -> bool {
             self.scene
         }
+        // Saved so `observe` compares the controller state through `Interactions::snapshot`.
+        fn snapshot(&self) -> serde_json::Value {
+            serde_json::json!({"opened": self.opened, "fires": self.fires, "scene": self.scene})
+        }
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -1150,6 +1154,12 @@ mod tests {
     /// Everything a trigger pass can change: its events, the per-trigger state and (as JSON)
     /// the saved event world, controller and trigger flags.
     fn observe(i: &Interactions, e: Events) -> (Observed, serde_json::Value) {
+        let latch = i.levels[0].ctl.downcast_ref::<Latch>().unwrap();
+        let snapshot = serde_json::to_value(i.snapshot()).unwrap();
+        assert_eq!(
+            snapshot["levels"][REG.id],
+            serde_json::json!({"opened": latch.opened, "fires": latch.fires, "scene": latch.scene})
+        );
         let triggers = i
             .triggers
             .iter()
@@ -1157,7 +1167,7 @@ mod tests {
             .collect();
         (
             (e.story, e.message, e.sound, e.transition, e.teleport, e.damage.to_bits(), triggers),
-            serde_json::to_value(i.snapshot()).unwrap(),
+            snapshot,
         )
     }
     /// A deterministic pass sequence over outside, inside and far positions with zero,
@@ -1285,5 +1295,49 @@ mod tests {
             crate::sim_maps::with_trigger_facts_reuse(on, || i.triggers(0.1, enter[0].1, enter[0].2));
             assert_eq!(*log.borrow(), ["open_thread", "scene_thread"]);
         }
+    }
+    /// Run in release too (`cargo test --release`), where the debug cross-check in the
+    /// trigger loop is compiled out and only the shipped cache path runs.
+    #[test]
+    fn trigger_fact_cache_never_survives_into_the_next_pass() {
+        use crate::interaction::FACT_BUILDS;
+        let builds = || FACT_BUILDS.with(|n| n.get());
+        // Two gated triggers and one shut trigger, none of which fires on the first pass.
+        let map = latch_map(&[
+            ("trigger_multiple", "gated_thread"),
+            ("trigger_multiple", "gated_thread"),
+            ("trigger_multiple", "shut_thread"),
+        ]);
+        let (out, inside) = (vec3(32., 40., 0.), vec3(32., 100., 0.));
+        let (mut i, log) = latch(&map);
+        i.levels[0].ctl.downcast_mut::<Latch>().unwrap().opened = true;
+        // Pass 1: facts say opened, so both gated triggers fire and the shut one is refused.
+        let start = builds();
+        i.triggers_with(0.1, out, inside, true);
+        assert_eq!(*log.borrow(), ["gated_thread", "gated_thread"]);
+        // Close the gate outside any dispatch, as a restore or a pre-loop output would.
+        let ctl = i.levels[0].ctl.downcast_mut::<Latch>().unwrap();
+        ctl.opened = false;
+        log.borrow_mut().clear();
+        i.reset_contacts();
+        // Pass 2 must rebuild: a cache kept from pass 1 would still say opened.
+        let before = builds();
+        i.triggers_with(0.1, out, inside, true);
+        assert_eq!(*log.borrow(), ["shut_thread"]);
+        assert_eq!(i.levels[0].ctl.downcast_ref::<Latch>().unwrap().fires, 3);
+        // Per pass: one build for `advance`, one cached build per span between fires, one per
+        // `dispatch`. The debug cross-check adds one per eligible trigger.
+        let check = |eligible: u64| if cfg!(debug_assertions) { eligible } else { 0 };
+        let pass1 = before - start;
+        let pass2 = builds() - before;
+        // Pass 1: advance, cache, fire, cache, fire, cache.
+        assert_eq!(pass1, 1 + 3 + 2 + check(3), "pass 1 builds");
+        // Pass 2: advance, cache (two refusals), fire, then nothing left to check.
+        assert_eq!(pass2, 1 + 1 + 1 + check(3), "pass 2 builds");
+        // A pass with no eligible trigger builds nothing beyond `advance`.
+        i.levels[0].ctl.downcast_mut::<Latch>().unwrap().scene = true;
+        let idle = builds();
+        i.triggers_with(0.1, inside, out, true);
+        assert_eq!(builds() - idle, 1, "scene pass builds");
     }
 }

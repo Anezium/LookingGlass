@@ -12,6 +12,9 @@ use anyhow::Result;
 use macroquad::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 type Entity = BTreeMap<String, String>;
+// Counts `event_facts` builds so tests can see where the trigger pass rebuilds them.
+#[cfg(test)]
+thread_local! { pub(crate) static FACT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 mod exits;
 pub mod friendly;
 mod hooks;
@@ -574,6 +577,8 @@ impl Interactions {
         Ok(())
     }
     pub fn event_facts(&self) -> Facts {
+        #[cfg(test)]
+        FACT_BUILDS.with(|n| n.set(n.get() + 1));
         let mut facts = Facts::default();
         if let Some(p) = &self.pool {
             facts.extend(p.facts());
@@ -1519,7 +1524,8 @@ impl Interactions {
             let event = Event::Entity(t.id, Input::Activate);
             let allowed = if reuse_facts {
                 let facts = facts.get_or_insert_with(|| self.event_facts());
-                #[cfg(test)]
+                // Debug tests cross-check every reuse; release tests run the shipped path.
+                #[cfg(all(test, debug_assertions))]
                 assert_eq!(*facts, self.event_facts(), "stale trigger facts at trigger {index}");
                 self.event_world.allowed(&event, facts)
             } else {
