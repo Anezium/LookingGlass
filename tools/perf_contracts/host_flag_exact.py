@@ -276,22 +276,27 @@ def main(argv=None):
 
     def compare(map_name, left, right, label, full, bits):
         (left_row, left_frames, left_images), (right_row, right_frames, right_images) = left, right
+        # Only builds with the sidecar can emit per-packet bits. The historical 0548549
+        # baseline cannot; there the aggregate uniform hash remains the gate and the
+        # candidate arms supply the field-level map.
+        field_bits = bits and (Path(left_row['run_dir']) / 'uniform-bits.jsonl').is_file() \
+            and (Path(right_row['run_dir']) / 'uniform-bits.jsonl').is_file()
         uniform_diffs = []
         for index, (x, y) in enumerate(zip(left_frames, right_frames)):
             for key in ['actor_skin', 'state_sha256', 'selected_lights_bits', 'joint_alpha_order', 'blend_world_order']:
                 assert x[key] == y[key], (map_name, label, index, key)
-            if bits:
+            if field_bits:
                 assert packets(x, False, False) == packets(y, False, False), (map_name, label, index, 'uploaded GPU packets')
             else:
                 assert packets(x, False, True) == packets(y, False, True), (map_name, label, index, 'uploaded GPU packets')
             assert x['counters'].get('vita_fx_dropped_layers', 0) == y['counters'].get('vita_fx_dropped_layers', 0), (map_name, label, index, 'dropped layers')
             if full:
-                assert packets(x, True, not bits) == packets(y, True, not bits), (map_name, label, index, 'packets including gpu_slot')
+                assert packets(x, True, not field_bits) == packets(y, True, not field_bits), (map_name, label, index, 'packets including gpu_slot')
                 assert all(y['counters'].get(key) == value for key, value in x['counters'].items() if key not in ELAPSED), (map_name, label, index, 'reference counters')
         assert len(left_frames) == len(right_frames) == 180
         assert left_images == right_images, (map_name, label, 'intermediate pixels')
         assert left_row['final_png_sha256'] == right_row['final_png_sha256'], (map_name, label, 'final image')
-        if bits:
+        if field_bits:
             bits_l = load_uniform_bits(Path(left_row['run_dir']))
             bits_r = load_uniform_bits(Path(right_row['run_dir']))
             expected_l = sum(len(frame['submitted_packets']) for frame in left_frames)
