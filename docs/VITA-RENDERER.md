@@ -111,6 +111,25 @@ Le pilote change le fichier, ferme puis relance l'application ; pas de recompila
 Fichier absent : défauts ci-dessus. Champ inconnu, erreur JSON ou valeur hors limites :
 erreur explicite dans le log et tous les réglages par défaut. Vérifier le log effectif.
 `[lg/vita-renderer] config {...}` imprime la configuration effective au démarrage.
+
+
+The config record stays one JSON document after its tag: the console auditors `json.loads`
+everything after `[lg/vita-renderer] config ` (`tools/config_record/test_auditor_parsers.py`
+checks them all against real host lines). The effective report cadence has its own record,
+`[lg/vita-renderer] report_cadence effective_log_frame_time_every=<n|off>`.
+
+- `log_frame_time_every`: miniquad timing report cadence in frames. Omitted keeps the
+  historical 10, `0` or `null` turns it off. A malformed value drops only this key (logged as
+  `invalid config key`) and keeps 10. Measurement configs set 0: in r15b, report=10 added
+  3.2/5.0 ms to p95 with no median change. The r12c-era runners count these lines as a hang
+  heartbeat (`run-session.py:89-94`), so a default of 0 needs those runners migrated first.
+- `sim_trigger_facts_reuse`: `false` (default). Builds trigger facts once per trigger pass and
+  rebuilds them after each fire.
+- `actor_publication_occurrences`: `false` (default). With `actor_single_prepare` active, the
+  first four draws of one actor surface in a frame each reserve their own two-slot publication
+  bank. The value is latched once per frame. A fifth draw, or any refused reservation, uses the
+  unchanged serial path.
+
 `[lg/vita-renderer] loaded {...}` imprime l'inventaire. Le JSON du banc ajoute
 `vita_renderer.configuration`, `world_only_active`, `inventory` et `view`.
 

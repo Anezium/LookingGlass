@@ -97,6 +97,9 @@ pub struct Config {
     pub actor_layer_reuse: bool,
     /// Prepare actor packets once using bounded owned publication banks.
     pub actor_single_prepare: bool,
+    /// Give each repeated draw of one actor surface in a frame its own publication
+    /// bank, up to four per frame. Default off pending console acceptance.
+    pub actor_publication_occurrences: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -278,6 +281,7 @@ impl Default for Config {
             render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
+            actor_publication_occurrences: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -422,6 +426,11 @@ impl Config {
         Ok(())
     }
 }
+fn config_log_line(c: &Config) -> String {
+    format!("[lg/vita-renderer] config {} effective_log_frame_time_every={}",
+        serde_json::to_string(c).unwrap_or_else(|e| format!("serialization_error={e}")),
+        c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string()))
+}
 /// Reject a malformed diagnostic cadence without discarding unrelated flags.
 fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
     let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -481,11 +490,7 @@ pub fn config() -> &'static Config {
             eprintln!("[lg/vita-renderer] invalid config {CONFIG_PATH}: {e:#}; using defaults");
             Config::default()
         });
-        println!(
-            "[lg/vita-renderer] config {} effective_log_frame_time_every={}",
-            serde_json::to_string(&c).unwrap_or_else(|e| format!("serialization_error={e}")),
-            c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string())
-        );
+        println!("{}", config_log_line(&c));
         println!("[lg/vita-renderer] actor_single_prepare active={}", c.actor_single_prepare_active());
         #[cfg(target_os = "vita")]
         apply_startup_clocks(c.clocks);
@@ -2142,6 +2147,22 @@ pub(crate) async fn visualizer(
 mod tests {
     use super::*;
     #[test]
+    fn twin_config_pair_differs_only_by_the_lever_and_roundtrips_the_log() {
+        let parse=|raw: &[u8]| { let (c, rejected)=parse_runtime_config(raw).unwrap(); assert!(rejected.is_none()); c.validate().unwrap(); c };
+        let off=parse(include_bytes!("../../configs/TWIN-OFF.json"));
+        let on=parse(include_bytes!("../../configs/TWIN-ON.json"));
+        let mut a=serde_json::to_value(&off).unwrap(); let b=serde_json::to_value(&on).unwrap();
+        assert_eq!(a["actor_publication_occurrences"],false); assert_eq!(b["actor_publication_occurrences"],true);
+        a["actor_publication_occurrences"]=serde_json::json!(true); assert_eq!(a,b);
+        for c in [off,on] {
+            assert!(c.sim_trigger_facts_reuse && c.sim_sight_query_reuse && !c.phase_census);
+            assert_eq!(c.log_frame_time_every,Some(0));
+            let line=config_log_line(&c);
+            let raw=line.strip_prefix("[lg/vita-renderer] config ").unwrap().strip_suffix(" effective_log_frame_time_every=off").unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(raw).unwrap(),serde_json::to_value(c).unwrap());
+        }
+    }
+    #[test]
     fn backend_report_interval_default_zero_null_and_strict_types() {
         for (raw,want) in [("{}",Some(10)),(r#"{"log_frame_time_every":10}"#,Some(10)),(r#"{"log_frame_time_every":1}"#,Some(1)),(r#"{"log_frame_time_every":0}"#,None),(r#"{"log_frame_time_every":null}"#,None)] {
             let c:Config=serde_json::from_str(raw).unwrap();
@@ -2214,6 +2235,25 @@ mod tests {
         }
         let (c, rejected) = parse_runtime_config(br#"{"log_frame_time_every":0,"sim_trigger_facts_reuse":true}"#).unwrap();
         assert!(rejected.is_none() && c.log_frame_time_every.filter(|&n| n > 0).is_none() && c.sim_trigger_facts_reuse);
+    }
+    #[test]
+    fn publication_occurrences_default_off_require_a_boolean_and_are_printed() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.actor_publication_occurrences);
+        }
+        for enabled in [false, true] {
+            let (c, rejected) = parse_runtime_config(serde_json::json!({"actor_publication_occurrences": enabled}).to_string().as_bytes()).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap(); assert_eq!(c.actor_publication_occurrences, enabled);
+            // Prerequisites keep their own defaults; the occurrence switch never activates single preparation.
+            assert!(c.actor_single_prepare_active());
+            let config = config_log_line(&c);
+            let printed: serde_json::Value = serde_json::from_str(config.split_once("[lg/vita-renderer] config ").unwrap().1.rsplit_once(" effective_log_frame_time_every=").unwrap().0).unwrap();
+            assert_eq!(printed["actor_publication_occurrences"], enabled);
+        }
+        for json in [r#"{"actor_publication_occurrences":1}"#, r#"{"actor_publication_occurrences":"on"}"#, r#"{"actor_publication_occurrences":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
     }
     #[test]
     fn hatter_door_candidates_default_off_and_require_a_boolean() {

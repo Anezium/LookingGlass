@@ -21,6 +21,9 @@ extern "C" {
 #[cfg(target_os = "vita")]
 const SCE_KERNEL_POWER_TICK_DEFAULT: i32 = 0;
 
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+pub(crate) fn probe_window_request() -> (i32, i32, bool) { (960, 544, false) }
+
 pub fn config() -> macroquad::conf::Conf {
     eprintln!("[lg/startup] window_configuration begin");
     #[cfg(target_os = "vita")]
@@ -28,7 +31,7 @@ pub fn config() -> macroquad::conf::Conf {
     #[cfg(not(target_os = "vita"))]
     let (width, height, high_dpi) = (1200, 680, true);
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-    let (width, height, high_dpi) = if crate::sim_maps::probe::enabled() { (960, 544, false) } else { (width, height, high_dpi) };
+    let (width, height, high_dpi) = if crate::sim_maps::probe::enabled() { probe_window_request() } else { (width, height, high_dpi) };
     macroquad::conf::Conf {
         miniquad_conf: Conf {
             window_title: "Looking Glass".into(),
@@ -3813,6 +3816,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         };
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::set_3d_camera(&world_camera);
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        crate::sim_maps::probe::note_projection(world_camera.matrix());
         #[cfg(not(feature="vita_renderer"))]
         set_camera(&world_camera);
         #[cfg(feature = "vita_renderer")]
@@ -4660,6 +4665,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         if crate::sim_maps::probe::enabled() {
             drop(host_block);
+            // Every frame's pixels are hashed; the domain edges also keep a PNG.
+            #[cfg(feature = "vita_renderer")]
+            crate::sim_maps::probe::record_exact_frame(&maps[current], frame, matches!(frame, 0 | 59 | 60 | 119 | 120 | 179))?;
             crate::sim_maps::probe::end(frame, &maps[current], active, &serde_json::json!({
                 "player": player, "stats": stats, "interactions": interactions.snapshot(),
                 "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
@@ -4771,10 +4779,69 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     Ok(())
 }
 
+/// Alice feet x positions per fixture frame. The host oracle checks each domain:
+/// 0-89 three draws (warm-up, then steady), 90-119 five draws (the fourth
+/// publishes and the fifth stays serial with occurrences on), 120-149 two draws
+/// in reversed order (the third occurrence goes unused), 150-179 three draws
+/// whose order changes every frame.
+#[cfg(all(feature="vita_renderer", feature="sim_maps_probe", not(target_os="vita")))]
+fn occurrence_fixture_draws(frame: usize) -> &'static [f32] {
+    match frame {
+        0..=89 => &[-40., 0., 40.],
+        90..=119 => &[-80., -40., 0., 40., 80.],
+        120..=149 => &[40., -40.],
+        _ if frame % 2 == 0 => &[0., 40., -40.],
+        _ => &[-40., 0., 40.],
+    }
+}
+
+/// Alice drawn several times per frame through the overlap render-check path.
+/// Host render-check only. Puppet loads stay on the serial puppet reason, and the
+/// map entries do not repeat an eligible surface, so this is the publication witness.
+#[cfg(all(feature="vita_renderer", feature="sim_maps_probe", not(target_os="vita")))]
+async fn publication_occurrence_fixture(assets: &mut Assets, options: &Options) -> Result<()> {
+    let mut active = enter_level(assets, "gvillage", None, None, options, true)?;
+    let mut alice = Character::load(assets)?;
+    alice.reset(&Player::new(Vec3::ZERO), 0.);
+    crate::character::skinning::overlap::startup(2, false);
+    for frame in 0..180 {
+        crate::phase_census::begin_configured();
+        crate::sim_maps::probe::begin();
+        let view = Camera3D { position: vec3(150., -190., 85.), target: Vec3::Z * 38., up: Vec3::Z,
+            fovy: 75_f32.to_radians(), z_near: 2., z_far: 30000., ..Default::default() };
+        clear_background(BLACK);
+        set_camera(&view);
+        crate::sim_maps::probe::note_projection(view.matrix());
+        active.scene.begin_fx_view(&view, frame as f32 * 0.05, false, true);
+        let mut skin = crate::character::skinning::overlap::Frame::begin();
+        for &x in occurrence_fixture_draws(frame) {
+            alice.draw_ghost(vec3(x, 0., 0.), false, false);
+        }
+        skin.dispatch();
+        skin.collect();
+        skin.assert_consumed();
+        drop(skin);
+        active.scene.finish_fx(true);
+        set_default_camera();
+        crate::sim_maps::probe::record_exact_frame("occurrence-fixture", frame as u64, true)?;
+        if frame == 179 { save_capture(std::path::Path::new("final.png"))?; }
+        crate::sim_maps::probe::end(frame as u64, "occurrence-fixture", true, &frame);
+        crate::phase_census::accept(true, frame >= 60);
+        next_frame().await;
+    }
+    crate::phase_census::host_finish("occurrence-fixture")?;
+    println!("PASS publication occurrence fixture: repeated draws of one Alice surface across 180 frames");
+    Ok(())
+}
+
 /// Native fixed-state integration: the real actor graph, preserved effects, world
 /// ordering, both worker counts, frozen simulation and clean map replacement.
 #[cfg(feature="vita_renderer")]
 pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -> Result<()> {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if std::env::var_os("LOOKING_GLASS_PUBLICATION_OCCURRENCE_FIXTURE").is_some() {
+        return publication_occurrence_fixture(assets, options).await;
+    }
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     if std::env::var_os("LOOKING_GLASS_SKIN_EXACT_FIXTURES").is_some() {
         return crate::npc::skin_exact_check::check(assets,options).await;

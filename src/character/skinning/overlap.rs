@@ -200,9 +200,23 @@ struct Task {
     census: bool,
     census_ns: u64,
 }
+#[cfg(test)]
+static PANIC_INPUT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Test-only: workers of this thread's store panic while `run` executes.
+#[cfg(test)]
+pub(crate) fn inject_worker_panic<T>(run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) { PANIC_INPUT.store(0, std::sync::atomic::Ordering::SeqCst); } }
+    let input = STORE.with(|s| s.borrow().as_ref().map(|s| s.input.get() as usize)).expect("overlap startup");
+    PANIC_INPUT.store(input, std::sync::atomic::Ordering::SeqCst);
+    let _reset = Reset;
+    run()
+}
 impl Task {
     unsafe fn run(address: usize) {
         let task = &mut *(address as *mut Task);
+        #[cfg(test)]
+        if task.input == PANIC_INPUT.load(std::sync::atomic::Ordering::SeqCst) { panic!("injected publication worker failure"); }
         let started=task.census.then(std::time::Instant::now);
         let input = &*(task.input as *const Inputs);
         for draw in &input.draws[task.draws.clone()] {
@@ -487,7 +501,7 @@ impl Store {
                 let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
                 let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorDirect);
                 crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged, instance,
-                    crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize})
+                    crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize,occurrence:0})
             } else { None };
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::prepare_allocations(prepare_alloc,direct.is_some());
@@ -507,6 +521,8 @@ impl Store {
                   super::kernel(&mut super::Job { input:&surface.vertices, vertices:&mut mesh.vertices, indices:&mesh.indices },p); }
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 crate::sim_maps::probe::record_skin(oracle,&mesh.vertices,&mesh.indices);
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                crate::sim_maps::probe::record_serial_publication(oracle,&mesh.vertices,&mesh.indices,actor_vertices::normalize);
                 let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
                 let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorFallback);
                 crate::render_fx::skin(mesh);
@@ -589,6 +605,7 @@ impl Store {
                 if s.oracle!=usize::MAX {
                     let vertices=unsafe {std::slice::from_raw_parts(s.output as *const Vertex,s.vertices.len())};
                     crate::sim_maps::probe::record_skin(s.oracle,vertices,&s.cpu.indices);
+                    crate::sim_maps::probe::record_direct_publication(s.oracle,s.alpha_variant);
                 }
             }
         }
