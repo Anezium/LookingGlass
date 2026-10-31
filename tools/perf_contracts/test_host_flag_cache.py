@@ -134,6 +134,27 @@ def test_effective_config_binding_is_required(tmp):
     assert oracle.files_match_receipt(directory, 'jlair1-census-180.json') is False
 
 
+def test_oracle_identity_mismatch_is_not_reused(tmp):
+    expected = oracle.receipt_core(identity(), {'actor_deferred_layers': False},
+                                   {'LOOKING_GLASS_SIM_MAPS_PROBE': '1'}, ['--map', 'jlair1'])
+    digest = hashlib.sha256(json.dumps(expected, sort_keys=True).encode()).hexdigest()[:20]
+    directory = tmp / 'host' / f'jlair1-off-{digest}'
+    (directory / 'private').mkdir(parents=True)
+    (directory / 'run.log').write_text('log\n')
+    (directory / 'jlair1-census-180.json').write_text('{}\n')
+    (directory / 'final.png').write_bytes(b'png')
+    (directory / 'private/vita_renderer.json').write_text('{}\n')
+    stale = dict(expected, oracle_sha256='f' * 64, exit_code=0,
+                 log_sha256=oracle.sha(directory / 'run.log'),
+                 census_sha256=oracle.sha(directory / 'jlair1-census-180.json'),
+                 final_png_sha256=oracle.sha(directory / 'final.png'),
+                 config_sha256=oracle.sha(directory / 'private/vita_renderer.json'),
+                 effective_config_sha256='e' * 64)
+    (directory / 'run-receipt.json').write_text(json.dumps(stale))
+    chosen, reuse = oracle.allocate_run_dir(tmp, 'jlair1', 'off', expected)
+    assert reuse is False and chosen != directory
+
+
 def test_changed_aggregate_with_unchanged_sidecar_is_detected(tmp):
     left = [frame(0, [bits_sha()]), frame(1, [bits_sha()])]
     right = [frame(0, [bits_sha()]), frame(1, ['f' * 64])]
