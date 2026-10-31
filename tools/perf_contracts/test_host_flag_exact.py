@@ -175,9 +175,12 @@ def expect_incomplete(label, root, **kw):
 def expect_fail(label, root, **kw):
     try:
         run(label, root, **kw)
-    except (AssertionError, SystemExit, KeyError, TypeError, ValueError) as exc:
-        if isinstance(exc, SystemExit) and exc.code == 0:
-            raise
+    except SystemExit as exc:
+        if exc.code in (0, oracle.INCOMPLETE_EXIT):
+            raise SystemExit(f'negative control ended with exit {exc.code}: {label}')
+        print('FAIL_AS_REQUIRED', label, str(exc)[:160])
+        return str(exc)
+    except (AssertionError, KeyError, TypeError, ValueError) as exc:
         text = str(exc)
         print('FAIL_AS_REQUIRED', label, text[:160])
         return text
