@@ -1374,7 +1374,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        {crate::sim_maps::probe::begin();crate::sim_maps::probe::script_hits(frame,&mut npcs);}
+        {crate::sim_maps::probe::set_frame(frame);crate::sim_maps::probe::begin();crate::sim_maps::probe::script_hits(frame,&mut npcs);}
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let mut host_block = crate::frame_profile::span("frame_input");
         #[cfg(feature = "native_timing")]
@@ -3786,6 +3786,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         clear_background(scene.atmosphere.background());
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::prepare_3d(scene.atmosphere.background());
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        crate::sim_maps::probe::sample_world_viewport();
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.gl("prepare-3d-returned"); }
         let world_camera = Camera3D {

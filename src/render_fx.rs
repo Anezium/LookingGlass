@@ -120,6 +120,13 @@ pub(crate) fn prune_surfaces() {
     SURFACE_LOOKUP.with(|s| s.borrow_mut().retain(|_, surface| surface.strong_count() > 0));
 }
 const MAX_VERTICES: usize = 1_000_000;
+/// Actor layer cap. Tests can scope another value; builds always read the config.
+#[cfg(feature = "vita_renderer")]
+fn actor_max_layers(c: &crate::render::vita_renderer::Config) -> usize {
+    #[cfg(test)]
+    if let Some(limit) = test_support::ACTOR_MAX_LAYERS.with(std::cell::Cell::get) { return limit; }
+    c.actor_max_layers
+}
 pub fn copy_mesh(m: &Mesh) -> Mesh {
     Mesh {
         vertices: m.vertices.clone(),
@@ -353,7 +360,7 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
     #[cfg(feature = "vita_renderer")]
     if retained_active() {
         let c=crate::render::vita_renderer::config();
-        let limit=if passes.iter().all(|p|p.effect){c.fx_max_layers}else{c.actor_max_layers};
+        let limit=if passes.iter().all(|p|p.effect){c.fx_max_layers}else{actor_max_layers(c)};
         let mut passes = passes;
         if passes.len() > limit {
             retained::count("vita_fx_dropped_layers", (passes.len() - limit) as u64);
@@ -945,6 +952,8 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
     #[cfg(not(feature="vita_renderer"))]
     let fast=false;
     let surface=mesh.texture.as_ref().and_then(|t|{
+        #[cfg(test)]
+        if let Some(surface)=test_support::surface(t) {return Some(surface);}
         let id=t.raw_miniquad_id();
         #[cfg(feature="vita_renderer")]
         if fast {return SURFACE_LOOKUP.with(|s|s.borrow().get(&id).and_then(Weak::upgrade));}
@@ -990,10 +999,9 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
             return;
         }
     }
-    let mut passes = Vec::new();
     #[cfg(feature = "vita_renderer")]
     let limit = if retained_active() {
-        {let c=crate::render::vita_renderer::config();if clock.is_some(){c.fx_max_layers}else{c.actor_max_layers}}
+        {let c=crate::render::vita_renderer::config();if clock.is_some(){c.fx_max_layers}else{actor_max_layers(c)}}
     } else {
         usize::MAX
     };
@@ -1006,8 +1014,27 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
             (surface.layers.len() - limit) as u64,
         );
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    crate::sim_maps::count("actor_layer_copy_bytes",layer_copy_bytes(mesh.vertices.len(),mesh.indices.len(),surface.layers.len().min(limit)));
+    let passes = layer_passes(&mesh.vertices, &mesh.indices, &surface, camera, time, alpha, appearance, fast, clock, limit);
+    drop(layers_profile);
+    let _submit_profile = crate::frame_profile::characters_span("characters_submit");
+    submit(
+        passes,
+        surface.transparent || (clock.is_none() && alpha < 1.),
+    );
+}
+
+/// The serial fallback's per-layer passes for one skinned surface. Each pass owns its own
+/// copy of `vertices` and `indices`, exactly as before. It never submits, never borrows
+/// FRAME mutably and never touches actor publication state; deferred actor layers call it
+/// after collect with the worker's raw bytes and the values captured at their draw.
+#[allow(clippy::too_many_arguments)]
+fn layer_passes(vertices: &[Vertex], indices: &[u16], surface: &Surface, camera: Vec3, time: f32,
+    alpha: f32, appearance: Appearance, fast: bool, clock: Option<f32>, limit: usize) -> Vec<Pass> {
+    let mut passes = Vec::new();
     for layer in surface.layers.iter().take(limit) {
-        let mut copy = copy_mesh(mesh);
+        let mut copy = Mesh { vertices: vertices.to_vec(), indices: indices.to_vec(), texture: None };
         copy.texture = Some(
             layer.textures[if layer.stage.images.is_empty() {
                 0
@@ -1049,12 +1076,123 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
             passes.push(p);
         }
     }
-    drop(layers_profile);
-    let _submit_profile = crate::frame_profile::characters_span("characters_submit");
-    submit(
-        passes,
-        surface.transparent || (clock.is_none() && alpha < 1.),
-    );
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    {
+        let mut capacity = 0u64;
+        let mut allocs = 0u64;
+        for pass in &passes {
+            capacity += (pass.mesh.vertices.capacity() * std::mem::size_of::<Vertex>()
+                + pass.mesh.indices.capacity() * std::mem::size_of::<u16>()) as u64;
+            allocs += u64::from(pass.mesh.vertices.capacity() > 0) + u64::from(pass.mesh.indices.capacity() > 0);
+        }
+        crate::sim_maps::count("actor_layer_copy_capacity_bytes", capacity);
+        crate::sim_maps::count("actor_layer_copy_allocs", allocs);
+    }
+    passes
+}
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+fn layer_copy_bytes(vertices: usize, indices: usize, layers: usize) -> u64 {
+    ((vertices * std::mem::size_of::<Vertex>() + indices * std::mem::size_of::<u16>()) * layers) as u64
+}
+
+/// Test-only scaffolding: unmanaged textures need no GL context, so surfaces registered
+/// here are found by texture identity instead of `raw_miniquad_id`. Builds never see this.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    thread_local! {
+        pub(super) static ACTOR_MAX_LAYERS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+        static SURFACES: RefCell<Vec<(Texture2D, Weak<Surface>)>> = RefCell::default();
+    }
+    pub(crate) fn with_actor_max_layers<T>(limit: usize, run: impl FnOnce() -> T) -> T {
+        struct Reset(Option<usize>);
+        impl Drop for Reset { fn drop(&mut self) { ACTOR_MAX_LAYERS.with(|s| s.set(self.0)); } }
+        let _reset = Reset(ACTOR_MAX_LAYERS.with(|s| s.replace(Some(limit))));
+        run()
+    }
+    pub(crate) fn surface(texture: &Texture2D) -> Option<Rc<Surface>> {
+        SURFACES.with(|s| s.borrow().iter().find(|(t, _)| t == texture).and_then(|(_, s)| s.upgrade()))
+    }
+    pub(crate) fn texture(id: u32) -> Texture2D {
+        use macroquad::miniquad::{RawId, TextureId};
+        Texture2D::from_miniquad_texture(TextureId::from_raw_id(RawId::OpenGl(id)))
+    }
+    pub(crate) fn register(base: &Texture2D, layers: Vec<(Stage, Vec<Texture2D>)>, transparent: bool) -> Rc<Surface> {
+        let layers: Vec<_> = layers.into_iter().map(|(stage, textures)| Layer { stage, textures }).collect();
+        let surface = Rc::new(Surface {
+            preserve_skin: layers.iter().any(|l| skin_stage_needs_normals(&l.stage)),
+            layers, transparent,
+            #[cfg(feature="vita_renderer")]
+            actors: RefCell::default(),
+        });
+        SURFACES.with(|s| s.borrow_mut().push((base.clone(), Rc::downgrade(&surface))));
+        surface
+    }
+    pub(crate) fn clear() { SURFACES.with(|s| s.borrow_mut().clear()); }
+    /// What `retained::begin_view` sets, without GL: direct, active, empty queues.
+    pub(crate) fn begin_direct(camera: Vec3, direction: Vec3, time: f32, appearance: Appearance) {
+        FRAME.with(|f| *f.borrow_mut() = Frame { active: true,
+            #[cfg(feature="vita_renderer")] direct: true,
+            camera, direction: direction.normalize_or_zero(), time, appearance, ..Default::default() });
+    }
+    pub(crate) const MAX: usize = MAX_VERTICES;
+    pub(crate) fn set_frame_vertices(vertices: usize) { FRAME.with(|f| f.borrow_mut().vertices = vertices); }
+    pub(crate) fn set_actor_max_layers(limit: Option<usize>) { ACTOR_MAX_LAYERS.with(|s| s.set(limit)); }
+    pub(crate) fn frame_vertices() -> usize { FRAME.with(|f| f.borrow().vertices) }
+    pub(crate) fn end_frame() { FRAME.with(|f| f.borrow_mut().active = false); }
+    #[derive(Debug, PartialEq)]
+    pub(crate) struct PassSnapshot {
+        pub texture: Option<Texture2D>, pub material: bool, pub geometry: bool,
+        pub lit: bool, pub clamp: bool, pub cutout: u32, pub cutout_reference: u32, pub gain: [u32; 4],
+        pub fog: u32, pub model: bool, pub appearance: (u32, bool, u32), pub filter_fade: u32,
+        #[cfg(feature="vita_renderer")] pub effect: bool,
+        #[cfg(feature="vita_renderer")] pub blend_index: usize,
+        #[cfg(feature="vita_renderer")] pub depth_equal: bool,
+        pub vertices: Vec<([u32; 3], [u32; 2], [u32; 4], [u8; 4])>, pub indices: Vec<u16>,
+    }
+    #[derive(Debug, PartialEq)]
+    pub(crate) struct FrameSnapshot {
+        pub groups: Vec<(bool, Vec<PassSnapshot>)>,
+        pub puffs: Vec<(usize, Vec<[u32; 3]>, Option<Texture2D>)>,
+        pub vertices: usize, pub dropped: usize, pub dropped_layers: u64,
+    }
+    pub(crate) fn snapshot() -> FrameSnapshot {
+        FRAME.with(|f| { let f = f.borrow();
+            FrameSnapshot {
+                groups: f.groups.iter().map(|g| (
+                    { #[cfg(feature="vita_renderer")] { g.transparent } #[cfg(not(feature="vita_renderer"))] { true } },
+                    g.passes.iter().map(|p| {
+                        #[cfg(feature="vita_renderer")] let mesh = p.geometry();
+                        #[cfg(not(feature="vita_renderer"))] let mesh = &p.mesh;
+                        PassSnapshot {
+                            texture: p.mesh.texture.clone(), material: p.material.is_some(),
+                            geometry: { #[cfg(feature="vita_renderer")] { p.geometry.is_some() } #[cfg(not(feature="vita_renderer"))] { false } },
+                            lit: p.lit, clamp: p.clamp, cutout: p.cutout.to_bits(), cutout_reference: p.cutout_reference.to_bits(),
+                            gain: p.gain.to_array().map(f32::to_bits), fog: p.fog.to_bits(), model: p.model,
+                            appearance: (p.appearance.dissolve.to_bits(), p.appearance.ghost, p.appearance.power.to_bits()),
+                            filter_fade: p.filter_fade.to_bits(),
+                            #[cfg(feature="vita_renderer")] effect: p.effect,
+                            #[cfg(feature="vita_renderer")] blend_index: p.blend_index,
+                            #[cfg(feature="vita_renderer")] depth_equal: p.depth_equal,
+                            vertices: mesh.vertices.iter().map(|v| (v.position.to_array().map(f32::to_bits), v.uv.to_array().map(f32::to_bits),
+                                v.normal.to_array().map(f32::to_bits), v.color)).collect(),
+                            indices: mesh.indices.clone(),
+                        }
+                    }).collect())).collect(),
+                puffs: {
+                    #[cfg(feature="vita_renderer")]
+                    { f.world_puffs.iter().map(|p| (p.before_group, p.vertices.iter().map(|v| v.position.to_array().map(f32::to_bits)).collect(), p.texture.clone())).collect() }
+                    #[cfg(not(feature="vita_renderer"))] { Vec::new() }
+                },
+                vertices: f.vertices, dropped: f.dropped,
+                dropped_layers: {
+                    #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
+                    { retained::host_report().get("vita_fx_dropped_layers").and_then(|v| v.as_u64()).unwrap_or(0) }
+                    #[cfg(not(all(feature="vita_renderer",not(target_os="vita"))))] { 0 }
+                },
+            }
+        })
+    }
 }
 
 pub async fn check(assets: &mut Assets) -> Result<()> {

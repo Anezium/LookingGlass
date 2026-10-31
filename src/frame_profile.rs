@@ -442,7 +442,7 @@ pub fn report(map: &str) -> anyhow::Result<()> {
 #[cfg(target_os = "vita")]
 pub use vita::{
     add_counter, begin_frame, bench_accepted_frames, bench_frames, characters_span, counter_owner,
-    counts, end_frame, flush_boundary, mode, simulation_frozen,
+    counts, end_frame, flush_boundary, mode, simulation_frozen, uncounts,
     record_batch, record_culled, record_geometry, record_layer, record_lg_submission, record_lg_submissions, record_model,
     record_world_submission, record_retained_world_pass, report, set_owner, startup_bench, story_movies_blocked, world_span, Counter, Owner,
 };
@@ -960,6 +960,25 @@ mod vita {
                 *s.pending_counts.entry(("", name)).or_default() += value;
                 if let Some(owner) = owner {
                     *s.pending_counts.entry((owner, name)).or_default() += value;
+                }
+            }
+        });
+    }
+    pub fn uncounts(values: &[(&'static str, u64)]) {
+        if !HOT_RECORDING.load(Relaxed) { return; }
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.recording { return; }
+            let owner = s.stack.iter().rev().find_map(|(_, label, _)| match *label {
+                "movers" | "particles" | "frame_movement" | "frame_camera" | "frame_scene"
+                | "frame_interactions" | "frame_combat" | "frame_alice" | "frame_interaction_search"
+                | "frame_hud" => Some(*label),
+                _ => None,
+            });
+            for &(name, value) in values {
+                if let Some(slot) = s.pending_counts.get_mut(&("", name)) { *slot = slot.saturating_sub(value); }
+                if let Some(owner) = owner {
+                    if let Some(slot) = s.pending_counts.get_mut(&(owner, name)) { *slot = slot.saturating_sub(value); }
                 }
             }
         });

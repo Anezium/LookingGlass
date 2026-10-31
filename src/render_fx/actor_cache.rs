@@ -46,7 +46,7 @@ fn state(s:&Stage,t:f32)->LayerState {
 }
 pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance,producer:Option<&actor_vertices::Publication<'_>>)->Option<Vec<Pass>> {
     let c=crate::render::vita_renderer::config();
-    let limit=c.actor_max_layers.min(surface.layers.len());
+    let limit=super::actor_max_layers(c).min(surface.layers.len());
     if !surface.layers.iter().take(limit).all(|l|simple(&l.stage)){return None;}
     if surface.layers.len()>limit {retained::count("vita_fx_dropped_layers",(surface.layers.len()-limit) as u64);}
     let mut actors=surface.actors.borrow_mut();
@@ -137,7 +137,7 @@ mod tests {
 /// Capture game-thread material/texture handles before dispatch. No geometry is read
 /// until collection replaces the empty recipe with its owned immutable publication.
 pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(Vec<Pass>,bool)> {
-    let limit=crate::render::vita_renderer::config().actor_max_layers.min(surface.layers.len());
+    let limit=super::actor_max_layers(crate::render::vita_renderer::config()).min(surface.layers.len());
     let layers=&surface.layers[..limit];
     let alpha=layers.first().or_else(||{crate::phase_census::rejection(3);None})?.stage.vertex_alpha;
     if !layers.iter().all(|l|simple(&l.stage)&&l.stage.vertex_alpha==alpha) {

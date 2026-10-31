@@ -2,6 +2,8 @@
 use std::{cell::{Cell,RefCell}, collections::BTreeMap, sync::OnceLock, time::Instant};
 use sha2::{Digest, Sha256};
 thread_local! {
+    static FRAME_NO:Cell<u64>=const {Cell::new(0)};
+    static PACKET_NO:Cell<u64>=const {Cell::new(0)};
     static ALLOC_TRACKED:Cell<bool>=const {Cell::new(false)};
     static PREPARE_ALLOC:Cell<[u64;2]>=const {Cell::new([0;2])};
     static SKINS: RefCell<Vec<serde_json::Value>> = RefCell::default();
@@ -14,6 +16,8 @@ thread_local! {
     static START: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static NPC_ACTOR: RefCell<String> = RefCell::default();
     static NPC_DECISIONS: RefCell<BTreeMap<String, (Sha256, u64)>> = RefCell::default();
+    /// GL viewport sampled by the host at the scaled 3D stage, once per frame.
+    static WORLD_VIEWPORT: Cell<Option<[i32; 4]>> = const { Cell::new(None) };
 }
 fn decisions_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -57,6 +61,26 @@ pub fn count(name: &'static str, n: u64) {
         COUNTS.with(|c| *c.borrow_mut().entry(name).or_default() += n);
     }
 }
+pub fn uncount(name: &'static str, n: u64) {
+    static COUNTS_ON: OnceLock<bool> = OnceLock::new();
+    if enabled() && *COUNTS_ON.get_or_init(|| std::env::var("LOOKING_GLASS_SIM_MAPS_COUNTERS").as_deref() != Ok("0")) {
+        COUNTS.with(|c| {
+            if let Some(slot) = c.borrow_mut().get_mut(name) { *slot = slot.saturating_sub(n); }
+        });
+    }
+}
+pub fn set_frame(frame: u64) { FRAME_NO.with(|c| c.set(frame)); PACKET_NO.with(|c| c.set(0)); }
+/// Frame number of the sample currently being collected.
+pub fn frame() -> u64 { FRAME_NO.with(Cell::get) }
+/// Record the scaled 3D viewport at the specified per-frame stage. This is a GL query of
+/// the current viewport at prepare-3d-returned, never the HUD/default framebuffer stage.
+pub fn sample_world_viewport() {
+    if !enabled() { return; }
+    use macroquad::miniquad::gl::glGetIntegerv;
+    let mut viewport = [0i32; 4];
+    unsafe { glGetIntegerv(0x0BA2, viewport.as_mut_ptr()); }
+    WORLD_VIEWPORT.with(|v| v.set(Some(viewport)));
+}
 pub fn begin() {
     crate::collision::sah_probe::begin();
     if enabled() {
@@ -67,6 +91,7 @@ pub fn begin() {
         COUNTS.with(|c| c.borrow_mut().clear());
         SPANS.with(|c| c.borrow_mut().clear());
         NPC_DECISIONS.with(|c| c.borrow_mut().clear());
+        WORLD_VIEWPORT.with(|v| v.set(None));
         crate::light_profile::render_host_reset();
         START.with(|s| *s.borrow_mut() = Some(Instant::now()));
     }
@@ -87,6 +112,7 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
         "blend_world_order": WORLD_ORDER.with(|s|s.borrow().clone()),
         "selected_lights_bits": crate::lighting::selected_bits(),
         "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow(),
+        "world_viewport": WORLD_VIEWPORT.with(Cell::get),
         "npc_decisions": npc_decisions(),
         "spans_ms": SPANS.with(|s| s.borrow().clone()),
         "render": crate::light_profile::render_host_report()
@@ -94,6 +120,8 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     if std::env::var_os("LOOKING_GLASS_SIM_MAPS_STATE").is_some() {
         std::fs::write(format!("state-{frame:05}.json"), bytes).unwrap();
     }
+    #[cfg(feature = "vita_renderer")]
+    if frame == 179 { crate::render_fx::actor_publication::emit_eligibility(map); }
 }
 
 pub fn span(label: &'static str, ms: f64) {
@@ -136,7 +164,7 @@ pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indi
     let gpu_geometry=format!("{:x}",mesh_hash(gpu_vertices,gpu_indices).finalize());
     assert_eq!(geometry,gpu_geometry,"stale GPU geometry at retained slot {gpu_slot}");
     let mut h=Sha256::new();for f in uniforms {h.update(f.to_bits().to_le_bytes());}
-    let uniforms=format!("{:x}",h.finalize());
+    let uniform_hash=format!("{:x}",h.finalize());
     let texture=texture.map(|t|TEXTURES.with(|cache| {let mut cache=cache.borrow_mut();
         cache.entry(format!("{:?}",t.raw_miniquad_id())).or_insert_with(|| {
             let image=t.get_texture_data();let mut h=Sha256::new();
@@ -144,7 +172,20 @@ pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indi
             format!("{:x}",h.finalize())
         }).clone()
     }));
-    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"geometry":geometry,"gpu_geometry":gpu_geometry,"gpu_slot":gpu_slot,"vertices":vertices.len(),"indices":indices.len(),"uniforms":uniforms,"policy":policy,"texture":texture})));
+    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"geometry":geometry,"gpu_geometry":gpu_geometry,"gpu_slot":gpu_slot,"vertices":vertices.len(),"indices":indices.len(),"uniforms":uniform_hash,"policy":policy,"texture":texture})));
+    // The packet hash stays the comparison key. Bits are a sidecar so a field diff can name
+    // the divergent uniform without changing the hash or the SIM_MAPS_FRAME line.
+    static BITS: OnceLock<bool> = OnceLock::new();
+    if *BITS.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_UNIFORM_BITS").is_some()) {
+        let index = PACKET_NO.with(|c| { let i = c.get(); c.set(i + 1); i });
+        let bits: Vec<u32> = uniforms.iter().copied().map(f32::to_bits).collect();
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("uniform-bits.jsonl") {
+            let _ = writeln!(file, "{}", serde_json::json!({
+                "frame": FRAME_NO.with(Cell::get), "index": index, "bits": bits,
+            }));
+        }
+    }
 }
 /// Host-only view motion leaves simulation inputs untouched.
 pub fn moving_view(frame:u64,eye:glam::Vec3,target:glam::Vec3)->(glam::Vec3,glam::Vec3) {
