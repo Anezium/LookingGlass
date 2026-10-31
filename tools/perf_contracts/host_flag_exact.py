@@ -49,6 +49,10 @@ Checks, per matched pair:
   are the witness and are excluded from that equality. The seven elapsed fields listed
   in ELAPSED_COUNTERS are excluded. cpu_ms and spans_ms are timings, not compared.
   render is null under this probe. An existing output directory is refused.
+
+Exit status: 0 only for an exact PASS, 3 for an INCOMPLETE image qualification (semantic
+PASS is recorded separately), and nonzero for any required mismatch. The census stability
+window needs more than 60 frames.
 """
 from pathlib import Path
 import argparse, hashlib, json, os, re, subprocess, sys
