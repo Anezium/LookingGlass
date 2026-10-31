@@ -21,6 +21,21 @@ SITE_FILES = {
 }
 # Authored build configuration and named presets, never a general data allowance.
 CONFIG_FILES = {
+    "configs/PL-r3e-baseline.json",
+    "configs/PL-r3e-cushion-2.json",
+    "configs/PL-r3e-no-cap.json",
+    "configs/PL-r3e-no-preresample.json",
+    "configs/PL-r3e-parameters-sample.json",
+    "configs/PL-r3e-r3d-control.json",
+    "configs/PL-r3e-worker-probe.json",
+    "configs/PL-r3f-candidate.json",
+    "configs/PL-r3f-cushion-8.json",
+    "configs/PL-r3f-r3e-control.json",
+    "configs/PL-r3g-reference.json",
+    "configs/PL-r3g-round2-off.json",
+    "configs/PL-r3h-capture.json",
+    "configs/PL-r3h-reference.json",
+    "docs/NATIVE-TIMING-PAIR-SPEC.example.json",
     ".cargo/config.toml", "configs/PL-def-r3.json", "configs/vita_renderer.lean.json",
     "configs/PL-r3d-baseline.json", "configs/PL-r3d-actor-prepare-off.json",
     "configs/PL-r3d-native-scale.json", "configs/PL-r3d-preview-every-frame.json",
