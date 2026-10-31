@@ -1461,7 +1461,7 @@ impl Scene {
                     let _render_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Fx);
                     particles.prepare_draw(camera, &self.atmosphere);
                     particles.prepare_quads(camera, Some(direction));
-                    for (i, _) in particles.depths(camera, direction) { particles.draw_one(i, camera, direction); }
+                    particles.draw_world(camera, direction);
                 }
                 return;
             }

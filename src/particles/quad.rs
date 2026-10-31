@@ -96,6 +96,14 @@ impl Buffer {
     pub(super) fn raw_quad(&self, index: usize) -> Option<[Vertex; 4]> {
         (index < self.raw_live).then(|| self.output[index])
     }
+    /// After a publishing `prepare`: indices below `raw` are raw quads, then
+    /// publications below `live`, then legacy puffs. Production never mixes them.
+    #[cfg(test)]
+    pub(super) fn mix_for_test(&mut self, raw: usize, live: usize) {
+        assert!(raw <= live && live <= self.live && self.publications.len() >= live);
+        self.raw_live = raw;
+        self.live = live;
+    }
 }
 #[cfg(test)]
 mod tests {

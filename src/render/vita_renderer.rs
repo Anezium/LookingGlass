@@ -109,6 +109,8 @@ pub struct Config {
     pub world_puff_batches: bool,
     /// Send additive attached quads to the joint-alpha batch bank directly.
     pub attached_puff_batches: bool,
+    /// Register contiguous raw puff quads under one frame borrow; default off pending console A/B.
+    pub fx_registration_batch: bool,
     pub fx_merge_in_place: bool,
     pub fx_worker_prep: bool,
     pub frame_phase_probe: bool,
@@ -278,7 +280,7 @@ impl Default for Config {
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
-            particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
+            particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_registration_batch: false, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             phase_census: false,
             skin_actual_consumers: false,
@@ -2222,6 +2224,26 @@ mod tests {
             assert_eq!(serde_json::to_value(&c).unwrap()["sim_trigger_facts_reuse"], enabled);
         }
         for json in [r#"{"sim_trigger_facts_reuse":1}"#, r#"{"sim_trigger_facts_reuse":"on"}"#, r#"{"sim_trigger_facts_reuse":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+    }
+    #[test]
+    fn fx_registration_batch_defaults_off_is_printed_and_requires_a_boolean() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap(), parse_runtime_config(b"{}").unwrap().0] {
+            assert!(!c.fx_registration_batch);
+        }
+        for enabled in [false, true] {
+            let raw = format!(r#"{{"fx_registration_batch":{enabled},"log_frame_time_every":0}}"#);
+            let (c, rejected) = parse_runtime_config(raw.as_bytes()).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap(); assert_eq!(c.fx_registration_batch, enabled);
+            assert_eq!(serde_json::to_value(&c).unwrap()["fx_registration_batch"], enabled);
+            let [record, _] = config_log_lines(&c);
+            let (_, rest) = record.split_once("[lg/vita-renderer] config ").unwrap();
+            let printed: serde_json::Value = serde_json::from_str(rest).unwrap();
+            assert_eq!(printed["fx_registration_batch"], enabled);
+        }
+        for json in [r#"{"fx_registration_batch":1}"#, r#"{"fx_registration_batch":"on"}"#, r#"{"fx_registration_batch":null}"#] {
             assert!(serde_json::from_str::<Config>(json).is_err());
         }
     }

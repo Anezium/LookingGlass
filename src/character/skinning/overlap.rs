@@ -34,6 +34,14 @@ pub(crate) fn gathering() -> bool {
 }
 /// The old traversal suppresses consumers; the single preparation executes them.
 pub(crate) fn gather_only() -> bool { gathering() && !single_preparing() }
+/// Run consumers as the gather traversal sees them; the previous phase returns on unwind.
+#[cfg(test)]
+pub(crate) fn with_gather_phase<T>(run: impl FnOnce() -> T) -> T {
+    struct Reset(Phase);
+    impl Drop for Reset { fn drop(&mut self) { PHASE.with(|p| p.set(self.0)); } }
+    let _reset = Reset(PHASE.with(|p| p.replace(Phase::Gather)));
+    run()
+}
 pub(crate) fn single_preparing() -> bool {
     #[cfg(feature="vita_renderer")]
     { gathering() && crate::render_fx::actor_publication::active() }

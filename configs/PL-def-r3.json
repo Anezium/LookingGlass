@@ -120,5 +120,6 @@
   "world_binding_cache": false,
   "world_gl_state_cache": false,
   "log_frame_time_every": 10,
-  "sim_trigger_facts_reuse": false
+  "sim_trigger_facts_reuse": false,
+  "fx_registration_batch": false
 }
