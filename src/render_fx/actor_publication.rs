@@ -5,6 +5,7 @@ use super::*;
 use crate::skeletal::SkinSurface;
 use std::{cell::Cell, collections::HashMap, sync::Arc};
 use crate::character::skinning::identity::ActorId;
+use super::actor_vertices::PublicationMode;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Key { pub actor: ActorId, pub surface: usize }
 const UNUSED_FRAMES:u64=120;
@@ -12,12 +13,17 @@ const SURFACES:usize=2048;
 const VERTICES:usize=65536;
 const INDICES:usize=262144;
 #[derive(Default)]
-struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], alpha:[Option<bool>;2], epoch:[u64;2], instance:[Option<u64>;2] }
+struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], mode:[Option<PublicationMode>;2], epoch:[u64;2], instance:[Option<u64>;2] }
+/// A non-simple recipe whose raw skin a worker writes into `bank`/`slot`. Its layers are
+/// built on the game thread after a successful drain, into the placeholder at `group`.
+/// Game-thread only: the Rc<Surface> and captured draw values never reach a worker.
+struct Deferred { group:usize, bank:usize, slot:usize, surface:Rc<Surface>, camera:Vec3, time:f32, appearance:Appearance, limit:usize }
 #[derive(Default)]
 struct State {
     banks:Vec<Bank>, lookup:HashMap<Key,usize>,
     #[cfg(test)] cursor:usize,
     pending:Vec<(usize,usize,usize)>,
+    deferred:Vec<Deferred>,
     held:Vec<Group>, held_puffs:Vec<retained::world_puffs::Puff>, completed:bool, vertex_capacity:usize, index_capacity:usize, epoch:u64,
 }
 impl State {
@@ -32,7 +38,7 @@ impl State {
     }
     fn next_frame(&mut self) {
         self.epoch=self.epoch.checked_add(1).expect("actor publication epoch overflow");
-        self.pending.clear(); self.held.clear(); self.held_puffs.clear(); self.completed=false;
+        self.pending.clear(); self.deferred.clear(); self.held.clear(); self.held_puffs.clear(); self.completed=false;
         for id in 0..self.banks.len() {
             if self.banks[id].key.is_some() && self.epoch-self.banks[id].last_used>UNUSED_FRAMES { self.evict(id); }
         }
@@ -43,7 +49,7 @@ impl State {
         self.banks.iter().enumerate().filter(|(_,b)|b.key.is_some() && b.last_used+1<self.epoch)
             .min_by_key(|(_,b)|b.last_used).map(|(id,_)|id)
     }
-    fn reserve_key(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:bool,key:Key)->Option<(usize,usize,usize)> {
+    fn reserve_key(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:PublicationMode,key:Key)->Option<(usize,usize,usize)> {
         let id=if let Some(&id)=self.lookup.get(&key) {id} else {
             let id=if let Some(id)=self.banks.iter().position(|b|b.key.is_none()) {id}
                 else if self.banks.len()<SURFACES {self.banks.push(Bank::default());self.banks.len()-1}
@@ -60,10 +66,10 @@ impl State {
     }
 
     #[cfg(test)]
-    fn reserve(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,alpha:bool)->Option<(usize,usize,usize)> {
+    fn reserve(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,alpha:PublicationMode)->Option<(usize,usize,usize)> {
         let id=self.cursor;self.cursor+=1;self.reserve_at(mesh,cpu,unchanged,0,alpha,id)
     }
-    fn reserve_at(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:bool,id:usize)->Option<(usize,usize,usize)> {
+    fn reserve_at(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:PublicationMode,id:usize)->Option<(usize,usize,usize)> {
         let s=self;
         if id>=SURFACES {return None;}
         while s.banks.len()<=id {s.banks.push(Bank::default());}
@@ -91,9 +97,9 @@ impl State {
             g.mesh.indices.clear();g.mesh.indices.reserve_exact(cpu.indices.len());
             g.mesh.indices.extend_from_slice(&cpu.indices);
         }
-        if !(unchanged && bank.instance[slot]==Some(instance) && same_cpu && same_uv && bank.alpha[slot]==Some(alpha) && bank.epoch[slot]==s.epoch.saturating_sub(1)) {g.advance_owned(!same_cpu);}
+        if !(unchanged && bank.instance[slot]==Some(instance) && same_cpu && same_uv && bank.mode[slot]==Some(alpha) && bank.epoch[slot]==s.epoch.saturating_sub(1)) {g.advance_owned(!same_cpu);}
         bank.instance[slot]=Some(instance);
-        bank.alpha[slot]=Some(alpha);bank.epoch[slot]=s.epoch;
+        bank.mode[slot]=Some(alpha);bank.epoch[slot]=s.epoch;
         let output=g.mesh.vertices.as_mut_ptr() as usize;
         let new_capacity=(g.vertices.capacity(),g.indices.capacity());
         bank.cpu[slot]=Some(cpu);
@@ -116,9 +122,53 @@ impl State {
 }
 thread_local! {
     static ACTIVE:Cell<bool>=const {Cell::new(false)};
+    /// actor_deferred_layers, latched once per frame on the game thread.
+    static DEFERRED:Cell<bool>=const {Cell::new(false)};
     static STATE:RefCell<State>=RefCell::default();
 }
 pub(crate) fn active()->bool { ACTIVE.with(Cell::get) }
+#[cfg(test)]
+thread_local! {
+    static DEFERRED_TEST:Cell<Option<bool>>=const {Cell::new(None)};
+    static DEFERRED_COMMITS:Cell<u64>=const {Cell::new(0)};
+}
+/// Scoped test override, restored on unwind. Worker behaviour never reads it: the
+/// value is latched in begin() and only the resulting mode reaches a worker.
+#[cfg(test)]
+pub(crate) fn with_deferred_layers<T>(on:bool,run:impl FnOnce()->T)->T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset { fn drop(&mut self) { DEFERRED_TEST.with(|s|s.set(self.0)); } }
+    let _reset=Reset(DEFERRED_TEST.with(|s|s.replace(Some(on))));
+    run()
+}
+/// Default off pending console acceptance. Tests: a scoped override, else
+/// LOOKING_GLASS_TEST_DEFERRED_LAYERS=on runs the whole suite with it on.
+pub(crate) fn deferred_layers()->bool {
+    #[cfg(test)]
+    { DEFERRED_TEST.with(Cell::get).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_DEFERRED_LAYERS").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => false,
+        Ok("on") => true,
+        _ => panic!("LOOKING_GLASS_TEST_DEFERRED_LAYERS must be off or on"),
+    }) }
+    #[cfg(not(test))]
+    { crate::render::vita_renderer::config().actor_deferred_layers }
+}
+#[cfg(test)]
+pub(crate) fn test_deferred_commits()->u64 { DEFERRED_COMMITS.with(Cell::get) }
+#[cfg(test)]
+pub(crate) fn test_deferred_pending()->(usize,usize,usize) {
+    STATE.with(|s| {let s=s.borrow();(s.deferred.len(),s.pending.len(),s.held.len())})
+}
+/// Exhaust the vertex budget of the banks for the rest of this scene (tests only).
+#[cfg(test)]
+pub(crate) fn test_fill_vertex_capacity() { STATE.with(|s| s.borrow_mut().vertex_capacity=VERTICES); }
+/// Hold extra references to up to `slots` existing slots of one bank, as an older
+/// retained publication would. Returns the held geometry.
+#[cfg(test)]
+pub(crate) fn test_retain(key:Key,slots:usize)->Vec<Rc<prepared::Geometry>> {
+    STATE.with(|s| {let s=s.borrow();
+        s.lookup.get(&key).map_or_else(Vec::new,|&id|s.banks[id].slots.iter().flatten().take(slots).cloned().collect())})
+}
 /// Scene::from_parts covers every map load, including same-map save restoration.
 /// The overlap owner checks Idle first: no worker can retain a destination here.
 pub(crate) fn reset() {
@@ -130,23 +180,33 @@ pub(crate) fn begin() {
     let c=crate::render::vita_renderer::config();
     let enabled=c.actor_single_prepare_active() && retained_active();
     ACTIVE.with(|a|a.set(enabled));
+    DEFERRED.with(|d|d.set(enabled && deferred_layers()));
     if enabled { STATE.with(|s| {let mut s=s.borrow_mut();s.next_frame();}); }
 }
 pub(crate) fn end() {
-    if ACTIVE.with(|a|a.replace(false)) { STATE.with(|s| {let mut s=s.borrow_mut();s.pending.clear();s.held.clear();s.held_puffs.clear();}); }
+    DEFERRED.with(|d|d.set(false));
+    if ACTIVE.with(|a|a.replace(false)) { STATE.with(|s| {let mut s=s.borrow_mut();s.pending.clear();s.deferred.clear();s.held.clear();s.held_puffs.clear();}); }
 }
 /// This address is valid only between prepare and the fully drained collect. Banks
 /// cannot be mutated again while any old packet/view still owns their publication.
-pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,key:Key)->Option<(usize,bool)> {
+pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,key:Key)->Option<(usize,PublicationMode)> {
     let texture=mesh.texture.as_ref()?;
-    let surface=SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade))?;
+    #[cfg(test)]
+    let surface=super::test_support::surface(texture);
+    #[cfg(not(test))]
+    let surface=None;
+    let surface=match surface {Some(s)=>s,None=>SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade))?};
     if SKIN_OPACITY.with(Cell::get)!=1. {return None;}
     let (time,appearance)=FRAME.with(|f| {let f=f.borrow();(f.time,f.appearance)});
-    let (passes,alpha)=actor_cache::recipe(&surface,time,appearance)?;
+    let Some((passes,alpha))=actor_cache::recipe(&surface,time,appearance) else {
+        // recipe() has no side effect when it refuses; the serial fallback stays exact.
+        return if DEFERRED.with(Cell::get) {prepare_deferred(mesh,cpu,unchanged,instance,key,surface,time,appearance)} else {None};
+    };
+    let mode=PublicationMode::recipe(alpha);
     let mut passes=Some(passes);
     let result=STATE.with(|s| {
         let mut s=s.borrow_mut();
-        let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,instance,alpha,key)?;
+        let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,instance,mode,key)?;
         let n=mesh.vertices.len()*passes.as_ref().unwrap().len();
         let used=FRAME.with(|f|f.borrow().vertices);
         if s.frame_budget_rejects(id,slot,used,n) {
@@ -160,11 +220,57 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
             f.groups.push(Group {passes:passes.take().unwrap(),transparent});Some(id)
         })?;
         s.pending.push((group,id,slot));
-        Some((output,alpha))
+        Some((output,mode))
     });
     // Full/held banks and packet limits must not discard a reusable recipe.
     if let Some(mut unused)=passes {actor_cache::recycle(&mut unused);}
     result
+}
+/// Eligible for deferral: a positive layer cap, at least one of the first `limit` layers
+/// non-simple, and entity opacity 1. Non-simple layers with mixed vertex alpha are accepted:
+/// raw output feeds the unchanged per-layer alpha code. Simple mixed-alpha stays serial.
+pub(super) fn deferred_accepts(surface:&Surface,limit:usize)->bool {
+    limit>0 && !surface.layers.is_empty()
+        && surface.layers.iter().take(limit).any(|l|!actor_cache::simple(&l.stage))
+        && SKIN_OPACITY.with(Cell::get)==1.
+}
+/// The serial fallback in skin_timed_produced, with clock=None and alpha=1, would build
+/// `limit` passes of `mesh.vertices.len()` vertices each and submit them as one group. Here
+/// the same group position, budget and dropped-layer count are committed now, and the passes
+/// are built after collect from the worker's raw bytes. Every refusal returns before any
+/// FRAME or counter mutation, so the serial fallback then counts exactly once.
+#[allow(clippy::too_many_arguments)]
+fn prepare_deferred(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,key:Key,surface:Rc<Surface>,time:f32,appearance:Appearance)->Option<(usize,PublicationMode)> {
+    let c=crate::render::vita_renderer::config();
+    let cap=super::actor_max_layers(c);
+    let limit=cap.min(surface.layers.len());
+    if !deferred_accepts(&surface,limit) {return None;}
+    // The fallback's `fast` must hold, so pass_at takes its material-free branch, which
+    // has no error path: every committed placeholder receives exactly `limit` passes.
+    if !(retained_active() && c.actor_fast_path) {return None;}
+    let dropped_layers=surface.layers.len().saturating_sub(cap);
+    let n=mesh.vertices.len().checked_mul(limit)?;
+    let (used,camera)=FRAME.with(|f| {let f=f.borrow();(f.vertices,f.camera)});
+    // submit(): f.vertices.saturating_add(count) > MAX_VERTICES drops the group.
+    if used.saturating_add(n)>MAX_VERTICES {return None;}
+    STATE.with(|s| {
+        let mut s=s.borrow_mut();
+        let (bank,slot,output)=s.reserve_key(mesh,cpu,unchanged,instance,PublicationMode::Raw,key)?;
+        let group=FRAME.with(|f| {
+            let mut f=f.borrow_mut();
+            debug_assert_eq!(f.vertices,used);
+            f.vertices+=n;let group=f.groups.len();
+            let transparent=surface.transparent||f.depth_read_only;
+            f.groups.push(Group {passes:Vec::new(),transparent});group
+        });
+        s.deferred.push(Deferred {group,bank,slot,surface,camera,time,appearance,limit});
+        // The placeholder is committed. Refusal returned before this and left the
+        // serial fallback to count the same capped layers once.
+        if dropped_layers>0 {retained::count("vita_fx_dropped_layers",dropped_layers as u64);}
+        #[cfg(test)]
+        DEFERRED_COMMITS.with(|c|c.set(c.get()+1));
+        Some((output,PublicationMode::Raw))
+    })
 }
 /// Separate staging preserves world/actor and equal-depth packet barriers and ties.
 pub(crate) fn hold() {
@@ -175,6 +281,39 @@ pub(crate) fn hold() {
 pub(crate) fn complete() {
     STATE.with(|s| {
         let mut s=s.borrow_mut();
+        // All workers drained successfully. Build deferred layers before FRAME's mutable
+        // borrow below: pass_at reads FRAME through retained_active().
+        if !s.deferred.is_empty() {
+            assert!(retained_active(),"deferred actor layers outside the direct view");
+            let mut deferred=std::mem::take(&mut s.deferred);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let mut copy_bytes=0;
+            for d in &deferred {
+                // A read-only view of the published slot; passes own their copies.
+                let geometry=s.banks[d.bank].slots[d.slot].as_ref().unwrap().clone();
+                let passes=super::layer_passes(&geometry.vertices,&geometry.indices,&d.surface,d.camera,d.time,1.,d.appearance,true,None,d.limit);
+                assert_eq!(passes.len(),d.limit,"deferred layer placeholder without its passes");
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                { copy_bytes+=super::layer_copy_bytes(geometry.vertices.len(),geometry.indices.len(),d.limit); }
+                let placeholder=&mut s.held[d.group];
+                debug_assert!(placeholder.passes.is_empty());
+                placeholder.passes=passes;
+            }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            {
+                crate::sim_maps::count("actor_deferred_surfaces",deferred.len() as u64);
+                crate::sim_maps::count("actor_deferred_capacity_bytes",(deferred.capacity()*std::mem::size_of::<Deferred>()) as u64);
+                crate::sim_maps::count("actor_deferred_layer_copy_bytes",copy_bytes);
+                crate::sim_maps::count("actor_layer_copy_bytes",copy_bytes);
+            }
+            deferred.clear();
+            s.deferred=deferred;
+        }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        {
+            crate::sim_maps::count("actor_publication_bank_bytes",(s.vertex_capacity*std::mem::size_of::<Vertex>()+s.index_capacity*2) as u64);
+            crate::sim_maps::count("actor_publication_bank_count",s.lookup.len() as u64);
+        }
         for n in 0..s.pending.len() {
             let (group,bank,slot)=s.pending[n];
             let geometry=s.banks[bank].slots[slot].as_ref().unwrap().clone();
@@ -195,6 +334,7 @@ pub(crate) fn complete() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const O:PublicationMode=PublicationMode::Opaque255;
     fn fixture()->(Mesh,Arc<SkinSurface>) {
         let surface=crate::skeletal::Surface::new("body".into(),
             [Vec3::ZERO,Vec3::X,Vec3::Y].into_iter().map(|offset|crate::skeletal::SkinVertex {
@@ -211,9 +351,9 @@ mod tests {
         // changes visitation, but the later NPC's immutable upload stamp stays warm.
         for first in [true,false,false,true,true,false] {
             state.next_frame();
-            if first {state.reserve_key(&mesh,cpu.clone(),true,0,false,key(actors[0],&cpu)).unwrap();}
-            if state.epoch==5 {state.reserve_key(&mesh,cpu.clone(),false,0,false,key(actors[2],&cpu)).unwrap();}
-            let (id,slot,ptr)=state.reserve_key(&mesh,cpu.clone(),true,0,false,key(actors[1],&cpu)).unwrap();
+            if first {state.reserve_key(&mesh,cpu.clone(),true,0,O,key(actors[0],&cpu)).unwrap();}
+            if state.epoch==5 {state.reserve_key(&mesh,cpu.clone(),false,0,O,key(actors[2],&cpu)).unwrap();}
+            let (id,slot,ptr)=state.reserve_key(&mesh,cpu.clone(),true,0,O,key(actors[1],&cpu)).unwrap();
             let stamp=state.banks[id].slots[slot].as_ref().unwrap().version;
             if let Some((old_id,old_ptr,old_stamp))=later {assert_eq!((id,ptr,stamp),(old_id,old_ptr,old_stamp));}
             later=Some((id,ptr,stamp));
@@ -224,19 +364,19 @@ mod tests {
     fn unchanged_shared_instance_moving_to_another_slot_advances_gpu_revision() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
         let key=key(ActorId::default(),&cpu);
-        let (id,a,_)=state.reserve_key(&mesh,cpu.clone(),false,11,false,key).unwrap();
-        let (_,b,_)=state.reserve_key(&mesh,cpu.clone(),false,22,false,key).unwrap();
+        let (id,a,_)=state.reserve_key(&mesh,cpu.clone(),false,11,O,key).unwrap();
+        let (_,b,_)=state.reserve_key(&mesh,cpu.clone(),false,22,O,key).unwrap();
         assert_ne!(a,b);
         let old_a=state.banks[id].slots[a].as_ref().unwrap().version;
         // The first instance disappears. Instance 22 is bit-static but now gets
         // slot A, whose last GPU upload belonged to instance 11.
         state.next_frame();
-        let (_,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,22,false,key).unwrap();
+        let (_,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,22,O,key).unwrap();
         assert_eq!(slot,a);
         let moved=state.banks[id].slots[slot].as_ref().unwrap().version;
         assert_ne!(moved.vertices,old_a.vertices,"different instance retained a stale GPU stamp");
         state.next_frame();
-        state.reserve_key(&mesh,cpu,true,22,false,key).unwrap();
+        state.reserve_key(&mesh,cpu,true,22,O,key).unwrap();
         assert_eq!(state.banks[id].slots[a].as_ref().unwrap().version,moved,
             "the same unchanged instance must retain its warm upload");
     }
@@ -244,24 +384,24 @@ mod tests {
     fn repeated_actor_surface_in_one_frame_uses_disjoint_destinations() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
         let key=key(ActorId::default(),&cpu);
-        let a=state.reserve_key(&mesh,cpu.clone(),false,0,false,key).unwrap();
-        let b=state.reserve_key(&mesh,cpu.clone(),false,0,false,key).unwrap();
-        assert_ne!(a.2,b.2);assert!(state.reserve_key(&mesh,cpu,false,0,false,key).is_none());
+        let a=state.reserve_key(&mesh,cpu.clone(),false,0,O,key).unwrap();
+        let b=state.reserve_key(&mesh,cpu.clone(),false,0,O,key).unwrap();
+        assert_ne!(a.2,b.2);assert!(state.reserve_key(&mesh,cpu,false,0,O,key).is_none());
     }
     #[test]
     fn unused_actor_ids_evict_at_age_and_under_capacity_pressure_without_touching_held_views() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
         let old_key=key(ActorId::default(),&cpu);
-        let (id,slot,_)=state.reserve_key(&mesh,cpu.clone(),false,0,false,old_key).unwrap();
+        let (id,slot,_)=state.reserve_key(&mesh,cpu.clone(),false,0,O,old_key).unwrap();
         let held=state.banks[id].slots[slot].as_ref().unwrap().clone();
         for _ in 0..=UNUSED_FRAMES {state.next_frame();}
         assert!(state.lookup.is_empty());assert_eq!(state.vertex_capacity,0);
         assert_eq!(held.indices,[0,1,2]);assert_eq!(Arc::strong_count(&cpu),1);
         // Slot-count pressure reuses an unused id, never grows the bounded table.
-        for _ in 0..SURFACES {state.reserve_key(&mesh,cpu.clone(),false,0,false,key(ActorId::default(),&cpu)).unwrap();}
-        assert!(state.reserve_key(&mesh,cpu.clone(),false,0,false,key(ActorId::default(),&cpu)).is_none());
+        for _ in 0..SURFACES {state.reserve_key(&mesh,cpu.clone(),false,0,O,key(ActorId::default(),&cpu)).unwrap();}
+        assert!(state.reserve_key(&mesh,cpu.clone(),false,0,O,key(ActorId::default(),&cpu)).is_none());
         state.next_frame();state.next_frame();
-        assert!(state.reserve_key(&mesh,cpu,false,0,false,Key {actor:ActorId::default(),surface:0}).is_some());
+        assert!(state.reserve_key(&mesh,cpu,false,0,O,Key {actor:ActorId::default(),surface:0}).is_some());
         assert_eq!(state.lookup.len(),SURFACES);assert_eq!(state.banks.len(),SURFACES);
     }
     #[test]
@@ -278,7 +418,7 @@ mod tests {
                 uv:Vec2::ONE,weights:vec![crate::skeletal::Weight {bone:0,amount:1.,offset:Vec3::ZERO}]}).collect(),vec![0,1,2]);
             let cpu=source.cpu();let mesh=Mesh {vertices:cpu.bind_vertices.clone(),indices:cpu.indices.clone(),texture:None};
             state.next_frame();
-            for _ in 0..5 {assert!(state.reserve_key(&mesh,cpu.clone(),false,0,false,key(ActorId::default(),&cpu)).is_some(),"unexpected serial fallback after map/reload");}
+            for _ in 0..5 {assert!(state.reserve_key(&mesh,cpu.clone(),false,0,O,key(ActorId::default(),&cpu)).is_some(),"unexpected serial fallback after map/reload");}
             let capacity=(state.vertex_capacity,state.index_capacity,state.lookup.len());
             if let Some(warm)=warm {assert_eq!(capacity,warm);} else {warm=Some(capacity);}
             held=state.banks[0].slots[0].clone();old_cpu=Some(Arc::downgrade(&cpu));
@@ -288,27 +428,27 @@ mod tests {
     #[test]
     fn held_views_exhaust_two_banks_and_never_overwrite_old_vertices() {
         let (mut mesh,cpu)=fixture();let mut state=State::default();
-        let (id,slot,ptr)=state.reserve(&mesh,cpu.clone(),false,false).unwrap();
+        let (id,slot,ptr)=state.reserve(&mesh,cpu.clone(),false,O).unwrap();
         let old=state.banks[id].slots[slot].as_ref().unwrap().clone();
         assert_eq!(ptr,old.vertices.as_ptr() as usize);
         mesh.vertices[0].uv.x=-0.;state.cursor=0;
-        let (id,slot,_)=state.reserve(&mesh,cpu.clone(),false,false).unwrap();
+        let (id,slot,_)=state.reserve(&mesh,cpu.clone(),false,O).unwrap();
         let second=state.banks[id].slots[slot].as_ref().unwrap().clone();
         assert_eq!(old.vertices[0].uv.x.to_bits(),1_f32.to_bits());
         assert_eq!(second.vertices[0].uv.x.to_bits(),(-0_f32).to_bits());
-        state.cursor=0;assert!(state.reserve(&mesh,cpu.clone(),false,false).is_none());
-        drop(old);state.cursor=0;assert!(state.reserve(&mesh,cpu,false,false).is_some());
+        state.cursor=0;assert!(state.reserve(&mesh,cpu.clone(),false,O).is_none());
+        drop(old);state.cursor=0;assert!(state.reserve(&mesh,cpu,false,O).is_some());
         assert_eq!(state.vertex_capacity,6);assert_eq!(state.index_capacity,6);
     }
     #[test]
     fn reclaimed_old_view_cannot_reuse_a_newer_inputs_revision() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.epoch=1;
-        state.reserve_at(&mesh,cpu.clone(),false,0,false,0).unwrap();
+        state.reserve_at(&mesh,cpu.clone(),false,0,O,0).unwrap();
         let old=state.banks[0].slots[0].as_ref().unwrap().clone();let version=old.version;
-        state.epoch=2;state.reserve_at(&mesh,cpu.clone(),false,0,false,0).unwrap();
+        state.epoch=2;state.reserve_at(&mesh,cpu.clone(),false,0,O,0).unwrap();
         let second=state.banks[0].slots[1].as_ref().unwrap().clone();
         drop(old);state.epoch=3;
-        state.reserve_at(&mesh,cpu,true,0,false,0).unwrap();
+        state.reserve_at(&mesh,cpu,true,0,O,0).unwrap();
         assert_ne!(state.banks[0].slots[0].as_ref().unwrap().version.vertices,version.vertices);
         assert_eq!(second.vertices[0].uv,Vec2::ONE);
     }
@@ -317,59 +457,135 @@ mod tests {
         let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
         let key=key(ActorId::default(),&cpu);
         let cold=crate::kernel_alloc::Scope::begin();
-        state.reserve_key(&mesh,cpu.clone(),false,1,false,key).unwrap();
+        state.reserve_key(&mesh,cpu.clone(),false,1,O,key).unwrap();
         let cold=cold.finish();assert!(cold<=5,"cold metadata plus one slot: {cold}");
         let warm=crate::kernel_alloc::Scope::begin();
-        for _ in 0..120 {state.next_frame();state.reserve_key(&mesh,cpu.clone(),true,1,false,key).unwrap();}
+        for _ in 0..120 {state.next_frame();state.reserve_key(&mesh,cpu.clone(),true,1,O,key).unwrap();}
         assert_eq!(warm.finish(),0);
         for _ in 0..=UNUSED_FRAMES {state.next_frame();}
         let reentry=crate::kernel_alloc::Scope::begin();
-        state.reserve_key(&mesh,cpu,false,2,false,key).unwrap();
+        state.reserve_key(&mesh,cpu,false,2,O,key).unwrap();
         let reentry=reentry.finish();assert!(reentry<=3,"one replacement slot: {reentry}");
         println!("publication transition allocations: cold={cold}, warm=0, reentry={reentry}; max vertices={VERTICES}, indices={INDICES}, banks={SURFACES}, bank_bytes={}",std::mem::size_of::<Bank>());
     }
     #[test]
     fn warmed_storage_is_bounded_and_map_replacement_copies_new_topology() {
         let (mesh,cpu)=fixture();let mut state=State::default();
-        state.reserve(&mesh,cpu.clone(),false,false).unwrap();
+        state.reserve(&mesh,cpu.clone(),false,O).unwrap();
         let scope=crate::kernel_alloc::Scope::begin();
-        for _ in 0..128 {state.cursor=0;assert!(state.reserve(&mesh,cpu.clone(),false,false).is_some());}
+        for _ in 0..128 {state.cursor=0;assert!(state.reserve(&mesh,cpu.clone(),false,O).is_some());}
         assert_eq!(scope.finish(),0);assert_eq!(state.banks.len(),1);
         state.cursor=0;let version=state.banks[0].slots[0].as_ref().unwrap().version;
-        state.reserve(&mesh,cpu.clone(),true,false).unwrap();
+        state.reserve(&mesh,cpu.clone(),true,O).unwrap();
         assert_eq!(state.banks[0].slots[0].as_ref().unwrap().version,version);
         let (_,new_cpu)=fixture();state.cursor=0;
         let before=state.banks[0].slots[0].as_ref().unwrap().version;
-        state.reserve(&mesh,new_cpu,false,false).unwrap();
+        state.reserve(&mesh,new_cpu,false,O).unwrap();
         assert_ne!(state.banks[0].slots[0].as_ref().unwrap().version.topology,before.topology);
-        state.cursor=SURFACES;assert!(state.reserve(&mesh,cpu.clone(),false,false).is_none());
+        state.cursor=SURFACES;assert!(state.reserve(&mesh,cpu.clone(),false,O).is_none());
         state.cursor=0;state.vertex_capacity=VERTICES;
         let mut larger=mesh;larger.vertices.push(Vertex::new(0.,0.,0.,0.,0.,WHITE));
-        assert!(state.reserve(&larger,cpu,false,false).is_none());
+        assert!(state.reserve(&larger,cpu,false,O).is_none());
     }
     #[test]
     fn identical_transform_token_dropped_by_the_frame_vertex_limit_cannot_skip_a_stale_slot() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
         let key=key(ActorId::default(),&cpu);
         // Previous frame: token 11 owns slot 0 and its GPU revision.
-        let (id,slot0,_)=state.reserve_key(&mesh,cpu.clone(),false,11,false,key).unwrap();
+        let (id,slot0,_)=state.reserve_key(&mesh,cpu.clone(),false,11,O,key).unwrap();
         let stale=state.banks[id].slots[slot0].as_ref().unwrap().version;
         state.next_frame();
         // First identical-transform instance claims token 11 and would skip.
         // The frame vertex limit then drops the reserved surface.
-        let (id,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,11,false,key).unwrap();
+        let (id,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,11,O,key).unwrap();
         assert_eq!(slot,slot0);
         assert_eq!(state.banks[id].slots[slot].as_ref().unwrap().version,stale);
         assert!(state.frame_budget_rejects(id,slot,MAX_VERTICES,1),"one more vertex overflows the frame");
         assert!(state.banks[id].instance[slot].is_none());
         assert_eq!(state.banks[id].epoch[slot],state.epoch,"the dropped slot stays reserved for this frame");
         // The dropped draw was not recorded, so the second instance claims token 11 again.
-        let (_,other,_)=state.reserve_key(&mesh,cpu.clone(),false,11,false,key).unwrap();
+        let (_,other,_)=state.reserve_key(&mesh,cpu.clone(),false,11,O,key).unwrap();
         assert_ne!(other,slot0);
         state.next_frame();
-        let (_,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,11,false,key).unwrap();
+        let (_,slot,_)=state.reserve_key(&mesh,cpu.clone(),true,11,O,key).unwrap();
         assert_eq!(slot,slot0);
         assert_ne!(state.banks[id].slots[slot].as_ref().unwrap().version.vertices,stale.vertices,
             "the shared token must upload over the other instance's slot");
+    }
+    #[test]
+    fn deferred_layers_accessor_follows_scoped_override_and_restores_on_unwind() {
+        let ambient=deferred_layers();
+        assert_eq!(ambient,std::env::var("LOOKING_GLASS_TEST_DEFERRED_LAYERS").as_deref()==Ok("on"));
+        for on in [false,true] {
+            assert_eq!(with_deferred_layers(on,deferred_layers),on);
+            assert_eq!(with_deferred_layers(on,||with_deferred_layers(!on,deferred_layers)),!on);
+            assert_eq!(with_deferred_layers(on,deferred_layers),on);
+            let failed=std::panic::catch_unwind(||with_deferred_layers(on,||panic!("inside override")));
+            assert!(failed.is_err());assert_eq!(deferred_layers(),ambient,"override must restore on unwind");
+        }
+    }
+    fn test_surface(stages:Vec<Stage>)->(Texture2D,Rc<Surface>) {
+        let base=super::super::test_support::texture(77);
+        let layers=stages.into_iter().map(|s|(Stage {images:vec!["a".into()],..s},vec![super::super::test_support::texture(78)])).collect();
+        (base.clone(),super::super::test_support::register(&base,layers,false))
+    }
+    #[test]
+    fn deferral_needs_a_non_simple_layer_within_the_cap_positive_cap_and_full_opacity() {
+        let env=Stage {environment:true,..Default::default()};
+        let (_,simple_only)=test_surface(vec![Stage::default(),Stage {vertex_alpha:true,..Default::default()}]);
+        let (_,late)=test_surface(vec![Stage::default(),env.clone()]);
+        let (_,early)=test_surface(vec![env.clone(),Stage::default()]);
+        assert!(!deferred_accepts(&simple_only,2),"simple mixed alpha stays serial");
+        assert!(deferred_accepts(&late,2) && !deferred_accepts(&late,1));
+        assert!(deferred_accepts(&early,1) && !deferred_accepts(&early,0));
+        super::super::with_skin_opacity(0.5,||assert!(!deferred_accepts(&early,2)));
+        super::super::test_support::clear();
+    }
+    #[test]
+    fn deferred_refusal_mutates_no_frame_counter_and_the_serial_fallback_counts_once() {
+        use super::super::test_support as ts;
+        let three=vec![Stage {environment:true,..Default::default()},Stage::default(),Stage::default()];
+        let (base,surface)=test_surface(three);
+        let (mesh,cpu)=fixture();let mesh=Mesh {texture:Some(base),..mesh};
+        let key=key(ActorId::default(),&cpu);
+        with_deferred_layers(true,|| {
+            for refusal in 0..3 {
+                reset();ts::begin_direct(Vec3::ZERO,Vec3::Y,1.,Appearance::default());retained::host_reset();
+                begin();assert!(active());
+                match refusal {
+                    0=>ts::set_frame_vertices(ts::MAX-5),     // budget: 3 vertices x 2 layers
+                    1=>STATE.with(|s|s.borrow_mut().vertex_capacity=VERTICES), // bank capacity
+                    _=>{assert!(prepare(&mesh,cpu.clone(),false,1,key).is_some());assert!(prepare(&mesh,cpu.clone(),false,2,key).is_some());} // both slots used
+                }
+                let before=ts::snapshot();
+                assert!(prepare(&mesh,cpu.clone(),false,3,key).is_none(),"refusal {refusal}");
+                assert_eq!(ts::snapshot(),before,"a refused deferral changed FRAME or counters");
+                // The serial fallback then counts the capped layer and any budget drop once.
+                super::super::skin(&mesh);
+                let after=ts::snapshot();
+                assert_eq!(after.dropped_layers,before.dropped_layers+1);
+                assert_eq!(after.dropped,before.dropped+usize::from(refusal==0));
+                end();ts::end_frame();
+            }
+            reset();
+        });
+        drop(surface);ts::clear();
+    }
+    #[test]
+    fn deferred_commit_counts_capped_layers_once_and_reserves_the_fallback_group() {
+        use super::super::test_support as ts;
+        let (base,surface)=test_surface(vec![Stage {dot_alpha:Some(Vec2::ONE),..Default::default()},Stage::default(),Stage::default()]);
+        let (mesh,cpu)=fixture();let mesh=Mesh {texture:Some(base),..mesh};
+        let [off,on]=[false,true].map(|on| with_deferred_layers(on,|| {
+            reset();ts::begin_direct(Vec3::ZERO,Vec3::Y,1.,Appearance::default());retained::host_reset();begin();
+            let direct=prepare(&mesh,cpu.clone(),false,1,key(ActorId::default(),&cpu));
+            if direct.is_none() {super::super::skin(&mesh);}
+            let snapshot=ts::snapshot();end();ts::end_frame();reset();(direct.map(|d|d.1),snapshot)
+        }));
+        assert_eq!(off.0,None);assert_eq!(on.0,Some(PublicationMode::Raw));
+        assert_eq!((on.1.vertices,on.1.dropped,on.1.dropped_layers),(off.1.vertices,off.1.dropped,off.1.dropped_layers));
+        assert_eq!((on.1.groups.len(),off.1.groups.len()),(1,1));
+        assert!(on.1.groups[0].1.is_empty(),"placeholder until complete()");
+        drop(surface);ts::clear();
     }
 }
