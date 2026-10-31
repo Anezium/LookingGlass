@@ -24,13 +24,23 @@ Checks, per matched pair:
 - actor_skin, state_sha256, selected_lights_bits, joint_alpha_order, blend_world_order,
   npc_decisions, submitted packets apart from gpu_slot, uniform hashes, named frame-0 uniform
   fields, geometry == gpu_geometry, no serial fallback, frame count, one nonempty image per
-  frame, the opening PNG and the final PNG wherever the framebuffer is reproducible, and the
-  census serial/worker vertex totals. The host framebuffer is not a reproducible cross-run
-  observable on every intermediate frame: two launches of the same arm at the same inputs
-  can differ on a few of 180 hashes while every semantic record is equal. An OFF/ON
-  intermediate-image difference therefore passes only when a second launch of the same arm
-  at the same inputs differs somewhere on the intermediate framebuffers too; if the same arm
-  is stable the difference is real and fails. opening/final PNG equality is never waived;
+  frame, the opening PNG, the final PNG and the census serial/worker vertex totals. The
+  opening/final PNG, census and semantic checks are mandatory and run independently of the
+  intermediate-image comparison; a failed image comparison never skips them;
+- Complete per-arm and per-repeat records: exactly one frame and one image per requested
+  frame in sequence, the requested map and active identity on every frame, non-bool integer
+  dimensions/frame numbers/byte counts, bytes == width*height*4, lowercase hex digests, and
+  a census with one row per frame whose post-warmup rows are populated. Equal empty slices
+  are not evidence. A malformed or semantically foreign record is a probe defect, not a
+  presentation retry;
+- The host framebuffer is not a reproducible cross-run observable on every intermediate
+  frame: two launches of the same arm at the same inputs can differ on a few of 180 hashes
+  while every semantic record is equal. A measured same-arm repeat is recorded only after
+  its source/binary/config/exit, requested identity, complete schema and semantic/view/
+  world/census/opening/final evidence match the reference OFF. Such a repeat is a stability
+  observation, never a waiver: every unresolved OFF/ON intermediate-image difference leaves
+  the image qualification INCOMPLETE and the command exits nonzero. If the repeated same
+  arm is stable the difference is a real mismatch and the run FAILS;
 - frame 0 also requires SIM_MAPS_VIEW and SIM_MAPS_WORLD. gl_viewport and scale_target have
   to be present and positive. The frame-0 camera, FOV, projection, depth view and time, and
   every opaque-world cull record (group bounds, model, visibility, draw payload and named
@@ -99,8 +109,15 @@ ELAPSED_COUNTERS = frozenset({
 })
 
 
+# A full exact gate either passes, fails a required equality, or leaves the
+# intermediate-image qualification incomplete. Incomplete is never success.
+INCOMPLETE_EXIT = 3
+CENSUS_WARMUP_FRAMES = 60
+HEX64 = re.compile(r'^[0-9a-f]{64}$')
+
+
 class ImageMismatch(AssertionError):
-    """Intermediate framebuffer hashes differ; a same-arm repeat must reproduce them."""
+    """Intermediate framebuffer hashes differ; the image gate is not exact."""
 
     def __init__(self, frames):
         self.frames = list(frames)
@@ -271,17 +288,69 @@ def assert_frame_pair(map_name, index, off_frame, on_frame, counter_prefix):
     assert off_counts == on_counts, (map_name, index, 'workload counters', off_counts, on_counts)
 
 
-def assert_images(map_name, off_images, on_images, frame_count):
-    assert off_images and on_images, (map_name, 'missing images', len(off_images), len(on_images))
-    assert len(off_images) == frame_count and len(on_images) == frame_count, (map_name, len(off_images), len(on_images), frame_count)
-    assert [image.get('frame') for image in off_images] == list(range(frame_count)), (map_name, 'image frames')
-    for image in off_images:
-        assert type(image.get('frame')) is int, (map_name, image)
-        assert type(image.get('width')) is int and image['width'] > 0, (map_name, image)
-        assert type(image.get('height')) is int and image['height'] > 0, (map_name, image)
-        assert type(image.get('bytes')) is int and image['bytes'] > 0, (map_name, image)
-        assert isinstance(image.get('sha256'), str) and len(image['sha256']) == 64, (map_name, image)
-    return [index for index, (left, right) in enumerate(zip(off_images, on_images)) if left != right]
+def assert_frame_schema(map_name, frames, frame_count, label):
+    """Complete requested frame records: count, sequence, map and active identity."""
+    assert isinstance(frames, list) and len(frames) == frame_count, (
+        label, 'frame count', None if not isinstance(frames, list) else len(frames), frame_count)
+    for index, frame in enumerate(frames):
+        assert isinstance(frame, dict), (label, 'frame record', index)
+        assert type(frame.get('frame')) is int and frame['frame'] == index, (
+            label, 'frame index', index, frame.get('frame'))
+        assert frame.get('map') == map_name, (label, 'requested map', index, frame.get('map'))
+        assert frame.get('active') is True, (label, 'active identity', index, frame.get('active'))
+
+
+def assert_image_schema(map_name, images, frame_count, label):
+    """Complete image records: count, sequence, integer RGBA sizes and hex digests."""
+    assert isinstance(images, list) and len(images) == frame_count, (
+        map_name, label, 'image count', None if not isinstance(images, list) else len(images), frame_count)
+    for index, image in enumerate(images):
+        assert isinstance(image, dict), (map_name, label, 'image record', index)
+        assert type(image.get('frame')) is int and image['frame'] == index, (
+            map_name, label, 'image index', index, image.get('frame'))
+        width, height = image.get('width'), image.get('height')
+        assert type(width) is int and width > 0, (map_name, label, 'image width', index, width)
+        assert type(height) is int and height > 0, (map_name, label, 'image height', index, height)
+        assert type(image.get('bytes')) is int and image['bytes'] == width * height * 4, (
+            map_name, label, 'image RGBA bytes', index, image.get('bytes'), width * height * 4)
+        digest = image.get('sha256')
+        assert isinstance(digest, str) and HEX64.fullmatch(digest), (
+            map_name, label, 'image sha256', index, digest)
+
+
+def assert_census(map_name, census, frame_count, label):
+    """Complete census: one row per frame, populated post-warmup rows, integer actor counts."""
+    assert isinstance(census, dict), (map_name, label, 'census record')
+    assert census.get('map') == map_name, (map_name, label, 'census map', census.get('map'))
+    rows = census.get('rows')
+    assert isinstance(rows, list) and len(rows) == frame_count, (
+        map_name, label, 'census row count', None if not isinstance(rows, list) else len(rows), frame_count)
+    assert frame_count > CENSUS_WARMUP_FRAMES, (map_name, label, 'census warmup window', frame_count)
+    assert type(census.get('capacity')) is int and census['capacity'] == frame_count, (
+        map_name, label, 'census capacity', census.get('capacity'))
+    if 'serial_fallbacks' in census:
+        assert type(census['serial_fallbacks']) is int and census['serial_fallbacks'] == 0, (
+            map_name, label, 'serial fallbacks', census['serial_fallbacks'])
+    for index, row in enumerate(rows):
+        assert isinstance(row, dict), (map_name, label, 'census row', index)
+        assert isinstance(row.get('actors'), list), (map_name, label, 'census actors', index)
+        for actor in row['actors']:
+            assert isinstance(actor, dict), (map_name, label, 'census actor', index)
+            for key in ('serial_vertices', 'worker_vertices'):
+                assert type(actor.get(key)) is int and actor[key] >= 0, (
+                    map_name, label, 'census vertex count', index, key, actor.get(key))
+    assert all(row['actors'] for row in rows[CENSUS_WARMUP_FRAMES:]), (
+        map_name, label, 'populated census rows')
+
+
+def census_vertices(census):
+    rows = census['rows'][CENSUS_WARMUP_FRAMES:]
+    return (sum(actor['serial_vertices'] for row in rows for actor in row['actors']),
+            sum(actor['worker_vertices'] for row in rows for actor in row['actors']))
+
+
+def differing_images(left, right):
+    return [index for index, (a, b) in enumerate(zip(left, right)) if a != b]
 
 
 def git_text(root, *args):
@@ -331,6 +400,8 @@ def main():
     p.add_argument('--repeat-off', action='append', default=[], help='map that also needs a second OFF launch with the same prerequisite')
     args = p.parse_args()
     assert 1 <= args.max_attempts <= 8, args.max_attempts
+    assert args.frames > CENSUS_WARMUP_FRAMES, (
+        'the census stability window needs more than', CENSUS_WARMUP_FRAMES, 'frames')
     root = Path(__file__).resolve().parents[2]
     out = args.output.resolve()
     if out.exists() and any(out.iterdir()):
@@ -400,18 +471,32 @@ def main():
         text = (d / 'run.log').read_text()
         lines = text.splitlines()
         images = [json.loads(line.split(' ', 1)[1]) for line in lines if line.startswith('SKIN_EXACT_IMAGE ')]
+        frames = [json.loads(line.split(' ', 1)[1]) for line in lines if line.startswith('SIM_MAPS_FRAME ')]
+        census_path = d / f'{map_name}-census-{args.frames}.json'
         try:
+            # Complete arm schema and identity precede any selection or comparison. A
+            # malformed record is a probe defect, never a presentation retry.
+            assert_frame_schema(map_name, frames, args.frames, (map_name, arm, attempt))
+            assert_image_schema(map_name, images, args.frames, (map_name, arm, attempt))
+            census = json.loads(census_path.read_text())
+            assert_census(map_name, census, args.frames, (map_name, arm, attempt))
             views = parse_view(lines)
             assert len(views) == 1, (map_name, arm, len(views))
             prereq = renderer_prerequisite(views[0], parse_load_stages(lines), images)
             worlds = parse_world(lines)
             assert_world_records(worlds, (map_name, arm, attempt))
+            final_png = d / 'final.png'
+            assert final_png.is_file() and final_png.stat().st_size > 0, (map_name, arm, 'final image')
         except AssertionError as exc:
-            # A missing or malformed record is a defect of the build, not a presentation input.
-            row['classification'] = 'missing-record'
+            row['classification'] = 'invalid-record'
             row['error'] = str(exc)
             note(row)
             raise
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            row['classification'] = 'invalid-record'
+            row['error'] = f'{type(exc).__name__}: {exc}'
+            note(row)
+            raise AssertionError(row['error']) from exc
         row['classification'] = 'prerequisite-present'
         row['prerequisite_sha256'] = canon(prereq)
         row['world_sha256'] = canon(worlds)
@@ -428,17 +513,11 @@ def main():
         assert single == ['[lg/vita-renderer] actor_single_prepare active=true'], (map_name, arm, single)
         fallback = [line for line in lines if '[lg/skin] serial fallback' in line or 'afterimage consumer must be declared' in line]
         assert not fallback, (map_name, arm, fallback[:3])
-        frames = [json.loads(line.split(' ', 1)[1]) for line in lines if line.startswith('SIM_MAPS_FRAME ')]
-        assert len(frames) == args.frames, (map_name, arm, len(frames))
-        assert [frame['frame'] for frame in frames] == list(range(args.frames)), (map_name, arm, 'frame index')
         assert all(all(packet['geometry'] == packet['gpu_geometry'] for packet in frame['submitted_packets']) for frame in frames), (map_name, arm, 'gpu readback')
-        census = json.loads((d / f'{map_name}-census-{args.frames}.json').read_text())
-        if 'serial_fallbacks' in census:
-            assert census['serial_fallbacks'] == 0, (map_name, arm)
         opening_png = d / 'private/opening-frame.png'
         assert opening_png.is_file() and opening_png.stat().st_size > 0, (map_name, arm, 'opening frame image')
         assert any(image.get('frame') == 0 and image.get('bytes', 0) > 0 for image in images), (map_name, arm, 'opening frame record')
-        rows = census['rows'][60:]
+        serial_vertices, worker_vertices = census_vertices(census)
         counters = {}
         for frame in frames:
             for key, value in frame['counters'].items():
@@ -447,40 +526,71 @@ def main():
         return dict(
             ok=True, arm=arm, attempt=attempt, directory=str(d), frames=frames, images=images,
             worlds=worlds, prerequisite=prereq, view=view_outputs(views[0]), counters=counters,
-            serial_vertices=sum(actor['serial_vertices'] for row in rows for actor in row['actors']),
-            worker_vertices=sum(actor['worker_vertices'] for row in rows for actor in row['actors']),
-            final_png_sha256=sha((d / 'final.png').read_bytes()),
+            serial_vertices=serial_vertices,
+            worker_vertices=worker_vertices,
+            final_png_sha256=sha(final_png.read_bytes()),
             opening_png_sha256=sha(opening_png.read_bytes()),
+            census_sha256=sha(census_path.read_bytes()),
             run_log_sha256=row['log_sha256'],
+            head=tree['head'], tree=tree['tree'], binary_sha256=binary_sha,
+            oracle_sha256=oracle_sha, config_sha256=row['config_sha256'], exit=proc.returncode,
             printed_flag=printed[args.flag],
             printed_prerequisites={key: printed[key] for key in prerequisites},
             gpu_draw_readbacks=sum(len(frame['submitted_packets']) for frame in frames))
 
-    def compare(map_name, off, on, allow_unstable=frozenset()):
-        assert prerequisite_equal(off['prerequisite'], on['prerequisite']), (map_name, 'prerequisite')
-        assert off['view'] == on['view'], (map_name, 'frame-0 camera', sorted(k for k in off['view'] if off['view'][k] != on['view'][k]))
+    def compare(map_name, off, on, images_equal=True):
+        # Schema is re-checked here so no caller can compare an incomplete arm.
+        assert_image_schema(map_name, off['images'], args.frames, (map_name, 'compare-off'))
+        assert_image_schema(map_name, on['images'], args.frames, (map_name, 'compare-on'))
+        # Every mandatory equality runs before any image verdict is raised. An image
+        # difference can therefore never skip a semantic or mandatory output check.
+        problems = []
+        if not prerequisite_equal(off['prerequisite'], on['prerequisite']):
+            problems.append(('prerequisite',))
+        if off['view'] != on['view']:
+            problems.append(('frame-0 camera', sorted(k for k in off['view'] if off['view'][k] != on['view'][k])))
         mismatch = world_mismatch(off['worlds'], on['worlds'])
-        assert mismatch is None, (map_name, 'world cull', mismatch)
+        if mismatch is not None:
+            problems.append(('world cull', mismatch))
         for index, (left, right) in enumerate(zip(off['frames'], on['frames'])):
-            assert_frame_pair(map_name, index, left, right, args.counter_prefix)
-        unstable_images = assert_images(map_name, off['images'], on['images'], args.frames)
-        unexpected = [index for index in unstable_images if index not in allow_unstable]
-        if unexpected:
-            raise ImageMismatch(unexpected)
-        assert off['final_png_sha256'] == on['final_png_sha256'], (map_name, 'final image')
-        assert off['opening_png_sha256'] == on['opening_png_sha256'], (map_name, 'opening frame image')
-        assert (off['serial_vertices'], off['worker_vertices']) == (on['serial_vertices'], on['worker_vertices']), (map_name, 'census vertices')
-        return unstable_images
+            try:
+                assert_frame_pair(map_name, index, left, right, args.counter_prefix)
+            except AssertionError as exc:
+                problems.append(exc.args[0] if exc.args else str(exc))
+        differences = differing_images(off['images'], on['images'])
+        if off['final_png_sha256'] != on['final_png_sha256']:
+            problems.append(('final image',))
+        if off['opening_png_sha256'] != on['opening_png_sha256']:
+            problems.append(('opening frame image',))
+        if (off['serial_vertices'], off['worker_vertices']) != (on['serial_vertices'], on['worker_vertices']):
+            problems.append(('census vertices',))
+        if problems:
+            raise AssertionError((map_name, problems[:8]))
+        if images_equal and differences:
+            raise ImageMismatch(differences)
+        return differences
 
     def public_arm(arm):
         return dict(
             attempt=arm['attempt'], directory=arm['directory'],
+            head=arm['head'], tree=arm['tree'], binary_sha256=arm['binary_sha256'],
+            oracle_sha256=arm['oracle_sha256'], config_sha256=arm['config_sha256'], exit=arm['exit'],
             prerequisite_sha256=canon(arm['prerequisite']), view=arm['view'],
             world_sha256=canon(arm['worlds']), opening_png_sha256=arm['opening_png_sha256'],
             final_png_sha256=arm['final_png_sha256'], run_log_sha256=arm['run_log_sha256'],
+            census_sha256=arm['census_sha256'],
             gpu_draw_readbacks=arm['gpu_draw_readbacks'],
             printed_flag=arm['printed_flag'], printed_prerequisites=arm['printed_prerequisites'])
 
+    def fail_map(map_name, reason, **detail):
+        result['status'] = 'FAIL'
+        result['error'] = dict(map=map_name, reason=reason, **detail)
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(json.dumps(result, indent=1) + '\n')
+        note(dict(map=map_name, classification='fail', reason=reason, detail=detail))
+        raise AssertionError(result['error'])
+
+    incomplete_maps = []
     for map_name in args.maps:
         matched = None
         kept = []
@@ -499,20 +609,19 @@ def main():
                       off_sha256=canon(off['prerequisite']), on_sha256=canon(on['prerequisite']),
                       differing=prerequisite_diff(off['prerequisite'], on['prerequisite'])))
         if matched is None:
-            result['status'] = 'FAIL'
-            result['error'] = dict(map=map_name, reason='no matched renderer prerequisite', attempts=kept)
-            receipt_path.write_text(json.dumps(result, indent=1) + '\n')
-            raise AssertionError(result['error'])
+            fail_map(map_name, 'no matched renderer prerequisite', attempts=kept)
         off, on = matched
         repeat = None
-        unstable = frozenset()
-        image_reproducibility = None
+        stability = None
+        image_status = 'EXACT'
+        image_differences = []
         try:
             compare(map_name, off, on)
         except ImageMismatch as exc:
-            # A framebuffer difference is only accepted when a second launch of the
-            # same arm, at the same presentation inputs, reproduces it. This is a
-            # measured host nondeterminism, not a semantic exemption.
+            # An intermediate-image difference is never accepted from repeat noise. A
+            # fully validated same-arm repeat only records whether pixels are stable.
+            image_differences = list(exc.frames)
+            image_status = 'INCOMPLETE'
             for extra in range(args.max_attempts):
                 again = launch(map_name, False, args.max_attempts + extra)
                 if prerequisite_equal(again['prerequisite'], off['prerequisite']):
@@ -522,33 +631,29 @@ def main():
                           classification='image-repeat-mismatch',
                           differing=prerequisite_diff(again['prerequisite'], off['prerequisite'])))
             if repeat is None:
-                result['status'] = 'FAIL'
-                result['error'] = dict(map=map_name, reason='no matched same-arm repeat for image stability')
-                receipt_path.write_text(json.dumps(result, indent=1) + '\n')
-                raise AssertionError(result['error'])
-            unstable = frozenset(index for index, (left, right) in
-                                 enumerate(zip(off['images'], repeat['images'])) if left != right)
-            # A same-arm launch that differs anywhere proves intermediate framebuffer pixels
-            # are not a reproducible cross-run observable on this map. If the same arm is
-            # stable, an OFF/ON image difference is real and must fail.
-            note(dict(map=map_name, attempt=off['attempt'], classification='image-reproducibility',
-                      differing=exc.frames[:32], same_arm_unstable=sorted(unstable)[:32]))
-            if not unstable:
-                result['status'] = 'FAIL'
-                result['error'] = dict(map=map_name, reason='image difference with a stable same-arm control',
-                                       differing=exc.frames[:32])
-                receipt_path.write_text(json.dumps(result, indent=1) + '\n')
-                raise
-            image_reproducibility = dict(differing=exc.frames[:32], same_arm_unstable=sorted(unstable)[:32],
-                                         stable_pixels_gate=False,
-                                         note='same-arm runs differ on intermediate framebuffers; opening/final PNGs and all semantic records remain exact')
+                note(dict(map=map_name, attempt=off['attempt'], classification='image-stability-unavailable',
+                          differing=image_differences[:32]))
+                stability = dict(available=False, differing=image_differences[:32],
+                                 note='no matched same-arm launch; image qualification stays incomplete')
+            else:
+                try:
+                    repeat_differences = compare(map_name, off, repeat, images_equal=False)
+                except AssertionError as exc:
+                    note(dict(map=map_name, attempt=repeat['attempt'], classification='repeat-output-fail', error=str(exc)))
+                    fail_map(map_name, 'same-arm repeat failed semantic or mandatory evidence', error=str(exc))
+                stability = dict(available=True, directory=repeat['directory'], attempt=repeat['attempt'],
+                                 explicit=False, differing=repeat_differences[:32],
+                                 same_arm_stable=not repeat_differences, validated_against_off=True,
+                                 note='validated repeat evidence; a repeat never waives a candidate image difference')
+                note(dict(map=map_name, attempt=off['attempt'], classification='image-stability-observation',
+                          differing=image_differences[:32], same_arm_differing=repeat_differences[:32],
+                          same_arm_stable=not repeat_differences))
+                if not repeat_differences:
+                    fail_map(map_name, 'image difference with a stable same-arm control',
+                             differing=image_differences[:32])
         except AssertionError as exc:
             note(dict(map=map_name, attempt=off['attempt'], classification='output-fail', error=str(exc)))
-            result['status'] = 'FAIL'
-            result['error'] = dict(map=map_name, reason='output mismatch after matched prerequisite', error=str(exc))
-            receipt_path.parent.mkdir(parents=True, exist_ok=True)
-            receipt_path.write_text(json.dumps(result, indent=1) + '\n')
-            raise
+            fail_map(map_name, 'output mismatch after matched prerequisite', error=str(exc))
         if map_name in repeat_off:
             if repeat is None:
                 for extra in range(args.max_attempts):
@@ -559,22 +664,28 @@ def main():
                     note(dict(map=map_name, attempt=args.max_attempts + extra, classification='repeat-off-mismatch',
                               differing=prerequisite_diff(again['prerequisite'], off['prerequisite'])))
                 if repeat is None:
-                    result['status'] = 'FAIL'
-                    result['error'] = dict(map=map_name, reason='repeated OFF never shared the matched prerequisite')
-                    receipt_path.write_text(json.dumps(result, indent=1) + '\n')
-                    raise AssertionError(result['error'])
-            # The repeat is the stability control, so image equality is not asserted here;
-            # semantic fields, uniforms and counters still are.
-            compare(map_name, off, repeat, allow_unstable=frozenset(range(args.frames)))
+                    fail_map(map_name, 'repeated OFF never shared the matched prerequisite')
+            try:
+                repeat_differences = compare(map_name, off, repeat, images_equal=False)
+            except AssertionError as exc:
+                fail_map(map_name, 'repeated OFF failed semantic or mandatory evidence', error=str(exc))
+            if stability is None:
+                stability = dict(available=True, directory=repeat['directory'], attempt=repeat['attempt'],
+                                 explicit=True, differing=repeat_differences[:32],
+                                 same_arm_stable=not repeat_differences, validated_against_off=True,
+                                 note='validated repeated OFF evidence; intermediate image equality is not asserted')
             note(dict(map=map_name, attempt=repeat['attempt'], classification='repeat-off-matched'))
-        witness = {}
-        for name in args.witness:
-            pair = [off['counters'].get(name, 0), on['counters'].get(name, 0)]
-            witness[name] = pair
-            assert pair[0] == 0, (map_name, 'OFF witness', name, pair[0])
-            if map_name in required:
-                assert pair[1] > 0, (map_name, 'vacuous ON witness', name, pair[1])
-            positive[name] += pair[1]
+        try:
+            witness = {}
+            for name in args.witness:
+                pair = [off['counters'].get(name, 0), on['counters'].get(name, 0)]
+                witness[name] = pair
+                assert pair[0] == 0, (map_name, 'OFF witness', name, pair[0])
+                if map_name in required:
+                    assert pair[1] > 0, (map_name, 'vacuous ON witness', name, pair[1])
+                positive[name] += pair[1]
+        except AssertionError as exc:
+            fail_map(map_name, 'witness mismatch', error=str(exc))
         prefixed = {k: [off['counters'].get(k, 0), on['counters'].get(k, 0)]
                     for k in sorted(set(off['counters']) | set(on['counters'])) if k.startswith(args.counter_prefix)}
         row = dict(
@@ -586,31 +697,50 @@ def main():
             packet_digest=[canon([packets(frame) for frame in arm['frames']]) for arm in (off, on)],
             image_digest=[canon(arm['images']) for arm in (off, on)], image_witnesses=len(off['images']),
             world_sha256=[canon(off['worlds']), canon(on['worlds'])],
-            image_reproducibility=image_reproducibility,
+            status='PASS' if image_status == 'EXACT' else 'INCOMPLETE',
+            semantic_status='PASS', image_status=image_status,
+            image_differences=image_differences[:32], stability_observation=stability,
             final_png_sha256=[off['final_png_sha256'], on['final_png_sha256']],
             opening_png_sha256=[off['opening_png_sha256'], on['opening_png_sha256']],
+            census_sha256=[off['census_sha256'], on['census_sha256']],
             elapsed_off_on={name: [off['counters'].get(name, 0), on['counters'].get(name, 0)] for name in sorted(ELAPSED_COUNTERS)},
             run_log_sha256=[off['run_log_sha256'], on['run_log_sha256']],
             gpu_draw_readbacks=[off['gpu_draw_readbacks'], on['gpu_draw_readbacks']],
             census_serial_worker_vertices=[[off['serial_vertices'], off['worker_vertices']], [on['serial_vertices'], on['worker_vertices']]],
             printed=[dict(flag=arm['printed_flag'], prerequisites=arm['printed_prerequisites']) for arm in (off, on)],
-            arms=[public_arm(off), public_arm(on)],
-            status='PASS')
+            arms=[public_arm(off), public_arm(on)])
         if repeat is not None:
             row['repeat_off'] = public_arm(repeat)
             row['repeat_off']['frame_digest'] = canon([{k: frame[k] for k in FRAME_KEYS} for frame in repeat['frames']])
             row['repeat_off']['packet_digest'] = canon([packets(frame) for frame in repeat['frames']])
+            row['repeat_off']['census_vertices'] = [repeat['serial_vertices'], repeat['worker_vertices']]
         result['maps'].append(row)
+        if image_status != 'EXACT':
+            incomplete_maps.append(map_name)
         receipt_path.write_text(json.dumps(result, indent=1) + '\n')
-        print('PASS', args.label, map_name, 'witness', json.dumps(witness), flush=True)
+        if image_status == 'EXACT':
+            print('PASS', args.label, map_name, 'witness', json.dumps(witness), flush=True)
+        else:
+            print('INCOMPLETE', args.label, map_name, 'semantic PASS', 'differing', image_differences[:16],
+                  'witness', json.dumps(witness), flush=True)
     assert all(v > 0 for v in positive.values()), ('vacuous oracle', positive)
     after = source_tree(root)
     assert after['tree'] == tree['tree'], ('source changed during oracle', tree['tree'], after['tree'])
     assert sha(args.binary.read_bytes()) == binary_sha
     assert sha(Path(__file__).read_bytes()) == oracle_sha
     result['witness_on_total'] = positive
-    result['status'] = 'PASS'
     result['source_after'] = after
+    result['semantic_status'] = 'PASS'
+    if incomplete_maps:
+        result['status'] = 'INCOMPLETE'
+        result['image_status'] = 'INCOMPLETE'
+        result['incomplete_maps'] = incomplete_maps
+        receipt_path.write_text(json.dumps(result, indent=1) + '\n')
+        print('INCOMPLETE', args.label, 'image qualification', json.dumps(incomplete_maps),
+              'semantic PASS; witness totals', json.dumps(positive), flush=True)
+        raise SystemExit(INCOMPLETE_EXIT)
+    result['status'] = 'PASS'
+    result['image_status'] = 'EXACT'
     receipt_path.write_text(json.dumps(result, indent=1) + '\n')
     print('PASS', args.label, 'witness totals', json.dumps(positive), flush=True)
 
