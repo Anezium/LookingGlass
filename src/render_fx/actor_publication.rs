@@ -15,7 +15,7 @@ const SURFACES:usize=2048;
 const VERTICES:usize=65536;
 const INDICES:usize=262144;
 #[cfg(any(test,feature="actor_diagnostics",all(feature="sim_maps_probe",not(target_os="vita"))))]
-const MEMORY_ROWS:usize=30;
+const MEMORY_ROWS:usize=36;
 #[derive(Default)]
 struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], alpha:[Option<bool>;2], epoch:[u64;2], instance:[Option<u64>;2] }
 #[derive(Default)]
@@ -77,7 +77,10 @@ impl State {
     /// outside the bank), or evicted (no longer bank-owned, kept alive by an
     /// external holder). Bank-owned capacity is what VERTICES/INDICES bound; the
     /// evicted, container, map and header rows are outside those caps. HashMap
-    /// rows are capacity*entry lower bounds without control bytes. Not Vita ABI.
+    /// rows are capacity*entry lower bounds without control bytes. The external
+    /// rows are aliases: FRAME groups and CPU handles reference allocations that
+    /// are already listed above, so they name holders without adding bytes to a
+    /// class. Not Vita ABI.
     #[cfg(any(test,feature="actor_diagnostics",all(feature="sim_maps_probe",not(target_os="vita"))))]
     fn memory(&mut self)->[(&'static str,u64);MEMORY_ROWS] {
         use std::mem::size_of;
@@ -100,6 +103,28 @@ impl State {
         let geometries=class.iter().map(|c|c[0]).sum::<usize>();
         let nested=self.held.iter().map(|g|g.passes.capacity()).sum::<usize>();
         let cpu=self.banks.iter().flat_map(|b|b.cpu.iter().flatten()).count();
+        // External holders: FRAME groups and CPU handles alias allocations listed
+        // above. Count them by unique address so the rows name holders, not bytes.
+        let mut bank_ptrs=std::collections::HashSet::new();
+        for g in self.banks.iter().flat_map(|b|b.slots.iter().flatten()) {bank_ptrs.insert(Rc::as_ptr(g) as usize);}
+        for g in self.evicted.iter().filter_map(std::rc::Weak::upgrade) {bank_ptrs.insert(Rc::as_ptr(&g) as usize);}
+        let (frame_groups,frame_refs,frame_bytes,frame_outside)=FRAME.with(|f| {
+            let f=f.borrow();
+            let mut refs=std::collections::HashMap::<usize,usize>::new();
+            for group in &f.groups {
+                for pass in &group.passes {
+                    #[cfg(feature="vita_renderer")]
+                    if let Some(g)=&pass.geometry {refs.insert(Rc::as_ptr(g) as usize,bytes(g));}
+                    #[cfg(not(feature="vita_renderer"))]
+                    let _=pass;
+                }
+            }
+            let outside=refs.keys().filter(|p|!bank_ptrs.contains(p)).count();
+            (f.groups.len(),refs.len(),refs.values().sum::<usize>(),outside)
+        });
+        let mut cpu_ptrs=std::collections::HashSet::new();
+        for c in self.banks.iter().flat_map(|b|b.cpu.iter().flatten()) {cpu_ptrs.insert(Arc::as_ptr(c) as usize);}
+        let cpu_bytes=cpu_ptrs.len()*(2*size_of::<usize>()+size_of::<SkinSurface>());
         [("actor_publication_mem_owned_bytes",(self.vertex_capacity*size_of::<Vertex>()+self.index_capacity*2) as u64),
          ("actor_publication_mem_banks",self.lookup.len() as u64),
          ("actor_publication_mem_bank_table_bytes",(self.banks.capacity()*size_of::<Bank>()) as u64),
@@ -130,7 +155,13 @@ impl State {
          ("actor_publication_mem_held_pass_bytes",(nested*size_of::<Pass>()) as u64),
          ("actor_publication_mem_evicted_weak_capacity",self.evicted.capacity() as u64),
          ("actor_publication_mem_evicted_weak_bytes",(self.evicted.capacity()*size_of::<std::rc::Weak<prepared::Geometry>>()) as u64),
-         ("actor_publication_mem_cpu_handles",cpu as u64)]
+         ("actor_publication_mem_cpu_handles",cpu as u64),
+         ("actor_publication_mem_cpu_arc_allocations",cpu_ptrs.len() as u64),
+         ("actor_publication_mem_cpu_arc_referenced_bytes",cpu_bytes as u64),
+         ("actor_publication_mem_external_frame_groups",frame_groups as u64),
+         ("actor_publication_mem_external_frame_geometry_refs",frame_refs as u64),
+         ("actor_publication_mem_external_frame_geometry_bytes",frame_bytes as u64),
+         ("actor_publication_mem_external_frame_not_bank_owned",frame_outside as u64)]
     }
     fn reserve_key(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:bool,key:Key)->Option<(usize,usize,usize)> {
         let id=if let Some(&id)=self.lookup.get(&key) {id} else {
@@ -888,6 +919,22 @@ mod tests {
         let r=rows(&mut state);show("warm-slot-b",Some(calls),&r);
         assert!(calls>0,"the alternate slot is cold until used");
         assert_eq!((r["actor_publication_mem_slots_current"],r["actor_publication_mem_slots_held"]),(1,1));
+        // Both slots hold a handle to the same CPU surface allocation: two handles,
+        // one allocation, counted once in the referenced-bytes row.
+        assert_eq!((r["actor_publication_mem_cpu_handles"],r["actor_publication_mem_cpu_arc_allocations"]),(2,1),
+            "CPU handles name one shared surface allocation");
+        assert_eq!(r["actor_publication_mem_cpu_arc_referenced_bytes"],(2*size_of::<usize>()+size_of::<SkinSurface>()) as u64);
+        assert_eq!((r["actor_publication_mem_external_frame_groups"],r["actor_publication_mem_external_frame_geometry_refs"]),(0,0),
+            "no FRAME group is holding an unpublished protocol here");
+        // A FRAME group that references a bank slot names the same allocation: the
+        // external rows grow, the unique class bytes do not.
+        FRAME.with(|f| f.borrow_mut().groups.push(Group {passes:vec![Pass {geometry:Some(holder.clone()),..pass()}],transparent:false}));
+        let r=rows(&mut state);show("frame-holder",None,&r);
+        assert_eq!((r["actor_publication_mem_external_frame_groups"],r["actor_publication_mem_external_frame_geometry_refs"],
+            r["actor_publication_mem_external_frame_not_bank_owned"]),(1,1,0),"a FRAME holder aliases a bank-owned allocation");
+        assert_eq!(r["actor_publication_mem_external_frame_geometry_bytes"],
+            (holder.vertices.capacity()*size_of::<Vertex>()+holder.indices.capacity()*2) as u64);
+        FRAME.with(|f| f.borrow_mut().groups.clear());
         drop(holder);let holder=geometry(&state,b);
         // Both slots warm: an overlapping frame allocates nothing.
         state.next_frame();
