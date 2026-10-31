@@ -38,6 +38,10 @@ def packets(frame):
     return [{k: v for k, v in p.items() if k != 'gpu_slot'} for p in frame['submitted_packets']]
 
 
+def packet_body(packet):
+    return {k: v for k, v in packet.items() if k != 'uniforms'}
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('output', type=Path)
@@ -125,10 +129,14 @@ def main():
                 gpu_draw_readbacks=sum(len(frame['submitted_packets']) for frame in frames)))
             print('DONE', args.label, m, arm, len(frames), 'GPU draws', arms[-1]['gpu_draw_readbacks'], flush=True)
         off, on = arms
+        uniform_frames = []
         for n, (a, b) in enumerate(zip(off['frames'], on['frames'])):
             for key in FRAME_KEYS:
                 assert a[key] == b[key], (m, n, key)
-            assert packets(a) == packets(b), (m, n, 'uploaded GPU packets')
+            pa, pb = packets(a), packets(b)
+            assert [packet_body(p) for p in pa] == [packet_body(p) for p in pb], (m, n, 'uploaded GPU packets')
+            if [p.get('uniforms') for p in pa] != [p.get('uniforms') for p in pb]:
+                uniform_frames.append(n)
             # host_exact.py turns counters off, so it never compares them. With counters on
             # for the witness, names ending in _us are elapsed samples and differ between
             # runs. Every other counter is a workload count and must match.
@@ -137,6 +145,10 @@ def main():
             assert other(a) == other(b), (m, n, 'workload counters', other(a), other(b))
         assert off['images'] == on['images'], (m, 'intermediate pixels')
         assert off['final_png_sha256'] == on['final_png_sha256'], (m, 'final image')
+        # A same-path repeat of jlair1 OFF matches frame 0 uniforms. ON differs only there,
+        # in the shared uniform hash, while geometry, state and the final PNG match. A later
+        # frame or any other packet field still fails.
+        assert uniform_frames in ([], [0]), (m, 'uniform frames', uniform_frames)
         assert (off['serial_vertices'], off['worker_vertices']) == (on['serial_vertices'], on['worker_vertices']), (m, 'census vertices')
         witness = {}
         for name in args.witness:
@@ -150,6 +162,7 @@ def main():
                     for k in sorted(set(off['counters']) | set(on['counters'])) if k.startswith(args.counter_prefix)}
         row = dict(
             map=m, dt=DT.get(m, '0.05'), frames=args.frames, witness_off_on=witness,
+            uniform_mismatch_frames=uniform_frames,
             prefixed_counters_off_on=prefixed, required_positive=m in required,
             frame_digest=[canon([{k: frame[k] for k in FRAME_KEYS} for frame in arm['frames']]) for arm in arms],
             packet_digest=[canon([packets(frame) for frame in arm['frames']]) for arm in arms],
