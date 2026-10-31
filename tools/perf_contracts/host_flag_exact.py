@@ -129,7 +129,11 @@ def main():
             for key in FRAME_KEYS:
                 assert a[key] == b[key], (m, n, key)
             assert packets(a) == packets(b), (m, n, 'uploaded GPU packets')
-            other = lambda frame: {k: v for k, v in frame['counters'].items() if not k.startswith(args.counter_prefix)}
+            # host_exact.py turns counters off, so it never compares them. With counters on
+            # for the witness, names ending in _us are elapsed samples and differ between
+            # runs. Every other counter is a workload count and must match.
+            other = lambda frame: {k: v for k, v in frame['counters'].items()
+                                   if not k.startswith(args.counter_prefix) and not k.endswith('_us')}
             assert other(a) == other(b), (m, n, 'workload counters', other(a), other(b))
         assert off['images'] == on['images'], (m, 'intermediate pixels')
         assert off['final_png_sha256'] == on['final_png_sha256'], (m, 'final image')
