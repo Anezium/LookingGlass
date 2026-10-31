@@ -2,8 +2,10 @@
 """Host ON/OFF oracle for one runtime flag on the diagnostic twin.
 
 tools/skin_exact_r9/host_exact.py stays unchanged. This oracle toggles exactly one
-named flag. Each arm writes dict(base, **prerequisites, <flag>=arm) plus
-phase_census=true. The environment is rebuilt without any LOOKING_GLASS_* variable,
+named flag. Each arm writes dict(base, **prerequisites, <flag>=arm). phase_census is not forced
+on: the diagnostic census exporter rejects this host window with a closure
+failure, so a census file is compared only when both arms actually write one.
+The environment is rebuilt without any LOOKING_GLASS_* variable,
 then only the probe variables below (and explicit --probe-env LOOKING_GLASS_* values)
 are set. LOOKING_GLASS_TEST_* switches never reach this binary.
 
@@ -162,7 +164,7 @@ def main(argv):
             directory = out / 'host' / args.label / f'{name}-{args.flag}-{tag}'
             (directory / 'private').mkdir(parents=True, exist_ok=False)
             flag = {} if arm is None else {args.flag: arm}
-            config = dict(base, **prerequisites, **flag, phase_census=True)
+            config = dict(base, **prerequisites, **flag)
             (directory / 'private/vita_renderer.json').write_text(json.dumps(config))
             env = {k: v for k, v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
             env.update(LOOKING_GLASS_SIM_MAPS_PROBE='1', LOOKING_GLASS_SIM_MAPS_DT=DT.get(name, '0.05'),
@@ -184,7 +186,8 @@ def main(argv):
                 assert printed[args.flag] is arm, (name, arm, 'printed flag')
             for key, value in prerequisites.items():
                 assert printed[key] == value, (name, arm, 'prerequisite', key, printed[key], value)
-            assert printed['phase_census'] is True, (name, arm)
+            if 'phase_census' in prerequisites:
+                assert printed['phase_census'] is prerequisites['phase_census'], (name, arm)
             want_cadence = 'off' if not printed.get('log_frame_time_every') else str(printed['log_frame_time_every'])
             assert cadence == want_cadence, (name, arm, cadence, want_cadence)
             single = [line for line in lines if line.startswith('[lg/vita-renderer] actor_single_prepare active=')]
@@ -196,11 +199,18 @@ def main(argv):
             assert len(frames) == args.frames, (name, arm, len(frames))
             assert all(packet['geometry'] == packet['gpu_geometry'] for frame in frames for packet in frame['submitted_packets']), (name, arm, 'gpu readback')
             census_path = directory / f'{name}-census-{args.frames}.json'
-            census = json.loads(census_path.read_text())
-            assert census.get('schema') == 6, (name, arm, census.get('schema'))
-            if 'serial_fallbacks' in census:
-                assert census['serial_fallbacks'] == 0, (name, arm)
-            measured = census['rows'][60:]
+            census = json.loads(census_path.read_text()) if census_path.is_file() and census_path.stat().st_size else None
+            if census is not None:
+                assert census.get('schema') == 6, (name, arm, census.get('schema'))
+                if 'serial_fallbacks' in census:
+                    assert census['serial_fallbacks'] == 0, (name, arm)
+                measured = census['rows'][60:]
+                serial_vertices = sum(actor['serial_vertices'] for row in measured for actor in row['actors'])
+                worker_vertices = sum(actor['worker_vertices'] for row in measured for actor in row['actors'])
+                census_body = strip_census(census)
+            else:
+                serial_vertices = worker_vertices = None
+                census_body = None
             counters = {}
             for frame in frames:
                 for key, value in frame['counters'].items():
@@ -208,9 +218,8 @@ def main(argv):
             png = (directory / 'final.png').read_bytes()
             assert len(png) > 0, (name, arm, 'empty final image')
             arms.append(dict(
-                arm=arm, frames=frames, images=images, counters=counters, census=strip_census(census),
-                serial_vertices=sum(actor['serial_vertices'] for row in measured for actor in row['actors']),
-                worker_vertices=sum(actor['worker_vertices'] for row in measured for actor in row['actors']),
+                arm=arm, frames=frames, images=images, counters=counters, census=census_body,
+                serial_vertices=serial_vertices, worker_vertices=worker_vertices,
                 final_png_bytes=len(png), final_png_sha256=sha(png),
                 run_log_sha256=sha((directory / 'run.log').read_bytes()),
                 printed_flag=printed.get(args.flag),
