@@ -4,7 +4,9 @@ static CENSUS:AtomicBool=AtomicBool::new(false);
 pub(crate) fn census_active()->bool {CENSUS.load(Relaxed)}
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Config {enabled:bool,map:String,allocation:bool,census:bool,tag:String}
+struct Config {enabled:bool,map:String,allocation:bool,census:bool,tag:String,
+    // Keep the physical pad for a human-played survey. Omitted keeps it off, as before.
+    #[serde(default)] physical_input:bool}
 pub(crate) struct Survey {
     config:Config,started:Instant,first:bool,ready:bool,armed:bool,pending_gameplay:bool,
     all_gameplay:bool,frames:usize,rows:Vec<(u64,u64)>,previous:Option<Instant>,arm_time:Option<Instant>,
@@ -25,7 +27,8 @@ impl Survey {
         if c.allocation {crate::allocation_census::enable();}
         if c.census {crate::phase_census::initialize_survey();}
         options.map=c.map.clone();options.entry=None;options.direct_map=true;options.new_game=false;options.load=None;
-        println!("[lg/r13b-survey] entry map={} entry=first tag={} input=disabled saves=disabled",c.map,c.tag);
+        println!("[lg/r13b-survey] entry map={} entry=first tag={} input={} saves=disabled",c.map,c.tag,
+            if c.physical_input {"enabled"} else {"disabled"});
         let capacity=if c.allocation {8192}else{180};
         Ok(Some(Box::new(Self{config:c,started:Instant::now(),first:false,ready:false,armed:false,
             pending_gameplay:false,all_gameplay:true,frames:0,rows:Vec::with_capacity(capacity),previous:None,
@@ -41,6 +44,8 @@ impl Survey {
         }
     }
     pub(crate) fn take_snapshot(&mut self)->bool {std::mem::take(&mut self.snapshot)}
+    #[cfg(target_os="vita")]
+    pub(crate) fn physical_input(&self)->bool {self.config.physical_input}
     #[cfg(target_os="vita")]
     pub(crate) fn presented(&mut self,map:&str,alive:bool,arm:bool)->anyhow::Result<()> {
         if !self.presented_at(map,alive,arm,Instant::now())? {return Ok(());}
@@ -96,7 +101,7 @@ impl Survey {
 #[cfg(test)] mod tests {use super::*;
     fn fixture(census:bool)->Box<Survey> {
         Box::new(Survey{config:Config{enabled:true,map:"fixture".into(),allocation:false,census,
-            tag:if census {"on"} else {"off"}.into()},started:Instant::now(),first:false,ready:false,armed:false,
+            tag:if census {"on"} else {"off"}.into(),physical_input:false},started:Instant::now(),first:false,ready:false,armed:false,
             pending_gameplay:false,all_gameplay:true,frames:0,rows:Vec::with_capacity(180),previous:None,
             arm_time:None,snapshot:false,done:false})
     }
@@ -153,8 +158,16 @@ impl Survey {
     #[test]fn full_mode_survey_retains_excluded_gameplay_attempts(){full_mode_window(true,true);}
     #[cfg(feature="frame_total_only")]
     #[test]fn full_mode_off_control_has_exact_csv_without_census(){full_mode_window(false,false);}
+    #[test]fn physical_input_is_opt_in_and_strict(){
+        let base=r#""enabled":true,"map":"potears2","allocation":false,"census":true,"tag":"on""#;
+        let c:Config=serde_json::from_str(&format!("{{{base}}}")).unwrap();assert!(!c.physical_input);
+        let c:Config=serde_json::from_str(&format!(r#"{{{base},"physical_input":false}}"#)).unwrap();assert!(!c.physical_input);
+        let c:Config=serde_json::from_str(&format!(r#"{{{base},"physical_input":true}}"#)).unwrap();assert!(c.physical_input);
+        for bad in [r#""physical_input":1"#,r#""physical_input":"on""#,r#""physical_input":null"#,r#""pad":true"#] {
+            assert!(serde_json::from_str::<Config>(&format!("{{{base},{bad}}}")).is_err(),"{bad}");}
+    }
     #[test]fn rejects_path_injection_and_simultaneous_observers(){
         for (map,a,c,ok) in [("potears1",true,false,true),("../x",false,false,false),("hatter1",true,true,false)] {
-            assert_eq!(validate(&Config{enabled:true,map:map.into(),allocation:a,census:c,tag:"memory".into()}).is_ok(),ok);}
+            assert_eq!(validate(&Config{enabled:true,map:map.into(),allocation:a,census:c,tag:"memory".into(),physical_input:false}).is_ok(),ok);}
     }
 }

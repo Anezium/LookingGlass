@@ -681,8 +681,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let physical_input = !crate::sim_maps::probe::enabled();
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let physical_input = true;
+    // A survey keeps the pad off unless its config sets physical_input (human-played census).
     #[cfg(target_os="vita")]
-    let physical_input = physical_input && r13_survey.is_none();
+    let physical_input = physical_input && r13_survey.as_ref().is_none_or(|s|s.physical_input());
+    // SELECT arms a survey, so it must not also open the chapter menu in that frame.
+    #[cfg(target_os="vita")]
+    let survey_owns_select = r13_survey.is_some();
+    #[cfg(not(target_os="vita"))]
+    let survey_owns_select = false;
     let startup=std::time::Instant::now();
     eprintln!("[lg/startup] viewer begin; UI begin");
     // Release cursor/audio before Miniquad destroys its native request queue.
@@ -1952,7 +1958,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 menu = false;
             }
         }
-        if pressed(KeyCode::Tab) {
+        if pressed(KeyCode::Tab) && !survey_owns_select {
             menu = !menu;
             inventory_menu = false;
             help_until = 0.0;
