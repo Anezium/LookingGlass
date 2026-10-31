@@ -149,7 +149,7 @@ pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indi
     let gpu_geometry=format!("{:x}",mesh_hash(gpu_vertices,gpu_indices).finalize());
     assert_eq!(geometry,gpu_geometry,"stale GPU geometry at retained slot {gpu_slot}");
     let mut h=Sha256::new();for f in uniforms {h.update(f.to_bits().to_le_bytes());}
-    let uniforms=format!("{:x}",h.finalize());
+    let uniform_hash=format!("{:x}",h.finalize());
     let texture=texture.map(|t|TEXTURES.with(|cache| {let mut cache=cache.borrow_mut();
         cache.entry(format!("{:?}",t.raw_miniquad_id())).or_insert_with(|| {
             let image=t.get_texture_data();let mut h=Sha256::new();
@@ -157,7 +157,7 @@ pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indi
             format!("{:x}",h.finalize())
         }).clone()
     }));
-    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"geometry":geometry,"gpu_geometry":gpu_geometry,"gpu_slot":gpu_slot,"vertices":vertices.len(),"indices":indices.len(),"uniforms":uniforms,"policy":policy,"texture":texture})));
+    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"geometry":geometry,"gpu_geometry":gpu_geometry,"gpu_slot":gpu_slot,"vertices":vertices.len(),"indices":indices.len(),"uniforms":uniform_hash,"policy":policy,"texture":texture})));
     // The packet hash stays the comparison key. Bits are a sidecar so a field diff can name
     // the divergent uniform without changing the hash or the SIM_MAPS_FRAME line.
     static BITS: OnceLock<bool> = OnceLock::new();
