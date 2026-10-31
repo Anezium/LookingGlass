@@ -37,6 +37,15 @@ TIMING_COUNTERS = (
     'skin_worker_service_us',
     'vita_fx_upload_cpu_us',
     'vita_fx_upload_gl_us',
+    # Full-profile host builds only (light_profile::fx_add without frame_total_only).
+    # Each one is an elapsed microsecond sum; vita_fx_upload_phase_bytes stays compared.
+    'vita_fx_finish_prepare_us',
+    'vita_fx_finish_recycle_us',
+    'vita_fx_merge_us',
+    'vita_fx_producer_us',
+    'vita_fx_upload_cpu_phase_us',
+    'vita_fx_upload_gl_phase_us',
+    'vita_fx_worker_wait_us',
 )
 TIMING_FRAME_FIELDS = ('cpu_ms', 'spans_ms')
 CENSUS_ELAPSED = (
@@ -111,7 +120,11 @@ def self_test():
     assert set(TIMING_COUNTERS) == {
         'fx_worker_max_service_us', 'fx_worker_wait_us', 'skin_collect_wait_us', 'skin_gather_us',
         'skin_worker_service_us', 'vita_fx_upload_cpu_us', 'vita_fx_upload_gl_us',
+        'vita_fx_finish_prepare_us', 'vita_fx_finish_recycle_us', 'vita_fx_merge_us', 'vita_fx_producer_us',
+        'vita_fx_upload_cpu_phase_us', 'vita_fx_upload_gl_phase_us', 'vita_fx_worker_wait_us',
     }
+    assert semantic_counters({'vita_fx_upload_phase_bytes': 5, 'vita_fx_merge_us': 3}, 'tls_fast_') == {
+        'vita_fx_upload_phase_bytes': 5}
     row = strip_census({'schema': 6, 'rows': [{'calls': [1], 'inclusive_ns': [9], 'actors': [{'serial_vertices': 3}]}]})
     assert row['rows'] == [{'calls': [1], 'actors': [{'serial_vertices': 3}]}]
     assert 'inclusive_ns' not in row['rows'][0]
