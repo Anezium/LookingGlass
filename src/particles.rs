@@ -553,13 +553,15 @@ pub(crate) mod registration_witness {
     #[cfg(test)]
     pub(crate) fn take() -> [usize; 3] { COUNTS.with(|c| c.replace([0; 3])) }
 }
-#[cfg(test)]
+#[cfg(all(test, feature="vita_renderer"))]
 thread_local! {
     static REGISTRATION_PRODUCER_REUSE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 /// Producer-reuse prerequisite of a registration walk. Tests can force it off
 /// despite `Config`'s `OnceLock`; the override restores on unwind. Production
-/// reads the config field and nothing else.
+/// reads the config field and nothing else. `vita_renderer` is not a default
+/// feature, so a normal build never names that module.
+#[cfg(feature="vita_renderer")]
 fn registration_producer_reuse() -> bool {
     #[cfg(test)]
     if let Some(on) = REGISTRATION_PRODUCER_REUSE.with(|c| c.get()) {
@@ -567,7 +569,7 @@ fn registration_producer_reuse() -> bool {
     }
     crate::render::vita_renderer::config().particle_producer_reuse
 }
-#[cfg(test)]
+#[cfg(all(test, feature="vita_renderer"))]
 fn with_registration_producer_reuse<T>(on: bool, run: impl FnOnce() -> T) -> T {
     struct Reset(Option<bool>);
     impl Drop for Reset {
