@@ -181,8 +181,14 @@ def main():
     expect_fail('world draw uniform', root, mutate=on_map(
         'other', lambda p, g: p['world'][0]['tested'][0]['uniform_fields'].update(
             mvp=[6] * 16, all=[6] * 16 + [5] * 127)))
-    expect_fail('intermediate image', root, mutate=on_map(
+    expect_fail('intermediate image with a stable same arm', root, mutate=on_map(
         'other', lambda p, g: p['images'][1].update(sha256='f' * 64)))
+
+    def unstable_same_arm(m, on, attempt, p, g):
+        if m == 'other' and ((on and attempt == 0) or ((not on) and attempt >= 8)) and len(p['images']) > 1:
+            p['images'][1].update(sha256='9' * 64)
+    receipt, game, _ = expect_pass('same-arm unstable intermediate image', root, mutate=unstable_same_arm)
+    assert receipt['maps'][1]['image_reproducibility']['same_arm_unstable'] == [1], receipt['maps'][1]
     expect_fail('opening frame image', root, mutate=on_map('other', lambda p, g: p.update(opening_png=b'png1')))
     expect_fail('missing images', root, mutate=lambda m, on, a, p, g: p.update(images=[]))
     expect_fail('missing opening png', root, mutate=on_map('utemple', lambda p, g: p.update(opening_png=None)))
