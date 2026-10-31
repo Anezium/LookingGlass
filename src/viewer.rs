@@ -4701,10 +4701,51 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     Ok(())
 }
 
+/// Alice, drawn three times per frame for a full census window.
+/// Host render-check only. Puppet loads stay on the serial puppet reason, and the
+/// map entries do not repeat an eligible surface, so this is the publication witness.
+#[cfg(all(feature="vita_renderer", feature="sim_maps_probe", not(target_os="vita")))]
+async fn publication_occurrence_fixture(assets: &mut Assets, options: &Options) -> Result<()> {
+    let mut active = enter_level(assets, "gvillage", None, None, options, true)?;
+    let mut alice = Character::load(assets)?;
+    alice.reset(&Player::new(Vec3::ZERO), 0.);
+    crate::character::skinning::overlap::startup(2, false);
+    for frame in 0..180 {
+        crate::phase_census::begin_configured();
+        crate::sim_maps::probe::begin();
+        let view = Camera3D { position: vec3(150., -190., 85.), target: Vec3::Z * 38., up: Vec3::Z,
+            fovy: 75_f32.to_radians(), z_near: 2., z_far: 30000., ..Default::default() };
+        clear_background(BLACK);
+        set_camera(&view);
+        active.scene.begin_fx_view(&view, frame as f32 * 0.05, false, true);
+        let mut skin = crate::character::skinning::overlap::Frame::begin();
+        for n in 0..3 {
+            alice.draw_ghost(vec3(n as f32 * 40. - 40., 0., 0.), false, false);
+        }
+        skin.dispatch();
+        skin.collect();
+        skin.assert_consumed();
+        drop(skin);
+        active.scene.finish_fx(true);
+        set_default_camera();
+        if frame == 179 { save_capture(std::path::Path::new("final.png"))?; }
+        crate::sim_maps::probe::end(frame as u64, "occurrence-fixture", true, &frame);
+        crate::phase_census::accept(true, frame >= 60);
+        next_frame().await;
+    }
+    crate::phase_census::host_finish("occurrence-fixture")?;
+    println!("PASS publication occurrence fixture: three draws of one Alice surface across 180 frames");
+    Ok(())
+}
+
 /// Native fixed-state integration: the real actor graph, preserved effects, world
 /// ordering, both worker counts, frozen simulation and clean map replacement.
 #[cfg(feature="vita_renderer")]
 pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -> Result<()> {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if std::env::var_os("LOOKING_GLASS_PUBLICATION_OCCURRENCE_FIXTURE").is_some() {
+        return publication_occurrence_fixture(assets, options).await;
+    }
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     if std::env::var_os("LOOKING_GLASS_SKIN_EXACT_FIXTURES").is_some() {
         return crate::npc::skin_exact_check::check(assets,options).await;

@@ -96,6 +96,9 @@ pub struct Config {
     pub actor_layer_reuse: bool,
     /// Prepare actor packets once using bounded owned publication banks.
     pub actor_single_prepare: bool,
+    /// Give each repeated draw of one actor surface in a frame its own publication
+    /// bank, up to four per frame. Default off pending console acceptance.
+    pub actor_publication_occurrences: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -276,6 +279,7 @@ impl Default for Config {
             render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
+            actor_publication_occurrences: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -2222,6 +2226,25 @@ mod tests {
             assert_eq!(serde_json::to_value(&c).unwrap()["sim_trigger_facts_reuse"], enabled);
         }
         for json in [r#"{"sim_trigger_facts_reuse":1}"#, r#"{"sim_trigger_facts_reuse":"on"}"#, r#"{"sim_trigger_facts_reuse":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+    }
+    #[test]
+    fn publication_occurrences_default_off_require_a_boolean_and_are_printed() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.actor_publication_occurrences);
+        }
+        for enabled in [false, true] {
+            let (c, rejected) = parse_runtime_config(serde_json::json!({"actor_publication_occurrences": enabled}).to_string().as_bytes()).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap(); assert_eq!(c.actor_publication_occurrences, enabled);
+            // Prerequisites keep their own defaults; the occurrence switch never activates single preparation.
+            assert!(c.actor_single_prepare_active());
+            let [config, _] = config_log_lines(&c);
+            let printed: serde_json::Value = serde_json::from_str(config.split_once("[lg/vita-renderer] config ").unwrap().1).unwrap();
+            assert_eq!(printed["actor_publication_occurrences"], enabled);
+        }
+        for json in [r#"{"actor_publication_occurrences":1}"#, r#"{"actor_publication_occurrences":"on"}"#, r#"{"actor_publication_occurrences":null}"#] {
             assert!(serde_json::from_str::<Config>(json).is_err());
         }
     }

@@ -130,6 +130,25 @@ pub fn record_skin(slot:usize,vertices:&[macroquad::prelude::Vertex],indices:&[u
     let hash=format!("{:x}",mesh_hash(vertices,indices).finalize());
     SKINS.with(|s|s.borrow_mut()[slot]["sha256"]=hash.into());
 }
+/// The serial kernel leaves raw colour alpha in the live mesh, while a worker
+/// publication stores it normalized. A serial entry therefore also records the
+/// normalized hashes of both alpha variants, so a surface that moves to a worker
+/// publication compares with the serial output of the same frame.
+pub fn record_serial_publication(slot:usize,vertices:&[macroquad::prelude::Vertex],indices:&[u16],
+    normalize:fn(macroquad::prelude::Vertex,bool)->macroquad::prelude::Vertex) {
+    if slot==usize::MAX {return;}
+    let [opaque,alpha]=[false,true].map(|variant| {
+        let published:Vec<_>=vertices.iter().map(|v|normalize(*v,variant)).collect();
+        format!("{:x}",mesh_hash(&published,indices).finalize())
+    });
+    SKINS.with(|s| {let mut s=s.borrow_mut();let entry=&mut s[slot];
+        entry["path"]="serial".into();entry["published_opaque_sha256"]=opaque.into();entry["published_alpha_sha256"]=alpha.into();});
+}
+pub fn record_direct_publication(slot:usize,alpha_variant:bool) {
+    if slot==usize::MAX {return;}
+    SKINS.with(|s| {let mut s=s.borrow_mut();let entry=&mut s[slot];
+        entry["path"]="direct".into();entry["alpha_variant"]=alpha_variant.into();});
+}
 pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indices:&[u16],vertices:&[macroquad::prelude::Vertex],indices:&[u16],uniforms:&[f32],policy:&[u32],texture:Option<&macroquad::prelude::Texture2D>) {
     if !skin_proof() {return;}
     let geometry=format!("{:x}",mesh_hash(vertices,indices).finalize());
