@@ -1466,7 +1466,7 @@ impl Scene {
                     particles.prepare_quads(camera, Some(direction));
                     let _registration=crate::phase_census::span(crate::phase_census::Region::FxRegistration);
                     crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::Registrations,1);
-                    for (i, _) in particles.depths(camera, direction) { particles.draw_one(i, camera, direction); }
+                    particles.draw_world(camera, direction);
                 }
                 return;
             }

@@ -110,6 +110,8 @@ pub struct Config {
     pub world_puff_batches: bool,
     /// Send additive attached quads to the joint-alpha batch bank directly.
     pub attached_puff_batches: bool,
+    /// Register contiguous raw puff quads under one frame borrow; default off pending console A/B.
+    pub fx_registration_batch: bool,
     pub fx_merge_in_place: bool,
     pub fx_worker_prep: bool,
     pub frame_phase_probe: bool,
@@ -280,7 +282,7 @@ impl Default for Config {
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
-            particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
+            particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_registration_batch: false, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             phase_census: false,
             skin_actual_consumers: false,
@@ -422,6 +424,11 @@ impl Config {
         Ok(())
     }
 }
+fn config_log_line(c: &Config) -> String {
+    format!("[lg/vita-renderer] config {} effective_log_frame_time_every={}",
+        serde_json::to_string(c).unwrap_or_else(|e| format!("serialization_error={e}")),
+        c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string()))
+}
 /// Reject a malformed diagnostic cadence without discarding unrelated flags.
 fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
     let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -481,11 +488,7 @@ pub fn config() -> &'static Config {
             eprintln!("[lg/vita-renderer] invalid config {CONFIG_PATH}: {e:#}; using defaults");
             Config::default()
         });
-        println!(
-            "[lg/vita-renderer] config {} effective_log_frame_time_every={}",
-            serde_json::to_string(&c).unwrap_or_else(|e| format!("serialization_error={e}")),
-            c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string())
-        );
+        println!("{}", config_log_line(&c));
         println!("[lg/vita-renderer] actor_single_prepare active={}", c.actor_single_prepare_active());
         #[cfg(target_os = "vita")]
         apply_startup_clocks(c.clocks);
@@ -1730,6 +1733,61 @@ impl Renderer {
         });
         drop(submit_span);
         count("vita_world_culled_groups", stats.culled as u64);
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        if !alpha && crate::sim_maps::probe::opening_inputs() {
+            let id_list: Vec<usize> = ids.to_vec();
+            let visible: std::collections::BTreeSet<usize> = self.prepared.iter().map(|p| p.group).collect();
+            let tested = id_list.iter().map(|&id| {
+                let g = &self.groups[id];
+                let drawn = self.prepared.iter().find(|p| p.group == id);
+                let cull_model = model_matrix(&g.recipe, time, transforms);
+                let uniform_fields = drawn.map(|p| {
+                    let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
+                    let b = |v: &[f32]| v.iter().copied().map(f32::to_bits).collect::<Vec<_>>();
+                    serde_json::json!({
+                        "mvp": b(&u.mvp), "model": b(&u.model), "uv": b(&u.uv), "uv_after": b(&u.uv_after),
+                        "eye": b(&u.eye), "surface": b(&u.surface), "gain": b(&u.gain), "alpha": b(&u.alpha),
+                        "dot_alpha": b(&u.dot_alpha), "vector_s": b(&u.vector_s), "vector_t": b(&u.vector_t),
+                        "turb": b(&u.turb), "deform": b(&u.deform), "wave": b(&u.wave), "move_dir": b(&u.move_dir),
+                        "atlas": b(&u.atlas), "fog_eye": b(&u.fog_eye), "distance_fog": b(&u.distance_fog),
+                        "liquid_fog": b(&u.liquid_fog), "fog_a_min": b(&u.fog_a_min), "fog_a_max": b(&u.fog_a_max),
+                        "fog_a": b(&u.fog_a), "fog_b_min": b(&u.fog_b_min), "fog_b_max": b(&u.fog_b_max),
+                        "fog_b": b(&u.fog_b), "all": b(u.values()),
+                    })
+                });
+                serde_json::json!({
+                    "id": id,
+                    "visible": visible.contains(&id),
+                    "indices": g.indices,
+                    "base_element": g.base_element,
+                    "triangles": g.indices / 3,
+                    "min_bits": g.min.to_array().map(f32::to_bits),
+                    "max_bits": g.max.to_array().map(f32::to_bits),
+                    "center_bits": g.center.to_array().map(f32::to_bits),
+                    "model_bits": self.models[id].map(|m| m.to_cols_array().map(f32::to_bits)),
+                    // Cull inputs and decision, recomputed for every tested group, culled
+                    // ones included: the frustum matrix with the group bounds decides.
+                    "cull_model_bits": cull_model.map(|m| m.to_cols_array().map(f32::to_bits)),
+                    "frustum_matrix_bits": cull_model.map(|m| (projection * m).to_cols_array().map(f32::to_bits)),
+                    "in_frustum": cull_model.map(|m| in_frustum(projection * m, g.min, g.max)),
+                    "drawn_indices": drawn.map(|p| p.indices),
+                    "pipeline": drawn.map(|_| g.recipe.blend * 3 + g.recipe.cull),
+                    "low": drawn.map(|_| g.recipe.stage.alpha_test == 0 && !self.low_pipelines.is_empty()),
+                    "uniform_fields": uniform_fields,
+                })
+            }).collect::<Vec<_>>();
+            println!("SIM_MAPS_WORLD {}", serde_json::json!({
+                "frame": crate::sim_maps::probe::frame_index(),
+                "cluster": cluster,
+                "projection_bits": projection.to_cols_array().map(f32::to_bits),
+                "eye_bits": eye.to_array().map(f32::to_bits),
+                "time_bits": time.to_bits(),
+                "depth_view_bits": crate::render_fx::depth_view_bits(),
+                "fast_frustum": config().fast_frustum,
+                "draw_order": self.prepared.iter().map(|p| p.group).collect::<Vec<_>>(),
+                "tested": tested,
+            }));
+        }
         unsafe {
             macroquad::miniquad::gl::glDepthMask(1);
         }
@@ -2142,6 +2200,22 @@ pub(crate) async fn visualizer(
 mod tests {
     use super::*;
     #[test]
+    fn twin_config_pair_differs_only_by_the_lever_and_roundtrips_the_log() {
+        let parse=|raw: &[u8]| { let (c, rejected)=parse_runtime_config(raw).unwrap(); assert!(rejected.is_none()); c.validate().unwrap(); c };
+        let off=parse(include_bytes!("../../configs/TWIN-OFF.json"));
+        let on=parse(include_bytes!("../../configs/TWIN-ON.json"));
+        let mut a=serde_json::to_value(&off).unwrap(); let b=serde_json::to_value(&on).unwrap();
+        assert_eq!(a["fx_registration_batch"],false); assert_eq!(b["fx_registration_batch"],true);
+        a["fx_registration_batch"]=serde_json::json!(true); assert_eq!(a,b);
+        for c in [off,on] {
+            assert!(c.sim_trigger_facts_reuse && c.sim_sight_query_reuse && !c.phase_census);
+            assert_eq!(c.log_frame_time_every,Some(0));
+            let line=config_log_line(&c);
+            let raw=line.strip_prefix("[lg/vita-renderer] config ").unwrap().strip_suffix(" effective_log_frame_time_every=off").unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(raw).unwrap(),serde_json::to_value(c).unwrap());
+        }
+    }
+    #[test]
     fn backend_report_interval_default_zero_null_and_strict_types() {
         for (raw,want) in [("{}",Some(10)),(r#"{"log_frame_time_every":10}"#,Some(10)),(r#"{"log_frame_time_every":1}"#,Some(1)),(r#"{"log_frame_time_every":0}"#,None),(r#"{"log_frame_time_every":null}"#,None)] {
             let c:Config=serde_json::from_str(raw).unwrap();
@@ -2214,6 +2288,26 @@ mod tests {
         }
         let (c, rejected) = parse_runtime_config(br#"{"log_frame_time_every":0,"sim_trigger_facts_reuse":true}"#).unwrap();
         assert!(rejected.is_none() && c.log_frame_time_every.filter(|&n| n > 0).is_none() && c.sim_trigger_facts_reuse);
+    }
+    #[test]
+    fn fx_registration_batch_defaults_off_is_printed_and_requires_a_boolean() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap(), parse_runtime_config(b"{}").unwrap().0] {
+            assert!(!c.fx_registration_batch);
+        }
+        for enabled in [false, true] {
+            let raw = format!(r#"{{"fx_registration_batch":{enabled},"log_frame_time_every":0}}"#);
+            let (c, rejected) = parse_runtime_config(raw.as_bytes()).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap(); assert_eq!(c.fx_registration_batch, enabled);
+            assert_eq!(serde_json::to_value(&c).unwrap()["fx_registration_batch"], enabled);
+            let record = config_log_line(&c);
+            let (_, rest) = record.split_once("[lg/vita-renderer] config ").unwrap();
+            let printed: serde_json::Value = serde_json::from_str(rest.rsplit_once(" effective_log_frame_time_every=").unwrap().0).unwrap();
+            assert_eq!(printed["fx_registration_batch"], enabled);
+        }
+        for json in [r#"{"fx_registration_batch":1}"#, r#"{"fx_registration_batch":"on"}"#, r#"{"fx_registration_batch":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
     }
     #[test]
     fn hatter_door_candidates_default_off_and_require_a_boolean() {

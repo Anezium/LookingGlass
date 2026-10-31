@@ -726,6 +726,56 @@ pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>,
         f.world_puffs.push(retained::world_puffs::Puff { vertices, texture, blend, before_group });
     });
 }
+#[cfg(test)]
+thread_local! { static FX_REGISTRATION_BATCH_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn with_fx_registration_batch<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset { fn drop(&mut self) { FX_REGISTRATION_BATCH_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(FX_REGISTRATION_BATCH_TEST.with(|s| s.replace(Some(on))));
+    run()
+}
+/// Default off pending console acceptance. Tests: a scoped override, else
+/// LOOKING_GLASS_TEST_FX_REGISTRATION_BATCH=on runs the whole suite with batching on.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn fx_registration_batch() -> bool {
+    #[cfg(test)]
+    { FX_REGISTRATION_BATCH_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_FX_REGISTRATION_BATCH").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => false,
+        Ok("on") => true,
+        _ => panic!("LOOKING_GLASS_TEST_FX_REGISTRATION_BATCH must be off or on"),
+    }) }
+    #[cfg(not(test))]
+    { crate::render::vita_renderer::config().fx_registration_batch }
+}
+/// One contiguous run of raw puff quads registered under a single FRAME borrow.
+#[cfg(feature="vita_renderer")]
+pub(crate) struct PuffSink<'a> {
+    frame: &'a mut Frame,
+}
+#[cfg(feature="vita_renderer")]
+impl PuffSink<'_> {
+    /// `world_puff_quad` after its gather-only check and debug assertion. It must
+    /// not call anything that borrows FRAME: the sink already holds it mutably.
+    pub(crate) fn push(&mut self, vertices: [Vertex; 4], texture: Option<Texture2D>, blend: Blend) {
+        let f = &mut *self.frame;
+        if f.vertices.saturating_add(4) > MAX_VERTICES { f.dropped += 1; return; }
+        f.vertices += 4;
+        let before_group = f.groups.len();
+        f.world_puffs.push(retained::world_puffs::Puff { vertices, texture, blend, before_group });
+    }
+}
+/// Callers skip raw quads without calling this while `gather_only()` is true.
+/// The assertion borrows FRAME, so it runs before the mutable borrow is taken;
+/// the borrow ends with the callback, before any geometry or legacy fallback.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn with_world_puff_sink<R>(f: impl FnOnce(&mut PuffSink<'_>) -> R) -> R {
+    debug_assert!(world_puff_batches_active());
+    FRAME.with(|frame| {
+        let mut frame = frame.borrow_mut();
+        f(&mut PuffSink { frame: &mut frame })
+    })
+}
 pub fn line(a: Vec3, b: Vec3, color: Color) {
     if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {
@@ -1453,6 +1503,63 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     )?;
     println!("PASS three real-map particle/transparency fixtures; synchronized CPU+GPU timings: {timings:?}");
     Ok(())
+}
+
+/// Puff registration fixtures: an isolated direct frame and a complete field record.
+#[cfg(all(test, feature="vita_renderer"))]
+pub(crate) mod registration_test {
+    use super::*;
+    pub(crate) struct FrameGuard(Frame);
+    impl Drop for FrameGuard {
+        fn drop(&mut self) { FRAME.with(|f| *f.borrow_mut() = std::mem::take(&mut self.0)); }
+    }
+    /// A retained direct frame with a chosen vertex budget use and recycled group count.
+    pub(crate) fn frame(direct: bool, vertices: usize, pool: usize) -> FrameGuard {
+        FrameGuard(FRAME.with(|f| std::mem::replace(&mut *f.borrow_mut(), Frame {
+            active: true, direct, camera: vec3(3., -4., 5.), direction: Vec3::X, vertices,
+            group_pool: (0..pool).map(|_| Vec::with_capacity(1)).collect(), ..Default::default() })))
+    }
+    pub(crate) fn max_vertices() -> usize { MAX_VERTICES }
+    fn vertex(v: &Vertex) -> serde_json::Value {
+        serde_json::json!([v.position.to_array().map(f32::to_bits), v.uv.to_array().map(f32::to_bits),
+            v.normal.to_array().map(f32::to_bits), v.color])
+    }
+    fn mesh(m: &Mesh) -> serde_json::Value {
+        serde_json::json!({"vertices": m.vertices.iter().map(vertex).collect::<Vec<_>>(), "indices": m.indices,
+            "texture": format!("{:?}", m.texture)})
+    }
+    fn pass(p: &Pass, identity: &dyn Fn(&Rc<prepared::Geometry>) -> serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "geometry_rc": p.geometry.as_ref().map(identity),
+            "geometry": p.geometry.as_ref().map(|g| (mesh(&g.mesh), g.valid)),
+            "effect": p.effect, "blend_index": p.blend_index, "depth_equal": p.depth_equal,
+            "mesh": mesh(&p.mesh), "material": p.material.as_ref().map(|m| Rc::as_ptr(m) as usize),
+            "lit": p.lit, "clamp": p.clamp, "cutout": p.cutout.to_bits(),
+            "cutout_reference": p.cutout_reference.to_bits(), "gain": p.gain.to_array().map(f32::to_bits),
+            "fog": p.fog.to_bits(), "model": p.model,
+            "appearance": [p.appearance.dissolve.to_bits(), u32::from(p.appearance.ghost), p.appearance.power.to_bits()],
+            "filter_fade": p.filter_fade.to_bits(),
+        })
+    }
+    /// Every FRAME field registration can write, element by element. `identity`
+    /// names each geometry Rc, for example by its producer publication slot.
+    pub(crate) fn snapshot(identity: &dyn Fn(&Rc<prepared::Geometry>) -> serde_json::Value) -> serde_json::Value {
+        FRAME.with(|f| {
+            let f = f.borrow();
+            serde_json::json!({
+                "world_puffs": f.world_puffs.iter().map(|p| serde_json::json!({
+                    "vertices": p.vertices.iter().map(vertex).collect::<Vec<_>>(),
+                    "texture": format!("{:?}", p.texture),
+                    "blend": format!("{:?}", p.blend), "before_group": p.before_group,
+                })).collect::<Vec<_>>(),
+                "groups": f.groups.iter().map(|g| serde_json::json!({"transparent": g.transparent,
+                    "passes": g.passes.iter().map(|p| pass(p, identity)).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+                "group_pool": f.group_pool.len(), "vertices": f.vertices, "dropped": f.dropped,
+                "retained": f.retained.len(), "active": f.active, "direct": f.direct,
+                "depth_read_only": f.depth_read_only,
+            })
+        })
+    }
 }
 
 #[cfg(test)]

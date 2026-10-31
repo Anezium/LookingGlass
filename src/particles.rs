@@ -514,6 +514,77 @@ struct Puff {
 }
 #[cfg(feature="vita_renderer")]
 mod quad;
+/// The billboard direction a registration walk passes to `draw_one`.
+#[derive(Clone, Copy)]
+pub(crate) enum Direction {
+    /// World puffs: the view's direction for every puff.
+    Common(Vec3),
+    /// Attached puffs: `(position - camera).normalize_or_zero()` per puff.
+    PerPuffFromCamera,
+}
+impl Direction {
+    fn at(self, puffs: &[Puff], index: usize, camera: Vec3) -> Vec3 {
+        match self {
+            Direction::Common(direction) => direction,
+            Direction::PerPuffFromCamera => (puffs[index].position - camera).normalize_or_zero(),
+        }
+    }
+}
+/// Batched-registration witnesses: host probe counters and a test thread-local.
+/// Native builds compile none of this.
+#[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+pub(crate) mod registration_witness {
+    #[cfg(test)]
+    thread_local! { static COUNTS: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) }; }
+    #[cfg(test)]
+    fn add(slot: usize, n: usize) { COUNTS.with(|c| { let mut v = c.get(); v[slot] += n; c.set(v); }); }
+    /// One raw run registered under a single FRAME borrow.
+    pub(crate) fn run(puffs: usize) {
+        #[cfg(test)] { add(0, 1); add(1, puffs); }
+        crate::sim_maps::count("fx_registration_batch_runs", 1);
+        crate::sim_maps::count("fx_registration_batch_puffs", puffs as u64);
+    }
+    /// A puff without a raw quad, handed to `draw_one` between runs.
+    pub(crate) fn fallback() {
+        #[cfg(test)] add(2, 1);
+        crate::sim_maps::count("fx_registration_batch_fallbacks", 1);
+    }
+    /// Runs, batched puffs and fallbacks since the last call, on this thread.
+    #[cfg(test)]
+    pub(crate) fn take() -> [usize; 3] { COUNTS.with(|c| c.replace([0; 3])) }
+}
+#[cfg(all(test, feature="vita_renderer"))]
+thread_local! {
+    static REGISTRATION_PRODUCER_REUSE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+/// Producer-reuse prerequisite of a registration walk. Tests can force it off
+/// despite `Config`'s `OnceLock`; the override restores on unwind. Production
+/// reads the config field and nothing else. `vita_renderer` is not a default
+/// feature, so a normal build never names that module.
+#[cfg(feature="vita_renderer")]
+fn registration_producer_reuse() -> bool {
+    #[cfg(test)]
+    if let Some(on) = REGISTRATION_PRODUCER_REUSE.with(|c| c.get()) {
+        return on;
+    }
+    crate::render::vita_renderer::config().particle_producer_reuse
+}
+#[cfg(all(test, feature="vita_renderer"))]
+fn with_registration_producer_reuse<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset {
+        fn drop(&mut self) { REGISTRATION_PRODUCER_REUSE.with(|c| c.set(self.0)); }
+    }
+    let _reset = Reset(REGISTRATION_PRODUCER_REUSE.with(|c| c.replace(Some(on))));
+    run()
+}
+/// The attached far-to-near order. Only for `order` built by `enumerate`:
+/// indices are unique and increasing, so the stable `sort_by` keeps equal
+/// distances in increasing index order, which the tie-break reproduces.
+/// Both use `total_cmp` on the same bits (NaN payload and sign, signed zero).
+fn sort_enumerated_far_first(order: &mut [(usize, f32)]) {
+    order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+}
 pub struct Steam {
     #[cfg(feature="vita_renderer")]
     quads: std::cell::RefCell<quad::Buffer>,
@@ -1270,9 +1341,61 @@ impl Steam {
             self.quads.borrow_mut().prepare(&self.puffs, &self.emitters, camera, direction);
         }
     }
+    /// The retained world loop: enumeration order, never sorted, one common direction.
+    #[cfg(feature="vita_renderer")]
+    pub(crate) fn draw_world(&self, camera: Vec3, direction: Vec3) {
+        if crate::render_fx::fx_registration_batch() {
+            self.register_batch(self.depths(camera, direction).map(|(i, _)| i), camera, Direction::Common(direction));
+        } else {
+            for (i, _) in self.depths(camera, direction) { self.draw_one(i, camera, direction); }
+        }
+    }
+    /// `draw_one` for each index of `order`, with contiguous raw quads registered
+    /// under one FRAME borrow per run. Puffs without a raw quad still go through
+    /// `draw_one` with that borrow released, so a geometry or legacy submission
+    /// lands between runs exactly where the per-puff walk puts it.
+    pub(crate) fn register_batch(&self, order: impl Iterator<Item = usize>, camera: Vec3, direction: Direction) {
+        // effect_geometry, submit and effect change neither FRAME.active/direct,
+        // Config nor the overlap phase, so one evaluation holds for the whole walk.
+        #[cfg(feature="vita_renderer")]
+        if crate::render_fx::retained_active() && registration_producer_reuse() {
+            let gather_only = crate::character::skinning::overlap::gather_only();
+            let quads = self.quads.borrow();
+            let mut order = order.peekable();
+            while let Some(&first) = order.peek() {
+                if quads.raw_quad(first).is_none() {
+                    order.next();
+                    #[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+                    registration_witness::fallback();
+                    self.draw_one(first, camera, direction.at(&self.puffs, first, camera));
+                    continue;
+                }
+                if gather_only {
+                    // world_puff_quad returns before any work in this phase.
+                    order.next();
+                    continue;
+                }
+                let _pushed = crate::render_fx::with_world_puff_sink(|sink| {
+                    let mut pushed = 0usize;
+                    while let Some(vertices) = order.peek().and_then(|&i| quads.raw_quad(i)) {
+                        let index = order.next().unwrap();
+                        let e = &self.emitters[self.puffs[index].emitter];
+                        sink.push(vertices, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
+                            if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
+                        pushed += 1;
+                    }
+                    pushed
+                });
+                #[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+                registration_witness::run(_pushed);
+            }
+            return;
+        }
+        for i in order { self.draw_one(i, camera, direction.at(&self.puffs, i, camera)); }
+    }
     pub fn draw_one(&self, index: usize, camera: Vec3, direction: Vec3) {
         #[cfg(feature="vita_renderer")]
-        if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
+        if crate::render_fx::retained_active() && registration_producer_reuse() {
             if let Some(vertices) = self.quads.borrow().raw_quad(index) {
                 let e = &self.emitters[self.puffs[index].emitter];
                 crate::render_fx::world_puff_quad(vertices, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
@@ -1692,6 +1815,11 @@ impl Attached {
         let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
         let _packets = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Packets);
         self.steam.prepare_draw(camera, atmosphere);
+        self.register_sampled(camera);
+        gl_use_default_material();
+    }
+    /// Producer quads, the far-to-near order and registration of every sampled puff.
+    fn register_sampled(&mut self, camera: Vec3) {
         #[cfg(feature="vita_renderer")] self.steam.prepare_quads(camera, None);
         let _registration=crate::phase_census::span(crate::phase_census::Region::FxRegistration);
         crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::Registrations,1);
@@ -1704,16 +1832,24 @@ impl Attached {
             .enumerate()
             .map(|(i, p)| (i, p.position.distance_squared(camera)))
             );
-        order.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for &(i, _) in &order {
-            self.steam.draw_one(
-                i,
-                camera,
-                (self.steam.puffs[i].position - camera).normalize_or_zero(),
-            );
+        #[cfg(feature="vita_renderer")]
+        let batch = crate::render_fx::fx_registration_batch();
+        #[cfg(not(feature="vita_renderer"))]
+        let batch = false;
+        if batch {
+            sort_enumerated_far_first(&mut order);
+            self.steam.register_batch(order.iter().map(|&(i, _)| i), camera, Direction::PerPuffFromCamera);
+        } else {
+            order.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for &(i, _) in &order {
+                self.steam.draw_one(
+                    i,
+                    camera,
+                    (self.steam.puffs[i].position - camera).normalize_or_zero(),
+                );
+            }
         }
         if self.reuse_scratch { self.order = order; }
-        gl_use_default_material();
     }
     #[cfg(test)]
     pub(crate) fn output_bits(&self, camera: Vec3) -> serde_json::Value {
@@ -2424,5 +2560,330 @@ pub(crate) mod tests {
         assert!((p[0].alpha - 0.75).abs() < 0.0001);
         assert_eq!(p[0].offset, b.sample(0.45, 123)[0].offset);
         assert!(b.sample(1.21, 123).is_empty());
+    }
+}
+
+/// fx_registration_batch: flag OFF (per-puff registration) against ON, field by field.
+#[cfg(all(test, feature="vita_renderer"))]
+mod registration_tests {
+    use super::*;
+    use crate::render_fx::{fx_registration_batch, registration_test, with_fx_registration_batch};
+    use macroquad::miniquad::{RawId, TextureId};
+    use super::registration_witness as witness;
+    use serde_json::{json, Value};
+
+    fn texture(id: u32) -> Texture2D {
+        Texture2D::from_miniquad_texture(TextureId::from_raw_id(RawId::OpenGl(id)))
+    }
+    /// Animated per-emitter textures, so texture identity follows each puff's age.
+    /// Lattice positions: many equal camera distances, enumeration is not depth order.
+    fn steam(emitters: usize, puffs: usize, additive: impl Fn(usize) -> bool) -> Steam {
+        let mut steam = tests::attached_fixture(emitters).steam;
+        for (e, emitter) in steam.emitters.iter_mut().enumerate() {
+            emitter.textures = (0..3).map(|frame| texture(100 + 10 * e as u32 + frame)).collect();
+            emitter.stage = crate::materials::Stage { images: vec!["a".into(), "b".into(), "c".into()], fps: 7., ..Default::default() };
+            emitter.additive = additive(e);
+            emitter.spec.growth = 0.3 * e as f32;
+            emitter.spec.alpha = 0.9;
+            emitter.spec.fade = e % 2 == 0;
+        }
+        steam.puffs = (0..puffs).map(|i| {
+            let p = vec3((i % 5) as f32 - 2., ((i / 5) % 5) as f32 - 2., ((i / 25) % 7) as f32 - 3.) * 16.;
+            Puff { sweep: PuffSweep::default(), position: p, constraint_center: p, velocity: Vec3::ZERO,
+                accel: Vec3::ZERO, age: 0.05 * (i % 11) as f32, life: 2., size: 3. + (i % 4) as f32,
+                roll: 0.37 * i as f32, emitter: i % emitters }
+        }).collect();
+        steam
+    }
+    /// Geometry Rc identity as the producer publication slot that owns it.
+    fn slot(steam: &Steam) -> impl Fn(&std::rc::Rc<crate::render_fx::prepared::Geometry>) -> Value + '_ {
+        move |g| {
+            let quads = steam.quads.borrow();
+            (0..steam.puffs.len()).find(|&i| quads.geometry(i).is_some_and(|p| std::rc::Rc::ptr_eq(&p, g)))
+                .map_or(json!("foreign"), |i| json!(i))
+        }
+    }
+    /// One arm on a fresh frame: the full record and this thread's witness counts.
+    fn arm(on: bool, steam: &Steam, vertices: usize, pool: usize, walk: impl FnOnce()) -> (Value, [usize; 3]) {
+        let _frame = registration_test::frame(true, vertices, pool);
+        witness::take();
+        with_fx_registration_batch(on, walk);
+        (registration_test::snapshot(&slot(steam)), witness::take())
+    }
+    fn first_difference(a: &Value, b: &Value, path: String) -> Option<String> {
+        match (a, b) {
+            (Value::Object(x), Value::Object(y)) if x.len() == y.len() => x.iter()
+                .find_map(|(k, v)| y.get(k).map_or(Some(format!("{path}.{k}")), |w| first_difference(v, w, format!("{path}.{k}")))),
+            (Value::Array(x), Value::Array(y)) if x.len() == y.len() => x.iter().zip(y).enumerate()
+                .find_map(|(i, (v, w))| first_difference(v, w, format!("{path}[{i}]"))),
+            _ => (a != b).then_some(path),
+        }
+    }
+    fn assert_same(off: &Value, on: &Value, context: &str) {
+        assert!(off == on, "{context}: ON differs from OFF at {:?}", first_difference(off, on, String::new()));
+    }
+    /// What the callers run for a custom order: the flag picks the batch walk.
+    fn walk(steam: &Steam, order: &[usize], camera: Vec3, direction: Direction) {
+        if fx_registration_batch() {
+            steam.register_batch(order.iter().copied(), camera, direction);
+        } else {
+            for &i in order { steam.draw_one(i, camera, direction.at(&steam.puffs, i, camera)); }
+        }
+    }
+    fn raw_runs(order: &[usize], raw: impl Fn(usize) -> bool) -> usize {
+        order.iter().enumerate().filter(|&(k, &i)| raw(i) && (k == 0 || !raw(order[k - 1]))).count()
+    }
+    fn before_groups(record: &Value) -> Vec<u64> {
+        record["world_puffs"].as_array().unwrap().iter().map(|p| p["before_group"].as_u64().unwrap()).collect()
+    }
+    /// Raw quads 0..12, publications 12..30 and legacy puffs 30..40, interleaved so
+    /// geometry and legacy groups land between raw runs.
+    const MIXED: [usize; 34] = [0, 1, 2, 15, 3, 4, 5, 33, 16, 17, 6, 31, 7, 8, 9, 12, 13, 10, 11, 39, 20, 21,
+        30, 22, 14, 18, 19, 23, 24, 25, 34, 35, 26, 29];
+    fn mixed() -> (Steam, Vec3) {
+        let steam = steam(3, 40, |e| e == 1);
+        let camera = vec3(1., -70., 9.);
+        steam.quads.borrow_mut().prepare(&steam.puffs, &steam.emitters, camera, Some(Vec3::X));
+        steam.quads.borrow_mut().mix_for_test(12, 30);
+        (steam, camera)
+    }
+
+    #[test]
+    fn fx_registration_batch_accessor_is_scoped_restored_on_unwind_and_follows_the_suite_arm() {
+        let ambient = fx_registration_batch();
+        let arm = std::env::var("LOOKING_GLASS_TEST_FX_REGISTRATION_BATCH");
+        assert_eq!(ambient, arm.as_deref() == Ok("on"), "suite arm {arm:?}");
+        for on in [false, true] {
+            assert_eq!(with_fx_registration_batch(on, fx_registration_batch), on);
+            with_fx_registration_batch(on, || {
+                assert_eq!(with_fx_registration_batch(!on, fx_registration_batch), !on);
+                assert_eq!(fx_registration_batch(), on);
+            });
+            assert!(std::panic::catch_unwind(|| with_fx_registration_batch(on, || panic!("unwind"))).is_err());
+            assert_eq!(fx_registration_batch(), ambient);
+        }
+    }
+
+    #[test]
+    fn fx_registration_suite_arm_moves_the_witness_without_an_override() {
+        let on = std::env::var("LOOKING_GLASS_TEST_FX_REGISTRATION_BATCH").as_deref() == Ok("on");
+        let (steam, camera) = mixed();
+        let _frame = registration_test::frame(true, 0, 0);
+        witness::take();
+        walk(&steam, &MIXED, camera, Direction::PerPuffFromCamera);
+        let ambient = (registration_test::snapshot(&slot(&steam)), witness::take());
+        drop(_frame);
+        let off = arm(false, &steam, 0, 0, || walk(&steam, &MIXED, camera, Direction::PerPuffFromCamera));
+        assert_same(&off.0, &ambient.0, "suite arm");
+        assert_eq!(ambient.1, if on { [raw_runs(&MIXED, |i| i < 12), 12, MIXED.len() - 12] } else { [0; 3] });
+    }
+
+    #[test]
+    fn fx_registration_attached_many_equal_distances_match_and_batch_only_raw_runs() {
+        let camera = Vec3::ZERO;
+        for (additive, reuse) in [(true, false), (true, true), (false, false), (false, true)] {
+            let mut a = tests::attached_fixture(3);
+            a.steam = steam(3, 1024, |_| additive);
+            a.reuse_scratch = reuse;
+            let mut distances: Vec<u32> = a.steam.puffs.iter().map(|p| p.position.distance_squared(camera).to_bits()).collect();
+            distances.sort_unstable(); distances.dedup();
+            assert!(distances.len() * 8 < 1024, "fixture must have many equal distances");
+            let atmosphere = crate::environment::Atmosphere::default();
+            let (off, on) = {
+                let mut attached_arm = |on: bool| {
+                    let _frame = registration_test::frame(true, 0, 0);
+                    witness::take();
+                    // draw_sampled minus its final gl_use_default_material, which needs a GL context.
+                    with_fx_registration_batch(on, || { a.steam.prepare_draw(camera, &atmosphere); a.register_sampled(camera) });
+                    (registration_test::snapshot(&slot(&a.steam)), witness::take())
+                };
+                (attached_arm(false), attached_arm(true))
+            };
+            assert_same(&off.0, &on.0, &format!("attached additive={additive} reuse={reuse}"));
+            assert_eq!(off.1, [0; 3]);
+            if additive {
+                // prepare_attached publishes raw quads only: one run of every puff.
+                assert_eq!(on.1, [1, 1024, 0]);
+                assert_eq!(on.0["world_puffs"].as_array().unwrap().len(), 1024);
+                assert!(on.0["groups"].as_array().unwrap().is_empty());
+            } else {
+                // Publications: every puff goes through draw_one and effect_geometry.
+                assert_eq!(on.1, [0, 0, 1024]);
+                assert_eq!(on.0["groups"].as_array().unwrap().len(), 1024);
+                assert!(on.0["groups"][0]["passes"][0]["geometry_rc"].is_u64());
+            }
+            assert_eq!(on.0["vertices"], 4096);
+            if reuse {
+                let cap = a.order.capacity();
+                assert!(cap >= 1024, "the existing order scratch holds the batch");
+                let _frame = registration_test::frame(true, 0, 0);
+                with_fx_registration_batch(true, || { a.steam.prepare_draw(camera, &atmosphere); a.register_sampled(camera) });
+                assert_eq!(a.order.capacity(), cap, "the order scratch is reused");
+            }
+        }
+    }
+
+    #[test]
+    fn fx_registration_mixed_walk_keeps_geometry_between_runs_and_before_group() {
+        let (steam, camera) = mixed();
+        let raw = |i: usize| i < 12;
+        for direction in [Direction::Common(vec3(0.6, 0.8, 0.)), Direction::PerPuffFromCamera] {
+            let off = arm(false, &steam, 0, 2, || walk(&steam, &MIXED, camera, direction));
+            let on = arm(true, &steam, 0, 2, || walk(&steam, &MIXED, camera, direction));
+            assert_same(&off.0, &on.0, "mixed walk");
+            assert_eq!(off.1, [0; 3]);
+            assert_eq!(on.1, [raw_runs(&MIXED, raw), 12, MIXED.len() - 12]);
+            assert!(on.1[0] >= 5);
+            let before = before_groups(&on.0);
+            assert_eq!(before.len(), 12);
+            assert!(before.windows(2).filter(|w| w[0] != w[1]).count() >= 4, "before_group must change mid-walk: {before:?}");
+            let groups = on.0["groups"].as_array().unwrap();
+            assert_eq!(groups.len(), MIXED.len() - 12);
+            assert!(groups.iter().any(|g| g["passes"][0]["geometry_rc"].is_u64()));
+            assert!(groups.iter().any(|g| g["passes"][0]["geometry_rc"].is_null()));
+            assert_eq!(on.0["group_pool"], 0);
+        }
+    }
+
+    #[test]
+    fn fx_registration_vertex_budget_reached_mid_run_drops_identically() {
+        let (steam, camera) = mixed();
+        let max = registration_test::max_vertices();
+        for start in [max - 20, max - 22, max - 24, max - 3, max] {
+            let off = arm(false, &steam, start, 0, || walk(&steam, &MIXED, camera, Direction::PerPuffFromCamera));
+            let on = arm(true, &steam, start, 0, || walk(&steam, &MIXED, camera, Direction::PerPuffFromCamera));
+            assert_same(&off.0, &on.0, &format!("budget start={start}"));
+            assert!(on.0["dropped"].as_u64().unwrap() > 0);
+            assert!(on.0["vertices"].as_u64().unwrap() <= max as u64);
+            assert_eq!(on.1[1], 12, "raw quads are still walked in runs when dropped");
+        }
+    }
+
+    #[test]
+    fn fx_registration_gather_only_skips_raw_quads_and_keeps_fallback_side_effects() {
+        let (steam, camera) = mixed();
+        crate::character::skinning::overlap::with_gather_phase(|| {
+            assert!(crate::character::skinning::overlap::gather_only());
+            let off = arm(false, &steam, 0, 3, || walk(&steam, &MIXED, camera, Direction::Common(Vec3::Y)));
+            let on = arm(true, &steam, 0, 3, || walk(&steam, &MIXED, camera, Direction::Common(Vec3::Y)));
+            assert_same(&off.0, &on.0, "gather only");
+            assert!(on.0["world_puffs"].as_array().unwrap().is_empty() && on.0["groups"].as_array().unwrap().is_empty());
+            // effect_geometry still takes recycled storage before submit returns.
+            assert_eq!(on.0["group_pool"], 0);
+            assert_eq!(on.1, [0, 0, MIXED.len() - 12]);
+        });
+    }
+
+    #[test]
+    fn fx_registration_world_walk_keeps_enumeration_order_with_one_direction() {
+        let steam = steam(2, 300, |e| e == 0);
+        let camera = vec3(5., -3., 2.);
+        let direction = vec3(0.3, 0.9, -0.2).normalize();
+        let depths: Vec<f32> = steam.depths(camera, direction).map(|(_, d)| d).collect();
+        assert!(depths.windows(2).any(|w| w[0] < w[1]) && depths.windows(2).any(|w| w[0] > w[1]));
+        let _prepare = registration_test::frame(true, 0, 0);
+        steam.prepare_quads(camera, Some(direction));
+        let off = arm(false, &steam, 0, 0, || steam.draw_world(camera, direction));
+        let on = arm(true, &steam, 0, 0, || steam.draw_world(camera, direction));
+        assert_same(&off.0, &on.0, "world walk");
+        assert_eq!(off.1, [0; 3]);
+        assert_eq!(on.1, [1, 300, 0]);
+        let quads = steam.quads.borrow();
+        for (i, p) in on.0["world_puffs"].as_array().unwrap().iter().enumerate() {
+            let expected: Vec<Value> = quads.raw_quad(i).unwrap().iter().map(|v| json!([v.position.to_array().map(f32::to_bits),
+                v.uv.to_array().map(f32::to_bits), v.normal.to_array().map(f32::to_bits), v.color])).collect();
+            assert_eq!(p["vertices"], json!(expected), "world puff {i} out of enumeration order");
+            assert_eq!(p["before_group"], 0);
+        }
+    }
+
+    #[test]
+    fn fx_registration_unprepared_buffer_falls_back_for_every_puff() {
+        // Reuse stays at the config default. With nothing prepared, every puff is a
+        // draw_one fallback between runs rather than a raw batch.
+        let steam = steam(2, 50, |e| e == 1);
+        let camera = vec3(-9., 4., 30.);
+        let order: Vec<usize> = (0..50).rev().collect();
+        let off = arm(false, &steam, 0, 0, || walk(&steam, &order, camera, Direction::PerPuffFromCamera));
+        let on = arm(true, &steam, 0, 0, || walk(&steam, &order, camera, Direction::PerPuffFromCamera));
+        assert_same(&off.0, &on.0, "unprepared");
+        assert_eq!(on.1, [0, 0, 50]);
+        assert_eq!(on.0["groups"].as_array().unwrap().len(), 50);
+    }
+
+    #[test]
+    fn fx_registration_producer_reuse_off_ignores_prepared_quads() {
+        // (g) Raw quads exist, but the prerequisite is false, so both arms take
+        // today's per-puff loop and the sink never opens.
+        let steam = steam(2, 40, |e| e == 1);
+        let camera = vec3(2., -8., 4.);
+        let direction = vec3(0.2, 0.9, 0.1).normalize();
+        {
+            let _frame = registration_test::frame(true, 0, 0);
+            steam.prepare_quads(camera, Some(direction));
+        }
+        assert!(steam.quads.borrow().raw_quad(0).is_some(), "the buffer is prepared; reuse is what must skip it");
+        let order: Vec<usize> = (0..40).collect();
+        let run = |on: bool| with_registration_producer_reuse(false, || {
+            arm(on, &steam, 0, 0, || walk(&steam, &order, camera, Direction::Common(direction)))
+        });
+        let off = run(false);
+        let on = run(true);
+        assert_same(&off.0, &on.0, "producer reuse off");
+        assert_eq!((off.1, on.1), ([0; 3], [0; 3]));
+        assert!(on.0["world_puffs"].as_array().unwrap().is_empty());
+        assert_eq!(on.0["groups"].as_array().unwrap().len(), 40);
+        assert!(steam.quads.borrow().raw_quad(0).is_some());
+        assert!(std::panic::catch_unwind(|| with_registration_producer_reuse(false, || panic!("unwind"))).is_err());
+        assert!(registration_producer_reuse(), "the override must restore the config value");
+    }
+
+    #[test]
+    fn fx_registration_retained_off_takes_the_unchanged_per_puff_path() {
+        // Raw quads exist, but without a direct frame the walk must reach draw_one's
+        // legacy material selection for the first puff, as OFF does. Host tests have
+        // no GL materials, so both arms stop at the same index; the sink never opens.
+        let (steam, camera) = mixed();
+        let outcome = |on: bool| {
+            let _frame = registration_test::frame(false, 0, 0);
+            witness::take();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                with_fx_registration_batch(on, || walk(&steam, &MIXED, camera, Direction::PerPuffFromCamera))));
+            let message = result.err().map(|e| e.downcast_ref::<String>().cloned().unwrap_or_default());
+            (message, registration_test::snapshot(&slot(&steam)), witness::take())
+        };
+        let (off, on) = (outcome(false), outcome(true));
+        assert!(off.0.as_deref().is_some_and(|m| m.contains("index out of bounds")), "{:?}", off.0);
+        assert_eq!(off.0, on.0);
+        assert_same(&off.1, &on.1, "retained off");
+        assert!(on.1["world_puffs"].as_array().unwrap().is_empty());
+        assert_eq!((off.2, on.2), ([0; 3], [0; 3]));
+    }
+
+    #[test]
+    fn fx_registration_enumerated_unstable_sort_matches_the_stable_sort() {
+        let special = [0f32, -0., f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -f32::NAN, f32::from_bits(0x7fc0_0001),
+            f32::from_bits(0xffc0_0001), f32::from_bits(0x7f80_0001), f32::from_bits(0xff80_0001), f32::from_bits(1),
+            f32::from_bits(0x8000_0001), f32::MIN_POSITIVE, f32::MAX, f32::MIN, 1., -1.];
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; seed };
+        let mut ties = 0;
+        for case in 0..600 {
+            let n = [0, 1, 2, 3, 19, 20, 21, 64, 300, 2048][case % 10] + (next() % 7) as usize;
+            let distances: Vec<f32> = (0..n).map(|_| match next() % 5 {
+                0 => special[next() as usize % special.len()],
+                1 | 2 => (next() % 6) as f32 * 0.5,
+                3 => f32::from_bits(next()),
+                _ => -((next() % 3) as f32),
+            }).collect();
+            let mut stable: Vec<(usize, f32)> = distances.iter().copied().enumerate().collect();
+            let mut unstable = stable.clone();
+            stable.sort_by(|a, b| b.1.total_cmp(&a.1));
+            sort_enumerated_far_first(&mut unstable);
+            let bits = |o: &[(usize, f32)]| o.iter().map(|&(i, d)| (i, d.to_bits())).collect::<Vec<_>>();
+            assert_eq!(bits(&stable), bits(&unstable), "case {case} n={n}");
+            ties += stable.windows(2).filter(|w| w[0].1.to_bits() == w[1].1.to_bits()).count();
+        }
+        assert!(ties > 10_000);
     }
 }

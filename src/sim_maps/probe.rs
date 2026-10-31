@@ -2,6 +2,7 @@
 use std::{cell::{Cell,RefCell}, collections::BTreeMap, sync::OnceLock, time::Instant};
 use sha2::{Digest, Sha256};
 thread_local! {
+    static FRAME_NO: Cell<u64> = const { Cell::new(u64::MAX) };
     static ALLOC_TRACKED:Cell<bool>=const {Cell::new(false)};
     static PREPARE_ALLOC:Cell<[u64;2]>=const {Cell::new([0;2])};
     static SKINS: RefCell<Vec<serde_json::Value>> = RefCell::default();
@@ -45,6 +46,47 @@ fn npc_decisions() -> serde_json::Value {
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_PROBE").is_some())
+}
+pub fn set_frame(frame: u64) { FRAME_NO.with(|c| c.set(frame)); }
+pub fn frame_index() -> u64 { FRAME_NO.with(|c| c.get()) }
+/// Frame 0 of a probe run. The host oracle asks for named uniform bits and the
+/// opaque-world cull record. Later frames stay on the existing hash line.
+pub fn opening_inputs() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && frame_index() == 0 && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_RENDER_INPUTS").is_some())
+}
+/// Per-frame framebuffer hashes and the frame-0 PNG, for the host oracle.
+pub fn frame_images() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_FRAME_IMAGE").is_some())
+}
+/// Named slices of the retained actor/FX uniform block. Offsets follow `uniforms` in `render_fx/retained.rs`.
+pub fn uniform_fields(u: &[f32]) -> serde_json::Value {
+    let bits = |s: &[f32]| s.iter().copied().map(f32::to_bits).collect::<Vec<_>>();
+    if u.len() != 147 {
+        return serde_json::json!({"len": u.len(), "bits": bits(u)});
+    }
+    serde_json::json!({
+        "model": bits(&u[0..16]),
+        "projection": bits(&u[16..32]),
+        "atlas_grid": bits(&u[32..34]),
+        "fullbright": bits(&u[34..35]),
+        "lit": bits(&u[35..36]),
+        "clamp_uv": bits(&u[36..37]),
+        "cutout": bits(&u[37..38]),
+        "cutout_reference": bits(&u[38..39]),
+        "gain": bits(&u[39..43]),
+        "fog_mode": bits(&u[43..44]),
+        "sky_size": bits(&u[44..46]),
+        "sky_fade": bits(&u[46..47]),
+        "fx_model": bits(&u[47..48]),
+        "fx_appearance": bits(&u[48..52]),
+        "lights": bits(&u[52..116]),
+        "camera": bits(&u[116..119]),
+        "atmosphere_distance": bits(&u[119..123]),
+        "atmosphere_liquid": bits(&u[123..127]),
+        "volumes": bits(&u[127..147]),
+    })
 }
 pub fn elapsed(actual: f32) -> f32 {
     if !enabled() { return actual; }
@@ -135,6 +177,7 @@ pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indi
     let geometry=format!("{:x}",mesh_hash(vertices,indices).finalize());
     let gpu_geometry=format!("{:x}",mesh_hash(gpu_vertices,gpu_indices).finalize());
     assert_eq!(geometry,gpu_geometry,"stale GPU geometry at retained slot {gpu_slot}");
+    let fields = opening_inputs().then(|| uniform_fields(uniforms));
     let mut h=Sha256::new();for f in uniforms {h.update(f.to_bits().to_le_bytes());}
     let uniforms=format!("{:x}",h.finalize());
     let texture=texture.map(|t|TEXTURES.with(|cache| {let mut cache=cache.borrow_mut();
@@ -144,7 +187,9 @@ pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indi
             format!("{:x}",h.finalize())
         }).clone()
     }));
-    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"geometry":geometry,"gpu_geometry":gpu_geometry,"gpu_slot":gpu_slot,"vertices":vertices.len(),"indices":indices.len(),"uniforms":uniforms,"policy":policy,"texture":texture})));
+    let mut record = serde_json::json!({"geometry":geometry,"gpu_geometry":gpu_geometry,"gpu_slot":gpu_slot,"vertices":vertices.len(),"indices":indices.len(),"uniforms":uniforms,"policy":policy,"texture":texture});
+    if let Some(fields) = fields { record["uniform_fields"] = fields; }
+    PACKETS.with(|s|s.borrow_mut().push(record));
 }
 /// Host-only view motion leaves simulation inputs untouched.
 pub fn moving_view(frame:u64,eye:glam::Vec3,target:glam::Vec3)->(glam::Vec3,glam::Vec3) {
