@@ -158,6 +158,38 @@ impl Survey {
     #[test]fn full_mode_survey_retains_excluded_gameplay_attempts(){full_mode_window(true,true);}
     #[cfg(feature="frame_total_only")]
     #[test]fn full_mode_off_control_has_exact_csv_without_census(){full_mode_window(false,false);}
+    // D1 human-played survey: movement before arming never starts the window, SELECT on a non-gameplay frame
+    // is ignored, the first gameplay SELECT arms exactly one window, later SELECT edges never restart it, and
+    // a death or menu frame after arming keeps all 180 attempted rows but excludes the window.
+    #[cfg(feature="frame_total_only")]
+    #[test]fn manual_survey_arms_once_and_excludes_death_or_menu(){
+        for loss in [None,Some(0usize),Some(59),Some(60),Some(179)] {
+            crate::phase_census::test_begin(false);
+            let mut s=fixture(false);s.config.physical_input=true;let mut now=Instant::now();
+            for _ in 0..30 {
+                s.accept(true);now+=std::time::Duration::from_millis(16);
+                assert!(!s.presented_at("potears2",true,false,now).unwrap());
+            }
+            assert!(s.ready && !s.armed && s.rows.is_empty());
+            s.accept(false);assert!(!s.presented_at("potears2",true,true,now).unwrap());assert!(!s.armed);
+            s.accept(true);assert!(!s.presented_at("potears2",true,true,now).unwrap());assert!(s.armed);
+            let arm=s.arm_time;assert!(s.rows.is_empty());
+            for i in 0..180 {
+                let gameplay=Some(i)!=loss;
+                s.accept(gameplay);now+=std::time::Duration::from_millis(64);
+                assert_eq!(s.presented_at("potears2",gameplay,true,now).unwrap(),i==179);
+                assert_eq!(s.arm_time,arm);assert_eq!(s.rows.len(),i+1);
+            }
+            assert_eq!(s.all_gameplay,loss.is_none());
+            let mut csv=Vec::new();s.write_samples(&mut csv).unwrap();
+            let csv=String::from_utf8(csv).unwrap();
+            assert_eq!(csv.lines().skip(1).filter(|l|l.ends_with(",false")).count(),60);
+            assert_eq!(csv.lines().skip(1).filter(|l|l.ends_with(",true")).count(),120);
+            s.done=true;s.accept(true);
+            assert!(!s.presented_at("potears2",true,true,now).unwrap());assert_eq!(s.rows.len(),180);
+            CENSUS.store(false,Relaxed);
+        }
+    }
     #[test]fn physical_input_is_opt_in_and_strict(){
         let base=r#""enabled":true,"map":"potears2","allocation":false,"census":true,"tag":"on""#;
         let c:Config=serde_json::from_str(&format!("{{{base}}}")).unwrap();assert!(!c.physical_input);
