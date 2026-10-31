@@ -41,7 +41,7 @@ def allowed(path):
     p = PurePosixPath(path)
     if p.is_absolute() or ".." in p.parts or "\\" in path:
         return False
-    if path in GAMEPLAY_MEDIA or path in SITE_FILES:
+    if path in GAMEPLAY_MEDIA or path in SITE_FILES or path == ".cargo/config.toml":
         return True
     if len(p.parts) == 1:
         return path in ROOT_FILES or (path.startswith("Launch") and p.suffix == ".cmd")
