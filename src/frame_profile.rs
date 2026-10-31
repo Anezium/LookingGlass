@@ -61,7 +61,10 @@ pub(crate) fn exclude_transition_frame() {
     #[cfg(target_os = "vita")]
     vita::discard_transition_frame();
 }
-fn transition_frame() -> bool { TRANSITION_FRAME.with(|v| v.get()) }
+fn transition_frame() -> bool {
+    crate::tls_fast::performed(crate::tls_fast::Lookup::TransitionFrame);
+    TRANSITION_FRAME.with(|v| v.get())
+}
 #[cfg(all(feature = "native_timing", target_os = "vita"))]
 thread_local! { static NATIVE_MEASURED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
 #[cfg(all(feature = "native_timing", target_os = "vita"))]
@@ -240,15 +243,27 @@ pub fn characters_span(label: &'static str) -> Option<Span> {
 }
 
 pub(crate) fn enabled() -> bool {
+    // `full()` is a side-effect-free atomic load (constant false with frame_total_only),
+    // and every branch below is false without it, so check it before the thread-local.
+    if crate::tls_fast::on() && !crate::light_profile::full() {
+        crate::tls_fast::skipped(crate::tls_fast::Lookup::TransitionFrame);
+        return false;
+    }
     if transition_frame() { return false; }
     #[cfg(target_os="vita")]
     { crate::light_profile::full() }
     #[cfg(not(target_os="vita"))]
-    {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_FRAME_PROFILE").is_some()) && crate::light_profile::full()
-    }
+    { host_profile_requested() && crate::light_profile::full() }
 }
+#[cfg(not(target_os="vita"))]
+fn host_profile_requested() -> bool {
+    #[cfg(test)]
+    if let Some(on) = HOST_PROFILE_TEST.with(|v| v.get()) { return on; }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_FRAME_PROFILE").is_some())
+}
+#[cfg(all(test, not(target_os="vita")))]
+thread_local! { static HOST_PROFILE_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
 
 pub(crate) fn heap_used_bytes()->Option<u64> {
     #[cfg(target_os="vita")] {Some(vita::heap_used())}
@@ -353,6 +368,13 @@ impl Drop for ObjectTotals {
 }
 pub(crate) struct ObjectTimer { work: ObjectWork, start: Option<Instant> }
 pub(crate) fn object_timer(work: ObjectWork) -> ObjectTimer {
+    // OBJECT_TOTALS is Some only inside an `object_totals()` scope that saw `enabled()`,
+    // which requires `full()`; FULL changes only at frame/mode boundaries.
+    if crate::tls_fast::on() && !crate::light_profile::full() {
+        crate::tls_fast::skipped(crate::tls_fast::Lookup::ObjectTotals);
+        return ObjectTimer { work, start: None };
+    }
+    crate::tls_fast::performed(crate::tls_fast::Lookup::ObjectTotals);
     ObjectTimer { work, start: OBJECT_TOTALS.with(|v| v.borrow().is_some().then(Instant::now)) }
 }
 impl Drop for ObjectTimer {
@@ -375,6 +397,18 @@ pub struct Span {
 pub fn span(label: &'static str) -> Span {
     #[cfg(not(target_os = "vita"))]
     if label == "frame_characters" { CHARACTER_DEPTH.with(|d| d.set(d.get() + 1)); }
+    if crate::tls_fast::on() {
+        // One evaluation serves both the start time and, on the Vita, the stack token.
+        let active = enabled();
+        return Span {
+            label,
+            start: active.then(Instant::now),
+            #[cfg(target_os = "vita")]
+            category: None,
+            #[cfg(target_os = "vita")]
+            token: if active { vita::enter(label) } else { None },
+        };
+    }
     Span {
         label,
         start: enabled().then(Instant::now),
@@ -385,6 +419,13 @@ pub fn span(label: &'static str) -> Span {
     }
 }
 impl Span {
+    /// Nothing to record or cancel: `cancel()` without a token only clears `start`.
+    fn idle(&self) -> bool {
+        #[cfg(target_os = "vita")]
+        { self.start.is_none() && self.token.is_none() }
+        #[cfg(not(target_os = "vita"))]
+        { self.start.is_none() }
+    }
     pub fn cancel(&mut self) {
         #[cfg(target_os = "vita")]
         if self.token.is_some() { vita::cancel(self.token.take()); }
@@ -395,6 +436,10 @@ impl Drop for Span {
     fn drop(&mut self) {
         #[cfg(not(target_os = "vita"))]
         if self.label == "frame_characters" { CHARACTER_DEPTH.with(|d| d.set(d.get() - 1)); }
+        if crate::tls_fast::on() && self.idle() {
+            crate::tls_fast::skipped(crate::tls_fast::Lookup::TransitionFrame);
+            return;
+        }
         if transition_frame() { self.cancel(); return; }
         if let Some(start) = self.start {
             let ms = start.elapsed().as_secs_f64() * 1000.;
@@ -1382,6 +1427,147 @@ mod bench_policy_tests {
             let captures=(0..361).filter(|_| {throttle.advance_frame();throttle.capture(mode)}).collect::<Vec<_>>();
             if mode==Mode::Full {assert_eq!(captures.len(),361);}
             else {assert_eq!(captures,vec![0,120,240,360]);}
+        }
+    }
+}
+
+// `tls_fast_path` must not change any profiler observation. Run with and without
+// frame_total_only: only the latter executes the full-profile recording path.
+#[cfg(all(test, not(target_os = "vita")))]
+mod tls_fast_tests {
+    use super::*;
+    use crate::tls_fast::{take_test_counts, with_tls_fast_path, Lookup};
+
+    fn with_host_profile<T>(on: bool, run: impl FnOnce() -> T) -> T {
+        struct Reset(Option<bool>);
+        impl Drop for Reset { fn drop(&mut self) { HOST_PROFILE_TEST.with(|v| v.set(self.0)); } }
+        let _reset = Reset(HOST_PROFILE_TEST.with(|v| v.replace(Some(on))));
+        run()
+    }
+    fn set_transition(on: bool) { TRANSITION_FRAME.with(|v| v.set(on)); }
+    fn depth() -> u32 { CHARACTER_DEPTH.with(|d| d.get()) }
+    fn samples(label: &str) -> usize { SAMPLES.with(|s| s.borrow().get(label).map_or(0, Vec::len)) }
+    fn full_profile_build() -> bool { !cfg!(feature = "frame_total_only") }
+
+    #[test]
+    fn full_is_constant_per_feature_set() {
+        assert_eq!(crate::light_profile::full(), full_profile_build());
+    }
+
+    #[test]
+    fn enabled_is_identical_with_the_full_check_first() {
+        for profile in [false, true] {
+            for transition in [false, true] {
+                let expected = profile && !transition && full_profile_build();
+                let results = [false, true].map(|flag| with_tls_fast_path(flag, || with_host_profile(profile, || {
+                    set_transition(transition);
+                    take_test_counts();
+                    let r = enabled();
+                    set_transition(false);
+                    (r, take_test_counts()[Lookup::TransitionFrame as usize])
+                })));
+                assert_eq!(results.map(|r| r.0), [expected; 2], "profile={profile} transition={transition}");
+                assert_eq!(results[0].1, [1, 0], "OFF always reads the transition flag");
+                assert_eq!(results[1].1, if full_profile_build() { [1, 0] } else { [0, 1] }, "ON skips it only when full() is false");
+            }
+        }
+    }
+
+    // One scripted frame of nested, cancelled and transition-dropped spans.
+    // Returns CHARACTER_DEPTH and characters_span() after every step, plus samples.
+    fn scripted_spans(profile: bool) -> (Vec<(u32, bool)>, [usize; 3], [[u64; 2]; 3]) {
+        with_host_profile(profile, || {
+            set_transition(false);
+            let start = depth();
+            take_test_counts();
+            let mut trace = Vec::new();
+            let step = |trace: &mut Vec<_>| trace.push((depth() - start, characters_span("tls_test_child").is_some()));
+            step(&mut trace);
+            let outer = span("frame_characters"); step(&mut trace);
+            {
+                let _plain = span("tls_test_plain");
+                let inner = span("frame_characters"); step(&mut trace);
+                drop(inner); step(&mut trace);
+            }
+            let mut cancelled = span("frame_characters"); cancelled.cancel(); step(&mut trace);
+            drop(cancelled); step(&mut trace);
+            let before_transition = span("frame_characters"); step(&mut trace);
+            set_transition(true);
+            let during_transition = span("frame_characters"); step(&mut trace);
+            let mut cancelled_in_transition = span("tls_test_plain"); cancelled_in_transition.cancel();
+            drop(cancelled_in_transition);
+            drop(during_transition); step(&mut trace);
+            drop(before_transition); step(&mut trace);
+            set_transition(false);
+            drop(outer); step(&mut trace);
+            assert_eq!(depth(), start);
+            (trace, [samples("frame_characters"), samples("tls_test_plain"), samples("tls_test_child")], take_test_counts())
+        })
+    }
+
+    #[test]
+    fn character_depth_and_samples_match_with_the_flag_on_and_off() {
+        for profile in [false, true] {
+            let off = with_tls_fast_path(false, || scripted_spans(profile));
+            let on = with_tls_fast_path(true, || scripted_spans(profile));
+            assert_eq!(off.0, on.0, "profile={profile}: CHARACTER_DEPTH trace");
+            assert_eq!(off.0.iter().map(|s| s.0).collect::<Vec<_>>(), [0, 1, 2, 1, 2, 1, 2, 3, 2, 1, 0]);
+            assert!(off.0.iter().all(|&(d, child)| child == (d > 0)));
+            let recorded = profile && full_profile_build();
+            // Only outer and inner record; the cancelled span and the spans dropped
+            // in the transition frame are discarded. Samples are thread-local, so
+            // the ON run sees the OFF run's samples too.
+            let per_run = if recorded { [2, 1, 6] } else { [0; 3] };
+            assert_eq!(off.1, per_run, "profile={profile}");
+            assert_eq!(on.1, per_run.map(|n| 2 * n), "profile={profile}");
+            // The witness: ON skips the drop-time transition read of every idle span.
+            let reads = |c: [[u64; 2]; 3]| c[Lookup::TransitionFrame as usize];
+            assert_eq!(reads(off.2)[1], 0);
+            assert!(reads(off.2)[0] > 0);
+            if recorded {
+                assert!(reads(on.2)[1] > 0 && reads(on.2)[0] > 0);
+            } else {
+                assert!(reads(on.2)[1] > 0);
+                if !full_profile_build() { assert_eq!(reads(on.2)[0], 0, "frame_total_only ON reads no transition flag"); }
+            }
+            SAMPLES.with(|s| s.borrow_mut().clear());
+        }
+    }
+
+    fn object_scope(profile: bool, transition: bool) -> (bool, bool, usize, [u64; 2]) {
+        with_host_profile(profile, || {
+            set_transition(transition);
+            take_test_counts();
+            let outside = object_timer(ObjectWork::MeshLayers).start.is_some();
+            let totals = object_totals();
+            let timer = object_timer(ObjectWork::MeshLayers);
+            let active = timer.start.is_some();
+            drop(timer);
+            let _ = object_timer(ObjectWork::Sampling);
+            let stored = OBJECT_TOTALS.with(|v| v.borrow().is_some());
+            drop(totals);
+            set_transition(false);
+            let counts = take_test_counts()[Lookup::ObjectTotals as usize];
+            let leaves = samples("objects_mesh_layers");
+            SAMPLES.with(|s| s.borrow_mut().clear());
+            assert!(!outside && active == stored);
+            (active, stored, leaves, counts)
+        })
+    }
+
+    #[test]
+    fn object_timer_matches_with_full_true_and_false() {
+        for profile in [false, true] {
+            for transition in [false, true] {
+                let off = with_tls_fast_path(false, || object_scope(profile, transition));
+                let on = with_tls_fast_path(true, || object_scope(profile, transition));
+                assert_eq!((off.0, off.1), (on.0, on.1));
+                assert_eq!(off.2, on.2);
+                let recorded = profile && !transition && full_profile_build();
+                assert_eq!((off.0, off.2), (recorded, usize::from(recorded)));
+                assert_eq!(off.3, [3, 0]);
+                assert_eq!(on.3, if full_profile_build() { [3, 0] } else { [0, 3] });
+            }
         }
     }
 }

@@ -126,6 +126,7 @@ mod frame_profile;
 mod frame_phases;
 mod phase_census;
 mod game_thread;
+mod tls_fast;
 mod skin_worker;
 #[cfg_attr(feature="frame_total_only", path="frame_total_profile.rs")]
 mod light_profile;

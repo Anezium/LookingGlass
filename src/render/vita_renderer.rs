@@ -203,6 +203,9 @@ pub struct Config {
     pub quality:String,
     pub opaque_order:String,
     pub world_alpha:bool,
+    /// Skip thread-local reads that cannot change behaviour (release ownership lookup,
+    /// inactive profiler spans). Latched once at config initialization; default off.
+    pub tls_fast_path: bool,
 }
 // The remote derive keeps one strict field schema while letting us distinguish
 // omitted actor preparation from an explicit request before applying defaults.
@@ -332,6 +335,7 @@ impl Default for Config {
             world_viewport_scale: 1.,
             depth_sentinel: false, scaled_depth_fix: true,
             render_scale:0.75,msaa_samples:1,quality:"low".into(),opaque_order:"front_to_back".into(),world_alpha:true,
+            tls_fast_path: false,
         }
     }
 }
@@ -450,6 +454,15 @@ pub(crate) fn fx_cpu_options() -> (bool, bool) {
     }
     let c = config();(c.fx_merge_ranges,c.fx_cpu_inline)
 }
+/// One startup record. The JSON document and `effective_log_frame_time_every` stay on the
+/// same line; diagnostic auditors read that single record. `report_cadence` is not emitted.
+fn config_record_line(c: &Config) -> String {
+    format!(
+        "[lg/vita-renderer] config {} effective_log_frame_time_every={}",
+        serde_json::to_string(c).unwrap_or_else(|e| format!("serialization_error={e}")),
+        c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string())
+    )
+}
 #[cfg(test)]
 pub fn config() -> &'static Config {
     static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -481,15 +494,12 @@ pub fn config() -> &'static Config {
             eprintln!("[lg/vita-renderer] invalid config {CONFIG_PATH}: {e:#}; using defaults");
             Config::default()
         });
-        println!(
-            "[lg/vita-renderer] config {} effective_log_frame_time_every={}",
-            serde_json::to_string(&c).unwrap_or_else(|e| format!("serialization_error={e}")),
-            c.log_frame_time_every.filter(|&n| n > 0).map_or_else(|| "off".into(), |n| n.to_string())
-        );
+        println!("{}", config_record_line(&c));
         println!("[lg/vita-renderer] actor_single_prepare active={}", c.actor_single_prepare_active());
         #[cfg(target_os = "vita")]
         apply_startup_clocks(c.clocks);
         apply_gpu_experiment(&c);
+        crate::tls_fast::init(c.tls_fast_path);
         c
     })
 }
@@ -2191,6 +2201,28 @@ mod tests {
                     assert_eq!(actual[other], if other == name { enabled } else { other != "sim_dynamic_buckets" });
                 }
             }
+        }
+    }
+    #[test]
+    fn tls_fast_path_defaults_off_requires_a_boolean_and_is_printed() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.tls_fast_path);
+        }
+        for enabled in [false, true] {
+            let (c, rejected) = parse_runtime_config(format!(r#"{{"tls_fast_path":{enabled}}}"#).as_bytes()).unwrap();
+            assert!(rejected.is_none());
+            assert_eq!(c.tls_fast_path, enabled);
+            let line = config_record_line(&c);
+            assert!(!line.contains("report_cadence"));
+            let (json, cadence) = line.split_once("[lg/vita-renderer] config ").unwrap().1.split_once(" effective_log_frame_time_every=").unwrap();
+            let printed: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert_eq!(printed["tls_fast_path"], enabled);
+            assert_eq!(cadence, "10");
+            assert_eq!(printed["sim_trigger_facts_reuse"], false);
+            assert_eq!(printed["sim_sight_query_reuse"], false);
+        }
+        for json in [r#"{"tls_fast_path":1}"#, r#"{"tls_fast_path":"on"}"#, r#"{"tls_fast_path":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
         }
     }
     #[test]
