@@ -108,7 +108,7 @@
   "profile_capture": false,
   "attached_puff_batches": true,
   "sim_hatter_door_candidates": false,
-  "sim_sight_query_reuse": false,
+  "sim_sight_query_reuse": true,
   "lights_static_cache": true,
   "sim_dynamic_buckets": false,
   "collision_sah": false,
@@ -121,5 +121,5 @@
   "world_binding_cache": false,
   "world_gl_state_cache": false,
   "log_frame_time_every": 10,
-  "sim_trigger_facts_reuse": false
+  "sim_trigger_facts_reuse": true
 }

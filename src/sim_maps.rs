@@ -129,13 +129,13 @@ pub(crate) fn with_trigger_facts_reuse<T>(on: bool, run: impl FnOnce() -> T) -> 
     let _reset = Reset(TRIGGER_FACTS_TEST.with(|s| s.replace(Some(on))));
     run()
 }
-// Default off pending console acceptance. Tests: a scoped override, else
-// LOOKING_GLASS_TEST_TRIGGER_FACTS=on runs the whole suite with reuse on.
+// Default on since r21, like Config. Tests: a scoped override, else
+// LOOKING_GLASS_TEST_TRIGGER_FACTS=off runs the whole suite with reuse off.
 pub fn trigger_facts_reuse() -> bool {
     #[cfg(test)]
     { TRIGGER_FACTS_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_TRIGGER_FACTS").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
+        Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
         _ => panic!("LOOKING_GLASS_TEST_TRIGGER_FACTS must be off or on"),
     }) }
     #[cfg(all(not(test), feature="vita_renderer"))]
@@ -143,13 +143,13 @@ pub fn trigger_facts_reuse() -> bool {
     #[cfg(all(not(test), not(feature="vita_renderer")))]
     { false }
 }
-// Default-off pending a console A/B. A whole-suite arm is chosen before startup;
+// Default on since r21, like Config. A whole-suite arm is chosen before startup;
 // tests override it per thread, so off/on comparisons share one process.
 pub fn sight_query_reuse() -> bool {
     #[cfg(test)]
     { SIGHT_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_SIGHT_REUSE").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
+        Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
         _ => panic!("LOOKING_GLASS_TEST_SIGHT_REUSE must be off or on"),
     }) }
     #[cfg(all(not(test), feature="vita_renderer"))]

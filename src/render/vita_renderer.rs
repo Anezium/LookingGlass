@@ -35,6 +35,7 @@ pub struct Config {
     /// disables it. Measurement runs set 0: the report adds 3-5 ms to p95 (r15b).
     pub log_frame_time_every: Option<u32>,
     /// Build trigger facts once per trigger pass and rebuild after each fire.
+    /// Default on since r21 (console A/B r16b: wchess2 -8.6/-9.1 ms, hatter1 -2.2/-2.4 ms).
     pub sim_trigger_facts_reuse: bool,
     /// Exact NPC sight predicates, publication-scoped trace reuse and stack targets.
     pub sim_npc_sight_candidates: bool,
@@ -43,6 +44,7 @@ pub struct Config {
     /// Defer Clockwork door traces until their exact range/facing predicates pass.
     pub sim_hatter_door_candidates: bool,
     /// Reuse bit-identical Ant sight traces within one immutable Ant update.
+    /// Default on since r21 (console A/B r16d: centipede1 -14.4 to -15.2 ms).
     pub sim_sight_query_reuse: bool,
     /// Exact static occlusion certificates for unchanged eye/light positions.
     pub lights_static_cache: bool,
@@ -242,9 +244,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             log_frame_time_every: Some(10),
-            sim_trigger_facts_reuse: false,
+            sim_trigger_facts_reuse: true,
             sim_hatter_door_candidates: false,
-            sim_sight_query_reuse: false,
+            sim_sight_query_reuse: true,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
             sim_npc_target_stack: true,
@@ -2196,7 +2198,7 @@ mod tests {
             assert!(!c.world_state_cache && c.skin_overlap && !c.audio_static_cache && c.sim_trigger_facts_reuse);
         }
         let (c, rejected) = parse_runtime_config(b"{}").unwrap();
-        assert!(rejected.is_none() && c.log_frame_time_every == Some(10) && !c.sim_trigger_facts_reuse);
+        assert!(rejected.is_none() && c.log_frame_time_every == Some(10) && c.sim_trigger_facts_reuse);
         assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","typo":true}"#).is_err());
         assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","world_state_cache":"bad"}"#).is_err());
     }
@@ -2215,9 +2217,9 @@ mod tests {
         }
     }
     #[test]
-    fn trigger_facts_reuse_defaults_off_and_requires_a_boolean() {
+    fn trigger_facts_reuse_defaults_on_and_requires_a_boolean() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
-            assert!(!c.sim_trigger_facts_reuse);
+            assert!(c.sim_trigger_facts_reuse);
         }
         for enabled in [false, true] {
             let c: Config = serde_json::from_value(serde_json::json!({"sim_trigger_facts_reuse": enabled})).unwrap();
@@ -2240,13 +2242,15 @@ mod tests {
         }
     }
     #[test]
-    fn sight_query_reuse_defaults_off_and_requires_a_boolean() {
+    fn sight_query_reuse_defaults_on_and_requires_a_boolean() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
-            assert!(!c.sim_sight_query_reuse);
+            assert!(c.sim_sight_query_reuse);
         }
-        let c: Config = serde_json::from_str(r#"{"sim_sight_query_reuse":true}"#).unwrap();
-        c.validate().unwrap(); assert!(c.sim_sight_query_reuse);
-        assert_eq!(serde_json::to_value(&c).unwrap()["sim_sight_query_reuse"], true);
+        for enabled in [false, true] {
+            let c: Config = serde_json::from_value(serde_json::json!({"sim_sight_query_reuse": enabled})).unwrap();
+            c.validate().unwrap(); assert_eq!(c.sim_sight_query_reuse, enabled);
+            assert_eq!(serde_json::to_value(&c).unwrap()["sim_sight_query_reuse"], enabled);
+        }
         for json in [r#"{"sim_sight_query_reuse":1}"#, r#"{"sim_sight_query_reuse":"on"}"#,
                      r#"{"sim_sight_query_reuse":null}"#] {
             assert!(serde_json::from_str::<Config>(json).is_err());
@@ -2347,6 +2351,26 @@ mod tests {
         let c: Config = serde_json::from_slice(bytes).unwrap();
         c.validate().unwrap();
         assert_eq!(serde_json::from_slice::<serde_json::Value>(bytes).unwrap(), serde_json::to_value(Config::default()).unwrap());
+    }
+    #[test]
+    fn human_play_configs_differ_only_in_the_two_reuse_levers() {
+        let on = include_bytes!("../../configs/PL-r21-human.json");
+        let off = include_bytes!("../../configs/PL-r21-human-levers-off.json");
+        let (c_on, rejected) = parse_runtime_config(on).unwrap();
+        assert!(rejected.is_none());
+        c_on.validate().unwrap();
+        assert!(c_on.sim_trigger_facts_reuse && c_on.sim_sight_query_reuse && c_on.log_frame_time_every.filter(|&n| n > 0).is_none());
+        let (c_off, rejected) = parse_runtime_config(off).unwrap();
+        assert!(rejected.is_none());
+        c_off.validate().unwrap();
+        assert!(!c_off.sim_trigger_facts_reuse && !c_off.sim_sight_query_reuse);
+        let mut v_on = serde_json::to_value(&c_on).unwrap();
+        let mut v_off = serde_json::to_value(&c_off).unwrap();
+        for key in ["sim_trigger_facts_reuse", "sim_sight_query_reuse"] {
+            v_on.as_object_mut().unwrap().remove(key);
+            v_off.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(v_on, v_off);
     }
     #[test]
     fn fx_cpu_candidates_default_off_and_require_boolean_values() {
