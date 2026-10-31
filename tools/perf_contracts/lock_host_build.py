@@ -57,6 +57,7 @@ def main():
         assert produced.is_file(), produced
         copy_to.parent.mkdir(parents=True, exist_ok=True)
         copy_to.write_bytes(produced.read_bytes())
+        copy_to.chmod(0o755)
         executable_sha = sha(copy_to)
         assert sha(produced) == executable_sha
         assert git(repo, 'rev-parse', 'HEAD').strip() == head

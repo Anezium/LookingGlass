@@ -332,7 +332,7 @@ def main(argv=None):
                 pool[arm].setdefault(view, []).append(result_run)
                 added[f'{arm}-r{rep}'] = dict(viewport=view, run_dir=result_run[0]['run_dir'])
             attempts.append(dict(attempt=attempt, runs=added))
-            for view in {view for runs in pool['off'].values() for view in runs}:
+            for view in pool['off']:
                 if view is None:
                     continue
                 if all(len(pool[arm].get(view, [])) >= reps for arm in pool):
