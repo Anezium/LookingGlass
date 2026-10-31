@@ -219,6 +219,23 @@ def test_late_viewport_change_is_rejected(tmp):
     assert oracle.viewport_issues([dict(frame=0, world_viewport=[0, 0, 721, 409])], [0, 0, 721, 409]) == []
 
 
+def test_frame_identity_coverage_precedes_viewport_selection(tmp):
+    frames = [dict(frame=i, map='wchess2', world_viewport=[0, 0, 721, 409]) for i in range(180)]
+    assert oracle.viewport_trajectory(frames, [0, 0, 721, 409], 'wchess2', 180)[1] == []
+    for value in (99, True, 100.0, None):
+        changed = [dict(row) for row in frames]
+        changed[100]['frame'] = value
+        assert oracle.viewport_trajectory(changed, [0, 0, 721, 409], 'wchess2', 180)[1], value
+    reordered = frames[:]
+    reordered[99], reordered[100] = reordered[100], reordered[99]
+    assert oracle.viewport_trajectory(reordered, None, 'wchess2', 180)[1]
+    assert oracle.viewport_trajectory(frames[:-1], None, 'wchess2', 180)[1]
+    changed = [dict(row) for row in frames]
+    changed[100]['map'] = 'jlair1'
+    assert oracle.viewport_trajectory(changed, None, 'wchess2', 180)[1]
+    return True
+
+
 def test_field_diff_names_only_the_changed_range(tmp):
     left = [0] * 147
     right = left.copy()

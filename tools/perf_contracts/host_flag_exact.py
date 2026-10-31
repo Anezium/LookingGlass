@@ -9,7 +9,7 @@ Per map and arm it checks the printed effective config (flag and every prerequis
 no serial fallback was logged, 180 SIM_MAPS_FRAME rows, geometry == gpu_geometry for every
 retained draw (actual GL buffer readback), and zero census serial fallbacks. Across arms it
 compares actor_skin, state_sha256, selected_lights_bits, joint_alpha_order, blend_world_order,
-uploaded packets including uniform hashes, the intermediate image witnesses and the final PNG,
+uploaded packets including uniform hashes, intermediate image witnesses when emitted, and the final PNG,
 plus the per-frame vita_fx_dropped_layers counter. With --baseline-binary it also runs a
 reference binary that predates the flag (its config omits the flag key) and requires the
 candidate OFF arm to equal it on the same fields, including gpu_slot, uniform hashes and every
@@ -27,7 +27,7 @@ drop anywhere is FAIL (vacuous).
 from pathlib import Path
 import argparse, hashlib, json, os, subprocess, sys
 
-ORACLE_VERSION = 3
+ORACLE_VERSION = 4
 ELAPSED = (
     'skin_worker_service_us',
     'skin_collect_wait_us',
@@ -226,7 +226,23 @@ def viewport_issues(frames, expected):
             issues.append(f"frame {frame.get('frame')}: viewport {value} != selected {expected}")
     return issues
 
-def viewport_trajectory(frames, startup=None):
+def frame_identity_issues(frames, map_name=None, expected_frames=None):
+    """Require unique ordered producer frame identities before selecting inputs."""
+    issues = []
+    if expected_frames is not None and len(frames) != expected_frames:
+        issues.append(f'frame count {len(frames)} != {expected_frames}')
+    for index, frame in enumerate(frames):
+        if not isinstance(frame, dict):
+            issues.append(f'frame row {index} is not an object')
+            continue
+        if type(frame.get('frame')) is not int or frame['frame'] != index:
+            issues.append(f'frame row {index} has identity {frame.get("frame")!r}')
+        if map_name is not None and frame.get('map') != map_name:
+            issues.append(f'frame row {index} map {frame.get("map")!r} != {map_name!r}')
+    return issues
+
+
+def viewport_trajectory(frames, startup=None, map_name=None, expected_frames=None):
     """Gate the recorded per-frame 3D viewport trajectory.
 
     The macOS host reports the requested drawable on frame 0 and the settled drawable from
@@ -234,6 +250,9 @@ def viewport_trajectory(frames, startup=None):
     frame is still recorded and checked: frame 0 must equal the `prepare-3d-returned`
     diagnostic, frames 1..179 must be one constant value, and any change at frame >= 2, any
     missing sample or any oscillation is rejected. Returns (steady, issues)."""
+    identity_issues = frame_identity_issues(frames, map_name, expected_frames)
+    if identity_issues:
+        return None, identity_issues
     values = []
     for frame in frames:
         value = frame.get('world_viewport')
@@ -367,7 +386,7 @@ def main(argv=None):
         assert all(all(packet['geometry'] == packet['gpu_geometry'] for packet in frame['submitted_packets']) for frame in frames), (map_name, tag, 'GPU readback')
         viewport = startup_viewport(directory)
         assert viewport is not None, (map_name, tag, 'missing or conflicting prepare-3d-returned viewport', startup_viewports(directory))
-        steady, issues = viewport_trajectory(frames, json.loads(viewport))
+        steady, issues = viewport_trajectory(frames, json.loads(viewport), map_name, 180)
         assert not issues, (map_name, tag, 'per-frame 3D viewport', issues[:4])
         if uniform_bits:
             assert (directory / 'uniform-bits.jsonl').is_file(), (map_name, tag, 'requested uniform bits missing')
@@ -430,7 +449,7 @@ def main(argv=None):
         # and never the HUD/default framebuffer stage.
         for row, frames in ((left_row, left_frames), (right_row, right_frames)):
             startup = json.loads(row['startup_viewport']) if row.get('startup_viewport') else None
-            steady, issues = viewport_trajectory(frames, startup)
+            steady, issues = viewport_trajectory(frames, startup, map_name, 180)
             assert not issues, (map_name, label, row['arm'], 'per-frame 3D viewport', issues[:4])
             assert json.dumps(steady) == row['viewport'], (map_name, label, row['arm'], 'steady viewport', steady, row['viewport'])
         # Aggregate uniform hashes are compared in every packet comparison, with or without
