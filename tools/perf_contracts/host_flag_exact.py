@@ -259,7 +259,7 @@ def main():
             'binary_sha256': digest, 'binary': str(binary), 'prerequisites': PREREQ,
             'phase_census': 'instrument, true in both arms; not the lever',
             'skin_comparison': 'full actor_skin equality, except a serial-to-direct row whose ON sha256 equals the OFF published hash of the worker alpha variant',
-            'fixture': 'occurrence-fixture draws one gnome three times per frame on the overlap render-check path; map entries did not repeat a surface',
+            'fixture': 'occurrence-fixture draws Alice three times per frame on the overlap render-check path; host map entries did not repeat an eligible surface',
             'maps': rows,
         }
         proof_path.write_text(json.dumps(proof, indent=2) + '\n', encoding='utf-8')
