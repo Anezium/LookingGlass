@@ -595,8 +595,11 @@ def main():
         matched = None
         kept = []
         for attempt in range(args.max_attempts):
-            off = launch(map_name, False, attempt)
-            on = launch(map_name, True, attempt)
+            try:
+                off = launch(map_name, False, attempt)
+                on = launch(map_name, True, attempt)
+            except AssertionError as exc:
+                fail_map(map_name, 'arm launch failed', error=str(exc))
             kept.append(dict(attempt=attempt, off=off['directory'], on=on['directory'],
                              off_prerequisite_sha256=canon(off['prerequisite']),
                              on_prerequisite_sha256=canon(on['prerequisite'])))
@@ -623,7 +626,10 @@ def main():
             image_differences = list(exc.frames)
             image_status = 'INCOMPLETE'
             for extra in range(args.max_attempts):
-                again = launch(map_name, False, args.max_attempts + extra)
+                try:
+                    again = launch(map_name, False, args.max_attempts + extra)
+                except AssertionError as launch_error:
+                    fail_map(map_name, 'image repeat launch failed', error=str(launch_error))
                 if prerequisite_equal(again['prerequisite'], off['prerequisite']):
                     repeat = again
                     break
@@ -657,7 +663,10 @@ def main():
         if map_name in repeat_off:
             if repeat is None:
                 for extra in range(args.max_attempts):
-                    again = launch(map_name, False, args.max_attempts + extra)
+                    try:
+                        again = launch(map_name, False, args.max_attempts + extra)
+                    except AssertionError as launch_error:
+                        fail_map(map_name, 'repeated OFF launch failed', error=str(launch_error))
                     if prerequisite_equal(again['prerequisite'], off['prerequisite']):
                         repeat = again
                         break
