@@ -46,7 +46,7 @@ struct Actor {
     reason_vertices: [u32;8],
 }
 impl Actor { const ZERO: Self = Self { id:0,serial_vertices:0,worker_vertices:0,serial_reasons:0,reason_vertices:[0;8] }; }
-pub(crate) const PUBLICATION_REJECTIONS: [&str;11] = ["missing_texture", "unregistered_surface", "opacity", "empty_recipe", "unsupported_recipe", "mixed_alpha", "bank_surface_capacity", "bank_held", "bank_vertex_capacity", "bank_index_capacity", "frame_vertex_budget"];
+pub(crate) const PUBLICATION_REJECTIONS: [&str;12] = ["missing_texture", "unregistered_surface", "opacity", "empty_recipe", "unsupported_recipe", "mixed_alpha", "bank_surface_capacity", "bank_held", "bank_vertex_capacity", "bank_index_capacity", "frame_vertex_budget", "occurrence_limit"];
 pub(crate) const COUNTERS: [&str;32] = ["upload_requests", "upload_hits", "upload_bytes", "world_draws", "world_texture_binds", "world_sampler_uniform_sets", "world_vbo_layout_changes", "actor_npc_overlay_calls", "ant_updates", "ant_substeps", "navigation_walks", "navigation_plans", "spawn_wave_calls", "world_live_particles", "world_new_particles", "attached_live_particles", "attached_new_birth_poses", "attached_sample_calls", "particle_quad_sets", "particle_pair_jobs", "trigger_visits", "trigger_eligible", "trigger_fires", "event_fact_builds", "player_prepare_calls", "player_map_hook_calls", "player_fixed_ticks", "hud_search_calls", "hud_draw_calls", "hud_menu_calls", "particle_registration_sets", "world_particle_sets"];
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -59,7 +59,7 @@ struct Row {
     sweeps: [u32; 5], sweep_ns: [u64; 5], acoustic_sweeps: u32, acoustic_sweep_ns: u64,
     static_ns:[u64;5], static_counts:[[u64;7];5],
     cache: [[u32; 3]; 3], queries: [[u32; 4]; 3], evictions: u32, errors: u32,
-    serial_fallbacks: u64, rejections:[u64;11], counters:[u64;COUNTERS.len()], reused_brackets:u64,
+    serial_fallbacks: u64, rejections:[u64;PUBLICATION_REJECTIONS.len()], counters:[u64;COUNTERS.len()], reused_brackets:u64,
     npc_queries:[[u64;12];15],
 }
 impl Row {
@@ -68,7 +68,7 @@ impl Row {
         inclusive: [0;REGIONS], exclusive: [0;REGIONS], calls: [0;REGIONS], parents: [0;REGIONS], parents_hi: [0;REGIONS],
         sweeps:[0;5], sweep_ns:[0;5], acoustic_sweeps:0, acoustic_sweep_ns:0,
         static_ns:[0;5],static_counts:[[0;7];5],
-        cache:[[0;3];3], queries:[[0;4];3], evictions:0, errors:0, serial_fallbacks:0, rejections:[0;11], counters:[0;COUNTERS.len()], reused_brackets:0, npc_queries:[[0;12];15] };
+        cache:[[0;3];3], queries:[[0;4];3], evictions:0, errors:0, serial_fallbacks:0, rejections:[0;PUBLICATION_REJECTIONS.len()], counters:[0;COUNTERS.len()], reused_brackets:0, npc_queries:[[0;12];15] };
 }
 #[derive(Clone, Copy)]
 struct Entry { scene: usize, bits: [u32;6], last: u64, prior: u64 }
@@ -465,7 +465,7 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
     let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
     #[cfg(not(feature="vita_renderer"))]
     let audio_static_cache=false;
-    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":6,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":COUNTERS,"actor_capacity":ACTORS,"serial_reasons":REASONS,
+    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":7,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":COUNTERS,"actor_capacity":ACTORS,"serial_reasons":REASONS,
         "audio_static_cache":audio_static_cache,"map":map,"regions":&NAMES[..],"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
@@ -596,7 +596,7 @@ mod tests {
              let (ns,calls)=totals.census_values().unwrap();world_publish(ns,calls,totals.profile_active());}
             for leaf in [Region::Input,Region::StoryWeapons,Region::Particles,Region::CameraScene,Region::RenderSetup,Region::FirstPerson,Region::FrameworkTail] {drop(span(leaf));}
             backend_report(7);
-            for i in 0..11 {rejection(i);}
+            for i in 0..PUBLICATION_REJECTIONS.len() {rejection(i);}
             for i in 0..7 {count(i,if i==3 {507}else{1});}
             accept(true,frame>=60);now+=std::time::Duration::from_secs(1);
             survey_presented(now,frame==179);
@@ -617,12 +617,12 @@ mod tests {
             let s=s.borrow();let mut bytes=Vec::new();write_csv(&s,&mut bytes).unwrap();
             let csv=std::str::from_utf8(&bytes).unwrap();let mut lines=csv.lines();
             let header:Vec<_>=lines.next().unwrap().split(',').collect();
-            assert_eq!(header.len(),8+5*REGIONS+11+COUNTERS.len()+15*12);
+            assert_eq!(header.len(),8+5*REGIONS+PUBLICATION_REJECTIONS.len()+COUNTERS.len()+15*12);
             for (i,line) in lines.enumerate() {
                 let values:Vec<_>=line.split(',').collect();assert_eq!(values.len(),header.len());
                 let row=&v["rows"][i];
                 for (field,index) in [("frame_total_ns",3),("bracket_union_ns",4),("unbracketed_residual_ns",5),("added_brackets",6),("reused_brackets",7)] {assert_eq!(values[index].parse::<u64>().unwrap(),row[field].as_u64().unwrap());}
-                for (field,base) in [("inclusive_ns",8),("exclusive_ns",8+REGIONS),("calls",8+2*REGIONS),("parent_masks",8+3*REGIONS),("parent_masks_hi",8+4*REGIONS),("publication_rejections",8+5*REGIONS),("diagnostic_counters",19+5*REGIONS)] {
+                for (field,base) in [("inclusive_ns",8),("exclusive_ns",8+REGIONS),("calls",8+2*REGIONS),("parent_masks",8+3*REGIONS),("parent_masks_hi",8+4*REGIONS),("publication_rejections",8+5*REGIONS),("diagnostic_counters",8+PUBLICATION_REJECTIONS.len()+5*REGIONS)] {
                     for (j,n) in row[field].as_array().unwrap().iter().enumerate() {assert_eq!(values[base+j].parse::<u64>().unwrap(),n.as_u64().unwrap());}
                 }
             }
@@ -682,7 +682,7 @@ mod tests {
             let mut bytes=Vec::new();write(&s,"fixture",&mut bytes).unwrap();
             let v:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["rows"][60]["measured_frame"],1);assert_eq!(v["rows"][179]["measured_frame"],120);
-            assert_eq!(v["schema"],6);assert_eq!(v["audio_static_cache"],false);
+            assert_eq!(v["schema"],7);assert_eq!(v["audio_static_cache"],false);
             assert_eq!(v["serial_fallbacks"],0);assert_eq!(v["rows"][0]["serial_fallbacks"],0);
             assert_eq!(v["regions"].as_array().unwrap().len(),NAMES.len());
             assert_eq!(v["actor_capacity"],ACTORS);assert!(v.get("static_count_columns").is_some());

@@ -63,6 +63,7 @@ impl State {
         if !self.occurrences_on {return Some(key);}
         let n=self.occurrences.entry((key.actor,key.surface)).or_insert(0);
         if *n>=MAX_OCCURRENCES {
+            crate::phase_census::rejection(11);
             #[cfg(any(feature="actor_diagnostics",all(feature="sim_maps_probe",not(target_os="vita"))))]
             retained::count("actor_publication_occurrence_limit",1);
             return None;
