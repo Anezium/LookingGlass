@@ -456,7 +456,7 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "static_cache_hit_miss_eviction":r.cache,
         "live_table_evictions":r.evictions,"hierarchy_errors":r.errors,
         "actors":&r.actors[..r.actor_count],"worker_skin_ns":r.worker_skin_ns,
-        "serial_fallbacks":r.serial_fallbacks,"publication_rejections":r.rejections,"diagnostic_counters":r.counters,
+        "serial_fallbacks":r.serial_fallbacks,"publication_rejections":r.rejections,"diagnostic_counters":&r.counters[..],
         "added_brackets":r.calls[30..].iter().map(|&n|n as u64).sum::<u64>()-r.reused_brackets,
         "reused_brackets":r.reused_brackets,
     })).collect();
@@ -465,7 +465,7 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
     let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
     #[cfg(not(feature="vita_renderer"))]
     let audio_static_cache=false;
-    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":7,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":COUNTERS,"actor_capacity":ACTORS,"serial_reasons":REASONS,
+    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":7,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":&COUNTERS[..],"actor_capacity":ACTORS,"serial_reasons":REASONS,
         "audio_static_cache":audio_static_cache,"map":map,"regions":&NAMES[..],"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
