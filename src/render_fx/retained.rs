@@ -30,6 +30,16 @@ pub(crate) fn count(name: &'static str, value: u64) {
     #[cfg(not(target_os = "vita"))]
     HOST_COUNTS.with(|c| *c.borrow_mut().entry(name).or_default() += value);
 }
+/// Reverse a speculative count when a frame discards the work that added it.
+pub(crate) fn uncount(name: &'static str, value: u64) {
+    crate::sim_maps::uncount(name, value);
+    #[cfg(target_os = "vita")]
+    crate::frame_profile::uncounts(&[(name, value)]);
+    #[cfg(not(target_os = "vita"))]
+    HOST_COUNTS.with(|c| {
+        if let Some(slot) = c.borrow_mut().get_mut(name) { *slot = slot.saturating_sub(value); }
+    });
+}
 fn boundary(site: &'static str) {
     let _span = crate::frame_profile::span("gl_flush");
     let _site = crate::frame_profile::span(site);
@@ -158,6 +168,14 @@ fn uniforms(p: &Pass, f: &Frame) -> [f32; UNIFORM_FLOATS] {
     debug_assert_eq!(cursor, UNIFORM_FLOATS);
     output
 }
+/// Field ends in the actor uniform block. Host oracle diffs use the same cuts.
+pub(crate) const UNIFORM_FIELDS: &[(&str, usize)] = &[
+    ("Model", 16), ("Projection", 32), ("AtlasGrid", 34), ("Fullbright", 35), ("Lit", 36),
+    ("ClampUV", 37), ("Cutout", 38), ("CutoutReference", 39), ("Gain", 43), ("FogMode", 44),
+    ("SkySize", 46), ("SkyFade", 47), ("FxModel", 48), ("FxAppearance", 52), ("Lights", 116),
+    ("FogEye", 119), ("DistanceFog", 123), ("LiquidFog", 127), ("FogAMin", 130), ("FogAMax", 133),
+    ("FogA", 137), ("FogBMin", 140), ("FogBMax", 143), ("FogB", 147),
+];
 /// Frame constants and lighting are expanded at most once per model/lit pair.
 /// Material/appearance fields remain live per pass; the whole payload still uploads.
 fn prepared_uniforms(p: &Pass, templates: &mut [Option<[f32; UNIFORM_FLOATS]>; 4]) -> [f32; UNIFORM_FLOATS] {
@@ -1409,6 +1427,15 @@ mod tests {
         let _ = <Gpu as AmbiguousIfSync<_>>::check;
         let _ = <Pass as AmbiguousIfSync<_>>::check;
         let _ = <crate::render::vita_renderer::Renderer as AmbiguousIfSync<_>>::check;
+    }
+    #[test]
+    fn uniform_field_table_covers_the_block() {
+        let mut previous = 0;
+        for (_, end) in super::UNIFORM_FIELDS {
+            assert!(*end > previous);
+            previous = *end;
+        }
+        assert_eq!(previous, super::UNIFORM_FLOATS);
     }
     #[test]
     fn prepared_uniforms_match_full_payload_across_material_camera_and_light_changes() {

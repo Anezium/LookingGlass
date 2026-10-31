@@ -1520,7 +1520,7 @@ mod tests {
         thread_local! { static SURFACES_KEEP: RefCell<Vec<std::rc::Rc<crate::render_fx::Surface>>> = RefCell::default(); }
         #[derive(Clone)]
         enum Step {
-            Draw(usize, usize, f32), Hidden(usize, usize), Topology(usize, usize), Puff, ReadOnly(Vec<Step>), Opacity(f32, Vec<Step>),
+            Draw(usize, usize, f32), DrawShaded(usize, usize, f32, bool, bool), Hidden(usize, usize), Topology(usize, usize), Puff, ReadOnly(Vec<Step>), Opacity(f32, Vec<Step>),
             Budget(usize), Retain(usize, usize, usize), FillCapacity, WorkerPanic(usize, usize), GatherPanic,
         }
         struct Run { frames: Vec<ts::FrameSnapshot>, commits: u64, live_skinned: usize }
@@ -1538,26 +1538,30 @@ mod tests {
                 let commits = ap::test_deferred_commits();
                 let mut snapshots = Vec::new();
                 for (index, steps) in frames.iter().enumerate() {
-                    ts::begin_direct(vec3(0., -60., 15.), vec3(0.1, 1., -0.2), 1.37 + 0.41 * index as f32,
-                        crate::render_fx::Appearance { dissolve: 0.25, ghost: index == 1, power: 0.5 });
+                    ts::begin_direct(
+                        vec3((index % 5) as f32 * 0.3, -60. + (index % 4) as f32, 15. + (index % 3) as f32),
+                        vec3(0.1 + (index % 2) as f32 * 0.05, 1., -0.2),
+                        1.37 + 0.17 * index as f32,
+                        crate::render_fx::Appearance { dissolve: (index % 8) as f32 * 0.04, ghost: index % 3 == 1, power: 0.2 + (index % 6) as f32 * 0.07 });
                     crate::render_fx::retained::host_reset();
                     let poses = pose(index);
                     let mut held = Vec::new();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let mut frame = Frame::begin();
                         fn exec(step: &Step, fixtures: &[Fixture], meshes: &mut [Vec<Vec<Option<Mesh>>>], actors: &[ActorId], poses: &[Transform], held: &mut Vec<std::rc::Rc<crate::render_fx::prepared::Geometry>>) {
-                            let p = |alpha: f32| Params { pose: poses, scales: &[], palette: &[], transform: Transform { rotation: Quat::from_rotation_y(0.1), translation: vec3(0., 5., 0.) },
-                                scale: 1.25, flat: false, fullbright: false, alpha };
+                            let p = |alpha: f32, flat: bool, fullbright: bool| Params { pose: poses, scales: &[], palette: &[], transform: Transform { rotation: Quat::from_rotation_y(0.1), translation: vec3(0., 5., 0.) },
+                                scale: 1.25, flat, fullbright, alpha };
                             match step {
-                                Step::Draw(m, a, alpha) => { let _s = actors[*a].scope(); assert_eq!(handle(&fixtures[*m].skeleton, &mut meshes[*m][*a], p(*alpha), true), Some(true)); }
-                                Step::Hidden(m, a) => { let _s = actors[*a].scope(); assert_eq!(handle(&fixtures[*m].skeleton, &mut meshes[*m][*a], p(1.), false), Some(false)); }
+                                Step::Draw(m, a, alpha) => { let _s = actors[*a].scope(); assert_eq!(handle(&fixtures[*m].skeleton, &mut meshes[*m][*a], p(*alpha, false, false), true), Some(true)); }
+                                Step::DrawShaded(m, a, alpha, flat, fullbright) => { let _s = actors[*a].scope(); assert_eq!(handle(&fixtures[*m].skeleton, &mut meshes[*m][*a], p(*alpha, *flat, *fullbright), true), Some(true)); }
+                                Step::Hidden(m, a) => { let _s = actors[*a].scope(); assert_eq!(handle(&fixtures[*m].skeleton, &mut meshes[*m][*a], p(1., false, false), false), Some(false)); }
                                 Step::Topology(m, a) => {
                                     let _s = actors[*a].scope();
                                     let mut changed: Vec<Option<Mesh>> = meshes[*m][*a].iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh {
                                         vertices: mesh.vertices.clone(), indices: mesh.indices.clone(), texture: mesh.texture.clone(),
                                     })).collect();
                                     changed[0].as_mut().unwrap().indices.swap(0, 1);
-                                    assert_eq!(handle(&fixtures[*m].skeleton, &mut changed, p(1.), true), Some(true));
+                                    assert_eq!(handle(&fixtures[*m].skeleton, &mut changed, p(1., false, false), true), Some(true));
                                 }
                                 Step::Puff => crate::render_fx::world_puff_quad([Vertex::new(1., 2., 3., 0., 0., WHITE); 4], None, Blend::Add),
                                 Step::ReadOnly(steps) => crate::render_fx::retained_depth_scope(|| for s in steps { exec(s, fixtures, meshes, actors, poses, held); }),
@@ -1570,7 +1574,7 @@ mod tests {
                                     // One palette entry for two bones: the worker indexes out of range.
                                     let palette = [(Mat3::IDENTITY, Vec3::ZERO)];
                                     let _s = actors[*a].scope();
-                                    assert_eq!(handle(&fixtures[*m].skeleton, &mut meshes[*m][*a], Params { palette: &palette, ..p(1.) }, true), Some(true));
+                                    assert_eq!(handle(&fixtures[*m].skeleton, &mut meshes[*m][*a], Params { palette: &palette, ..p(1., false, false) }, true), Some(true));
                                 }
                                 Step::GatherPanic => panic!("injected game-thread failure during gather"),
                             }
@@ -1695,12 +1699,263 @@ mod tests {
             let off = run(false, None, &models, &[normal.clone(), vec![], normal.clone(), vec![], normal.clone()], true);
             assert_eq!(on.commits, 2 + 3 + 2 + 1 + 2);
             for frame in [0, 2, 4] { assert_eq!(on.frames[frame], off.frames[frame], "frame {frame} after a failed frame"); }
-            // The failed collect published nothing: only the world packet remains.
+            // The failed collect published no actor group: only the world packet remains.
             assert_eq!(on.frames[1].groups.len(), 1);
-            // A game-thread failure before dispatch unwinds with its placeholder still queued
-            // in FRAME (as the existing recipe groups are); the next view begin clears it.
-            assert_eq!(on.frames[3].groups.iter().filter(|g| g.1.is_empty()).count(), 1);
+            assert!(on.frames[1].groups.iter().all(|g| !g.1.is_empty()), "worker failure left an unfilled placeholder");
+            // Cleanup has already run. This snapshot is the failed view itself, before the next
+            // begin_direct replaces FRAME.
+            assert_eq!(on.frames[3].groups.iter().filter(|g| g.1.is_empty()).count(), 0, "gather failure left an empty placeholder");
+            assert_eq!(on.frames[3].vertices, 0);
+            assert_eq!(on.frames[3].dropped_layers, 0);
             assert_eq!(ap::test_deferred_pending(), (0, 0, 0));
+        }
+        #[test]
+        fn dropped_guard_discards_unfilled_groups_and_the_next_frame_does_not_repair_them() {
+            // Per frame: serial model 4, model 0 (deferred only when on), a puff, then direct
+            // model 3, whose geometry would arrive in complete(). Frame 0 drops the guard during
+            // gather, frame 1 after hold() and a world draw, frame 2 completes normally.
+            let models = full_matrix();
+            let go = |on: bool| -> Vec<ts::FrameSnapshot> {
+                startup(2, false); reset_publications(); ts::clear(); SURFACES_KEEP.with(|k| k.borrow_mut().clear());
+                let fixtures: Vec<_> = models.iter().enumerate().map(|(i, m)| fixture(i, m)).collect();
+                let actors: Vec<_> = (0..3).map(|_| ActorId::default()).collect();
+                let mut meshes: Vec<Vec<Vec<Option<Mesh>>>> = fixtures.iter()
+                    .map(|f| actors.iter().map(|_| vec![Some(crate::render_fx::copy_mesh(&f.mesh))]).collect()).collect();
+                let snapshots = ap::with_deferred_layers(on, || {
+                    let mut snapshots = Vec::new();
+                    for index in 0..3 {
+                        let pose = pose(index);
+                        ts::begin_direct(vec3(index as f32, -60., 15.), Vec3::Y, 1.5 + index as f32,
+                            crate::render_fx::Appearance { dissolve: 0.2, ghost: index == 1, power: 0.4 });
+                        crate::render_fx::retained::host_reset();
+                        {
+                            let mut frame = Frame::begin();
+                            for (model, actor) in [(4, 0), (0, 1), (usize::MAX, 0), (3, 2)] {
+                                if model == usize::MAX {
+                                    crate::render_fx::world_puff_quad([Vertex::new(1., 2., 3., 0., 0., WHITE); 4], None, Blend::Add);
+                                    continue;
+                                }
+                                let _s = actors[actor].scope();
+                                let params = Params { pose: &pose, scales: &[], palette: &[], transform: Transform { rotation: Quat::from_rotation_y(0.1), translation: vec3(0., 5., 0.) },
+                                    scale: 1.25, flat: false, fullbright: false, alpha: 1. };
+                                assert_eq!(handle(&fixtures[model].skeleton, &mut meshes[model][actor], params, true), Some(true));
+                            }
+                            if index > 0 {
+                                frame.dispatch();
+                                crate::render_fx::effect(&Mesh { vertices: vec![Vertex::new(4., 5., 6., 0.2, 0.3, RED); 3], indices: vec![0, 1, 2], texture: None }, Blend::Alpha);
+                            }
+                            if index == 2 { frame.collect(); }
+                            drop(frame);
+                        }
+                        // Read before the next begin_direct replaces FRAME.
+                        assert_eq!(ap::test_deferred_pending(), (0, 0, 0), "frame {index}");
+                        snapshots.push(ts::snapshot());
+                    }
+                    snapshots
+                });
+                reset_publications(); ts::clear(); SURFACES_KEEP.with(|k| k.borrow_mut().clear());
+                snapshots
+            };
+            let off = go(false);
+            let on = go(true);
+            let unfilled = |frame: &ts::FrameSnapshot| frame.groups.iter().filter(|g| g.1.is_empty() || g.1.iter().any(|p| !p.geometry && p.vertices.is_empty())).count();
+            for (index, frame) in on.iter().chain(&off).enumerate() { assert_eq!(unfilled(frame), 0, "unfilled group after cleanup, snapshot {index}: {frame:?}"); }
+            // Frame 0: off keeps serial models 4 and 0; on keeps model 4 only. The puff index
+            // moves back over the discarded placeholder, and its 12 vertices leave FRAME.
+            let [off0, off1, off2]: [ts::FrameSnapshot; 3] = off.try_into().unwrap();
+            let [on0, on1, on2]: [ts::FrameSnapshot; 3] = on.try_into().unwrap();
+            assert_eq!(off0.groups.len(), 2);
+            assert_eq!(off0.puffs.iter().map(|p| p.0).collect::<Vec<_>>(), [2]);
+            let mut expect = off0;
+            expect.groups.remove(1);
+            expect.puffs[0].0 -= 1;
+            expect.vertices -= 12;
+            assert_eq!(on0, expect, "failed gather cleanup");
+            // Frame 1: the world group drawn after hold comes first, then the finished held
+            // groups in complete() order; the placeholder and the direct group are gone.
+            assert_eq!(off1.groups.len(), 3);
+            assert_eq!(off1.puffs.iter().map(|p| p.0).collect::<Vec<_>>(), [3]);
+            let mut expect = off1;
+            expect.groups.remove(2);
+            expect.puffs[0].0 -= 1;
+            expect.vertices -= 12;
+            assert_eq!(on1, expect, "failed held-view cleanup");
+            // Frame 2 runs the full path in both arms and must match exactly.
+            assert_eq!(on2.groups.len(), 4);
+            assert_eq!(on2, off2, "the frame after two failed views");
+            assert!(on2.groups.iter().any(|g| g.1.len() == 2 && !g.1[0].geometry), "frame 2 did not defer model 0");
+        }
+        #[test]
+        fn every_alpha_reaches_full_layers_for_each_non_simple_kind() {
+            use Step::*;
+            let models = vec![
+                Model { layers: vec![environment()], transparent: false, vertices: 6 },
+                Model { layers: vec![dot_alpha()], transparent: false, vertices: 6 },
+                Model { layers: vec![scroll_animated()], transparent: false, vertices: 6 },
+                Model { layers: vec![vector_uv()], transparent: true, vertices: 6 },
+                Model { layers: vec![environment(), simple(false, Blend::Add)], transparent: false, vertices: 6 },
+            ];
+            let frames: Vec<Vec<Step>> = (0..=255).map(|alpha| {
+                let byte = alpha as f32 / 255.;
+                let flat = alpha % 2 == 0;
+                let fullbright = alpha % 3 == 0;
+                vec![
+                    DrawShaded(0, 0, byte, flat, fullbright),
+                    DrawShaded(1, 1, byte, flat, fullbright),
+                    DrawShaded(2, 2, byte, flat, fullbright),
+                    DrawShaded(3, 3, byte, flat, fullbright),
+                    DrawShaded(4, 0, byte, flat, fullbright),
+                ]
+            }).collect();
+            let (off, on) = compare(None, &models, &frames, true, 256 * 5);
+            assert!(off.frames.iter().zip(&on.frames).all(|(a, b)| a == b));
+            assert!(on.frames.iter().any(|frame| frame.groups.iter().any(|group| group.1.iter().any(|pass|
+                pass.vertices.iter().any(|vertex| vertex.2 != [0, 0, 0, 0] || vertex.1 != [0, 0])))));
+        }
+        #[test]
+        fn live_uv_edits_and_raw_normalized_raw_advance_the_same_slot_stamp() {
+            let models = vec![Model { layers: vec![simple(false, Blend::Opaque), environment()], transparent: false, vertices: 6 }];
+            startup(2, false); reset_publications(); ts::clear(); SURFACES_KEEP.with(|k| k.borrow_mut().clear());
+            let fixture = fixture(0, &models[0]);
+            let actor = ActorId::default();
+            let key = ap::Key { actor, surface: Arc::as_ptr(&fixture.skeleton.surfaces[0].cpu()) as usize };
+            let mut mesh = vec![Some(crate::render_fx::copy_mesh(&fixture.mesh))];
+            let pose = pose(1);
+            let params = Params { pose: &pose, scales: &[], palette: &[], transform: Transform { rotation: Quat::from_rotation_y(0.1), translation: vec3(0., 5., 0.) },
+                scale: 1.25, flat: false, fullbright: false, alpha: 1. };
+            let draw = |mesh: &mut [Option<Mesh>], cap: usize| {
+                ts::set_actor_max_layers(Some(cap));
+                ts::begin_direct(vec3(0., -60., 15.), Vec3::Y, 4.5, crate::render_fx::Appearance { dissolve: 0.2, ghost: false, power: 0.5 });
+                crate::render_fx::retained::host_reset();
+                let mut frame = Frame::begin();
+                { let _s = actor.scope(); assert_eq!(handle(&fixture.skeleton, mesh, params, true), Some(true)); }
+                frame.dispatch();
+                frame.collect();
+                ts::snapshot()
+            };
+            ap::with_deferred_layers(true, || {
+                let raw = draw(&mut mesh, 2);
+                let raw_stamp = ap::test_stamp(key).unwrap();
+                assert_eq!(raw_stamp.1, PublicationMode::Raw);
+                assert!(raw.groups.iter().any(|g| g.1.len() == 2));
+                let uv = mesh[0].as_ref().unwrap().vertices[0].uv;
+                mesh[0].as_mut().unwrap().vertices[0].uv = Vec2::new(uv.x + 0.37, -0.2);
+                let edited = draw(&mut mesh, 2);
+                let edited_stamp = ap::test_stamp(key).unwrap();
+                assert_eq!(edited_stamp.1, PublicationMode::Raw);
+                assert_ne!(edited_stamp.0, raw_stamp.0, "a live UV edit with the same pose kept the upload stamp");
+                let edited_uv = mesh[0].as_ref().unwrap().vertices[0].uv.to_array().map(f32::to_bits);
+                assert!(edited.groups.iter().flat_map(|g| &g.1).any(|pass| pass.vertices.iter().any(|v| v.1 == edited_uv)));
+                let normalized = draw(&mut mesh, 1);
+                let normalized_stamp = ap::test_stamp(key).unwrap();
+                assert_ne!(normalized_stamp.1, PublicationMode::Raw);
+                assert_ne!(normalized_stamp.0, edited_stamp.0, "Raw to normalized kept the upload stamp");
+                assert!(normalized.groups.iter().all(|g| !g.1.is_empty()));
+                let raw_again = draw(&mut mesh, 2);
+                let raw_again_stamp = ap::test_stamp(key).unwrap();
+                assert_eq!(raw_again_stamp.1, PublicationMode::Raw);
+                assert_ne!(raw_again_stamp.0, normalized_stamp.0, "normalized to Raw kept the upload stamp");
+                assert!(raw_again.groups.iter().any(|g| g.1.len() == 2));
+                ts::set_actor_max_layers(None);
+            });
+            reset_publications(); ts::clear(); SURFACES_KEEP.with(|k| k.borrow_mut().clear());
+        }
+        /// One unique surface per call: a new bank key every draw. Two layers, so a one-layer
+        /// cap drops one layer per draw in both arms.
+        fn custom_surface(model: usize, vertex_count: usize, indices: Vec<u16>) -> Fixture {
+            let layers = [environment(), simple(false, Blend::Add)];
+            let vertices = (0..vertex_count).map(|i| {
+                let t = i as f32;
+                crate::skeletal::SkinVertex { uv: vec2(0.13 * t - 0.4, 0.71 - 0.02 * t),
+                    weights: vec![Weight { bone: 0, amount: 0.6, offset: vec3(t, (t * 0.1).sin(), 1.) },
+                        Weight { bone: 1, amount: 0.4, offset: vec3(-t * 0.2, 1., t * 0.05) }] }
+            }).collect();
+            let skeleton = Skeleton { bones: vec![crate::skeletal::Bone { parent: None, name: "root".into() }, crate::skeletal::Bone { parent: Some(0), name: "b".into() }],
+                surfaces: vec![crate::skeletal::Surface::new(format!("cap{model}"), vertices, indices)], skin_bounds: vec![] };
+            let base = ts::texture(100_000 + 4 * model as u32);
+            let registered = layers.iter().enumerate().map(|(l, stage)| (stage.clone(), vec![ts::texture(100_001 + 4 * model as u32 + l as u32)])).collect();
+            SURFACES_KEEP.with(|k| k.borrow_mut().push(ts::register(&base, registered, false)));
+            let cpu = skeleton.surfaces[0].cpu();
+            let mut vertices = cpu.bind_vertices.clone();
+            for v in &mut vertices { v.position = Vec3::splat(-77.); v.color = [9, 8, 7, 6]; }
+            Fixture { mesh: Mesh { vertices, indices: cpu.indices.clone(), texture: Some(base) }, skeleton }
+        }
+        struct Unique { commits: u64, frames: Vec<ts::FrameSnapshot>, capacities: Vec<(usize, usize)> }
+        /// Real draws through prepare, capture, workers, drain and complete with a one-layer cap.
+        /// Each frame lists the vertex counts of its unique surfaces. Capacities are the bank
+        /// vertex/index totals after each collect.
+        fn drive_unique(on: bool, frames: &[Vec<usize>], indices: &[u16]) -> Unique {
+            startup(2, false); reset_publications(); ts::clear(); SURFACES_KEEP.with(|k| k.borrow_mut().clear());
+            let mut model = 0usize;
+            let mut snaps = Vec::new();
+            let mut capacities = Vec::new();
+            let commits = ap::with_deferred_layers(on, || ts::with_actor_max_layers(1, || {
+                let before = ap::test_deferred_commits();
+                for sizes in frames {
+                    ts::begin_direct(vec3(0., -20., 8.), Vec3::Y, 1.2 + model as f32, crate::render_fx::Appearance::default());
+                    crate::render_fx::retained::host_reset();
+                    let mut frame = Frame::begin();
+                    for &vertex_count in sizes {
+                        let fixture = custom_surface(model, vertex_count, indices.to_vec());
+                        let actor = ActorId::default();
+                        let mut mesh = vec![Some(crate::render_fx::copy_mesh(&fixture.mesh))];
+                        let pose = pose(1);
+                        { let _s = actor.scope();
+                            assert_eq!(handle(&fixture.skeleton, &mut mesh, Params { pose: &pose, scales: &[], palette: &[],
+                                transform: Transform { rotation: Quat::IDENTITY, translation: Vec3::ZERO }, scale: 1., flat: false, fullbright: false, alpha: 1. }, true), Some(true)); }
+                        model += 1;
+                    }
+                    frame.dispatch();
+                    frame.collect();
+                    drop(frame);
+                    snaps.push(ts::snapshot());
+                    capacities.push(ap::test_capacities());
+                    ts::end_frame();
+                }
+                ap::test_deferred_commits() - before
+            }));
+            reset_publications(); ts::clear(); SURFACES_KEEP.with(|k| k.borrow_mut().clear());
+            Unique { commits, frames: snaps, capacities }
+        }
+        #[test]
+        fn populated_bank_capacity_and_held_slots_refuse_capped_draws_once() {
+            use Step::*;
+            let models = full_matrix();
+            // Held slots populated by real draws in the previous frame, with a capped model.
+            let held = vec![
+                vec![Draw(5, 0, 1.), Draw(5, 0, 1.)],
+                vec![Retain(5, 0, 2), Draw(5, 0, 1.), Draw(0, 1, 1.)],
+            ];
+            let (off, on) = compare(None, &models, &held, false, 2 + 1);
+            assert_eq!(off.frames.iter().map(|f| f.dropped_layers).collect::<Vec<_>>(), vec![2, 1]);
+            assert_eq!(on.frames.iter().map(|f| f.dropped_layers).collect::<Vec<_>>(), vec![2, 1]);
+            // Vertex table: frame 0 fills 64 x 512 = 32768 real vertices; frame 1 adds 64 more
+            // (65536 total) and then a 65th surface. Nothing is evictable yet (banks used in
+            // the current or previous epoch cannot be reclaimed), so that draw hits the real
+            // vertex refusal and completes serially. No test-only capacity assignment.
+            let indices = vec![0u16, 1, 2];
+            let mut second: Vec<usize> = vec![512; 64];
+            second.push(768);
+            let vertex_off = drive_unique(false, &[vec![512; 64], second.clone()], &indices);
+            let vertex_on = drive_unique(true, &[vec![512; 64], second], &indices);
+            assert_eq!(vertex_off.commits, 0);
+            assert_eq!(vertex_on.commits, 128, "the 129th draw at real vertex capacity must refuse");
+            assert_eq!(vertex_on.capacities.iter().map(|c| c.0).collect::<Vec<_>>(), [32768, 65536]);
+            assert_eq!(vertex_off.frames, vertex_on.frames, "populated vertex table output differed from serial");
+            assert_eq!(vertex_on.frames.iter().map(|f| f.dropped_layers).collect::<Vec<_>>(), [64, 65]);
+            // Index table: 8000 indices per surface fill 256000 of 262144 at 32 surfaces. The
+            // 33rd shares the frame, nothing is old enough to evict, and it refuses to serial
+            // with its capped layer counted once, by the fallback.
+            let fat: Vec<u16> = (0..8000).map(|i| (i % 3) as u16).collect();
+            let index_off = drive_unique(false, &[vec![3; 40]], &fat);
+            let index_on = drive_unique(true, &[vec![3; 40]], &fat);
+            assert_eq!(index_off.commits, 0);
+            assert_eq!(index_on.commits, 32, "index table accepted {}", index_on.commits);
+            assert_eq!(index_on.capacities, [(32 * 3, 32 * 8000)]);
+            assert_eq!(index_off.frames, index_on.frames, "index-cap refusal output differed from serial");
+            assert_eq!(index_on.frames[0].groups.len(), 40);
+            assert!(index_on.frames[0].groups.iter().all(|group| !group.1.is_empty()));
+            assert_eq!((index_on.frames[0].dropped_layers, index_off.frames[0].dropped_layers), (40, 40));
         }
         #[test]
         fn raw_mode_keeps_every_kernel_byte_for_all_256_alphas() {

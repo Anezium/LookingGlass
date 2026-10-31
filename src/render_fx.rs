@@ -1076,6 +1076,18 @@ fn layer_passes(vertices: &[Vertex], indices: &[u16], surface: &Surface, camera:
             passes.push(p);
         }
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    {
+        let mut capacity = 0u64;
+        let mut allocs = 0u64;
+        for pass in &passes {
+            capacity += (pass.mesh.vertices.capacity() * std::mem::size_of::<Vertex>()
+                + pass.mesh.indices.capacity() * std::mem::size_of::<u16>()) as u64;
+            allocs += u64::from(pass.mesh.vertices.capacity() > 0) + u64::from(pass.mesh.indices.capacity() > 0);
+        }
+        crate::sim_maps::count("actor_layer_copy_capacity_bytes", capacity);
+        crate::sim_maps::count("actor_layer_copy_allocs", allocs);
+    }
     passes
 }
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1125,6 +1137,7 @@ pub(crate) mod test_support {
     }
     pub(crate) const MAX: usize = MAX_VERTICES;
     pub(crate) fn set_frame_vertices(vertices: usize) { FRAME.with(|f| f.borrow_mut().vertices = vertices); }
+    pub(crate) fn set_actor_max_layers(limit: Option<usize>) { ACTOR_MAX_LAYERS.with(|s| s.set(limit)); }
     pub(crate) fn frame_vertices() -> usize { FRAME.with(|f| f.borrow().vertices) }
     pub(crate) fn end_frame() { FRAME.with(|f| f.borrow_mut().active = false); }
     #[derive(Debug, PartialEq)]

@@ -3,7 +3,7 @@
 //! is the sole publication boundary; retained GPU storage keeps its five-slot ring.
 use super::*;
 use crate::skeletal::SkinSurface;
-use std::{cell::Cell, collections::HashMap, sync::Arc};
+use std::{cell::Cell, collections::HashMap, rc::Weak, sync::Arc};
 use crate::character::skinning::identity::ActorId;
 use super::actor_vertices::PublicationMode;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -17,14 +17,24 @@ struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometr
 /// A non-simple recipe whose raw skin a worker writes into `bank`/`slot`. Its layers are
 /// built on the game thread after a successful drain, into the placeholder at `group`.
 /// Game-thread only: the Rc<Surface> and captured draw values never reach a worker.
-struct Deferred { group:usize, bank:usize, slot:usize, surface:Rc<Surface>, camera:Vec3, time:f32, appearance:Appearance, limit:usize }
+struct Deferred { group:usize, bank:usize, slot:usize, surface:Rc<Surface>, camera:Vec3, time:f32, appearance:Appearance, limit:usize, vertices:usize, dropped_layers:u64 }
 #[derive(Default)]
 struct State {
     banks:Vec<Bank>, lookup:HashMap<Key,usize>,
     #[cfg(test)] cursor:usize,
-    pending:Vec<(usize,usize,usize)>,
+    /// (group, bank, slot, vertex charge) of direct groups that receive geometry in complete().
+    pending:Vec<(usize,usize,usize,usize)>,
     deferred:Vec<Deferred>,
-    held:Vec<Group>, held_puffs:Vec<retained::world_puffs::Puff>, completed:bool, vertex_capacity:usize, index_capacity:usize, epoch:u64,
+    held:Vec<Group>, held_puffs:Vec<retained::world_puffs::Puff>,
+    /// True after hold() moves this frame's actor groups out of FRAME.
+    /// Failed cleanup must touch that owner, not a later world group.
+    staged_held:bool,
+    completed:bool,
+    /// Geometries whose bank Rc was dropped while another owner still held them.
+    /// Host probe and tests only: memory_account() prunes it, nothing does on the Vita.
+    #[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+    evicted_referenced:Vec<Weak<prepared::Geometry>>,
+    vertex_capacity:usize, index_capacity:usize, epoch:u64,
 }
 impl State {
     fn clear(&mut self) { *self=Self::default(); }
@@ -32,13 +42,16 @@ impl State {
         let bank=&mut self.banks[id];
         if let Some(key)=bank.key.take() { self.lookup.remove(&key); }
         for g in bank.slots.iter().flatten() {
+            #[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+            if Rc::strong_count(g)>1 { self.evicted_referenced.push(Rc::downgrade(g)); }
             self.vertex_capacity-=g.vertices.capacity(); self.index_capacity-=g.indices.capacity();
         }
         *bank=Bank::default();
     }
     fn next_frame(&mut self) {
         self.epoch=self.epoch.checked_add(1).expect("actor publication epoch overflow");
-        self.pending.clear(); self.deferred.clear(); self.held.clear(); self.held_puffs.clear(); self.completed=false;
+        self.pending.clear(); self.deferred.clear(); self.held.clear(); self.held_puffs.clear();
+        self.staged_held=false; self.completed=false;
         for id in 0..self.banks.len() {
             if self.banks[id].key.is_some() && self.epoch-self.banks[id].last_used>UNUSED_FRAMES { self.evict(id); }
         }
@@ -119,6 +132,167 @@ impl State {
             true
         } else { false }
     }
+    /// Unsuccessful frame cleanup: a gather panic, a dropped guard or a failed collect.
+    /// Every group still waiting for collect output (deferred placeholders and direct groups
+    /// whose geometry arrives in complete()) is removed from its current owner, with its
+    /// vertex charge and committed dropped-layer count. Before hold() that owner is FRAME.
+    /// After hold() it is `held`; the remaining held groups and puffs are finished serial or
+    /// world output and go back to FRAME in the order complete() would have used.
+    /// After complete() this is a no-op.
+    fn discard_unfilled(&mut self) {
+        if self.completed { return; }
+        let mut remove: Vec<usize> = self.deferred.iter().map(|d| d.group)
+            .chain(self.pending.iter().map(|p| p.0)).collect();
+        remove.sort_unstable();
+        remove.dedup();
+        let charge: usize = self.deferred.iter().map(|d| d.vertices).sum::<usize>()
+            + self.pending.iter().map(|p| p.3).sum::<usize>();
+        let dropped: u64 = self.deferred.iter().map(|d| d.dropped_layers).sum();
+        fn strip(groups: &mut Vec<Group>, puffs: &mut [retained::world_puffs::Puff], remove: &[usize]) {
+            for &index in remove.iter().rev() { groups.remove(index); }
+            for puff in puffs {
+                let shift = remove.iter().filter(|g| **g < puff.before_group).count();
+                puff.before_group -= shift;
+            }
+        }
+        let staged = self.staged_held;
+        let (held, held_puffs) = (&mut self.held, &mut self.held_puffs);
+        FRAME.with(|f| {
+            let mut f = f.borrow_mut();
+            if staged {
+                strip(held, held_puffs, &remove);
+                let world_groups = f.groups.len();
+                for puff in held_puffs.iter_mut() { puff.before_group += world_groups; }
+                f.groups.append(held);
+                f.world_puffs.append(held_puffs);
+            } else {
+                let f = &mut *f;
+                strip(&mut f.groups, &mut f.world_puffs, &remove);
+            }
+            f.vertices = f.vertices.checked_sub(charge).expect("discarded actor vertices exceed FRAME.vertices");
+        });
+        if dropped > 0 { retained::uncount("vita_fx_dropped_layers", dropped); }
+        self.pending.clear();
+        self.deferred.clear();
+        self.staged_held = false;
+    }
+}
+#[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+/// One walked publication allocation. Payload bytes do not depend on pointer width.
+/// Container headers do: host Vec is 24 B and Rc/Arc header is 16 B; Vita ABI uses 12 B and 8 B.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MemoryAccount {
+    bank_vertex_len: usize, bank_vertex_cap: usize, bank_index_len: usize, bank_index_cap: usize,
+    geometry_allocs: usize, free_slots: usize, held_slots: usize,
+    evicted_allocs: usize, evicted_vertex_cap: usize, evicted_index_cap: usize, evicted_payload_bytes: usize,
+    lookup_len: usize, lookup_cap: usize, lookup_bytes_estimate: usize, banks_len: usize, banks_cap: usize, cpu_arcs: usize,
+    pending_len: usize, pending_cap: usize, deferred_len: usize, deferred_cap: usize,
+    held_len: usize, held_cap: usize, puff_len: usize, puff_cap: usize,
+    held_pass_bytes: usize, held_pass_allocs: usize,
+    payload_bytes: usize, container_host_bytes: usize, rc_boxes: usize,
+}
+#[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+fn live_geometry(g: &Rc<prepared::Geometry>, seen: &mut HashMap<usize, ()>, into: &mut MemoryAccount, evicted: bool) {
+    let ptr = Rc::as_ptr(g) as usize;
+    if seen.insert(ptr, ()).is_some() { return; }
+    let vc = g.vertices.capacity();
+    let ic = g.indices.capacity();
+    let bytes = vc * std::mem::size_of::<Vertex>() + ic * std::mem::size_of::<u16>();
+    into.rc_boxes += 1;
+    if evicted {
+        into.evicted_allocs += 1;
+        into.evicted_vertex_cap += vc;
+        into.evicted_index_cap += ic;
+        into.evicted_payload_bytes += bytes;
+    } else {
+        into.payload_bytes += bytes;
+        into.geometry_allocs += 1;
+        into.bank_vertex_len += g.vertices.len();
+        into.bank_vertex_cap += vc;
+        into.bank_index_len += g.indices.len();
+        into.bank_index_cap += ic;
+    }
+}
+#[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+impl State {
+    fn memory_account(&mut self) -> MemoryAccount {
+        self.evicted_referenced.retain(|g| g.strong_count() > 0);
+        let mut seen = HashMap::new();
+        let mut account = MemoryAccount {
+            lookup_len: self.lookup.len(), lookup_cap: self.lookup.capacity(),
+            banks_len: self.banks.len(), banks_cap: self.banks.capacity(),
+            pending_len: self.pending.len(), pending_cap: self.pending.capacity(),
+            deferred_len: self.deferred.len(), deferred_cap: self.deferred.capacity(),
+            held_len: self.held.len(), held_cap: self.held.capacity(),
+            puff_len: self.held_puffs.len(), puff_cap: self.held_puffs.capacity(),
+            ..MemoryAccount::zero()
+        };
+        account.container_host_bytes = self.banks.capacity() * std::mem::size_of::<Bank>()
+            + self.pending.capacity() * std::mem::size_of::<(usize, usize, usize, usize)>()
+            + self.deferred.capacity() * std::mem::size_of::<Deferred>()
+            + self.held.capacity() * std::mem::size_of::<Group>()
+            + self.held_puffs.capacity() * std::mem::size_of::<retained::world_puffs::Puff>();
+        account.lookup_bytes_estimate = self.lookup.capacity()
+            * (std::mem::size_of::<Key>() + std::mem::size_of::<usize>() + 1);
+        // Held passes own the per-layer copies. A pass whose geometry Rc is Some shares the
+        // bank geometry already walked above, so only its own buffers are added here.
+        for group in &self.held {
+            account.held_pass_bytes += group.passes.capacity() * std::mem::size_of::<Pass>();
+            for pass in &group.passes {
+                account.held_pass_bytes += pass.mesh.vertices.capacity() * std::mem::size_of::<Vertex>()
+                    + pass.mesh.indices.capacity() * std::mem::size_of::<u16>();
+                account.held_pass_allocs += usize::from(pass.mesh.vertices.capacity() > 0)
+                    + usize::from(pass.mesh.indices.capacity() > 0);
+            }
+        }
+        let mut cpu = HashMap::new();
+        for bank in &self.banks {
+            for slot in &bank.slots {
+                match slot {
+                    Some(g) => {
+                        if Rc::strong_count(g) > 1 { account.held_slots += 1; }
+                        live_geometry(g, &mut seen, &mut account, false);
+                    }
+                    None => account.free_slots += 1,
+                }
+            }
+            for cpu_slot in bank.cpu.iter().flatten() {
+                cpu.insert(Arc::as_ptr(cpu_slot) as usize, ());
+            }
+        }
+        account.cpu_arcs = cpu.len();
+        let evicted: Vec<_> = self.evicted_referenced.iter().filter_map(Weak::upgrade).collect();
+        for g in &evicted { live_geometry(g, &mut seen, &mut account, true); }
+        account
+    }
+}
+#[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+impl MemoryAccount {
+    const fn zero() -> Self {
+        Self {
+            bank_vertex_len: 0, bank_vertex_cap: 0, bank_index_len: 0, bank_index_cap: 0,
+            geometry_allocs: 0, free_slots: 0, held_slots: 0, evicted_allocs: 0, evicted_vertex_cap: 0,
+            evicted_index_cap: 0, evicted_payload_bytes: 0, lookup_len: 0, lookup_cap: 0, lookup_bytes_estimate: 0,
+            banks_len: 0, banks_cap: 0, cpu_arcs: 0,
+            pending_len: 0, pending_cap: 0, deferred_len: 0, deferred_cap: 0, held_len: 0, held_cap: 0,
+            puff_len: 0, puff_cap: 0, held_pass_bytes: 0, held_pass_allocs: 0,
+            payload_bytes: 0, container_host_bytes: 0, rc_boxes: 0,
+        }
+    }
+    /// Host heap estimate for walked publication storage. Rc header is 2 pointers.
+    /// Geometry's own Vec headers sit inside `size_of::<Geometry>()`. Buffer payload is separate.
+    /// Lookup buckets use one byte plus key/value per capacity slot (hashbrown layout, no SIMD
+    /// group overhead). Held pass structs stay in their Vec capacity. This is not a malloc trace.
+    fn host_bytes(self) -> usize {
+        self.payload_bytes + self.evicted_payload_bytes + self.held_pass_bytes + self.lookup_bytes_estimate
+            + self.rc_boxes * (std::mem::size_of::<usize>() * 2 + std::mem::size_of::<prepared::Geometry>())
+            + self.container_host_bytes
+    }
+    /// Same payload and the same Rc count, with a 4-byte Vita pointer header.
+    /// Container structs stay on the host figure: their padding is not retargeted.
+    fn vita_abi_bytes(self) -> usize {
+        self.payload_bytes + self.evicted_payload_bytes + self.held_pass_bytes + self.rc_boxes * 8
+    }
 }
 thread_local! {
     static ACTIVE:Cell<bool>=const {Cell::new(false)};
@@ -162,6 +336,20 @@ pub(crate) fn test_deferred_pending()->(usize,usize,usize) {
 /// Exhaust the vertex budget of the banks for the rest of this scene (tests only).
 #[cfg(test)]
 pub(crate) fn test_fill_vertex_capacity() { STATE.with(|s| s.borrow_mut().vertex_capacity=VERTICES); }
+#[cfg(test)]
+pub(crate) fn test_capacities() -> (usize, usize) {
+    STATE.with(|s| { let s = s.borrow(); (s.vertex_capacity, s.index_capacity) })
+}
+#[cfg(test)]
+pub(crate) fn test_stamp(key: Key) -> Option<(u64, PublicationMode)> {
+    STATE.with(|s| {
+        let s = s.borrow();
+        let id = *s.lookup.get(&key)?;
+        let bank = &s.banks[id];
+        let slot = bank.epoch.iter().position(|epoch| *epoch == s.epoch)?;
+        Some((bank.slots[slot].as_ref()?.version.vertices, bank.mode[slot]?))
+    })
+}
 /// Hold extra references to up to `slots` existing slots of one bank, as an older
 /// retained publication would. Returns the held geometry.
 #[cfg(test)]
@@ -185,7 +373,13 @@ pub(crate) fn begin() {
 }
 pub(crate) fn end() {
     DEFERRED.with(|d|d.set(false));
-    if ACTIVE.with(|a|a.replace(false)) { STATE.with(|s| {let mut s=s.borrow_mut();s.pending.clear();s.deferred.clear();s.held.clear();s.held_puffs.clear();}); }
+    if ACTIVE.with(|a|a.replace(false)) {
+        STATE.with(|s| {
+            let mut s=s.borrow_mut();
+            s.discard_unfilled();
+            s.pending.clear(); s.deferred.clear(); s.held.clear(); s.held_puffs.clear(); s.staged_held=false;
+        });
+    }
 }
 /// This address is valid only between prepare and the fully drained collect. Banks
 /// cannot be mutated again while any old packet/view still owns their publication.
@@ -196,6 +390,7 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
     #[cfg(not(test))]
     let surface=None;
     let surface=match surface {Some(s)=>s,None=>SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade))?};
+    note_eligibility(&surface);
     if SKIN_OPACITY.with(Cell::get)!=1. {return None;}
     let (time,appearance)=FRAME.with(|f| {let f=f.borrow();(f.time,f.appearance)});
     let Some((passes,alpha))=actor_cache::recipe(&surface,time,appearance) else {
@@ -219,7 +414,7 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
             let transparent=surface.transparent||f.depth_read_only;
             f.groups.push(Group {passes:passes.take().unwrap(),transparent});Some(id)
         })?;
-        s.pending.push((group,id,slot));
+        s.pending.push((group,id,slot,n));
         Some((output,mode))
     });
     // Full/held banks and packet limits must not discard a reusable recipe.
@@ -263,7 +458,7 @@ fn prepare_deferred(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,
             let transparent=surface.transparent||f.depth_read_only;
             f.groups.push(Group {passes:Vec::new(),transparent});group
         });
-        s.deferred.push(Deferred {group,bank,slot,surface,camera,time,appearance,limit});
+        s.deferred.push(Deferred {group,bank,slot,surface,camera,time,appearance,limit,vertices:n,dropped_layers:dropped_layers as u64});
         // The placeholder is committed. Refusal returned before this and left the
         // serial fallback to count the same capped layers once.
         if dropped_layers>0 {retained::count("vita_fx_dropped_layers",dropped_layers as u64);}
@@ -276,7 +471,7 @@ fn prepare_deferred(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,
 pub(crate) fn hold() {
     STATE.with(|s| {let mut s=s.borrow_mut();FRAME.with(|f| {let mut f=f.borrow_mut();
         std::mem::swap(&mut s.held,&mut f.groups);std::mem::swap(&mut s.held_puffs,&mut f.world_puffs);
-    });});
+    }); s.staged_held=true; });
 }
 pub(crate) fn complete() {
     STATE.with(|s| {
@@ -285,37 +480,52 @@ pub(crate) fn complete() {
         // borrow below: pass_at reads FRAME through retained_active().
         if !s.deferred.is_empty() {
             assert!(retained_active(),"deferred actor layers outside the direct view");
-            let mut deferred=std::mem::take(&mut s.deferred);
+            // Records stay in `s.deferred` until every placeholder is filled, so a panic here
+            // still lets end() find and discard all of this frame's deferred groups.
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            let mut copy_bytes=0;
-            for d in &deferred {
+            let (mut copy_bytes, mut copy_cap, mut copy_allocs) = (0u64, 0u64, 0u64);
+            for n in 0..s.deferred.len() {
+                let d=&s.deferred[n];
+                let (group,limit,surface,camera,time,appearance)=(d.group,d.limit,d.surface.clone(),d.camera,d.time,d.appearance);
                 // A read-only view of the published slot; passes own their copies.
                 let geometry=s.banks[d.bank].slots[d.slot].as_ref().unwrap().clone();
-                let passes=super::layer_passes(&geometry.vertices,&geometry.indices,&d.surface,d.camera,d.time,1.,d.appearance,true,None,d.limit);
-                assert_eq!(passes.len(),d.limit,"deferred layer placeholder without its passes");
+                let passes=super::layer_passes(&geometry.vertices,&geometry.indices,&surface,camera,time,1.,appearance,true,None,limit);
+                assert_eq!(passes.len(),limit,"deferred layer placeholder without its passes");
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                { copy_bytes+=super::layer_copy_bytes(geometry.vertices.len(),geometry.indices.len(),d.limit); }
-                let placeholder=&mut s.held[d.group];
+                {
+                    copy_bytes+=super::layer_copy_bytes(geometry.vertices.len(),geometry.indices.len(),limit);
+                    for pass in &passes {
+                        copy_cap+= (pass.mesh.vertices.capacity()*std::mem::size_of::<Vertex>()
+                            + pass.mesh.indices.capacity()*std::mem::size_of::<u16>()) as u64;
+                        copy_allocs+=u64::from(pass.mesh.vertices.capacity()>0)+u64::from(pass.mesh.indices.capacity()>0);
+                    }
+                }
+                let placeholder=&mut s.held[group];
                 debug_assert!(placeholder.passes.is_empty());
                 placeholder.passes=passes;
             }
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             {
-                crate::sim_maps::count("actor_deferred_surfaces",deferred.len() as u64);
-                crate::sim_maps::count("actor_deferred_capacity_bytes",(deferred.capacity()*std::mem::size_of::<Deferred>()) as u64);
+                crate::sim_maps::count("actor_deferred_surfaces",s.deferred.len() as u64);
+                crate::sim_maps::count("actor_deferred_capacity_bytes",(s.deferred.capacity()*std::mem::size_of::<Deferred>()) as u64);
                 crate::sim_maps::count("actor_deferred_layer_copy_bytes",copy_bytes);
+                crate::sim_maps::count("actor_deferred_layer_copy_capacity_bytes",copy_cap);
+                crate::sim_maps::count("actor_deferred_layer_copy_allocs",copy_allocs);
                 crate::sim_maps::count("actor_layer_copy_bytes",copy_bytes);
+                crate::sim_maps::count("actor_layer_copy_capacity_bytes",copy_cap);
+                crate::sim_maps::count("actor_layer_copy_allocs",copy_allocs);
             }
-            deferred.clear();
-            s.deferred=deferred;
+            s.deferred.clear();
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         {
+            let account=s.memory_account();
             crate::sim_maps::count("actor_publication_bank_bytes",(s.vertex_capacity*std::mem::size_of::<Vertex>()+s.index_capacity*2) as u64);
             crate::sim_maps::count("actor_publication_bank_count",s.lookup.len() as u64);
+            emit_memory(&account);
         }
         for n in 0..s.pending.len() {
-            let (group,bank,slot)=s.pending[n];
+            let (group,bank,slot,_)=s.pending[n];
             let geometry=s.banks[bank].slots[slot].as_ref().unwrap().clone();
             for pass in &mut s.held[group].passes {pass.geometry=Some(geometry.clone());}
         }
@@ -329,6 +539,116 @@ pub(crate) fn complete() {
         });
         s.completed=true;
     });
+}
+
+fn note_eligibility(surface: &Rc<Surface>) {
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    {
+        let id = Rc::as_ptr(surface) as usize;
+        ELIGIBILITY.with(|found| {
+            let mut found = found.borrow_mut();
+            if !found.contains_key(&id) { found.insert(id, eligibility_record(surface)); }
+        });
+    }
+    #[cfg(not(all(feature="sim_maps_probe", not(target_os="vita"))))]
+    { let _ = surface; }
+}
+#[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
+/// Stage flags and the uniform/mixed class for one actor surface. Host inventory and tests
+/// both use this; it does not allocate a bank or submit a layer.
+pub(crate) fn eligibility_record(surface: &Surface) -> serde_json::Value {
+    let limit = super::actor_max_layers(crate::render::vita_renderer::config()).min(surface.layers.len());
+    let layers: Vec<_> = surface.layers.iter().map(|layer| {
+        let stage = &layer.stage;
+        serde_json::json!({
+            "environment": stage.environment,
+            "vector_uv": stage.vector_uv.is_some(),
+            "dot_alpha": stage.dot_alpha.is_some(),
+            "mods": !stage.mods.is_empty(),
+            "vertex_alpha": stage.vertex_alpha,
+        })
+    }).collect();
+    let accepts = deferred_accepts(surface, limit);
+    let considered: Vec<bool> = surface.layers.iter().take(limit).map(|layer| layer.stage.vertex_alpha).collect();
+    let classification = if considered.is_empty() { "empty" }
+        else if considered.iter().all(|alpha| *alpha == considered[0]) { "uniform" }
+        else { "mixed" };
+    let reason = if surface.layers.is_empty() { "empty" }
+        else if limit == 0 { "cap" }
+        else if SKIN_OPACITY.with(Cell::get) != 1. { "opacity" }
+        else if !surface.layers.iter().take(limit).any(|layer| !actor_cache::simple(&layer.stage)) { "simple" }
+        else if accepts { "deferred" }
+        else { "refused" };
+    serde_json::json!({
+        "layers": layers, "limit": limit, "classification": classification,
+        "deferred_accepts": accepts, "reason": reason,
+        "environment": surface.layers.iter().any(|layer| layer.stage.environment),
+    })
+}
+#[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+thread_local! {
+    static ELIGIBILITY: RefCell<std::collections::BTreeMap<usize, serde_json::Value>> = RefCell::default();
+}
+#[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+pub(crate) fn emit_eligibility(map: &str) {
+    ELIGIBILITY.with(|found| {
+        let found = found.borrow();
+        let mut surfaces: Vec<_> = found.iter().map(|(id, record)| {
+            let mut record = record.clone();
+            record["surface"] = serde_json::json!(id);
+            record
+        }).collect();
+        surfaces.sort_by_key(|record| record["surface"].as_u64().unwrap_or(0));
+        let environment_actors = surfaces.iter().filter(|record| record["environment"] == true).count();
+        println!("ACTOR_LAYER_ELIGIBILITY {}", serde_json::json!({
+            "map": map, "surfaces": surfaces, "environment_actors": environment_actors,
+        }));
+    });
+}
+#[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+fn emit_memory(account: &MemoryAccount) {
+    let host = account.host_bytes();
+    let vita = account.vita_abi_bytes();
+    let rows = [
+        ("actor_mem_payload_bytes", account.payload_bytes),
+        ("actor_mem_evicted_payload_bytes", account.evicted_payload_bytes),
+        ("actor_mem_held_pass_bytes", account.held_pass_bytes),
+        ("actor_mem_held_pass_allocs", account.held_pass_allocs),
+        ("actor_mem_lookup_bytes_estimate", account.lookup_bytes_estimate),
+        ("actor_mem_container_host_bytes", account.container_host_bytes),
+        ("actor_mem_host_bytes", host),
+        ("actor_mem_vita_abi_bytes", vita),
+        ("actor_mem_geometry_allocs", account.geometry_allocs),
+        ("actor_mem_evicted_allocs", account.evicted_allocs),
+        ("actor_mem_evicted_vertex_cap", account.evicted_vertex_cap),
+        ("actor_mem_evicted_index_cap", account.evicted_index_cap),
+        ("actor_mem_free_slots", account.free_slots),
+        ("actor_mem_held_slots", account.held_slots),
+        ("actor_mem_bank_vertex_len", account.bank_vertex_len),
+        ("actor_mem_bank_vertex_cap", account.bank_vertex_cap),
+        ("actor_mem_bank_index_len", account.bank_index_len),
+        ("actor_mem_bank_index_cap", account.bank_index_cap),
+        ("actor_mem_lookup_len", account.lookup_len),
+        ("actor_mem_lookup_cap", account.lookup_cap),
+        ("actor_mem_banks_len", account.banks_len),
+        ("actor_mem_banks_cap", account.banks_cap),
+        ("actor_mem_cpu_arcs", account.cpu_arcs),
+        ("actor_mem_pending_len", account.pending_len),
+        ("actor_mem_pending_cap", account.pending_cap),
+        ("actor_mem_deferred_len", account.deferred_len),
+        ("actor_mem_deferred_cap", account.deferred_cap),
+        ("actor_mem_held_len", account.held_len),
+        ("actor_mem_held_cap", account.held_cap),
+        ("actor_mem_puff_len", account.puff_len),
+        ("actor_mem_puff_cap", account.puff_cap),
+        ("actor_mem_rc_boxes", account.rc_boxes),
+        ("actor_mem_sizeof_vertex", std::mem::size_of::<Vertex>()),
+        ("actor_mem_sizeof_geometry", std::mem::size_of::<prepared::Geometry>()),
+        ("actor_mem_sizeof_bank", std::mem::size_of::<Bank>()),
+        ("actor_mem_sizeof_deferred", std::mem::size_of::<Deferred>()),
+        ("actor_mem_worst_bank_payload_bytes", VERTICES * std::mem::size_of::<Vertex>() + INDICES * 2),
+    ];
+    for (name, value) in rows { crate::sim_maps::count(name, value as u64); }
 }
 
 #[cfg(test)]
@@ -580,12 +900,76 @@ mod tests {
             reset();ts::begin_direct(Vec3::ZERO,Vec3::Y,1.,Appearance::default());retained::host_reset();begin();
             let direct=prepare(&mesh,cpu.clone(),false,1,key(ActorId::default(),&cpu));
             if direct.is_none() {super::super::skin(&mesh);}
-            let snapshot=ts::snapshot();end();ts::end_frame();reset();(direct.map(|d|d.1),snapshot)
+            let snapshot=ts::snapshot();
+            end();
+            let cleaned=ts::snapshot();
+            ts::end_frame();reset();
+            (direct.map(|d|d.1),snapshot,cleaned)
         }));
         assert_eq!(off.0,None);assert_eq!(on.0,Some(PublicationMode::Raw));
         assert_eq!((on.1.vertices,on.1.dropped,on.1.dropped_layers),(off.1.vertices,off.1.dropped,off.1.dropped_layers));
         assert_eq!((on.1.groups.len(),off.1.groups.len()),(1,1));
-        assert!(on.1.groups[0].1.is_empty(),"placeholder until complete()");
+        assert!(on.1.groups[0].1.is_empty(),"placeholder until complete or failed cleanup");
+        assert!(on.2.groups.is_empty(),"failed cleanup left the unfilled placeholder");
+        assert_eq!((on.2.vertices,on.2.dropped_layers),(0,0));
+        assert!(!off.2.groups.is_empty(),"serial output must survive the same guard drop");
         drop(surface);ts::clear();
+    }
+    #[test]
+    fn memory_account_counts_each_rc_once_and_keeps_evicted_geometry_while_referenced() {
+        let (mesh,cpu)=fixture();
+        let mut state=State::default();
+        state.next_frame();
+        let key=key(ActorId::default(),&cpu);
+        let (id,slot,_)=state.reserve_key(&mesh,cpu.clone(),false,0,O,key).unwrap();
+        let held=state.banks[id].slots[slot].as_ref().unwrap().clone();
+        let account=state.memory_account();
+        assert_eq!(account.geometry_allocs,1);
+        assert_eq!(account.rc_boxes,1);
+        assert_eq!((account.bank_vertex_len,account.bank_index_len),(3,3));
+        assert!(account.bank_vertex_cap>=account.bank_vertex_len);
+        assert!(account.bank_index_cap>=account.bank_index_len);
+        assert_eq!(account.cpu_arcs,1);
+        assert_eq!(account.held_slots,1);
+        assert!(account.payload_bytes>=3*std::mem::size_of::<Vertex>()+6);
+        assert!(account.host_bytes()>account.payload_bytes);
+        assert_eq!(account.vita_abi_bytes(),account.payload_bytes+8);
+        for _ in 0..=UNUSED_FRAMES {state.next_frame();}
+        let evicted=state.memory_account();
+        assert_eq!(evicted.geometry_allocs,0);
+        assert_eq!(evicted.evicted_allocs,1);
+        assert_eq!(evicted.rc_boxes,1,"the surviving allocation is counted once");
+        assert_eq!(evicted.payload_bytes,0);
+        assert_eq!(evicted.bank_vertex_cap,0,"evicted storage is not bank-live");
+        assert!(evicted.evicted_payload_bytes>=3*std::mem::size_of::<Vertex>()+6);
+        assert_eq!(evicted.evicted_payload_bytes,evicted.evicted_vertex_cap*std::mem::size_of::<Vertex>()
+            +evicted.evicted_index_cap*std::mem::size_of::<u16>());
+        assert_eq!(held.indices,[0,1,2]);
+        drop(held);
+        let gone=state.memory_account();
+        assert_eq!((gone.evicted_allocs,gone.rc_boxes,gone.payload_bytes),(0,0,0));
+    }
+    #[test]
+    fn eligibility_record_names_stage_flags_and_uniform_or_mixed_alpha() {
+        let env=Stage {environment:true,vertex_alpha:true,..Default::default()};
+        let dot=Stage {dot_alpha:Some(Vec2::ONE),mods:vec![crate::materials::TcMod::Rotate(1.)],..Default::default()};
+        let (_,mixed)=test_surface(vec![env.clone(),Stage {vertex_alpha:false,vector_uv:Some((Vec3::X,Vec3::Y)),..Default::default()}]);
+        let record=eligibility_record(&mixed);
+        assert_eq!(record["deferred_accepts"],true);
+        assert_eq!(record["classification"],"mixed");
+        assert_eq!(record["reason"],"deferred");
+        assert_eq!(record["environment"],true);
+        assert_eq!(record["layers"][0]["environment"],true);
+        assert_eq!(record["layers"][0]["vertex_alpha"],true);
+        assert_eq!(record["layers"][1]["vector_uv"],true);
+        let (_,simple)=test_surface(vec![Stage {vertex_alpha:true,..Default::default()},Stage {vertex_alpha:true,..Default::default()}]);
+        let record=eligibility_record(&simple);
+        assert_eq!(record["deferred_accepts"],false);
+        assert_eq!(record["classification"],"uniform");
+        assert_eq!(record["reason"],"simple");
+        let dot_record=eligibility_record(&test_surface(vec![dot]).1);
+        assert_eq!(dot_record["layers"][0]["dot_alpha"],true);
+        assert_eq!(dot_record["layers"][0]["mods"],true);
+        super::super::test_support::clear();
     }
 }
