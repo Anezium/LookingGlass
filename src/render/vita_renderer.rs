@@ -202,6 +202,9 @@ pub struct Config {
     pub quality:String,
     pub opaque_order:String,
     pub world_alpha:bool,
+    /// Skip thread-local reads that cannot change behaviour (release ownership lookup,
+    /// inactive profiler spans). Latched once at config initialization; default off.
+    pub tls_fast_path: bool,
 }
 // The remote derive keeps one strict field schema while letting us distinguish
 // omitted actor preparation from an explicit request before applying defaults.
@@ -330,6 +333,7 @@ impl Default for Config {
             world_viewport_scale: 1.,
             depth_sentinel: false, scaled_depth_fix: true,
             render_scale:0.75,msaa_samples:1,quality:"low".into(),opaque_order:"front_to_back".into(),world_alpha:true,
+            tls_fast_path: false,
         }
     }
 }
@@ -498,6 +502,7 @@ pub fn config() -> &'static Config {
         #[cfg(target_os = "vita")]
         apply_startup_clocks(c.clocks);
         apply_gpu_experiment(&c);
+        crate::tls_fast::init(c.tls_fast_path);
         c
     })
 }
@@ -2222,6 +2227,22 @@ mod tests {
             assert_eq!(serde_json::to_value(&c).unwrap()["sim_trigger_facts_reuse"], enabled);
         }
         for json in [r#"{"sim_trigger_facts_reuse":1}"#, r#"{"sim_trigger_facts_reuse":"on"}"#, r#"{"sim_trigger_facts_reuse":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+    }
+    #[test]
+    fn tls_fast_path_defaults_off_requires_a_boolean_and_is_printed() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.tls_fast_path);
+        }
+        for enabled in [false, true] {
+            let (c, rejected) = parse_runtime_config(format!(r#"{{"tls_fast_path":{enabled}}}"#).as_bytes()).unwrap();
+            assert!(rejected.is_none()); assert_eq!(c.tls_fast_path, enabled);
+            let [config, _] = config_log_lines(&c);
+            let printed: serde_json::Value = serde_json::from_str(config.split_once("[lg/vita-renderer] config ").unwrap().1).unwrap();
+            assert_eq!(printed["tls_fast_path"], enabled);
+        }
+        for json in [r#"{"tls_fast_path":1}"#, r#"{"tls_fast_path":"on"}"#, r#"{"tls_fast_path":null}"#] {
             assert!(serde_json::from_str::<Config>(json).is_err());
         }
     }
