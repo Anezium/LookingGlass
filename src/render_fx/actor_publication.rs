@@ -512,8 +512,9 @@ pub(crate) fn complete() {
                 crate::sim_maps::count("actor_deferred_layer_copy_capacity_bytes",copy_cap);
                 crate::sim_maps::count("actor_deferred_layer_copy_allocs",copy_allocs);
                 crate::sim_maps::count("actor_layer_copy_bytes",copy_bytes);
-                crate::sim_maps::count("actor_layer_copy_capacity_bytes",copy_cap);
-                crate::sim_maps::count("actor_layer_copy_allocs",copy_allocs);
+                // layer_passes already counted this call's capacity and allocations into
+                // actor_layer_copy_capacity_bytes/allocs; adding copy_cap here would count the
+                // same deferred copies twice in the all-helper totals.
             }
             s.deferred.clear();
         }
