@@ -46,6 +46,8 @@ result = dict(flag=args.flag, prerequisites=prereq, base_config=str(R / 'tools/l
               baseline_binary=str(args.baseline_binary) if args.baseline_binary else None,
               baseline_binary_sha256=sha(args.baseline_binary) if args.baseline_binary else None,
               gpu_observer='glGetBufferSubData on the bound vertex attribute and element buffers before every retained draw',
+              elapsed_counters_not_compared=['skin_worker_service_us', 'skin_collect_wait_us', 'skin_gather_us', 'fx_worker_wait_us', 'fx_worker_max_service_us'],
+              uniforms_not_compared='sha256 of live f32 bits; a repeated 0548549 jlair1 run changed frame 0 packet 0 while geometry matched',
               maps={}, status='INCOMPLETE')
 out_json = O / 'proof' / f'HOST-FLAG-EXACT-{args.flag}.json'
 
@@ -54,16 +56,17 @@ def write():
 
 def run(m, tag, binary, config):
     d = O / 'host' / f'{m}-{tag}'
-    (d / 'private').mkdir(parents=True, exist_ok=False)
-    (d / 'private/vita_renderer.json').write_text(json.dumps(config))
-    env = {k: v for k, v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
-    env.update(LOOKING_GLASS_SIM_MAPS_PROBE='1', LOOKING_GLASS_SIM_MAPS_DT=DT.get(m, '0.05'), LOOKING_GLASS_SIM_MAPS_COUNTERS='1',
-               LOOKING_GLASS_SKIN_PROOF='1', LOOKING_GLASS_SKIN_MOVING_VIEW='1', LOOKING_GLASS_SKIN_DEATHS='1')
-    cmd = ['/usr/bin/time', '-l', '-o', str(d / 'rusage.txt'), str(binary), '--data', args.data, '--no-audio',
-           '--save-dir', str(d / 'private/saves'), '--map', m, '--frames', '180', '--capture', str(d / 'final.png')]
-    with (d / 'run.log').open('w') as f:
-        proc = subprocess.run(cmd, cwd=d, env=env, stdout=f, stderr=subprocess.STDOUT, timeout=1800)
-    assert proc.returncode == 0, (m, tag, proc.returncode, str(d / 'run.log'))
+    if not ((d / 'run.log').is_file() and (d / f'{m}-census-180.json').is_file()):
+        (d / 'private').mkdir(parents=True, exist_ok=False)
+        (d / 'private/vita_renderer.json').write_text(json.dumps(config))
+        env = {k: v for k, v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
+        env.update(LOOKING_GLASS_SIM_MAPS_PROBE='1', LOOKING_GLASS_SIM_MAPS_DT=DT.get(m, '0.05'), LOOKING_GLASS_SIM_MAPS_COUNTERS='1',
+                   LOOKING_GLASS_SKIN_PROOF='1', LOOKING_GLASS_SKIN_MOVING_VIEW='1', LOOKING_GLASS_SKIN_DEATHS='1')
+        cmd = ['/usr/bin/time', '-l', '-o', str(d / 'rusage.txt'), str(binary), '--data', args.data, '--no-audio',
+               '--save-dir', str(d / 'private/saves'), '--map', m, '--frames', '180', '--capture', str(d / 'final.png')]
+        with (d / 'run.log').open('w') as f:
+            proc = subprocess.run(cmd, cwd=d, env=env, stdout=f, stderr=subprocess.STDOUT, timeout=1800)
+        assert proc.returncode == 0, (m, tag, proc.returncode, str(d / 'run.log'))
     lines = (d / 'run.log').read_text().splitlines()
     configs = [json.loads(l.split('[lg/vita-renderer] config ', 1)[1]) for l in lines if l.startswith('[lg/vita-renderer] config ')]
     assert len(configs) == 1, (m, tag, 'one effective config record')
@@ -105,12 +108,19 @@ def compare(m, a, b, label, full):
     for n, (x, y) in enumerate(zip(fa, fb)):
         for k in ['actor_skin', 'state_sha256', 'selected_lights_bits', 'joint_alpha_order', 'blend_world_order']:
             assert x[k] == y[k], (m, label, n, k)
-        packets = lambda f: [{k: v for k, v in q.items() if k != 'gpu_slot'} for q in f['submitted_packets']]
+        # uniforms is a hash of live float bits. A second run of the 0548549 binary on jlair1
+        # changed frame 0 packet 0 while geometry stayed equal, so the hash is not a stable output.
+        packets = lambda f: [{k: v for k, v in q.items() if k not in ('gpu_slot', 'uniforms')} for q in f['submitted_packets']]
         assert packets(x) == packets(y), (m, label, n, 'uploaded GPU packets')
         assert x['counters'].get('vita_fx_dropped_layers', 0) == y['counters'].get('vita_fx_dropped_layers', 0), (m, label, n, 'dropped layers')
         if full:
-            assert x['submitted_packets'] == y['submitted_packets'], (m, label, n, 'packets including gpu_slot')
-            assert all(y['counters'].get(k) == v for k, v in x['counters'].items()), (m, label, n, 'reference counters')
+            with_slot = lambda f: [{k: v for k, v in q.items() if k != 'uniforms'} for q in f['submitted_packets']]
+            assert with_slot(x) == with_slot(y), (m, label, n, 'packets including gpu_slot')
+            # Worker service microseconds are a clock reading. Two builds of the same draws
+            # do not land on the same number, so they are not an output comparison.
+            elapsed = {'skin_worker_service_us', 'skin_collect_wait_us', 'skin_gather_us',
+                       'fx_worker_wait_us', 'fx_worker_max_service_us'}
+            assert all(y['counters'].get(k) == v for k, v in x['counters'].items() if k not in elapsed), (m, label, n, 'reference counters')
     assert len(fa) == len(fb) == 180
     assert ia == ib, (m, label, 'intermediate pixels')
     assert ra['final_png_sha256'] == rb['final_png_sha256'], (m, label, 'final image')
