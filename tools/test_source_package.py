@@ -79,6 +79,12 @@ class SourcePackageTests(unittest.TestCase):
         for path in ["private/note.md", "src/data.pk3", "src/../private/a.rs", "/src/main.rs"]:
             self.assertFalse(allowed(path), path)
 
+    def test_vita_build_config_is_an_exact_source_path(self):
+        self.assertEqual(audit_data(".cargo/config.toml", b'[target]'), [])
+        self.assertTrue(audit_data(".cargo/config.toml", b'\0binary'))
+        self.assertFalse(allowed(".cargo/credentials.toml"))
+        self.assertFalse(allowed(".cargo/unreviewed.toml"))
+
     def test_curated_media_requires_exact_path_and_content(self):
         name = "docs/media/gameplay/dry-landing.mp4"
         sample = b"synthetic\0recording"
