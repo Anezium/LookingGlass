@@ -179,10 +179,23 @@ def test_late_viewport_change_is_rejected(tmp):
         '[lg/load-diagnostic] reason=restore stage=prepare-3d-returned framebuffer_binding=0 '
         'viewport=[0, 0, 722, 409] framebuffer_status=0x8cd5\n')
     assert oracle.startup_viewport(directory) is None
-    frames = [dict(frame=0, world_viewport=[0, 0, 721, 409]), dict(frame=1, world_viewport=[0, 0, 722, 409])]
-    assert oracle.viewport_issues(frames, [0, 0, 721, 409])
-    assert oracle.viewport_issues(frames[:1], [0, 0, 721, 409]) == []
-    assert oracle.viewport_issues([dict(frame=0, world_viewport=None)], [0, 0, 721, 409])
+    # The only permitted change is the macOS startup settle at frame 0 -> 1.
+    settled = [dict(frame=i, world_viewport=[0, 0, 721, 409]) for i in range(1, 6)]
+    steady, issues = oracle.viewport_trajectory([dict(frame=0, world_viewport=[0, 0, 720, 408])] + settled,
+                                                [0, 0, 720, 408])
+    assert issues == [] and steady == [0, 0, 721, 409]
+    assert oracle.startup_transition_frame([dict(frame=0, world_viewport=[0, 0, 720, 408])] + settled) == 1
+    # A change after frame 1 is late and must be rejected.
+    late = settled[:3] + [dict(frame=4, world_viewport=[0, 0, 722, 409])]
+    steady, issues = oracle.viewport_trajectory([dict(frame=0, world_viewport=[0, 0, 721, 409])] + late,
+                                                [0, 0, 721, 409])
+    assert steady == [0, 0, 722, 409] and issues
+    # Oscillation is rejected too.
+    assert oracle.viewport_trajectory(settled + [dict(frame=6, world_viewport=[0, 0, 720, 408])],
+                                      [0, 0, 721, 409])[1]
+    assert oracle.viewport_trajectory([dict(frame=0, world_viewport=None)], [0, 0, 721, 409])[1]
+    assert oracle.viewport_trajectory(settled, [0, 0, 722, 409])[1]
+    assert oracle.viewport_issues([dict(frame=0, world_viewport=[0, 0, 721, 409])], [0, 0, 721, 409]) == []
 
 
 def test_field_diff_names_only_the_changed_range(tmp):

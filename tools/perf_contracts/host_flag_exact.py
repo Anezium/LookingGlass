@@ -216,9 +216,7 @@ def startup_viewport(directory):
     return views[0] if views and len(set(views)) == 1 else None
 
 def viewport_issues(frames, expected):
-    """Per-frame world/actor 3D viewport, recorded by the host-only probe at
-    prepare-3d-returned. Gate it independently of semantic comparison; the HUD/default
-    framebuffer stages are never used here."""
+    """Exact per-frame equality. Kept for controls that do not model the startup settle."""
     issues = []
     for frame in frames:
         value = frame.get('world_viewport')
@@ -227,6 +225,39 @@ def viewport_issues(frames, expected):
         elif expected is not None and list(value) != list(expected):
             issues.append(f"frame {frame.get('frame')}: viewport {value} != selected {expected}")
     return issues
+
+def viewport_trajectory(frames, startup=None):
+    """Gate the recorded per-frame 3D viewport trajectory.
+
+    The macOS host reports the requested drawable on frame 0 and the settled drawable from
+    frame 1; the only permitted change is that single startup settle (frame 0 -> 1). Every
+    frame is still recorded and checked: frame 0 must equal the `prepare-3d-returned`
+    diagnostic, frames 1..179 must be one constant value, and any change at frame >= 2, any
+    missing sample or any oscillation is rejected. Returns (steady, issues)."""
+    values = []
+    for frame in frames:
+        value = frame.get('world_viewport')
+        if not isinstance(value, list) or len(value) != 4 or any(not isinstance(part, int) for part in value):
+            return None, [f"frame {frame.get('frame')}: missing world_viewport {value!r}"]
+        values.append(list(value))
+    if not values:
+        return None, ['no frames']
+    issues = []
+    if startup is not None and list(startup) != values[0]:
+        issues.append(f'startup diagnostic {startup} != frame 0 viewport {values[0]}')
+    steady = values[-1]
+    start = len(values) - 1
+    while start > 0 and values[start - 1] == steady:
+        start -= 1
+    if start > 1:
+        issues.append(f'late viewport change at frame {start}: {values[start - 1]} -> {steady}')
+    return steady, issues
+
+def startup_transition_frame(frames):
+    for index in range(1, len(frames)):
+        if frames[index].get('world_viewport') != frames[index - 1].get('world_viewport'):
+            return index
+    return None
 
 def packets(frame, keep_slot, keep_uniforms):
     drop = set() if keep_slot else {'gpu_slot'}
@@ -336,8 +367,7 @@ def main(argv=None):
         assert all(all(packet['geometry'] == packet['gpu_geometry'] for packet in frame['submitted_packets']) for frame in frames), (map_name, tag, 'GPU readback')
         viewport = startup_viewport(directory)
         assert viewport is not None, (map_name, tag, 'missing or conflicting prepare-3d-returned viewport', startup_viewports(directory))
-        viewport_expected = json.loads(viewport)
-        issues = viewport_issues(frames, viewport_expected)
+        steady, issues = viewport_trajectory(frames, json.loads(viewport))
         assert not issues, (map_name, tag, 'per-frame 3D viewport', issues[:4])
         if uniform_bits:
             assert (directory / 'uniform-bits.jsonl').is_file(), (map_name, tag, 'requested uniform bits missing')
@@ -358,7 +388,9 @@ def main(argv=None):
         actor_keys = sorted({key for counter in counters for key in counter if key.startswith('actor_')})
         sidecar = directory / 'uniform-bits.jsonl'
         row = dict(map=map_name, arm=tag, run_dir=str(directory), reused=reuse, attempt=attempt,
-                   viewport=viewport,
+                   viewport=json.dumps(steady), startup_viewport=viewport,
+                   viewport_key=json.dumps([json.loads(viewport), steady]),
+                   viewport_transition_frame=startup_transition_frame(frames),
                    config_sha256=sha(directory / 'private/vita_renderer.json'), log_sha256=sha(directory / 'run.log'),
                    receipt_sha256=(sha(directory / 'run-receipt.json') if reuse else None),
                    effective_config_sha256=hashlib.sha256(json.dumps(effective, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
@@ -397,9 +429,10 @@ def main(argv=None):
         # The scaled 3D viewport is a prerequisite observed per frame, never a semantic field
         # and never the HUD/default framebuffer stage.
         for row, frames in ((left_row, left_frames), (right_row, right_frames)):
-            expected_view = json.loads(row['viewport'])
-            issues = viewport_issues(frames, expected_view)
+            startup = json.loads(row['startup_viewport']) if row.get('startup_viewport') else None
+            steady, issues = viewport_trajectory(frames, startup)
             assert not issues, (map_name, label, row['arm'], 'per-frame 3D viewport', issues[:4])
+            assert json.dumps(steady) == row['viewport'], (map_name, label, row['arm'], 'steady viewport', steady, row['viewport'])
         # Aggregate uniform hashes are compared in every packet comparison, with or without
         # a bit sidecar. The sidecar is an additional field-level gate, never a replacement.
         assert not packet_differences(left_frames, right_frames, keep_slot=False, keep_uniforms=True), \
@@ -464,9 +497,11 @@ def main(argv=None):
                 rep = sum(len(v) for v in pool[arm].values())
                 bits = wants_bits and arm != 'baseline'
                 result_run = run(map_name, arm, binary, config, run_identity, attempt, bits, rep)
-                view = result_run[0]['viewport']
+                view = result_run[0]['viewport_key']
                 pool[arm].setdefault(view, []).append(result_run)
-                added[f'{arm}-r{rep}'] = dict(viewport=view, run_dir=result_run[0]['run_dir'])
+                added[f'{arm}-r{rep}'] = dict(viewport=result_run[0]['viewport'],
+                                              startup_viewport=result_run[0]['startup_viewport'],
+                                              run_dir=result_run[0]['run_dir'])
             attempts.append(dict(attempt=attempt, runs=added))
             for view in pool['off']:
                 if view is None:
@@ -485,8 +520,12 @@ def main(argv=None):
         off = pool['off'][selected_view][:reps]
         on = pool['on'][selected_view][:reps]
         ref = pool['baseline'][selected_view][:reps] if 'baseline' in pool else []
-        entry['viewport'] = selected_view
+        entry['viewport_key'] = selected_view
+        entry['startup_viewport'], entry['steady_viewport'] = json.loads(selected_view)
+        entry['viewport'] = entry['steady_viewport']
         entry['viewport_frames_gated'] = 180
+        entry['viewport_transitions'] = {arm: [run[0]['viewport_transition_frame'] for run in runs]
+                                        for arm, runs in (('off', off), ('on', on), ('baseline', ref))}
         entry['runs_at_viewport'] = {arm: len(runs) for arm, runs in
                                      ((name, pool[name][selected_view]) for name in pool)}
         entry['off'], entry['on'] = off[0][0], on[0][0]

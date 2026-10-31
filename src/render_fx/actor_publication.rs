@@ -183,7 +183,8 @@ impl State {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MemoryAccount {
     bank_vertex_len: usize, bank_vertex_cap: usize, bank_index_len: usize, bank_index_cap: usize,
-    geometry_allocs: usize, free_slots: usize, held_slots: usize,
+    geometry_allocs: usize, free_slots: usize, held_slots: usize, external_slots: usize,
+    held_reference_count: usize,
     evicted_allocs: usize, evicted_vertex_cap: usize, evicted_index_cap: usize, evicted_payload_bytes: usize,
     lookup_len: usize, lookup_cap: usize, lookup_bytes_estimate: usize, banks_len: usize, banks_cap: usize, cpu_arcs: usize,
     pending_len: usize, pending_cap: usize, deferred_len: usize, deferred_cap: usize,
@@ -242,11 +243,16 @@ impl State {
         // Held passes own the per-layer copies. A pass whose geometry Rc is Some shares the
         // bank geometry already walked above, so only its own buffers are added here. Pass Vec
         // storage is a separate container allocation at host size, never a Vita layout.
+        let mut held_refs: HashMap<usize, usize> = HashMap::new();
         for group in &self.held {
             let container = group.passes.capacity() * std::mem::size_of::<Pass>();
             account.held_container_bytes += container;
             account.held_container_allocs += usize::from(group.passes.capacity() > 0);
             for pass in &group.passes {
+                if let Some(g) = &pass.geometry {
+                    *held_refs.entry(Rc::as_ptr(g) as usize).or_default() += 1;
+                    account.held_reference_count += 1;
+                }
                 account.held_buffer_bytes += pass.mesh.vertices.capacity() * std::mem::size_of::<Vertex>()
                     + pass.mesh.indices.capacity() * std::mem::size_of::<u16>();
                 account.held_buffer_allocs += usize::from(pass.mesh.vertices.capacity() > 0)
@@ -259,7 +265,12 @@ impl State {
             for slot in &bank.slots {
                 match slot {
                     Some(g) => {
-                        if Rc::strong_count(g) > 1 { account.held_slots += 1; }
+                        // Separate an actual held-pass reference from any other owner (FRAME
+                        // during the append window, or an external retained publication).
+                        if Rc::strong_count(g) > 1 {
+                            if held_refs.contains_key(&(Rc::as_ptr(g) as usize)) { account.held_slots += 1; }
+                            else { account.external_slots += 1; }
+                        }
                         live_geometry(g, &mut seen, &mut account, false);
                     }
                     None => account.free_slots += 1,
@@ -280,7 +291,7 @@ impl MemoryAccount {
     const fn zero() -> Self {
         Self {
             bank_vertex_len: 0, bank_vertex_cap: 0, bank_index_len: 0, bank_index_cap: 0,
-            geometry_allocs: 0, free_slots: 0, held_slots: 0, evicted_allocs: 0, evicted_vertex_cap: 0,
+            geometry_allocs: 0, free_slots: 0, held_slots: 0, external_slots: 0, held_reference_count: 0, evicted_allocs: 0, evicted_vertex_cap: 0,
             evicted_index_cap: 0, evicted_payload_bytes: 0, lookup_len: 0, lookup_cap: 0, lookup_bytes_estimate: 0,
             banks_len: 0, banks_cap: 0, cpu_arcs: 0,
             pending_len: 0, pending_cap: 0, deferred_len: 0, deferred_cap: 0, held_len: 0, held_cap: 0,
@@ -326,6 +337,8 @@ impl MemoryAccount {
             ("actor_mem_geometry_allocs", self.geometry_allocs as u64),
             ("actor_mem_live_allocs", self.geometry_allocs as u64),
             ("actor_mem_held_referenced_allocs", self.held_slots as u64),
+            ("actor_mem_external_referenced_slots", self.external_slots as u64),
+            ("actor_mem_held_reference_count", self.held_reference_count as u64),
             ("actor_mem_reusable_slots", self.free_slots as u64),
             ("actor_mem_evicted_allocs", self.evicted_allocs as u64),
             ("actor_mem_evicted_referenced_allocs", self.evicted_allocs as u64),
@@ -704,6 +717,7 @@ fn emit_memory_phase(state: &mut State, phase: &'static str, pre_clear_deferred_
         "frame": crate::sim_maps::probe::frame(),
         "phase": phase,
         "pre_clear_deferred_len": pre_clear_deferred_len,
+        "scope": "state-owned banks/pending/deferred/held only; FRAME-owned groups, CPU/surface owners, allocator overhead and observer scratch are out of scope",
     });
     for (name, value) in account.rows() {
         record[name.trim_start_matches("actor_mem_")] = serde_json::json!(value);
@@ -990,7 +1004,9 @@ mod tests {
         assert!(account.bank_vertex_cap>=account.bank_vertex_len);
         assert!(account.bank_index_cap>=account.bank_index_len);
         assert_eq!(account.cpu_arcs,1);
-        assert_eq!(account.held_slots,1);
+        assert_eq!(account.held_slots,0);
+        assert_eq!(account.external_slots,1,"a retained publication is an external holder");
+        assert_eq!(account.held_reference_count,0);
         assert!(account.payload_bytes>=3*std::mem::size_of::<Vertex>()+6);
         assert!(account.host_bytes()>account.payload_bytes);
         assert_eq!(account.held_buffer_bytes,0);
@@ -1027,6 +1043,8 @@ mod tests {
         assert_eq!(rows["actor_mem_held_container_allocs"],3);
         assert_eq!(rows["actor_mem_live_allocs"],0);
         assert_eq!(rows["actor_mem_held_referenced_allocs"],0);
+        assert_eq!(rows["actor_mem_external_referenced_slots"],0);
+        assert_eq!(rows["actor_mem_held_reference_count"],0);
         assert_eq!(rows["actor_mem_reusable_slots"],0);
         assert_eq!(rows["actor_mem_evicted_referenced_allocs"],0);
         assert_eq!(rows["actor_mem_bank_payload_bound_bytes"],(VERTICES*std::mem::size_of::<Vertex>()+INDICES*2) as u64);
