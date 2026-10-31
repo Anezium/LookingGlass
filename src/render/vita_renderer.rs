@@ -1733,6 +1733,61 @@ impl Renderer {
         });
         drop(submit_span);
         count("vita_world_culled_groups", stats.culled as u64);
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        if !alpha && crate::sim_maps::probe::opening_inputs() {
+            let id_list: Vec<usize> = ids.to_vec();
+            let visible: std::collections::BTreeSet<usize> = self.prepared.iter().map(|p| p.group).collect();
+            let tested = id_list.iter().map(|&id| {
+                let g = &self.groups[id];
+                let drawn = self.prepared.iter().find(|p| p.group == id);
+                let cull_model = model_matrix(&g.recipe, time, transforms);
+                let uniform_fields = drawn.map(|p| {
+                    let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
+                    let b = |v: &[f32]| v.iter().copied().map(f32::to_bits).collect::<Vec<_>>();
+                    serde_json::json!({
+                        "mvp": b(&u.mvp), "model": b(&u.model), "uv": b(&u.uv), "uv_after": b(&u.uv_after),
+                        "eye": b(&u.eye), "surface": b(&u.surface), "gain": b(&u.gain), "alpha": b(&u.alpha),
+                        "dot_alpha": b(&u.dot_alpha), "vector_s": b(&u.vector_s), "vector_t": b(&u.vector_t),
+                        "turb": b(&u.turb), "deform": b(&u.deform), "wave": b(&u.wave), "move_dir": b(&u.move_dir),
+                        "atlas": b(&u.atlas), "fog_eye": b(&u.fog_eye), "distance_fog": b(&u.distance_fog),
+                        "liquid_fog": b(&u.liquid_fog), "fog_a_min": b(&u.fog_a_min), "fog_a_max": b(&u.fog_a_max),
+                        "fog_a": b(&u.fog_a), "fog_b_min": b(&u.fog_b_min), "fog_b_max": b(&u.fog_b_max),
+                        "fog_b": b(&u.fog_b), "all": b(u.values()),
+                    })
+                });
+                serde_json::json!({
+                    "id": id,
+                    "visible": visible.contains(&id),
+                    "indices": g.indices,
+                    "base_element": g.base_element,
+                    "triangles": g.indices / 3,
+                    "min_bits": g.min.to_array().map(f32::to_bits),
+                    "max_bits": g.max.to_array().map(f32::to_bits),
+                    "center_bits": g.center.to_array().map(f32::to_bits),
+                    "model_bits": self.models[id].map(|m| m.to_cols_array().map(f32::to_bits)),
+                    // Cull inputs and decision, recomputed for every tested group, culled
+                    // ones included: the frustum matrix with the group bounds decides.
+                    "cull_model_bits": cull_model.map(|m| m.to_cols_array().map(f32::to_bits)),
+                    "frustum_matrix_bits": cull_model.map(|m| (projection * m).to_cols_array().map(f32::to_bits)),
+                    "in_frustum": cull_model.map(|m| in_frustum(projection * m, g.min, g.max)),
+                    "drawn_indices": drawn.map(|p| p.indices),
+                    "pipeline": drawn.map(|_| g.recipe.blend * 3 + g.recipe.cull),
+                    "low": drawn.map(|_| g.recipe.stage.alpha_test == 0 && !self.low_pipelines.is_empty()),
+                    "uniform_fields": uniform_fields,
+                })
+            }).collect::<Vec<_>>();
+            println!("SIM_MAPS_WORLD {}", serde_json::json!({
+                "frame": crate::sim_maps::probe::frame_index(),
+                "cluster": cluster,
+                "projection_bits": projection.to_cols_array().map(f32::to_bits),
+                "eye_bits": eye.to_array().map(f32::to_bits),
+                "time_bits": time.to_bits(),
+                "depth_view_bits": crate::render_fx::depth_view_bits(),
+                "fast_frustum": config().fast_frustum,
+                "draw_order": self.prepared.iter().map(|p| p.group).collect::<Vec<_>>(),
+                "tested": tested,
+            }));
+        }
         unsafe {
             macroquad::miniquad::gl::glDepthMask(1);
         }

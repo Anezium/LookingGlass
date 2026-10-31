@@ -469,10 +469,13 @@ pub(crate) async fn check_transition_loading(assets: &mut Assets, options: &Opti
 pub(crate) fn save_capture(path: &std::path::Path) -> Result<()> {
     #[cfg(feature="native_timing")]
     crate::native_timing::operations::attempt();
+    write_capture(get_screen_data(), path)
+}
+
+fn write_capture(frame: Image, path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    let frame = get_screen_data();
     // OpenGL reads rows from the bottom; PNG stores rows from the top.
     let mut pixels = frame.bytes;
     let stride = frame.width as usize * 4;
@@ -1362,7 +1365,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        {crate::sim_maps::probe::begin();crate::sim_maps::probe::script_hits(frame,&mut npcs);}
+        {crate::sim_maps::probe::begin();crate::sim_maps::probe::set_frame(frame);crate::sim_maps::probe::script_hits(frame,&mut npcs);}
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let mut host_block = crate::frame_profile::span("frame_input");
         #[cfg(feature = "native_timing")]
@@ -3788,6 +3791,38 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         set_camera(&world_camera);
         #[cfg(feature = "vita_renderer")]
         crate::render::vita_renderer::record_view(&world_camera);
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        if crate::sim_maps::probe::opening_inputs() {
+            use macroquad::camera::Camera;
+            let mut gl_viewport = [0i32; 4];
+            unsafe { macroquad::miniquad::gl::glGetIntegerv(0x0BA2, gl_viewport.as_mut_ptr()); }
+            #[cfg(feature = "vita_renderer")]
+            let scale_target = crate::render::vita_renderer::diagnostic_target();
+            #[cfg(not(feature = "vita_renderer"))]
+            let scale_target: Option<[u32; 2]> = None;
+            #[cfg(feature = "vita_renderer")]
+            let depth_view = crate::render_fx::depth_view_bits();
+            #[cfg(not(feature = "vita_renderer"))]
+            let depth_view: Option<[u32; 6]> = None;
+            println!("SIM_MAPS_VIEW {}", serde_json::json!({
+                "frame": frame,
+                "requested_window": [960, 544],
+                "screen_bits": [screen_width().to_bits(), screen_height().to_bits()],
+                "camera_aspect_bits": world_camera.aspect.map(f32::to_bits),
+                "fovy_bits": world_camera.fovy.to_bits(),
+                "eye_bits": world_camera.position.to_array().map(f32::to_bits),
+                "target_bits": world_camera.target.to_array().map(f32::to_bits),
+                "up_bits": world_camera.up.to_array().map(f32::to_bits),
+                "near_bits": world_camera.z_near.to_bits(),
+                "far_bits": world_camera.z_far.to_bits(),
+                "projection_bits": world_camera.matrix().to_cols_array().map(f32::to_bits),
+                "depth_view_bits": depth_view,
+                "time_bits": environment_clock.to_bits(),
+                "camera_viewport": world_camera.viewport,
+                "gl_viewport": gl_viewport,
+                "scale_target": scale_target,
+            }));
+        }
         #[cfg(feature = "vita_renderer")]
         let world_only = crate::render::vita_renderer::world_only();
         #[cfg(not(feature = "vita_renderer"))]
@@ -4608,6 +4643,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 "character": alice.snapshot(), "environment_clock": environment_clock,
                 "pickup_clock": pickup_clock, "transforms": transforms,
             }));
+            // One readback per frame, hashed. Frame 0 is also kept as a PNG. This only
+            // reads the framebuffer; it does not count as a capture operation.
+            if crate::sim_maps::probe::frame_images() {
+                let image = get_screen_data();
+                use sha2::{Digest, Sha256};
+                let hash = format!("{:x}", Sha256::digest(&image.bytes));
+                println!("SKIN_EXACT_IMAGE {}", serde_json::json!({"frame":frame,"sha256":hash,"width":image.width,"height":image.height,"bytes":image.bytes.len()}));
+                if frame == 0 {
+                    write_capture(image, std::path::Path::new("private/opening-frame.png"))?;
+                }
+            }
         }
         #[cfg(feature = "vita_renderer")]
         let presented_probe = load_probe.take();
