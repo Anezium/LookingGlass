@@ -16,8 +16,12 @@ Checks, per map:
   joint_alpha_order, blend_world_order, submitted packets apart from gpu_slot, geometry ==
   gpu_geometry for every packet, no serial fallback, frame count, intermediate image witnesses
   and the final PNG;
-- additionally: npc_decisions, frame/map/active, every other counter (counters named by
-  --counter-prefix are the witness and are excluded), and the census serial/worker vertices.
+- additionally: npc_decisions, frame/map/active, every other semantic counter (counters named
+  by --counter-prefix are the witness and are excluded; names ending in _us, _ns or _ms are
+  worker elapsed times and are recorded, not compared, because they already differ between two
+  flag-off binaries), and the census serial/worker vertices.
+  Map runs do not print SKIN_EXACT_IMAGE; that line belongs to the fixture checker. The final
+  PNG is the image comparison for a map run, and it must be non-empty.
 
 With --control-binary (a build of the base commit, which does not know the flag), a third run
 writes dict(base, **prerequisites) without the flag key and must match the OFF arm on every
@@ -111,10 +115,12 @@ def main():
             for f in frames:
                 for k, v in f['counters'].items():
                     counters[k] = counters.get(k, 0) + v
+            png = (d / 'final.png').read_bytes()
+            assert len(png) > 0, (m, arm, 'empty final image')
             arms.append(dict(arm=arm, frames=frames, images=images, counters=counters,
                              serial_vertices=sum(a['serial_vertices'] for r in rs for a in r['actors']),
                              worker_vertices=sum(a['worker_vertices'] for r in rs for a in r['actors']),
-                             final_png_sha256=sha((d / 'final.png').read_bytes()),
+                             final_png_bytes=len(png), final_png_sha256=sha(png),
                              run_log_sha256=sha((d / 'run.log').read_bytes()),
                              printed_flag=printed.get(args.flag), printed_prerequisites={k: printed[k] for k in prerequisites},
                              gpu_draw_readbacks=sum(len(f['submitted_packets']) for f in frames)))
@@ -127,8 +133,11 @@ def main():
                     assert a[k] == b[k], (m, name, n, k)
                 packets = lambda f: [{k: v for k, v in p.items() if k != 'gpu_slot'} for p in f['submitted_packets']]
                 assert packets(a) == packets(b), (m, name, n, 'uploaded GPU packets')
-                other = lambda f: {k: v for k, v in f['counters'].items() if not (args.counter_prefix and k.startswith(args.counter_prefix))}
-                assert other(a) == other(b), (m, name, n, 'workload counters')
+                def semantic(f):
+                    return {k: v for k, v in f['counters'].items()
+                            if not (args.counter_prefix and k.startswith(args.counter_prefix))
+                            and not k.endswith(('_us', '_ns', '_ms'))}
+                assert semantic(a) == semantic(b), (m, name, n, 'workload counters')
             assert off['images'] == other_arm['images'], (m, name, 'intermediate pixels')
             assert off['final_png_sha256'] == other_arm['final_png_sha256'], (m, name, 'final image')
             assert (off['serial_vertices'], off['worker_vertices']) == (other_arm['serial_vertices'], other_arm['worker_vertices']), (m, name, 'census vertices')
@@ -147,6 +156,9 @@ def main():
                    frame_digest=[canon([{k: f[k] for k in FRAME_KEYS + EXTRA_KEYS} for f in x['frames']]) for x in arms],
                    packet_digest=[canon([[{k: v for k, v in p.items() if k != 'gpu_slot'} for p in f['submitted_packets']] for f in x['frames']]) for x in arms],
                    image_digest=[canon(x['images']) for x in arms], image_witnesses=len(off['images']),
+                   timing_counters_not_compared='Names ending in _us/_ns/_ms are worker elapsed times. They differ between the OFF arm and a 0548549 control built without this flag, so they are not a flag effect.',
+                   timing_counter_sums=[{k: x['counters'][k] for k in sorted(x['counters']) if k.endswith(('_us', '_ns', '_ms'))} for x in arms],
+                   final_png_bytes=[x['final_png_bytes'] for x in arms],
                    final_png_sha256=[x['final_png_sha256'] for x in arms], run_log_sha256=[x['run_log_sha256'] for x in arms],
                    gpu_draw_readbacks=[x['gpu_draw_readbacks'] for x in arms],
                    census_serial_worker_vertices=[[x['serial_vertices'], x['worker_vertices']] for x in arms],
