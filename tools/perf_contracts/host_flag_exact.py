@@ -317,35 +317,41 @@ def main(argv=None):
         wants_bits = args.uniform_bits and (not args.uniform_bits_map or map_name in args.uniform_bits_map)
         reps = args.repeat if (not args.repeat_map or map_name in args.repeat_map) else 1
         entry = result['maps'][map_name] = {}
+        pool = {arm: {} for arm in (['off', 'on', 'baseline'] if args.baseline_binary else ['off', 'on'])}
         attempts = []
-        selected = None
+        selected_view = None
         for attempt in range(max(1, args.viewport_attempts)):
-            off = [run(map_name, 'off', args.binary, dict(base, **prereq, **{args.flag: False}), identity, attempt, wants_bits, rep)
-                   for rep in range(reps)]
-            on = [run(map_name, 'on', args.binary, dict(base, **prereq, **{args.flag: True}), identity, attempt, wants_bits, rep)
-                  for rep in range(reps)]
-            ref = [run(map_name, 'baseline', args.baseline_binary, dict(base, **prereq), baseline_identity, attempt, wants_bits, rep)
-                   for rep in range(reps)] if args.baseline_binary else []
-            views = {}
-            for arm, runs in (('off', off), ('on', on), ('baseline', ref)):
-                for rep, result_run in enumerate(runs):
-                    views[f'{arm}-r{rep}'] = result_run[0]['viewport']
-            attempts.append(dict(attempt=attempt, viewports=views,
-                                 run_dirs={name: result_run[0]['run_dir'] for name, result_run in
-                                           [(f'off-r{rep}', r) for rep, r in enumerate(off)]
-                                           + [(f'on-r{rep}', r) for rep, r in enumerate(on)]
-                                           + [(f'baseline-r{rep}', r) for rep, r in enumerate(ref)]}))
-            if None not in views.values() and len(set(views.values())) == 1:
-                selected = (off, on, ref)
+            added = {}
+            for arm in pool:
+                binary = args.baseline_binary if arm == 'baseline' else args.binary
+                run_identity = baseline_identity if arm == 'baseline' else identity
+                config = dict(base, **prereq) if arm == 'baseline' else dict(base, **prereq, **{args.flag: arm == 'on'})
+                rep = sum(len(v) for v in pool[arm].values())
+                result_run = run(map_name, arm, binary, config, run_identity, attempt, wants_bits, rep)
+                view = result_run[0]['viewport']
+                pool[arm].setdefault(view, []).append(result_run)
+                added[f'{arm}-r{rep}'] = dict(viewport=view, run_dir=result_run[0]['run_dir'])
+            attempts.append(dict(attempt=attempt, runs=added))
+            for view in {view for runs in pool['off'].values() for view in runs}:
+                if view is None:
+                    continue
+                if all(len(pool[arm].get(view, [])) >= reps for arm in pool):
+                    selected_view = view
+                    break
+            if selected_view is not None:
                 break
-            print('RETRY', map_name, 'startup viewport differs across arms', views, flush=True)
+            print('RETRY', map_name, 'waiting for one startup viewport with', reps, 'run(s) per arm',
+                  {arm: {str(view): len(runs) for view, runs in views.items()} for arm, views in pool.items()}, flush=True)
         entry['viewport_attempts'] = attempts
-        if selected is None:
-            result['status'] = f'FAIL ({map_name}: arms never shared one startup viewport)'
+        if selected_view is None:
+            result['status'] = f'FAIL ({map_name}: arms never shared one startup viewport with {reps} run(s) each)'
             write(); sys.exit(1)
-        off, on, ref = selected
-        entry['viewport'] = off[0][0]['viewport']
-        entry['attempt'] = off[0][0]['attempt']
+        off = pool['off'][selected_view][:reps]
+        on = pool['on'][selected_view][:reps]
+        ref = pool['baseline'][selected_view][:reps] if 'baseline' in pool else []
+        entry['viewport'] = selected_view
+        entry['runs_at_viewport'] = {arm: len(runs) for arm, runs in
+                                     ((name, pool[name][selected_view]) for name in pool)}
         entry['off'], entry['on'] = off[0][0], on[0][0]
         if ref:
             entry['baseline'] = ref[0][0]
