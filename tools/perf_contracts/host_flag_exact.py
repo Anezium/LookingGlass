@@ -357,7 +357,7 @@ def assert_world_group(group, label):
     for key in ('model_bits', 'cull_model_bits', 'frustum_matrix_bits'):
         if group[key] is not None:
             u32_list(group[key], 16, (label, key))
-    assert group['in_frustum'] in (None, True, False), (label, 'in_frustum')
+    assert group['in_frustum'] is None or type(group['in_frustum']) is bool, (label, 'in_frustum')
     assert (group['in_frustum'] is None) == (group['cull_model_bits'] is None), (label, 'cull decision without input')
     assert (group['in_frustum'] is None) == (group['frustum_matrix_bits'] is None), (label, 'frustum matrix without input')
     if group['visible']:

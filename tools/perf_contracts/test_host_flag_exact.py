@@ -405,6 +405,8 @@ def main():
         row.update({k: None for k in ('actor_skin', 'selected_lights_bits', 'joint_alpha_order',
                                       'blend_world_order', 'npc_decisions')}) for row in p['frames']])
     expect_fail('world bool frame', root, reason='frame', mutate=lambda m, on, a, p, g: p['world'][0].update(frame=False))
+    expect_fail('world numeric frustum flag', root, reason='in_frustum',
+                mutate=on_map('other', lambda p, g: p['world'][0]['tested'][1].update(in_frustum=1)))
     expect_fail('world null record', root, reason='record', mutate=lambda m, on, a, p, g: p.update(world=[None]))
     expect_fail('decoded text is not an object', root, mutate=lambda m, on, a, p, g: [
         row.update(actor_skin=[{'actor': 9, 'surface': 0, 'sha256': 7}]) for row in p['frames']])
