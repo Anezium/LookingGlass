@@ -86,6 +86,16 @@ class SourcePackageTests(unittest.TestCase):
             self.assertFalse(allowed(path), path)
         self.assertTrue(audit_data("configs/PL-def-r3.json", b"invalid json"))
 
+    def test_named_timing_configs_keep_the_source_boundary(self):
+        for path in ["configs/PL-r3e-baseline.json", "configs/PL-r3h-reference.json",
+                     "docs/NATIVE-TIMING-PAIR-SPEC.example.json"]:
+            self.assertEqual(audit_data(path, b'{"enabled": true}'), [], path)
+            self.assertTrue(audit_data(path, b'invalid JSON'), path)
+            self.assertTrue(audit_data(path, b'{}\0'), path)
+        for path in ["configs/unreviewed.json", "configs/original.pk3",
+                     "docs/unreviewed.json", "configs/../private/data.json"]:
+            self.assertFalse(allowed(path), path)
+
     def test_curated_media_requires_exact_path_and_content(self):
         name = "docs/media/gameplay/dry-landing.mp4"
         sample = b"synthetic\0recording"
