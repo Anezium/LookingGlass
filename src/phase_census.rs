@@ -292,7 +292,12 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "serial_fallbacks":r.serial_fallbacks,
     })).collect();
     let serial_fallbacks:u64=s.rows[..s.count].iter().map(|r|r.serial_fallbacks).sum();
-    let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
+    let audio_static_cache = {
+        #[cfg(feature = "vita_renderer")]
+        { crate::render::vita_renderer::config().audio_static_cache }
+        #[cfg(not(feature = "vita_renderer"))]
+        { false }
+    };
     serde_json::to_writer(&mut *out,&serde_json::json!({"schema":3,"actor_capacity":ACTORS,"serial_reasons":REASONS,
         "audio_static_cache":audio_static_cache,"map":map,"regions":NAMES,"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
