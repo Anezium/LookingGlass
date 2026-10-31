@@ -2,19 +2,24 @@
 """Synthetic controls for the host flag oracle. No game, no binary.
 
 Every case runs the oracle's real main() in a fresh directory. Only subprocess.run (the game
-launch) and the git source check are replaced. The fake game writes complete frame, image,
-census and PNG records for the requested frame count.
+launch) and the git source check are replaced. The fake game writes complete producer-shaped
+frame, image, view, world, census and PNG records for the requested frame count: typed
+semantic arrays, named frame-0 uniform slices bound to the uniform hash, a full phase_census
+schema with accepted_frame/sequence/measured_frame/actor/fallback evidence and warmup
+alignment. Its nullable fields follow the producers (camera viewport, world cluster, texture,
+actor id) and vacuous arrays are exercised explicitly.
 
 Expectations follow the strict contract, not the fake's labels:
-- a genuinely exact pair exits 0 and PASSes;
+- a genuinely exact producer-shaped pair exits 0 and PASSes;
 - coherent candidate/repeat intermediate-image instability exits INCOMPLETE (3) with an
   explicit semantic PASS; a same-arm repeat never turns a candidate difference into PASS;
-- a malformed schema, foreign identity, missing mandatory output, semantic mismatch or
-  unstable-repeat defect FAILs;
+- a malformed schema, malformed launch, foreign identity, missing mandatory output, semantic
+  mismatch or unstable-repeat defect FAILs with a terminal FAIL receipt and the failed
+  attempt in the ledger;
 - an input-only presentation retry is bounded and retained.
 This is a test of the validator, not game evidence.
 """
-import importlib.util, json, subprocess, sys, tempfile
+import importlib.util, json, struct, subprocess, sys, tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,10 +35,22 @@ TREE = dict(head='h' * 40, tree='t' * 40, porcelain=' M docs/RCHESS1.md\n')
 LOAD = ('[lg/load-diagnostic] reason=startup-entry stage=prepare-3d-returned framebuffer_binding=0 '
         'viewport=[0, 0, {w}, {h}] framebuffer_status=0x8cd5 gl_error_before=0x0 gl_error_after=0x0 '
         'scale_target=Some([{w}, {h}]) render_scale=0.75')
+REGIONS = list(oracle.CENSUS_REGIONS)
+CALLS = {}
+
+
+def digest(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
 
 
 def packet_fields():
     return {key: [7] * width for key, width in oracle.FIELD_WIDTHS.items()}
+
+
+def uniform_hash(fields):
+    bits = [value for key in oracle.FIELD_WIDTHS for value in fields[key]]
+    return digest(struct.pack('<147I', *bits))
 
 
 def world_fields():
@@ -52,7 +69,7 @@ def view():
     }
 
 
-def world():
+def world(cluster=3):
     def group(gid, visible):
         g = {'id': gid, 'visible': visible, 'indices': 9, 'base_element': gid * 9, 'triangles': 3,
              'min_bits': [1, 1, 1], 'max_bits': [2, 2, 2], 'center_bits': [1, 1, 1],
@@ -62,7 +79,7 @@ def world():
         if visible:
             g.update(drawn_indices=9, pipeline=0, low=True, uniform_fields=world_fields())
         return g
-    return {'frame': 0, 'cluster': 3, 'projection_bits': [1] * 16, 'eye_bits': [1, 2, 3], 'time_bits': 0,
+    return {'frame': 0, 'cluster': cluster, 'projection_bits': [1] * 16, 'eye_bits': [1, 2, 3], 'time_bits': 0,
             'depth_view_bits': [1] * 6, 'fast_frustum': True, 'draw_order': [7], 'tested': [group(7, True), group(8, False)]}
 
 
@@ -73,28 +90,70 @@ def frame(index, on, map_name):
     }
     for n, name in enumerate(sorted(oracle.ELAPSED_COUNTERS)):
         counters[name] = n + (100 if on else 1) + index
-    packet = {'geometry': 'g', 'gpu_geometry': 'g', 'gpu_slot': 3 if on else 4, 'uniforms': 'u' * 64,
-              'policy': [0], 'texture': 't', 'vertices': 4, 'indices': 6}
-    if index == 0:
-        packet['uniform_fields'] = packet_fields()
-    return {'frame': index, 'map': map_name, 'active': True, 'actor_skin': [], 'state_sha256': 's',
-            'selected_lights_bits': [], 'joint_alpha_order': [], 'blend_world_order': [], 'npc_decisions': [],
-            'submitted_packets': [packet], 'counters': counters, 'render': None, 'cpu_ms': 1.0 + on, 'spans_ms': {}}
+    fields = packet_fields() if index == 0 else None
+    packet = {'geometry': digest(b'geometry'), 'gpu_geometry': digest(b'geometry'),
+              'gpu_slot': 3 if on else 4, 'uniforms': uniform_hash(fields) if fields else digest(b'uniforms'),
+              'policy': [0, 0, 1], 'texture': digest(b'texture'), 'vertices': 4, 'indices': 6}
+    if fields is not None:
+        packet['uniform_fields'] = fields
+    return {'frame': index, 'map': map_name, 'active': True,
+            'actor_skin': [{'actor': 9, 'surface': 0, 'sha256': digest(b'skin-0')},
+                           {'actor': None, 'surface': 1, 'sha256': digest(b'skin-1')}],
+            'state_sha256': digest(b'state' + str(index).encode()),
+            'selected_lights_bits': [[1, 2, 3, 0, 0, 0, 0, 0, 1]],
+            'joint_alpha_order': [[0, 15, 0], [0, 16, 0]],
+            'blend_world_order': [[695, True], [698, False]],
+            'npc_decisions': [{'actor': '0:alice:alice', 'observations': 3, 'sha256': digest(b'decision')}],
+            'submitted_packets': [packet], 'counters': counters, 'render': None,
+            'cpu_ms': 1.0 + on, 'spans_ms': {'light_selection': 0.1}}
+
+
+def census_row(index):
+    total = 1000 + index
+    coverage = 500
+    return {
+        'accepted_frame': index + 1, 'sequence': index + 1,
+        'measured_frame': None if index < oracle.CENSUS_WARMUP_FRAMES else index - oracle.CENSUS_WARMUP_FRAMES + 1,
+        'frame_total_ns': total, 'bracket_union_ns': coverage,
+        'unbracketed_residual_ns': total - coverage,
+        'inclusive_ns': [0] * len(REGIONS), 'exclusive_ns': [0] * len(REGIONS),
+        'calls': [0] * len(REGIONS), 'parent_masks': [0] * len(REGIONS),
+        'static_traversal_ns': [0] * 5, 'static_traversal_counts': [[0] * 7 for _ in range(5)],
+        'sweep_count': [0] * 5, 'sweep_ns': [0] * 5,
+        'acoustics_world_sweep_count': 0, 'acoustics_world_sweep_ns': 0,
+        'static_queries_total_hit1_hit4_hit16': [[0] * 4 for _ in range(3)],
+        'static_cache_hit_miss_eviction': [[0] * 3 for _ in range(3)],
+        'live_table_evictions': 0, 'hierarchy_errors': 0,
+        'actors': [{'id': 10, 'serial_vertices': 1, 'worker_vertices': 2, 'serial_reasons': 0,
+                    'reason_vertices': [0] * len(oracle.CENSUS_SERIAL_REASONS)}],
+        'worker_skin_ns': [0, 0], 'serial_fallbacks': 0,
+    }
 
 
 def census(map_name):
-    row = {'accepted_frame': 1, 'actors': [{'id': 10, 'serial_vertices': 1, 'worker_vertices': 2}]}
-    return {'map': map_name, 'capacity': FRAMES, 'rows': [dict(row) for _ in range(FRAMES)],
-            'serial_fallbacks': 0}
+    return {
+        'schema': 3, 'actor_capacity': 128,
+        'serial_reasons': list(oracle.CENSUS_SERIAL_REASONS), 'audio_static_cache': False,
+        'map': map_name, 'regions': REGIONS, 'owners': list(oracle.CENSUS_OWNERS),
+        'static_count_columns': list(oracle.CENSUS_STATIC_COLUMNS),
+        'query_classes': list(oracle.CENSUS_QUERY_CLASSES),
+        'rows': [census_row(i) for i in range(FRAMES)], 'capacity': FRAMES,
+        'table_entries': 4096, 'table_probes': 16, 'serial_fallbacks': 0,
+        'parent_mask_frame_bit': len(REGIONS),
+        'clock': 'monotonic elapsed nanoseconds; includes preemption and API waits; no GPU timing',
+        'residual': 'frame_total minus union of root brackets; nested inclusive values must never be summed',
+        'query_rule': 'exact scene and endpoint bits; previous 1/4/16 attempted frames',
+        'observer_threshold_ms': 1.0,
+    }
 
 
 class Game:
-    """Fake probe binary. mutate(map, on, attempt, parts) edits one launch's output."""
+    """Fake probe binary. mutate(map, on, attempt, parts, game) edits one launch's output."""
 
     def __init__(self, binary, mutate=None):
         self.binary, self.mutate, self.calls = binary, mutate, []
 
-    def __call__(self, cmd, cwd, env, stdout, **_):
+    def __call__(self, cmd, cwd, env, stdout, timeout=None, **_):
         d = Path(cwd)
         config = json.loads((d / 'private/vita_renderer.json').read_text())
         on = config[FLAG]
@@ -104,8 +163,8 @@ class Game:
         parts = dict(
             config=config, size=[722, 409], view=view(), world=[world()],
             frames=[frame(i, on, map_name) for i in range(FRAMES)],
-            images=[{'frame': i, 'sha256': f'{i:064x}', 'width': 960, 'height': 544, 'bytes': 960 * 544 * 4}
-                    for i in range(FRAMES)],
+            images=[{'frame': i, 'sha256': digest(b'image' + str(i).encode()), 'width': 960, 'height': 544,
+                     'bytes': 960 * 544 * 4} for i in range(FRAMES)],
             census=census(map_name), opening_png=b'png0', final_png=b'pngN', exit=0, extra=[])
         if self.mutate:
             self.mutate(map_name, on, attempt, parts, self)
@@ -128,23 +187,31 @@ class Game:
         return subprocess.CompletedProcess(cmd, parts['exit'])
 
 
-def run(label, root, mutate=None, maps=('utemple', 'other'), extra=(), trees=None, prepare=None):
+def run(label, root, mutate=None, maps=('utemple', 'other'), extra=(), trees=None, prepare=None,
+        launch_timeout=None):
     out = root / label
     binary = root / f'{label}.bin'
     binary.write_bytes(b'probe-binary')
     if prepare:
         prepare(out)
     game = Game(binary, mutate)
+    CALLS[label] = game.calls
     trees = iter(trees or [TREE, TREE])
     argv = ['host_flag_exact.py', str(out), '--binary', str(binary), '--flag', FLAG, '--maps', *maps,
             '--prerequisites', '{"particle_producer_reuse": true}', '--witness', 'fx_registration_batch_puffs',
             '--witness', 'fx_registration_batch_runs', '--require-positive', 'utemple',
             '--counter-prefix', 'fx_registration_batch_', '--frames', str(FRAMES), *extra]
+    if launch_timeout is not None:
+        argv += ['--launch-timeout', str(launch_timeout)]
     with patch.object(sys, 'argv', argv), patch.object(oracle.subprocess, 'run', game), \
             patch.object(oracle, 'source_tree', lambda _root: next(trees)), \
             patch.object(oracle, 'DATA', str(root)):
         oracle.main()
     return json.loads((out / 'proof/host-flag-exact.json').read_text()), game, out
+
+
+def ledger(out):
+    return [json.loads(line) for line in (out / 'proof/attempts.jsonl').read_text().splitlines()]
 
 
 def expect_pass(label, root, **kw):
@@ -172,19 +239,24 @@ def expect_incomplete(label, root, **kw):
     return receipt
 
 
-def expect_fail(label, root, **kw):
+def expect_fail(label, root, reason=None, **kw):
     try:
         run(label, root, **kw)
     except SystemExit as exc:
         if exc.code in (0, oracle.INCOMPLETE_EXIT):
             raise SystemExit(f'negative control ended with exit {exc.code}: {label}')
-        print('FAIL_AS_REQUIRED', label, str(exc)[:160])
-        return str(exc)
-    except (AssertionError, KeyError, TypeError, ValueError) as exc:
-        text = str(exc)
-        print('FAIL_AS_REQUIRED', label, text[:160])
-        return text
-    raise SystemExit(f'negative control passed: {label}')
+    except AssertionError:
+        pass
+    else:
+        raise SystemExit(f'negative control passed: {label}')
+    out = root / label
+    receipt = json.loads((out / 'proof/host-flag-exact.json').read_text())
+    assert receipt['status'] == 'FAIL', (label, receipt['status'])
+    assert receipt.get('error'), (label, 'no recorded error')
+    if reason is not None:
+        assert reason in json.dumps(receipt['error']), (label, reason, receipt['error'])
+    print('FAIL_AS_REQUIRED', label, json.dumps(receipt['error'])[:150])
+    return receipt, out
 
 
 def on_map(map_name, edit):
@@ -213,6 +285,19 @@ def main():
     assert receipt['witness_on_total'] == {'fx_registration_batch_puffs': 2 * 4 * FRAMES,
                                            'fx_registration_batch_runs': 2 * FRAMES}
 
+    # Legitimate nullable producer fields and vacuous arrays still pass.
+    def nullable(parts, game):
+        parts['world'][0]['cluster'] = None
+        for row in parts['frames']:
+            row['actor_skin'] = []
+            row['selected_lights_bits'] = []
+            row['joint_alpha_order'] = []
+            row['blend_world_order'] = []
+            row['npc_decisions'] = []
+            for packet in row['submitted_packets']:
+                packet['texture'] = None
+    expect_pass('nullable producer fields', root, mutate=lambda m, on, a, p, g: nullable(p, g))
+
     # The seven producer-validated elapsed fields differ in every frame of the baseline
     # already (frame()). Any other counter, map or frame is gated.
     expect_fail('unrelated-map frame0 uniform hash', root, mutate=on_map(
@@ -221,8 +306,8 @@ def main():
         'other', lambda p, g: p['frames'][0]['counters'].update(vita_world_opaque_triangles=3740)))
     expect_fail('future elapsed-looking counter', root, mutate=on_map(
         'utemple', lambda p, g: p['frames'][1]['counters'].update(semantic_future_us=5)))
-    expect_fail('frame0 named uniform field', root, mutate=on_map(
-        'other', lambda p, g: p['frames'][0]['submitted_packets'][0]['uniform_fields']['projection'].__setitem__(0, 8)))
+    expect_fail('frame0 named uniform field', root, reason='uniform',
+                mutate=on_map('other', lambda p, g: p['frames'][0]['submitted_packets'][0]['uniform_fields']['projection'].__setitem__(0, 8)))
     expect_fail('frame0 fovy', root, mutate=on_map('other', lambda p, g: p['view'].update(fovy_bits=1065619850)))
     expect_fail('world group culled', root, mutate=on_map(
         'other', lambda p, g: p['world'][0]['tested'][0].update(
@@ -294,16 +379,122 @@ def main():
         'other', lambda p, g: p['extra'].append('[lg/skin] serial fallback actor=1')))
     expect_fail('nonzero exit', root, mutate=on_map('other', lambda p, g: p.update(exit=1)))
 
+    # R3-1: equal malformed typed records must fail, never establish an exact PASS.
+    expect_fail('census sequence 999 in both arms', root, reason='accepted_frame', mutate=lambda m, on, a, p, g: [
+        row.update(accepted_frame=999, sequence=999, measured_frame=999) for row in p['census']['rows']])
+    expect_fail('census bool sequence', root, reason='accepted_frame', mutate=lambda m, on, a, p, g: [
+        row.update(accepted_frame=True, sequence=True) for row in p['census']['rows'][:1]])
+    def census_missing_identity(m, on, attempt, parts, game):
+        for row in parts['census']['rows']:
+            for key in ('accepted_frame', 'sequence', 'measured_frame'):
+                row.pop(key)
+            for actor in row['actors']:
+                actor.pop('id')
+    expect_fail('census missing identity', root, reason='schema', mutate=census_missing_identity)
+    expect_fail('census missing fallback evidence', root, reason='schema',
+                mutate=lambda m, on, a, p, g: p['census'].pop('serial_fallbacks'))
+    expect_fail('census bool actor identity', root, mutate=lambda m, on, a, p, g: [
+        actor.update(id=True) for row in p['census']['rows'] for actor in row['actors']])
+    expect_fail('census bad warmup alignment', root, reason='measured_frame', mutate=lambda m, on, a, p, g: [
+        row.update(measured_frame=None) for row in p['census']['rows'][60:61]])
+    expect_fail('state hash not hex', root, mutate=lambda m, on, a, p, g: [
+        row.update(state_sha256='z' * 64) for row in p['frames']])
+    expect_fail('packet uniform hash not hex', root, mutate=lambda m, on, a, p, g: [
+        packet.update(uniforms='z' * 64) for row in p['frames'] for packet in row['submitted_packets']])
+    expect_fail('null semantic arrays', root, reason='actor_skin', mutate=lambda m, on, a, p, g: [
+        row.update({k: None for k in ('actor_skin', 'selected_lights_bits', 'joint_alpha_order',
+                                      'blend_world_order', 'npc_decisions')}) for row in p['frames']])
+    expect_fail('world bool frame', root, reason='frame', mutate=lambda m, on, a, p, g: p['world'][0].update(frame=False))
+    expect_fail('world null record', root, reason='record', mutate=lambda m, on, a, p, g: p.update(world=[None]))
+    expect_fail('decoded text is not an object', root, mutate=lambda m, on, a, p, g: [
+        row.update(actor_skin=[{'actor': 9, 'surface': 0, 'sha256': 7}]) for row in p['frames']])
+
+    # R3-2: a malformed launch is terminal before pair or repeat selection.
+    def pair_prereq_missing_uniform(m, on, attempt, parts, game):
+        if m == 'other' and on and attempt == 0:
+            parts['view']['screen_bits'][0] += 1
+            parts['frames'][0]['submitted_packets'][0].pop('uniform_fields')
+    receipt, out = expect_fail('pair prerequisite malformed launch', root, reason='invalid record',
+                               mutate=pair_prereq_missing_uniform)
+    assert [c for c in game_calls('pair prerequisite malformed launch', root) if c[0] == 'other'] == [
+        ('other', False, 0), ('other', True, 0)], game_calls('pair prerequisite malformed launch', root)
+    rows = ledger(out)
+    assert any(row.get('map') == 'other' and row.get('arm') is True and row.get('attempt') == 0
+               and row.get('classification') == 'invalid-record' for row in rows), rows
+    assert any(row.get('classification') == 'launch-start' and row.get('map') == 'other'
+               and row.get('arm') is True and row.get('attempt') == 0 for row in rows), rows
+
+    def repeat_prereq_missing_uniform(m, on, attempt, parts, game):
+        if m != 'other':
+            return
+        if on and attempt == 0:
+            parts['images'][1]['sha256'] = 'a' * 64
+        if not on and attempt >= REPEAT_ATTEMPT:
+            parts['images'][3]['sha256'] = 'b' * 64
+            if attempt == REPEAT_ATTEMPT:
+                parts['view']['screen_bits'][0] += 1
+                parts['frames'][0]['submitted_packets'][0].pop('uniform_fields')
+    receipt, out = expect_fail('repeat prerequisite malformed launch', root, reason='invalid record',
+                               mutate=repeat_prereq_missing_uniform)
+    calls = game_calls('repeat prerequisite malformed launch', root)
+    assert ('other', False, REPEAT_ATTEMPT) in calls, calls
+    assert ('other', False, REPEAT_ATTEMPT + 1) not in calls, calls
+    rows = ledger(out)
+    assert any(row.get('map') == 'other' and row.get('arm') is False and row.get('attempt') == REPEAT_ATTEMPT
+               and row.get('classification') == 'invalid-record' for row in rows), rows
+
+    # R3-3: every operational failure closes one terminal FAIL receipt, never stale RUNNING.
+    def exec_error(m, on, attempt, parts, game):
+        if m == 'other' and on and attempt == 0:
+            raise PermissionError('synthetic exec denied')
+    receipt, out = expect_fail('launch process error', root, reason='launch process error', mutate=exec_error)
+    assert receipt['status'] == 'FAIL'
+    rows = ledger(out)
+    assert any(row.get('map') == 'other' and row.get('arm') is True and row.get('attempt') == 0
+               and row.get('classification') == 'launch-error' for row in rows), rows
+    assert any(row.get('classification') == 'launch-start' and row.get('map') == 'other'
+               and row.get('attempt') == 0 for row in rows), rows
+
+    expect_fail('malformed json', root, reason='decode error', mutate=on_map(
+        'other', lambda p, g: p['extra'].append('SIM_MAPS_FRAME {broken')))
+
+    def missing_config(parts, game):
+        parts['config'] = dict(parts['config'])
+        parts['config'].pop('particle_producer_reuse')
+    expect_fail('missing printed config key', root, reason='missing prerequisite',
+                mutate=on_map('other', missing_config))
+
+    def timeout(m, on, attempt, parts, game):
+        raise subprocess.TimeoutExpired('probe', 0.5)
+    receipt, out = expect_fail('bounded launch timeout', root, reason='launch timeout',
+                               mutate=timeout, extra=('--launch-timeout', '0.5'))
+    assert receipt['status'] == 'FAIL'
+    assert any(row.get('classification') == 'timeout' for row in ledger(out)), ledger(out)
+
     def rewrite_binary(p, g):
         g.binary.write_bytes(b'rebuilt-binary')
     expect_fail('binary changed during launch', root, mutate=on_map('utemple', rewrite_binary))
     expect_fail('source changed during oracle', root,
                 trees=[TREE, dict(TREE, tree='x' * 40)])
 
-    def stale(out):
-        (out / 'host').mkdir(parents=True)
-        (out / 'host/cached-run.log').write_text('SIM_MAPS_FRAME {}\n')
-    expect_fail('existing output directory (stale cache)', root, prepare=stale)
+    def stale(out_dir):
+        (out_dir / 'host').mkdir(parents=True)
+        (out_dir / 'host/cached-run.log').write_text('SIM_MAPS_FRAME {}\n')
+    out = root / 'existing output directory (stale cache)'
+    binary = root / 'stale.bin'
+    binary.write_bytes(b'probe-binary')
+    stale(out)
+    argv = ['host_flag_exact.py', str(out), '--binary', str(binary), '--flag', FLAG,
+            '--maps', 'utemple', '--prerequisites', '{"particle_producer_reuse": true}',
+            '--witness', 'fx_registration_batch_puffs', '--require-positive', 'utemple',
+            '--counter-prefix', 'fx_registration_batch_', '--frames', str(FRAMES)]
+    with patch.object(sys, 'argv', argv), patch.object(oracle, 'DATA', str(root)):
+        try:
+            oracle.main()
+        except SystemExit as exc:
+            assert 'refuse reuse' in str(exc), exc
+        else:
+            raise SystemExit('stale output directory was reused')
 
     # Presentation input: a pair whose frame-0 window differs is kept and not compared.
     def first_pair_moves(m, on, attempt, p, g):
@@ -315,14 +506,14 @@ def main():
     assert receipt['maps'][1]['matched_attempt'] == 1, receipt['maps'][1]
     kept = sorted(p.name for p in (out / 'host/host-flag-exact').iterdir() if p.name.startswith('other-'))
     assert kept == [f'other-{FLAG}-0-a0', f'other-{FLAG}-0-a1', f'other-{FLAG}-1-a0', f'other-{FLAG}-1-a1'], kept
-    ledger = [json.loads(line) for line in (out / 'proof/attempts.jsonl').read_text().splitlines()]
-    assert any(row.get('classification') == 'prerequisite-mismatch' and row['map'] == 'other' for row in ledger)
+    rows = ledger(out)
+    assert any(row.get('classification') == 'prerequisite-mismatch' and row['map'] == 'other' for row in rows)
 
     def always_moves(m, on, attempt, p, g):
         if m == 'other' and on:
             p['images'][2].update(width=961, bytes=961 * 544 * 4)
-    text = expect_fail('input never matches', root, mutate=always_moves, extra=('--max-attempts', '3'))
-    assert 'no matched renderer prerequisite' in text, text
+    receipt, _ = expect_fail('input never matches', root, reason='no matched renderer prerequisite',
+                             mutate=always_moves, extra=('--max-attempts', '3'))
     expect_fail('output mismatch is not retried', root, mutate=lambda m, on, a, p, g: (
         m == 'other' and on and a == 0 and p['frames'][2]['counters'].update(vita_world_gpu_draws=1)))
 
@@ -331,7 +522,7 @@ def main():
     assert receipt['maps'][0]['stability_observation']['explicit'] is True, receipt['maps'][0]
     expect_fail('repeated OFF semantic mismatch', root, extra=('--repeat-off', 'utemple'),
                 mutate=lambda m, on, a, p, g: (m == 'utemple' and not on and a >= REPEAT_ATTEMPT
-                                               and p['frames'][2].update(state_sha256='foreign-state')))
+                                               and p['frames'][2].update(state_sha256='a' * 64)))
     expect_fail('repeated OFF foreign map', root, extra=('--repeat-off', 'utemple'),
                 mutate=lambda m, on, a, p, g: (m == 'utemple' and not on and a >= REPEAT_ATTEMPT
                                                and [row.update(map='foreign-map') for row in p['frames']]))
@@ -345,6 +536,11 @@ def main():
                 mutate=lambda m, on, a, p, g: (m == 'utemple' and not on and a >= REPEAT_ATTEMPT
                                                and p.update(final_png=b'other')))
     print('PASS synthetic oracle controls', root)
+
+
+def game_calls(label, root):
+    """The fake game's call list for one label, recorded before the run starts."""
+    return CALLS.get(label, [])
 
 
 if __name__ == '__main__':
