@@ -12,6 +12,7 @@ thread_local! {
     static COUNTS: RefCell<BTreeMap<&'static str, u64>> = RefCell::default();
     static SPANS: RefCell<BTreeMap<&'static str, f64>> = RefCell::default();
     static START: RefCell<Option<Instant>> = const { RefCell::new(None) };
+    static PROJECTION: Cell<Option<[u32; 16]>> = const { Cell::new(None) };
     static NPC_ACTOR: RefCell<String> = RefCell::default();
     static NPC_DECISIONS: RefCell<BTreeMap<String, (Sha256, u64)>> = RefCell::default();
 }
@@ -67,6 +68,7 @@ pub fn begin() {
         COUNTS.with(|c| c.borrow_mut().clear());
         SPANS.with(|c| c.borrow_mut().clear());
         NPC_DECISIONS.with(|c| c.borrow_mut().clear());
+        PROJECTION.with(|p| p.set(None));
         crate::light_profile::render_host_reset();
         START.with(|s| *s.borrow_mut() = Some(Instant::now()));
     }
@@ -89,11 +91,25 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
         "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow(),
         "npc_decisions": npc_decisions(),
         "spans_ms": SPANS.with(|s| s.borrow().clone()),
-        "render": crate::light_profile::render_host_report()
+        "render": crate::light_profile::render_host_report(),
+        "renderer_drops": renderer_drops()
     })));
     if std::env::var_os("LOOKING_GLASS_SIM_MAPS_STATE").is_some() {
         std::fs::write(format!("state-{frame:05}.json"), bytes).unwrap();
     }
+}
+
+/// This frame's refused groups and capped layers, independent of the counter switch.
+fn renderer_drops() -> serde_json::Value {
+    #[cfg(all(feature = "vita_renderer", not(target_os = "vita")))]
+    {
+        // A counter that was never charged has no entry yet; its value is zero.
+        let report = crate::render_fx::retained::host_report();
+        let value = |key: &str| report.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        serde_json::json!({"groups": value("vita_fx_dropped_groups"), "layers": value("vita_fx_dropped_layers")})
+    }
+    #[cfg(not(all(feature = "vita_renderer", not(target_os = "vita"))))]
+    { serde_json::Value::Null }
 }
 
 pub fn span(label: &'static str, ms: f64) {
@@ -196,6 +212,48 @@ pub fn script_hits(frame:u64,npcs:&mut crate::npc::Npcs) {
     let targets=npcs.targets();let mut accepted=0;
     for t in &targets {accepted+=usize::from(npcs.hit(crate::combat::Hit {id:t.id,damage,kind,knockback:glam::Vec3::ZERO}).is_some());}
     println!("SIM_SKIN_HITS {}",serde_json::json!({"frame":frame,"targets":targets.len(),"accepted":accepted,"kind":format!("{kind:?}")}));
+}
+
+/// The camera matrix submitted this frame, recorded where the renderer receives it.
+pub fn note_projection(matrix: glam::Mat4) {
+    if skin_proof() {
+        PROJECTION.with(|p| p.set(Some(matrix.to_cols_array().map(f32::to_bits))));
+    }
+}
+
+/// Per-frame framebuffer hash plus the presentation inputs that produced it:
+/// requested window, effective framebuffer, scaled target, GL viewport and the
+/// camera matrix. `png` also keeps the frame as an image. A frame without a
+/// recorded camera matrix or with an empty viewport/framebuffer is an error.
+#[cfg(all(feature = "vita_renderer", feature = "sim_maps_probe", not(target_os = "vita")))]
+pub fn record_exact_frame(case: &str, frame: u64, png: bool) -> anyhow::Result<()> {
+    if !skin_proof() { return Ok(()); }
+    let projection = PROJECTION.with(Cell::get).ok_or_else(|| anyhow::anyhow!("no camera matrix recorded for {case} frame {frame}"))?;
+    let mut viewport = [0i32; 4];
+    unsafe { macroquad::miniquad::gl::glGetIntegerv(0x0BA2, viewport.as_mut_ptr()); }
+    anyhow::ensure!(viewport[2] > 0 && viewport[3] > 0, "empty GL viewport for {case} frame {frame}: {viewport:?}");
+    let image = macroquad::prelude::get_screen_data();
+    anyhow::ensure!(image.width > 0 && image.height > 0 && !image.bytes.is_empty(), "empty framebuffer for {case} frame {frame}");
+    let png = if png {
+        let path = std::path::PathBuf::from(format!("exact-frames/{case}-{frame:03}.png"));
+        crate::viewer::save_capture(&path)?;
+        Some(serde_json::json!({"path": path.display().to_string(), "sha256": format!("{:x}", Sha256::digest(std::fs::read(&path)?))}))
+    } else { None };
+    let (width, height, high_dpi) = crate::viewer::probe_window_request();
+    println!("SKIN_EXACT_PRESENTATION {}", serde_json::json!({
+        "case": case, "frame": frame,
+        "requested_window": [width, height], "requested_high_dpi": high_dpi,
+        "screen_size_bits": [macroquad::prelude::screen_width().to_bits(), macroquad::prelude::screen_height().to_bits()],
+        "framebuffer": [image.width, image.height],
+        "scaled_target": crate::render::vita_renderer::diagnostic_target(),
+        "viewport": viewport,
+        "projection_bits": projection,
+    }));
+    println!("SKIN_EXACT_IMAGE {}", serde_json::json!({
+        "case": case, "frame": frame, "sha256": format!("{:x}", Sha256::digest(&image.bytes)),
+        "width": image.width, "height": image.height, "png": png,
+    }));
+    Ok(())
 }
 
 pub fn prepare_checkpoint()->Option<u64> {

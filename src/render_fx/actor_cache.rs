@@ -99,7 +99,7 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
             world_static:None,
             #[cfg(target_os="vita")]
             world_geometry_counted:false,
-            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:Some(l.textures[p.frame].clone())},
+            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
             material:None,lit:p.lit,clamp:p.clamp,cutout:p.cutout,cutout_reference:p.reference,
             gain:p.gain,fog:p.fog,model:true,appearance,filter_fade:0.});
     }
@@ -148,7 +148,7 @@ pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(V
             blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
-            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:Some(l.textures[p.frame].clone())},
+            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
             material:None,lit:p.lit,clamp:p.clamp,cutout:p.cutout,cutout_reference:p.reference,
             gain:p.gain,fog:p.fog,model:true,appearance,filter_fade:0.});
     }
@@ -156,3 +156,11 @@ pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(V
 }
 
 pub(super) fn release_storage() { PASS_STORAGE.with(|s| *s.borrow_mut() = Vec::new()); }
+
+/// Production layers always have one texture per declared image. Only a GL-less
+/// test, which cannot create a texture, gives a layer none.
+fn layer_texture(layer: &super::Layer, frame: usize) -> Option<Texture2D> {
+    #[cfg(test)]
+    if layer.textures.is_empty() { return None; }
+    Some(layer.textures[frame].clone())
+}

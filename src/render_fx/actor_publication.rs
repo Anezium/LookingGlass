@@ -14,6 +14,8 @@ const MAX_OCCURRENCES:u16=4;
 const SURFACES:usize=2048;
 const VERTICES:usize=65536;
 const INDICES:usize=262144;
+#[cfg(any(test,feature="actor_diagnostics",all(feature="sim_maps_probe",not(target_os="vita"))))]
+const MEMORY_ROWS:usize=30;
 #[derive(Default)]
 struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], alpha:[Option<bool>;2], epoch:[u64;2], instance:[Option<u64>;2] }
 #[derive(Default)]
@@ -69,23 +71,66 @@ impl State {
         *n+=1;
         Some(key)
     }
-    /// Retained bytes for diagnostics. Bank-owned capacity is what the
-    /// VERTICES/INDICES caps bound; the other rows are outside those caps.
+    /// Host-layout inventory for diagnostics. Each geometry allocation is listed
+    /// once, under one owner/lifetime class: a bank slot that is free, current
+    /// (reserved this frame) or held (an earlier frame's output still referenced
+    /// outside the bank), or evicted (no longer bank-owned, kept alive by an
+    /// external holder). Bank-owned capacity is what VERTICES/INDICES bound; the
+    /// evicted, container, map and header rows are outside those caps. HashMap
+    /// rows are capacity*entry lower bounds without control bytes. Not Vita ABI.
     #[cfg(any(test,feature="actor_diagnostics",all(feature="sim_maps_probe",not(target_os="vita"))))]
-    fn memory(&mut self)->[(&'static str,u64);6] {
+    fn memory(&mut self)->[(&'static str,u64);MEMORY_ROWS] {
         use std::mem::size_of;
-        // HashMap capacity times entry size: a lower bound that excludes control bytes.
         fn map<K,V>(m:&HashMap<K,V>)->usize {m.capacity()*size_of::<(K,V)>()}
+        fn bytes(g:&prepared::Geometry)->usize {g.vertices.capacity()*size_of::<Vertex>()+g.indices.capacity()*2}
+        // An Rc allocation holds two counts and the value; each non-empty Vec is one more allocation.
+        fn allocations(g:&prepared::Geometry)->usize {1+usize::from(g.vertices.capacity()>0)+usize::from(g.indices.capacity()>0)}
         self.evicted.retain(|g|g.strong_count()>0);
-        let evicted:usize=self.evicted.iter().filter_map(std::rc::Weak::upgrade)
-            .map(|g|g.vertices.capacity()*size_of::<Vertex>()+g.indices.capacity()*2).sum();
+        let mut class=[[0usize;3];4];
+        for bank in &self.banks {
+            for (slot,g) in bank.slots.iter().enumerate() {
+                let Some(g)=g else {continue};
+                let c=if bank.epoch[slot]==self.epoch {1} else if Rc::strong_count(g)>1 {2} else {0};
+                class[c][0]+=1;class[c][1]+=bytes(g);class[c][2]+=allocations(g);
+            }
+        }
+        for g in self.evicted.iter().filter_map(std::rc::Weak::upgrade) {
+            class[3][0]+=1;class[3][1]+=bytes(&g);class[3][2]+=allocations(&g);
+        }
+        let geometries=class.iter().map(|c|c[0]).sum::<usize>();
+        let nested=self.held.iter().map(|g|g.passes.capacity()).sum::<usize>();
+        let cpu=self.banks.iter().flat_map(|b|b.cpu.iter().flatten()).count();
         [("actor_publication_mem_owned_bytes",(self.vertex_capacity*size_of::<Vertex>()+self.index_capacity*2) as u64),
          ("actor_publication_mem_banks",self.lookup.len() as u64),
          ("actor_publication_mem_bank_table_bytes",(self.banks.capacity()*size_of::<Bank>()) as u64),
          ("actor_publication_mem_maps_bytes",(map(&self.lookup)+map(&self.occurrences)) as u64),
          ("actor_publication_mem_pending_held_bytes",(self.pending.capacity()*size_of::<(usize,usize,usize)>()
             +self.held.capacity()*size_of::<Group>()+self.held_puffs.capacity()*size_of::<retained::world_puffs::Puff>()) as u64),
-         ("actor_publication_mem_evicted_referenced_bytes",evicted as u64)]
+         ("actor_publication_mem_evicted_referenced_bytes",class[3][1] as u64),
+         ("actor_publication_mem_slots_free",class[0][0] as u64),
+         ("actor_publication_mem_slots_free_bytes",class[0][1] as u64),
+         ("actor_publication_mem_slots_current",class[1][0] as u64),
+         ("actor_publication_mem_slots_current_bytes",class[1][1] as u64),
+         ("actor_publication_mem_slots_held",class[2][0] as u64),
+         ("actor_publication_mem_slots_held_bytes",class[2][1] as u64),
+         ("actor_publication_mem_evicted_referenced",class[3][0] as u64),
+         ("actor_publication_mem_geometry_allocations",class.iter().map(|c|c[2]).sum::<usize>() as u64),
+         ("actor_publication_mem_geometry_header_bytes",(geometries*(2*size_of::<usize>()+size_of::<prepared::Geometry>())) as u64),
+         ("actor_publication_mem_banks_len",self.banks.len() as u64),
+         ("actor_publication_mem_banks_capacity",self.banks.capacity() as u64),
+         ("actor_publication_mem_lookup_len",self.lookup.len() as u64),
+         ("actor_publication_mem_lookup_capacity",self.lookup.capacity() as u64),
+         ("actor_publication_mem_occurrences_len",self.occurrences.len() as u64),
+         ("actor_publication_mem_occurrences_capacity",self.occurrences.capacity() as u64),
+         ("actor_publication_mem_pending_len",self.pending.len() as u64),
+         ("actor_publication_mem_pending_capacity",self.pending.capacity() as u64),
+         ("actor_publication_mem_held_groups_len",self.held.len() as u64),
+         ("actor_publication_mem_held_groups_capacity",self.held.capacity() as u64),
+         ("actor_publication_mem_held_pass_capacity",nested as u64),
+         ("actor_publication_mem_held_pass_bytes",(nested*size_of::<Pass>()) as u64),
+         ("actor_publication_mem_evicted_weak_capacity",self.evicted.capacity() as u64),
+         ("actor_publication_mem_evicted_weak_bytes",(self.evicted.capacity()*size_of::<std::rc::Weak<prepared::Geometry>>()) as u64),
+         ("actor_publication_mem_cpu_handles",cpu as u64)]
     }
     fn reserve_key(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:bool,key:Key)->Option<(usize,usize,usize)> {
         let id=if let Some(&id)=self.lookup.get(&key) {id} else {
@@ -203,12 +248,19 @@ pub(crate) fn end() {
 }
 /// This address is valid only between prepare and the fully drained collect. Banks
 /// cannot be mutated again while any old packet/view still owns their publication.
+///
+/// A refusal returns None and the caller runs the original serial consumer, which
+/// owns the refused draw's FRAME.dropped and vita_fx_dropped_layers charges. A kept
+/// direct draw takes the capped-layer charge the serial cache would have taken.
 pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,key:Key)->Option<(usize,bool)> {
-    let texture=mesh.texture.as_ref()?;
-    let surface=SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade))?;
+    let surface=mesh.texture.as_ref().and_then(|texture|SURFACE_LOOKUP.with(|s|s.borrow().get(&texture.raw_miniquad_id()).and_then(Weak::upgrade)));
+    #[cfg(test)]
+    let surface=surface.or_else(super::test_surface);
+    let surface=surface?;
     if SKIN_OPACITY.with(Cell::get)!=1. {return None;}
     let (time,appearance)=FRAME.with(|f| {let f=f.borrow();(f.time,f.appearance)});
     let (passes,alpha)=actor_cache::recipe(&surface,time,appearance)?;
+    let capped=surface.layers.len()-passes.len();
     let mut passes=Some(passes);
     let result=STATE.with(|s| {
         let mut s=s.borrow_mut();
@@ -216,16 +268,14 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
         let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,instance,alpha,key)?;
         let n=mesh.vertices.len()*passes.as_ref().unwrap().len();
         let used=FRAME.with(|f|f.borrow().vertices);
-        if s.frame_budget_rejects(id,slot,used,n) {
-            FRAME.with(|f|f.borrow_mut().dropped+=1);
-            return None;
-        }
+        if s.frame_budget_rejects(id,slot,used,n) {return None;}
         let group=FRAME.with(|f| {
             let mut f=f.borrow_mut();
             f.vertices+=n;let id=f.groups.len();
             let transparent=surface.transparent||f.depth_read_only;
             f.groups.push(Group {passes:passes.take().unwrap(),transparent});Some(id)
         })?;
+        if capped>0 {retained::count("vita_fx_dropped_layers",capped as u64);}
         s.pending.push((group,id,slot));
         Some((output,alpha))
     });
@@ -252,13 +302,26 @@ pub(crate) fn complete() {
         #[cfg(feature="actor_diagnostics")]
         retained::count("actor_publication_banks",s.lookup.len() as u64);
         #[cfg(any(feature="actor_diagnostics",all(feature="sim_maps_probe",not(target_os="vita"))))]
-        for (name,value) in s.memory() {retained::count(name,value);}
+        {
+            let memory=s.memory();
+            for (name,value) in memory {retained::count(name,value);}
+            // Per-frame inventory for the host oracle; independent of the counter switch.
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if crate::sim_maps::probe::skin_proof() {
+                println!("PUBLICATION_MEMORY {}",serde_json::json!({"epoch":s.epoch,"rows":memory.iter().map(|(k,v)|(k.to_string(),*v)).collect::<std::collections::BTreeMap<_,_>>()}));
+            }
+        }
         FRAME.with(|f| {let mut f=f.borrow_mut();let world_groups=f.groups.len();
             for puff in &mut s.held_puffs {puff.before_group+=world_groups;}
             f.groups.append(&mut s.held);f.world_puffs.append(&mut s.held_puffs);
         });
         s.completed=true;
     });
+}
+
+#[cfg(test)]
+pub(super) fn pinned_slots()->Vec<Rc<prepared::Geometry>> {
+    STATE.with(|s|s.borrow().banks.iter().flat_map(|b|b.slots.iter().filter_map(|g|g.clone())).collect())
 }
 
 #[cfg(test)]
@@ -765,7 +828,7 @@ mod tests {
             size_of::<Bank>(),size_of::<Key>(),size_of::<((ActorId,usize),u16)>(),size_of::<(usize,usize,usize)>(),size_of::<Group>());
         // Two extra occurrences, two slots each, at the contract's actor vertex counts.
         for (map,vertices) in [("skool2",1294_usize),("centipede1",1434)] {
-            println!("publication memory: {map} two extra occurrences x2 slots: {} B at {vertex} B/vertex, {} B at 40 B/vertex, plus 2 B per index",
+            println!("publication memory sketch, not a measured heap delta: {map} two extra occurrences x2 slots: {} B at host {vertex} B/vertex, {} B at a 40 B/vertex layout sketch, plus 2 B per index",
                 2*2*vertices*vertex,2*2*vertices*40);
         }
         // Exhaustion: every bank of four occurrences, owned capacity at the vertex cap.
@@ -780,6 +843,96 @@ mod tests {
         let memory=state.memory();
         assert!(state.vertex_capacity<=VERTICES && state.index_capacity<=INDICES);
         assert!(memory[0].1<=(VERTICES*vertex+INDICES*2) as u64,"bank-owned bytes exceed the caps");
-        println!("publication memory: after exhaustion {memory:?}; cap {} B bank-owned",VERTICES*vertex+INDICES*2);
+        println!("publication memory: bank-owned cap check {memory:?}; vertex/index cap {} B. This is not a total heap bound.",VERTICES*vertex+INDICES*2);
+    }
+    /// Q1 F4. Owner/lifetime inventory at cold, warm (both slots), overlap,
+    /// release, exhaustion and external-holder eviction. Every geometry allocation
+    /// appears in exactly one class, and the classes add up to bank-owned bytes.
+    #[test]
+    fn publication_memory_inventory_lists_each_allocation_once_by_owner_and_lifetime() {
+        use std::collections::{BTreeMap,BTreeSet};
+        use std::mem::size_of;
+        fn rows(state:&mut State)->BTreeMap<&'static str,u64> {
+            let rows:BTreeMap<_,_>=state.memory().into_iter().collect();
+            // Independent identity check: no allocation is listed twice.
+            let mut seen=BTreeSet::new();
+            for g in state.banks.iter().flat_map(|b|b.slots.iter().flatten()) {
+                assert!(seen.insert(Rc::as_ptr(g) as usize),"a bank slot repeats an allocation");
+                if g.vertices.capacity()>0 {assert!(seen.insert(g.vertices.as_ptr() as usize));}
+            }
+            for g in state.evicted.iter().filter_map(std::rc::Weak::upgrade) {
+                assert!(seen.insert(Rc::as_ptr(&g) as usize),"evicted geometry is still bank-owned");
+            }
+            assert_eq!(rows["actor_publication_mem_slots_free_bytes"]+rows["actor_publication_mem_slots_current_bytes"]
+                +rows["actor_publication_mem_slots_held_bytes"],rows["actor_publication_mem_owned_bytes"],"classes cover bank-owned bytes once");
+            rows
+        }
+        fn show(stage:&str,calls:Option<u64>,rows:&BTreeMap<&'static str,u64>) {
+            println!("PUBLICATION_INVENTORY {}",serde_json::json!({"stage":stage,"allocation_calls":calls,"rows":rows,
+                "layout":"host","vita_abi_measured":false}));
+        }
+        println!("publication inventory host layout: Vertex {} B, Geometry {} B, Rc allocation {} B, Bank {} B, Pass {} B",
+            size_of::<Vertex>(),size_of::<prepared::Geometry>(),2*size_of::<usize>()+size_of::<prepared::Geometry>(),size_of::<Bank>(),size_of::<Pass>());
+        let (mesh,cpu)=fixture();let mut state=on();let k=key(ActorId::default(),&cpu);
+        let scope=crate::kernel_alloc::Scope::begin();state.next_frame();let calls=scope.finish();
+        let r=rows(&mut state);show("cold",Some(calls),&r);
+        assert_eq!((calls,r["actor_publication_mem_geometry_allocations"],r["actor_publication_mem_owned_bytes"]),(0,0,0));
+        // Slot A, then slot B while A is still referenced by an outside holder.
+        let scope=crate::kernel_alloc::Scope::begin();let a=claim(&mut state,&mesh,&cpu,false,1,k,0).unwrap();let calls=scope.finish();
+        let holder=geometry(&state,a);
+        let r=rows(&mut state);show("warm-slot-a",Some(calls),&r);
+        assert!(calls>0);assert_eq!((r["actor_publication_mem_slots_current"],r["actor_publication_mem_geometry_allocations"]),(1,3));
+        state.next_frame();
+        let scope=crate::kernel_alloc::Scope::begin();let b=claim(&mut state,&mesh,&cpu,true,1,k,0).unwrap();let calls=scope.finish();
+        assert_ne!(a.1,b.1);
+        let r=rows(&mut state);show("warm-slot-b",Some(calls),&r);
+        assert!(calls>0,"the alternate slot is cold until used");
+        assert_eq!((r["actor_publication_mem_slots_current"],r["actor_publication_mem_slots_held"]),(1,1));
+        drop(holder);let holder=geometry(&state,b);
+        // Both slots warm: an overlapping frame allocates nothing.
+        state.next_frame();
+        let scope=crate::kernel_alloc::Scope::begin();let c=claim(&mut state,&mesh,&cpu,true,1,k,0).unwrap();let calls=scope.finish();
+        assert_eq!(c.1,a.1);
+        let r=rows(&mut state);show("overlap",Some(calls),&r);
+        assert_eq!(calls,0,"zero additional allocations once both slots are warm");
+        assert_eq!((r["actor_publication_mem_slots_current"],r["actor_publication_mem_slots_held"],r["actor_publication_mem_slots_free"]),(1,1,0));
+        drop(holder);state.next_frame();
+        let r=rows(&mut state);show("released",None,&r);
+        assert_eq!((r["actor_publication_mem_slots_free"],r["actor_publication_mem_slots_held"]),(2,0));
+        // Nested pass vectors owned by held groups are their own row.
+        state.held.push(Group {passes:Vec::with_capacity(4),transparent:false});
+        let r=rows(&mut state);show("held-group",None,&r);
+        assert_eq!(r["actor_publication_mem_held_pass_capacity"],4);
+        assert_eq!(r["actor_publication_mem_held_pass_bytes"],(4*size_of::<Pass>()) as u64);
+        state.held.clear();
+        // Exhaustion: distinct surfaces until the vertex cap refuses.
+        let (big,big_cpu)=surface(4096,vec![0,1,2]);let mut state=on();let actor=ActorId::default();
+        state.next_frame();
+        let mut holders=Vec::new();
+        let scope=crate::kernel_alloc::Scope::begin();
+        let mut fitted=0;
+        while let Some(c)=claim(&mut state,&big,&big_cpu,false,0,Key {actor,surface:fitted,occurrence:0},0) {holders.push(geometry(&state,c));fitted+=1;}
+        let calls=scope.finish();
+        let r=rows(&mut state);show("exhaustion",Some(calls),&r);
+        assert_eq!(fitted,VERTICES/4096);
+        assert!(r["actor_publication_mem_owned_bytes"]<=(VERTICES*size_of::<Vertex>()+INDICES*2) as u64);
+        // The holders outlive their banks: aged eviction drops bank ownership only.
+        for _ in 0..=UNUSED_FRAMES {state.next_frame();}
+        let r=rows(&mut state);show("evicted-held",None,&r);
+        assert_eq!((r["actor_publication_mem_owned_bytes"],r["actor_publication_mem_evicted_referenced"]),(0,fitted as u64));
+        let evicted=r["actor_publication_mem_evicted_referenced_bytes"];
+        // A second fill while the first holders live: bank-owned stays under the
+        // cap, but bank-owned plus externally held bytes exceeds it.
+        let mut second=Vec::new();
+        let mut n=0;
+        while let Some(c)=claim(&mut state,&big,&big_cpu,false,0,Key {actor,surface:1000+n,occurrence:0},0) {second.push(geometry(&state,c));n+=1;}
+        let r=rows(&mut state);show("refill-with-external-holders",None,&r);
+        let cap=(VERTICES*size_of::<Vertex>()+INDICES*2) as u64;
+        assert!(r["actor_publication_mem_owned_bytes"]<=cap);
+        assert!(r["actor_publication_mem_owned_bytes"]+evicted>cap,"external holders keep bytes outside the bank cap");
+        println!("publication inventory: bank-owned bytes stay under {cap} B; geometry an external holder keeps after eviction is outside that cap, so total retained bytes are bounded only by how long holders live");
+        drop((holders,second));
+        let r=rows(&mut state);show("holders-dropped",None,&r);
+        assert_eq!(r["actor_publication_mem_evicted_referenced"],0);
     }
 }
