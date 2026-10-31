@@ -482,10 +482,13 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
     note_eligibility(&surface);
     if SKIN_OPACITY.with(Cell::get)!=1. {crate::phase_census::rejection(2);return None;}
     let (time,appearance)=FRAME.with(|f| {let f=f.borrow();(f.time,f.appearance)});
-    let Some((passes,alpha))=actor_cache::recipe(&surface,time,appearance) else {
-        // recipe() has no side effect when it refuses; the serial fallback stays exact.
-        return if DEFERRED.with(Cell::get) {prepare_deferred(mesh,cpu,unchanged,instance,key,surface,time,appearance)} else {None};
-    };
+    // Classify before recipe() records a diagnostic rejection. Eligible raw
+    // layers are accepted work, while a refused bank/budget reports its real cause.
+    let limit=super::actor_max_layers(crate::render::vita_renderer::config()).min(surface.layers.len());
+    if DEFERRED.with(Cell::get) && deferred_accepts(&surface,limit) {
+        return prepare_deferred(mesh,cpu,unchanged,instance,key,surface,time,appearance);
+    }
+    let (passes,alpha)=actor_cache::recipe(&surface,time,appearance)?;
     let mode=PublicationMode::recipe(alpha);
     let mut passes=Some(passes);
     let result=STATE.with(|s| {
@@ -537,7 +540,7 @@ fn prepare_deferred(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,
     let n=mesh.vertices.len().checked_mul(limit)?;
     let (used,camera)=FRAME.with(|f| {let f=f.borrow();(f.vertices,f.camera)});
     // submit(): f.vertices.saturating_add(count) > MAX_VERTICES drops the group.
-    if used.saturating_add(n)>MAX_VERTICES {return None;}
+    if used.saturating_add(n)>MAX_VERTICES {crate::phase_census::rejection(10);return None;}
     STATE.with(|s| {
         let mut s=s.borrow_mut();
         let (bank,slot,output)=s.reserve_key(mesh,cpu,unchanged,instance,PublicationMode::Raw,key)?;
@@ -548,6 +551,7 @@ fn prepare_deferred(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,
             let transparent=surface.transparent||f.depth_read_only;
             f.groups.push(Group {passes:Vec::new(),transparent});group
         });
+        crate::phase_census::count(32,1);
         s.deferred.push(Deferred {group,bank,slot,surface,camera,time,appearance,limit,vertices:n,dropped_layers:dropped_layers as u64});
         // The placeholder is committed. Refusal returned before this and left the
         // serial fallback to count the same capped layers once.

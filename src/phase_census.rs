@@ -47,7 +47,7 @@ struct Actor {
 }
 impl Actor { const ZERO: Self = Self { id:0,serial_vertices:0,worker_vertices:0,serial_reasons:0,reason_vertices:[0;8] }; }
 pub(crate) const PUBLICATION_REJECTIONS: [&str;11] = ["missing_texture", "unregistered_surface", "opacity", "empty_recipe", "unsupported_recipe", "mixed_alpha", "bank_surface_capacity", "bank_held", "bank_vertex_capacity", "bank_index_capacity", "frame_vertex_budget"];
-pub(crate) const COUNTERS: [&str;32] = ["upload_requests", "upload_hits", "upload_bytes", "world_draws", "world_texture_binds", "world_sampler_uniform_sets", "world_vbo_layout_changes", "actor_npc_overlay_calls", "ant_updates", "ant_substeps", "navigation_walks", "navigation_plans", "spawn_wave_calls", "world_live_particles", "world_new_particles", "attached_live_particles", "attached_new_birth_poses", "attached_sample_calls", "particle_quad_sets", "particle_pair_jobs", "trigger_visits", "trigger_eligible", "trigger_fires", "event_fact_builds", "player_prepare_calls", "player_map_hook_calls", "player_fixed_ticks", "hud_search_calls", "hud_draw_calls", "hud_menu_calls", "particle_registration_sets", "world_particle_sets"];
+pub(crate) const COUNTERS: [&str;33] = ["upload_requests", "upload_hits", "upload_bytes", "world_draws", "world_texture_binds", "world_sampler_uniform_sets", "world_vbo_layout_changes", "actor_npc_overlay_calls", "ant_updates", "ant_substeps", "navigation_walks", "navigation_plans", "spawn_wave_calls", "world_live_particles", "world_new_particles", "attached_live_particles", "attached_new_birth_poses", "attached_sample_calls", "particle_quad_sets", "particle_pair_jobs", "trigger_visits", "trigger_eligible", "trigger_fires", "event_fact_builds", "player_prepare_calls", "player_map_hook_calls", "player_fixed_ticks", "hud_search_calls", "hud_draw_calls", "hud_menu_calls", "particle_registration_sets", "world_particle_sets", "deferred_layer_surfaces"];
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub(crate) enum Counter { AntUpdates=8, AntSubsteps, NavigationWalks, NavigationPlans, SpawnWaves, WorldLive, WorldNew, AttachedLive, AttachedNew, AttachedSamples, QuadSets, PairJobs, TriggerVisits, TriggerEligible, TriggerFires, FactBuilds, PlayerPrepare, PlayerHooks, PlayerTicks, HudSearch, HudDraw, HudMenus, Registrations, WorldSets }
@@ -465,7 +465,7 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
     let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
     #[cfg(not(feature="vita_renderer"))]
     let audio_static_cache=false;
-    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":6,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":COUNTERS,"actor_capacity":ACTORS,"serial_reasons":REASONS,
+    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":7,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":COUNTERS,"actor_capacity":ACTORS,"serial_reasons":REASONS,
         "audio_static_cache":audio_static_cache,"map":map,"regions":&NAMES[..],"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
@@ -682,7 +682,7 @@ mod tests {
             let mut bytes=Vec::new();write(&s,"fixture",&mut bytes).unwrap();
             let v:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["rows"][60]["measured_frame"],1);assert_eq!(v["rows"][179]["measured_frame"],120);
-            assert_eq!(v["schema"],6);assert_eq!(v["audio_static_cache"],false);
+            assert_eq!(v["schema"],7);assert_eq!(v["audio_static_cache"],false);
             assert_eq!(v["serial_fallbacks"],0);assert_eq!(v["rows"][0]["serial_fallbacks"],0);
             assert_eq!(v["regions"].as_array().unwrap().len(),NAMES.len());
             assert_eq!(v["actor_capacity"],ACTORS);assert!(v.get("static_count_columns").is_some());
