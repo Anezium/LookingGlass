@@ -188,7 +188,12 @@ struct MemoryAccount {
     lookup_len: usize, lookup_cap: usize, lookup_bytes_estimate: usize, banks_len: usize, banks_cap: usize, cpu_arcs: usize,
     pending_len: usize, pending_cap: usize, deferred_len: usize, deferred_cap: usize,
     held_len: usize, held_cap: usize, puff_len: usize, puff_cap: usize,
-    held_pass_bytes: usize, held_pass_allocs: usize,
+    /// Per-layer vertex/index buffer allocations owned by held passes (not Pass Vec storage).
+    held_buffer_bytes: usize, held_buffer_allocs: usize,
+    /// Pass/container allocations: the Vec<Pass> allocation of each held group.
+    held_container_bytes: usize, held_container_allocs: usize,
+    /// Held buffer + container bytes, kept as the host total component.
+    held_pass_bytes: usize,
     payload_bytes: usize, container_host_bytes: usize, rc_boxes: usize,
 }
 #[cfg(any(test, all(feature="sim_maps_probe", not(target_os="vita"))))]
@@ -235,16 +240,20 @@ impl State {
         account.lookup_bytes_estimate = self.lookup.capacity()
             * (std::mem::size_of::<Key>() + std::mem::size_of::<usize>() + 1);
         // Held passes own the per-layer copies. A pass whose geometry Rc is Some shares the
-        // bank geometry already walked above, so only its own buffers are added here.
+        // bank geometry already walked above, so only its own buffers are added here. Pass Vec
+        // storage is a separate container allocation at host size, never a Vita layout.
         for group in &self.held {
-            account.held_pass_bytes += group.passes.capacity() * std::mem::size_of::<Pass>();
+            let container = group.passes.capacity() * std::mem::size_of::<Pass>();
+            account.held_container_bytes += container;
+            account.held_container_allocs += usize::from(group.passes.capacity() > 0);
             for pass in &group.passes {
-                account.held_pass_bytes += pass.mesh.vertices.capacity() * std::mem::size_of::<Vertex>()
+                account.held_buffer_bytes += pass.mesh.vertices.capacity() * std::mem::size_of::<Vertex>()
                     + pass.mesh.indices.capacity() * std::mem::size_of::<u16>();
-                account.held_pass_allocs += usize::from(pass.mesh.vertices.capacity() > 0)
+                account.held_buffer_allocs += usize::from(pass.mesh.vertices.capacity() > 0)
                     + usize::from(pass.mesh.indices.capacity() > 0);
             }
         }
+        account.held_pass_bytes = account.held_buffer_bytes + account.held_container_bytes;
         let mut cpu = HashMap::new();
         for bank in &self.banks {
             for slot in &bank.slots {
@@ -275,7 +284,8 @@ impl MemoryAccount {
             evicted_index_cap: 0, evicted_payload_bytes: 0, lookup_len: 0, lookup_cap: 0, lookup_bytes_estimate: 0,
             banks_len: 0, banks_cap: 0, cpu_arcs: 0,
             pending_len: 0, pending_cap: 0, deferred_len: 0, deferred_cap: 0, held_len: 0, held_cap: 0,
-            puff_len: 0, puff_cap: 0, held_pass_bytes: 0, held_pass_allocs: 0,
+            puff_len: 0, puff_cap: 0, held_buffer_bytes: 0, held_buffer_allocs: 0,
+            held_container_bytes: 0, held_container_allocs: 0, held_pass_bytes: 0,
             payload_bytes: 0, container_host_bytes: 0, rc_boxes: 0,
         }
     }
@@ -288,10 +298,65 @@ impl MemoryAccount {
             + self.rc_boxes * (std::mem::size_of::<usize>() * 2 + std::mem::size_of::<prepared::Geometry>())
             + self.container_host_bytes
     }
-    /// Same payload and the same Rc count, with a 4-byte Vita pointer header.
-    /// Container structs stay on the host figure: their padding is not retargeted.
-    fn vita_abi_bytes(self) -> usize {
-        self.payload_bytes + self.evicted_payload_bytes + self.held_pass_bytes + self.rc_boxes * 8
+    /// Explicitly scoped mixed-width subtotal, **not** a Vita ABI total: walked bank and
+    /// evicted payload, held per-layer buffers, and an 8-byte Rc header per counted Rc box.
+    /// It deliberately excludes `held_container_bytes` (host-sized Pass Vec storage),
+    /// `container_host_bytes` (host-sized banks/pending/deferred/held/puff Vecs) and the
+    /// host-sized Geometry boxes inside the Rc allocation. Those need target struct sizes
+    /// that a host build cannot observe, so they are reported separately, never relabelled.
+    fn mixed_width_abi_subtotal_bytes(self) -> usize {
+        self.payload_bytes + self.evicted_payload_bytes + self.held_buffer_bytes + self.rc_boxes * 8
+    }
+    /// Every observed field with its scoped counter name. Ownership classes stay separate:
+    /// live bank-owned geometry, held-referenced slots, reusable free slots and evicted
+    /// geometry still held by another owner are never added into one another.
+    fn rows(self) -> Vec<(&'static str, u64)> {
+        vec![
+            ("actor_mem_payload_bytes", self.payload_bytes as u64),
+            ("actor_mem_evicted_payload_bytes", self.evicted_payload_bytes as u64),
+            ("actor_mem_held_buffer_bytes", self.held_buffer_bytes as u64),
+            ("actor_mem_held_buffer_allocs", self.held_buffer_allocs as u64),
+            ("actor_mem_held_container_bytes", self.held_container_bytes as u64),
+            ("actor_mem_held_container_allocs", self.held_container_allocs as u64),
+            ("actor_mem_held_pass_bytes", self.held_pass_bytes as u64),
+            ("actor_mem_mixed_width_abi_subtotal_bytes", self.mixed_width_abi_subtotal_bytes() as u64),
+            ("actor_mem_lookup_bytes_estimate", self.lookup_bytes_estimate as u64),
+            ("actor_mem_container_host_bytes", self.container_host_bytes as u64),
+            ("actor_mem_host_bytes", self.host_bytes() as u64),
+            ("actor_mem_geometry_allocs", self.geometry_allocs as u64),
+            ("actor_mem_live_allocs", self.geometry_allocs as u64),
+            ("actor_mem_held_referenced_allocs", self.held_slots as u64),
+            ("actor_mem_reusable_slots", self.free_slots as u64),
+            ("actor_mem_evicted_allocs", self.evicted_allocs as u64),
+            ("actor_mem_evicted_referenced_allocs", self.evicted_allocs as u64),
+            ("actor_mem_evicted_vertex_cap", self.evicted_vertex_cap as u64),
+            ("actor_mem_evicted_index_cap", self.evicted_index_cap as u64),
+            ("actor_mem_free_slots", self.free_slots as u64),
+            ("actor_mem_held_slots", self.held_slots as u64),
+            ("actor_mem_bank_vertex_len", self.bank_vertex_len as u64),
+            ("actor_mem_bank_vertex_cap", self.bank_vertex_cap as u64),
+            ("actor_mem_bank_index_len", self.bank_index_len as u64),
+            ("actor_mem_bank_index_cap", self.bank_index_cap as u64),
+            ("actor_mem_lookup_len", self.lookup_len as u64),
+            ("actor_mem_lookup_cap", self.lookup_cap as u64),
+            ("actor_mem_banks_len", self.banks_len as u64),
+            ("actor_mem_banks_cap", self.banks_cap as u64),
+            ("actor_mem_cpu_arcs", self.cpu_arcs as u64),
+            ("actor_mem_pending_len", self.pending_len as u64),
+            ("actor_mem_pending_cap", self.pending_cap as u64),
+            ("actor_mem_deferred_len", self.deferred_len as u64),
+            ("actor_mem_deferred_cap", self.deferred_cap as u64),
+            ("actor_mem_held_len", self.held_len as u64),
+            ("actor_mem_held_cap", self.held_cap as u64),
+            ("actor_mem_puff_len", self.puff_len as u64),
+            ("actor_mem_puff_cap", self.puff_cap as u64),
+            ("actor_mem_rc_boxes", self.rc_boxes as u64),
+            ("actor_mem_sizeof_vertex", std::mem::size_of::<Vertex>() as u64),
+            ("actor_mem_sizeof_geometry", std::mem::size_of::<prepared::Geometry>() as u64),
+            ("actor_mem_sizeof_bank", std::mem::size_of::<Bank>() as u64),
+            ("actor_mem_sizeof_deferred", std::mem::size_of::<Deferred>() as u64),
+            ("actor_mem_bank_payload_bound_bytes", (VERTICES * std::mem::size_of::<Vertex>() + INDICES * 2) as u64),
+        ]
     }
 }
 thread_local! {
@@ -378,6 +443,8 @@ pub(crate) fn end() {
             let mut s=s.borrow_mut();
             s.discard_unfilled();
             s.pending.clear(); s.deferred.clear(); s.held.clear(); s.held_puffs.clear(); s.staged_held=false;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            emit_memory_phase(&mut s, "end-cleared", 0);
         });
     }
 }
@@ -476,6 +543,12 @@ pub(crate) fn hold() {
 pub(crate) fn complete() {
     STATE.with(|s| {
         let mut s=s.borrow_mut();
+        // Host-only phase evidence: hold-returned is the gather/hold population before any
+        // deferred construction. The pre-clear Deferred length is preserved for later samples.
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let pre_clear_deferred = s.deferred.len();
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        emit_memory_phase(&mut s, "hold-returned", pre_clear_deferred);
         // All workers drained successfully. Build deferred layers before FRAME's mutable
         // borrow below: pass_at reads FRAME through retained_active().
         if !s.deferred.is_empty() {
@@ -519,17 +592,24 @@ pub(crate) fn complete() {
             s.deferred.clear();
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        emit_memory_phase(&mut s, "deferred-built", pre_clear_deferred);
+        for n in 0..s.pending.len() {
+            let (group,bank,slot,_)=s.pending[n];
+            let geometry=s.banks[bank].slots[slot].as_ref().unwrap().clone();
+            for pass in &mut s.held[group].passes {pass.geometry=Some(geometry.clone());}
+        }
+        // Direct attachment is the inclusive held population: pending geometry Rcs are now
+        // shared with their held passes, so held_slots authenticates real references rather
+        // than a pre-attachment zero. The default counters are emitted at this phase.
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         {
             let account=s.memory_account();
             crate::sim_maps::count("actor_publication_bank_bytes",(s.vertex_capacity*std::mem::size_of::<Vertex>()+s.index_capacity*2) as u64);
             crate::sim_maps::count("actor_publication_bank_count",s.lookup.len() as u64);
             emit_memory(&account);
         }
-        for n in 0..s.pending.len() {
-            let (group,bank,slot,_)=s.pending[n];
-            let geometry=s.banks[bank].slots[slot].as_ref().unwrap().clone();
-            for pass in &mut s.held[group].passes {pass.geometry=Some(geometry.clone());}
-        }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        emit_memory_phase(&mut s, "direct-attached", pre_clear_deferred);
         #[cfg(feature="actor_diagnostics")]
         retained::count("actor_publication_capacity_bytes",(s.vertex_capacity*std::mem::size_of::<Vertex>()+s.index_capacity*2) as u64);
         #[cfg(feature="actor_diagnostics")]
@@ -539,6 +619,8 @@ pub(crate) fn complete() {
             f.groups.append(&mut s.held);f.world_puffs.append(&mut s.held_puffs);
         });
         s.completed=true;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        emit_memory_phase(&mut s, "frame-appended", pre_clear_deferred);
     });
 }
 
@@ -608,48 +690,25 @@ pub(crate) fn emit_eligibility(map: &str) {
 }
 #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
 fn emit_memory(account: &MemoryAccount) {
-    let host = account.host_bytes();
-    let vita = account.vita_abi_bytes();
-    let rows = [
-        ("actor_mem_payload_bytes", account.payload_bytes),
-        ("actor_mem_evicted_payload_bytes", account.evicted_payload_bytes),
-        ("actor_mem_held_pass_bytes", account.held_pass_bytes),
-        ("actor_mem_held_pass_allocs", account.held_pass_allocs),
-        ("actor_mem_lookup_bytes_estimate", account.lookup_bytes_estimate),
-        ("actor_mem_container_host_bytes", account.container_host_bytes),
-        ("actor_mem_host_bytes", host),
-        ("actor_mem_vita_abi_bytes", vita),
-        ("actor_mem_geometry_allocs", account.geometry_allocs),
-        ("actor_mem_evicted_allocs", account.evicted_allocs),
-        ("actor_mem_evicted_vertex_cap", account.evicted_vertex_cap),
-        ("actor_mem_evicted_index_cap", account.evicted_index_cap),
-        ("actor_mem_free_slots", account.free_slots),
-        ("actor_mem_held_slots", account.held_slots),
-        ("actor_mem_bank_vertex_len", account.bank_vertex_len),
-        ("actor_mem_bank_vertex_cap", account.bank_vertex_cap),
-        ("actor_mem_bank_index_len", account.bank_index_len),
-        ("actor_mem_bank_index_cap", account.bank_index_cap),
-        ("actor_mem_lookup_len", account.lookup_len),
-        ("actor_mem_lookup_cap", account.lookup_cap),
-        ("actor_mem_banks_len", account.banks_len),
-        ("actor_mem_banks_cap", account.banks_cap),
-        ("actor_mem_cpu_arcs", account.cpu_arcs),
-        ("actor_mem_pending_len", account.pending_len),
-        ("actor_mem_pending_cap", account.pending_cap),
-        ("actor_mem_deferred_len", account.deferred_len),
-        ("actor_mem_deferred_cap", account.deferred_cap),
-        ("actor_mem_held_len", account.held_len),
-        ("actor_mem_held_cap", account.held_cap),
-        ("actor_mem_puff_len", account.puff_len),
-        ("actor_mem_puff_cap", account.puff_cap),
-        ("actor_mem_rc_boxes", account.rc_boxes),
-        ("actor_mem_sizeof_vertex", std::mem::size_of::<Vertex>()),
-        ("actor_mem_sizeof_geometry", std::mem::size_of::<prepared::Geometry>()),
-        ("actor_mem_sizeof_bank", std::mem::size_of::<Bank>()),
-        ("actor_mem_sizeof_deferred", std::mem::size_of::<Deferred>()),
-        ("actor_mem_worst_bank_payload_bytes", VERTICES * std::mem::size_of::<Vertex>() + INDICES * 2),
-    ];
-    for (name, value) in rows { crate::sim_maps::count(name, value as u64); }
+    for (name, value) in account.rows() { crate::sim_maps::count(name, value); }
+}
+
+/// Phase-authenticated account sample. The default counters are emitted at direct-attached;
+/// this line preserves hold-returned (pre-clear Deferred), deferred-built, direct-attached,
+/// frame-appended and end-cleared populations separately, so a single zero cannot be read as
+/// the lifetime peak. `pre_clear_deferred_len` is the Deferred length before complete() clears it.
+#[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+fn emit_memory_phase(state: &mut State, phase: &'static str, pre_clear_deferred_len: usize) {
+    let account = state.memory_account();
+    let mut record = serde_json::json!({
+        "frame": crate::sim_maps::probe::frame(),
+        "phase": phase,
+        "pre_clear_deferred_len": pre_clear_deferred_len,
+    });
+    for (name, value) in account.rows() {
+        record[name.trim_start_matches("actor_mem_")] = serde_json::json!(value);
+    }
+    println!("ACTOR_MEMORY_PHASE {record}");
 }
 
 #[cfg(test)]
@@ -934,7 +993,10 @@ mod tests {
         assert_eq!(account.held_slots,1);
         assert!(account.payload_bytes>=3*std::mem::size_of::<Vertex>()+6);
         assert!(account.host_bytes()>account.payload_bytes);
-        assert_eq!(account.vita_abi_bytes(),account.payload_bytes+8);
+        assert_eq!(account.held_buffer_bytes,0);
+        assert_eq!(account.held_container_bytes,0);
+        assert_eq!(account.mixed_width_abi_subtotal_bytes(),account.payload_bytes+8);
+        assert_eq!(account.held_pass_bytes,account.held_buffer_bytes+account.held_container_bytes);
         for _ in 0..=UNUSED_FRAMES {state.next_frame();}
         let evicted=state.memory_account();
         assert_eq!(evicted.geometry_allocs,0);
@@ -949,6 +1011,26 @@ mod tests {
         drop(held);
         let gone=state.memory_account();
         assert_eq!((gone.evicted_allocs,gone.rc_boxes,gone.payload_bytes),(0,0,0));
+    }
+    #[test]
+    fn memory_account_separates_buffer_container_and_mixed_width_subtotals() {
+        let account=MemoryAccount { payload_bytes:1000, evicted_payload_bytes:200, held_buffer_bytes:300,
+            held_buffer_allocs:4, held_container_bytes:500, held_container_allocs:3, held_pass_bytes:800,
+            lookup_bytes_estimate:7, container_host_bytes:11, rc_boxes:2, ..MemoryAccount::zero() };
+        assert_eq!(account.host_bytes(),1000+200+800+7+11+2*(2*std::mem::size_of::<usize>()+std::mem::size_of::<prepared::Geometry>()));
+        // The mixed-width subtotal excludes the host-sized Pass Vec container and every
+        // host container, so it cannot be read as a Vita ABI total.
+        assert_eq!(account.mixed_width_abi_subtotal_bytes(),1000+200+300+16);
+        assert!(account.mixed_width_abi_subtotal_bytes()<account.host_bytes());
+        let rows:std::collections::BTreeMap<_,_>=account.rows().into_iter().collect();
+        assert_eq!(rows["actor_mem_held_buffer_allocs"],4);
+        assert_eq!(rows["actor_mem_held_container_allocs"],3);
+        assert_eq!(rows["actor_mem_live_allocs"],0);
+        assert_eq!(rows["actor_mem_held_referenced_allocs"],0);
+        assert_eq!(rows["actor_mem_reusable_slots"],0);
+        assert_eq!(rows["actor_mem_evicted_referenced_allocs"],0);
+        assert_eq!(rows["actor_mem_bank_payload_bound_bytes"],(VERTICES*std::mem::size_of::<Vertex>()+INDICES*2) as u64);
+        assert_eq!(rows["actor_mem_mixed_width_abi_subtotal_bytes"],1000+200+300+16);
     }
     #[test]
     fn eligibility_record_names_stage_flags_and_uniform_or_mixed_alpha() {

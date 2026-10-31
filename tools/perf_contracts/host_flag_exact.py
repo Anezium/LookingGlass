@@ -27,7 +27,7 @@ drop anywhere is FAIL (vacuous).
 from pathlib import Path
 import argparse, hashlib, json, os, subprocess, sys
 
-ORACLE_VERSION = 2
+ORACLE_VERSION = 3
 ELAPSED = (
     'skin_worker_service_us',
     'skin_collect_wait_us',
@@ -43,10 +43,14 @@ UNIFORM_FIELDS = (
     ('FogEye', 119), ('DistanceFog', 123), ('LiquidFog', 127), ('FogAMin', 130), ('FogAMax', 133),
     ('FogA', 137), ('FogBMin', 140), ('FogBMax', 143), ('FogB', 147),
 )
+UNIFORM_WIDTH = UNIFORM_FIELDS[-1][1]
 DT = {'pandemonium': '0.04184', 'hedge3': '0.06'}
 
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def oracle_sha256():
+    return sha(Path(__file__).resolve())
 
 def probe_env(base_env, map_name, uniform_bits):
     env = {k: v for k, v in base_env.items() if not k.startswith('LOOKING_GLASS_')}
@@ -58,7 +62,8 @@ def probe_env(base_env, map_name, uniform_bits):
     return env
 
 def receipt_core(identity, config, env, argv_tail):
-    return dict(oracle_version=ORACLE_VERSION, executable_path=identity.get('executable_path'),
+    return dict(oracle_version=ORACLE_VERSION, oracle_sha256=oracle_sha256(),
+                executable_path=identity.get('executable_path'),
                 executable_sha256=identity['executable_sha256'],
                 source_revision=identity['source_revision'], source_manifest_sha256=identity['source_manifest_sha256'],
                 toolchain=identity['toolchain'], features=identity['features'], rustflags=identity['rustflags'],
@@ -73,10 +78,16 @@ def receipt_matches(saved, expected):
     return True
 
 def files_match_receipt(directory, census_name):
+    """A reusable directory is bound to every file it records, including the optional
+    uniform-bit sidecar: a recorded or requested sidecar must exist and hash-match, and an
+    unrecorded sidecar makes the directory non-reusable (it would be an unbound artifact).
+    The effective config is covered by the log hash and its own recorded digest."""
     receipt_path = directory / 'run-receipt.json'
     if not receipt_path.is_file():
         return False
     saved = json.loads(receipt_path.read_text())
+    if saved.get('oracle_version') != ORACLE_VERSION:
+        return False
     needed = {
         'run.log': saved.get('log_sha256'),
         census_name: saved.get('census_sha256'),
@@ -87,6 +98,18 @@ def files_match_receipt(directory, census_name):
         path = directory / name
         if not digest or not path.is_file() or sha(path) != digest:
             return False
+    if not saved.get('effective_config_sha256'):
+        return False
+    sidecar = directory / 'uniform-bits.jsonl'
+    recorded = saved.get('uniform_bits_sha256')
+    if saved.get('uniform_bits_expected'):
+        if not recorded or not sidecar.is_file() or sha(sidecar) != recorded:
+            return False
+    elif recorded:
+        if not sidecar.is_file() or sha(sidecar) != recorded:
+            return False
+    elif sidecar.is_file():
+        return False
     return True
 
 def allocate_run_dir(root, map_name, tag, expected):
@@ -120,6 +143,9 @@ def divergent_uniform_fields(left, right):
         names.append('tail')
     return names
 
+def bits_sha256(bits):
+    return hashlib.sha256(b''.join(int(value).to_bytes(4, 'little', signed=False) for value in bits)).hexdigest()
+
 def load_uniform_bits(directory):
     path = directory / 'uniform-bits.jsonl'
     if not path.is_file():
@@ -132,17 +158,89 @@ def load_uniform_bits(directory):
         rows[(row['frame'], row['index'])] = row['bits']
     return rows
 
-def startup_viewport(directory):
-    """The GL viewport the binary itself logged before the first frame. Part of the
-    environment: the same binary on a different startup viewport projects differently."""
+def uniform_bits_issues(directory, frames):
+    """Every recorded sidecar row must be exactly 147 little-endian u32 values with unique
+    (frame,index) coverage, and its SHA-256 must equal that packet's actual aggregate hash."""
+    path = Path(directory) / 'uniform-bits.jsonl'
+    if not path.is_file():
+        return ['missing uniform-bits.jsonl']
+    issues = []
+    rows = {}
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line:
+            continue
+        row = json.loads(line)
+        key = (row.get('frame'), row.get('index'))
+        if key in rows:
+            issues.append(f'duplicate coverage {key} line {number}')
+        rows[key] = row.get('bits')
+    expected = {}
+    for frame in frames:
+        for index, packet in enumerate(frame['submitted_packets']):
+            expected[(frame['frame'], index)] = packet['uniforms']
+    for key, bits in rows.items():
+        if not isinstance(bits, list) or len(bits) != UNIFORM_WIDTH:
+            issues.append(f'width {key}')
+            continue
+        if any(not isinstance(value, int) or value < 0 or value > 0xffffffff for value in bits):
+            issues.append(f'range {key}')
+            continue
+        if bits_sha256(bits) != expected.get(key):
+            issues.append(f'hash linkage {key}')
+    missing = sorted(set(expected) - set(rows))
+    extra = sorted(set(rows) - set(expected))
+    if missing:
+        issues.append(f'missing coverage {len(missing)} first {missing[:4]}')
+    if extra:
+        issues.append(f'extra coverage {len(extra)} first {extra[:4]}')
+    return issues
+
+def startup_viewports(directory):
+    """All prepare-3d-returned viewports the binary logged. More than one distinct value
+    means the scaled 3D viewport changed during the run and must not be selected."""
     import re
     pattern = re.compile(r'viewport=(\[[^\]]*\])')
+    views = []
     for line in (directory / 'run.log').read_text().splitlines():
         if 'stage=prepare-3d-returned' in line:
             match = pattern.search(line)
             if match:
-                return match.group(1)
-    return None
+                views.append(match.group(1))
+    return views
+
+def startup_viewport(directory):
+    """The GL viewport the binary itself logged before the first frame. Part of the
+    environment: the same binary on a different startup viewport projects differently.
+    A conflicting later prepare-3d-returned viewport yields None instead of the first one."""
+    views = startup_viewports(directory)
+    return views[0] if views and len(set(views)) == 1 else None
+
+def viewport_issues(frames, expected):
+    """Per-frame world/actor 3D viewport, recorded by the host-only probe at
+    prepare-3d-returned. Gate it independently of semantic comparison; the HUD/default
+    framebuffer stages are never used here."""
+    issues = []
+    for frame in frames:
+        value = frame.get('world_viewport')
+        if not isinstance(value, list) or len(value) != 4 or any(not isinstance(part, int) for part in value):
+            issues.append(f"frame {frame.get('frame')}: missing world_viewport {value!r}")
+        elif expected is not None and list(value) != list(expected):
+            issues.append(f"frame {frame.get('frame')}: viewport {value} != selected {expected}")
+    return issues
+
+def packets(frame, keep_slot, keep_uniforms):
+    drop = set() if keep_slot else {'gpu_slot'}
+    if not keep_uniforms:
+        drop.add('uniforms')
+    return [{key: value for key, value in packet.items() if key not in drop} for packet in frame['submitted_packets']]
+
+def packet_differences(left_frames, right_frames, keep_slot=True, keep_uniforms=True):
+    """Frame indices whose submitted packets differ. keep_uniforms defaults to True so the
+    aggregate uniform hash is always part of every packet comparison."""
+    if len(left_frames) != len(right_frames):
+        return ['frame-count', len(left_frames), len(right_frames)]
+    return [index for index, (left, right) in enumerate(zip(left_frames, right_frames))
+            if packets(left, keep_slot, keep_uniforms) != packets(right, keep_slot, keep_uniforms)]
 
 def main(argv=None):
     p = argparse.ArgumentParser()
@@ -188,6 +286,7 @@ def main(argv=None):
                   baseline_binary_sha256=baseline_identity['executable_sha256'] if baseline_identity else None,
                   baseline_identity=baseline_identity,
                   gpu_observer='glGetBufferSubData on the bound vertex attribute and element buffers before every retained draw',
+                  world_viewport_stage='per frame at prepare-3d-returned (scaled 3D target); HUD/default framebuffer stages excluded',
                   elapsed_counters_not_compared=list(ELAPSED),
                   uniform_fields=[list(item) for item in UNIFORM_FIELDS],
                   uniform_bits_maps=sorted(map_name for map_name in args.maps
@@ -204,6 +303,7 @@ def main(argv=None):
         expected = receipt_core(run_identity, config, {k: env[k] for k in sorted(env) if k.startswith('LOOKING_GLASS_')}, argv_tail)
         expected['attempt'] = attempt
         expected['repeat'] = rep
+        expected['uniform_bits_expected'] = uniform_bits
         if rep not in (0, None):
             tag = f'{tag}-r{rep}'
         directory, reuse = allocate_run_dir(output, map_name, tag, expected)
@@ -215,14 +315,6 @@ def main(argv=None):
                    '--capture', str(directory / 'final.png')]
             with (directory / 'run.log').open('w') as handle:
                 proc = subprocess.run(cmd, cwd=directory, env=env, stdout=handle, stderr=subprocess.STDOUT, timeout=1800)
-            receipt = dict(expected, exit_code=proc.returncode, argv=cmd, run_dir=str(directory),
-                           log_sha256=sha(directory / 'run.log'),
-                           config_sha256=sha(directory / 'private/vita_renderer.json'),
-                           final_png_sha256=sha(directory / 'final.png') if (directory / 'final.png').is_file() else None,
-                           census_sha256=sha(directory / f'{map_name}-census-180.json') if (directory / f'{map_name}-census-180.json').is_file() else None)
-            if (directory / 'uniform-bits.jsonl').is_file():
-                receipt['uniform_bits_sha256'] = sha(directory / 'uniform-bits.jsonl')
-            (directory / 'run-receipt.json').write_text(json.dumps(receipt, indent=1) + '\n')
             assert proc.returncode == 0, (map_name, tag, proc.returncode, str(directory / 'run.log'))
         lines = (directory / 'run.log').read_text().splitlines()
         configs = [json.loads(line.split('[lg/vita-renderer] config ', 1)[1]) for line in lines if line.startswith('[lg/vita-renderer] config ')]
@@ -242,6 +334,17 @@ def main(argv=None):
         eligibility = [json.loads(line.split(' ', 1)[1]) for line in lines if line.startswith('ACTOR_LAYER_ELIGIBILITY ')]
         assert len(frames) == 180, (map_name, tag, len(frames))
         assert all(all(packet['geometry'] == packet['gpu_geometry'] for packet in frame['submitted_packets']) for frame in frames), (map_name, tag, 'GPU readback')
+        viewport = startup_viewport(directory)
+        assert viewport is not None, (map_name, tag, 'missing or conflicting prepare-3d-returned viewport', startup_viewports(directory))
+        viewport_expected = json.loads(viewport)
+        issues = viewport_issues(frames, viewport_expected)
+        assert not issues, (map_name, tag, 'per-frame 3D viewport', issues[:4])
+        if uniform_bits:
+            assert (directory / 'uniform-bits.jsonl').is_file(), (map_name, tag, 'requested uniform bits missing')
+            issues = uniform_bits_issues(directory, frames)
+            assert not issues, (map_name, tag, 'uniform bits sidecar', issues[:6])
+        else:
+            assert not (directory / 'uniform-bits.jsonl').is_file(), (map_name, tag, 'unrequested uniform bits sidecar')
         census = json.loads((directory / f'{map_name}-census-180.json').read_text())
         assert census['serial_fallbacks'] == 0, (map_name, tag)
         rows = census['rows'][60:]
@@ -253,10 +356,14 @@ def main(argv=None):
         def peak(name):
             return max(counter.get(name, 0) for counter in counters)
         actor_keys = sorted({key for counter in counters for key in counter if key.startswith('actor_')})
+        sidecar = directory / 'uniform-bits.jsonl'
         row = dict(map=map_name, arm=tag, run_dir=str(directory), reused=reuse, attempt=attempt,
-                   viewport=startup_viewport(directory),
+                   viewport=viewport,
                    config_sha256=sha(directory / 'private/vita_renderer.json'), log_sha256=sha(directory / 'run.log'),
-                   receipt_sha256=sha(directory / 'run-receipt.json'),
+                   receipt_sha256=(sha(directory / 'run-receipt.json') if reuse else None),
+                   effective_config_sha256=hashlib.sha256(json.dumps(effective, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                   uniform_bits_expected=uniform_bits,
+                   uniform_bits_sha256=(sha(sidecar) if sidecar.is_file() else None),
                    serial_vertices=sum(actor['serial_vertices'] for row in rows for actor in row['actors']) / 120,
                    worker_vertices=sum(actor['worker_vertices'] for row in rows for actor in row['actors']) / 120,
                    final_png_sha256=sha(directory / 'final.png'),
@@ -265,33 +372,56 @@ def main(argv=None):
                    counters_measured_mean={key: mean(key) for key in sorted({key for counter in measured for key in counter})},
                    counters_peak={key: peak(key) for key in actor_keys},
                    eligibility=eligibility[-1] if eligibility else None)
+        if not reuse:
+            receipt = dict(expected, exit_code=0, argv=cmd, run_dir=str(directory),
+                           log_sha256=row['log_sha256'], config_sha256=row['config_sha256'],
+                           final_png_sha256=row['final_png_sha256'],
+                           census_sha256=sha(directory / f'{map_name}-census-180.json'),
+                           effective_config_sha256=row['effective_config_sha256'],
+                           uniform_bits_expected=uniform_bits,
+                           uniform_bits_sha256=row['uniform_bits_sha256'])
+            receipt_path = directory / 'run-receipt.json'
+            with receipt_path.open('x') as handle:
+                handle.write(json.dumps(receipt, indent=1) + '\n')
+            row['receipt_sha256'] = sha(receipt_path)
+        else:
+            saved = json.loads((directory / 'run-receipt.json').read_text())
+            assert saved['effective_config_sha256'] == row['effective_config_sha256'], (map_name, tag, 'effective config changed')
+            assert saved['uniform_bits_sha256'] == row['uniform_bits_sha256'], (map_name, tag, 'sidecar binding')
+            assert saved['uniform_bits_expected'] == uniform_bits, (map_name, tag, 'sidecar expectation')
         print('DONE', map_name, tag, 'serial', row['serial_vertices'], 'worker', row['worker_vertices'], 'draws', row['gpu_draw_readbacks'], 'reused', reuse, flush=True)
         return row, frames, images
 
-    def packets(frame, keep_slot, keep_uniforms=True):
-        drop = set() if keep_slot else {'gpu_slot'}
-        if not keep_uniforms:
-            drop.add('uniforms')
-        return [{key: value for key, value in packet.items() if key not in drop} for packet in frame['submitted_packets']]
-
     def compare(map_name, left, right, label, full, bits):
         (left_row, left_frames, left_images), (right_row, right_frames, right_images) = left, right
-        # Only builds with the sidecar can emit per-packet bits. The historical 0548549
-        # baseline cannot; there the aggregate uniform hash remains the gate and the
-        # candidate arms supply the field-level map.
+        # The scaled 3D viewport is a prerequisite observed per frame, never a semantic field
+        # and never the HUD/default framebuffer stage.
+        for row, frames in ((left_row, left_frames), (right_row, right_frames)):
+            expected_view = json.loads(row['viewport'])
+            issues = viewport_issues(frames, expected_view)
+            assert not issues, (map_name, label, row['arm'], 'per-frame 3D viewport', issues[:4])
+        # Aggregate uniform hashes are compared in every packet comparison, with or without
+        # a bit sidecar. The sidecar is an additional field-level gate, never a replacement.
+        assert not packet_differences(left_frames, right_frames, keep_slot=False, keep_uniforms=True), \
+            (map_name, label, 'uploaded GPU packets including aggregate uniform hash')
+        if bits:
+            for row, frames in ((left_row, left_frames), (right_row, right_frames)):
+                if not row.get('uniform_bits_expected'):
+                    continue
+                issues = uniform_bits_issues(row['run_dir'], frames)
+                assert not issues, (map_name, label, row['arm'], 'uniform bits sidecar', issues[:6])
+                sidecar = Path(row['run_dir']) / 'uniform-bits.jsonl'
+                receipt = json.loads((Path(row['run_dir']) / 'run-receipt.json').read_text())
+                assert receipt.get('uniform_bits_sha256') == sha(sidecar), (map_name, label, row['arm'], 'sidecar receipt hash')
         field_bits = bits and (Path(left_row['run_dir']) / 'uniform-bits.jsonl').is_file() \
             and (Path(right_row['run_dir']) / 'uniform-bits.jsonl').is_file()
         uniform_diffs = []
         for index, (x, y) in enumerate(zip(left_frames, right_frames)):
             for key in ['actor_skin', 'state_sha256', 'selected_lights_bits', 'joint_alpha_order', 'blend_world_order']:
                 assert x[key] == y[key], (map_name, label, index, key)
-            if field_bits:
-                assert packets(x, False, False) == packets(y, False, False), (map_name, label, index, 'uploaded GPU packets')
-            else:
-                assert packets(x, False, True) == packets(y, False, True), (map_name, label, index, 'uploaded GPU packets')
             assert x['counters'].get('vita_fx_dropped_layers', 0) == y['counters'].get('vita_fx_dropped_layers', 0), (map_name, label, index, 'dropped layers')
             if full:
-                assert packets(x, True, not field_bits) == packets(y, True, not field_bits), (map_name, label, index, 'packets including gpu_slot')
+                assert not packet_differences([x], [y], keep_slot=True, keep_uniforms=True), (map_name, label, index, 'packets including gpu_slot')
                 assert all(y['counters'].get(key) == value for key, value in x['counters'].items() if key not in ELAPSED), (map_name, label, index, 'reference counters')
         assert len(left_frames) == len(right_frames) == 180
         assert left_images == right_images, (map_name, label, 'intermediate pixels')
@@ -332,7 +462,8 @@ def main(argv=None):
                 run_identity = baseline_identity if arm == 'baseline' else identity
                 config = dict(base, **prereq) if arm == 'baseline' else dict(base, **prereq, **{args.flag: arm == 'on'})
                 rep = sum(len(v) for v in pool[arm].values())
-                result_run = run(map_name, arm, binary, config, run_identity, attempt, wants_bits, rep)
+                bits = wants_bits and arm != 'baseline'
+                result_run = run(map_name, arm, binary, config, run_identity, attempt, bits, rep)
                 view = result_run[0]['viewport']
                 pool[arm].setdefault(view, []).append(result_run)
                 added[f'{arm}-r{rep}'] = dict(viewport=view, run_dir=result_run[0]['run_dir'])
@@ -355,6 +486,7 @@ def main(argv=None):
         on = pool['on'][selected_view][:reps]
         ref = pool['baseline'][selected_view][:reps] if 'baseline' in pool else []
         entry['viewport'] = selected_view
+        entry['viewport_frames_gated'] = 180
         entry['runs_at_viewport'] = {arm: len(runs) for arm, runs in
                                      ((name, pool[name][selected_view]) for name in pool)}
         entry['off'], entry['on'] = off[0][0], on[0][0]

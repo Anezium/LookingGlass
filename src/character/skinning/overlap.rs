@@ -1793,8 +1793,10 @@ mod tests {
                 Model { layers: vec![dot_alpha()], transparent: false, vertices: 6 },
                 Model { layers: vec![scroll_animated()], transparent: false, vertices: 6 },
                 Model { layers: vec![vector_uv()], transparent: true, vertices: 6 },
-                Model { layers: vec![environment(), simple(false, Blend::Add)], transparent: false, vertices: 6 },
+                Model { layers: vec![environment(), simple(true, Blend::Add)], transparent: false, vertices: 6 },
             ];
+            assert!(models[4].layers.iter().any(|stage| stage.vertex_alpha), "the exhaustive fixture must include vertex alpha");
+            assert!(models[4].layers.iter().any(|stage| !stage.vertex_alpha), "the exhaustive fixture must mix both alpha policies");
             let frames: Vec<Vec<Step>> = (0..=255).map(|alpha| {
                 let byte = alpha as f32 / 255.;
                 let flat = alpha % 2 == 0;

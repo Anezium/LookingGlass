@@ -16,6 +16,8 @@ thread_local! {
     static START: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static NPC_ACTOR: RefCell<String> = RefCell::default();
     static NPC_DECISIONS: RefCell<BTreeMap<String, (Sha256, u64)>> = RefCell::default();
+    /// GL viewport sampled by the host at the scaled 3D stage, once per frame.
+    static WORLD_VIEWPORT: Cell<Option<[i32; 4]>> = const { Cell::new(None) };
 }
 fn decisions_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -68,6 +70,17 @@ pub fn uncount(name: &'static str, n: u64) {
     }
 }
 pub fn set_frame(frame: u64) { FRAME_NO.with(|c| c.set(frame)); PACKET_NO.with(|c| c.set(0)); }
+/// Frame number of the sample currently being collected.
+pub fn frame() -> u64 { FRAME_NO.with(Cell::get) }
+/// Record the scaled 3D viewport at the specified per-frame stage. This is a GL query of
+/// the current viewport at prepare-3d-returned, never the HUD/default framebuffer stage.
+pub fn sample_world_viewport() {
+    if !enabled() { return; }
+    use macroquad::miniquad::gl::glGetIntegerv;
+    let mut viewport = [0i32; 4];
+    unsafe { glGetIntegerv(0x0BA2, viewport.as_mut_ptr()); }
+    WORLD_VIEWPORT.with(|v| v.set(Some(viewport)));
+}
 pub fn begin() {
     crate::collision::sah_probe::begin();
     if enabled() {
@@ -78,6 +91,7 @@ pub fn begin() {
         COUNTS.with(|c| c.borrow_mut().clear());
         SPANS.with(|c| c.borrow_mut().clear());
         NPC_DECISIONS.with(|c| c.borrow_mut().clear());
+        WORLD_VIEWPORT.with(|v| v.set(None));
         crate::light_profile::render_host_reset();
         START.with(|s| *s.borrow_mut() = Some(Instant::now()));
     }
@@ -98,6 +112,7 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
         "blend_world_order": WORLD_ORDER.with(|s|s.borrow().clone()),
         "selected_lights_bits": crate::lighting::selected_bits(),
         "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow(),
+        "world_viewport": WORLD_VIEWPORT.with(Cell::get),
         "npc_decisions": npc_decisions(),
         "spans_ms": SPANS.with(|s| s.borrow().clone()),
         "render": crate::light_profile::render_host_report()
