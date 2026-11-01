@@ -5,6 +5,7 @@ mod logging;
 mod allocation_census;
 #[cfg(any(target_os="vita", test))]
 mod r13_survey;
+mod tls_count;
 mod sim_maps;
 mod acting;
 mod ambient_animation;

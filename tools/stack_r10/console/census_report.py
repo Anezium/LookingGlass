@@ -11,6 +11,14 @@ R14B_COUNTERS=R14_COUNTERS+['actor_npc_overlay_calls']
 
 R15_REGIONS=R14B_REGIONS+['npc_generic_update', 'npc_levels_step', 'fx_world_particles', 'fx_attached_sample_birth', 'fx_quad_build', 'fx_registration', 'fx_worker_pair_wait', 'player_input_prepare', 'player_trigger_checks', 'player_map_hooks', 'hud_drawing', 'hud_prompt_search', 'hud_menus', 'tail_save', 'tail_profiler']
 R15_COUNTERS=R14B_COUNTERS+['ant_updates', 'ant_substeps', 'navigation_walks', 'navigation_plans', 'spawn_wave_calls', 'world_live_particles', 'world_new_particles', 'attached_live_particles', 'attached_new_birth_poses', 'attached_sample_calls', 'particle_quad_sets', 'particle_pair_jobs', 'trigger_visits', 'trigger_eligible', 'trigger_fires', 'event_fact_builds', 'player_prepare_calls', 'player_map_hook_calls', 'player_fixed_ticks', 'hud_search_calls', 'hud_draw_calls', 'hud_menu_calls', 'particle_registration_sets', 'world_particle_sets']
+# Schema 7 (A7): appended leaves 67..84 and counters 32..43; schema-6 indexes unchanged.
+A7_LEAVES=['joint_merge_puff_build','joint_merge_observe','joint_merge_signature','joint_merge_plan','joint_merge_copy',
+ 'camera_scripted','camera_follow','camera_handoff','camera_presentation','camera_prepare_3d','camera_transforms_ropes',
+ 'gather_story_pose','gather_frame_begin','gather_alice','gather_npcs','gather_level_art','gather_dispatch','world_draw_between']
+A7_PARENTS={**{i:[34] for i in range(67,72)},**{i:[46] for i in range(72,78)},**{i:[14] for i in range(78,84)},84:[11]}
+R7_REGIONS=R15_REGIONS+A7_LEAVES
+R7_COUNTERS=R15_COUNTERS+['merge_puffs','merge_observed_passes','merge_plan_hits','merge_plan_builds','merge_destinations',
+ 'merge_unchanged_groups','merge_copied_vertices','merge_copied_indices','merge_kept_vertices','tls_main_lookups','tls_main_steps','tls_other_lookups']
 NPC_COLUMNS=['queries','static_queries','nodes','hulls_tested','hulls_clipped','planes','legacy_certificates','fallbacks','sweep_ns','static_ns','repeat_keys','table_evictions']
 def parent_masks(data,row):
  if data['schema']<6:return row['parent_masks']
@@ -44,18 +52,31 @@ def validate6(data,row):
    if any(b[0] or b[1] for b in q[controller*5:controller*5+5]):assert calls[leaf]>0, 'NPC queries without controller leaf'
  assert c[22]<=c[21]<=c[20]
 
+def validate7(data,row):
+ assert isinstance(data['tls_counting'],bool) and isinstance(data['vertex_bytes'],int) and data['vertex_bytes']>0
+ c=row['diagnostic_counters'];calls=row['calls'];inc=row['inclusive_ns']
+ if inc[34]>0:
+  # One signature, plan and copy leaf per merge bank; each plan is a hit or a build.
+  assert calls[69]==calls[70]==calls[71]==c[34]+c[35], 'merge plan/leaf mismatch'
+  if c[32]>0:assert calls[67]>0, 'puffs without puff build'
+  if c[33]>0:assert calls[68]>0, 'observed passes without observe leaf'
+ if calls[71]==0:assert c[36]==c[38]==c[39]==c[40]==0, 'merge copy counts without copy leaf'
+ # world_draw_between pairs adjacent draws inside one world_submit call.
+ assert calls[84]<=calls[40] and calls[84]+calls[11]>=calls[40] or calls[40]==0, 'world between/draw mismatch'
+ if not data['tls_counting']:assert c[41]==c[42]==c[43]==0, 'tls counts while counting is off'
+
 def stats(v):
  v=sorted(v);assert v
  return {'n':len(v),'median':v[len(v)//2],'p95':v[len(v)*95//100],'mean':sum(v)/len(v),'min':v[0],'max':v[-1],'sum':sum(v)}
 
 def validate(data,mapname):
- assert data['schema'] in (3,4,5,6) and data['map']==mapname and data['capacity']==180
+ assert data['schema'] in (3,4,5,6,7) and data['map']==mapname and data['capacity']==180
  assert isinstance(data['audio_static_cache'], bool)
- names=data['regions'];n=len(names);assert n==({3:30,4:51,5:52,6:67}[data["schema"]]) and len(set(names))==n
+ names=data['regions'];n=len(names);assert n==({3:30,4:51,5:52,6:67,7:85}[data["schema"]]) and len(set(names))==n
  if data["schema"]>=4:
-  assert names==(R15_REGIONS if data["schema"]==6 else R14B_REGIONS if data["schema"]==5 else R14_REGIONS)
+  assert names==(R7_REGIONS if data["schema"]==7 else R15_REGIONS if data["schema"]==6 else R14B_REGIONS if data["schema"]==5 else R14_REGIONS)
   assert data["publication_rejection_columns"]==R14_REJECTIONS
-  assert data["diagnostic_counter_columns"]==(R15_COUNTERS if data["schema"]==6 else R14B_COUNTERS if data["schema"]==5 else R14_COUNTERS)
+  assert data["diagnostic_counter_columns"]==(R7_COUNTERS if data["schema"]==7 else R15_COUNTERS if data["schema"]==6 else R14B_COUNTERS if data["schema"]==5 else R14_COUNTERS)
  assert data['query_classes']==['room','ambient','effects'] and data['table_entries']==4096 and data['table_probes']==16
  assert data['parent_mask_frame_bit']==n and data['owners']==['audio','player','npc','camera','other']
  rows=data['rows'];assert len(rows)==180
@@ -63,7 +84,8 @@ def validate(data,mapname):
  assert [r['measured_frame'] for r in rows]==[None]*60+list(range(1,121))
  assert all(a['sequence']<b['sequence'] for a,b in zip(rows,rows[1:]))
  for r in rows:
-  if data['schema']==6:validate6(data,r)
+  if data['schema']>=6:validate6(data,r)
+  if data['schema']>=7:validate7(data,r)
   assert r['hierarchy_errors']==0 and r['frame_total_ns']>0
   assert r['frame_total_ns']==r['bracket_union_ns']+r['unbracketed_residual_ns']
   assert r['unbracketed_residual_ns']>=0
@@ -75,10 +97,11 @@ def validate(data,mapname):
   assert not any(m & (1<<n) for m in parent_masks(data,r)[24:33]), 'Actor subdivisions escaped actor_gather'
   if data['schema']>=4:
    if data['schema']>=5:
-    assert isinstance(r['reused_brackets'],int) and (sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0)<=r['reused_brackets']<=(sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0)+r['calls'][36]
+    between=r['calls'][84] if data['schema']>=7 else 0
+    assert isinstance(r['reused_brackets'],int) and (sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0)+between<=r['reused_brackets']<=(sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0)+r['calls'][36]+between
     assert r['added_brackets']+r['reused_brackets']==sum(r['calls'][30:])
    else:assert r['added_brackets']==sum(r['calls'][30:])
-   for field,width in [('publication_rejections',11),('diagnostic_counters',32 if data['schema']==6 else 8 if data['schema']==5 else 7)]:
+   for field,width in [('publication_rejections',11),('diagnostic_counters',44 if data['schema']==7 else 32 if data['schema']==6 else 8 if data['schema']==5 else 7)]:
     assert len(r[field])==width and all(isinstance(v,int) and v>=0 for v in r[field])
    assert r['diagnostic_counters'][1]<=r['diagnostic_counters'][0]
    if r['diagnostic_counters'][3]>0:
@@ -90,8 +113,9 @@ def validate(data,mapname):
    if data['schema']>=5:
     allowed[51]=[29]
     assert r['diagnostic_counters'][7]==r['calls'][51]
-   if data['schema']==6:
+   if data['schema']>=6:
     allowed.update({52:[0],53:[0],54:[18],55:[18],56:[18,54],57:[18,54],58:[56],59:[1],60:[1],61:[1,59],62:[21],63:[21],64:[62],65:[49],66:[49]})
+   if data['schema']>=7:allowed.update(A7_PARENTS)
    for i,parents in allowed.items():
     mask=parent_masks(data,r)[i]
     assert mask & ~sum(1<<j for j in parents)==0, (names[i],mask,parents)
@@ -126,6 +150,7 @@ def report(data,wall_delta_ms=None,observer_status=None):
  def observer_calls(r,i):
   if data['schema']>=5:
    if 40<=i<43:return 0 if data.get('world_clocks_reused',True) else r['calls'][i]
+   if i==84 and data['schema']>=7:return 0
    if i==36:return r['calls'][i]-(r['reused_brackets']-(sum(r['calls'][40:43]) if data.get('world_clocks_reused',True) else 0))
   return r['calls'][i]
  result={'map':data['map'],'frames':120,'frame_total_ms':stats([r['frame_total_ns']/1e6 for r in rows]),'residual_ms':stats([r['unbracketed_residual_ns']/1e6 for r in rows]),'regions':[],'collision':[],'acoustic_opportunity':[]}
@@ -189,7 +214,14 @@ def report(data,wall_delta_ms=None,observer_status=None):
  result['residual_reading']={'fraction_of_frame_mean':fraction,'label':'RESIDUAL_UNATTRIBUTED' if fraction>0.15 else 'WITHIN_15_PERCENT',
   'known_contents':'Input and pre-object viewer work, story, stats, particle simulation, camera, power-art, first person and capture, save tail, profiler bookkeeping, and next_frame except vglSwapBuffers (assumed to include macroquad HUD batch flush). Never assign to a subsystem.',
   'follow_up':'Name existing Region::Other intervals in src/viewer.rs at 2576, 3288, 3713, 3811, 4197 in a later build.'}
- if data['schema']==6:
+ if data['schema']>=7:
+  c=lambda i:[r['diagnostic_counters'][i] for r in rows]
+  look=sum(c(41));steps=sum(c(42))
+  result['tls']={'counting':data['tls_counting'],'main_lookups_per_frame':stats(c(41)),'main_mean_walk':steps/look if look else None,
+   'other_lookups_per_frame':stats(c(43)),'note':'Census-on arm: includes the census bookkeeping lookups. Use the census-off tls arm for D2.'}
+  result['merge_bytes']={'vertex_bytes':data['vertex_bytes'],'copied_vertex_bytes_per_frame':stats([v*data['vertex_bytes'] for v in c(38)]),
+   'kept_vertex_bytes_per_frame':stats([v*data['vertex_bytes'] for v in c(40)]),'copied_index_bytes_per_frame':stats([v*2 for v in c(39)])}
+ if data['schema']>=6:
   result['npc_query_categories']=[dict(controller=data['npc_query_controllers'][i//5],category=data['npc_query_categories'][i%5],totals=dict(zip(NPC_COLUMNS,[sum(r['npc_query_categories'][i][j] for r in rows) for j in range(12)]))) for i in range(15)]
   result['npc_repeat_rule']=data['npc_repeat_rule']
   result['diagnostic_counters']={name:stats([r['diagnostic_counters'][i] for r in rows]) for i,name in enumerate(data['diagnostic_counter_columns'])}
@@ -216,6 +248,10 @@ def markdown(result):
  lines+=['',result['collision_coverage'],'','| Acoustic class | Queries | K=1/4/16 hits | K=1/4/16 fractions |','|---|---:|---|---|']
  for q in result['acoustic_opportunity']:lines.append(f"| {q['class']} | {q['queries']} | {q['hits_K1_K4_K16']} | {q['hit_fraction']} |")
  lines += ['',f"Acoustic world sweeps (nested audio subset): {result['acoustics_world_sweep']}",f"Live table evictions measured/warmup/all: {result['live_table_evictions']}/{result['warmup_live_table_evictions']}/{result['all_accepted_live_table_evictions']}; history: {result['acoustic_reading']['history_bound']}. Read K=4 for room/ambient; K=1 near zero is expected.",result['acoustic_reading']['limits'],'',result['residual_reading']['label'],result['residual_reading']['known_contents'],result['residual_reading']['follow_up']]
+ if 'tls' in result:
+  t=result['tls'];m=result['merge_bytes']
+  lines+=['',f"TLS counting {t['counting']}: main lookups/frame mean {t['main_lookups_per_frame']['mean']:.1f}, mean walk {t['main_mean_walk']}, other-thread lookups/frame mean {t['other_lookups_per_frame']['mean']:.1f}. {t['note']}",
+   f"Merge copy bytes/frame mean: vertices {m['copied_vertex_bytes_per_frame']['mean']:.0f} (kept {m['kept_vertex_bytes_per_frame']['mean']:.0f}), indices {m['copied_index_bytes_per_frame']['mean']:.0f}; vertex_bytes={m['vertex_bytes']}."]
  return '\n'.join(lines)+'\n'
 
 def main():

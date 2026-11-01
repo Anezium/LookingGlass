@@ -796,6 +796,7 @@ fn merge_cached_options<'a>(
     // Packet topology/state is cached. Changed vertex ranges always stream anew.
     // A world packet or actor is a barrier for particle material regrouping.
     let local_reuse = crate::sim_maps::merge_local_reuse();
+    let census_signature = crate::phase_census::span(crate::phase_census::Region::MergeSignature);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let signature_span = crate::frame_profile::span("fx_merge_signature");
     let mut signature = std::mem::take(&mut cache.signature);
@@ -827,14 +828,18 @@ fn merge_cached_options<'a>(
         );
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     drop(signature_span);
+    drop(census_signature);
+    let census_plan = crate::phase_census::span(crate::phase_census::Region::MergePlan);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let plan_span = crate::frame_profile::span("fx_merge_plan");
     // Keep the prior signature in separate reusable storage for exact plan matching.
     let hit = reuse && cache.previous_signature == signature;
     if hit {
         count("vita_fx_merge_plan_hits", 1);
+        crate::phase_census::path_count(crate::phase_census::Counter::MergePlanHits, 1);
     } else {
         count("vita_fx_merge_plan_builds", 1);
+        crate::phase_census::path_count(crate::phase_census::Counter::MergePlanBuilds, 1);
         cache.steps.clear();
         cache.kept.clear();
         let mut candidates = std::mem::take(&mut cache.candidates); candidates.clear();
@@ -891,6 +896,9 @@ fn merge_cached_options<'a>(
     cache.signature = signature;
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     drop(plan_span);
+    drop(census_plan);
+    let _census_copy = crate::phase_census::span(crate::phase_census::Region::MergeCopy);
+    crate::phase_census::path_count(crate::phase_census::Counter::MergeDestinations, cache.destinations.len() as u64);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let _copy_span = crate::frame_profile::span("fx_merge_copy");
     for (target, sources) in &cache.destinations {
@@ -922,6 +930,7 @@ fn merge_cached_options<'a>(
                 groups[source].passes.clear();
                 }
                 count("vita_fx_unchanged_merged_groups", 1);
+                crate::phase_census::path_count(crate::phase_census::Counter::MergeUnchanged, 1);
                 cache.version_scratch.insert(target, version_storage);
                 continue;
             }
@@ -979,6 +988,9 @@ fn merge_cached_options<'a>(
             }
             count("vita_fx_pack_vertices", copied as u64);
             count("vita_fx_pack_indices", if keep_indices {0} else {indices as u64});
+            crate::phase_census::path_count(crate::phase_census::Counter::MergeCopiedVertices, copied as u64);
+            crate::phase_census::path_count(crate::phase_census::Counter::MergeKeptVertices, (vertices - copied) as u64);
+            crate::phase_census::path_count(crate::phase_census::Counter::MergeCopiedIndices, if keep_indices {0} else {indices as u64});
             count("vita_fx_certified_indices_reused", if keep_indices {indices as u64} else {0});
             groups[target].passes[0].geometry = None;
             groups[target].passes[0].mesh = dest;
@@ -1140,6 +1152,8 @@ pub(crate) fn finish_world(
     };
     let merge_leaf=crate::phase_census::span(crate::phase_census::Region::FinishMergePack);
     if !puffs.is_empty() {
+        let _puff_leaf=crate::phase_census::span(crate::phase_census::Region::MergePuffBuild);
+        crate::phase_census::path_count(crate::phase_census::Counter::MergePuffs, puffs.len() as u64);
         gpu.puff_batches[gpu.ring_phase].build(&mut groups, &puffs, &mut list,
             crate::render::vita_renderer::config().fx_batching == "material");
     }
@@ -1148,6 +1162,7 @@ pub(crate) fn finish_world(
     let mut recycled = std::mem::take(&mut gpu.recycle_storage); recycled.clear();
     let c = crate::render::vita_renderer::config();
     if c.fx_prepare_cache {
+        let _observe_leaf=crate::phase_census::span(crate::phase_census::Region::MergeObserve);
         let storage = &mut gpu.preparation[gpu.ring_phase];
         let mut index = 0;
         for group in &mut groups { for p in &mut group.passes {
@@ -1156,6 +1171,7 @@ pub(crate) fn finish_world(
             index += 1;
         }}
         storage.truncate(index); // Unused producers cannot alias a future occupant.
+        crate::phase_census::path_count(crate::phase_census::Counter::MergeObserved, index as u64);
     }
     crate::light_profile::fx_add(crate::light_profile::FxMetric::FinishPrepare, preparation_started.elapsed().as_micros() as u64);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]

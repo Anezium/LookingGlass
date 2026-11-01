@@ -1630,6 +1630,8 @@ impl Renderer {
         let mut applications = [0u64; 4];
         let mut uniform_traffic = [0u64; 3];
         let _submission = crate::render_tail::submission(config().world_binding_cache, config().world_gl_state_cache);
+        // Schema 7: draw i's last lap to draw i+1's first read, from reads Totals already takes.
+        let (mut between_ns, mut between_calls, mut previous_end) = (0u64, 0u32, None::<std::time::Instant>);
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
@@ -1652,6 +1654,9 @@ impl Renderer {
                 state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
             };
             let mut start = totals.start();
+            if let (Some(previous), Some(now)) = (previous_end, start) {
+                between_ns += now.duration_since(previous).as_nanos() as u64; between_calls += 1;
+            }
             if plan.pipeline { ctx.apply_pipeline(&pipeline); applications[0] += 1; }
             if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});} applications[1] += 1; }
             scale::log_depth(!alpha);
@@ -1672,6 +1677,7 @@ impl Renderer {
             }
             ctx.draw(g.base_element, prepared.indices, 1);
             totals.lap(2, &mut start);
+            previous_end = start;
             if previous_pipeline != Some(pi) {
                 pipeline_changes += 1;
                 if !cache_enabled { count("vita_world_pipeline_changes", 1); }
@@ -1718,6 +1724,7 @@ impl Renderer {
         }
         if let Some((ns, calls)) = totals.census_values() {
             crate::phase_census::world_publish(ns, calls, totals.profile_active());
+            if between_calls > 0 { crate::phase_census::world_between_publish(between_ns, between_calls); }
         }
         if cache_enabled {
             counts(&[

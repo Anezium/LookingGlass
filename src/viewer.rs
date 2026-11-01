@@ -3589,6 +3589,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Camera);
             crate::phase_census::set_owner(crate::phase_census::Owner::Camera);
         }
+        let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraScripted);
         let mut pand_camera = interactions.camera_after(
             interactions
                 .duchess
@@ -3647,6 +3648,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let scripted_camera = pand_camera.or_else(|| {
             cinematic_camera.map(|(eye, target, _)| crate::cinematic::Camera::look(eye, target))
         });
+        drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraFollow);
         let (eye, aim, gameplay_alice) = (|| {
             #[cfg(target_os = "vita")]
             if let Some(pose) = bench_camera {
@@ -3665,6 +3667,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 (pos, pos + direction, false)
             }
         })();
+        drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraHandoff);
         let fade = interactions
             .fade_after(
                 interactions
@@ -3732,6 +3735,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             } else {
                 gameplay_alice && camera.distance(player.feet + Vec3::Z * 32.) > 30.
             };
+        drop(census_leaf);
         if simulate {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_audio_mix"); }
@@ -3767,6 +3771,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_scene");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Scene);
         }
+        let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPresentation);
         scene.atmosphere.liquid =
             crate::water::Liquid::from_contents(scene.world.liquid_at(camera)).tint();
         interactions.presentation.apply(&mut scene);
@@ -3786,6 +3791,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(distance) = interactions.levels.iter().find_map(|s| s.ctl.fog_distance()) {
             scene.atmosphere.distance.w = distance;
         }
+        drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPrepare3d);
         clear_background(scene.atmosphere.background());
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::prepare_3d(scene.atmosphere.background());
@@ -3828,6 +3834,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let world_only = crate::render::vita_renderer::world_only();
         #[cfg(not(feature = "vita_renderer"))]
         let world_only = false;
+        drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraTransforms);
         let mut transforms = interactions.transforms();
         transforms.extend(scene.world.traversal.transforms(&player));
         let rope_hand = interactions
@@ -3842,6 +3849,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .map(|r| (r.model, player.feet + Vec3::Z * 40.))
             });
         scene.update_ropes(world_dt, rope_hand, &transforms);
+        drop(census_leaf);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Particles);
         {
             #[cfg(target_os = "vita")]
@@ -3924,9 +3932,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 viewer_block = crate::frame_profile::span("skin_gather");
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
             }
+            let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherStoryPose);
             level_art.story_pose(&story);
+            drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherFrameBegin);
             crate::audio::game_stage(3);
             let mut frame = crate::character::skinning::overlap::Frame::begin();
+            drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherAlice);
             if crate::character::skinning::overlap::single_frame() {
                 if draw_world && show_alice && stats.invisible <= 0. { crate::lighting::shadow(&scene.world, player.feet, 22.); }
                 alice.atmosphere(&scene.atmosphere, camera);
@@ -3934,9 +3945,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic()) {
                 alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
             }
+            drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherNpcs);
             npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
+            drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherLevelArt);
             level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+            drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherDispatch);
             frame.dispatch();
+            drop(census_leaf);
             crate::audio::game_stage(0);
             Some(frame)
         } else { None };

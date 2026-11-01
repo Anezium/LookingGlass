@@ -14,9 +14,10 @@ fn main() {
             format!("{:x}", Sha256::digest(bytes))
         }).collect::<Vec<_>>().join(":");
         println!("cargo:rustc-env=LG_VITAGL_ID={identity}");
-        for symbol in ["malloc", "calloc", "realloc", "free", "memalign", "_malloc_r", "_calloc_r", "_realloc_r", "_memalign_r", "_free_r", "vglGetProcAddress", "glTexImage2D", "vglSwapBuffers", "sceCtrlPeekBufferPositive"] {
+        for symbol in ["malloc", "calloc", "realloc", "free", "memalign", "_malloc_r", "_calloc_r", "_realloc_r", "_memalign_r", "_free_r", "vglGetProcAddress", "glTexImage2D", "vglSwapBuffers", "sceCtrlPeekBufferPositive", "pthread_getspecific"] {
             println!("cargo:rustc-link-arg=-Wl,--wrap={symbol}");
         }
+        // pthread_getspecific: A7 D2 lookup counter (src/tls_count.rs); off by default, tail-calls the real function.
         // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.
         println!("cargo:rustc-link-arg=-Wl,--undefined=sceUserMainThreadStackSize");
         println!("cargo:rustc-link-arg=-Wl,--undefined=_newlib_heap_size_user");

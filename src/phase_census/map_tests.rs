@@ -14,9 +14,13 @@ fn path_span(region:Region)->Timer {
 fn world_draws() {
     let _world=path_span(Region::WorldSubmit);
     let mut totals=crate::frame_profile::Totals::<3>::new();
-    for _ in 0..507 {let mut at=totals.start();for i in 0..3 {totals.lap(i,&mut at);}}
+    // Same boundary reuse as the production loop: between draws costs no extra read.
+    let (mut between,mut pairs,mut previous)=(0u64,0u32,None::<Instant>);
+    for _ in 0..507 {let mut at=totals.start();
+        if let (Some(p),Some(n))=(previous,at) {between+=n.duration_since(p).as_nanos() as u64;pairs+=1;}
+        for i in 0..3 {totals.lap(i,&mut at);} previous=at;}
     let (ns,calls)=totals.census_values().expect("production census gate");
-    world_publish(ns,calls,totals.profile_active());count(3,507);
+    world_publish(ns,calls,totals.profile_active());world_between_publish(between,pairs);count(3,507);
 }
 fn npc_path(world:&crate::collision::World) {
     for levels in [false,true] {
@@ -73,7 +77,7 @@ fn r15_four_map_paths_record_every_leaf_without_test_activation() {
         assert_eq!(allocations.finish(),0,"census/query observer hot path allocated");
         let document=test_survey_json().unwrap();
         for row in document["rows"].as_array().unwrap() {
-            assert_eq!(row["added_brackets"],1522+added);assert_eq!(row["reused_brackets"],0);
+            assert_eq!(row["added_brackets"],1522+added);assert_eq!(row["reused_brackets"],506);
             for i in 52..REGIONS {if row["calls"][i].as_u64().unwrap()>0 {seen[i]=true;assert!(row["inclusive_ns"][i].as_u64().unwrap()>0);}}
             assert_eq!(row["exclusive_ns"].as_array().unwrap().iter().map(|v|v.as_u64().unwrap()).sum::<u64>()+row["unbracketed_residual_ns"].as_u64().unwrap(),row["frame_total_ns"].as_u64().unwrap());
         }
@@ -82,9 +86,10 @@ fn r15_four_map_paths_record_every_leaf_without_test_activation() {
             std::fs::write(dir.join(format!("r15-{map}-census.json")),serde_json::to_vec(&document).unwrap()).unwrap();
             STATE.with(|s|{let s=s.borrow();let mut out=Vec::new();write_csv(&s,&mut out).unwrap();std::fs::write(dir.join(format!("r15-{map}-census.csv")),out).unwrap();});
         }
-        println!("R15_PATH map={map} added_r15={added} added_total={} reused=0 world_draws=507 world_clock_reads=2028 hot_allocations=0",1522+added);
+        println!("R15_PATH map={map} added_r15={added} added_total={} reused=506 world_draws=507 world_clock_reads=2028 hot_allocations=0",1522+added);
     }
-    assert!(seen[52..].iter().all(|&s|s),"a new leaf has no feature-exact proof");
+    // Schema-7 leaves (67..) have their own proof: a7_schema7_leaves_nest_under_declared_parents_and_close.
+    assert!(seen[52..67].iter().all(|&s|s),"a new leaf has no feature-exact proof");
     println!("R15_STORAGE_BYTES state={} row={}",std::mem::size_of::<State>(),std::mem::size_of::<Row>());
     begin(false);
     for region in [Region::Fx,Region::FxWorld,Region::PlayerPrepare,Region::HudDraw] {let timer=path_span(region);assert!(timer.start.is_none());}

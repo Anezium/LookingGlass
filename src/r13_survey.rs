@@ -6,15 +6,23 @@ pub(crate) fn census_active()->bool {CENSUS.load(Relaxed)}
 #[serde(deny_unknown_fields)]
 struct Config {enabled:bool,map:String,allocation:bool,census:bool,tag:String,
     // Keep the physical pad for a human-played survey. Omitted keeps it off, as before.
-    #[serde(default)] physical_input:bool}
+    #[serde(default)] physical_input:bool,
+    // A7 D2: count pthread_getspecific lookups through the window. Omitted keeps it off.
+    #[serde(default)] tls_count:bool}
 pub(crate) struct Survey {
     config:Config,started:Instant,first:bool,ready:bool,armed:bool,pending_gameplay:bool,
     all_gameplay:bool,frames:usize,rows:Vec<(u64,u64)>,previous:Option<Instant>,arm_time:Option<Instant>,
     snapshot:bool,pub(crate) done:bool,
+    tls:TlsWindow,
 }
+/// Per-window D2 bookkeeping, main thread only; inert unless the survey asks for it.
+#[derive(Clone,Copy,Default)]
+struct TlsWindow {armed:crate::tls_count::Snapshot,measured:crate::tls_count::Snapshot,previous:u32,
+    frame_min:u32,frame_max:u32}
 fn validate(c:&Config)->anyhow::Result<()> {
     anyhow::ensure!(!c.map.is_empty() && c.map.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()),"invalid survey map");
     anyhow::ensure!(["memory","off","on"].contains(&c.tag.as_str()) && !(c.allocation && c.census),"invalid survey mode");
+    anyhow::ensure!(!(c.tls_count && c.allocation),"tls_count needs the 180-frame window, not the allocation window");
     Ok(())
 }
 impl Survey {
@@ -32,7 +40,7 @@ impl Survey {
         let capacity=if c.allocation {8192}else{180};
         Ok(Some(Box::new(Self{config:c,started:Instant::now(),first:false,ready:false,armed:false,
             pending_gameplay:false,all_gameplay:true,frames:0,rows:Vec::with_capacity(capacity),previous:None,
-            arm_time:None,snapshot:false,done:false})))
+            arm_time:None,snapshot:false,done:false,tls:TlsWindow::default()})))
     }
     #[cfg(any(target_os="vita",test))]
     pub(crate) fn accept(&mut self,gameplay:bool) {
@@ -58,6 +66,7 @@ impl Survey {
         let mut out=std::io::BufWriter::new(std::fs::File::create(dir.join(format!("{map}-r13b-{}.csv",self.config.tag)))?);
         self.write_samples(&mut out)?;out.flush()?;
         if self.config.census {crate::phase_census::export_survey(map)?;}
+        if self.config.tls_count {println!("{}",self.tls_line(map));}
         println!("[lg/r13b-survey] done map={map} samples={} warmup_frames=60 measured_frames={} died={}",self.rows.len(),self.rows.len()-60,!alive);
         self.done=true;Ok(())
     }
@@ -78,6 +87,11 @@ impl Survey {
                 let now=Instant::now();
                 self.armed=true;self.previous=Some(now);self.arm_time=Some(now);
                 CENSUS.store(self.config.census,Relaxed);
+                if self.config.tls_count {
+                    crate::tls_count::register_main();crate::tls_count::set_counting(true);
+                    self.tls.armed=crate::tls_count::snapshot();self.tls.previous=self.tls.armed.main_lookups;
+                    self.tls.frame_min=u32::MAX;
+                }
                 if self.config.census {crate::phase_census::begin_survey(now);}
                 println!("[lg/r13b-survey] window_begin map={map} warmup_frames=60 measured_frames=120");
             }
@@ -89,7 +103,27 @@ impl Survey {
         self.rows.push((now.duration_since(self.arm_time.unwrap()).as_micros() as u64,now.duration_since(previous).as_micros() as u64));
         let finished=if self.config.allocation {now.duration_since(self.arm_time.unwrap()).as_secs()>=40}else{self.frames>=180};
         if self.config.census {crate::phase_census::survey_presented(now,finished);}
+        if self.config.tls_count {self.tls_frame(finished);}
         Ok(finished)
+    }
+    /// Called after each attempted frame's presentation. Frame 60 ends warmup.
+    #[cfg(any(target_os="vita",test))]
+    fn tls_frame(&mut self,finished:bool) {
+        let now=crate::tls_count::snapshot();
+        let delta=now.main_lookups.wrapping_sub(self.tls.previous);self.tls.previous=now.main_lookups;
+        if self.frames==60 {self.tls.measured=now;crate::tls_count::reset_window_shape();}
+        else if self.frames>60 {self.tls.frame_min=self.tls.frame_min.min(delta);self.tls.frame_max=self.tls.frame_max.max(delta);}
+        if finished {crate::tls_count::set_counting(false);}
+    }
+    /// One D2 record per window. Every count covers the 120 measured frames except warmup_main_lookups.
+    #[cfg(any(target_os="vita",test))]
+    fn tls_line(&self,map:&str)->String {
+        let end=crate::tls_count::snapshot();let m=end.since(self.tls.measured);
+        let warm=self.tls.measured.since(self.tls.armed);let h=crate::tls_count::histogram();
+        format!("[lg/tls] map={map} tag={} measured_frames={} main_lookups={} main_steps={} main_misses={} main_max_steps={} main_lookups_frame_min={} main_lookups_frame_max={} main_steps_hist_1_2_4_8_16_32_64_more={}/{}/{}/{}/{}/{}/{}/{} other_lookups={} other_steps={} warmup_main_lookups={}",
+            self.config.tag,self.frames.saturating_sub(60),m.main_lookups,m.main_steps,m.main_misses,crate::tls_count::max_steps(),
+            if self.tls.frame_min==u32::MAX {0} else {self.tls.frame_min},self.tls.frame_max,
+            h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7],m.other_lookups,m.other_steps,warm.main_lookups)
     }
     #[cfg(any(target_os="vita",test))]
     fn write_samples(&self,out:&mut impl std::io::Write)->anyhow::Result<()> {
@@ -101,9 +135,9 @@ impl Survey {
 #[cfg(test)] mod tests {use super::*;
     fn fixture(census:bool)->Box<Survey> {
         Box::new(Survey{config:Config{enabled:true,map:"fixture".into(),allocation:false,census,
-            tag:if census {"on"} else {"off"}.into(),physical_input:false},started:Instant::now(),first:false,ready:false,armed:false,
+            tag:if census {"on"} else {"off"}.into(),physical_input:false,tls_count:false},started:Instant::now(),first:false,ready:false,armed:false,
             pending_gameplay:false,all_gameplay:true,frames:0,rows:Vec::with_capacity(180),previous:None,
-            arm_time:None,snapshot:false,done:false})
+            arm_time:None,snapshot:false,done:false,tls:TlsWindow::default()})
     }
     #[cfg(feature="frame_total_only")]
     fn full_mode_window(census:bool,loss:bool) {
@@ -198,8 +232,37 @@ impl Survey {
         for bad in [r#""physical_input":1"#,r#""physical_input":"on""#,r#""physical_input":null"#,r#""pad":true"#] {
             assert!(serde_json::from_str::<Config>(&format!("{{{base},{bad}}}")).is_err(),"{bad}");}
     }
+    #[test]fn tls_count_is_opt_in_and_strict(){
+        let base=r#""enabled":true,"map":"skool2","allocation":false,"census":false,"tag":"off""#;
+        let c:Config=serde_json::from_str(&format!("{{{base}}}")).unwrap();assert!(!c.tls_count);
+        let c:Config=serde_json::from_str(&format!(r#"{{{base},"tls_count":true}}"#)).unwrap();assert!(c.tls_count);
+        for bad in [r#""tls_count":1"#,r#""tls_count":"on""#,r#""tls_count":null"#] {
+            assert!(serde_json::from_str::<Config>(&format!("{{{base},{bad}}}")).is_err(),"{bad}");}
+    }
+    // The window record: counting starts at arming, warmup ends at frame 60 and
+    // counting stops on the finishing frame. Host has no wrapper, so counts stay 0;
+    // the walk and counters are covered in tls_count's own test.
+    #[cfg(feature="frame_total_only")]
+    #[test]fn tls_window_line_has_one_record_and_stops_counting(){
+        let _lock=crate::tls_count::TEST_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        crate::phase_census::test_begin(false);
+        let mut s=fixture(false);s.config.tls_count=true;let mut now=Instant::now();
+        s.accept(true);assert!(!s.presented_at("skool2",true,false,now).unwrap());
+        assert!(!s.presented_at("skool2",true,true,now).unwrap());assert!(s.armed);
+        assert!(crate::tls_count::counting());
+        for i in 0..180 {s.accept(true);now+=std::time::Duration::from_millis(16);
+            assert_eq!(s.presented_at("skool2",true,false,now).unwrap(),i==179);}
+        assert!(!crate::tls_count::counting(),"counting must stop with the window");
+        let line=s.tls_line("skool2");
+        assert!(line.starts_with("[lg/tls] map=skool2 tag=off measured_frames=120 main_lookups="),"{line}");
+        assert_eq!(line.matches(" main_steps_hist_1_2_4_8_16_32_64_more=").count(),1);
+        assert!(!line.contains('\n'));
+        CENSUS.store(false,Relaxed);
+    }
     #[test]fn rejects_path_injection_and_simultaneous_observers(){
         for (map,a,c,ok) in [("potears1",true,false,true),("../x",false,false,false),("hatter1",true,true,false)] {
-            assert_eq!(validate(&Config{enabled:true,map:map.into(),allocation:a,census:c,tag:"memory".into(),physical_input:false}).is_ok(),ok);}
+            assert_eq!(validate(&Config{enabled:true,map:map.into(),allocation:a,census:c,tag:"memory".into(),physical_input:false,tls_count:false}).is_ok(),ok);}
+        assert!(validate(&Config{enabled:true,map:"utemple".into(),allocation:true,census:false,tag:"memory".into(),physical_input:false,tls_count:true}).is_err());
+        assert!(validate(&Config{enabled:true,map:"utemple".into(),allocation:false,census:true,tag:"on".into(),physical_input:false,tls_count:true}).is_ok());
     }
 }

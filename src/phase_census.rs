@@ -18,13 +18,22 @@ pub(crate) enum Region { Npc, PlayerMovement, FixedPhysics, Movers, Objects, Aud
     Acoustics, Lights, WorldOpaque, WorldVisibility, WorldParameters, WorldSubmit,
     AlphaPrepare, AlphaSubmit, ActorGather, ActorCollect, ActorPublication, ActorSubmit,
     Fx, JointFinish, FxSubmit, Hud, Present, Swap, ActorPose, ActorScalesPalette, ActorNumeric,
-    ActorSerial, ActorWorkerDispatch, ActorConsumers, ActorDirect, ActorFallback, ActorAttachments, FinishSort, FinishMergePack, FinishUploadCpu, FinishUploadGl, FinishUniforms, FinishPass, FinishRecycle, WorldStateBindings, WorldUniforms, WorldDraws, Input, StoryWeapons, Particles, CameraScene, RenderSetup, FirstPerson, FrameworkTail, BackendReport, ActorNpcOverlays, NpcGeneric, NpcLevels, FxWorld, FxAttachedSample, FxQuadBuild, FxRegistration, FxPairWait, PlayerPrepare, PlayerChecks, PlayerHooks, HudDraw, HudSearch, HudMenus, TailSave, TailProfiler, Other }
+    ActorSerial, ActorWorkerDispatch, ActorConsumers, ActorDirect, ActorFallback, ActorAttachments, FinishSort, FinishMergePack, FinishUploadCpu, FinishUploadGl, FinishUniforms, FinishPass, FinishRecycle, WorldStateBindings, WorldUniforms, WorldDraws, Input, StoryWeapons, Particles, CameraScene, RenderSetup, FirstPerson, FrameworkTail, BackendReport, ActorNpcOverlays, NpcGeneric, NpcLevels, FxWorld, FxAttachedSample, FxQuadBuild, FxRegistration, FxPairWait, PlayerPrepare, PlayerChecks, PlayerHooks, HudDraw, HudSearch, HudMenus, TailSave, TailProfiler,
+    // Schema 7 (A7): appended so every schema-6 index keeps its meaning.
+    MergePuffBuild, MergeObserve, MergeSignature, MergePlan, MergeCopy,
+    CameraScripted, CameraFollow, CameraHandoff, CameraPresentation, CameraPrepare3d, CameraTransforms,
+    GatherStoryPose, GatherFrameBegin, GatherAlice, GatherNpcs, GatherLevelArt, GatherDispatch,
+    WorldDrawBetween, Other }
 const REGIONS: usize = Region::Other as usize;
 const NAMES: [&str; REGIONS] = ["npc_think_movement", "player_movement", "fixed_physics", "movers", "objects",
     "audio_prepare", "prepare_acoustics", "light_selection", "world_opaque", "world_visibility",
     "world_parameters", "world_submit", "alpha_prepare", "alpha_submit", "actor_gather", "actor_collect",
     "actor_publication", "actor_submit", "fx_gather", "joint_finish", "fx_submit", "hud", "present", "swap", "actor_pose", "actor_scales_palette",
-    "actor_numeric_capture", "actor_serial_skin", "actor_worker_dispatch", "actor_consumers_publication", "actor_direct_prepare", "actor_fallback_skin_layers", "actor_npc_attachments", "joint_sort", "joint_merge_pack", "joint_upload_cpu", "joint_upload_gl", "joint_uniform_prep", "joint_pass_setup_end", "joint_recycle", "world_state_bindings", "world_uniforms", "world_draws", "input", "story_weapons", "particles", "camera_scene", "render_setup", "first_person", "framework_tail", "backend_timing_report", "actor_npc_overlays", "npc_generic_update", "npc_levels_step", "fx_world_particles", "fx_attached_sample_birth", "fx_quad_build", "fx_registration", "fx_worker_pair_wait", "player_input_prepare", "player_trigger_checks", "player_map_hooks", "hud_drawing", "hud_prompt_search", "hud_menus", "tail_save", "tail_profiler"];
+    "actor_numeric_capture", "actor_serial_skin", "actor_worker_dispatch", "actor_consumers_publication", "actor_direct_prepare", "actor_fallback_skin_layers", "actor_npc_attachments", "joint_sort", "joint_merge_pack", "joint_upload_cpu", "joint_upload_gl", "joint_uniform_prep", "joint_pass_setup_end", "joint_recycle", "world_state_bindings", "world_uniforms", "world_draws", "input", "story_weapons", "particles", "camera_scene", "render_setup", "first_person", "framework_tail", "backend_timing_report", "actor_npc_overlays", "npc_generic_update", "npc_levels_step", "fx_world_particles", "fx_attached_sample_birth", "fx_quad_build", "fx_registration", "fx_worker_pair_wait", "player_input_prepare", "player_trigger_checks", "player_map_hooks", "hud_drawing", "hud_prompt_search", "hud_menus", "tail_save", "tail_profiler",
+    "joint_merge_puff_build", "joint_merge_observe", "joint_merge_signature", "joint_merge_plan", "joint_merge_copy",
+    "camera_scripted", "camera_follow", "camera_handoff", "camera_presentation", "camera_prepare_3d", "camera_transforms_ropes",
+    "gather_story_pose", "gather_frame_begin", "gather_alice", "gather_npcs", "gather_level_art", "gather_dispatch",
+    "world_draw_between"];
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub(crate) enum Owner { Audio, Player, Npc, Camera, Other }
@@ -47,10 +56,15 @@ struct Actor {
 }
 impl Actor { const ZERO: Self = Self { id:0,serial_vertices:0,worker_vertices:0,serial_reasons:0,reason_vertices:[0;8] }; }
 pub(crate) const PUBLICATION_REJECTIONS: [&str;11] = ["missing_texture", "unregistered_surface", "opacity", "empty_recipe", "unsupported_recipe", "mixed_alpha", "bank_surface_capacity", "bank_held", "bank_vertex_capacity", "bank_index_capacity", "frame_vertex_budget"];
-pub(crate) const COUNTERS: [&str;32] = ["upload_requests", "upload_hits", "upload_bytes", "world_draws", "world_texture_binds", "world_sampler_uniform_sets", "world_vbo_layout_changes", "actor_npc_overlay_calls", "ant_updates", "ant_substeps", "navigation_walks", "navigation_plans", "spawn_wave_calls", "world_live_particles", "world_new_particles", "attached_live_particles", "attached_new_birth_poses", "attached_sample_calls", "particle_quad_sets", "particle_pair_jobs", "trigger_visits", "trigger_eligible", "trigger_fires", "event_fact_builds", "player_prepare_calls", "player_map_hook_calls", "player_fixed_ticks", "hud_search_calls", "hud_draw_calls", "hud_menu_calls", "particle_registration_sets", "world_particle_sets"];
+pub(crate) const COUNTERS: [&str;44] = ["upload_requests", "upload_hits", "upload_bytes", "world_draws", "world_texture_binds", "world_sampler_uniform_sets", "world_vbo_layout_changes", "actor_npc_overlay_calls", "ant_updates", "ant_substeps", "navigation_walks", "navigation_plans", "spawn_wave_calls", "world_live_particles", "world_new_particles", "attached_live_particles", "attached_new_birth_poses", "attached_sample_calls", "particle_quad_sets", "particle_pair_jobs", "trigger_visits", "trigger_eligible", "trigger_fires", "event_fact_builds", "player_prepare_calls", "player_map_hook_calls", "player_fixed_ticks", "hud_search_calls", "hud_draw_calls", "hud_menu_calls", "particle_registration_sets", "world_particle_sets",
+    "merge_puffs", "merge_observed_passes", "merge_plan_hits", "merge_plan_builds", "merge_destinations",
+    "merge_unchanged_groups", "merge_copied_vertices", "merge_copied_indices", "merge_kept_vertices",
+    "tls_main_lookups", "tls_main_steps", "tls_other_lookups"];
 #[derive(Clone, Copy)]
 #[repr(usize)]
-pub(crate) enum Counter { AntUpdates=8, AntSubsteps, NavigationWalks, NavigationPlans, SpawnWaves, WorldLive, WorldNew, AttachedLive, AttachedNew, AttachedSamples, QuadSets, PairJobs, TriggerVisits, TriggerEligible, TriggerFires, FactBuilds, PlayerPrepare, PlayerHooks, PlayerTicks, HudSearch, HudDraw, HudMenus, Registrations, WorldSets }
+pub(crate) enum Counter { AntUpdates=8, AntSubsteps, NavigationWalks, NavigationPlans, SpawnWaves, WorldLive, WorldNew, AttachedLive, AttachedNew, AttachedSamples, QuadSets, PairJobs, TriggerVisits, TriggerEligible, TriggerFires, FactBuilds, PlayerPrepare, PlayerHooks, PlayerTicks, HudSearch, HudDraw, HudMenus, Registrations, WorldSets,
+    MergePuffs, MergeObserved, MergePlanHits, MergePlanBuilds, MergeDestinations, MergeUnchanged,
+    MergeCopiedVertices, MergeCopiedIndices, MergeKeptVertices, TlsMainLookups, TlsMainSteps, TlsOtherLookups }
 #[derive(Clone, Copy)]
 struct Row {
     sequence: u64, measured: bool, total: u64, coverage: u64,
@@ -81,12 +95,13 @@ struct State {
     table: [Entry;TABLE],
     serial_fallback_base: u64,
     controller:usize, category:usize, epoch:u64, exact:[ExactEntry;1024],
+    tls_base:crate::tls_count::Snapshot,
 }
 impl State {
     #[cfg(test)]
     const fn new() -> Self { Self { rows:[Row::ZERO;CAPACITY],current:Row::ZERO,count:0,accepted:0,
         start:None,pending:false,overflow:false,sequence:0,owner:Owner::Other,sweep_depth:0,scene:0,query_class:0,
-        stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE],serial_fallback_base:0,controller:2,category:4,epoch:0,exact:[ExactEntry::EMPTY;1024] } }
+        stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE],serial_fallback_base:0,controller:2,category:4,epoch:0,exact:[ExactEntry::EMPTY;1024],tls_base:crate::tls_count::Snapshot::ZERO } }
     fn boxed() -> Box<Self> {
         // Initialize bounded storage once, before gameplay. A full const State
         // would embed the enlarged actor rows in the native ELF's initializer.
@@ -116,6 +131,7 @@ impl State {
             std::ptr::addr_of_mut!((*p).category).write(4);
             std::ptr::addr_of_mut!((*p).epoch).write(0);
             std::ptr::addr_of_mut!((*p).exact).write([ExactEntry::EMPTY;1024]);
+            std::ptr::addr_of_mut!((*p).tls_base).write(crate::tls_count::Snapshot::ZERO);
             storage.assume_init()
         }
     }
@@ -125,6 +141,11 @@ impl State {
                 self.current.total=now.duration_since(start).as_nanos() as u64;
                 self.current.serial_fallbacks=crate::character::skinning::overlap::serial_fallbacks()
                     .saturating_sub(self.serial_fallback_base);
+                let tls=crate::tls_count::snapshot();
+                for (i,(now,base)) in [tls.main_lookups,tls.main_steps,tls.other_lookups].into_iter()
+                    .zip([self.tls_base.main_lookups,self.tls_base.main_steps,self.tls_base.other_lookups]).enumerate() {
+                    self.current.counters[Counter::TlsMainLookups as usize+i]=u64::from(now.wrapping_sub(base));
+                }
                 if self.depth != 0 || self.sweep_depth != 0 { self.current.errors += 1; }
                 if self.count < CAPACITY {self.rows[self.count]=self.current;self.count+=1;} else {self.overflow=true;}
             }
@@ -160,7 +181,15 @@ thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     static STATE: RefCell<Box<State>> = RefCell::new(State::boxed());
 }
-pub(crate) fn active() -> bool {ACTIVE.with(Cell::get)}
+/// Set once, before the first census window opens on any thread, and never cleared.
+/// Until then every census entry point returns after one relaxed load instead of a
+/// thread-local lookup (0.56 us each on the Vita, r15d calibration). Afterwards the
+/// per-thread ACTIVE flag decides exactly as before, so a census arm is unchanged.
+static EVER_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[inline]
+pub(crate) fn active() -> bool {
+    EVER_ARMED.load(std::sync::atomic::Ordering::Relaxed) && ACTIVE.with(Cell::get)
+}
 pub(crate) fn is_active()->bool {active()}
 fn configured() -> bool {
     #[cfg(feature="vita_renderer")]
@@ -220,11 +249,13 @@ fn begin(enabled:bool) {
     begin_at(enabled,Instant::now());
 }
 fn begin_at(enabled:bool,now:Instant) {
+    if enabled {EVER_ARMED.store(true,std::sync::atomic::Ordering::Relaxed);}
     ACTIVE.with(|a|a.set(enabled));if !enabled {return;}
     STATE.with(|s| {let mut s=s.borrow_mut();s.close(now);s.sequence+=1;
         s.current=Row{sequence:s.sequence,..Row::ZERO};s.controller=2;s.category=4;s.start=Some(now);s.owner=Owner::Other;
         s.depth=0;s.sweep_depth=0;
-        s.serial_fallback_base=crate::character::skinning::overlap::serial_fallbacks();});
+        s.serial_fallback_base=crate::character::skinning::overlap::serial_fallbacks();
+        s.tls_base=crate::tls_count::snapshot();});
 }
 pub(crate) fn accept(accepted:bool,measured:bool) {
     if !active() {return;}
@@ -241,6 +272,12 @@ pub(crate) fn world_publish(ns:&[u64;3], calls:&[u32;3], reused:bool) {
     publish_leaves(Region::WorldSubmit,
         [Region::WorldStateBindings,Region::WorldUniforms,Region::WorldDraws], ns, calls,
         if reused {calls.iter().map(|&n|u64::from(n)).sum()} else {0});
+}
+/// Schema 7: per-draw time outside the three Totals intervals (after draw i's
+/// last lap up to draw i+1's first read). It reuses the existing boundary reads, so
+/// it adds no clock read and is always counted as a reused bracket.
+pub(crate) fn world_between_publish(ns:u64, calls:u32) {
+    publish_leaves(Region::WorldSubmit,[Region::WorldDrawBetween],&[ns],&[calls],u64::from(calls));
 }
 fn publish_leaves<const N:usize>(parent:Region, regions:[Region;N], ns:&[u64;N], calls:&[u32;N], reused:u64) {
     if !active() {return;}
@@ -308,7 +345,13 @@ pub(crate) fn span(region:Region) -> Timer {
             Region::FxWorld|Region::FxAttachedSample|Region::FxQuadBuild|Region::FxRegistration|Region::FxPairWait=>Some(Region::Fx),
             Region::PlayerPrepare|Region::PlayerChecks|Region::PlayerHooks=>Some(Region::PlayerMovement),
             Region::HudDraw|Region::HudSearch|Region::HudMenus=>Some(Region::Hud),
-            Region::TailSave|Region::TailProfiler=>Some(Region::FrameworkTail),_=>None};
+            Region::TailSave|Region::TailProfiler=>Some(Region::FrameworkTail),
+            Region::MergePuffBuild|Region::MergeObserve|Region::MergeSignature|Region::MergePlan|Region::MergeCopy=>Some(Region::FinishMergePack),
+            Region::CameraScripted|Region::CameraFollow|Region::CameraHandoff|Region::CameraPresentation|Region::CameraPrepare3d|Region::CameraTransforms=>Some(Region::CameraScene),
+            Region::GatherStoryPose|Region::GatherFrameBegin|Region::GatherAlice|Region::GatherNpcs|Region::GatherLevelArt|Region::GatherDispatch=>Some(Region::ActorGather),
+            // Published only by world_between_publish, never as a pushed span.
+            Region::WorldDrawBetween=>return,
+            _=>None};
         if required.is_some_and(|r|!s.stack[..s.depth].contains(&(r as usize))) {return;}
         if s.depth==DEPTH {s.current.errors+=1;return;}
         timer.level=s.depth;let d=s.depth;s.stack[d]=region as usize;s.children[d]=0;s.depth+=1;
@@ -456,7 +499,7 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "static_cache_hit_miss_eviction":r.cache,
         "live_table_evictions":r.evictions,"hierarchy_errors":r.errors,
         "actors":&r.actors[..r.actor_count],"worker_skin_ns":r.worker_skin_ns,
-        "serial_fallbacks":r.serial_fallbacks,"publication_rejections":r.rejections,"diagnostic_counters":r.counters,
+        "serial_fallbacks":r.serial_fallbacks,"publication_rejections":r.rejections,"diagnostic_counters":&r.counters[..],
         "added_brackets":r.calls[30..].iter().map(|&n|n as u64).sum::<u64>()-r.reused_brackets,
         "reused_brackets":r.reused_brackets,
     })).collect();
@@ -465,7 +508,7 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
     let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
     #[cfg(not(feature="vita_renderer"))]
     let audio_static_cache=false;
-    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":6,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":COUNTERS,"actor_capacity":ACTORS,"serial_reasons":REASONS,
+    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":7,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":&COUNTERS[..],"actor_capacity":ACTORS,"serial_reasons":REASONS,
         "audio_static_cache":audio_static_cache,"map":map,"regions":&NAMES[..],"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
         "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
@@ -480,8 +523,11 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "residual":"frame_total minus union of root brackets; nested inclusive values must never be summed",
         "query_rule":"exact scene and endpoint bits; previous 1/4/16 attempted frames, excluding same-frame-only repeats; live evictions make hit opportunity a lower bound",
         "schema_notes":"World leaves use census-enabled Totals with four shared boundary reads per draw. With frame_total_only the full profiler is off, so world calls are added_brackets; reused_brackets applies only when the full profiler owns the clocks. Finish API/uniform leaves accumulate locally. With frame_total_only, old MetricInstant reads are inactive: upload API and uniform clocks are added. Otherwise buffer-update block reuses its existing MetricInstant pair. joint_upload_cpu exclusive and joint_uniform_prep are upper bounds including observer overhead. actor_npc_overlays includes electric/frozen entry and visibility restoration; overlay_calls counts these entries under actor_gather. Empty-bracket calibration measures the inactive span path, not active bookkeeping; clock samples include amortized outer reads. No automatic bias subtraction.",
+        "schema7_notes":SCHEMA7_NOTES,"vertex_bytes":std::mem::size_of::<macroquad::prelude::Vertex>(),
+        "tls_counting":crate::tls_count::counting(),
         "observer_threshold_ms":1.0}))?;writeln!(out)?;Ok(())
 }
+const SCHEMA7_NOTES:&str="Schema 7 appends 18 leaves (67..84) and 12 counters (32..43); schema-6 indexes are unchanged. joint_merge_* nest under joint_merge_pack (signature/plan/copy run once per merge bank, normally 2 calls). camera_* nest under camera_scene; the audio listener update stays in camera_scene exclusive with its existing audio_prepare child. gather_* nest under actor_gather and may contain the older actor leaves. world_draw_between is the time between draw i's last world lap and draw i+1's first read; it reuses those reads (reused bracket). merge_*_vertices count vertices, multiply by vertex_bytes for bytes. tls_* are per-frame deltas of the pthread_getspecific counting wrapper and are zero unless the survey enabled tls_count; with census on they include the census's own lookups.";
 fn write_csv(s:&State,out:&mut impl Write)->anyhow::Result<()> {
     write!(out,"accepted_frame,sequence,measured,frame_total_ns,bracket_union_ns,unbracketed_residual_ns,added_brackets,reused_brackets")?;
     for suffix in ["inclusive_ns","exclusive_ns","calls","parent_mask","parent_mask_hi"] {for name in NAMES {write!(out,",{name}_{suffix}")?;}}
@@ -682,7 +728,7 @@ mod tests {
             let mut bytes=Vec::new();write(&s,"fixture",&mut bytes).unwrap();
             let v:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
             assert_eq!(v["rows"][60]["measured_frame"],1);assert_eq!(v["rows"][179]["measured_frame"],120);
-            assert_eq!(v["schema"],6);assert_eq!(v["audio_static_cache"],false);
+            assert_eq!(v["schema"],7);assert_eq!(v["audio_static_cache"],false);
             assert_eq!(v["serial_fallbacks"],0);assert_eq!(v["rows"][0]["serial_fallbacks"],0);
             assert_eq!(v["regions"].as_array().unwrap().len(),NAMES.len());
             assert_eq!(v["actor_capacity"],ACTORS);assert!(v.get("static_count_columns").is_some());
@@ -701,6 +747,94 @@ mod tests {
         s.rows[0].errors=1;assert!(write(&s,"fixture",&mut Vec::new()).is_err());s.rows[0].errors=0;
         s.rows[0].coverage=11;assert!(write(&s,"fixture",&mut Vec::new()).is_err());s.rows[0].coverage=0;
         s.rows[0].total=0;assert!(write(&s,"fixture",&mut Vec::new()).is_err());
+    }
+    /// Schema 7: every new leaf nests under its declared parent, is inert outside it,
+    /// world_draw_between is a reused bracket, rows close, nothing allocates.
+    #[test]
+    #[cfg(feature="frame_total_only")]
+    fn a7_schema7_leaves_nest_under_declared_parents_and_close() {
+        use Region::*;
+        let mut now=Instant::now();begin_survey(now);
+        let scope=crate::kernel_alloc::Scope::begin();
+        for frame in 0..180 {
+            // Outside their parents the new leaves record nothing.
+            for leaf in [MergeCopy,CameraFollow,GatherNpcs] {drop(span(leaf));}
+            {let _f=span(JointFinish);let _m=span(FinishMergePack);
+             {let _p=span(MergePuffBuild);path_count(Counter::MergePuffs,3);}
+             {let _o=span(MergeObserve);path_count(Counter::MergeObserved,9);}
+             for _bank in 0..2 {
+                 drop(span(MergeSignature));
+                 {let _p=span(MergePlan);path_count(if frame%2==0 {Counter::MergePlanHits} else {Counter::MergePlanBuilds},1);}
+                 {let _c=span(MergeCopy);path_count(Counter::MergeCopiedVertices,100);path_count(Counter::MergeCopiedIndices,150);}
+             }}
+            {let _c=span(CameraScene);
+             for leaf in [CameraScripted,CameraFollow,CameraHandoff] {drop(span(leaf));}
+             {let _a=span(AudioPrepare);}
+             for leaf in [CameraPresentation,CameraPrepare3d,CameraTransforms] {drop(span(leaf));}}
+            {let _g=span(ActorGather);
+             for leaf in [GatherStoryPose,GatherFrameBegin,GatherAlice] {drop(span(leaf));}
+             {let _n=span(GatherNpcs);drop(span(ActorPose));}
+             for leaf in [GatherLevelArt,GatherDispatch] {drop(span(leaf));}}
+            {let _w=span(WorldSubmit);
+             let mut totals=crate::frame_profile::Totals::<3>::new();
+             let (mut between,mut calls,mut previous)=(0u64,0u32,None::<Instant>);
+             for _ in 0..40 {let mut start=totals.start();
+                 if let (Some(p),Some(n))=(previous,start) {between+=n.duration_since(p).as_nanos() as u64;calls+=1;}
+                 for i in 0..3 {totals.lap(i,&mut start);} previous=start;}
+             let (ns,c)=totals.census_values().unwrap();world_publish(ns,c,totals.profile_active());
+             world_between_publish(between,calls);
+             // A pushed span of the published-only leaf is refused.
+             drop(span(WorldDrawBetween));}
+            accept(true,frame>=60);now+=std::time::Duration::from_secs(1);
+            survey_presented(now,frame==179);
+        }
+        assert_eq!(scope.finish(),0,"schema-7 hot path allocated");
+        let v=test_survey_json().unwrap();
+        assert_eq!(v["schema"],7);assert_eq!(v["regions"].as_array().unwrap().len(),85);
+        assert_eq!(v["diagnostic_counter_columns"].as_array().unwrap().len(),44);
+        assert!(v["vertex_bytes"].as_u64().unwrap()>0);
+        let parent=|i:usize,p:usize,row:&serde_json::Value| {
+            let m=row["parent_masks"][i].as_u64().unwrap() as u128|(row["parent_masks_hi"][i].as_u64().unwrap() as u128)<<64;
+            assert_eq!(m,1u128<<p,"{} parent",NAMES[i]);};
+        for row in v["rows"].as_array().unwrap() {
+            let calls=|r:Region|row["calls"][r as usize].as_u64().unwrap();
+            for (r,n) in [(MergePuffBuild,1),(MergeObserve,1),(MergeSignature,2),(MergePlan,2),(MergeCopy,2),
+                (CameraScripted,1),(CameraFollow,1),(CameraHandoff,1),(CameraPresentation,1),(CameraPrepare3d,1),(CameraTransforms,1),
+                (GatherStoryPose,1),(GatherFrameBegin,1),(GatherAlice,1),(GatherNpcs,1),(GatherLevelArt,1),(GatherDispatch,1),
+                (WorldDrawBetween,39),(ActorPose,1)] {assert_eq!(calls(r),n,"{}",NAMES[r as usize]);}
+            for i in 67..72 {parent(i,FinishMergePack as usize,row);}
+            for i in 72..78 {parent(i,CameraScene as usize,row);}
+            for i in 78..84 {parent(i,ActorGather as usize,row);}
+            parent(84,WorldSubmit as usize,row);parent(ActorPose as usize,GatherNpcs as usize,row);
+            assert_eq!(row["reused_brackets"],39);assert_eq!(row["hierarchy_errors"],0);
+            let c=&row["diagnostic_counters"];
+            assert_eq!((c[32].as_u64(),c[33].as_u64(),c[34].as_u64().unwrap()+c[35].as_u64().unwrap(),c[38].as_u64(),c[39].as_u64()),
+                (Some(3),Some(9),2,Some(200),Some(300)));
+            let sum:u64=row["exclusive_ns"].as_array().unwrap().iter().map(|n|n.as_u64().unwrap()).sum();
+            assert_eq!(sum,row["bracket_union_ns"].as_u64().unwrap());
+        }
+        if let Ok(dir)=std::env::var("ALICE_TIMING_TEST_OUTPUT") {
+            std::fs::write(std::path::Path::new(&dir).join("a7-synthetic-census.json"),serde_json::to_vec(&v).unwrap()).unwrap();
+            STATE.with(|s| {let s=s.borrow();let mut bytes=Vec::new();write_csv(&s,&mut bytes).unwrap();
+                std::fs::write(std::path::Path::new(&dir).join("a7-synthetic-census.csv"),bytes).unwrap();});
+        }
+        begin(false);
+    }
+    /// Inactive cost of one census span on this host: the gated path (no window ever
+    /// opened in the process) and the thread-local path the schema-6 build always took.
+    /// Prints only. Run alone (`--exact`) so no other test has armed the census first.
+    #[test]
+    fn a7_inactive_span_cost_host() {
+        const N:u32=4_000_000;
+        let run=|| {let start=Instant::now();
+            for _ in 0..N {drop(std::hint::black_box(span(std::hint::black_box(Region::CameraFollow))));}
+            start.elapsed().as_nanos() as f64/f64::from(N)};
+        let gated=EVER_ARMED.load(std::sync::atomic::Ordering::Relaxed);
+        let first=[run(),run(),run()];
+        // Arm on another thread: this thread's ACTIVE stays false, so spans take the TLS check.
+        std::thread::spawn(|| {begin(true);begin(false);}).join().unwrap();
+        let second=[run(),run(),run()];
+        println!("A7_INACTIVE_SPAN_NS gated_first={} first={first:?} tls_path={second:?}",!gated);
     }
     #[test]
     fn observer_cost_microbenchmark() {
