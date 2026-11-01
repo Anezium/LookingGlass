@@ -24,6 +24,13 @@ pub fn count(name: &'static str, n: u64) {
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let _ = (name, n);
 }
+#[inline]
+pub fn uncount(name: &'static str, n: u64) {
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    probe::uncount(name, n);
+    #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+    let _ = (name, n);
+}
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
 pub mod probe;
 

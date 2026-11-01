@@ -20,6 +20,16 @@ impl Revision {
         }
     }
 }
+/// What a worker writes into an owned publication. Opaque255 and VertexAlpha are the
+/// two normalized recipe variants. Raw keeps the exact serial kernel bytes, so the
+/// game thread can rebuild every layer's alpha exactly as the serial fallback does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationMode { Opaque255, VertexAlpha, Raw }
+impl PublicationMode {
+    pub(crate) fn recipe(vertex_alpha: bool) -> Self {
+        if vertex_alpha { Self::VertexAlpha } else { Self::Opaque255 }
+    }
+}
 pub(crate) fn normalize(mut vertex: Vertex, vertex_alpha: bool) -> Vertex {
     vertex.color[3] = if vertex_alpha {
         (255. * (vertex.color[3] as f32 / 255.).clamp(0., 1.)) as u8
