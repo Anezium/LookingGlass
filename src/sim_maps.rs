@@ -113,12 +113,13 @@ pub(crate) fn with_r2_switches<T>(switches: [bool; 3], run: impl FnOnce() -> T) 
     run()
 }
 
-// Round three remains independently default-off pending console acceptance.
+// Round three: default on since r22 (hatter1 console ABBA). In tests an unset
+// LOOKING_GLASS_TEST_SIM_R3 means the shipped default; `off` runs the suite with it off.
 pub fn hatter_door_candidates() -> bool {
     #[cfg(test)]
     { match std::env::var("LOOKING_GLASS_TEST_SIM_R3").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
+        Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
         _ => panic!("LOOKING_GLASS_TEST_SIM_R3 must be off or on"),
     } }
     #[cfg(all(not(test), feature="vita_renderer"))]

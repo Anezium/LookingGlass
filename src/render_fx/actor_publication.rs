@@ -513,13 +513,13 @@ pub(crate) fn with_deferred_layers<T>(on:bool,run:impl FnOnce()->T)->T {
     let _reset=Reset(DEFERRED_TEST.with(|s|s.replace(Some(on))));
     run()
 }
-/// Default off pending console acceptance. Tests: a scoped override, else
-/// LOOKING_GLASS_TEST_DEFERRED_LAYERS=on runs the whole suite with it on.
+/// Default on since r22. Tests: a scoped override, else the shipped default;
+/// LOOKING_GLASS_TEST_DEFERRED_LAYERS=off runs the whole suite with it off.
 pub(crate) fn deferred_layers()->bool {
     #[cfg(test)]
     { DEFERRED_TEST.with(Cell::get).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_DEFERRED_LAYERS").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
+        Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
         _ => panic!("LOOKING_GLASS_TEST_DEFERRED_LAYERS must be off or on"),
     }) }
     #[cfg(not(test))]
@@ -534,13 +534,13 @@ pub(crate) fn with_publication_occurrences<T>(on:bool,run:impl FnOnce()->T)->T {
     let _reset=Reset(OCCURRENCES_TEST.with(|s|s.replace(Some(on))));
     run()
 }
-/// Default off pending console acceptance. Tests: a scoped override, else
-/// LOOKING_GLASS_TEST_PUBLICATION_OCCURRENCES=on runs the whole suite with it on.
+/// Default on since r22. Tests: a scoped override, else the shipped default;
+/// LOOKING_GLASS_TEST_PUBLICATION_OCCURRENCES=off runs the whole suite with it off.
 pub(crate) fn publication_occurrences()->bool {
     #[cfg(test)]
     { OCCURRENCES_TEST.with(|s|s.get()).unwrap_or_else(||match std::env::var("LOOKING_GLASS_TEST_PUBLICATION_OCCURRENCES").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
+        Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
         _ => panic!("LOOKING_GLASS_TEST_PUBLICATION_OCCURRENCES must be off or on"),
     }) }
     #[cfg(not(test))]
@@ -1078,7 +1078,7 @@ mod tests {
     #[test]
     fn deferred_layers_accessor_follows_scoped_override_and_restores_on_unwind() {
         let ambient=deferred_layers();
-        assert_eq!(ambient,std::env::var("LOOKING_GLASS_TEST_DEFERRED_LAYERS").as_deref()==Ok("on"));
+        assert_eq!(ambient,std::env::var("LOOKING_GLASS_TEST_DEFERRED_LAYERS").as_deref()!=Ok("off"));
         for on in [false,true] {
             assert_eq!(with_deferred_layers(on,deferred_layers),on);
             assert_eq!(with_deferred_layers(on,||with_deferred_layers(!on,deferred_layers)),!on);
@@ -1296,7 +1296,7 @@ mod tests {
     #[test]
     fn publication_occurrence_switch_scoped_override_restores_on_unwind_and_env_selects_the_suite_arm() {
         let suite=match std::env::var("LOOKING_GLASS_TEST_PUBLICATION_OCCURRENCES").as_deref() {
-            Err(std::env::VarError::NotPresent) | Ok("off") => false, Ok("on") => true, other => panic!("{other:?}") };
+            Ok("off") => false, Err(std::env::VarError::NotPresent) | Ok("on") => true, other => panic!("{other:?}") };
         println!("publication occurrence suite arm: {}",if suite {"on"} else {"off"});
         assert_eq!(publication_occurrences(),suite);
         for on in [false,true] {
@@ -1308,8 +1308,8 @@ mod tests {
             assert_eq!(publication_occurrences(),!suite);panic!("unwind through the override");
         }));
         assert!(unwound.is_err());assert_eq!(publication_occurrences(),suite);
-        // The test Config is a frozen default; the switch never reads it in tests.
-        assert!(!crate::render::vita_renderer::config().actor_publication_occurrences);
+        // The test Config is a frozen default (on); the switch never reads it in tests.
+        assert!(crate::render::vita_renderer::config().actor_publication_occurrences);
     }
     #[test]
     fn third_same_key_draw_publishes_only_with_occurrences_on() {

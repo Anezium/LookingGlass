@@ -42,6 +42,7 @@ pub struct Config {
     pub sim_npc_sight_cache: bool,
     pub sim_npc_target_stack: bool,
     /// Defer Clockwork door traces until their exact range/facing predicates pass.
+    /// Default on since r22 (console ABBA, hatter1: -6.29 to -7.31 ms).
     pub sim_hatter_door_candidates: bool,
     /// Reuse bit-identical Ant sight traces within one immutable Ant update.
     /// Default on since r21 (console A/B r16d: centipede1 -14.4 to -15.2 ms).
@@ -101,10 +102,11 @@ pub struct Config {
     /// Prepare actor packets once using bounded owned publication banks.
     pub actor_single_prepare: bool,
     /// Give each repeated draw of one actor surface in a frame its own publication
-    /// bank, up to four per frame. Default off pending console acceptance.
+    /// bank, up to four per frame. Default on since r22 (console ABBA, skool2: -1.84 / -2.16 ms).
     pub actor_publication_occurrences: bool,
     /// Skin non-simple actor layer recipes on the workers (raw kernel bytes) and build
-    /// their layers on the game thread after collect. Default off pending console A/B.
+    /// their layers on the game thread after collect. Default on since r22
+    /// (console ABBA, wchess2: -4.47 to -5.01 ms).
     pub actor_deferred_layers: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
@@ -251,7 +253,7 @@ impl Default for Config {
         Self {
             log_frame_time_every: Some(10),
             sim_trigger_facts_reuse: true,
-            sim_hatter_door_candidates: false,
+            sim_hatter_door_candidates: true,
             sim_sight_query_reuse: true,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
@@ -287,8 +289,8 @@ impl Default for Config {
             render_draw_timing: false,
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
-            actor_publication_occurrences: false,
-            actor_deferred_layers: false,
+            actor_publication_occurrences: true,
+            actor_deferred_layers: true,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -2239,9 +2241,9 @@ mod tests {
         }
     }
     #[test]
-    fn publication_occurrences_default_off_require_a_boolean_and_are_printed() {
+    fn publication_occurrences_default_on_require_a_boolean_and_are_printed() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
-            assert!(!c.actor_publication_occurrences);
+            assert!(c.actor_publication_occurrences);
         }
         for enabled in [false, true] {
             let (c, rejected) = parse_runtime_config(serde_json::json!({"actor_publication_occurrences": enabled}).to_string().as_bytes()).unwrap();
@@ -2258,11 +2260,11 @@ mod tests {
         }
     }
     #[test]
-    fn actor_deferred_layers_defaults_off_requires_a_boolean_and_is_printed() {
+    fn actor_deferred_layers_defaults_on_requires_a_boolean_and_is_printed() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
-            assert!(!c.actor_deferred_layers);
+            assert!(c.actor_deferred_layers);
             let [config, _] = config_log_lines(&c);
-            assert!(config.contains("\"actor_deferred_layers\":false"), "{config}");
+            assert!(config.contains("\"actor_deferred_layers\":true"), "{config}");
         }
         for enabled in [false, true] {
             let c: Config = serde_json::from_value(serde_json::json!({"actor_deferred_layers": enabled})).unwrap();
@@ -2278,12 +2280,14 @@ mod tests {
         }
     }
     #[test]
-    fn hatter_door_candidates_default_off_and_require_a_boolean() {
+    fn hatter_door_candidates_default_on_and_require_a_boolean() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
-            assert!(!c.sim_hatter_door_candidates);
+            assert!(c.sim_hatter_door_candidates);
         }
-        let c: Config = serde_json::from_str(r#"{"sim_hatter_door_candidates":true}"#).unwrap();
-        c.validate().unwrap(); assert!(c.sim_hatter_door_candidates);
+        for enabled in [false, true] {
+            let c: Config = serde_json::from_value(serde_json::json!({"sim_hatter_door_candidates": enabled})).unwrap();
+            c.validate().unwrap(); assert_eq!(c.sim_hatter_door_candidates, enabled);
+        }
         for json in [r#"{"sim_hatter_door_candidates":1}"#, r#"{"sim_hatter_door_candidates":"on"}"#] {
             assert!(serde_json::from_str::<Config>(json).is_err());
         }
@@ -2418,6 +2422,37 @@ mod tests {
             v_off.as_object_mut().unwrap().remove(key);
         }
         assert_eq!(v_on, v_off);
+    }
+    #[test]
+    fn r22_human_play_configs_differ_only_in_the_five_levers() {
+        const LEVERS: [&str; 5] = ["sim_trigger_facts_reuse", "sim_sight_query_reuse", "sim_hatter_door_candidates",
+            "actor_publication_occurrences", "actor_deferred_layers"];
+        let parse = |bytes: &[u8]| {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            assert!(c.log_frame_time_every.filter(|&n| n > 0).is_none(), "human play runs without the frame-time log");
+            serde_json::to_value(&c).unwrap()
+        };
+        let mut on = parse(include_bytes!("../../configs/PL-r22-human.json"));
+        let mut off = parse(include_bytes!("../../configs/PL-r22-human-levers-off.json"));
+        let r21 = parse(include_bytes!("../../configs/PL-r21-human.json"));
+        for key in LEVERS {
+            assert_eq!(on[key], true, "{key} on");
+            assert_eq!(off[key], false, "{key} off");
+            assert_eq!(serde_json::to_value(Config::default()).unwrap()[key], true, "{key} shipped default");
+        }
+        // r22 human = r21 human plus the three new levers.
+        let mut r21_plus = r21.clone();
+        for key in ["sim_hatter_door_candidates", "actor_publication_occurrences", "actor_deferred_layers"] {
+            r21_plus[key] = serde_json::json!(true);
+        }
+        assert_eq!(on, r21_plus);
+        for key in LEVERS {
+            on.as_object_mut().unwrap().remove(key);
+            off.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(on, off);
     }
     #[test]
     fn fx_cpu_candidates_default_off_and_require_boolean_values() {
