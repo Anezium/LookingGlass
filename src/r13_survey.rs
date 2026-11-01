@@ -259,6 +259,24 @@ impl Survey {
         assert!(!line.contains('\n'));
         CENSUS.store(false,Relaxed);
     }
+    // A census window opened with counting on says so in its export, although
+    // counting is already off again when the export is written.
+    #[cfg(feature="frame_total_only")]
+    #[test]fn census_export_records_tls_counting_of_its_window(){
+        let _lock=crate::tls_count::TEST_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        for tls in [false,true] {
+            crate::phase_census::test_begin(false);
+            let mut s=fixture(true);s.config.tls_count=tls;let mut now=Instant::now();
+            s.accept(true);assert!(!s.presented_at("utemple",true,false,now).unwrap());
+            assert!(!s.presented_at("utemple",true,true,now).unwrap());
+            for i in 0..180 {crate::light_profile::begin("utemple",crate::frame_profile::Mode::Full);
+                crate::phase_census::accept(true,true);s.accept(true);now+=std::time::Duration::from_millis(16);
+                assert_eq!(s.presented_at("utemple",true,false,now).unwrap(),i==179);}
+            assert!(!crate::tls_count::counting());
+            assert_eq!(crate::phase_census::test_survey_json().unwrap()["tls_counting"],tls);
+            CENSUS.store(false,Relaxed);
+        }
+    }
     #[test]fn rejects_path_injection_and_simultaneous_observers(){
         for (map,a,c,ok) in [("potears1",true,false,true),("../x",false,false,false),("hatter1",true,true,false)] {
             assert_eq!(validate(&Config{enabled:true,map:map.into(),allocation:a,census:c,tag:"memory".into(),physical_input:false,tls_count:false}).is_ok(),ok);}

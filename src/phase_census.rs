@@ -96,12 +96,14 @@ struct State {
     serial_fallback_base: u64,
     controller:usize, category:usize, epoch:u64, exact:[ExactEntry;1024],
     tls_base:crate::tls_count::Snapshot,
+    /// TLS counting state when the survey window opened (the survey arms counting first).
+    tls_window:bool,
 }
 impl State {
     #[cfg(test)]
     const fn new() -> Self { Self { rows:[Row::ZERO;CAPACITY],current:Row::ZERO,count:0,accepted:0,
         start:None,pending:false,overflow:false,sequence:0,owner:Owner::Other,sweep_depth:0,scene:0,query_class:0,
-        stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE],serial_fallback_base:0,controller:2,category:4,epoch:0,exact:[ExactEntry::EMPTY;1024],tls_base:crate::tls_count::Snapshot::ZERO } }
+        stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE],serial_fallback_base:0,controller:2,category:4,epoch:0,exact:[ExactEntry::EMPTY;1024],tls_base:crate::tls_count::Snapshot::ZERO,tls_window:false } }
     fn boxed() -> Box<Self> {
         // Initialize bounded storage once, before gameplay. A full const State
         // would embed the enlarged actor rows in the native ELF's initializer.
@@ -132,6 +134,7 @@ impl State {
             std::ptr::addr_of_mut!((*p).epoch).write(0);
             std::ptr::addr_of_mut!((*p).exact).write([ExactEntry::EMPTY;1024]);
             std::ptr::addr_of_mut!((*p).tls_base).write(crate::tls_count::Snapshot::ZERO);
+            std::ptr::addr_of_mut!((*p).tls_window).write(false);
             storage.assume_init()
         }
     }
@@ -232,7 +235,7 @@ pub(crate) fn export_survey(map:&str)->anyhow::Result<()> {
 // Its presentation timestamp owns BOTH the CSV interval and the census row.
 #[cfg(any(target_os="vita",test))]
 pub(crate) fn begin_survey(now:Instant) {
-    STATE.with(|s| {let mut s=s.borrow_mut();s.count=0;s.accepted=0;s.start=None;
+    STATE.with(|s| {let mut s=s.borrow_mut();s.count=0;s.accepted=0;s.start=None;s.tls_window=crate::tls_count::counting();
         s.pending=false;s.overflow=false;s.sequence=0;s.depth=0;s.sweep_depth=0;
         s.table.fill(Entry::EMPTY);s.exact.fill(ExactEntry::EMPTY);});
     begin_at(true,now);
@@ -524,7 +527,7 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "query_rule":"exact scene and endpoint bits; previous 1/4/16 attempted frames, excluding same-frame-only repeats; live evictions make hit opportunity a lower bound",
         "schema_notes":"World leaves use census-enabled Totals with four shared boundary reads per draw. With frame_total_only the full profiler is off, so world calls are added_brackets; reused_brackets applies only when the full profiler owns the clocks. Finish API/uniform leaves accumulate locally. With frame_total_only, old MetricInstant reads are inactive: upload API and uniform clocks are added. Otherwise buffer-update block reuses its existing MetricInstant pair. joint_upload_cpu exclusive and joint_uniform_prep are upper bounds including observer overhead. actor_npc_overlays includes electric/frozen entry and visibility restoration; overlay_calls counts these entries under actor_gather. Empty-bracket calibration measures the inactive span path, not active bookkeeping; clock samples include amortized outer reads. No automatic bias subtraction.",
         "schema7_notes":SCHEMA7_NOTES,"vertex_bytes":std::mem::size_of::<macroquad::prelude::Vertex>(),
-        "tls_counting":crate::tls_count::counting(),
+        "tls_counting":s.tls_window,
         "observer_threshold_ms":1.0}))?;writeln!(out)?;Ok(())
 }
 const SCHEMA7_NOTES:&str="Schema 7 appends 18 leaves (67..84) and 12 counters (32..43); schema-6 indexes are unchanged. joint_merge_* nest under joint_merge_pack (signature/plan/copy run once per merge bank, normally 2 calls). camera_* nest under camera_scene; the audio listener update stays in camera_scene exclusive with its existing audio_prepare child. gather_* nest under actor_gather and may contain the older actor leaves. world_draw_between is the time between draw i's last world lap and draw i+1's first read; it reuses those reads (reused bracket). merge_*_vertices count vertices, multiply by vertex_bytes for bytes. tls_* are per-frame deltas of the pthread_getspecific counting wrapper and are zero unless the survey enabled tls_count; with census on they include the census's own lookups.";
