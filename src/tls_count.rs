@@ -118,9 +118,15 @@ mod vita {
     /// Link-time replacement for every `pthread_getspecific` reference (build.rs).
     /// `pthread_getspecific(NULL)` returns NULL; otherwise the key handle's first
     /// word is the OS key that the list stores at +4 (libpthread `pthread_getspecific.o`).
+    /// The off path is one load, one branch and a tail call; counting stays out of line.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_pthread_getspecific(key: *const core::ffi::c_void) -> *mut core::ffi::c_void {
-        if !COUNTING.load(Relaxed) { return unsafe { __real_pthread_getspecific(key) }; }
+        if COUNTING.load(Relaxed) { return unsafe { counted(key) }; }
+        unsafe { __real_pthread_getspecific(key) }
+    }
+    #[cold]
+    #[inline(never)]
+    unsafe fn counted(key: *const core::ffi::c_void) -> *mut core::ffi::c_void {
         if key.is_null() { return core::ptr::null_mut(); }
         let os_key = unsafe { *(key as *const u32) };
         let head = unsafe { vitasdk_get_tls_data(0) };
