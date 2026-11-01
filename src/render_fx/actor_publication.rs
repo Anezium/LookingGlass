@@ -184,15 +184,24 @@ impl State {
         let id=if let Some(&id)=self.lookup.get(&key) {id} else {
             let id=if let Some(id)=self.banks.iter().position(|b|b.key.is_none()) {id}
                 else if self.banks.len()<SURFACES {self.banks.push(Bank::default());self.banks.len()-1}
-                else {let id=self.oldest_unused()?;self.evict(id);id};
+                else {let id=self.oldest_unused().or_else(||{crate::phase_census::rejection(6);None})?;self.evict(id);id};
             self.banks[id].key=Some(key); self.lookup.insert(key,id); id
         };
         self.banks[id].last_used=self.epoch;
         loop {
             if let Some(result)=self.reserve_at(mesh,cpu.clone(),unchanged,instance,alpha,id) {return Some(result);}
             // Held slots cannot be reclaimed; evict only unrelated unused ids.
-            if self.banks[id].slots.iter().enumerate().all(|(slot,g)|g.as_ref().is_some_and(|g|Rc::strong_count(g)>1 || self.banks[id].epoch[slot]==self.epoch)) {return None;}
-            self.evict(self.oldest_unused()?);
+            if self.banks[id].slots.iter().enumerate().all(|(slot,g)|g.as_ref().is_some_and(|g|Rc::strong_count(g)>1 || self.banks[id].epoch[slot]==self.epoch)) {crate::phase_census::rejection(7);return None;}
+            self.evict(self.oldest_unused().or_else(||{
+                if crate::phase_census::active() {
+                    let reason=self.banks[id].slots.iter().enumerate().position(|(slot,g)|g.as_ref().is_none_or(|g|Rc::strong_count(g)==1 && (self.epoch==0 || self.banks[id].epoch[slot]!=self.epoch))).map_or(9, |slot| {
+                        let old=self.banks[id].slots[slot].as_ref().map_or(0,|g|g.vertices.capacity());
+                        if self.vertex_capacity-old+old.max(mesh.vertices.len())>VERTICES {8}else{9}
+                    });
+                    crate::phase_census::rejection(reason);
+                }
+                None
+            })?);
         }
     }
 
@@ -612,6 +621,7 @@ pub(crate) fn end() {
 /// Occurrence banks apply to direct recipe draws only; deferred draws keep one key.
 pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,key:Key)->Option<(usize,PublicationMode)> {
     let texture=mesh.texture.as_ref();
+    if texture.is_none() {crate::phase_census::rejection(0);}
     #[cfg(test)]
     let surface=texture.and_then(super::test_support::surface);
     #[cfg(not(test))]
@@ -619,9 +629,9 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
     let surface=surface.or_else(||texture.and_then(|t|SURFACE_LOOKUP.with(|s|s.borrow().get(&t.raw_miniquad_id()).and_then(Weak::upgrade))));
     #[cfg(test)]
     let surface=surface.or_else(super::test_surface);
-    let surface=surface?;
+    let surface=surface.or_else(||{if texture.is_some() {crate::phase_census::rejection(1);}None})?;
     note_eligibility(&surface);
-    if SKIN_OPACITY.with(Cell::get)!=1. {return None;}
+    if SKIN_OPACITY.with(Cell::get)!=1. {crate::phase_census::rejection(2);return None;}
     let (time,appearance)=FRAME.with(|f| {let f=f.borrow();(f.time,f.appearance)});
     let Some((passes,alpha))=actor_cache::recipe(&surface,time,appearance) else {
         // recipe() has no side effect when it refuses; the serial fallback stays exact.
@@ -636,7 +646,7 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
         let (id,slot,output)=s.reserve_key(mesh,cpu,unchanged,instance,mode,key)?;
         let n=mesh.vertices.len()*passes.as_ref().unwrap().len();
         let used=FRAME.with(|f|f.borrow().vertices);
-        if s.frame_budget_rejects(id,slot,used,n) {return None;}
+        if s.frame_budget_rejects(id,slot,used,n) {crate::phase_census::rejection(10);return None;}
         let group=FRAME.with(|f| {
             let mut f=f.borrow_mut();
             f.vertices+=n;let id=f.groups.len();

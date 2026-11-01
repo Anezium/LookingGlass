@@ -67,6 +67,8 @@ impl Buffer {
             let mid = puffs.len()/2;
             let (a,b) = self.output.split_at_mut(mid);
             let (ra,rb) = self.recipes.split_at(mid);
+            let _pair=crate::phase_census::span(crate::phase_census::Region::FxPairWait);
+            crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::PairJobs,1);
             crate::character::skinning::overlap::cpu_pair(||kernel(ra,a),||kernel(rb,b));
         } else { kernel(&self.recipes,&mut self.output); }
         if raw {

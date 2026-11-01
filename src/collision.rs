@@ -651,13 +651,30 @@ fn sah_switch() -> bool {
     #[cfg(not(feature="vita_renderer"))]
     { false }
 }
+static R13_GEOMETRIES:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
+static R13_GEOMETRY_BYTES:[std::sync::atomic::AtomicUsize;3]=[const{std::sync::atomic::AtomicUsize::new(0)};3];
 impl StaticGeometry {
+    fn census_capacities(&self)->[usize;3] {
+        fn tree(n:&Node)->usize {match n {
+            Node::Leaf{hulls,..}=>hulls.capacity()*std::mem::size_of::<usize>(),
+            Node::Branch{left,right,..}=>2*std::mem::size_of::<Node>()+tree(left)+tree(right),
+        }}
+        [self.hulls.capacity()*std::mem::size_of::<Hull>()
+            +self.hulls.iter().map(|h|h.planes.capacity()*std::mem::size_of::<crate::bsp::Plane>()).sum::<usize>(),
+            self.tree.as_ref().map_or(0,tree),self.sah.as_ref().map_or(0,|h|h.storage_bytes())]
+    }
     fn new(hulls: Vec<Hull>, tree: Option<Node>) -> Self {
         Self::with_acceleration(hulls, tree, true)
     }
     fn with_acceleration(hulls: Vec<Hull>, tree: Option<Node>, accelerate: bool) -> Self {
         let sah = if accelerate && sah_switch() { tree.as_ref().map(|t| sah::Hierarchy::build(&hulls,t)) } else {None};
-        Self {hulls,tree,sah}
+        let out=Self {hulls,tree,sah};
+        if crate::allocation_census::enabled(){
+            use std::sync::atomic::Ordering::Relaxed;
+            for (counter,n) in R13_GEOMETRY_BYTES.iter().zip(out.census_capacities()){counter.fetch_add(n,Relaxed);}
+            R13_GEOMETRIES.fetch_add(1,Relaxed);
+        }
+        out
     }
     fn trace(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> (Trace,u32,u32) {
         let mut counts = sah::Counts::default();
@@ -691,8 +708,33 @@ impl StaticGeometry {
         self.trace(start,end,Vec3::ZERO,&query).0
     }
 }
+impl Drop for StaticGeometry {fn drop(&mut self){
+    if crate::allocation_census::enabled(){
+        use std::sync::atomic::Ordering::Relaxed;
+        for (counter,n) in R13_GEOMETRY_BYTES.iter().zip(self.census_capacities()){counter.fetch_sub(n,Relaxed);}
+        R13_GEOMETRIES.fetch_sub(1,Relaxed);
+    }
+}}
 impl World {
+    pub(crate) fn census_payload(&self)->serde_json::Value {
+        fn tree(n:&Node)->usize {match n {
+            Node::Leaf{hulls,..}=>hulls.capacity()*std::mem::size_of::<usize>(),
+            Node::Branch{left,right,..}=>2*std::mem::size_of::<Node>()+tree(left)+tree(right),
+        }}
+        let g=&self.static_geometry;
+        serde_json::json!({"geometry_identity":std::sync::Arc::as_ptr(g) as usize,
+            "geometry_arc_owners":std::sync::Arc::strong_count(g),
+            "all_live_unique_static_geometries":R13_GEOMETRIES.load(std::sync::atomic::Ordering::Relaxed),
+            "all_live_hulls_tree_sah_capacity_bytes":R13_GEOMETRY_BYTES.each_ref().map(|v|v.load(std::sync::atomic::Ordering::Relaxed)),
+            "hulls_planes_capacity_bytes":g.hulls.capacity()*std::mem::size_of::<Hull>()
+                +g.hulls.iter().map(|h|h.planes.capacity()*std::mem::size_of::<crate::bsp::Plane>()).sum::<usize>(),
+            "legacy_tree_capacity_bytes":g.tree.as_ref().map_or(0,tree),
+            "sah_capacity_bytes":g.sah.as_ref().map_or(0,|h|h.storage_bytes()),
+            "scope":"one live static geometry; Arc aliases share it; excludes dynamic colliders and allocator metadata"})
+    }
+
     fn invalidate_npc_sight(&mut self) {
+        crate::phase_census::solid_publication();
         self.npc_sight_cache.get_mut().clear();
         // Unreachable while a reuse scope is open (it borrows self); kept so a
         // mutation can never leave an entry behind, whatever the call order.
@@ -738,6 +780,8 @@ impl World {
             #[cfg_attr(not(test), allow(unused_mut))]
             let mut memo = self.sight_memo.borrow_mut();
             if let Some(trace) = memo.entries.iter().find(|(k, _)| *k == key).map(|(_, t)| *t) {
+                // Keep the census query/repeat counts identical to an uncached sweep.
+                crate::phase_census::query_key(self, start, end, half, 1, None);
                 #[cfg(test)]
                 { memo.hits += 1; }
                 crate::sim_maps::count("sight_reuse_hits", 1);
@@ -769,11 +813,13 @@ impl World {
     /// Full trace reuse, including dynamic/settled/weapon geometry. Keys use
     /// float bits (no tolerance), and never escape the owning collision world.
     pub(crate) fn npc_sight(&self, start: Vec3, end: Vec3) -> Trace {
+        let _category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Sight);
         if !crate::sim_maps::npc_sight_cache() {
             return self.sweep(start, end, Vec3::splat(0.5));
         }
         let key = Self::query_key(start, end, Vec3::splat(0.5));
         if let Some(trace) = self.npc_sight_cache.borrow().get(&key).copied() {
+            crate::phase_census::query_key(self,start,end,Vec3::splat(0.5),1,None);
             crate::sim_maps::count("npc_sight_cache_hits", 1);
             return trace;
         }
@@ -803,6 +849,7 @@ impl World {
         Self::from_bsp_mask(map, PLAYER_MASK, false)
     }
     fn empty_shell(static_geometry: std::sync::Arc<StaticGeometry>, brush_count: usize, min: Vec3, max: Vec3) -> Self {
+        crate::phase_census::solid_publication();
         Self {
             npc_sight_cache: std::cell::RefCell::default(),
             query_cache: std::cell::RefCell::default(),
@@ -884,6 +931,8 @@ impl World {
         Self::from_bsp_mask(map, 1 | 0x20000, true)
     }
     fn from_bsp_mask(map: &Bsp, mask: i32, accelerate: bool) -> Result<Self> {
+        crate::phase_census::solid_publication();
+        let _r13_memory = crate::allocation_census::Scope::new(3);
         let mut hulls = Vec::new();
         let mut liquids = Vec::new();
         for index in map.world_brushes.clone() {
@@ -1007,7 +1056,7 @@ impl World {
 
     /// Trace a box centre from start to end. Zero extents give a point trace.
     pub fn sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
-        let _census = crate::phase_census::sweep();
+        let _census = crate::phase_census::query_sweep(self,start,end,half,1,None);
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::SweepCalls, 1);
@@ -1017,7 +1066,7 @@ impl World {
     /// Damage traces may contact a destructible obstacle itself, but must still
     /// respect every other obstacle. Movement never supplies an exception.
     pub fn sweep_except(&self, start: Vec3, end: Vec3, half: Vec3, ignore: Option<usize>) -> Trace {
-        let _census = crate::phase_census::sweep();
+        let _census = crate::phase_census::query_sweep(self,start,end,half,1,ignore);
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::SweepExceptCalls, 1);
@@ -1035,11 +1084,12 @@ impl World {
     }
     /// Visible scenery can block the view without changing player or weapon collision.
     pub fn set_camera_obstacles(&mut self, obstacles: Vec<Collider>) {
+        crate::phase_census::solid_publication();
         self.camera_obstacles = obstacles;
     }
     pub fn camera_sweep(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Camera);
-        let _census = crate::phase_census::sweep();
+        let _census = crate::phase_census::query_sweep(self,start,end,half,3,None);
         #[cfg(target_os = "vita")]
         {
             add_counter(Counter::CameraSweepCalls, 1);
@@ -1071,7 +1121,7 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
-        let _census = crate::phase_census::sweep();
+        let _census = crate::phase_census::query_sweep(self,start,end,half,2,None);
         self.npc_profile.sweep();
         crate::sim_maps::count("world_sweeps", 1);
         #[cfg(test)]
@@ -1363,6 +1413,7 @@ impl World {
     }
 
     pub fn fixture(boxes: &[(Vec3, Vec3)]) -> Self {
+        crate::phase_census::solid_publication();
         let hulls = Self::box_hulls(boxes);
         let tree = if hulls.is_empty() {
             None
@@ -1558,7 +1609,7 @@ mod tests {
                 super::Vec3::new(100., 10., 10.),
             ),
         ]);
-        let collider = super::Collider::from_hulls(std::sync::Arc::try_unwrap(world.static_geometry).unwrap().hulls);
+        let collider = super::Collider::from_hulls(std::sync::Arc::try_unwrap(world.static_geometry).unwrap().hulls.clone());
         assert!(!collider.contains(super::Vec3::ZERO));
         assert!(collider.contains(collider.interior_point().unwrap()));
     }

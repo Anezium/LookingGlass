@@ -1,0 +1,128 @@
+use core::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering::Relaxed};
+static ENABLED:AtomicBool=AtomicBool::new(false);
+static ID_CALLS:AtomicUsize=AtomicUsize::new(0);
+static SAMPLES:AtomicUsize=AtomicUsize::new(0);
+static LAST_SAMPLE_PAYLOAD:AtomicUsize=AtomicUsize::new(0);
+static PAYLOAD:AtomicUsize=AtomicUsize::new(0);
+static ARGS:[AtomicUsize;3]=[const {AtomicUsize::new(0)};3];
+static OUTPUT:AtomicUsize=AtomicUsize::new(0x12340);
+static ERRNO:AtomicI32=AtomicI32::new(0);
+static PAYLOAD_ERRNO:AtomicI32=AtomicI32::new(0);
+thread_local! {static THREAD_ID:std::cell::Cell<i32>=const {std::cell::Cell::new(11)};}
+#[no_mangle] pub extern "C" fn sceKernelGetThreadId()->i32 {
+    ID_CALLS.fetch_add(1,Relaxed);THREAD_ID.with(|id|id.get())
+}
+#[repr(C)] pub struct MallInfo {fields:[usize;10]}
+#[no_mangle] pub extern "C" fn _mallinfo_r(r:*mut c_void)->MallInfo {
+    assert!(r.is_null());SAMPLES.fetch_add(1,Relaxed);
+    LAST_SAMPLE_PAYLOAD.store(PAYLOAD.load(Relaxed),Relaxed);
+    let mut fields=[0;10];fields[0]=1024;fields[7]=128;MallInfo{fields}
+}
+fn payload(tag:usize,args:[usize;3])->*mut c_void {
+    PAYLOAD.store(tag,Relaxed);
+    for (out,v) in ARGS.iter().zip(args) {out.store(v,Relaxed);}
+    ERRNO.store(PAYLOAD_ERRNO.load(Relaxed),Relaxed);
+    OUTPUT.load(Relaxed) as *mut c_void
+}
+#[no_mangle] pub extern "C" fn __real_malloc(n:usize)->*mut c_void {payload(1,[n,0,0])}
+#[no_mangle] pub extern "C" fn __real_calloc(n:usize,s:usize)->*mut c_void {payload(2,[n,s,0])}
+#[no_mangle] pub extern "C" fn __real_realloc(p:*mut c_void,n:usize)->*mut c_void {payload(3,[p as usize,n,0])}
+#[no_mangle] pub extern "C" fn __real_free(p:*mut c_void) {payload(4,[p as usize,0,0]);}
+#[no_mangle] pub extern "C" fn __real_memalign(a:usize,n:usize)->*mut c_void {payload(5,[a,n,0])}
+#[no_mangle] pub extern "C" fn __real__malloc_r(r:*mut c_void,n:usize)->*mut c_void {payload(6,[r as usize,n,0])}
+#[no_mangle] pub extern "C" fn __real__calloc_r(r:*mut c_void,n:usize,s:usize)->*mut c_void {payload(7,[r as usize,n,s])}
+#[no_mangle] pub extern "C" fn __real__realloc_r(r:*mut c_void,p:*mut c_void,n:usize)->*mut c_void {payload(8,[r as usize,p as usize,n])}
+#[no_mangle] pub extern "C" fn __real__memalign_r(r:*mut c_void,a:usize,n:usize)->*mut c_void {payload(9,[r as usize,a,n])}
+#[no_mangle] pub extern "C" fn __real__free_r(r:*mut c_void,p:*mut c_void) {payload(10,[r as usize,p as usize,0]);}
+fn reset(enabled:bool,transition:bool) {
+    ENABLED.store(enabled,Relaxed);THREAD_ID.with(|id|id.set(11));
+    allocation_census::peak::reset_for_test();transition_memory::reset_for_test(transition);
+    ID_CALLS.store(0,Relaxed);SAMPLES.store(0,Relaxed);PAYLOAD.store(0,Relaxed);
+    LAST_SAMPLE_PAYLOAD.store(0,Relaxed);OUTPUT.store(0x12340,Relaxed);
+    ERRNO.store(37,Relaxed);PAYLOAD_ERRNO.store(37,Relaxed);
+}
+fn check(tag:usize,args:[usize;3],out:*mut c_void) {
+    assert_eq!(PAYLOAD.load(Relaxed),tag);assert_eq!(ARGS.each_ref().map(|a|a.load(Relaxed)),args);
+    assert_eq!(out as usize,OUTPUT.load(Relaxed));assert_eq!(ERRNO.load(Relaxed),PAYLOAD_ERRNO.load(Relaxed));
+}
+fn released() {
+    let guard=allocation_census::peak::Guard::enter(0,0,false);
+    assert_eq!(allocation_census::peak::fallbacks(),0);drop(guard);
+    THREAD_ID.with(|id|id.set(22));
+    let guard=allocation_census::peak::Guard::enter(0,0,false);
+    assert_eq!(allocation_census::peak::fallbacks(),0);drop(guard);
+    THREAD_ID.with(|id|id.set(11));
+}
+#[test] fn all_ten_matching_payloads_preserve_arguments_return_and_errno() {unsafe {
+    use kernel_alloc::*;
+    for enabled in [false,true] {for null in [false,true] {
+        reset(enabled,false);if null {OUTPUT.store(0,Relaxed);PAYLOAD_ERRNO.store(12,Relaxed);}
+        let r=0x7770 as *mut c_void;let p=0x8880 as *mut c_void;
+        check(1,[19,0,0],__wrap_malloc(19));released();
+        check(2,[3,17,0],__wrap_calloc(3,17));released();
+        check(3,[p as usize,41,0],__wrap_realloc(p,41));released();
+        __wrap_free(p);check(4,[p as usize,0,0],OUTPUT.load(Relaxed) as *mut c_void);released();
+        check(5,[256,81,0],__wrap_memalign(256,81));released();
+        check(6,[r as usize,21,0],__wrap__malloc_r(r,21));released();
+        check(7,[r as usize,5,23],__wrap__calloc_r(r,5,23));released();
+        check(8,[r as usize,p as usize,67],__wrap__realloc_r(r,p,67));released();
+        check(9,[r as usize,512,101],__wrap__memalign_r(r,512,101));released();
+        __wrap__free_r(r,p);check(10,[r as usize,p as usize,0],OUTPUT.load(Relaxed) as *mut c_void);released();
+    }}
+}}
+#[test] fn default_off_is_inert_and_zero_null_invalid_requests_reach_payload() {unsafe {
+    use kernel_alloc::*;reset(false,false);
+    check(2,[0,usize::MAX,0],__wrap_calloc(0,usize::MAX));
+    check(2,[usize::MAX,2,0],__wrap_calloc(usize::MAX,2));
+    check(3,[0,0,0],__wrap_realloc(core::ptr::null_mut(),0));
+    check(5,[3,0,0],__wrap_memalign(3,0));
+    __wrap_free(core::ptr::null_mut());assert_eq!(ARGS[0].load(Relaxed),0);
+    assert_eq!(SAMPLES.load(Relaxed),0);assert_eq!(ID_CALLS.load(Relaxed),0);
+    assert_eq!(allocation_census::peak::state_for_test(),[0;4]);
+}}
+#[test] fn calloc_overflow_saturates_only_observer_and_releases_after_null() {unsafe {
+    reset(true,false);OUTPUT.store(0,Relaxed);PAYLOAD_ERRNO.store(12,Relaxed);
+    check(2,[usize::MAX,2,0],kernel_alloc::__wrap_calloc(usize::MAX,2));
+    assert_eq!(LAST_SAMPLE_PAYLOAD.load(Relaxed),2);assert_eq!(SAMPLES.load(Relaxed),1);
+    assert_eq!(allocation_census::peak::bounds(),[128,192*1024*1024]);released();
+    check(7,[0,usize::MAX,2],kernel_alloc::__wrap__calloc_r(core::ptr::null_mut(),usize::MAX,2));released();
+}}
+#[test] fn nesting_never_releases_outer_owner_and_contention_never_waits() {unsafe {
+    reset(true,false);
+    let outer=allocation_census::peak::Guard::enter(65536,0,true);
+    let state=allocation_census::peak::state_for_test();assert_eq!(state[1],65536+64);
+    kernel_alloc::__wrap_malloc(33);
+    assert_eq!(allocation_census::peak::state_for_test(),state);assert_eq!(SAMPLES.load(Relaxed),0);
+    std::thread::spawn(|| {
+        THREAD_ID.with(|id|id.set(22));kernel_alloc::__wrap_malloc(49);
+    }).join().unwrap();
+    assert_eq!(allocation_census::peak::fallbacks(),1);
+    assert_eq!(allocation_census::peak::bounds()[1],192*1024*1024);
+    assert_eq!(SAMPLES.load(Relaxed),0);drop(outer);
+    assert_eq!(SAMPLES.load(Relaxed),1);assert_eq!(allocation_census::peak::bounds()[1],192*1024*1024);
+    THREAD_ID.with(|id|id.set(22));let guard=allocation_census::peak::Guard::enter(1,0,true);drop(guard);
+    assert_eq!(allocation_census::peak::fallbacks(),1);
+}}
+#[test] fn sample_cadence_alignment_growth_and_raii_release() {
+    reset(true,false);
+    for _ in 0..129 {drop(allocation_census::peak::Guard::enter(1,0,true));}
+    assert_eq!(SAMPLES.load(Relaxed),2);
+    assert_eq!(allocation_census::peak::state_for_test()[2],129);
+    let guard=allocation_census::peak::Guard::enter(31,256,true);
+    assert_eq!(allocation_census::peak::state_for_test()[1],31+256+64);drop(guard);
+    drop(allocation_census::peak::Guard::enter(65536,0,true));assert_eq!(SAMPLES.load(Relaxed),3);
+    let unwind=std::panic::catch_unwind(|| {let _guard=allocation_census::peak::Guard::enter(1,0,true);panic!("host Rust-scope RAII control");});
+    assert!(unwind.is_err());released();
+    THREAD_ID.with(|id|id.set(0));drop(allocation_census::peak::Guard::enter(1,0,true));
+    assert_eq!(allocation_census::peak::fallbacks(),1);
+    assert_eq!(allocation_census::peak::bounds()[1],192*1024*1024);
+}
+#[test] fn transition_sampling_and_kernel_count_still_wrap_matching_payload() {unsafe {
+    reset(true,true);kernel_alloc::begin();
+    kernel_alloc::__wrap_malloc(65536);assert_eq!(LAST_SAMPLE_PAYLOAD.load(Relaxed),1);
+    kernel_alloc::__wrap_calloc(usize::MAX,2);assert_eq!(LAST_SAMPLE_PAYLOAD.load(Relaxed),2);
+    kernel_alloc::__wrap_realloc(core::ptr::null_mut(),1);assert_eq!(LAST_SAMPLE_PAYLOAD.load(Relaxed),3);
+    assert_eq!(kernel_alloc::finish(),3);
+    assert_eq!(transition_memory::state_for_test(),[128,1024,1]);released();
+}}

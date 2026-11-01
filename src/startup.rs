@@ -37,6 +37,7 @@ impl Phase {
     }
     pub fn mark(&mut self, label: &str) {
         crate::transition_memory::phase(self.scope, label);
+        if crate::allocation_census::enabled(){crate::allocation_census::snapshot(label);}
         let now = Instant::now();
         let counters = STATE.with(|s| s.borrow().1);
         eprintln!("[lg/startup] {} {label} elapsed_ms={:.3} total_ms={:.3}", self.scope,

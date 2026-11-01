@@ -996,7 +996,6 @@ impl Steam {
             let _hotspot = crate::frame_profile::span("particles_retain");
             self.puffs.retain(|p| p.age < p.life);
         }
-        #[cfg(target_os = "vita")]
         let retained = self.puffs.len() as u32;
         #[cfg(target_os = "vita")]
         let _emit_profile = crate::frame_profile::span("particles_emit");
@@ -1057,6 +1056,7 @@ impl Steam {
         }
         // Stable retain and append order is birth order for world puffs. Drop
         // the oldest live births first; emitter RNG/credit still run normally.
+        crate::phase_census::path_count(crate::phase_census::Counter::WorldNew,self.puffs.len() as u64 - retained as u64);
         #[cfg(target_os = "vita")]
         let births = self.puffs.len() as u32 - retained;
         let dropped = self.puffs.len().saturating_sub(config.puff_cap);
@@ -1232,6 +1232,7 @@ impl Steam {
             add_counter(Counter::PuffsBirths, self.puffs.len() as u32 - retained);
         }
     }
+    pub(crate) fn live_puffs(&self)->u64 {self.puffs.len() as u64}
     pub fn depths(&self, camera: Vec3, direction: Vec3) -> impl Iterator<Item = (usize, f32)> + '_ {
         self.puffs
             .iter()
@@ -1248,6 +1249,8 @@ impl Steam {
     }
     #[cfg(feature="vita_renderer")]
     pub(crate) fn prepare_quads(&self, camera: Vec3, direction: Option<Vec3>) {
+        let _quads=crate::phase_census::span(crate::phase_census::Region::FxQuadBuild);
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::QuadSets,1);
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             if let Some(direction) = direction.filter(|_| crate::render_fx::world_puff_batches_active()) {
                 self.quads.borrow_mut().prepare_world(&self.puffs, &self.emitters, camera, direction);
@@ -1690,6 +1693,8 @@ impl Attached {
         let _packets = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Packets);
         self.steam.prepare_draw(camera, atmosphere);
         #[cfg(feature="vita_renderer")] self.steam.prepare_quads(camera, None);
+        let _registration=crate::phase_census::span(crate::phase_census::Region::FxRegistration);
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::Registrations,1);
         let mut order = if self.reuse_scratch { std::mem::take(&mut self.order) } else { Vec::new() };
         order.clear();
         order.extend(self
@@ -1733,6 +1738,9 @@ impl Attached {
     ) {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _profile = crate::frame_profile::span("attached_sample");
+        let _sample=crate::phase_census::span(crate::phase_census::Region::FxAttachedSample);
+        let mut diagnostic_new=0u64;
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::AttachedSamples,1);
         self.steam.puffs.clear();
         self.live_births.clear();
         let mut previous = if self.reuse_scratch { Default::default() } else { std::mem::take(&mut self.births) };
@@ -1778,7 +1786,7 @@ impl Attached {
                 }
                 let key = (index, birth);
                 let pose = if self.reuse_scratch { self.births.get(&key).copied() } else { previous.remove(&key) }
-                    .unwrap_or_else(|| birth_pose(at, e.spec.tag.as_deref()));
+                    .unwrap_or_else(|| {diagnostic_new+=1;birth_pose(at, e.spec.tag.as_deref())});
                 self.births.insert(key, pose);
                 if self.reuse_scratch { self.live_births.push(key); }
                 let offset = sampled(e.spec.offset, &mut seed)
@@ -1811,6 +1819,8 @@ impl Attached {
                 });
             }
         }
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::AttachedLive,self.steam.puffs.len() as u64);
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::AttachedNew,diagnostic_new);
         if self.reuse_scratch {
             self.births.retain(|key, _| self.live_births.binary_search(key).is_ok());
         }
@@ -1822,6 +1832,14 @@ impl Attached {
 pub(crate) mod tests {
     use super::*;
     pub(crate) fn world_test_steam() -> Steam { attached_fixture(2).steam }
+    #[cfg(feature="vita_renderer")]
+    pub(crate) fn census_quad_fixture(attached:&mut Attached) {
+        // CPU producer entry used by prepare_quads, no retained renderer/GL.
+        let _quads=crate::phase_census::span(crate::phase_census::Region::FxQuadBuild);
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::QuadSets,1);
+        attached.steam.quads.borrow_mut().prepare(&attached.steam.puffs,&attached.steam.emitters,Vec3::Z*100.,None);
+    }
+
     #[test]
     fn puff_sweep_cadence_covers_accumulated_segment_and_pause() {
         use crate::vita_sim::{Config, PuffCollide};

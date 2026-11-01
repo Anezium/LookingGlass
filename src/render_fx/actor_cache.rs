@@ -139,8 +139,13 @@ mod tests {
 pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(Vec<Pass>,bool)> {
     let limit=super::actor_max_layers(crate::render::vita_renderer::config()).min(surface.layers.len());
     let layers=&surface.layers[..limit];
-    let alpha=layers.first()?.stage.vertex_alpha;
-    if !layers.iter().all(|l|simple(&l.stage)&&l.stage.vertex_alpha==alpha) {return None;}
+    let alpha=layers.first().or_else(||{crate::phase_census::rejection(3);None})?.stage.vertex_alpha;
+    if !layers.iter().all(|l|simple(&l.stage)&&l.stage.vertex_alpha==alpha) {
+        if crate::phase_census::active() {
+            let reason=if layers.iter().any(|l|!simple(&l.stage)) {4}else{5};
+            crate::phase_census::rejection(reason);
+        }
+        return None;}
     let mut passes=pass_storage(limit);
     for l in layers {
         let p=state(&l.stage,time);

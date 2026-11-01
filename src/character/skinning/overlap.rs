@@ -502,6 +502,7 @@ impl Store {
                 // add J17's dual normalized-output comparison loop to the workers.
                 let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
                 let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
+                let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorDirect);
                 crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged, instance,
                     crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize,occurrence:0})
             } else { None };
@@ -529,6 +530,7 @@ impl Store {
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 crate::sim_maps::probe::record_serial_publication(oracle,&mesh.vertices,&mesh.indices,actor_vertices::normalize);
                 let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
+                let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorFallback);
                 crate::render_fx::skin(mesh);
                 #[cfg(feature="actor_diagnostics")]
                 crate::render_fx::retained::count("actor_mutable_consumer_surfaces",1);

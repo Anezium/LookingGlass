@@ -1339,6 +1339,10 @@ impl Renderer {
                 m
             }).values().sum();
         let staging_bytes = groups.len() * std::mem::size_of::<Prepared>();
+        if crate::allocation_census::enabled() {crate::allocation_census::payload("retained_world",serde_json::json!({
+            "gpu_geometry_payload_bytes":bytes,"unique_pvs_capacity_bytes":pvs_with_unknown_bytes,
+            "uniform_staging_capacity_bytes":staging_bytes,"construction_geometry_capacity_bound":construction_geometry_peak_bytes,
+            "scope":"GPU payload is separate from newlib; CPU capacities exclude metadata"}));}
         let construction_buffer_peak_bytes = construction_geometry_peak_bytes.max(
             old_scene_geometry_capacity_bytes + bytes + pvs_with_unknown_bytes + staging_bytes);
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
@@ -1582,7 +1586,7 @@ impl Renderer {
         };
         if !alpha && config().sky {
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
-            let mut totals = crate::frame_profile::Totals::<3>::new();
+            let mut totals = crate::frame_profile::Totals::<3>::profile_only();
             let bg = scene.atmosphere.background();
             let sky = [
                 [bg.r, bg.g, bg.b, 1.],
@@ -1612,6 +1616,8 @@ impl Renderer {
         let mut previous_pipeline = None;
         let mut previous_texture = None;
         let _census_submit = crate::phase_census::span(crate::phase_census::Region::WorldSubmit);
+        #[cfg(target_os="vita")]
+        let _commands=crate::phase_census::world_commands();
         let submit_span = crate::frame_profile::span("vita_world_submit");
         let mut totals = crate::frame_profile::Totals::<3>::new();
         // Lifetime is exactly this owned opaque pass: fresh AFTER sky/interop/
@@ -1645,14 +1651,13 @@ impl Renderer {
             } else {
                 state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
             };
-            let start = totals.start();
+            let mut start = totals.start();
             if plan.pipeline { ctx.apply_pipeline(&pipeline); applications[0] += 1; }
             if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});} applications[1] += 1; }
             scale::log_depth(!alpha);
             if low { low_draws += 1; if !cache_enabled {count("vita_world_low_draws",1);} }
             if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
-            totals.add(0, start);
-            let start = totals.start();
+            totals.lap(0, &mut start);
             if plan.uniforms {
                 let traffic = self.field_uniforms[usize::from(low)].apply(ctx, u.values(), config().uniform_field_cache);
                 applications[3] += 1;
@@ -1660,14 +1665,13 @@ impl Renderer {
                 uniform_traffic[1] += traffic.bytes;
                 uniform_traffic[2] += traffic.calls;
             }
-            totals.add(1, start);
-            let start = totals.start();
+            totals.lap(1, &mut start);
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             if alpha || g.recipe.stage.blend != Blend::Opaque {
                 crate::sim_maps::probe::world_order(prepared.group, alpha);
             }
             ctx.draw(g.base_element, prepared.indices, 1);
-            totals.add(2, start);
+            totals.lap(2, &mut start);
             if previous_pipeline != Some(pi) {
                 pipeline_changes += 1;
                 if !cache_enabled { count("vita_world_pipeline_changes", 1); }
@@ -1711,6 +1715,9 @@ impl Renderer {
                     g.recipe.model.is_none(),
                 );
             }
+        }
+        if let Some((ns, calls)) = totals.census_values() {
+            crate::phase_census::world_publish(ns, calls, totals.profile_active());
         }
         if cache_enabled {
             counts(&[
@@ -1767,7 +1774,7 @@ impl Renderer {
             .enumerate()
             .map(|(id, p)| (p.depth, id))
             .collect::<Vec<_>>();
-        let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::new());
+        let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::profile_only());
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id| {
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
