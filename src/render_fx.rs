@@ -100,7 +100,14 @@ thread_local! {
     static SURFACES: RefCell<Vec<(macroquad::miniquad::TextureId, Weak<Surface>)>> = RefCell::default();
     #[cfg(feature="vita_renderer")]
     static SURFACE_LOOKUP:RefCell<std::collections::HashMap<macroquad::miniquad::TextureId,Weak<Surface>>>=RefCell::default();
+    /// Unit tests have no GL context, so they cannot mint a Texture2D for SURFACE_LOOKUP.
+    #[cfg(all(test, feature="vita_renderer"))]
+    static TEST_SURFACE:RefCell<Option<Rc<Surface>>>=const { RefCell::new(None) };
 }
+/// Stands in for the fast SURFACE_LOOKUP hit only. Everything after the lookup,
+/// in actor_publication::prepare and in the serial skin consumer, is the real body.
+#[cfg(all(test, feature="vita_renderer"))]
+fn test_surface() -> Option<Rc<Surface>> { TEST_SURFACE.with(|s| s.borrow().clone()) }
 /// Called between fully presented frames, before any scene is destroyed.
 pub(crate) fn release_scene() {
     #[cfg(feature="vita_renderer")]
@@ -950,6 +957,8 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
         if fast {return SURFACE_LOOKUP.with(|s|s.borrow().get(&id).and_then(Weak::upgrade));}
         SURFACES.with(|s|s.borrow().iter().rev().find(|(key,_)|*key==id).and_then(|(_,v)|v.upgrade()))
     });
+    #[cfg(all(test, feature="vita_renderer"))]
+    let surface = surface.or_else(|| if fast { test_surface() } else { None });
     let (camera, time, appearance) = FRAME.with(|f| {
         let f = f.borrow();
         (f.camera, f.time, f.appearance)
@@ -1475,5 +1484,128 @@ mod tests {
             vec4(0., 0., 0., 1.),
             vec4(1., 0., 0., 1.)
         ]));
+    }
+
+    /// Q1 F1. Each draw runs the real actor_publication::prepare and, when it
+    /// refuses, the real serial consumer `skin`, as capture_single does. A direct
+    /// draw gets the worker's normalized output written at its published address,
+    /// then hold/complete publish it. Both arms must produce the same groups,
+    /// geometry bytes, vertex budget, FRAME.dropped and capped-layer counts.
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn prepare_refusals_and_serial_fallback_charge_each_draw_once_in_both_arms() {
+        use crate::character::skinning::identity::ActorId;
+        use sha2::{Digest, Sha256};
+        use std::sync::Arc;
+        let source = crate::skeletal::Surface::new("body".into(), [Vec3::ZERO, Vec3::X, Vec3::Y].into_iter().map(|offset|
+            crate::skeletal::SkinVertex { uv: Vec2::ONE, weights: vec![crate::skeletal::Weight { bone: 0, amount: 1., offset }] }).collect(), vec![0, 1, 2]);
+        let cpu = source.cpu();
+        // Raw alpha 128: the serial cache and the worker both publish it normalized.
+        let mesh = Mesh { vertices: (0..3).map(|i| Vertex::new(i as f32, 2. * i as f32, 1., 0.25 * i as f32, 0.5, Color::from_rgba(10, 20, 30, 128))).collect(),
+            indices: cpu.indices.clone(), texture: None };
+        // Three layers over actor_max_layers=2: one capped layer per kept draw.
+        let surface = Rc::new(Surface {
+            layers: (0..3).map(|_| Layer { stage: Stage::default(), textures: Vec::new() }).collect(),
+            transparent: false, preserve_skin: false, actors: RefCell::default(),
+        });
+        assert_eq!(crate::render::vita_renderer::config().actor_max_layers, 2);
+        let per_draw = mesh.vertices.len() * 2;
+        let actor = ActorId::default();
+        let key = actor_publication::Key { actor, surface: Arc::as_ptr(&cpu) as usize, occurrence: 0 };
+        #[derive(Debug, PartialEq)]
+        struct Observed { direct: Vec<bool>, vertices: usize, dropped: usize, capped: u64, groups: Vec<(bool, Vec<(usize, bool, bool, u32, [u32; 4], String)>)> }
+        // Frame spec: draws, budget already used, and whether this frame's publications stay referenced.
+        let run = |on: bool, frames: &[(usize, usize, bool)]| -> Vec<Observed> {
+            actor_publication::reset();
+            TEST_SURFACE.with(|s| s.replace(Some(surface.clone())));
+            let mut holders: Vec<Vec<Group>> = Vec::new();
+            let mut out = Vec::new();
+            actor_publication::with_publication_occurrences(on, || {
+                for &(draws, used, hold) in frames {
+                    retained::host_reset();
+                    FRAME.with(|f| *f.borrow_mut() = Frame { active: true, direct: true, vertices: used, ..Frame::default() });
+                    actor_publication::begin();
+                    assert!(actor_publication::active());
+                    let mut direct = Vec::new();
+                    let mut outputs = Vec::new();
+                    for _ in 0..draws {
+                        match actor_publication::prepare(&mesh, cpu.clone(), false, 7, key) {
+                            Some(published) => { direct.push(true); outputs.push(published); }
+                            None => { direct.push(false); skin(&mesh); }
+                        }
+                    }
+                    // Worker stand-in: the normalized vertices the real kernel publishes.
+                    for (address, alpha) in outputs {
+                        for (k, v) in mesh.vertices.iter().enumerate() {
+                            unsafe { (address as *mut Vertex).add(k).write(actor_vertices::normalize(*v, alpha)); }
+                        }
+                    }
+                    actor_publication::hold();
+                    actor_publication::complete();
+                    actor_publication::end();
+                    let (vertices, dropped, groups) = FRAME.with(|f| {
+                        let mut f = f.borrow_mut();
+                        (f.vertices, f.dropped, std::mem::take(&mut f.groups))
+                    });
+                    let shape = groups.iter().map(|g| (g.transparent, g.passes.iter().map(|p| {
+                        let g = p.geometry();
+                        let mut h = Sha256::new();
+                        for v in &g.vertices {
+                            for x in v.position.to_array().into_iter().chain(v.uv.to_array()).chain(v.normal.to_array()) { h.update(x.to_bits().to_le_bytes()); }
+                            h.update(v.color);
+                        }
+                        for i in &g.indices { h.update(i.to_le_bytes()); }
+                        (p.blend_index, p.lit, p.clamp, p.cutout.to_bits(), p.gain.to_array().map(f32::to_bits), format!("{:x}", h.finalize()))
+                    }).collect())).collect();
+                    let capped = retained::host_report().get("vita_fx_dropped_layers").and_then(|v| v.as_u64()).unwrap_or(0);
+                    out.push(Observed { direct, vertices, dropped, capped, groups: shape });
+                    if hold { holders.push(groups); }
+                }
+            });
+            drop(holders);
+            TEST_SURFACE.with(|s| s.replace(None));
+            FRAME.with(|f| *f.borrow_mut() = Frame::default());
+            actor_publication::reset();
+            out
+        };
+        let full = MAX_VERTICES;
+        let two_fit = MAX_VERTICES - 2 * per_draw;
+        let cases: [(&str, Vec<(usize, usize, bool)>, [Vec<bool>; 2]); 6] = [
+            ("successful direct, third, fourth and fifth draws", vec![(5, 0, false); 3],
+                [vec![true, true, false, false, false], vec![true, true, true, true, false]]),
+            ("full budget refuses every draw", vec![(3, full, false)],
+                [vec![false; 3], vec![false; 3]]),
+            ("budget fits two: refused direct third draw", vec![(3, two_fit, false)],
+                [vec![true, true, false], vec![true, true, false]]),
+            ("budget fits two of five", vec![(5, two_fit, false)],
+                [vec![true, true, false, false, false], vec![true, true, false, false, false]]),
+            ("held slots: frame 1 and 2 stay referenced", vec![(3, 0, true), (3, 0, true), (3, 0, false)],
+                [vec![false; 3], vec![false; 3]]),
+            ("held slots under a full budget", vec![(3, 0, true), (3, 0, true), (3, full, false)],
+                [vec![false; 3], vec![false; 3]]),
+        ];
+        for (name, frames, [off_last, on_last]) in cases {
+            let (off, on) = (run(false, &frames), run(true, &frames));
+            assert_eq!((off.len(), on.len()), (frames.len(), frames.len()), "{name}");
+            assert_eq!(off.last().unwrap().direct, off_last, "{name}: off arm path");
+            assert_eq!(on.last().unwrap().direct, on_last, "{name}: on arm path");
+            for (n, ((a, b), &(draws, used, _))) in off.iter().zip(&on).zip(&frames).enumerate() {
+                let kept = (MAX_VERTICES - used) / per_draw;
+                let kept = kept.min(draws);
+                assert_eq!(a.dropped, draws - kept, "{name} frame {n}: off FRAME.dropped is one per refused draw");
+                assert_eq!(b.dropped, draws - kept, "{name} frame {n}: on FRAME.dropped is one per refused draw");
+                // The serial cache charges a capped layer whether or not submit then
+                // drops the draw; a kept direct draw takes the same charge.
+                assert_eq!((a.capped, b.capped), (draws as u64, draws as u64), "{name} frame {n}: capped layers");
+                assert_eq!((a.vertices, b.vertices), (used + kept * per_draw, used + kept * per_draw), "{name} frame {n}: vertex budget");
+                assert_eq!(a.groups.len(), kept, "{name} frame {n}");
+                assert_eq!(a.groups, b.groups, "{name} frame {n}: group order, recipes and geometry bytes");
+            }
+        }
+        // The held case is not vacuous: frame 2 still publishes in the on arm.
+        let held = run(true, &[(3, 0, true), (3, 0, true)]);
+        assert_eq!(held[1].direct, vec![true; 3], "each occurrence moves to its alternate slot");
+        let held = run(false, &[(3, 0, true), (3, 0, true)]);
+        assert_eq!(held[1].direct, vec![false; 3], "the single off bank has both slots referenced");
     }
 }

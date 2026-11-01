@@ -124,6 +124,11 @@ checks them all against real host lines). The effective report cadence has its o
   heartbeat (`run-session.py:89-94`), so a default of 0 needs those runners migrated first.
 - `sim_trigger_facts_reuse`: `false` (default). Builds trigger facts once per trigger pass and
   rebuilds them after each fire.
+- `actor_publication_occurrences`: `false` (default). With `actor_single_prepare` active, the
+  first four draws of one actor surface in a frame each reserve their own two-slot publication
+  bank. The value is latched once per frame. A fifth draw, or any refused reservation, uses the
+  unchanged serial path.
+
 `[lg/vita-renderer] loaded {...}` imprime l'inventaire. Le JSON du banc ajoute
 `vita_renderer.configuration`, `world_only_active`, `inventory` et `view`.
 
