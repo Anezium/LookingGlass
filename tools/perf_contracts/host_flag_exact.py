@@ -390,7 +390,8 @@ def main(argv=None):
         sidecar = directory / 'uniform-bits.jsonl'
         row = dict(map=map_name, arm=tag, run_dir=str(directory), reused=reuse, attempt=attempt,
                    viewport=json.dumps(steady), startup_viewport=viewport,
-                   viewport_key=json.dumps([json.loads(viewport), steady]),
+                   # Frame 0 is captured at the host window size, which varies by a pixel at startup.
+                   viewport_key=json.dumps([json.loads(viewport), steady, [images[0]['width'], images[0]['height']]]),
                    viewport_transition_frame=startup_transition_frame(frames),
                    config_sha256=sha(directory / 'private/vita_renderer.json'), log_sha256=sha(directory / 'run.log'),
                    receipt_sha256=(sha(directory / 'run-receipt.json') if reuse else None),
@@ -522,7 +523,7 @@ def main(argv=None):
         on = pool['on'][selected_view][:reps]
         ref = pool['baseline'][selected_view][:reps] if 'baseline' in pool else []
         entry['viewport_key'] = selected_view
-        entry['startup_viewport'], entry['steady_viewport'] = json.loads(selected_view)
+        entry['startup_viewport'], entry['steady_viewport'] = json.loads(selected_view)[:2]
         entry['viewport'] = entry['steady_viewport']
         entry['viewport_frames_gated'] = 180
         entry['viewport_transitions'] = {arm: [run[0]['viewport_transition_frame'] for run in runs]
