@@ -24,15 +24,16 @@ struct Approach {
     start: Vec3,
     wish: Vec2,
     /// Body-valid floor in range and faced, with static geometry on the line to the door, and
-    /// outside the zone where flag-64 doors open for a nearby body with no press at all.
+    /// outside the zone where flag-64 doors open for a nearby body with no press at all. It must
+    /// hold under the real movers: door 112's candidate at (-5024, 2872, 320) drops Alice.
     behind: Vec3,
 }
 fn approaches() -> [Approach; 2] {
     [
         Approach { label: "east-corridor", door: 119, start: vec3(-3540., 2728., 192.),
             wish: vec2(1., 0.), behind: vec3(-3408., 2840., 192.) },
-        Approach { label: "north-corridor", door: 112, start: vec3(-4880., 3000., 208.),
-            wish: vec2(0., -1.), behind: vec3(-5024., 2872., 320.) },
+        Approach { label: "south-corridor", door: 92, start: vec3(-4864., 1420., 256.),
+            wish: vec2(0., 1.), behind: vec3(-4784., 1488., 256.) },
     ]
 }
 
@@ -216,27 +217,41 @@ fn approach(r: &mut Route, rec: &mut Recorder, ap: &Approach, static_world: &Wor
     // In range and faced, with real geometry on the line. `no-occluder` stands on the clear line.
     let spot = if v == "no-occluder" { ap.start + ap.wish.extend(0.) * 90. } else { ap.behind };
     stage(r, spot)?;
-    let eye = r.player.eye();
-    let d = center - eye;
-    let aim = d.normalize();
-    ensure!(d.length() < RANGE && d.normalize().dot(aim) > 0.3, "Occlusion spot is not in range and faced");
-    let (world_trace, own_trace, fixed) = {
-        let o = own(r);
-        let door = &o.objects[k];
-        (r.world.sweep(eye, center, Vec3::splat(0.5)), door.collider.trace(eye, center, Vec3::splat(0.5)),
-            static_world.sweep(eye, center, Vec3::splat(0.5)))
-    };
-    rec.event(json!({"tick":r.ticks,"approach":label,"event":"occlusion-spot","feet":r.player.feet.to_array(),"distance":d.length(),
-        "world_fraction":world_trace.fraction,"own_fraction":own_trace.fraction,"static_fraction":fixed.fraction}));
-    for press in [false, true] {
+    let settled = r.player.feet;
+    let mut spot_event = false;
+    for frame_no in 0..124 {
+        let eye = r.player.eye();
+        let d = center - eye;
+        ensure!(d.length() < RANGE, "Occlusion spot left range at {:?}", r.player.feet);
+        let (world_trace, own_trace, fixed) = {
+            let door = &own(r).objects[k];
+            (r.world.sweep(eye, center, Vec3::splat(0.5)), door.collider.trace(eye, center, Vec3::splat(0.5)),
+                static_world.sweep(eye, center, Vec3::splat(0.5)))
+        };
+        if !spot_event {
+            spot_event = true;
+            rec.event(json!({"tick":r.ticks,"approach":label,"event":"occlusion-spot","feet":r.player.feet.to_array(),"distance":d.length(),
+                "world_fraction":world_trace.fraction,"own_fraction":own_trace.fraction,"static_fraction":fixed.fraction}));
+        }
+        let aim = d.normalize();
         let hold = door_state(r, k).0;
+        // Two raw use edges while the spot is held, one mid-way and one at the end.
+        let press = frame_no == 60 || frame_no == 122;
         let (prompt, owner) = frame(r, rec, aim, press, Vec2::ZERO)?;
         ensure!(prompt.is_none(), "Behind geometry: prompt {prompt:?}");
         ensure!(owner == UseOwner::Traversal, "Behind geometry: owner {owner:?}");
+        ensure!(!in_auto_open_zone(r), "Occlusion spot {:?} can open a door by proximity", r.player.feet);
         ensure!(door_state(r, k).0 <= hold && door_state(r, k).1 == 0., "Use behind geometry moved door {}", ap.door);
+        ensure!(r.player.feet.distance(settled) < 1., "Alice did not stay on the occlusion spot: {:?} from {settled:?}", r.player.feet);
+        ensure!(!world_trace.start_solid && world_trace.fraction + 0.02 < own_trace.fraction,
+            "Door {} is not behind geometry from {:?}", ap.door, r.player.feet);
+        ensure!(!fixed.start_solid && fixed.fraction + 0.02 < own_trace.fraction,
+            "The occluder of door {} is not static map geometry", ap.door);
     }
     // The controller's own use path, with the press forced past the owner.
-    let (eye, hold) = (r.player.eye(), door_state(r, k).0);
+    let eye = r.player.eye();
+    let aim = (center - eye).normalize();
+    let hold = door_state(r, k).0;
     r.interactions.update(FIXED_DT, &r.map, &mut r.world, &r.player, aim, true)?;
     ensure!(door_state(r, k).0 <= hold, "Forced use behind geometry held door {}", ap.door);
     {
@@ -244,11 +259,6 @@ fn approach(r: &mut Route, rec: &mut Recorder, ap: &Approach, static_world: &Wor
         ensure!(o.door_pick_mode(&r.world, eye, aim, false).is_none()
             && o.door_pick_mode(&r.world, eye, aim, true).is_none(), "Door modes selected through geometry");
     }
-    ensure!(!in_auto_open_zone(r), "Occlusion spot {:?} can open a door by proximity", r.player.feet);
-    ensure!(!world_trace.start_solid && world_trace.fraction + 0.02 < own_trace.fraction,
-        "Door {} is not behind geometry from {:?}", ap.door, r.player.feet);
-    ensure!(!fixed.start_solid && fixed.fraction + 0.02 < own_trace.fraction,
-        "The occluder of door {} is not static map geometry", ap.door);
     rec.event(json!({"approach":label,"event":"approach-passed","first_prompt_distance":first_prompt,"door":ap.door}));
     Ok(())
 }
