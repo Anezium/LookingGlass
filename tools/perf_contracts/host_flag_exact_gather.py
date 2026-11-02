@@ -58,6 +58,9 @@ REMOVED_WORK = {
 REMOVED_WORK.add('fx_merge_source_reusable_vertices')
 NOISY_PIXELS = {'hedge3'}  # OFF against OFF differs here: --arm control
 ELAPSED = ('_us', '_ns', '_ms')  # elapsed-time counters, same class as cpu_ms
+# Allocation sizes of host containers. A HashMap's capacity depends on the process's random hash
+# seed: tower2's lookup capacity differs between two OFF runs in some processes (--arm control).
+HOST_MEMORY = ('actor_mem_', 'actor_publication_mem_')
 PREREQ_FIELDS = ('requested_window', 'requested_high_dpi', 'screen_size_bits', 'framebuffer', 'scaled_target', 'viewport')
 # Maps to try in turn. A control is met on the first map where the fault shows; prop-observe needs
 # a placement that repeats and later moves, which not every map has.
@@ -146,7 +149,7 @@ def compare(name, off, on, strict_images):
             raise Mismatch((name, i, 'submitted packets', len(pa), len(pb), first))
         keys = (set(a['counters']) | set(b['counters'])) - WITNESS
         for key in sorted(keys):
-            if key.endswith(ELAPSED):
+            if key.endswith(ELAPSED) or key.startswith(HOST_MEMORY):
                 continue
             if a['counters'].get(key, 0) != b['counters'].get(key, 0):
                 counter_changes[key] = counter_changes.get(key, 0) + b['counters'].get(key, 0) - a['counters'].get(key, 0)
