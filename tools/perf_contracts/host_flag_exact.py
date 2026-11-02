@@ -22,7 +22,8 @@ the old one in place.
 
 Witness: --witness serial_vertices_drop requires the census serial vertices (measured rows
 60..179) to drop in the ON arm on at least one map, and on every --witness-map. A run with no
-drop anywhere is FAIL (vacuous).
+drop anywhere is FAIL (vacuous). --witness observe_moved does the same with the measured mean
+of the fx_observe_moved_vertices probe counter, and requires that counter absent in the OFF arm.
 """
 from pathlib import Path
 import argparse, hashlib, json, os, subprocess, sys
@@ -283,7 +284,7 @@ def main(argv=None):
     p.add_argument('--flag', required=True)
     p.add_argument('--prereq', default='{}', help='JSON object written in every arm')
     p.add_argument('--maps', nargs='+', required=True)
-    p.add_argument('--witness', choices=['serial_vertices_drop'], required=True)
+    p.add_argument('--witness', choices=['serial_vertices_drop', 'observe_moved'], required=True)
     p.add_argument('--witness-map', action='append', default=[])
     p.add_argument('--uniform-bits', action='store_true')
     p.add_argument('--uniform-bits-map', action='append', default=[],
@@ -540,9 +541,13 @@ def main(argv=None):
             compare(map_name, ref[0], off[0], 'baseline-vs-off', True, wants_bits)
             entry['baseline_vs_off'] = 'PASS'
         entry['witness_serial_vertex_drop'] = off[0][0]['serial_vertices'] - on[0][0]['serial_vertices']
+        entry['witness_observe_moved_vertices'] = on[0][0]['counters_measured_mean'].get('fx_observe_moved_vertices', 0)
+        if args.witness == 'observe_moved':
+            assert off[0][0]['counters_measured_mean'].get('fx_observe_moved_vertices', 0) == 0, (map_name, 'OFF arm moved vertices')
         write()
 
-    drops = {map_name: entry['witness_serial_vertex_drop'] for map_name, entry in result['maps'].items()}
+    drops = {map_name: entry['witness_observe_moved_vertices' if args.witness == 'observe_moved' else 'witness_serial_vertex_drop']
+             for map_name, entry in result['maps'].items()}
     result['witness'] = dict(kind=args.witness, serial_vertex_drop_per_map=drops, required_maps=args.witness_map)
     inventory = {map_name: entry.get('on', {}).get('eligibility') for map_name, entry in result['maps'].items()}
     missing_inventory = [map_name for map_name, record in inventory.items() if not record]
@@ -566,7 +571,7 @@ def main(argv=None):
         result['status'] = 'FAIL (no environment-mapped actor surface in the inventory)'
         write(); sys.exit(1)
     if not any(value > 0 for value in drops.values()):
-        result['status'] = 'FAIL (vacuous: no map moved serial vertices to the workers)'
+        result['status'] = f'FAIL (vacuous: witness {args.witness} never moved on any map)'
         write(); sys.exit(1)
     missing = [map_name for map_name in args.witness_map if not drops.get(map_name, 0) > 0]
     if missing:

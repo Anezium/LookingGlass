@@ -1164,10 +1164,14 @@ pub(crate) fn finish_world(
     if c.fx_prepare_cache {
         let _observe_leaf=crate::phase_census::span(crate::phase_census::Region::MergeObserve);
         let storage = &mut gpu.preparation[gpu.ring_phase];
+        let observe_move = crate::sim_maps::fx_observe_move();
         let mut index = 0;
         for group in &mut groups { for p in &mut group.passes {
             if storage.len() <= index { storage.push(Default::default()); }
-            if p.geometry.is_none() { p.geometry = Some(storage[index].observe(&p.mesh, None)); }
+            if p.geometry.is_none() {
+                p.geometry = Some(if observe_move { storage[index].observe_owned(&mut p.mesh) }
+                    else { storage[index].observe(&p.mesh, None) });
+            }
             index += 1;
         }}
         storage.truncate(index); // Unused producers cannot alias a future occupant.
@@ -1537,6 +1541,49 @@ mod tests {
                 pool.insert(id,std::rc::Rc::try_unwrap(g).ok().unwrap());
             }
         }
+    }
+    /// finish_world's order with real merge banks: observe, merge, recycle the destination.
+    /// Output bytes and versions-as-changes must not depend on who owns the observed arrays.
+    #[test]
+    fn owned_observation_keeps_merged_output_across_changes_and_recycled_banks() {
+        use super::super::prepared::Cache;
+        let run=|owned:bool| {
+            let mut cache=MergeCache::default();let mut pool=BTreeMap::new();
+            let mut publications=(0..4).map(|_|Cache::default()).collect::<Vec<_>>();
+            let mut source=(0..4).map(|_|fixture_group()).collect::<Vec<_>>();
+            let mut record=Vec::new();let mut emptied=0;
+            for frame in 0..40u32 {
+                source[(frame%4) as usize].passes[0].mesh.vertices[0].position.x=frame as f32;
+                if frame==9 {source[1].passes[0].mesh.indices.swap(0,1);}
+                if frame==17 {source[2].passes[0].mesh.vertices[1].normal.w=f32::from_bits(0x7fc00001);}
+                if frame==23 {source[3].passes[0].mesh.vertices[2].uv.y=-0.;}
+                let mut groups=source.iter().map(|g| {
+                    let mut copy=fixture_group();copy.passes[0].mesh=super::super::copy_mesh(&g.passes[0].mesh);copy
+                }).collect::<Vec<_>>();
+                for (g,c) in groups.iter_mut().zip(&mut publications) {
+                    let p=&mut g.passes[0];
+                    p.geometry=Some(if owned {c.observe_owned(&mut p.mesh)} else {c.observe(&p.mesh,None)});
+                    emptied+=u64::from(p.mesh.vertices.is_empty());
+                }
+                let mut list=if frame%13<9 {vec![(3.,Source::Actor(0)),(2.,Source::Actor(1)),(1.,Source::Actor(2)),(0.,Source::Actor(3))]}
+                    else {vec![(3.,Source::Actor(2)),(2.,Source::World(0)),(1.,Source::Actor(0)),(0.,Source::Actor(1))]};
+                let recycled=merge_cached(&mut cache,&mut groups,&mut list,false,true,&mut pool).to_vec();
+                for g in &groups { for p in &g.passes {
+                    let m=p.geometry();
+                    record.push((m.vertices.iter().map(|v|(v.position.to_array().map(f32::to_bits),v.uv.to_array().map(f32::to_bits),v.color,v.normal.to_array().map(f32::to_bits))).collect::<Vec<_>>(),m.indices.clone()));
+                }}
+                record.push((Vec::new(),list.iter().map(|x|match x.1 {Source::Actor(i)=>i as u16,_=>9}).collect()));
+                for &id in &recycled {
+                    let p=&mut groups[id].passes[0];let g=p.geometry.take().unwrap();
+                    pool.insert(id,std::rc::Rc::try_unwrap(g).ok().unwrap());
+                }
+            }
+            (record,emptied)
+        };
+        let (off,emptied_off)=run(false);let (on,emptied_on)=run(true);
+        assert_eq!(off,on);
+        // Anti-vacuity: the copying arm never empties a pass, the owning arm did.
+        assert_eq!(emptied_off,0);assert!(emptied_on>0);
     }
     #[test]
     fn partial_merge_ranges_match_full_copy_across_changes_and_recycled_banks() {

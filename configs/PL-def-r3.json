@@ -123,5 +123,6 @@
   "log_frame_time_every": 10,
   "sim_trigger_facts_reuse": true,
   "actor_publication_occurrences": true,
-  "actor_deferred_layers": true
+  "actor_deferred_layers": true,
+  "fx_observe_move": false
 }
