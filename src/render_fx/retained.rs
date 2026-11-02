@@ -445,6 +445,9 @@ impl Gpu {
             else { track_vertex && vertices_equal(&b.previous_vertices, &mesh.vertices) };
         let same_index = if let Some(v) = version { b.version.is_some_and(|old| old.identity == v.identity && old.topology == v.topology) }
             else { track_index && b.previous_indices == mesh.indices };
+        // Host oracle: upload every packet, so two arms differ in nothing the GL driver sees.
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let (same_vertex,same_index)=if crate::sim_maps::probe::force_uploads() {(false,false)} else {(same_vertex,same_index)};
         // Generation equality is sufficient only within the same publication identity.
         if version.is_some() && same_vertex && same_index { count("vita_fx_prepare_upload_hits", 1); }
         if c.gpu_state_probe || c.gpu_index_dedupe {
