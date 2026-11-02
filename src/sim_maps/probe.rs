@@ -152,6 +152,10 @@ pub fn joint_order(kind: u8, id: usize, depth: f32) {
     if enabled() {JOINT_ORDER.with(|s|s.borrow_mut().push((kind,id,depth.to_bits())));}
 }
 
+pub fn force_uploads() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_FORCE_UPLOAD").is_some())
+}
 /// Host oracle sabotage: makes a lever wrong on purpose, to prove the comparison sees it.
 pub fn negative_control() -> Option<&'static str> {
     static ON: OnceLock<Option<String>> = OnceLock::new();
