@@ -87,6 +87,12 @@ impl Cache {
         self.producer = Some(stamp);
         slot.clone()
     }
+    /// What observe() returns for a mesh whose vertices and indices are the ones it last
+    /// observed, without comparing them. The caller vouches for that. Empty: observe.
+    pub(super) fn unchanged(&mut self) -> Option<Rc<Geometry>> {
+        self.producer = None;
+        self.current.clone()
+    }
     pub(super) fn observe(&mut self, mesh: &Mesh, alpha_variant: Option<bool>) -> Rc<Geometry> {
         self.producer = None;
         let color = |v: &Vertex| {
