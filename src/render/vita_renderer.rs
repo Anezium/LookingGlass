@@ -108,6 +108,14 @@ pub struct Config {
     /// their layers on the game thread after collect. Default on since r22
     /// (console ABBA, wchess2: -4.47 to -5.01 ms).
     pub actor_deferred_layers: bool,
+    /// Skip the per-vertex UV compare and copy of a publication slot that already holds
+    /// the UVs of this live mesh. Exact while nothing edits a live skeletal UV, which no
+    /// production code does. Default off until its console ABBA.
+    pub actor_publication_uv_reuse: bool,
+    /// Keep one animated copy per repeated Prop draw occurrence in a frame and skip the
+    /// animation and the geometry compare while its exact inputs repeat. Default off
+    /// until its console ABBA.
+    pub prop_occurrence_reuse: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -291,6 +299,8 @@ impl Default for Config {
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             actor_publication_occurrences: true,
             actor_deferred_layers: true,
+            actor_publication_uv_reuse: false,
+            prop_occurrence_reuse: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -2271,6 +2281,25 @@ mod tests {
         }
         for json in [r#"{"actor_publication_occurrences":1}"#, r#"{"actor_publication_occurrences":"on"}"#, r#"{"actor_publication_occurrences":null}"#] {
             assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+    }
+    #[test]
+    fn gather_reuse_levers_default_off_require_a_boolean_and_are_printed() {
+        for key in ["actor_publication_uv_reuse", "prop_occurrence_reuse"] {
+            for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+                assert_eq!(serde_json::to_value(&c).unwrap()[key], false, "{key} default");
+            }
+            for enabled in [false, true] {
+                let (c, rejected) = parse_runtime_config(serde_json::json!({key: enabled}).to_string().as_bytes()).unwrap();
+                assert!(rejected.is_none());
+                c.validate().unwrap();
+                let [config, _] = config_log_lines(&c);
+                let printed: serde_json::Value = serde_json::from_str(config.split_once("[lg/vita-renderer] config ").unwrap().1).unwrap();
+                assert_eq!(printed[key], enabled);
+            }
+            for value in ["1", r#""on""#, "null"] {
+                assert!(serde_json::from_str::<Config>(&format!("{{\"{key}\":{value}}}")).is_err());
+            }
         }
     }
     #[test]
