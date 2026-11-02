@@ -62,6 +62,8 @@ pub fn count(name: &'static str, n: u64) {
         COUNTS.with(|c| *c.borrow_mut().entry(name).or_default() += n);
     }
 }
+/// The counters so far, for host fixtures that do not use the frame probe.
+pub fn counters() -> BTreeMap<&'static str, u64> { COUNTS.with(|c| c.borrow().clone()) }
 pub fn uncount(name: &'static str, n: u64) {
     static COUNTS_ON: OnceLock<bool> = OnceLock::new();
     if enabled() && *COUNTS_ON.get_or_init(|| std::env::var("LOOKING_GLASS_SIM_MAPS_COUNTERS").as_deref() != Ok("0")) {
