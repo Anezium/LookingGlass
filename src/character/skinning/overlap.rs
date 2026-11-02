@@ -609,7 +609,7 @@ impl Store {
                 if s.oracle!=usize::MAX {
                     let vertices=unsafe {std::slice::from_raw_parts(s.output as *const Vertex,s.vertices.len())};
                     crate::sim_maps::probe::record_skin(s.oracle,vertices,&s.cpu.indices);
-                    crate::sim_maps::probe::record_direct_publication(s.oracle,s.alpha_variant);
+                    crate::sim_maps::probe::record_direct_publication(s.oracle,s.mode==PublicationMode::VertexAlpha);
                 }
             }
         }
