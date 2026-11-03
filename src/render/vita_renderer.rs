@@ -116,6 +116,9 @@ pub struct Config {
     /// animation and the geometry compare while its exact inputs repeat. Default off
     /// until its console ABBA.
     pub prop_occurrence_reuse: bool,
+    /// Observed FX publications take a changed array from the pass that owns it instead of
+    /// copying it. Exact on the host oracle. Default off pending console A/B.
+    pub fx_observe_move: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -301,6 +304,7 @@ impl Default for Config {
             actor_deferred_layers: true,
             actor_publication_uv_reuse: false,
             prop_occurrence_reuse: false,
+            fx_observe_move: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -2286,6 +2290,29 @@ mod tests {
             for value in ["1", r#""on""#, "null"] {
                 assert!(serde_json::from_str::<Config>(&format!("{{\"{key}\":{value}}}")).is_err());
             }
+        }
+    }
+    #[test]
+    fn fx_observe_move_defaults_off_requires_a_boolean_and_is_printed() {
+        for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
+            assert!(!c.fx_observe_move);
+            let [config, _] = config_log_lines(&c);
+            assert!(config.contains("\"fx_observe_move\":false"), "{config}");
+        }
+        for enabled in [false, true] {
+            let c: Config = serde_json::from_value(serde_json::json!({"fx_observe_move": enabled})).unwrap();
+            c.validate().unwrap(); assert_eq!(c.fx_observe_move, enabled);
+            assert!(c.actor_single_prepare_active());
+            assert_eq!(serde_json::to_value(&c).unwrap()["fx_observe_move"], enabled);
+            let [config, _] = config_log_lines(&c);
+            assert!(config.contains(&format!("\"fx_observe_move\":{enabled}")), "{config}");
+        }
+        for json in [r#"{"fx_observe_move":1}"#, r#"{"fx_observe_move":"on"}"#, r#"{"fx_observe_move":null}"#] {
+            assert!(serde_json::from_str::<Config>(json).is_err());
+        }
+        // The accessor reports the requested state, so a suite arm cannot be vacuous.
+        for enabled in [false, true] {
+            assert_eq!(crate::sim_maps::with_fx_observe_move(enabled, crate::sim_maps::fx_observe_move), enabled);
         }
     }
     #[test]

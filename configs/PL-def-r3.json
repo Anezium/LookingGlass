@@ -125,5 +125,6 @@
   "actor_publication_occurrences": true,
   "actor_deferred_layers": true,
   "actor_publication_uv_reuse": false,
-  "prop_occurrence_reuse": false
+  "prop_occurrence_reuse": false,
+  "fx_observe_move": false
 }

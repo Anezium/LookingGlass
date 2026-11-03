@@ -26,7 +26,7 @@ def main():
     receipt_path = Path(sys.argv[4]).resolve()
     head = git(repo, 'rev-parse', 'HEAD').strip()
     dirty = [line for line in git(repo, 'status', '--porcelain=v1', '--untracked-files=all').splitlines() if line.strip()]
-    assert dirty == [' M docs/RCHESS1.md'], dirty
+    assert dirty in ([], [' M docs/RCHESS1.md']), dirty
     manifest_sha, _listing = manifest(repo)
     assert os.environ.get('RUSTFLAGS') == '--cfg observer_free_B', os.environ.get('RUSTFLAGS')
     target = os.environ['CARGO_TARGET_DIR']
