@@ -2539,7 +2539,18 @@ mod tests {
             assert_eq!(off[key], false, "{key} off");
             assert_eq!(serde_json::to_value(Config::default()).unwrap()[key], true, "{key} shipped default");
         }
-        assert_eq!(on, r22, "r25 human is r22 human plus the three levers");
+        // What the console ABBAs measured, minus the diagnostic exports: profile_capture stays
+        // off and profiler stays light, because the human session writes no diagnostic exports.
+        const MEASURED: [&str; 3] = ["collision_sah", "skin_actual_consumers", "audio_static_cache"];
+        let mut r22_plus = r22.clone();
+        for key in MEASURED {
+            assert_eq!(on[key], true, "{key} on");
+            assert_eq!(off[key], true, "{key} is not a lever: on in both arms");
+            r22_plus[key] = serde_json::json!(true);
+        }
+        assert_eq!(on, r22_plus, "r25 human is r22 human plus the three levers and the three measured keys");
+        assert_eq!(on["profile_capture"], false);
+        assert_eq!(on["profiler"], "light");
         assert!(on["log_frame_time_every"].as_u64().unwrap_or(0) == 0, "human play runs without the frame-time log");
         assert_eq!(measure["log_frame_time_every"], 10);
         measure["log_frame_time_every"] = on["log_frame_time_every"].clone();
