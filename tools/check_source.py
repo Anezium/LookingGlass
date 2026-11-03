@@ -24,6 +24,7 @@ CONFIG_FILES = {
     ".cargo/config.toml", "configs/PL-def-r3.json", "configs/vita_renderer.lean.json",
     "configs/PL-r21-human.json", "configs/PL-r21-human-levers-off.json",
     "configs/PL-r22-human.json", "configs/PL-r22-human-levers-off.json",
+    "configs/PL-r25-human.json", "configs/PL-r25-human-levers-off.json", "configs/PL-r25-human-measure.json",
     "configs/PL-r3d-baseline.json", "configs/PL-r3d-actor-prepare-off.json",
     "configs/PL-r3d-native-scale.json", "configs/PL-r3d-preview-every-frame.json",
     "configs/PL-r3d-film-bypass.json", "configs/PL-r3d-audio-direct.json",

@@ -561,12 +561,13 @@ pub(crate) fn with_publication_uv_reuse<T>(on:bool,run:impl FnOnce()->T)->T {
     let _reset=Reset(UV_REUSE_TEST.with(|s|s.replace(Some(on))));
     run()
 }
-/// Default off. Tests: a scoped override, else LOOKING_GLASS_TEST_PUBLICATION_UV_REUSE=on|off.
+/// Default on since r25. Tests: a scoped override, else the shipped default;
+/// LOOKING_GLASS_TEST_PUBLICATION_UV_REUSE=off runs the whole suite with it off.
 pub(crate) fn publication_uv_reuse()->bool {
     #[cfg(test)]
     { UV_REUSE_TEST.with(|s|s.get()).unwrap_or_else(||match std::env::var("LOOKING_GLASS_TEST_PUBLICATION_UV_REUSE").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
+        Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
         _ => panic!("LOOKING_GLASS_TEST_PUBLICATION_UV_REUSE must be off or on"),
     }) }
     #[cfg(not(test))]
@@ -574,7 +575,8 @@ pub(crate) fn publication_uv_reuse()->bool {
 }
 /// The contract of actor_publication_uv_reuse: code that writes a live skeletal mesh's
 /// UVs after load calls this before the mesh's next draw. Production has no such writer
-/// (the audit is in tools/perf_contracts/host_flag_exact_gather.py); test fixtures do.
+/// (the audit is in tools/perf_contracts/host_flag_exact_gather.py, and tools/check_source.py
+/// fails on a .uv write in a new file); test fixtures do. A first writer must promote this.
 #[cfg(test)]
 pub(crate) fn note_live_uv_edit() { STATE.with(|s| {let mut s=s.borrow_mut();s.uv_edits=s.uv_edits.wrapping_add(1);}); }
 /// This frame's publication epoch. One per frame in which single preparation runs.

@@ -124,7 +124,7 @@
   "sim_trigger_facts_reuse": true,
   "actor_publication_occurrences": true,
   "actor_deferred_layers": true,
-  "actor_publication_uv_reuse": false,
-  "prop_occurrence_reuse": false,
-  "fx_observe_move": false
+  "actor_publication_uv_reuse": true,
+  "prop_occurrence_reuse": true,
+  "fx_observe_move": true
 }

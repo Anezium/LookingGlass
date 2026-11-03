@@ -843,13 +843,14 @@ struct PropOccurrences {
     /// The entry holding the vertices last written; None is Prop::meshes.
     last: Option<usize>,
 }
-/// Default off. Tests: a scoped override, else LOOKING_GLASS_TEST_PROP_OCCURRENCE_REUSE=on|off.
+/// Default on since r25. Tests: a scoped override, else the shipped default;
+/// LOOKING_GLASS_TEST_PROP_OCCURRENCE_REUSE=off runs the whole suite with it off.
 #[cfg(feature="vita_renderer")]
 fn prop_occurrence_reuse() -> bool {
     #[cfg(test)]
     { PROP_REUSE_TEST.with(std::cell::Cell::get).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_PROP_OCCURRENCE_REUSE").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
+        Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
         _ => panic!("LOOKING_GLASS_TEST_PROP_OCCURRENCE_REUSE must be off or on"),
     }) }
     #[cfg(not(test))]

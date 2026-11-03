@@ -110,14 +110,16 @@ pub struct Config {
     pub actor_deferred_layers: bool,
     /// Skip the per-vertex UV compare and copy of a publication slot that already holds
     /// the UVs of this live mesh. Exact while nothing edits a live skeletal UV, which no
-    /// production code does. Default off until its console ABBA.
+    /// production code does (tools/check_source.py fails on a new writer). Default on since r25;
+    /// with prop_occurrence_reuse, console ABBA: hatter1 -10.16/-10.17, skool2 -4.11/-3.99, wchess2 -3.11/-3.04 ms.
     pub actor_publication_uv_reuse: bool,
     /// Keep one animated copy per repeated Prop draw occurrence in a frame and skip the
-    /// animation and the geometry compare while its exact inputs repeat. Default off
-    /// until its console ABBA.
+    /// animation and the geometry compare while its exact inputs repeat. Default on since r25,
+    /// measured with actor_publication_uv_reuse above.
     pub prop_occurrence_reuse: bool,
     /// Observed FX publications take a changed array from the pass that owns it instead of
-    /// copying it. Exact on the host oracle. Default off pending console A/B.
+    /// copying it. Exact on the host oracle. Default on since r25
+    /// (console ABBA: wchess2 -2.51/-1.96, skool2 -1.32/-1.66 ms).
     pub fx_observe_move: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
@@ -302,9 +304,9 @@ impl Default for Config {
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             actor_publication_occurrences: true,
             actor_deferred_layers: true,
-            actor_publication_uv_reuse: false,
-            prop_occurrence_reuse: false,
-            fx_observe_move: false,
+            actor_publication_uv_reuse: true,
+            prop_occurrence_reuse: true,
+            fx_observe_move: true,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -2274,10 +2276,10 @@ mod tests {
         }
     }
     #[test]
-    fn gather_reuse_levers_default_off_require_a_boolean_and_are_printed() {
+    fn gather_reuse_levers_default_on_require_a_boolean_and_are_printed() {
         for key in ["actor_publication_uv_reuse", "prop_occurrence_reuse"] {
             for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
-                assert_eq!(serde_json::to_value(&c).unwrap()[key], false, "{key} default");
+                assert_eq!(serde_json::to_value(&c).unwrap()[key], true, "{key} default");
             }
             for enabled in [false, true] {
                 let (c, rejected) = parse_runtime_config(serde_json::json!({key: enabled}).to_string().as_bytes()).unwrap();
@@ -2293,11 +2295,11 @@ mod tests {
         }
     }
     #[test]
-    fn fx_observe_move_defaults_off_requires_a_boolean_and_is_printed() {
+    fn fx_observe_move_defaults_on_requires_a_boolean_and_is_printed() {
         for c in [Config::default(), serde_json::from_str::<Config>("{}").unwrap()] {
-            assert!(!c.fx_observe_move);
+            assert!(c.fx_observe_move);
             let [config, _] = config_log_lines(&c);
-            assert!(config.contains("\"fx_observe_move\":false"), "{config}");
+            assert!(config.contains("\"fx_observe_move\":true"), "{config}");
         }
         for enabled in [false, true] {
             let c: Config = serde_json::from_value(serde_json::json!({"fx_observe_move": enabled})).unwrap();
@@ -2507,6 +2509,44 @@ mod tests {
         for key in LEVERS {
             on.as_object_mut().unwrap().remove(key);
             off.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(on, off);
+    }
+    #[test]
+    fn r25_human_play_configs_add_three_levers_to_r22() {
+        const NEW: [&str; 3] = ["actor_publication_uv_reuse", "prop_occurrence_reuse", "fx_observe_move"];
+        const OLD: [&str; 5] = ["sim_trigger_facts_reuse", "sim_sight_query_reuse", "sim_hatter_door_candidates",
+            "actor_publication_occurrences", "actor_deferred_layers"];
+        let parse = |bytes: &[u8]| {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            serde_json::to_value(&c).unwrap()
+        };
+        let mut on = parse(include_bytes!("../../configs/PL-r25-human.json"));
+        let mut off = parse(include_bytes!("../../configs/PL-r25-human-levers-off.json"));
+        let mut measure = parse(include_bytes!("../../configs/PL-r25-human-measure.json"));
+        let r22 = parse(include_bytes!("../../configs/PL-r22-human.json"));
+        // A missing key would silently take the shipped default, so read the files' own keys too.
+        for bytes in [&include_bytes!("../../configs/PL-r25-human.json")[..], &include_bytes!("../../configs/PL-r25-human-measure.json")[..]] {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            for key in NEW.iter().chain(&OLD) { assert_eq!(raw[*key], true, "{key} written on"); }
+        }
+        let raw: serde_json::Value = serde_json::from_slice(include_bytes!("../../configs/PL-r25-human-levers-off.json")).unwrap();
+        for key in NEW.iter().chain(&OLD) { assert_eq!(raw[*key], false, "{key} written off"); }
+        for key in NEW {
+            assert_eq!(on[key], true, "{key} on");
+            assert_eq!(off[key], false, "{key} off");
+            assert_eq!(serde_json::to_value(Config::default()).unwrap()[key], true, "{key} shipped default");
+        }
+        assert_eq!(on, r22, "r25 human is r22 human plus the three levers");
+        assert!(on["log_frame_time_every"].as_u64().unwrap_or(0) == 0, "human play runs without the frame-time log");
+        assert_eq!(measure["log_frame_time_every"], 10);
+        measure["log_frame_time_every"] = on["log_frame_time_every"].clone();
+        assert_eq!(measure, on, "the measurement variant differs only in the frame log");
+        for key in NEW.iter().chain(&OLD) {
+            on.as_object_mut().unwrap().remove(*key);
+            off.as_object_mut().unwrap().remove(*key);
         }
         assert_eq!(on, off);
     }

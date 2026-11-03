@@ -146,13 +146,13 @@ pub(crate) fn with_fx_observe_move<T>(on: bool, run: impl FnOnce() -> T) -> T {
     let _reset = Reset(FX_OBSERVE_MOVE_TEST.with(|s| s.replace(Some(on))));
     run()
 }
-// Default off, like Config. Tests: a scoped override, else
-// LOOKING_GLASS_TEST_FX_OBSERVE_MOVE=on runs the whole suite with the lever on.
+// Default on since r25, like Config. Tests: a scoped override, else the shipped default;
+// LOOKING_GLASS_TEST_FX_OBSERVE_MOVE=off runs the whole suite with the lever off.
 pub fn fx_observe_move() -> bool {
     #[cfg(test)]
     { FX_OBSERVE_MOVE_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_FX_OBSERVE_MOVE").as_deref() {
-        Ok("on") => true,
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
+        Ok("off") => false,
         _ => panic!("LOOKING_GLASS_TEST_FX_OBSERVE_MOVE must be off or on"),
     }) }
     #[cfg(all(not(test), feature="vita_renderer"))]
