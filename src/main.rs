@@ -139,6 +139,8 @@ mod viewmodel;
 mod village;
 mod village_route;
 mod visibility;
+#[cfg(not(target_os = "vita"))]
+mod host_fixture;
 mod water;
 mod water_art;
 mod weapon_rules;
