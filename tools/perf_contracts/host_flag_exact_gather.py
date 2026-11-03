@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host oracle for the two actor_gather levers: actor_publication_uv_reuse, prop_occurrence_reuse.
+"""Host oracle for the r25 levers: actor_publication_uv_reuse, prop_occurrence_reuse, fx_observe_move.
 
 Runs one sim_maps_probe binary on real maps for 180 frames per arm. Only the lever keys differ
 between arms; the config is the production console overlay. Every frame is compared: skin rows,
@@ -16,12 +16,10 @@ whole Mesh. Nothing writes .uv. Every `.uv =` in src/ is a copy (render_fx layer
 power_pose effects), a weapon or loot mesh, world geometry or a test. The ON arm also compares
 every reused UV in this binary and aborts on a stale one.
 
-Pixels. The host GL driver is not a pure function of the draws. Two identical OFF runs of hedge3
-differ by 1-3/255 in a few pixels on random frames, and skipping an upload moves such clusters
-(tower1 frames 40, 41, 59: 2-7 pixels, 1/255). So this oracle has two modes. Normal mode runs the
-lever as it ships; packets are strict and image differences are reported. --force-upload uploads
-every packet in both arms, leaving the driver the same commands, and pixels are strict too. There
-hedge3 is reported as noise, because its OFF arms disagree with each other.
+Pixels are strict, as the levers ship. The probe flushes before its per-draw GPU readback; without
+that flush the readback's own flush point depended on pending uploads and moved host pixels by
+1/255 (tower1 frames 40, 41, 59). hedge3 is reported, not strict: two OFF runs differ by 1-3/255 on
+random frames with identical packets, mechanism unknown. --force-upload remains as a diagnostic.
 
 Negative controls (--negative) sabotage the lever through LOOKING_GLASS_GATHER_NEGATIVE. There
 the comparison must fail: a pass would mean this oracle cannot see the fault.
@@ -38,10 +36,11 @@ MORE = ['centipede1', 'pandemonium', 'hedge3', 'keep', 'grounds2', 'tower1', 'to
 DT = {'pandemonium': '0.04184', 'hedge3': '0.06'}
 FRAMES = 180
 ATTEMPTS = 6
-LEVERS = ('actor_publication_uv_reuse', 'prop_occurrence_reuse')
-ARMS = {'off': (False, False), 'on': (True, True), 'uv': (True, False), 'prop': (False, True), 'control': (False, False)}
+LEVERS = ('actor_publication_uv_reuse', 'prop_occurrence_reuse', 'fx_observe_move')
+ARMS = {'off': (False, False, False), 'on': (True, True, True), 'uv': (True, False, False), 'prop': (False, True, False),
+        'move': (False, False, True), 'control': (False, False, False)}
 TIMING = {'cpu_ms', 'spans_ms'}
-WITNESS = {'actor_publication_uv_reused_vertices', 'prop_occurrence_reused_vertices', 'prop_occurrence_copied_vertices'}
+WITNESS = {'actor_publication_uv_reused_vertices', 'prop_occurrence_reused_vertices', 'prop_occurrence_copied_vertices', 'fx_observe_moved_vertices'}
 # Counts of work the levers remove on purpose. The produced geometry and every packet are
 # compared separately. A Prop placement keeps its geometry version, so its layer copy, its merge
 # copy and its upload stop. Any other counter that moves fails the case.
@@ -100,8 +99,7 @@ def arm_environment(name, negative, force_upload):
 
 def run_arm(binary, config, name, arm, arm_dir, negative, force_upload):
     (arm_dir / 'private').mkdir(parents=True)
-    uv, prop = ARMS[arm]
-    (arm_dir / 'private/vita_renderer.json').write_text(json.dumps(dict(config, actor_publication_uv_reuse=uv, prop_occurrence_reuse=prop)))
+    (arm_dir / 'private/vita_renderer.json').write_text(json.dumps(dict(config, **dict(zip(LEVERS, ARMS[arm])))))
     command = [str(binary), '--data', str(DATA), '--no-audio', '--save-dir', str(arm_dir / 'private/saves'),
                '--map', name, '--frames', str(FRAMES), '--capture', str(arm_dir / 'final.png')]
     start = time.monotonic()
@@ -201,7 +199,7 @@ def run_case(ctx, name, arm='on', negative=None):
             continue
         off, on = pair
         try:
-            row = compare(name, off, on, ctx['force_upload'] and name not in NOISY_PIXELS or arm == 'control' and name not in NOISY_PIXELS)
+            row = compare(name, off, on, name not in NOISY_PIXELS)
         except Mismatch as error:
             if not negative:
                 raise
@@ -222,7 +220,7 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--maps', nargs='*')
-    parser.add_argument('--arm', choices=['on', 'uv', 'prop', 'control'], default='on')
+    parser.add_argument('--arm', choices=['on', 'uv', 'prop', 'move', 'control'], default='on')
     parser.add_argument('--negative', nargs='*', default=[])
     parser.add_argument('--force-upload', action='store_true')
     parser.add_argument('--keep-logs', action='store_true')
