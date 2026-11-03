@@ -707,6 +707,8 @@ pub static REGISTRATION: Registration = Registration {
         ),
     ],
     checks: &[
+        #[cfg(not(target_os = "vita"))]
+        Check {flag:"--hatter1-door-fixture",help:"Staged door prompt, use, motion and occlusion fixture.",run:Run::Headless(motion::door_fixture::check)},
         Check {flag:"--hatter1-route-native-check",help:"Verify continuous Clockwork traversal with its native cast.",run:Run::Windowed(route::check)},
         Check {
             flag: "--hatter1-traversal-check",

@@ -18,7 +18,9 @@ const INDICES:usize=262144;
 #[cfg(any(test,feature="actor_diagnostics",all(feature="sim_maps_probe",not(target_os="vita"))))]
 const MEMORY_ROWS:usize=36;
 #[derive(Default)]
-struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], mode:[Option<PublicationMode>;2], epoch:[u64;2], instance:[Option<u64>;2] }
+struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], mode:[Option<PublicationMode>;2], epoch:[u64;2], instance:[Option<u64>;2],
+    /// The live vertex array whose UVs each slot last copied, and the edit count of that copy.
+    uv_live:[usize;2], uv_edits:[u32;2] }
 /// A non-simple recipe whose raw skin a worker writes into `bank`/`slot`. Its layers are
 /// built on the game thread after a successful drain, into the placeholder at `group`.
 /// Game-thread only: the Rc<Surface> and captured draw values never reach a worker.
@@ -39,6 +41,11 @@ struct State {
     direct_capped:u64,
     /// Draw index per (actor, surface) in this frame; cleared, not freed, each frame.
     occurrences:HashMap<(ActorId,usize),u16>, occurrences_on:bool,
+    /// actor_publication_uv_reuse, latched per frame. `uv_edits` counts announced live UV edits.
+    uv_reuse_on:bool, uv_edits:u32,
+    /// Reused UVs that disagreed with the live mesh. Tests and the host probe compare; the Vita never does.
+    #[cfg(any(test,all(feature="sim_maps_probe",not(target_os="vita"))))]
+    uv_stale:u64,
     /// Geometries whose bank Rc was dropped while another owner still held them.
     /// Host probe and tests only: memory_account() prunes it, nothing does on the Vita.
     #[cfg(any(test, feature="actor_diagnostics", all(feature="sim_maps_probe", not(target_os="vita"))))]
@@ -223,15 +230,35 @@ impl State {
         let geometry=bank.slots[slot].get_or_insert_with(||Rc::new(prepared::Geometry::new(Mesh {
             vertices:Vec::new(),indices:Vec::new(),texture:None })));
         let g=Rc::get_mut(geometry).unwrap();
-        if g.vertices.len()!=mesh.vertices.len() {
+        let resized=g.vertices.len()!=mesh.vertices.len();
+        if resized {
             g.mesh.vertices.reserve_exact(mesh.vertices.len().saturating_sub(g.vertices.len()));
             g.mesh.vertices.resize(mesh.vertices.len(),Vertex::new(0.,0.,0.,0.,0.,WHITE));
         }
         // UV is the only live field untouched by the exact skin kernel. Snapshot it
         // before returning to a shared-model caller; blink/hidden edits cannot race.
-        let same_uv=g.vertices.len()==mesh.vertices.len() && g.vertices.iter().zip(&mesh.vertices)
-            .all(|(a,b)|a.uv.to_array().map(f32::to_bits)==b.uv.to_array().map(f32::to_bits));
-        for (out,live) in g.mesh.vertices.iter_mut().zip(&mesh.vertices) {out.uv=live.uv;}
+        // With actor_publication_uv_reuse a slot that already holds this live array's UVs
+        // skips both walks: production writes a live skeletal mesh's position, normal,
+        // color and texture, never its UVs (see note_live_uv_edit). Workers keep them too.
+        let live=mesh.vertices.as_ptr() as usize;
+        let uv_held=s.uv_reuse_on && !resized && same_cpu && bank.uv_live[slot]==live && bank.uv_edits[slot]==s.uv_edits;
+        let same_uv=if uv_held {
+            crate::sim_maps::count("actor_publication_uv_reused_vertices",mesh.vertices.len() as u64);
+            #[cfg(any(test,all(feature="sim_maps_probe",not(target_os="vita"))))]
+            if !g.vertices.iter().zip(&mesh.vertices).all(|(a,b)|a.uv.to_array().map(f32::to_bits)==b.uv.to_array().map(f32::to_bits)) {
+                s.uv_stale+=1;
+                #[cfg(all(not(test),feature="sim_maps_probe",not(target_os="vita")))]
+                assert!(crate::sim_maps::probe::negative_control().is_some(),"actor_publication_uv_reuse held a stale UV");
+            }
+            true
+        } else {
+            let same_uv=g.vertices.len()==mesh.vertices.len() && g.vertices.iter().zip(&mesh.vertices)
+                .all(|(a,b)|a.uv.to_array().map(f32::to_bits)==b.uv.to_array().map(f32::to_bits));
+            for (out,live) in g.mesh.vertices.iter_mut().zip(&mesh.vertices) {out.uv=live.uv;}
+            bank.uv_live[slot]=if s.uv_reuse_on {live} else {0};
+            bank.uv_edits[slot]=s.uv_edits;
+            same_uv
+        };
 
         if !same_cpu {
             g.mesh.indices.clear();g.mesh.indices.reserve_exact(cpu.indices.len());
@@ -535,6 +562,35 @@ pub(crate) fn deferred_layers()->bool {
     { crate::render::vita_renderer::config().actor_deferred_layers }
 }
 #[cfg(test)]
+thread_local! { static UV_REUSE_TEST:Cell<Option<bool>>=const {Cell::new(None)}; }
+#[cfg(test)]
+pub(crate) fn with_publication_uv_reuse<T>(on:bool,run:impl FnOnce()->T)->T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset { fn drop(&mut self) { UV_REUSE_TEST.with(|s|s.set(self.0)); } }
+    let _reset=Reset(UV_REUSE_TEST.with(|s|s.replace(Some(on))));
+    run()
+}
+/// Default on since r25. Tests: a scoped override, else the shipped default;
+/// LOOKING_GLASS_TEST_PUBLICATION_UV_REUSE=off runs the whole suite with it off.
+pub(crate) fn publication_uv_reuse()->bool {
+    #[cfg(test)]
+    { UV_REUSE_TEST.with(|s|s.get()).unwrap_or_else(||match std::env::var("LOOKING_GLASS_TEST_PUBLICATION_UV_REUSE").as_deref() {
+        Ok("off") => false,
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
+        _ => panic!("LOOKING_GLASS_TEST_PUBLICATION_UV_REUSE must be off or on"),
+    }) }
+    #[cfg(not(test))]
+    { crate::render::vita_renderer::config().actor_publication_uv_reuse }
+}
+/// The contract of actor_publication_uv_reuse: code that writes a live skeletal mesh's
+/// UVs after load calls this before the mesh's next draw. Production has no such writer
+/// (the audit is in tools/perf_contracts/host_flag_exact_gather.py, and tools/check_source.py
+/// fails on a .uv write in a new file); test fixtures do. A first writer must promote this.
+#[cfg(test)]
+pub(crate) fn note_live_uv_edit() { STATE.with(|s| {let mut s=s.borrow_mut();s.uv_edits=s.uv_edits.wrapping_add(1);}); }
+/// This frame's publication epoch. One per frame in which single preparation runs.
+pub(crate) fn frame_epoch()->u64 { STATE.with(|s|s.borrow().epoch) }
+#[cfg(test)]
 thread_local! { static OCCURRENCES_TEST:Cell<Option<bool>>=const {Cell::new(None)}; }
 #[cfg(test)]
 pub(crate) fn with_publication_occurrences<T>(on:bool,run:impl FnOnce()->T)->T {
@@ -598,7 +654,7 @@ pub(crate) fn begin() {
     ACTIVE.with(|a|a.set(enabled));
     DEFERRED.with(|d|d.set(enabled && deferred_layers()));
     // Latched once per frame: every prepare in this frame uses the same value.
-    if enabled { STATE.with(|s| {let mut s=s.borrow_mut();s.occurrences_on=publication_occurrences();s.next_frame();}); }
+    if enabled { STATE.with(|s| {let mut s=s.borrow_mut();s.occurrences_on=publication_occurrences();s.uv_reuse_on=publication_uv_reuse();s.next_frame();}); }
 }
 pub(crate) fn end() {
     DEFERRED.with(|d|d.set(false));
@@ -1320,6 +1376,81 @@ mod tests {
         assert!(unwound.is_err());assert_eq!(publication_occurrences(),suite);
         // The test Config is a frozen default (on); the switch never reads it in tests.
         assert!(crate::render::vita_renderer::config().actor_publication_occurrences);
+    }
+    // actor_publication_uv_reuse.
+    fn uv_state(on:bool)->State { State {uv_reuse_on:on,occurrences_on:true,..Default::default()} }
+    /// One frame's publication, with the previous output still in flight, so the two slots
+    /// alternate as they do in play. Returns (vertices, whether the upload stamp moved, stale count).
+    struct UvArm {state:State,actor:ActorId,held:Option<Rc<prepared::Geometry>>,stamps:[Option<u64>;2]}
+    impl UvArm {
+        fn new(on:bool)->Self { Self {state:State {uv_reuse_on:on,occurrences_on:true,..Default::default()},actor:ActorId::default(),held:None,stamps:[None;2]} }
+        fn frame(&mut self,mesh:&Mesh,cpu:&Arc<SkinSurface>)->(Vec<Vertex>,bool,u64) {
+            self.state.next_frame();
+            let (id,slot,_)=self.state.reserve_key(mesh,cpu.clone(),true,0,PublicationMode::Opaque255,key(self.actor,cpu)).unwrap();
+            let g=self.state.banks[id].slots[slot].as_ref().unwrap().clone();
+            let moved=self.stamps[slot].replace(g.version.vertices)!=Some(g.version.vertices);
+            let vertices=g.vertices.clone();
+            self.held=Some(g);
+            (vertices,moved,self.state.uv_stale)
+        }
+    }
+    #[test]
+    fn uv_reuse_publishes_the_same_vertices_and_upload_stamps_as_the_full_walks() {
+        let (mesh,cpu)=fixture();
+        let (mut on,mut off)=(UvArm::new(true),UvArm::new(false));
+        for frame in 0..8 {
+            let a=on.frame(&mesh,&cpu);
+            let b=off.frame(&mesh,&cpu);
+            assert_eq!(a.0.iter().map(|v|v.uv).collect::<Vec<_>>(),b.0.iter().map(|v|v.uv).collect::<Vec<_>>(),"frame {frame}");
+            assert_eq!(a.1,b.1,"upload stamp in frame {frame}");
+            assert_eq!(a.2,0);
+        }
+        let live=mesh.vertices.as_ptr() as usize;
+        assert_eq!(on.state.banks.len(),1);
+        assert_eq!(on.state.banks[0].uv_live,[live;2],"both slots hold the live UVs");
+        assert_eq!(off.state.banks[0].uv_live,[0;2],"the off path keeps no memo");
+    }
+    #[test]
+    fn uv_reuse_negative_control_an_unannounced_edit_goes_stale_and_is_counted() {
+        let (mut mesh,cpu)=fixture();
+        let (mut on,mut off)=(UvArm::new(true),UvArm::new(false));
+        for _ in 0..4 {on.frame(&mesh,&cpu);off.frame(&mesh,&cpu);}
+        mesh.vertices[0].uv=Vec2::new(-3.,9.);
+        let a=on.frame(&mesh,&cpu);
+        let b=off.frame(&mesh,&cpu);
+        assert_eq!(b.0[0].uv,Vec2::new(-3.,9.));
+        assert_ne!(a.0[0].uv,b.0[0].uv,"the lever must differ here, or this test proves nothing");
+        assert_eq!(a.2,1);assert!(b.1,"the off arm moved its upload stamp");
+    }
+    #[test]
+    fn uv_reuse_full_walks_return_after_an_announced_edit_a_new_mesh_or_a_new_surface() {
+        let (mut mesh,cpu)=fixture();
+        let (mut on,mut off)=(UvArm::new(true),UvArm::new(false));
+        for _ in 0..4 {on.frame(&mesh,&cpu);off.frame(&mesh,&cpu);}
+        // Announced edit: each slot repeats the walks once.
+        mesh.vertices[0].uv=Vec2::new(5.,6.);on.state.uv_edits+=1;
+        for _ in 0..4 {
+            let a=on.frame(&mesh,&cpu);let b=off.frame(&mesh,&cpu);
+            assert_eq!(a.0[0].uv,Vec2::new(5.,6.));assert_eq!(a.0[0].uv,b.0[0].uv);assert_eq!(a.1,b.1);assert_eq!(a.2,0);
+        }
+        // A second live array with other UVs, same surface: the address differs.
+        let mut other=crate::render_fx::copy_mesh(&mesh);other.vertices[0].uv=Vec2::new(7.,8.);
+        for _ in 0..4 {
+            let a=on.frame(&other,&cpu);let b=off.frame(&other,&cpu);
+            assert_eq!(a.0[0].uv,Vec2::new(7.,8.));assert_eq!(a.0[0].uv,b.0[0].uv);assert_eq!(a.1,b.1);assert_eq!(a.2,0);
+        }
+        // A new surface in the same bank slot.
+        let (_,cpu2)=fixture();
+        let k=key(on.actor,&cpu);
+        on.state.next_frame();
+        let id=on.state.lookup[&k];on.held=None;
+        let (_,slot,_)=on.state.reserve_at(&mesh,cpu2.clone(),true,0,PublicationMode::Opaque255,id).unwrap();
+        assert_eq!(on.state.banks[id].slots[slot].as_ref().unwrap().vertices[0].uv,Vec2::new(5.,6.));
+        assert_eq!(on.state.uv_stale,0);
+        // Evicting the bank forgets the memo with it.
+        on.held=None;on.state.evict(id);
+        let a=on.frame(&mesh,&cpu);
+        assert_eq!(a.0[0].uv,Vec2::new(5.,6.));assert_eq!(a.2,0);
     }
     #[test]
     fn third_same_key_draw_publishes_only_with_occurrences_on() {

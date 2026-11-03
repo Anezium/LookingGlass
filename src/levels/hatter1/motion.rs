@@ -1,3 +1,5 @@
+#[cfg(not(target_os = "vita"))]
+pub(super) mod door_fixture;
 use super::*;
 pub(super) struct Object {
     pub id: usize,

@@ -244,6 +244,11 @@ pub static RESERVATIONS: [Reservation; 39] = [
                 "--potears2-transport-check",
                 "--potears2-store-write-check",
                 "--potears2-store-read-check",
+                // Host-only fixtures, never compiled for the console.
+                #[cfg(not(target_os = "vita"))]
+                "--potears2-sight-fixture",
+                #[cfg(not(target_os = "vita"))]
+                "--potears2-sight-fixture-30hz",
             ],
             route: &["--potears2-route-check", "--potears2-route-native-check"],
             skip: &["--potears2-skip-route-check"],
@@ -310,7 +315,10 @@ pub static RESERVATIONS: [Reservation; 39] = [
         render: &["--funhouse-render-check"],
     }), ..visit(22, "funhouse") },
     Reservation {flags:Some(VisitFlags {
-        contract:&["--hatter1-check", "--hatter1-traversal-check"],
+        contract:&["--hatter1-check", "--hatter1-traversal-check",
+            // Host-only fixture, never compiled for the console.
+            #[cfg(not(target_os = "vita"))]
+            "--hatter1-door-fixture"],
         route:&["--hatter1-route-check", "--hatter1-route-native-check"], skip:&["--hatter1-skip-route-check"],
         render:&["--hatter1-render-check"],
     }), ..visit(23, "hatter1")},

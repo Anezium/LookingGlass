@@ -137,6 +137,29 @@ pub(crate) fn with_trigger_facts_reuse<T>(on: bool, run: impl FnOnce() -> T) -> 
     let _reset = Reset(TRIGGER_FACTS_TEST.with(|s| s.replace(Some(on))));
     run()
 }
+#[cfg(test)]
+thread_local! { static FX_OBSERVE_MOVE_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn with_fx_observe_move<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset { fn drop(&mut self) { FX_OBSERVE_MOVE_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(FX_OBSERVE_MOVE_TEST.with(|s| s.replace(Some(on))));
+    run()
+}
+// Default on since r25, like Config. Tests: a scoped override, else the shipped default;
+// LOOKING_GLASS_TEST_FX_OBSERVE_MOVE=off runs the whole suite with the lever off.
+pub fn fx_observe_move() -> bool {
+    #[cfg(test)]
+    { FX_OBSERVE_MOVE_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_FX_OBSERVE_MOVE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("on") => true,
+        Ok("off") => false,
+        _ => panic!("LOOKING_GLASS_TEST_FX_OBSERVE_MOVE must be off or on"),
+    }) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().fx_observe_move }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
 // Default on since r21, like Config. Tests: a scoped override, else
 // LOOKING_GLASS_TEST_TRIGGER_FACTS=off runs the whole suite with reuse off.
 pub fn trigger_facts_reuse() -> bool {

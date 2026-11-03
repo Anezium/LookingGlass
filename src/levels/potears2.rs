@@ -9,6 +9,8 @@ mod save_check;
 mod scene;
 mod transport;
 mod transport_check;
+#[cfg(not(target_os = "vita"))]
+mod sight_fixture;
 use super::{state, Check, Registration, Run, SaveCase};
 use crate::combat::{Feedback, Hit, Target};
 use crate::level::scene::{SceneRunner, SceneState};
@@ -713,6 +715,10 @@ pub static REGISTRATION: Registration = Registration {
     owns_npc: |name,model| (name == "billthelizard" && model == "c_bill") || (name == "antguards" && matches!(model,"c_armyant"|"c_armyantcorp")),
     target_base: Some(guards::BASE), story_beats: BEATS,
     checks: &[
+        #[cfg(not(target_os = "vita"))]
+        Check { flag: "--potears2-sight-fixture", help: "Staged Hard door-guard sight, memory and reacquisition fixture.", run: Run::Headless(sight_fixture::check) },
+        #[cfg(not(target_os = "vita"))]
+        Check { flag: "--potears2-sight-fixture-30hz", help: "The same fixture at a 30 Hz frame cadence, where sight traces repeat.", run: Run::Headless(sight_fixture::check_30hz) },
         Check { flag: "--potears2-store-write-check", help: "Write normal-route transport saves.", run: Run::Windowed(|a|Box::pin(save_check::run(a,true))) },
         Check { flag: "--potears2-store-read-check", help: "Read normal-route saves in a fresh process.", run: Run::Windowed(|a|Box::pin(save_check::run(a,false))) },
         Check { flag: "--potears2-transport-check", help: "Verify pond rides, fish timer, pause and restore.", run: Run::Headless(transport_check::check) },

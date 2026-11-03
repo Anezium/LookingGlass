@@ -24,6 +24,7 @@ CONFIG_FILES = {
     ".cargo/config.toml", "configs/PL-def-r3.json", "configs/vita_renderer.lean.json",
     "configs/PL-r21-human.json", "configs/PL-r21-human-levers-off.json",
     "configs/PL-r22-human.json", "configs/PL-r22-human-levers-off.json",
+    "configs/PL-r25-human.json", "configs/PL-r25-human-levers-off.json", "configs/PL-r25-human-measure.json",
     "configs/PL-r3d-baseline.json", "configs/PL-r3d-actor-prepare-off.json",
     "configs/PL-r3d-native-scale.json", "configs/PL-r3d-preview-every-frame.json",
     "configs/PL-r3d-film-bypass.json", "configs/PL-r3d-audio-direct.json",
@@ -49,6 +50,26 @@ SECRET = re.compile(
     rb"(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|"
     rb"AKIA[A-Z0-9]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"
 )
+# actor_publication_uv_reuse holds a slot's UVs while the live skeletal mesh array is the same.
+# No production code writes a live skeletal UV, and this check keeps it that way: a .uv write in
+# any other file fails. These files were audited on 2026-11-03: copies, Prop, loot and world
+# meshes, the uniform of that name, the reuse itself and tests. Before adding a file, check
+# that the write cannot reach a live skeletal mesh. If it can, the writer must call
+# render_fx::actor_publication::note_live_uv_edit (today cfg(test): promote it).
+UV_WRITE_FILES = {
+    "src/bsp.rs", "src/loot_art.rs", "src/power_pose/effects.rs", "src/render.rs",
+    "src/render/vita_renderer.rs", "src/render_fx.rs", "src/render_fx/actor_publication.rs",
+    "src/render_fx/prepared.rs", "src/render_fx/retained.rs", "src/render_fx/retained/state_cache.rs",
+    "src/character/skinning/overlap.rs", "src/sim_maps/probe.rs", "src/weapons.rs",
+}
+UV_WRITE = re.compile(rb"\.uv(?:\.[xy])?\s*(?:[-+*/]?=(?!=))|&mut\s+[\w.\[\]()]*\.uv\b")
+
+
+def uv_write_errors(path, data):
+    if not path.endswith(".rs") or path in UV_WRITE_FILES:
+        return []
+    lines = [data.count(b"\n", 0, m.start()) + 1 for m in UV_WRITE.finditer(data)]
+    return [f"Unaudited .uv write (see UV_WRITE_FILES): {path}:{line}" for line in lines]
 
 
 def allowed(path):
@@ -81,6 +102,7 @@ def audit_data(path, data):
         errors.append(f"Binary content in source file: {path}")
     if SECRET.search(data):
         errors.append(f"Possible credential/private key in: {path}")
+    errors.extend(uv_write_errors(path, data))
     if path.endswith(".json"):
         try:
             json.loads(data)

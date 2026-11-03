@@ -62,6 +62,8 @@ pub fn count(name: &'static str, n: u64) {
         COUNTS.with(|c| *c.borrow_mut().entry(name).or_default() += n);
     }
 }
+/// The counters so far, for host fixtures that do not use the frame probe.
+pub fn counters() -> BTreeMap<&'static str, u64> { COUNTS.with(|c| c.borrow().clone()) }
 pub fn uncount(name: &'static str, n: u64) {
     static COUNTS_ON: OnceLock<bool> = OnceLock::new();
     if enabled() && *COUNTS_ON.get_or_init(|| std::env::var("LOOKING_GLASS_SIM_MAPS_COUNTERS").as_deref() != Ok("0")) {
@@ -152,6 +154,21 @@ pub fn joint_order(kind: u8, id: usize, depth: f32) {
     if enabled() {JOINT_ORDER.with(|s|s.borrow_mut().push((kind,id,depth.to_bits())));}
 }
 
+pub fn force_uploads() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_FORCE_UPLOAD").is_some())
+}
+/// Host oracle sabotage: makes a lever wrong on purpose, to prove the comparison sees it.
+pub fn negative_control() -> Option<&'static str> {
+    static ON: OnceLock<Option<String>> = OnceLock::new();
+    ON.get_or_init(|| std::env::var("LOOKING_GLASS_GATHER_NEGATIVE").ok()).as_deref()
+}
+/// `uv`: one live UV edit nobody announces, in both arms. The lever-on arm must go stale.
+pub fn negative_uv_edit(mesh: &mut macroquad::prelude::Mesh) {
+    if negative_control() == Some("uv") && frame() >= 90 {
+        if let Some(v) = mesh.vertices.first_mut() { v.uv.x = frame() as f32 * 0.125; }
+    }
+}
 pub fn skin_proof() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     enabled() && *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_PROOF").is_some())
@@ -311,6 +328,7 @@ pub fn gpu_geometry(vertex_count:usize,index_count:usize)->(Vec<macroquad::prelu
     use macroquad::prelude::*;
     #[link(name="OpenGL",kind="framework")]
     extern "C" {
+        fn glFlush();
         fn glGetIntegerv(pname:u32,data:*mut i32);
         fn glGetVertexAttribiv(index:u32,pname:u32,data:*mut i32);
         fn glBindBuffer(target:u32,buffer:u32);
@@ -319,6 +337,9 @@ pub fn gpu_geometry(vertex_count:usize,index_count:usize)->(Vec<macroquad::prelu
     let mut vertices=vec![Vertex {position:Vec3::ZERO,uv:Vec2::ZERO,normal:Vec4::ZERO,color:[0;4]};vertex_count];
     let mut indices=vec![0_u16;index_count];
     unsafe {
+        // Without this the readback's own flush point depends on whether the buffer has a
+        // pending upload, and those boundaries move host pixels by 1/255.
+        glFlush();
         let mut old_array=0;let mut attribute_buffer=0;let mut index_buffer=0;
         glGetIntegerv(0x8894,&mut old_array); // ARRAY_BUFFER_BINDING
         glGetVertexAttribiv(0,0x889F,&mut attribute_buffer); // ATTRIB_ARRAY_BUFFER_BINDING
