@@ -925,6 +925,10 @@ pub fn skin(mesh: &Mesh) {
     crate::game_thread::assert_current();
     SKIN_OPACITY.with(|a| skin_timed(mesh, None, a.get()));
 }
+/// False inside with_skin_opacity below 1. Such a skin() goes to layer_passes and never
+/// reaches the actor layer cache, so it must not start a skin_unchanged() run.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn skin_fully_opaque() -> bool { SKIN_OPACITY.with(std::cell::Cell::get) == 1. }
 
 /// Scope entity translucency to one actor, including its attachment meshes.
 pub fn with_skin_opacity(alpha: f32, draw: impl FnOnce()) {

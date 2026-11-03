@@ -1040,10 +1040,13 @@ impl Prop {
         }
     }
     /// Returns false when the draw is the plain one: lever off, outside single preparation,
-    /// a non-finite animation position, past the occurrence bound or inputs that do not repeat.
+    /// a faded draw, a non-finite animation position, past the occurrence bound or inputs that
+    /// do not repeat. A faded draw skips the layer cache, so it leaves the memo untouched: the
+    /// copy and the cache stay in step, which is what skin_unchanged() vouches for.
     #[cfg(feature="vita_renderer")]
     fn draw_occurrence(&mut self, attachment: Transform, scale: f32, fullbright: bool, time: f32, looping: bool) -> bool {
-        if !prop_occurrence_reuse() || scale <= 0. || !crate::character::skinning::overlap::single_preparing() {
+        if !prop_occurrence_reuse() || scale <= 0. || !crate::render_fx::skin_fully_opaque()
+            || !crate::character::skinning::overlap::single_preparing() {
             return false;
         }
         let memo = &mut self.occurrences;
@@ -3574,7 +3577,7 @@ mod prop_occurrence_tests {
     use crate::character::skinning::overlap;
     use crate::render_fx::test_support as ts;
     #[derive(Clone, Copy, Debug)]
-    struct Call { pose: Transform, scale: f32, bright: bool, time: f32, looping: bool }
+    struct Call { pose: Transform, scale: f32, bright: bool, time: f32, looping: bool, opacity: f32 }
     fn surface(frames: usize) -> tan::Surface {
         let shape = |f: usize, n: usize| vec3(n as f32 + f as f32 * 0.5, (n * n) as f32 * 0.25, 1. + f as f32);
         tan::Surface {
@@ -3597,7 +3600,7 @@ mod prop_occurrence_tests {
         (Prop { _material_layers: Vec::new(), model, meshes, scale: 1.25, occurrences: PropOccurrences::default() }, vec![keep, swapped])
     }
     fn at(x: f32) -> Transform { Transform { translation: vec3(x, 2., 3.), rotation: Quat::from_rotation_z(x * 0.1) } }
-    fn call(x: f32, time: f32, looping: bool) -> Call { Call { pose: at(x), scale: 1., bright: false, time, looping } }
+    fn call(x: f32, time: f32, looping: bool) -> Call { Call { pose: at(x), scale: 1., bright: false, time, looping, opacity: 1. } }
     fn with_arm<T>(on: bool, run: impl FnOnce() -> T) -> T {
         struct Reset(Option<bool>);
         impl Drop for Reset { fn drop(&mut self) { PROP_REUSE_TEST.with(|s| s.set(self.0)); } }
@@ -3618,7 +3621,7 @@ mod prop_occurrence_tests {
                 crate::render_fx::retained::host_reset();
                 let mut frame = overlap::Frame::begin();
                 assert!(overlap::single_preparing());
-                for c in calls { p.draw_frame(c.pose, c.scale, c.bright, c.time, c.looping); }
+                for c in calls { crate::render_fx::with_skin_opacity(c.opacity, || p.draw_frame(c.pose, c.scale, c.bright, c.time, c.looping)); }
                 frame.dispatch();
                 frame.collect();
                 out.push(ts::snapshot());
@@ -3680,6 +3683,31 @@ mod prop_occurrence_tests {
             vec![call(0., f32::NAN, true)], vec![call(0., 0.25, true)], vec![call(0., f32::INFINITY, true)], vec![call(0., 0.25, true)]];
         let p = same_output(&frames, |_, _| {});
         assert_eq!(p.occurrences.entries.len(), PROP_OCCURRENCES);
+    }
+    #[test]
+    fn opaque_draw_after_a_faded_draw_at_the_same_key() {
+        // The faded draw reaches layer_passes, not the layer cache. If it updated the memo,
+        // the next opaque draw at its key would vouch for geometry the cache never saw.
+        let faded = |x: f32| Call { opacity: 0.75, ..call(x, 0.25, true) };
+        let frames = vec![vec![call(1., 0.25, true)], vec![call(1., 0.25, true)], vec![call(1., 0.25, true)],
+            vec![faded(2.)], vec![call(2., 0.25, true)], vec![call(2., 0.25, true)],
+            vec![faded(2.)], vec![call(2., 0.25, true)], vec![faded(3.)], vec![call(1., 0.25, true)]];
+        same_output(&frames, |_, _| {});
+    }
+    #[test]
+    fn a_faded_draw_leaves_the_memo_untouched_and_writes_the_plain_meshes() {
+        let opaque: Vec<_> = (0..3).map(|_| vec![call(1., 0.25, true)]).collect();
+        let (_, _, before) = run(true, &opaque, |_, _| {});
+        let mut frames = opaque.clone();
+        frames.push(vec![Call { opacity: 0.75, ..call(2., 0.25, true) }]);
+        let (_, _, after) = run(true, &frames, |_, _| {});
+        let (a, b) = (&before.occurrences.entries[0], &after.occurrences.entries[0]);
+        assert_eq!(a.pose, b.pose);
+        assert_eq!(a.frames, b.frames);
+        let positions = |e: &PropOccurrence| e.meshes[0].vertices.iter().map(|v| v.position.to_array().map(f32::to_bits)).collect::<Vec<_>>();
+        assert_eq!(positions(a), positions(b));
+        assert_eq!(before.occurrences.last, Some(0));
+        assert_eq!(after.occurrences.last, None, "draw_electric must read the faded draw's plain meshes");
     }
     #[test]
     fn caller_edits_through_meshes_at_reach_later_draws_in_both_arms() {
