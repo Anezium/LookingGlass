@@ -152,6 +152,21 @@ pub fn joint_order(kind: u8, id: usize, depth: f32) {
     if enabled() {JOINT_ORDER.with(|s|s.borrow_mut().push((kind,id,depth.to_bits())));}
 }
 
+pub fn force_uploads() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_FORCE_UPLOAD").is_some())
+}
+/// Host oracle sabotage: makes a lever wrong on purpose, to prove the comparison sees it.
+pub fn negative_control() -> Option<&'static str> {
+    static ON: OnceLock<Option<String>> = OnceLock::new();
+    ON.get_or_init(|| std::env::var("LOOKING_GLASS_GATHER_NEGATIVE").ok()).as_deref()
+}
+/// `uv`: one live UV edit nobody announces, in both arms. The lever-on arm must go stale.
+pub fn negative_uv_edit(mesh: &mut macroquad::prelude::Mesh) {
+    if negative_control() == Some("uv") && frame() >= 90 {
+        if let Some(v) = mesh.vertices.first_mut() { v.uv.x = frame() as f32 * 0.125; }
+    }
+}
 pub fn skin_proof() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     enabled() && *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_PROOF").is_some())

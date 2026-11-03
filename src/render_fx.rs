@@ -913,7 +913,13 @@ pub(crate) fn skin_requires_preservation(mesh: &Mesh) -> bool {
 }
 pub(crate) fn skin_produced(mesh: &Mesh, publication: actor_vertices::Publication<'_>) {
     crate::game_thread::assert_current();
-    SKIN_OPACITY.with(|a| skin_timed_produced(mesh, None, a.get(), Some(publication)));
+    SKIN_OPACITY.with(|a| skin_timed_produced(mesh, None, a.get(), Some(publication), false));
+}
+/// skin() for a mesh whose vertices and indices have not changed since its last skin()
+/// call on this same Mesh. The layer cache returns its geometry without comparing it.
+pub(crate) fn skin_unchanged(mesh: &Mesh) {
+    crate::game_thread::assert_current();
+    SKIN_OPACITY.with(|a| skin_timed_produced(mesh, None, a.get(), None, true));
 }
 pub fn skin(mesh: &Mesh) {
     crate::game_thread::assert_current();
@@ -938,10 +944,12 @@ pub(crate) fn skin_effect(mesh: &Mesh, age: f32, alpha: f32) {
 }
 
 fn skin_timed(mesh: &Mesh, clock: Option<f32>, alpha: f32) {
-    skin_timed_produced(mesh, clock, alpha, None);
+    skin_timed_produced(mesh, clock, alpha, None, false);
 }
 fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
-    publication: Option<actor_vertices::Publication<'_>>) {
+    publication: Option<actor_vertices::Publication<'_>>, unchanged: bool) {
+    #[cfg(not(feature="vita_renderer"))]
+    let _ = unchanged;
     #[cfg(not(feature="vita_renderer"))]
     let _ = &publication;
     if crate::character::skinning::overlap::gather_only() { return; }
@@ -1001,7 +1009,7 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
     };
     #[cfg(feature="vita_renderer")]
     if fast && clock.is_none() && alpha==1. && crate::render::vita_renderer::config().actor_layer_cache {
-        if let Some(passes)=actor_cache::prepare(&surface,mesh,time,appearance,publication.as_ref()) {
+        if let Some(passes)=actor_cache::prepare(&surface,mesh,time,appearance,publication.as_ref(),unchanged) {
             drop(layers_profile);
             let _submit_profile=crate::frame_profile::characters_span("characters_submit");
             submit(passes,surface.transparent);

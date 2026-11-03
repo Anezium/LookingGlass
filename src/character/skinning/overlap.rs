@@ -484,6 +484,8 @@ impl Store {
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::negative_uv_edit(mesh);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             let oracle=crate::sim_maps::probe::reserve_skin(actor,mesh_id);
             // Explicit consumers require live mutable fields now. Untracked topology,
             // layers and exhausted banks use the original exact serial kernel.
@@ -609,7 +611,7 @@ impl Store {
                 if s.oracle!=usize::MAX {
                     let vertices=unsafe {std::slice::from_raw_parts(s.output as *const Vertex,s.vertices.len())};
                     crate::sim_maps::probe::record_skin(s.oracle,vertices,&s.cpu.indices);
-                    crate::sim_maps::probe::record_direct_publication(s.oracle,s.alpha_variant);
+                    crate::sim_maps::probe::record_direct_publication(s.oracle,s.mode==PublicationMode::VertexAlpha);
                 }
             }
         }
@@ -1861,6 +1863,7 @@ mod tests {
                 assert!(raw.groups.iter().any(|g| g.1.len() == 2));
                 let uv = mesh[0].as_ref().unwrap().vertices[0].uv;
                 mesh[0].as_mut().unwrap().vertices[0].uv = Vec2::new(uv.x + 0.37, -0.2);
+                ap::note_live_uv_edit();
                 let edited = draw(&mut mesh, 2);
                 let edited_stamp = ap::test_stamp(key).unwrap();
                 assert_eq!(edited_stamp.1, PublicationMode::Raw);

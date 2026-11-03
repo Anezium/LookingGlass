@@ -817,15 +817,113 @@ pub(crate) struct Prop {
     model: tan::Model,
     meshes: Vec<Mesh>,
     scale: f32,
+    occurrences: PropOccurrences,
+}
+/// Bound on the draws of one Prop per frame that get their own copy.
+#[cfg(feature="vita_renderer")]
+const PROP_OCCURRENCES: usize = 8;
+/// prop_occurrence_reuse: the n-th draw_frame of a Prop in a frame. A draw whose exact inputs
+/// repeated from the previous frame gets its own animated copy, so a Prop placed several
+/// times no longer overwrites one mesh and re-publishes it per placement every frame.
+#[derive(Default)]
+struct PropOccurrence {
+    /// Attachment bits, scale bits, fullbright.
+    pose: [u32; 9],
+    /// Per surface: the two frames and the lerp factor, 0 when both frames are the same one.
+    frames: Vec<[u32; 3]>,
+    inputs_known: bool,
+    /// Empty until the inputs first repeat.
+    meshes: Vec<Mesh>,
+}
+#[derive(Default)]
+struct PropOccurrences {
+    epoch: u64,
+    next: usize,
+    entries: Vec<PropOccurrence>,
+    /// The entry holding the vertices last written; None is Prop::meshes.
+    last: Option<usize>,
+}
+/// Default off. Tests: a scoped override, else LOOKING_GLASS_TEST_PROP_OCCURRENCE_REUSE=on|off.
+#[cfg(feature="vita_renderer")]
+fn prop_occurrence_reuse() -> bool {
+    #[cfg(test)]
+    { PROP_REUSE_TEST.with(std::cell::Cell::get).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_PROP_OCCURRENCE_REUSE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => false,
+        Ok("on") => true,
+        _ => panic!("LOOKING_GLASS_TEST_PROP_OCCURRENCE_REUSE must be off or on"),
+    }) }
+    #[cfg(not(test))]
+    { crate::render::vita_renderer::config().prop_occurrence_reuse }
+}
+#[cfg(all(test,feature="vita_renderer"))]
+thread_local! { static PROP_REUSE_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+/// The frame position of one surface, as the animation reads it.
+fn surface_frame(s: &tan::Surface, frame_time: f32, time: f32, looping: bool) -> (f32, usize, usize) {
+    let frame = time.max(0.) / frame_time.max(0.001);
+    let frame = if looping {
+        frame % s.frames.len() as f32
+    } else {
+        frame.min((s.frames.len() - 1) as f32)
+    };
+    let a = frame.floor() as usize;
+    let b = if looping {
+        (a + 1) % s.frames.len()
+    } else {
+        (a + 1).min(s.frames.len() - 1)
+    };
+    (frame, a, b)
+}
+#[allow(clippy::too_many_arguments)]
+fn animate_meshes(model: &tan::Model, meshes: &mut [Mesh], own_scale: f32, attachment: Transform,
+    scale: f32, fullbright: bool, time: f32, looping: bool) {
+    for (s, m) in model.surfaces.iter().zip(meshes) {
+        let (frame, a, b) = surface_frame(s, model.frame_time, time, looping);
+        for ((v, &p), &q) in m.vertices.iter_mut().zip(&s.frames[a]).zip(&s.frames[b]) {
+            let p = p.lerp(q, frame.fract());
+            v.position = attachment.point(p * own_scale * scale);
+            v.normal = Vec4::ZERO;
+        }
+        for tri in m.indices.chunks_exact(3) {
+            let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+            let n = (m.vertices[b].position - m.vertices[a].position)
+                .cross(m.vertices[c].position - m.vertices[a].position);
+            for i in [a, b, c] {
+                m.vertices[i].normal += n.extend(0.);
+            }
+        }
+        for (v, &uv) in m.vertices.iter_mut().zip(&s.uv) {
+            v.uv = uv;
+            let light = if fullbright {
+                1.
+            } else {
+                0.65 + 0.35
+                    * v.normal
+                        .truncate()
+                        .normalize_or_zero()
+                        .dot(vec3(0.3, -0.5, 1.).normalize())
+                        .max(0.)
+            };
+            v.color = [
+                (light * 255.) as u8,
+                (light * 255.) as u8,
+                (light * 255.) as u8,
+                255,
+            ];
+        }
+    }
 }
 fn draw_mesh(mesh: &Mesh) {
     crate::render_fx::effect(mesh, crate::materials::Blend::AlphaAdd);
 }
 impl Prop {
     pub(crate) fn draw_electric(&self, art: &crate::electric::Art, remaining: f32) {
-        for mesh in &self.meshes {
+        for mesh in self.last_meshes() {
             art.draw(mesh, remaining);
         }
+    }
+    /// The vertices of the last draw that wrote any, wherever they live.
+    fn last_meshes(&self) -> &[Mesh] {
+        self.occurrences.last.map_or(&self.meshes, |i| &self.occurrences.entries[i].meshes)
     }
     /// Centre world pickup art independently of the first-person hand anchor.
     pub(crate) fn draw_pickup(&mut self, center: Vec3, angle: f32) {
@@ -909,6 +1007,7 @@ impl Prop {
             _material_layers: material_layers,
             meshes,
             scale: def.scale,
+            occurrences: PropOccurrences::default(),
         })
     }
     pub(crate) fn point(&self, attachment: Transform, tag: &str, scale: f32) -> Vec3 {
@@ -934,9 +1033,81 @@ impl Prop {
         looping: bool,
     ) {
         if crate::character::skinning::overlap::gather_only() { return; }
-        for mesh in self.meshes_at(attachment, scale, fullbright, time, looping) {
+        #[cfg(feature="vita_renderer")]
+        if self.draw_occurrence(attachment, scale, fullbright, time, looping) { return; }
+        for mesh in self.animate(attachment, scale, fullbright, time, looping) {
             crate::render_fx::skin(mesh);
         }
+    }
+    /// Returns false when the draw is the plain one: lever off, outside single preparation,
+    /// a non-finite animation position, past the occurrence bound or inputs that do not repeat.
+    #[cfg(feature="vita_renderer")]
+    fn draw_occurrence(&mut self, attachment: Transform, scale: f32, fullbright: bool, time: f32, looping: bool) -> bool {
+        if !prop_occurrence_reuse() || scale <= 0. || !crate::character::skinning::overlap::single_preparing() {
+            return false;
+        }
+        let memo = &mut self.occurrences;
+        let epoch = crate::render_fx::actor_publication::frame_epoch();
+        if memo.epoch != epoch {
+            memo.epoch = epoch;
+            memo.next = 0;
+        }
+        let index = memo.next;
+        if index >= PROP_OCCURRENCES {
+            return false;
+        }
+        memo.next += 1;
+        if index == memo.entries.len() {
+            memo.entries.push(PropOccurrence::default());
+        }
+        let entry = &mut memo.entries[index];
+        let [tx, ty, tz] = attachment.translation.to_array().map(f32::to_bits);
+        let [rx, ry, rz, rw] = attachment.rotation.to_array().map(f32::to_bits);
+        let pose = [tx, ty, tz, rx, ry, rz, rw, scale.to_bits(), u32::from(fullbright)];
+        let mut repeated = entry.inputs_known && entry.pose == pose && entry.frames.len() == self.model.surfaces.len();
+        entry.pose = pose;
+        entry.frames.resize(self.model.surfaces.len(), [0; 3]);
+        for (slot, s) in entry.frames.iter_mut().zip(&self.model.surfaces) {
+            let (frame, a, b) = surface_frame(s, self.model.frame_time, time, looping);
+            if !frame.is_finite() {
+                entry.inputs_known = false;
+                return false;
+            }
+            // p.lerp(q, f) is p + (q - p) * f, so with q == p the factor cannot reach the result.
+            let key = [a as u32, b as u32, if a == b { 0 } else { frame.fract().to_bits() }];
+            repeated &= *slot == key;
+            *slot = key;
+        }
+        entry.inputs_known = true;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let repeated = repeated || crate::sim_maps::probe::negative_control() == Some("prop-pose");
+        if repeated && !entry.meshes.is_empty() {
+            memo.last = Some(index);
+            for mesh in &entry.meshes {
+                crate::sim_maps::count("prop_occurrence_reused_vertices", mesh.vertices.len() as u64);
+                crate::render_fx::skin_unchanged(mesh);
+            }
+            return true;
+        }
+        if !repeated && entry.meshes.is_empty() {
+            return false;
+        }
+        if entry.meshes.is_empty() {
+            entry.meshes = self.meshes.iter().map(|m| Mesh {
+                vertices: m.vertices.clone(), indices: m.indices.clone(), texture: m.texture.clone() }).collect();
+            crate::sim_maps::count("prop_occurrence_copied_vertices", entry.meshes.iter().map(|m| m.vertices.len() as u64).sum());
+        }
+        animate_meshes(&self.model, &mut entry.meshes, self.scale, attachment, scale, fullbright, time, looping);
+        memo.last = Some(index);
+        for mesh in &entry.meshes {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if crate::sim_maps::probe::negative_control() == Some("prop-observe") {
+                crate::render_fx::skin_unchanged(mesh);
+                continue;
+            }
+            crate::render_fx::skin(mesh);
+        }
+        true
     }
     /// Animate once; callers with layered materials may draw the same geometry
     /// several times. Always reset authored UVs before applying per-pass tcMods.
@@ -948,55 +1119,20 @@ impl Prop {
         time: f32,
         looping: bool,
     ) -> &mut [Mesh] {
+        // The caller may keep editing these meshes (per-pass UVs, textures). The occurrence
+        // copies were taken from them, so copies from before this call are forgotten.
+        let writes = scale > 0. && !crate::character::skinning::overlap::gather_only();
+        if writes && !self.occurrences.entries.is_empty() {
+            self.occurrences = PropOccurrences::default();
+        }
+        self.animate(attachment, scale, fullbright, time, looping)
+    }
+    fn animate(&mut self, attachment: Transform, scale: f32, fullbright: bool, time: f32, looping: bool) -> &mut [Mesh] {
         if scale <= 0. || crate::character::skinning::overlap::gather_only() {
             return &mut self.meshes[..0];
         }
-        for (s, m) in self.model.surfaces.iter().zip(&mut self.meshes) {
-            let frame = time.max(0.) / self.model.frame_time.max(0.001);
-            let frame = if looping {
-                frame % s.frames.len() as f32
-            } else {
-                frame.min((s.frames.len() - 1) as f32)
-            };
-            let a = frame.floor() as usize;
-            let b = if looping {
-                (a + 1) % s.frames.len()
-            } else {
-                (a + 1).min(s.frames.len() - 1)
-            };
-            for ((v, &p), &q) in m.vertices.iter_mut().zip(&s.frames[a]).zip(&s.frames[b]) {
-                let p = p.lerp(q, frame.fract());
-                v.position = attachment.point(p * self.scale * scale);
-                v.normal = Vec4::ZERO;
-            }
-            for tri in m.indices.chunks_exact(3) {
-                let [a, b, c] = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
-                let n = (m.vertices[b].position - m.vertices[a].position)
-                    .cross(m.vertices[c].position - m.vertices[a].position);
-                for i in [a, b, c] {
-                    m.vertices[i].normal += n.extend(0.);
-                }
-            }
-            for (v, &uv) in m.vertices.iter_mut().zip(&s.uv) {
-                v.uv = uv;
-                let light = if fullbright {
-                    1.
-                } else {
-                    0.65 + 0.35
-                        * v.normal
-                            .truncate()
-                            .normalize_or_zero()
-                            .dot(vec3(0.3, -0.5, 1.).normalize())
-                            .max(0.)
-                };
-                v.color = [
-                    (light * 255.) as u8,
-                    (light * 255.) as u8,
-                    (light * 255.) as u8,
-                    255,
-                ];
-            }
-        }
+        animate_meshes(&self.model, &mut self.meshes, self.scale, attachment, scale, fullbright, time, looping);
+        self.occurrences.last = None;
         &mut self.meshes
     }
 }
@@ -3429,5 +3565,155 @@ mod tests {
         .unwrap();
         empty.validate().unwrap();
         assert_eq!(saved_json(&empty.migrated()), saved_json(&empty));
+    }
+}
+
+#[cfg(all(test, feature = "vita_renderer"))]
+mod prop_occurrence_tests {
+    use super::*;
+    use crate::character::skinning::overlap;
+    use crate::render_fx::test_support as ts;
+    #[derive(Clone, Copy, Debug)]
+    struct Call { pose: Transform, scale: f32, bright: bool, time: f32, looping: bool }
+    fn surface(frames: usize) -> tan::Surface {
+        let shape = |f: usize, n: usize| vec3(n as f32 + f as f32 * 0.5, (n * n) as f32 * 0.25, 1. + f as f32);
+        tan::Surface {
+            detail: Vec::new(), name: "s".into(),
+            uv: (0..4).map(|i| vec2(i as f32 * 0.25, 1. - i as f32 * 0.25)).collect(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+            frames: (0..frames).map(|f| (0..4).map(|n| shape(f, n)).collect()).collect(),
+        }
+    }
+    fn prop(frames: usize, texture: u32) -> (Prop, Vec<std::rc::Rc<crate::render_fx::Surface>>) {
+        let base = ts::texture(texture);
+        let stage = crate::materials::Stage::default();
+        let keep = ts::register(&base, vec![(stage.clone(), vec![ts::texture(texture + 100)])], false);
+        // A second registered texture for a caller to swap in.
+        let swapped = ts::register(&ts::texture(texture + 300), vec![(stage, vec![ts::texture(texture + 400)])], false);
+        let model = tan::Model { surfaces: vec![surface(frames)], tags: Default::default(), tag_rotations: Default::default(), frame_time: 0.1 };
+        let meshes = model.surfaces.iter().map(|s| Mesh {
+            vertices: s.uv.iter().map(|&uv| Vertex { position: Vec3::ZERO, uv, color: [255; 4], normal: Vec4::ZERO }).collect(),
+            indices: s.indices.clone(), texture: Some(base.clone()) }).collect();
+        (Prop { _material_layers: Vec::new(), model, meshes, scale: 1.25, occurrences: PropOccurrences::default() }, vec![keep, swapped])
+    }
+    fn at(x: f32) -> Transform { Transform { translation: vec3(x, 2., 3.), rotation: Quat::from_rotation_z(x * 0.1) } }
+    fn call(x: f32, time: f32, looping: bool) -> Call { Call { pose: at(x), scale: 1., bright: false, time, looping } }
+    fn with_arm<T>(on: bool, run: impl FnOnce() -> T) -> T {
+        struct Reset(Option<bool>);
+        impl Drop for Reset { fn drop(&mut self) { PROP_REUSE_TEST.with(|s| s.set(self.0)); } }
+        let _reset = Reset(PROP_REUSE_TEST.with(|s| s.replace(Some(on))));
+        run()
+    }
+    /// What each frame published, plus the vertices last written, for one arm on a fresh Prop.
+    fn run(on: bool, frames: &[Vec<Call>], between: impl Fn(usize, &mut Prop)) -> (Vec<ts::FrameSnapshot>, Vec<Vec<[u32; 3]>>, Prop) {
+        overlap::startup(2, false);
+        overlap::reset_publications();
+        ts::clear();
+        let (mut p, _keep) = prop(4, 7000);
+        let mut out = Vec::new();
+        let mut last = Vec::new();
+        with_arm(on, || {
+            for (index, calls) in frames.iter().enumerate() {
+                ts::begin_direct(vec3(0., -60., 15.), Vec3::Y, 4.5, crate::render_fx::Appearance::default());
+                crate::render_fx::retained::host_reset();
+                let mut frame = overlap::Frame::begin();
+                assert!(overlap::single_preparing());
+                for c in calls { p.draw_frame(c.pose, c.scale, c.bright, c.time, c.looping); }
+                frame.dispatch();
+                frame.collect();
+                out.push(ts::snapshot());
+                last.push(p.last_meshes().iter().flat_map(|m| &m.vertices).map(|v| v.position.to_array().map(f32::to_bits)).collect());
+                drop(frame);
+                between(index, &mut p);
+            }
+        });
+        (out, last, p)
+    }
+    fn same_output(frames: &[Vec<Call>], between: impl Fn(usize, &mut Prop) + Copy) -> Prop {
+        let (off, off_last, _) = run(false, frames, between);
+        let (on, on_last, p) = run(true, frames, between);
+        for (i, (a, b)) in off.iter().zip(&on).enumerate() { assert_eq!(a, b, "published frame {i}"); }
+        assert_eq!(off_last, on_last, "last written vertices");
+        p
+    }
+    #[test]
+    fn static_placements_publish_the_same_packets_and_skip_animation() {
+        let frames: Vec<_> = (0..8).map(|_| vec![call(1., 0., false), call(2., 0., false), call(3., 0., false)]).collect();
+        let p = same_output(&frames, |_, _| {});
+        assert_eq!(p.occurrences.entries.len(), 3);
+        assert!(p.occurrences.entries.iter().all(|e| !e.meshes.is_empty()), "every repeated placement got its copy");
+        assert_eq!(p.occurrences.last, Some(2));
+    }
+    #[test]
+    fn every_input_change_recomputes_exactly() {
+        let mut frames: Vec<Vec<Call>> = Vec::new();
+        for i in 0..4 { frames.push(vec![call(1., 0.25, true), call(2., 0.25, false)]); let _ = i; }
+        frames.push(vec![call(1.5, 0.25, true), call(2., 0.25, false)]); // pose
+        frames.push(vec![call(1.5, 0.25, true), call(2., 0.25, false)]);
+        frames.push(vec![call(1.5, 0.35, true), call(2., 0.25, false)]); // time, lerp factor
+        frames.push(vec![call(1.5, 0.35, true), Call { scale: 2., ..call(2., 0.25, false) }]); // scale
+        frames.push(vec![call(1.5, 0.35, true), Call { bright: true, ..call(2., 0.25, false) }]); // fullbright
+        frames.push(vec![call(1.5, 0.35, false), call(2., 0.25, false)]); // looping
+        frames.push(vec![call(2., 0.25, false), call(1.5, 0.35, false)]); // order
+        frames.push(vec![call(2., 0.25, false)]); // fewer draws
+        frames.push(vec![call(2., 0.25, false), call(1.5, 0.35, false), call(9., 0.1, true)]); // more draws
+        same_output(&frames, |_, _| {});
+    }
+    #[test]
+    fn a_finished_clamped_clip_stays_reused_while_its_clock_runs() {
+        let frames: Vec<_> = (0..6).map(|i| vec![call(1., 9. + i as f32, false)]).collect();
+        let p = same_output(&frames, |_, _| {});
+        assert!(!p.occurrences.entries[0].meshes.is_empty(), "the clamped frame repeated");
+        // A single-frame model ignores the clock even while it loops: q - p is zero.
+        let (single, _keep) = prop(1, 7500);
+        let [a, b] = [0.13_f32, 0.77].map(|time| surface_frame(&single.model.surfaces[0], 0.1, time, true));
+        assert_eq!((a.1, a.2), (b.1, b.2));
+        assert_ne!(a.0.fract().to_bits(), b.0.fract().to_bits());
+        let lerp = |f: f32| single.model.surfaces[0].frames[0][3].lerp(single.model.surfaces[0].frames[0][3], f).to_array().map(f32::to_bits);
+        assert_eq!(lerp(a.0.fract()), lerp(b.0.fract()));
+    }
+    #[test]
+    fn invisible_non_finite_and_over_bound_draws_stay_on_the_plain_path() {
+        let many: Vec<Call> = (0..PROP_OCCURRENCES + 3).map(|i| call(i as f32, 0.25, true)).collect();
+        let frames = vec![many.clone(), many.clone(), many.clone(), many,
+            vec![Call { scale: 0., ..call(1., 0.25, true) }], vec![call(0., 0.25, true)],
+            vec![call(0., f32::NAN, true)], vec![call(0., 0.25, true)], vec![call(0., f32::INFINITY, true)], vec![call(0., 0.25, true)]];
+        let p = same_output(&frames, |_, _| {});
+        assert_eq!(p.occurrences.entries.len(), PROP_OCCURRENCES);
+    }
+    #[test]
+    fn caller_edits_through_meshes_at_reach_later_draws_in_both_arms() {
+        let frames: Vec<_> = (0..10).map(|_| vec![call(1., 0.25, true)]).collect();
+        let replacement = ts::texture(7300);
+        let p = same_output(&frames, |index, p| {
+            if index == 4 {
+                let meshes = p.meshes_at(at(5.), 1., true, 0.25, true);
+                meshes[0].vertices[0].uv = Vec2::new(-9., 9.);
+                meshes[0].texture = Some(replacement.clone());
+            }
+        });
+        assert_eq!(p.occurrences.entries.len(), 1, "the memo restarted after the caller's edit");
+        assert_eq!(p.last_meshes()[0].texture, Some(replacement));
+    }
+    #[test]
+    fn negative_control_a_changed_copy_stays_published_only_through_the_vouched_path() {
+        // The vouched path must really skip the compare: edit the copy behind it and see it stale.
+        let frames: Vec<_> = (0..6).map(|_| vec![call(1., 0.25, true)]).collect();
+        let (clean, _, _) = run(true, &frames, |_, _| {});
+        let (edited, _, _) = run(true, &frames, |index, p| {
+            if index == 3 { p.occurrences.entries[0].meshes[0].vertices[0].uv = Vec2::new(-7., 7.); }
+        });
+        assert_eq!(clean, edited, "skin_unchanged compared the mesh after all");
+        // The plain path publishes the same edit, so a stale copy is visible to the comparison.
+        let (plain, _, _) = run(false, &frames, |index, p| {
+            if index == 3 { p.meshes[0].indices.swap(0, 1); }
+        });
+        assert_ne!(plain, clean, "the comparison cannot see a change in the mesh");
+    }
+    #[test]
+    fn the_occurrence_memo_is_not_touched_with_the_lever_off() {
+        let frames: Vec<_> = (0..4).map(|_| vec![call(1., 0.25, true), call(2., 0.25, true)]).collect();
+        let (_, _, p) = run(false, &frames, |_, _| {});
+        assert!(p.occurrences.entries.is_empty() && p.occurrences.last.is_none());
     }
 }

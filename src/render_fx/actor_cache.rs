@@ -44,7 +44,7 @@ fn state(s:&Stage,t:f32)->LayerState {
         gain:gain(s,t),fog:fog(s.blend),frame:s.frame(t),vertex_alpha:s.vertex_alpha,
         dynamic:s.rgb.is_some()||s.alpha.is_some()||s.images.len()>1}
 }
-pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance,producer:Option<&actor_vertices::Publication<'_>>)->Option<Vec<Pass>> {
+pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance,producer:Option<&actor_vertices::Publication<'_>>,unchanged:bool)->Option<Vec<Pass>> {
     let c=crate::render::vita_renderer::config();
     let limit=super::actor_max_layers(c).min(surface.layers.len());
     if !surface.layers.iter().take(limit).all(|l|simple(&l.stage)){return None;}
@@ -75,7 +75,10 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
             let previous=cached.geometry[variant].version();
             let geometry=if let Some(producer)=producer.filter(|_|c.actor_layer_reuse) {
                 cached.geometry[variant].publish(mesh,p.vertex_alpha,producer)
-            } else {cached.geometry[variant].observe(mesh, Some(p.vertex_alpha))};
+            } else {
+                let vouched=if unchanged {cached.geometry[variant].unchanged()} else {None};
+                vouched.unwrap_or_else(||cached.geometry[variant].observe(mesh, Some(p.vertex_alpha)))
+            };
             if previous!=Some(geometry.version) { copies+=1; }
             geometry
         } else if c.actor_shared_geometry {
