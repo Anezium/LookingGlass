@@ -328,6 +328,7 @@ pub fn gpu_geometry(vertex_count:usize,index_count:usize)->(Vec<macroquad::prelu
     use macroquad::prelude::*;
     #[link(name="OpenGL",kind="framework")]
     extern "C" {
+        fn glFlush();
         fn glGetIntegerv(pname:u32,data:*mut i32);
         fn glGetVertexAttribiv(index:u32,pname:u32,data:*mut i32);
         fn glBindBuffer(target:u32,buffer:u32);
@@ -336,6 +337,9 @@ pub fn gpu_geometry(vertex_count:usize,index_count:usize)->(Vec<macroquad::prelu
     let mut vertices=vec![Vertex {position:Vec3::ZERO,uv:Vec2::ZERO,normal:Vec4::ZERO,color:[0;4]};vertex_count];
     let mut indices=vec![0_u16;index_count];
     unsafe {
+        // Without this the readback's own flush point depends on whether the buffer has a
+        // pending upload, and those boundaries move host pixels by 1/255.
+        glFlush();
         let mut old_array=0;let mut attribute_buffer=0;let mut index_buffer=0;
         glGetIntegerv(0x8894,&mut old_array); // ARRAY_BUFFER_BINDING
         glGetVertexAttribiv(0,0x889F,&mut attribute_buffer); // ATTRIB_ARRAY_BUFFER_BINDING
