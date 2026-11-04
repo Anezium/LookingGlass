@@ -72,6 +72,7 @@ impl Survey {
         crate::gpu_timing::export(map)?;
         if let Some(line)=crate::pass_clock::summary(map) {println!("{line}");}
         if self.config.tls_count {println!("{}",self.tls_line(map));}
+        if self.config.tls_count {println!("{}",crate::tls_count::sites_line(map));}
         println!("[lg/r13b-survey] done map={map} samples={} warmup_frames=60 measured_frames={} died={}",self.rows.len(),self.rows.len()-60,!alive);
         self.done=true;Ok(())
     }
@@ -118,7 +119,7 @@ impl Survey {
     fn tls_frame(&mut self,finished:bool) {
         let now=crate::tls_count::snapshot();
         let delta=now.main_lookups.wrapping_sub(self.tls.previous);self.tls.previous=now.main_lookups;
-        if self.frames==60 {self.tls.measured=now;crate::tls_count::reset_window_shape();}
+        if self.frames==60 {self.tls.measured=now;crate::tls_count::reset_window_shape();crate::tls_count::reset_sites();}
         else if self.frames>60 {self.tls.frame_min=self.tls.frame_min.min(delta);self.tls.frame_max=self.tls.frame_max.max(delta);}
         if finished {crate::tls_count::set_counting(false);}
     }

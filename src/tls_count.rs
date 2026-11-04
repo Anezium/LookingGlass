@@ -75,6 +75,46 @@ pub(crate) fn reset_window_shape() {
     for h in &MAIN_HISTOGRAM { h.store(0, Relaxed); }
 }
 
+/// Who asks. A bounded table of call sites, by return address, main thread only, while counting.
+/// A site is the instruction after the call into `pthread_getspecific`, which ends up in the
+/// `thread_local!` it serves or in the function that inlined it. Addresses resolve against the ELF
+/// offline: the line also prints this function's own address, so the load offset is known.
+const SITES: usize = 256;
+#[derive(Default)]
+struct Site { pc: AtomicUsize, lookups: AtomicU32, steps: AtomicU32 }
+static SITE_TABLE: [Site; SITES] = [const { Site { pc: AtomicUsize::new(0), lookups: AtomicU32::new(0), steps: AtomicU32::new(0) } }; SITES];
+static SITE_OVERFLOW: AtomicU32 = AtomicU32::new(0);
+#[inline(always)]
+pub(crate) fn record_site(head: usize, pc: usize, steps: u32) {
+    if head == 0 || head != MAIN_HEAD.load(Relaxed) { return; }
+    let mut slot = (pc >> 1).wrapping_mul(0x9E37_79B1) % SITES;
+    for _ in 0..SITES {
+        let site = &SITE_TABLE[slot];
+        let known = site.pc.load(Relaxed);
+        if known == pc || known == 0 {
+            if known == 0 { site.pc.store(pc, Relaxed); }
+            site.lookups.store(site.lookups.load(Relaxed).wrapping_add(1), Relaxed);
+            site.steps.store(site.steps.load(Relaxed).wrapping_add(steps), Relaxed);
+            return;
+        }
+        slot = (slot + 1) % SITES;
+    }
+    SITE_OVERFLOW.store(SITE_OVERFLOW.load(Relaxed).wrapping_add(1), Relaxed);
+}
+/// Forget the warmup, like the shape counters.
+pub(crate) fn reset_sites() {
+    for site in &SITE_TABLE { site.pc.store(0, Relaxed); site.lookups.store(0, Relaxed); site.steps.store(0, Relaxed); }
+    SITE_OVERFLOW.store(0, Relaxed);
+}
+/// One line after the window. Top sites by steps, the thing a walk pays for.
+pub(crate) fn sites_line(map: &str) -> String {
+    let mut rows: Vec<(u32, u32, usize)> = SITE_TABLE.iter().filter(|s| s.pc.load(Relaxed) != 0)
+        .map(|s| (s.steps.load(Relaxed), s.lookups.load(Relaxed), s.pc.load(Relaxed))).collect();
+    rows.sort_unstable_by(|a, b| b.cmp(a));
+    let listed: Vec<String> = rows.iter().take(48).map(|(steps, lookups, pc)| format!("{pc:#x}:{lookups}:{steps}")).collect();
+    format!("[lg/tls-sites] map={map} self={:#x} sites={} overflow={} pc_lookups_steps={}", sites_line as fn(&str) -> String as usize, rows.len(), SITE_OVERFLOW.load(Relaxed), listed.join(","))
+}
+
 /// The exact `pte_osTlsGetValue` loop: first node from the head word, compare the key
 /// at +4, follow +0. Returns (value or null, nodes visited, found).
 #[inline(always)]
@@ -121,17 +161,23 @@ mod vita {
     /// The off path is one load, one branch and a tail call; counting stays out of line.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_pthread_getspecific(key: *const core::ffi::c_void) -> *mut core::ffi::c_void {
-        if COUNTING.load(Relaxed) { return unsafe { counted(key) }; }
+        if COUNTING.load(Relaxed) {
+            // Read first: nothing before this line can call out, so lr still holds the return address.
+            let pc: usize;
+            unsafe { core::arch::asm!("mov {}, lr", out(reg) pc, options(nomem, nostack, preserves_flags)); }
+            return unsafe { counted(key, pc) };
+        }
         unsafe { __real_pthread_getspecific(key) }
     }
     #[cold]
     #[inline(never)]
-    unsafe fn counted(key: *const core::ffi::c_void) -> *mut core::ffi::c_void {
+    unsafe fn counted(key: *const core::ffi::c_void, pc: usize) -> *mut core::ffi::c_void {
         if key.is_null() { return core::ptr::null_mut(); }
         let os_key = unsafe { *(key as *const u32) };
         let head = unsafe { vitasdk_get_tls_data(0) };
         let (value, steps, found) = unsafe { walk(head, os_key) };
         record(head as usize, steps, found);
+        record_site(head as usize, pc, steps);
         value
     }
     pub(super) fn main_head() -> usize { unsafe { vitasdk_get_tls_data(0) as usize } }
@@ -185,6 +231,26 @@ mod tests {
         assert_eq!(histogram(), [1, 1, 2, 0, 0, 0, 0, 1]);
         let wrapped = Snapshot { main_lookups: 3, ..Snapshot::ZERO }.since(Snapshot { main_lookups: u32::MAX, ..Snapshot::ZERO });
         assert_eq!(wrapped.main_lookups, 4, "wrapping difference");
+    }
+    #[test]
+    fn sites_are_counted_by_address_on_the_main_thread_and_printed_by_steps() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        test_register_main(0x5000);
+        reset_sites();
+        for _ in 0..3 { record_site(0x5000, 0x8100_0011, 10); }
+        record_site(0x5000, 0x8100_0021, 40);
+        record_site(0x6000, 0x8100_0031, 99); // Another thread.
+        let line = sites_line("skool2");
+        assert!(line.starts_with("[lg/tls-sites] map=skool2 self=0x"), "{line}");
+        assert!(line.contains("sites=2 overflow=0"), "{line}");
+        assert!(line.ends_with("pc_lookups_steps=0x81000021:1:40,0x81000011:3:30"), "{line}");
+        // A full table counts what it cannot place and keeps what it has.
+        reset_sites();
+        for i in 0..(SITES + 2) { record_site(0x5000, 0x1000 + i * 2, 1); }
+        assert!(sites_line("m").contains(&format!("sites={SITES} overflow=2")));
+        // The warmup is forgotten.
+        reset_sites();
+        assert!(sites_line("m").contains("sites=0 overflow=0"));
     }
     #[test]
     fn buckets_cover_every_length_once() {
