@@ -2282,6 +2282,28 @@ mod tests {
         assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","world_state_cache":"bad"}"#).is_err());
     }
     #[test]
+    fn g2_keys_default_off_validate_and_are_printed() {
+        let defaults = Config::default();
+        assert_eq!(defaults.gpu_timing, "off");
+        assert!(defaults.gpu_mask.is_empty() && defaults.rt_scenes.is_none() && defaults.param_buffer_mib.is_none() && !defaults.display_clear_skip);
+        defaults.validate().unwrap();
+        let record = config_log_lines(&defaults).join("\n");
+        for key in ["\"gpu_timing\":\"off\"", "\"gpu_mask\":[]", "\"rt_scenes\":null", "\"param_buffer_mib\":null", "\"display_clear_skip\":false"] {
+            assert!(record.contains(key), "{key} missing from {record}");
+        }
+        for (good, text) in [
+            (true, r#"{"gpu_timing":"backlog"}"#), (true, r#"{"gpu_timing":"poll"}"#), (true, r#"{"gpu_timing":"wait"}"#),
+            (false, r#"{"gpu_timing":"on"}"#), (false, r#"{"gpu_timing":""}"#),
+            (true, r#"{"gpu_mask":["sky","fx_alpha"]}"#), (false, r#"{"gpu_mask":["bubbles"]}"#),
+            (true, r#"{"rt_scenes":[2,1]}"#), (false, r#"{"rt_scenes":[0,1]}"#), (false, r#"{"rt_scenes":[9,1]}"#),
+            (true, r#"{"param_buffer_mib":32}"#), (false, r#"{"param_buffer_mib":8}"#), (false, r#"{"param_buffer_mib":128}"#),
+            (true, r#"{"display_clear_skip":true}"#),
+        ] {
+            let parsed: Config = serde_json::from_str(text).unwrap();
+            assert_eq!(parsed.validate().is_ok(), good, "{text}");
+        }
+    }
+    #[test]
     fn config_record_stays_one_json_document_and_cadence_has_its_own_record() {
         let tag = "[lg/vita-renderer] config ";
         for (raw, cadence) in [("{}", "10"), (r#"{"log_frame_time_every":0}"#, "off"), (r#"{"log_frame_time_every":null}"#, "off"), (r#"{"log_frame_time_every":3,"sim_trigger_facts_reuse":true}"#, "3")] {
