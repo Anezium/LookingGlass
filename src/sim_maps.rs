@@ -222,6 +222,20 @@ pub fn fx_attached_persist() -> bool {
     #[cfg(all(not(test), not(feature="vita_renderer")))]
     { false }
 }
+/// Attached emitters honour `sphere`. Changes pixels. Default off.
+pub fn fx_attached_sphere() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { crate::render::vita_renderer::config().fx_attached_sphere }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
+/// The bubble sprite takes its image's width and a compounding scalerate. Changes pixels. Default off.
+pub fn fx_bubble_true_size() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { crate::render::vita_renderer::config().fx_bubble_true_size }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
 // Default on since r25, like Config. Tests: a scoped override, else the shipped default;
 // LOOKING_GLASS_TEST_FX_OBSERVE_MOVE=off runs the whole suite with the lever off.
 pub fn fx_observe_move() -> bool {

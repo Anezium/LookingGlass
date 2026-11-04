@@ -14,7 +14,9 @@ fn basis(direction: Vec3) -> (Vec3, Vec3) {
     (right, right.cross(direction).normalize_or_zero())
 }
 fn recipe(p: &Puff, e: &Emitter, camera: Vec3, axes: (Vec3, Vec3)) -> Recipe {
-    Recipe { position: p.position, size: p.size, growth: e.spec.growth, age: p.age,
+    // A compounding emitter arrives with its growth already in the size.
+    let (size, growth) = if e.spec.growth_compounds { (e.spec.grown(p.size, p.age), 0.) } else { (p.size, e.spec.growth) };
+    Recipe { position: p.position, size, growth, age: p.age,
         life: p.life, roll: p.roll, alpha: e.spec.alpha, fade: e.spec.fade,
         fade_in: e.spec.fade_in, color: e.spec.color, camera, right: axes.0, up: axes.1, per_puff_basis: false }
 }

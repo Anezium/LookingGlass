@@ -80,6 +80,27 @@ struct Spec {
     random_roll: bool,
     sphere: bool,
     start_off: bool,
+    /// `scalerate` compounds, as the original client integrates it, instead of adding to 1.
+    growth_compounds: bool,
+}
+impl Spec {
+    /// Under `fx_bubble_true_size`, the bubble sprite only. The original draws a sprite as wide as
+    /// its image times the entity scale, so this 16-pixel image is a quarter of the 64-pixel baseline.
+    fn true_bubble_size(&mut self, width: Option<f32>) {
+        if self.image != "bubble" || !crate::sim_maps::fx_bubble_true_size() { return; }
+        let factor = width.map_or(1., |w| w / 64.);
+        self.size.low *= factor;
+        self.size.high *= factor;
+        self.growth_compounds = true;
+    }
+    /// Radius of a billboard this old, from the spawned radius.
+    fn grown(&self, size: f32, age: f32) -> f32 {
+        if self.growth_compounds { size * (self.growth * age).exp() } else { size * (1. + self.growth * age).max(0.) }
+    }
+}
+/// The original's `sphere` direction: three independent values in -1..1, not normalized.
+fn sphere_axis(seed: &mut u32) -> Vec3 {
+    vec3(random(seed) * 2. - 1., random(seed) * 2. - 1., random(seed) * 2. - 1.)
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -110,6 +131,7 @@ impl Default for Spec {
             random_roll: false,
             sphere: false,
             start_off: false,
+            growth_compounds: false,
         }
     }
 }
@@ -858,6 +880,7 @@ impl Steam {
                     spec.size.low *= factor;
                     spec.size.high *= factor;
                 }
+                spec.true_bubble_size(textures.first().map(Texture2D::width));
                 let enabled = !spec.start_off;
                 emitters.push(Emitter {
                     id,
@@ -1322,7 +1345,7 @@ impl Steam {
         let up = right.cross(direction).normalize_or_zero();
         let p = &self.puffs[index];
         let e = &self.emitters[p.emitter];
-        let radius = p.size * (1. + e.spec.growth * p.age).max(0.);
+        let radius = e.spec.grown(p.size, p.age);
         let x = (right * p.roll.cos() + up * p.roll.sin()) * radius;
         let y = (-right * p.roll.sin() + up * p.roll.cos()) * radius;
         let opacity = e.spec.alpha
@@ -1701,7 +1724,7 @@ impl Attached {
             return Ok(None);
         }
         let mut emitters = Vec::new();
-        for spec in definitions {
+        for mut spec in definitions {
             let stage = materials
                 .get(&spec.image)
                 .and_then(|s| s.stages.first())
@@ -1727,6 +1750,7 @@ impl Attached {
                 stage.blend,
                 crate::materials::Blend::Add | crate::materials::Blend::AlphaAdd
             );
+            spec.true_bubble_size(textures.first().map(Texture2D::width));
             emitters.push(Emitter {
                 id: 0,
                 pickup: false,
@@ -1855,6 +1879,7 @@ impl Attached {
         self.age = age;
         self.persisted.resize_with(self.steam.emitters.len(), Default::default);
         let mut full = false;
+        let sphere = crate::sim_maps::fx_attached_sphere();
         for (index, e) in self.steam.emitters.iter().enumerate() {
             let emitter = &mut self.persisted[index];
             if full || e.spec.burst.is_some_and(|(at, _)| age < at) {
@@ -1908,11 +1933,12 @@ impl Attached {
                     slot.offset = sampled(e.spec.offset, &mut seed)
                         + slot.rotation * sampled(e.spec.axis_offset, &mut seed);
                     let random_velocity = sampled(e.spec.velocity, &mut seed);
+                    let forward = if sphere && e.spec.sphere { sphere_axis(&mut seed) } else { slot.rotation * Vec3::X };
                     slot.velocity = if e.spec.tag_velocity {
                         slot.rotation * random_velocity
                     } else {
                         random_velocity
-                    } + slot.rotation * Vec3::X * e.spec.forward;
+                    } + forward * e.spec.forward;
                     slot.accel = sampled(e.spec.accel, &mut seed);
                     slot.size = 32. * e.spec.size.sample(&mut seed);
                     slot.roll = if e.spec.random_roll {
@@ -1974,6 +2000,7 @@ impl Attached {
             self.births.clear();
         }
         self.age = age;
+        let sphere = crate::sim_maps::fx_attached_sphere();
         'emitters: for (index, e) in self.steam.emitters.iter().enumerate() {
             if e.spec.burst.is_some_and(|(at, _)| age < at) {
                 continue;
@@ -2013,11 +2040,12 @@ impl Attached {
                 let offset = sampled(e.spec.offset, &mut seed)
                     + pose.rotation * sampled(e.spec.axis_offset, &mut seed);
                 let random_velocity = sampled(e.spec.velocity, &mut seed);
+                let forward = if sphere && e.spec.sphere { sphere_axis(&mut seed) } else { pose.rotation * Vec3::X };
                 let velocity = if e.spec.tag_velocity {
                     pose.rotation * random_velocity
                 } else {
                     random_velocity
-                } + pose.rotation * Vec3::X * e.spec.forward;
+                } + forward * e.spec.forward;
                 let accel = sampled(e.spec.accel, &mut seed);
                 self.steam.puffs.push(Puff {
                     sweep: PuffSweep::default(),
@@ -2055,6 +2083,20 @@ impl Attached {
 pub(crate) mod tests {
     use super::*;
     pub(crate) fn world_test_steam() -> Steam { attached_fixture(2).steam }
+    #[test]
+    fn sphere_axis_is_per_axis_and_growth_keeps_its_old_form_unless_compounding() {
+        let mut seed = 7;
+        let axes: Vec<Vec3> = (0..4096).map(|_| sphere_axis(&mut seed)).collect();
+        assert!(axes.iter().all(|a| a.abs().cmple(Vec3::ONE).all()));
+        assert!(axes.iter().any(|a| a.length() > 1.2) && axes.iter().any(|a| a.length() < 0.8), "not normalized");
+        let mut spec = Spec { growth: 0.1, ..Default::default() };
+        assert_eq!(spec.grown(8., 5.).to_bits(), (8. * (1. + 0.1f32 * 5.)).to_bits());
+        spec.growth = -1.;
+        assert_eq!(spec.grown(8., 5.), 0.);
+        spec.growth = 0.1;
+        spec.growth_compounds = true;
+        assert!((spec.grown(8., 5.) - 8. * 0.5f32.exp()).abs() < 1e-5);
+    }
     #[cfg(feature="vita_renderer")]
     pub(crate) fn census_quad_fixture(attached:&mut Attached) {
         // CPU producer entry used by prepare_quads, no retained renderer/GL.

@@ -36,6 +36,9 @@ REMOVED_WORK = {
     # A shader with no light uniforms uploads fewer bytes; packets still carry the full payload. A removed clear moves nothing counted.
     'simple_dynamic_lights': {'vita_fx_uniform_bytes'},
     'display_clear_skip': set(),
+    # Both change pixels on purpose. The oracle reports where; a clean PASS means the key did not reach that map.
+    'fx_attached_sphere': set(),
+    'fx_bubble_true_size': set(),
     'fx_attached_persist': FUNNEL | {
         'particle_direct_quads', 'particle_reused_quads', 'vita_world_puff_quads', 'vita_world_puff_batches',
         'vita_world_puff_batch_storage_bytes', 'vita_fx_merge_plan_hits', 'vita_fx_merge_plan_builds',

@@ -127,6 +127,12 @@ pub struct Config {
     /// School two publishes the other movers' colliders only when a rider's body trace will read
     /// them, and builds a mover's collider only when something can read it. Default off.
     pub mover_advance_reuse: bool,
+    /// Attached emitters that declare `sphere` send each particle along its own random direction,
+    /// as the original client does, instead of along the tag's X axis. Changes pixels. Default off.
+    pub fx_attached_sphere: bool,
+    /// The `bubble` sprite is as wide as its 16-pixel image times the scale, and its scalerate
+    /// compounds, as in the original. Changes pixels. Default off.
+    pub fx_bubble_true_size: bool,
     /// GPU timing through a survey window: off, backlog, poll or wait. See `gpu_timing`.
     pub gpu_timing: String,
     /// Diagnostic only, the picture changes: draw classes whose draw call is skipped, CPU kept.
@@ -328,6 +334,7 @@ impl Default for Config {
             fx_attached_persist: false,
             mover_advance_reuse: false,
             gpu_timing: "off".into(), gpu_mask: Vec::new(), rt_scenes: None, param_buffer_mib: None, display_clear_skip: false,
+            fx_attached_sphere: false, fx_bubble_true_size: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -2285,10 +2292,10 @@ mod tests {
     fn g2_keys_default_off_validate_and_are_printed() {
         let defaults = Config::default();
         assert_eq!(defaults.gpu_timing, "off");
-        assert!(defaults.gpu_mask.is_empty() && defaults.rt_scenes.is_none() && defaults.param_buffer_mib.is_none() && !defaults.display_clear_skip);
+        assert!(defaults.gpu_mask.is_empty() && defaults.rt_scenes.is_none() && defaults.param_buffer_mib.is_none() && !defaults.display_clear_skip && !defaults.fx_attached_sphere && !defaults.fx_bubble_true_size);
         defaults.validate().unwrap();
         let record = config_log_lines(&defaults).join("\n");
-        for key in ["\"gpu_timing\":\"off\"", "\"gpu_mask\":[]", "\"rt_scenes\":null", "\"param_buffer_mib\":null", "\"display_clear_skip\":false"] {
+        for key in ["\"gpu_timing\":\"off\"", "\"gpu_mask\":[]", "\"rt_scenes\":null", "\"param_buffer_mib\":null", "\"display_clear_skip\":false", "\"fx_attached_sphere\":false", "\"fx_bubble_true_size\":false"] {
             assert!(record.contains(key), "{key} missing from {record}");
         }
         for (good, text) in [

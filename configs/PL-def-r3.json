@@ -133,5 +133,7 @@
   "rt_scenes": null,
   "param_buffer_mib": null,
   "display_clear_skip": false,
+  "fx_attached_sphere": false,
+  "fx_bubble_true_size": false,
   "mover_advance_reuse": false
 }
