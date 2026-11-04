@@ -332,14 +332,15 @@ mod tests {
         assert!(on.iter().flat_map(|p| &p.topology_new).any(|new| !*new));
         assert!(on.iter().flat_map(|p| &p.vertices_new).any(|new| !*new));
     }
-    /// Two raw quads, then one effect packet of the same length with other indices, then back.
+    /// Three raw quads, then an effect packet and a quad of the same total length with other
+    /// indices, then back. The bank packs both frames, so only an index compare tells them apart.
     fn bank_mixed_script(persist: bool) -> Vec<Vec<Draw>> {
         crate::sim_maps::with_fx_attached_persist(persist, || {
             let mut bank = Bank::default();
             let mut groups = Vec::new();
             let mut out = Vec::new();
             for frame in 0..6 {
-                let puffs = if frame % 3 == 1 { Vec::new() } else { vec![puff(1, Blend::Alpha), puff(2, Blend::Alpha)] };
+                let puffs = if frame % 3 == 1 { Vec::new() } else { vec![puff(1, Blend::Alpha), puff(2, Blend::Alpha), puff(3, Blend::Alpha)] };
                 let mut list: Vec<(f32, Source)> = puffs.iter().enumerate().map(|(i, _)| (2. - i as f32, Source::Puff(i))).collect();
                 if frame % 3 == 1 {
                     let mut effect = pass_for(&puff(1, Blend::Alpha), true, false);
