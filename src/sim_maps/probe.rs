@@ -13,6 +13,7 @@ thread_local! {
     static WORLD_ORDER: RefCell<Vec<(usize,bool)>> = RefCell::default();
     static WORLD_PACKETS: RefCell<(u64,Sha256)> = RefCell::new((0,Sha256::new()));
     static WORLD_GEOMETRY: RefCell<Vec<String>> = RefCell::default();
+    static WORLD_RANGES: RefCell<Vec<(i32, i32)>> = RefCell::default();
     static GL_TRACE: RefCell<(u64,Sha256)> = RefCell::new((0,Sha256::new()));
     static COUNTS: RefCell<BTreeMap<&'static str, u64>> = RefCell::default();
     static SPANS: RefCell<BTreeMap<&'static str, f64>> = RefCell::default();
@@ -168,15 +169,21 @@ fn world_packets_enabled() -> bool {
 /// Where a group's vertices live in which buffer does not enter it.
 pub fn world_geometry(hashes: Vec<String>) { if world_packets_enabled() { WORLD_GEOMETRY.with(|g| *g.borrow_mut() = hashes); } }
 pub fn world_packets_active() -> bool { world_packets_enabled() }
+pub fn world_ranges(ranges: Vec<(i32, i32)>) { if world_packets_enabled() { WORLD_RANGES.with(|r| *r.borrow_mut() = ranges); } }
 pub fn world_geometry_hash(group: usize) -> String { WORLD_GEOMETRY.with(|g| g.borrow()[group].clone()) }
-/// One world draw as the GPU sees it, into one hash per frame: group, resolved geometry, texture,
-/// uniform words, program and pipeline class. The buffer handles and offsets do not enter it.
-pub fn world_packet(group: usize, texture: &macroquad::miniquad::TextureId, uniforms: &[u32; 143], low: bool, pipeline_class: u8) {
+/// One world draw as the GPU sees it, into one hash per frame: group, resolved geometry and whether
+/// the range sent is the checked one, texture, uniform words, program and pipeline class. The buffer
+/// handles and offsets do not enter it.
+pub fn world_packet(group: usize, base: i32, count: i32, texture: &macroquad::miniquad::TextureId, uniforms: &[u32; 143], low: bool, pipeline_class: u8) {
     if !world_packets_enabled() { return; }
     WORLD_PACKETS.with(|s| {
         let mut s = s.borrow_mut();
         s.0 += 1;
         s.1.update((group as u64).to_le_bytes());
+        // The range sent to GL, against the one its bytes were checked at. Zero and the group's count when right.
+        let (allocated_base, allocated_count) = WORLD_RANGES.with(|r| r.borrow()[group]);
+        s.1.update((base - allocated_base).to_le_bytes());
+        s.1.update((count - allocated_count).to_le_bytes());
         WORLD_GEOMETRY.with(|g| s.1.update(g.borrow()[group].as_bytes()));
         s.1.update(format!("{texture:?}").as_bytes());
         for word in uniforms { s.1.update(word.to_le_bytes()); }

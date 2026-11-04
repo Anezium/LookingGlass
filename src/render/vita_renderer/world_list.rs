@@ -70,37 +70,30 @@ impl WorldList {
     pub fn forget_visibility(&mut self) { for v in &mut self.visible { v.generation = 0; } }
 }
 
-/// Uniform payloads by value, so a draw can compare one integer instead of 143 words.
+/// Uniform payloads by value inside one pass, so a draw can compare one integer instead of 143 words.
 ///
 /// Many parameters hold equal bits: the parameter key also covers textures, which are not uniforms.
-/// `class` is a stable id per distinct payload, checked word for word when it is taken, so equal
-/// ids mean equal bits and different ids mean different bits. Ids hold until `reserve` starts a
-/// new epoch, and that happens only between passes. `Parameter` remembers its id and the epoch.
-pub(super) struct Classes { bits: Vec<[u32; 143]>, hashes: Vec<u32>, capacity: usize, pub epoch: u32 }
+/// The time is in every payload, so a class means nothing past its pass. Each parameter takes its
+/// class once a pass, after its last write, and the table points at the first parameter that held
+/// those bits. Equal ids mean equal bits and different ids mean different bits, checked word for
+/// word when taken. Nothing is copied and the table never grows past the parameter count.
+pub(super) struct Classes { first: Vec<(u32, u32)> }
 impl Classes {
-    pub fn new(parameters: usize) -> Self {
-        // Room for a full set in every pass of a slow turn before a reset is needed.
-        let capacity = (parameters * 4).max(16);
-        Self { bits: Vec::with_capacity(capacity), hashes: Vec::with_capacity(capacity), capacity, epoch: 1 }
-    }
-    /// At the start of a pass. Guarantees `incoming` new payloads fit without a mid-pass reset.
-    pub fn reserve(&mut self, incoming: usize) {
-        if self.bits.len() + incoming > self.capacity {
-            self.bits.clear();
-            self.hashes.clear();
-            self.epoch = self.epoch.wrapping_add(1);
-        }
-    }
-    pub fn class(&mut self, bits: &[u32; 143]) -> u32 {
+    pub fn new(parameters: usize) -> Self { Self { first: Vec::with_capacity(parameters) } }
+    pub fn begin_pass(&mut self) { self.first.clear(); }
+    /// `own` is the asking parameter, `bits_of` reads any parameter already in the table.
+    pub fn class<'a>(&mut self, own: u32, bits: &[u32; 143], bits_of: impl Fn(u32) -> &'a [u32; 143]) -> u32 {
         let hash = bits.iter().fold(0x811c_9dc5_u32, |h, w| (h ^ *w).wrapping_mul(0x0100_0193));
-        for (i, known) in self.hashes.iter().enumerate() {
-            if *known == hash && self.bits[i] == *bits { return i as u32; }
+        for (i, &(known, parameter)) in self.first.iter().enumerate() {
+            if known == hash && bits_of(parameter) == bits { return i as u32; }
         }
-        self.bits.push(*bits);
-        self.hashes.push(hash);
-        (self.bits.len() - 1) as u32
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        assert!(self.first.len() < self.first.capacity(), "a pass asked for more classes than parameters");
+        self.first.push((hash, own));
+        (self.first.len() - 1) as u32
     }
-    #[cfg(test)] pub fn len(&self) -> usize { self.bits.len() }
+    #[cfg(test)] pub fn len(&self) -> usize { self.first.len() }
+    #[cfg(test)] pub fn capacity(&self) -> usize { self.first.capacity() }
 }
 
 /// The state-cached loop's decisions, with the uniform payload named by its class. Equal class
@@ -261,7 +254,7 @@ mod tests {
         for _ in 0..400 {
             let (steps, bits) = random_steps(&mut rng, 60);
             let mut classes = Classes::new(12);
-            let class: Vec<u32> = bits.iter().map(|b| classes.class(b)).collect();
+            let class: Vec<u32> = bits.iter().enumerate().map(|(i, b)| classes.class(i as u32, b, |p| &bits[p as usize])).collect();
             let mut cache = state_cache::Cache::<u32, (u32, u32, u32, u32), 143>::new();
             let (legacy, legacy_applications) = stream(&steps, &bits, &mut |p, low, b, q| cache.observe(p, low, true, b, bits[q as usize]));
             let mut planner = Planner::<u32, (u32, u32, u32, u32)>::new();
@@ -290,33 +283,29 @@ mod tests {
         assert!(p.observe(1, false, 2, 5).bindings);
     }
     #[test]
-    fn classes_name_payloads_exactly_and_reset_only_between_passes() {
-        let mut classes = Classes::new(4);
+    fn classes_name_payloads_exactly_inside_a_pass() {
         let a = [1; 143];
         let mut b = a;
         b[142] = 2;
         let mut negative_zero = [0_u32; 143];
         negative_zero[3] = (-0_f32).to_bits();
-        let (ca, cb, cz) = (classes.class(&a), classes.class(&b), classes.class(&negative_zero));
-        assert!(ca != cb && cb != cz && ca != cz);
-        assert_eq!(classes.class(&a), ca);
-        assert_eq!(classes.class(&b), cb);
-        assert_eq!(classes.len(), 3);
-        // A forced hash collision must still compare words: a's entry now claims b's hash.
-        classes.hashes[ca as usize] = classes.hashes[cb as usize];
-        assert_eq!(classes.class(&b), cb);
-        classes.hashes[ca as usize] = classes.hashes[cz as usize];
-        assert_eq!(classes.class(&negative_zero), cz);
-        assert_eq!(classes.len(), 3);
-        let epoch = classes.epoch;
-        classes.reserve(4);
-        assert_eq!((classes.epoch, classes.len()), (epoch, 3), "room left: ids stay valid");
-        classes.reserve(16);
-        assert_eq!((classes.epoch, classes.len()), (epoch + 1, 0), "no room: new epoch, empty");
-        let capacity = classes.bits.capacity();
-        classes.reserve(16);
-        for i in 0..16 { let mut p = a; p[0] = i; classes.class(&p); }
-        assert_eq!(classes.bits.capacity(), capacity, "a reserved pass does not reallocate");
+        let mut positive_zero = negative_zero;
+        positive_zero[3] = 0_f32.to_bits();
+        let all = [a, b, negative_zero, positive_zero, a, b];
+        let mut classes = Classes::new(all.len());
+        let of = |p: u32| &all[p as usize];
+        let got: Vec<u32> = all.iter().enumerate().map(|(i, bits)| classes.class(i as u32, bits, of)).collect();
+        assert_eq!(got, [0, 1, 2, 3, 0, 1], "equal bits share a class, a word apart do not, -0 is not 0");
+        assert_eq!(classes.len(), 4);
+        // A forced hash collision must still compare words.
+        classes.first[0].0 = classes.first[1].0;
+        assert_eq!(classes.class(1, &b, of), 1);
+        // A new pass forgets everything and keeps its storage, so a frame does not allocate.
+        let capacity = classes.capacity();
+        classes.begin_pass();
+        assert_eq!(classes.len(), 0);
+        assert_eq!(classes.class(1, &b, of), 0, "ids mean nothing across passes");
+        assert_eq!(classes.capacity(), capacity);
     }
     fn vertex(tag: u32) -> WorldVertex {
         WorldVertex { position: [tag as f32, 0., 0.], uv: [0.; 2], color: [0; 4], lightmap: [0.; 4], normal: [0.; 3] }

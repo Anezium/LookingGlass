@@ -27,6 +27,7 @@ TIMING = {'cpu_ms', 'spans_ms'}
 ELAPSED = ('_us', '_ns', '_ms')
 HOST_MEMORY = ('actor_mem_', 'actor_publication_mem_')
 NOISY_PIXELS = {'hedge3'}  # OFF against OFF differs here, see host_flag_exact_gather.py
+NOISY_MAX_FRAMES = 5  # Runs differ on 0 to 3 isolated frames there. A real error differs on many, and hedge3 is the only map with three shared world buffers.
 PREREQ_FIELDS = ('requested_window', 'requested_high_dpi', 'screen_size_bits', 'framebuffer', 'scaled_target', 'viewport')
 FUNNEL = {'fx_funnel_registered_raw', 'fx_funnel_registered_publication', 'fx_funnel_joint_raw_quads',
           'fx_funnel_joint_raw_outside_view', 'fx_funnel_joint_publication_quads', 'fx_funnel_joint_publication_outside_view'}
@@ -180,6 +181,8 @@ def compare(ctx, name, off, on, strict_images):
             image_frames.append(i)
         if off['presentation'][i]['projection_bits'] != on['presentation'][i]['projection_bits']:
             raise Mismatch((name, i, 'projection'))
+    if not strict_images and len(image_frames) > NOISY_MAX_FRAMES:
+        raise Mismatch((name, 'framebuffer on more frames than noise', image_frames[:12]))
     if strict_images and off['final'] != on['final']:
         raise Mismatch((name, 'final image'))
     if unexplained:
