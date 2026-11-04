@@ -302,7 +302,8 @@ mod tests {
                     p.before_group = 0;
                     p
                 }).collect::<Vec<_>>();
-                if frame % 11 == 3 { puffs[3].vertices[2].color[1] = 9; }
+                // One late member changes in a frame that otherwise repeats the last.
+                if frame == 12 { puffs[3].vertices[2].color[1] = 9; }
                 let mut list = (0..count).map(|i| ((count - i) as f32, Source::Puff(i))).collect::<Vec<_>>();
                 bank.build(&mut groups, &puffs, &mut list, true);
                 let draws = snapshot(&groups, &list);
@@ -330,6 +331,35 @@ mod tests {
         assert!(on.iter().flat_map(|p| &p.topology_new).any(|new| *new));
         assert!(on.iter().flat_map(|p| &p.topology_new).any(|new| !*new));
         assert!(on.iter().flat_map(|p| &p.vertices_new).any(|new| !*new));
+    }
+    /// Two raw quads, then one effect packet of the same length with other indices, then back.
+    fn bank_mixed_script(persist: bool) -> Vec<Vec<Draw>> {
+        crate::sim_maps::with_fx_attached_persist(persist, || {
+            let mut bank = Bank::default();
+            let mut groups = Vec::new();
+            let mut out = Vec::new();
+            for frame in 0..6 {
+                let puffs = if frame % 3 == 1 { Vec::new() } else { vec![puff(1, Blend::Alpha), puff(2, Blend::Alpha)] };
+                let mut list: Vec<(f32, Source)> = puffs.iter().enumerate().map(|(i, _)| (2. - i as f32, Source::Puff(i))).collect();
+                if frame % 3 == 1 {
+                    let mut effect = pass_for(&puff(1, Blend::Alpha), true, false);
+                    effect.mesh.vertices.extend(puff(2, Blend::Alpha).vertices);
+                    effect.mesh.indices = vec![0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 3, 2];
+                    groups.push(super::super::super::Group { passes: vec![effect], transparent: true });
+                    groups.push(super::super::super::Group { passes: vec![pass_for(&puff(3, Blend::Alpha), true, false)], transparent: true });
+                    list = vec![(2., Source::Actor(0)), (1., Source::Actor(1))];
+                }
+                bank.build(&mut groups, &puffs, &mut list, true);
+                out.push(snapshot(&groups, &list));
+                recycle(&mut groups);
+            }
+            out
+        })
+    }
+    #[test]
+    fn persisted_bank_compares_indices_when_a_member_is_not_a_raw_quad() {
+        let _frame = frame();
+        assert_eq!(bank_mixed_script(false), bank_mixed_script(true));
     }
     #[test]
     fn a_whole_set_registers_like_one_quad_at_a_time_up_to_the_vertex_limit() {

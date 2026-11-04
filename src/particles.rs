@@ -2124,7 +2124,11 @@ pub(crate) mod tests {
             persist_step(&mut legacy, &mut persisted, 1001, 1.2, -1., &all);
             assert!(persisted.steam.puffs.is_empty());
             run(&mut legacy, &mut persisted, 2, 0.05, 1., &all);
-            // A rewind.
+            // A small rewind: the window still overlaps, and the map forgets its poses anyway.
+            for f in 0..30 { persist_step(&mut legacy, &mut persisted, 1100 + f, 50. + f as f32 * 0.05, 1., &all); }
+            persist_step(&mut legacy, &mut persisted, 1131, 51., 1., &all);
+            for f in 0..10 { persist_step(&mut legacy, &mut persisted, 1132 + f, 51. + f as f32 * 0.05, 1., &all); }
+            // A far one.
             persist_step(&mut legacy, &mut persisted, 1002, 0.5, 1., &all);
             for f in 0..30 { persist_step(&mut legacy, &mut persisted, 1003 + f, 0.5 + f as f32 * 0.05, 1., &all); }
         }
@@ -2138,6 +2142,17 @@ pub(crate) mod tests {
         // The births past the cap forgot their poses, and the cap moves as the first emitters die.
         for frame in 2..40 { persist_step(&mut legacy, &mut persisted, frame, 10. + frame as f32 * 0.5, 1., &all); }
         persist_step(&mut legacy, &mut persisted, 50, 31., 1., &all);
+        // A gate moves the cap's position in the window: births past it forget their poses, so
+        // they ask again when room returns.
+        let (mut legacy, mut persisted) = (attached_fixture(5), attached_fixture(5));
+        for e in legacy.steam.emitters.iter_mut().chain(persisted.steam.emitters.iter_mut()) { e.spec.life = Range::fixed(3.); e.spec.rate = 300.; }
+        for (i, e) in legacy.steam.emitters.iter_mut().chain(persisted.steam.emitters.iter_mut()).enumerate() { e.spec.name = format!("e{}", i % 5); }
+        let closed = |name: &str, _: f32, _: bool| name != "e0";
+        persist_step(&mut legacy, &mut persisted, 100, 3., 1., &closed);
+        persist_step(&mut legacy, &mut persisted, 101, 3.01, 1., &all);
+        assert_eq!(persisted.steam.puffs.len(), 4096);
+        persist_step(&mut legacy, &mut persisted, 102, 3.02, 1., &closed);
+        persist_step(&mut legacy, &mut persisted, 103, 3.03, 1., &closed);
     }
     #[test]
     fn persisted_sample_holds_one_window_and_warm_frames_do_not_allocate() {
