@@ -740,6 +740,23 @@ pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>,
         f.world_puffs.push(retained::world_puffs::Puff { vertices, texture, blend, before_group });
     });
 }
+/// `world_puff_quad` for a whole set, in order, under one borrow of the frame.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn world_puff_quads<'a>(quads: impl ExactSizeIterator<Item = (&'a [Vertex; 4], Option<Texture2D>, Blend)>) {
+    if crate::character::skinning::overlap::gather_only() { return; }
+    debug_assert!(world_puff_batches_active());
+    FRAME.with(|f| {
+        let mut f = f.borrow_mut();
+        let f = &mut *f;
+        f.world_puffs.reserve(quads.len());
+        let before_group = f.groups.len();
+        for (vertices, texture, blend) in quads {
+            if f.vertices.saturating_add(4) > MAX_VERTICES { f.dropped += 1; continue; }
+            f.vertices += 4;
+            f.world_puffs.push(retained::world_puffs::Puff { vertices: *vertices, texture, blend, before_group });
+        }
+    });
+}
 pub fn line(a: Vec3, b: Vec3, color: Color) {
     if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {

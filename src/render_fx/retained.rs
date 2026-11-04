@@ -1151,6 +1151,11 @@ pub(crate) fn finish_world(
         let _sort_time = crate::sim_maps::timer("r26_joint_sort_ns");
         order(list, crate::render::vita_renderer::config().sort_alpha)
     };
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if crate::sim_maps::fx_attached_persist() && crate::sim_maps::probe::negative_control() == Some("persist-quad-order") {
+        let puff_slots: Vec<usize> = list.iter().enumerate().filter(|(_, e)| matches!(e.1, Source::Puff(_))).map(|(i, _)| i).collect();
+        if let [.., a, b] = puff_slots[..] { list.swap(a, b); }
+    }
     let bank_time = crate::sim_maps::timer("r26_bank_ns");
     if !puffs.is_empty() {
         gpu.puff_batches[gpu.ring_phase].build(&mut groups, &puffs, &mut list,

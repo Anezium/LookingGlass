@@ -157,6 +157,26 @@ pub(crate) fn with_fx_observe_move<T>(on: bool, run: impl FnOnce() -> T) -> T {
     let _reset = Reset(FX_OBSERVE_MOVE_TEST.with(|s| s.replace(Some(on))));
     run()
 }
+/// r26 CPU levers. Keep in step with Config and with tools/perf_contracts/host_flag_exact_cpu.py.
+#[cfg(test)]
+pub(crate) const R26_LEVERS: [&str; 1] = ["fx_attached_persist"];
+#[cfg(test)]
+thread_local! { static FX_ATTACHED_PERSIST_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn with_fx_attached_persist<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset { fn drop(&mut self) { FX_ATTACHED_PERSIST_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(FX_ATTACHED_PERSIST_TEST.with(|s| s.replace(on)));
+    run()
+}
+pub fn fx_attached_persist() -> bool {
+    #[cfg(test)]
+    { FX_ATTACHED_PERSIST_TEST.with(|s| s.get()) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().fx_attached_persist }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
 // Default on since r25, like Config. Tests: a scoped override, else the shipped default;
 // LOOKING_GLASS_TEST_FX_OBSERVE_MOVE=off runs the whole suite with the lever off.
 pub fn fx_observe_move() -> bool {
