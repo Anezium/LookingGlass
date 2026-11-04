@@ -3803,7 +3803,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             scene.atmosphere.distance.w = distance;
         }
         drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPrepare3d);
-        clear_background(scene.atmosphere.background());
+        #[cfg(feature="vita_renderer")]
+        let display_clear = !crate::render::vita_renderer::display_clear_skipped();
+        #[cfg(not(feature="vita_renderer"))]
+        let display_clear = true;
+        if display_clear { clear_background(scene.atmosphere.background()); }
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::prepare_3d(scene.atmosphere.background());
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]

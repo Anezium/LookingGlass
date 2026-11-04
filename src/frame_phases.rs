@@ -65,7 +65,9 @@ extern "C" {
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_vglSwapBuffers(dialog: u8) {
     mark(10); crate::light_profile::swap_begin();
+    let gpu_swap = crate::gpu_timing::swap_enter();
     { let _census = crate::phase_census::span(crate::phase_census::Region::Swap); __real_vglSwapBuffers(dialog); }
+    crate::gpu_timing::swap_return(gpu_swap);
     crate::light_profile::swap_end(); mark(11);
 }
 #[cfg(target_os="vita")]

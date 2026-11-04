@@ -450,7 +450,10 @@ pub mod draw_query {
         if !active() { return; }
         if ARMED.with(Cell::get) { finish_previous(); }
         SEQUENCE.with(|value| value.set(0));
-        let armed = frame == target_frame();
+        static LAST: OnceLock<u64> = OnceLock::new();
+        let last = *LAST.get_or_init(|| std::env::var("LOOKING_GLASS_DRAW_QUERY_LAST")
+            .ok().and_then(|value| value.parse().ok()).unwrap_or_else(target_frame));
+        let armed = frame >= target_frame() && frame <= last;
         if armed {
             SAMPLE_FRAME.with(|value| value.set(frame));
             println!("DRAW_QUERY armed frame={frame} target={}", target_frame());

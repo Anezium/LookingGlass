@@ -128,5 +128,10 @@
   "prop_occurrence_reuse": true,
   "fx_observe_move": true,
   "fx_attached_persist": false,
+  "gpu_timing": "off",
+  "gpu_mask": [],
+  "rt_scenes": null,
+  "param_buffer_mib": null,
+  "display_clear_skip": false,
   "mover_advance_reuse": false
 }

@@ -6,6 +6,7 @@ mod allocation_census;
 #[cfg(any(target_os="vita", test))]
 mod r13_survey;
 mod tls_count;
+mod gpu_timing;
 mod sim_maps;
 mod acting;
 mod ambient_animation;
@@ -222,6 +223,7 @@ fn app_main() {
         #[cfg(target_os="vita")]
         light_profile::set_mode(frame_profile::Mode::read());
         character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench, c.skin_overlap);
+        gpu_timing::before_gl_init();
         frame_phases::initialize();
         phase_census::initialize();
     }

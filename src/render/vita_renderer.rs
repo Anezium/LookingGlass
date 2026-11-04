@@ -127,6 +127,18 @@ pub struct Config {
     /// School two publishes the other movers' colliders only when a rider's body trace will read
     /// them, and builds a mover's collider only when something can read it. Default off.
     pub mover_advance_reuse: bool,
+    /// GPU timing through a survey window: off, backlog, poll or wait. See `gpu_timing`.
+    pub gpu_timing: String,
+    /// Diagnostic only, the picture changes: draw classes whose draw call is skipped, CPU kept.
+    pub gpu_mask: Vec<String>,
+    /// Scenes per frame for the display and framebuffer render targets, before vglInit.
+    /// None keeps vitaGL's 1 and 1. Diagnostic.
+    pub rt_scenes: Option<[u8; 2]>,
+    /// GXM parameter buffer in MiB, before vglInit. None keeps vitaGL's 16. Diagnostic.
+    pub param_buffer_mib: Option<u32>,
+    /// With a scaled 3D target, skip the display clear that opens the frame. The upscale covers
+    /// every display pixel, so its scene draws nothing that stays. Default off.
+    pub display_clear_skip: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -315,6 +327,7 @@ impl Default for Config {
             fx_observe_move: true,
             fx_attached_persist: false,
             mover_advance_reuse: false,
+            gpu_timing: "off".into(), gpu_mask: Vec::new(), rt_scenes: None, param_buffer_mib: None, display_clear_skip: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -450,6 +463,10 @@ impl Config {
         ensure!(self.render_scale==1. || self.msaa_samples==1,"scaled target requires msaa_samples=1");
         ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
         ensure!(matches!(self.opaque_order.as_str(),"material"|"front_to_back"),"invalid opaque_order");
+        ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
+        for name in &self.gpu_mask { ensure!(crate::gpu_timing::mask_bit(name).is_some(),"unknown gpu_mask class {name}"); }
+        if let Some(scenes)=self.rt_scenes { ensure!(scenes.iter().all(|&n|(1..=8).contains(&n)),"rt_scenes must be 1 to 8"); }
+        if let Some(mib)=self.param_buffer_mib { ensure!((16..=64).contains(&mib),"param_buffer_mib must be 16 to 64"); }
         ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
         ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
         ensure!(
@@ -631,6 +648,7 @@ pub(crate) fn apply_world_viewport() {
     if let Some((x,y,w,h))=world_viewport() { unsafe { get_internal_gl().quad_context.apply_viewport(x,y,w,h); } }
 }
 pub(crate) fn prepare_3d(bg:Color){scale::prepare(bg);}
+pub(crate) fn display_clear_skipped() -> bool { config().display_clear_skip && config().render_scale < 1. }
 pub(crate) fn begin_3d_pass(action:PassAction){scale::begin(action);}
 pub(crate) fn set_3d_camera(camera:&Camera3D){scale::camera(camera);}
 pub(crate) fn present_3d(){scale::present();}
@@ -1628,7 +1646,7 @@ impl Renderer {
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::draw_query::mark("world_opaque","sky",0,None,0,None);
-            ctx.draw(0, 3, 1);
+            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) { ctx.draw(0, 3, 1); }
             totals.add(2, start);
             totals.publish(["vita_world_sky_state_bindings", "vita_world_sky_uniforms", "vita_world_sky_draws_time"]);
             count("vita_world_gpu_draws", 1);
@@ -1707,7 +1725,8 @@ impl Renderer {
                 if low {"world_low"} else {"world_full"},
                 g.recipe.blend, Some(prepared.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
-            ctx.draw(g.base_element, prepared.indices, 1);
+            let class = if alpha { crate::gpu_timing::MASK_WORLD_ALPHA } else if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
+            if !crate::gpu_timing::masked(class) { ctx.draw(g.base_element, prepared.indices, 1); }
             totals.lap(2, &mut start);
             previous_end = start;
             if previous_pipeline != Some(pi) {
@@ -1847,7 +1866,7 @@ impl Renderer {
             crate::sim_maps::probe::draw_query::mark("world_alpha","world_full",
                 g.recipe.blend, Some(p.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.first().map(String::as_str));
-            ctx.draw(g.base_element, g.indices, 1);
+            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) { ctx.draw(g.base_element, g.indices, 1); }
             totals.add(2, start);
             count("vita_world_gpu_draws", 1);
             count("vita_world_alpha_triangles", g.indices as u64 / 3);

@@ -34,6 +34,7 @@ impl Survey {
         anyhow::ensure!(crate::frame_profile::Mode::read()==crate::frame_profile::Mode::Full,"survey requires full profile mode");
         if c.allocation {crate::allocation_census::enable();}
         if c.census {crate::phase_census::initialize_survey();}
+        crate::gpu_timing::prepare();
         options.map=c.map.clone();options.entry=None;options.direct_map=true;options.new_game=false;options.load=None;
         println!("[lg/r13b-survey] entry map={} entry=first tag={} input={} saves=disabled",c.map,c.tag,
             if c.physical_input {"enabled"} else {"disabled"});
@@ -56,6 +57,7 @@ impl Survey {
     pub(crate) fn physical_input(&self)->bool {self.config.physical_input}
     #[cfg(target_os="vita")]
     pub(crate) fn presented(&mut self,map:&str,alive:bool,arm:bool)->anyhow::Result<()> {
+        if self.armed && !self.done {crate::gpu_timing::presented(self.frames as u32+1);}
         if !self.presented_at(map,alive,arm,Instant::now())? {return Ok(());}
         CENSUS.store(false,Relaxed);
         self.snapshot=true;
@@ -66,6 +68,7 @@ impl Survey {
         let mut out=std::io::BufWriter::new(std::fs::File::create(dir.join(format!("{map}-r13b-{}.csv",self.config.tag)))?);
         self.write_samples(&mut out)?;out.flush()?;
         if self.config.census {crate::phase_census::export_survey(map)?;}
+        crate::gpu_timing::export(map)?;
         if self.config.tls_count {println!("{}",self.tls_line(map));}
         println!("[lg/r13b-survey] done map={map} samples={} warmup_frames=60 measured_frames={} died={}",self.rows.len(),self.rows.len()-60,!alive);
         self.done=true;Ok(())
@@ -82,6 +85,7 @@ impl Survey {
                 println!("[lg/r13b-survey] ready map={map} gameplay=true select_to_arm=true");}
             if self.ready && self.pending_gameplay && arm {
                 crate::phase_census::calibrate();
+                crate::gpu_timing::arm();
                 // Calibration/printing must not enter even the first warmup wall.
                 #[cfg(target_os="vita")]
                 let now=Instant::now();

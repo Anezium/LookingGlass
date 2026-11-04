@@ -583,7 +583,8 @@ impl Gpu {
                     p.lit as u32,p.clamp as u32,p.cutout.to_bits(),p.cutout_reference.to_bits(),
                     p.fog.to_bits(),p.model as u32,p.filter_fade.to_bits()],p.mesh.texture.as_ref());
         }
-        ctx.draw(0, p.geometry().indices.len() as i32, 1);
+        let class = if p.effect { crate::gpu_timing::fx_class(p.blend_index) } else { crate::gpu_timing::MASK_ACTORS };
+        if !crate::gpu_timing::masked(class) { ctx.draw(0, p.geometry().indices.len() as i32, 1); }
         self.stats.draws += 1;
         self.stats.triangles += p.geometry().indices.len() as u64 / 3;
         let metrics = &mut self.stats.render[usize::from(p.effect)];
