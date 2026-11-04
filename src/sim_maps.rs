@@ -178,15 +178,32 @@ pub fn mover_replay_checks() -> bool { probe::mover_replay_enabled() }
 pub fn mover_replay_checks() -> bool { true }
 pub fn mover_advance_reuse() -> bool {
     #[cfg(test)]
-    { MOVER_ADVANCE_REUSE_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_MOVER_ADVANCE_REUSE").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
-        _ => panic!("LOOKING_GLASS_TEST_MOVER_ADVANCE_REUSE must be off or on"),
-    }) }
+    { MOVER_ADVANCE_REUSE_TEST.with(|s| s.get()).unwrap_or_else(|| test_lever_env("LOOKING_GLASS_TEST_MOVER_ADVANCE_REUSE")) }
     #[cfg(all(not(test), feature="vita_renderer"))]
     { crate::render::vita_renderer::config().mover_advance_reuse }
     #[cfg(all(not(test), not(feature="vita_renderer")))]
     { false }
+}
+/// Off unless the variable says on. Read once per lever: allocation tests run with a lever on,
+/// and reading the environment allocates.
+#[cfg(test)]
+fn test_lever_env(name: &'static str) -> bool {
+    static SEEN: std::sync::Mutex<Vec<(&'static str, bool)>> = std::sync::Mutex::new(Vec::new());
+    thread_local! { static LOCAL: std::cell::Cell<[Option<bool>; 2]> = const { std::cell::Cell::new([None; 2]) }; }
+    let slot = usize::from(name.ends_with("MOVER_ADVANCE_REUSE"));
+    if let Some(on) = LOCAL.with(|l| l.get()[slot]) { return on; }
+    let mut seen = SEEN.lock().unwrap();
+    let on = seen.iter().find(|s| s.0 == name).map(|s| s.1).unwrap_or_else(|| {
+        let on = match std::env::var(name).as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("off") => false,
+            Ok("on") => true,
+            _ => panic!("{name} must be off or on"),
+        };
+        seen.push((name, on));
+        on
+    });
+    LOCAL.with(|l| { let mut v = l.get(); v[slot] = Some(on); l.set(v); });
+    on
 }
 #[cfg(test)]
 thread_local! { static FX_ATTACHED_PERSIST_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
@@ -199,11 +216,7 @@ pub(crate) fn with_fx_attached_persist<T>(on: bool, run: impl FnOnce() -> T) -> 
 }
 pub fn fx_attached_persist() -> bool {
     #[cfg(test)]
-    { FX_ATTACHED_PERSIST_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_FX_ATTACHED_PERSIST").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("off") => false,
-        Ok("on") => true,
-        _ => panic!("LOOKING_GLASS_TEST_FX_ATTACHED_PERSIST must be off or on"),
-    }) }
+    { FX_ATTACHED_PERSIST_TEST.with(|s| s.get()).unwrap_or_else(|| test_lever_env("LOOKING_GLASS_TEST_FX_ATTACHED_PERSIST")) }
     #[cfg(all(not(test), feature="vita_renderer"))]
     { crate::render::vita_renderer::config().fx_attached_persist }
     #[cfg(all(not(test), not(feature="vita_renderer")))]
