@@ -1143,6 +1143,8 @@ pub(crate) fn finish_world(
             }
             if let Some(g) = groups.get(id).filter(|g| g.transparent &&
                 g.passes.first().is_some_and(|p| !p.geometry().vertices.is_empty())) {
+                crate::sim_maps::count("joint_center_group_scans", 1);
+                crate::sim_maps::count("joint_center_group_vertices", g.passes[0].geometry().vertices.len() as u64);
                 list.push(((center(g.passes[0].geometry()) - camera).dot(direction), Source::Actor(id)));
             }
         }
