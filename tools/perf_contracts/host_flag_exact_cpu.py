@@ -52,9 +52,14 @@ REMOVED_WORK = {
         'vita_fx_unchanged_merged_groups', 'fx_merge_range_vertices_kept',
     },
     'joint_center_cache': set(),
-    'mover_advance_reuse': {'mover_publications', 'mover_far_steps', 'collider_model_calls', 'collider_local_builds', 'dynamic_bucket_builds'},
+    'mover_advance_reuse': {'mover_publications', 'mover_far_steps', 'collider_model_calls', 'collider_local_builds', 'dynamic_bucket_builds',
+                            # Under --mover-replay the on arm rebuilds what it skipped, to check it. Without it, fewer.
+                            'brush_hulls_built'},
     'world_static_merge': {
         'vita_world_gpu_draws', 'vita_world_low_draws', 'vita_world_texture_binds', 'vita_world_buffer_binds',
+        'vita_world_binding_applications', 'vita_world_merged_draws', 'vita_world_uniform_bytes',
+        'world_merge_pairs', 'world_merge_pairs_same_texture', 'world_merge_pairs_same_state',
+        'world_merge_pairs_same_state_contiguous', 'world_merge_candidates',
     },
 }
 
