@@ -42,7 +42,7 @@ REMOVED_WORK = {
         'vita_fx_geometry_upload_bytes', 'vita_fx_index_uploads_skipped', 'vita_fx_mesh_uploads',
         'vita_fx_prepare_upload_hits', 'vita_fx_upload_cache_hits', 'vita_fx_vertex_uploads_skipped',
         'vita_fx_stream_capacity_bytes', 'vita_fx_buffer_growths', 'fx_index_updates', 'fx_uploaded_indices',
-        'fx_vertex_updates', 'fx_uploaded_vertices',
+        'fx_vertex_updates', 'fx_uploaded_vertices', 'joint_center_group_scans', 'joint_center_group_vertices',
         # A set with no raw quads used to skip the bank and merge in merge_cached. As raw quads it
         # merges in the bank, with the same result. jlair2: 12 input groups become 2, 17 merged
         # meshes become 7, and the 26 packets and their bytes stay.
