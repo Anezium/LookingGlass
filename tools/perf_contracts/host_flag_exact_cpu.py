@@ -33,8 +33,8 @@ FUNNEL = {'fx_funnel_registered_raw', 'fx_funnel_registered_publication', 'fx_fu
 # Work a lever removes on purpose, or moves between the raw and publication routes. Draw counts,
 # triangle counts, drops and the joint list length are not here: if those move, the case fails.
 REMOVED_WORK = {
-    # A shader source change and a removed clear: nothing counted moves.
-    'simple_dynamic_lights': set(),
+    # A shader with no light uniforms uploads fewer bytes; packets still carry the full payload. A removed clear moves nothing counted.
+    'simple_dynamic_lights': {'vita_fx_uniform_bytes'},
     'display_clear_skip': set(),
     'fx_attached_persist': FUNNEL | {
         'particle_direct_quads', 'particle_reused_quads', 'vita_world_puff_quads', 'vita_world_puff_batches',
