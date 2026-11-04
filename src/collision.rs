@@ -259,6 +259,8 @@ impl Collider {
     pub(crate) fn probe_test_bounds(&self) -> (Vec3, Vec3) { self.bounds.map(|b| (b.min, b.max)).unwrap() }
     #[cfg(test)]
     pub(crate) fn from_test_hulls() -> Self { Self::from_hulls(Vec::new()) }
+    #[cfg(test)]
+    pub(crate) fn bounds_for_review(&self) -> Option<(Vec3, Vec3)> { self.bounds.map(|b| (b.min, b.max)) }
     /// The bounds' furthest corner from `point`. Nothing for a collider with no bounds.
     pub(crate) fn far_reach_from(&self, point: Vec3) -> Option<f32> {
         self.bounds.map(|b| (b.min - point).abs().max((b.max - point).abs()).length())

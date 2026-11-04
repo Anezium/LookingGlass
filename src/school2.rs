@@ -1839,6 +1839,104 @@ mod mover_tests {
             (frames, world.dynamic_publications.take().unwrap().len())
         })
     }
+    struct FuzzRng(u64);
+    impl FuzzRng {
+        fn next(&mut self) -> u32 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (self.0 >> 33) as u32 }
+        fn f(&mut self, low: f32, high: f32) -> f32 { low + (high - low) * ((self.next() % 65536) as f32 / 65536.) }
+    }
+    /// F3: the reach limit has two sides, current and proposed, and both must be beyond before a
+    /// group may take the far step. Random movers and player teleports reach the boundary from
+    /// both sides, including a pose that is out of reach while the next one touches the player.
+    fn fuzz_scene(r: &mut FuzzRng) -> Vec<Object> {
+        let n = 3 + r.next() as usize % 8;
+        let mut objects = Vec::new();
+        for i in 0..n {
+            let origin = vec3(r.f(-500., 500.), r.f(-500., 500.), r.f(-40., 120.));
+            let half = [16., 32., 64., 128., 256.][r.next() as usize % 5];
+            let pendulum = Motion::Pendulum { pivot: origin + vec3(r.f(-20., 20.), r.f(-20., 20.), r.f(50., 300.)), roll: r.next() % 2 == 0, period: r.f(1., 5.) };
+            match r.next() % 8 {
+                0 => { let number = i;
+                    objects.push(object(&format!("gym_pend{number}"), origin, pendulum.clone(), half, true));
+                    objects.push(object(&format!("gym_light{number}"), origin + vec3(r.f(-700., 700.), 0., 40.), pendulum, half / 2., r.next() % 5 != 0)); }
+                1 => { let number = i;
+                    objects.push(object(&format!("gym_light{number}"), origin + vec3(0., 0., 40.), Motion::Still, half / 2., true));
+                    objects.push(object(&format!("gym_pend{number}"), origin, pendulum, half, true)); }
+                2 => objects.push(object(&format!("door{i}"), origin, Motion::Slam { angle: r.f(30., 120.), down: r.f(0.2, 1.), up: r.f(0.5, 2.) }, half, true)),
+                3 => objects.push(object(&format!("open{i}"), origin, Motion::Open { angle: r.f(-90., 90.), duration: r.f(0.5, 4.) }, half, true)),
+                4 => objects.push(object("exit_portal", origin, Motion::Still, half, r.next() % 2 == 0)),
+                5 => objects.push(object(&format!("still{i}"), origin, Motion::Still, half, r.next() % 2 == 0)),
+                _ => { let points: Vec<Vec3> = (0..3 + r.next() % 5).map(|_| origin + vec3(r.f(-200., 200.), r.f(-200., 200.), r.f(-60., 100.))).collect();
+                    objects.push(object(&format!("lift{i}"), origin, Motion::Path { points, period: r.f(2., 15.), spin: r.next() % 3 == 0 }, half, r.next() % 6 != 0)); }
+            }
+        }
+        // One lift always passes through the spawn, so riders and blocks occur.
+        let lift = Motion::Path { points: vec![vec3(0., 0., -30.), vec3(0., 0., 0.), vec3(0., 0., 60.), vec3(10., 0., 90.)], period: 8., spin: false };
+        objects.push(object("lift_main", Vec3::ZERO, lift, 64., true));
+        objects
+    }
+    #[test]
+    fn mover_reuse_fuzz_matches_the_old_loop_through_teleports_and_moving_movers() {
+        let (mut rides, mut blocks, mut far) = (0u64, 0u64, 0u64);
+        for case in 0..300u64 {
+            let mut scripts = Vec::new();
+            for reuse in [false, true] {
+                let mut r = FuzzRng(case.wrapping_mul(0x9e3779b97f4a7c15) ^ 0xd00d);
+                let mut objects = fuzz_scene(&mut r);
+                let frames = crate::sim_maps::with_mover_advance_reuse(reuse, || {
+                    let map = crate::interaction::tests::fixture();
+                    let mut world = World::fixture(&[]);
+                    let mut player = Player::new(vec3(0., 0., 1.));
+                    player.grounded = true;
+                    let fixed = [Collider::fixture(vec3(50., -8., -8.), vec3(66., 8., 8.))];
+                    let mut frames = Vec::new();
+                    for frame in 0..120u32 {
+                        match r.next() % 24 {
+                            // The player jumps onto a top, next to a mover, into one, or just above a far edge.
+                            0 | 1 | 2 => { let i = r.next() as usize % objects.len();
+                                if let Some((min, max)) = objects[i].collider.bounds_for_review() { player.feet = vec3((min.x + max.x) * 0.5 + r.f(-8., 8.), (min.y + max.y) * 0.5 + r.f(-8., 8.), max.z + r.f(-2., 3.)); player.velocity = Vec3::ZERO; player.grounded = true; } }
+                            3 => player.velocity.z = r.f(-5., 30.),
+                            4 => player.velocity.z = 0.,
+                            5 => { player.feet += vec3(r.f(-300., 300.), r.f(-300., 300.), r.f(-20., 20.)); }
+                            // Another controller opens a door, as jumbo_door does.
+                            6 => { let i = r.next() as usize % objects.len(); if objects[i].name.starts_with("still") { objects[i].motion = Motion::Open { angle: r.f(-90., 90.), duration: 3. }; objects[i].time = 0.; } }
+                            // A quest step toggles one.
+                            7 => { let i = r.next() as usize % objects.len(); objects[i].enabled = !objects[i].enabled; }
+                            // A load puts one somewhere else on its clock.
+                            8 => { let i = r.next() as usize % objects.len(); let t = r.f(0., 20.); let map = crate::interaction::tests::fixture();
+                                objects[i].time = t; objects[i].pose = objects[i].sample(t); objects[i].collider = objects[i].shape.collider(&map, objects[i].pose).unwrap(); }
+                            _ => {}
+                        }
+                        let dt = [0.05, 0.065, 1. / 60., 1. / 120., 0.1, 0.25, 0., 0.0167][r.next() as usize % 8];
+                        advance_movers(&mut objects, dt, &map, &mut world, &mut player, &fixed).unwrap();
+                        assert!(objects.iter().all(|o| !o.collider_stale));
+                        world.set_dynamic(fixed.iter().cloned().chain(objects.iter().filter(|o| o.enabled && o.name != "exit_portal").map(|o| o.collider.clone())).collect());
+                        let mut sweeps = Vec::new();
+                        for d in [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
+                            let t = world.body_trace(player.feet, player.feet + d * 48.);
+                            sweeps.push(t.fraction.to_bits()); sweeps.extend(t.normal.to_array().map(f32::to_bits)); sweeps.push(u32::from(t.start_solid));
+                        }
+                        frames.push(Frame {
+                            objects: objects.iter().map(|o| (o.pose.origin.to_array().into_iter().chain(o.pose.rotation.to_array()).map(f32::to_bits).collect(), o.time.to_bits(), o.collider.geometry_bits())).collect(),
+                            feet: player.feet.to_array().map(f32::to_bits), normal: player.ground_normal.to_array().map(f32::to_bits), grounded: player.grounded, sweeps });
+                        let _ = frame;
+                    }
+                    frames
+                });
+                scripts.push(frames);
+            }
+            let on = scripts.pop().unwrap(); let off = scripts.pop().unwrap();
+            for (i, (a, b)) in off.iter().zip(&on).enumerate() {
+                assert_eq!(a, b, "case {case} frame {i}");
+                if i > 0 {
+                    rides += u64::from(a.feet != off[i - 1].feet);
+                    blocks += a.objects.iter().zip(&off[i - 1].objects).filter(|(x, y)| x.1 == y.1).count() as u64;
+                    far += 1;
+                }
+            }
+        }
+        println!("MOVER fuzz: frames {far} frames with the feet moved {rides} objects whose clock held {blocks}");
+        assert!(rides > 500);
+    }
     #[test]
     fn reach_covers_the_collider_at_any_rotation() {
         let shape = plate(64.);
