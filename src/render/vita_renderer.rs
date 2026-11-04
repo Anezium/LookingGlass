@@ -10,6 +10,7 @@ mod pvs_cache;
 mod state_cache;
 mod submit;
 mod world_list;
+mod gxm;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -135,6 +136,9 @@ pub struct Config {
     /// All world groups in a few shared buffers, not one VBO and IBO per group. Draw order and
     /// vertex bytes stay. Default off.
     pub world_shared_buffers: bool,
+    /// Opaque world draws straight to sceGxm: off, shadow, live, or a proof mode. Requires
+    /// world_list_submit. Only the Vita build acts on it; a host treats it as off. Default off.
+    pub world_gxm: String,
     /// Attached emitters that declare `sphere` send each particle along its own random direction,
     /// as the original client does, instead of along the tag's X axis. Changes pixels. Default off.
     pub fx_attached_sphere: bool,
@@ -344,6 +348,7 @@ impl Default for Config {
             world_pass_clock: false,
             world_list_submit: false,
             world_shared_buffers: false,
+            world_gxm: "off".into(),
             gpu_timing: "off".into(), gpu_mask: Vec::new(), rt_scenes: None, param_buffer_mib: None, display_clear_skip: false,
             fx_attached_sphere: false, fx_bubble_true_size: false,
             light_gl_observers: false,
@@ -660,6 +665,8 @@ fn mask_in_mode(requested: bool, mode: crate::frame_profile::Mode) -> bool {
     requested && mode == crate::frame_profile::Mode::RenderBench
 }
 /// Diagnostic world-only probe. Full-frame actor/HUD alignment remains full-size.
+/// The one line `world_gxm` prints after the survey window, if it is on.
+pub(crate) fn world_gxm_summary(map: &str) -> Option<String> { gxm::summary_line(map) }
 pub(crate) fn world_viewport() -> Option<(i32,i32,i32,i32)> {
     if !world_only() || config().world_viewport_scale==1. { return None; }
     Some((0,0,(screen_width()*config().render_scale*config().world_viewport_scale).round() as i32,
@@ -993,6 +1000,7 @@ pub struct Renderer {
     models: Vec<Option<Mat4>>,
     schedule: submit::Schedule,
     list: Option<world_list::WorldList>,
+    gxm: Box<gxm::State>,
 }
 fn blend_class(blend: Blend) -> usize {
     match blend {
@@ -1458,6 +1466,7 @@ impl Renderer {
         let list = c.world_list_submit.then(|| world_list::WorldList::new(&groups, &pipelines, &low_pipelines, parameter_count));
         Ok(Self {
             list,
+            gxm: gxm::State::published(gxm::Mode::parse(&c.world_gxm).unwrap_or(gxm::Mode::Off), groups.len(), &shader::meta()),
             _game_thread: crate::game_thread::GameThread::new(),
             parameters, parameter_key: None, parameter_generation: 0,
             field_uniforms: std::array::from_fn(|_| super::uniform_fields::Cache::new(shader::meta())),
@@ -1748,6 +1757,8 @@ impl Renderer {
             .saturating_sub(self.alpha_order.len()),
             ..Default::default()
         };
+        #[cfg(target_os = "vita")]
+        if list_submit && self.gxm.proof_due() { self.proof_frame(scene, time); }
         if !alpha && config().sky {
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
             let mut totals = crate::frame_profile::Totals::<3>::profile_only();
@@ -1800,83 +1811,13 @@ impl Renderer {
         let (mut between_ns, mut between_calls, mut previous_end) = (0u64, 0u32, None::<std::time::Instant>);
         let _pass_submit = (!alpha).then(|| crate::pass_clock::scope(crate::pass_clock::WORLD_SUBMIT));
         if list_submit {
-            let list = self.list.as_ref().unwrap();
-            // One lookup a pass. Nothing below changes what the context points at.
-            let gl = unsafe { get_internal_gl() };
-            let ctx = gl.quad_context;
-            let mut planner = world_list::Planner::new();
-            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            let mut drawn = 0u64;
-            for item in &list.items {
-                let draw = &list.draws[item.group as usize];
-                let low = draw.low;
-                let binding = (draw.vertex, draw.index, item.texture, draw.atlas);
-                let mut plan = planner.observe(draw.pipeline, low, binding, item.uniforms);
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                { if world_list::negative("world-list-stale-uniform") && drawn % 7 == 3 { plan.uniforms = false; } drawn += 1; }
-                let _ = &mut plan;
-                let mut start = totals.start();
-                if let (Some(previous), Some(now)) = (previous_end, start) {
-                    between_ns += now.duration_since(previous).as_nanos() as u64; between_calls += 1;
-                }
-                if plan.pipeline { ctx.apply_pipeline(&draw.pipeline); applications[0] += 1; }
-                if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(1);} applications[1] += 1; }
-                if plan.pipeline { scale::log_depth(true); }
-                if low { low_draws += 1; }
-                if plan.bindings {
-                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                    let texture = if world_list::negative("world-list-wrong-texture") && drawn % 11 == 5 { draw.atlas } else { item.texture };
-                    #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
-                    let texture = item.texture;
-                    ctx.apply_bindings_from_slice(&[draw.vertex], draw.index, &[texture, draw.atlas]);
-                    applications[2] += 1;
-                }
-                totals.lap(0, &mut start);
-                if plan.uniforms {
-                    let values = self.parameters[draw.parameter as usize].uniforms.values();
-                    let traffic = self.field_uniforms[usize::from(low)].apply(ctx, values, true);
-                    applications[3] += 1;
-                    uniform_traffic[0] += u64::from(traffic.calls > 0);
-                    uniform_traffic[1] += traffic.bytes;
-                    uniform_traffic[2] += traffic.calls;
-                }
-                totals.lap(1, &mut start);
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                {
-                    let g = &self.groups[item.group as usize];
-                    if g.recipe.stage.blend != Blend::Opaque { crate::sim_maps::probe::world_order(item.group as usize, false); }
-                    crate::sim_maps::probe::draw_query::mark("world_opaque", if low {"world_low"} else {"world_full"},
-                        g.recipe.blend, Some(item.group as usize), g.recipe.stage.alpha_test,
-                        g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
-                }
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                let base_element = draw.base_element + i32::from(world_list::negative("world-pack-wrong-base") && drawn % 17 == 9) * 3;
-                #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
-                let base_element = draw.base_element;
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                crate::sim_maps::probe::world_packet(item.group as usize, base_element, draw.indices, &item.texture,
-                    self.parameters[draw.parameter as usize].uniforms.bits_ref(), low, draw.pipeline_class);
-                let class = if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                let dropped = world_list::negative("world-list-drop-draw") && drawn % 13 == 6;
-                #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
-                let dropped = false;
-                if !dropped && !crate::gpu_timing::masked(class) { ctx.draw(base_element, draw.indices, 1); }
-                totals.lap(2, &mut start);
-                previous_end = start;
-                if previous_pipeline != Some(draw.pipeline_class as usize) {
-                    pipeline_changes += 1;
-                    previous_pipeline = Some(draw.pipeline_class as usize);
-                }
-                if previous_texture != Some(item.texture) {
-                    texture_changes += 1;
-                    previous_texture = Some(item.texture);
-                }
-                stats.batches += 1;
-                stats.triangles += draw.indices as usize / 3;
-                #[cfg(target_os = "vita")]
-                { static_batches += usize::from(draw.static_group); }
-            }
+            let mut counts = world_list::Counts::default();
+            self.submit_list(time, gxm::Pass::Frame, &mut totals, &mut counts, &mut previous_end, &mut between_ns, &mut between_calls);
+            low_draws = counts.low_draws; pipeline_changes = counts.pipeline_changes; texture_changes = counts.texture_changes;
+            applications = counts.applications; uniform_traffic = counts.uniform_traffic;
+            stats.batches += counts.batches; stats.triangles += counts.triangles;
+            #[cfg(target_os = "vita")]
+            { static_batches = counts.static_batches; }
         } else {
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
@@ -2026,6 +1967,159 @@ impl Renderer {
         // No flush_depth_begin/end: draws have already reached miniquad/vitaGL.
         stats
     }
+    /// The opaque pass from dense records. `pass` says how: as the frame's own pass, per the key, or
+    /// as one trial of a proof frame.
+    fn submit_list(&mut self, time: f32, pass: gxm::Pass, totals: &mut crate::frame_profile::Totals<3>, c: &mut world_list::Counts,
+                   previous_end: &mut Option<std::time::Instant>, between_ns: &mut u64, between_calls: &mut u32) {
+        let Self { list, parameters, field_uniforms, groups, gxm: state, .. } = self;
+        let list = list.as_ref().unwrap();
+        let _ = &groups;
+        // One lookup a pass. Nothing below changes what the context points at.
+        let gl = unsafe { get_internal_gl() };
+        let ctx = gl.quad_context;
+        let mut planner = world_list::Planner::new();
+        let (mut previous_pipeline, mut previous_texture) = (None, None);
+        let way = state.way(pass);
+        let mut drawn = 0u64;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let mut last_written = [None::<usize>; 2];
+        #[cfg(target_os = "vita")]
+        let mut real = gxm::vita::Real::new();
+        for item in &list.items {
+            let draw = &list.draws[item.group as usize];
+            let low = draw.low;
+            let binding = (draw.vertex, draw.index, item.texture, draw.atlas);
+            let mut plan = planner.observe(draw.pipeline, low, binding, item.uniforms);
+            // The whole point of a class: a skipped write must be a write of equal bits.
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            {
+                let storage = &mut last_written[usize::from(low)];
+                if plan.uniforms { *storage = Some(draw.parameter as usize); }
+                else { assert_eq!(parameters[storage.expect("a skip before any write")].bits, parameters[draw.parameter as usize].bits, "a uniform class skipped a different payload"); }
+            }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if world_list::negative("world-list-stale-uniform") && drawn % 7 == 3 { plan.uniforms = false; }
+            drawn += 1;
+            let mut start = totals.start();
+            if let (Some(previous), Some(now)) = (*previous_end, start) {
+                *between_ns += now.duration_since(previous).as_nanos() as u64; *between_calls += 1;
+            }
+            let bits = &parameters[draw.parameter as usize].bits;
+            let class = if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
+            #[cfg(target_os = "vita")]
+            let direct = way == gxm::Way::Direct && !plan.pipeline && !draw.animated && !crate::gpu_timing::masked(class)
+                && state.direct_draw(&mut real, item.group as usize, draw.indices as u32, item.uniforms, low, bits, pass, drawn - 1);
+            #[cfg(not(target_os = "vita"))]
+            let direct = false;
+            if !direct {
+                // vitaGL holds what it last wrote, not what a direct draw left. Take every step through it.
+                #[cfg(target_os = "vita")]
+                if way == gxm::Way::Direct {
+                    gxm::vita::uniforms_are_stale();
+                    plan.bindings = true;
+                    plan.uniforms = true;
+                }
+                if plan.pipeline { ctx.apply_pipeline(&draw.pipeline); c.applications[0] += 1; }
+                if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(1);} c.applications[1] += 1; }
+                if plan.pipeline { scale::log_depth(true); }
+                if plan.bindings {
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    let texture = if world_list::negative("world-list-wrong-texture") && drawn % 11 == 5 { draw.atlas } else { item.texture };
+                    #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+                    let texture = item.texture;
+                    ctx.apply_bindings_from_slice(&[draw.vertex], draw.index, &[texture, draw.atlas]);
+                    c.applications[2] += 1;
+                }
+            }
+            if low { c.low_draws += 1; }
+            totals.lap(0, &mut start);
+            if !direct && plan.uniforms {
+                let values = parameters[draw.parameter as usize].uniforms.values();
+                let traffic = field_uniforms[usize::from(low)].apply(ctx, values, true);
+                c.applications[3] += 1;
+                c.uniform_traffic[0] += u64::from(traffic.calls > 0);
+                c.uniform_traffic[1] += traffic.bytes;
+                c.uniform_traffic[2] += traffic.calls;
+            }
+            totals.lap(1, &mut start);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            {
+                let g = &groups[item.group as usize];
+                if g.recipe.stage.blend != Blend::Opaque { crate::sim_maps::probe::world_order(item.group as usize, false); }
+                crate::sim_maps::probe::draw_query::mark("world_opaque", if low {"world_low"} else {"world_full"},
+                    g.recipe.blend, Some(item.group as usize), g.recipe.stage.alpha_test,
+                    g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
+            }
+            let _ = (time, bits);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let base_element = draw.base_element + i32::from(world_list::negative("world-pack-wrong-base") && drawn % 17 == 9) * 3;
+            #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+            let base_element = draw.base_element;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::world_packet(item.group as usize, base_element, draw.indices, &item.texture,
+                parameters[draw.parameter as usize].uniforms.bits_ref(), low, draw.pipeline_class);
+            if !direct {
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                let dropped = world_list::negative("world-list-drop-draw") && drawn % 13 == 6;
+                #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+                let dropped = false;
+                #[cfg(target_os = "vita")]
+                if way != gxm::Way::Vitagl { gxm::vita::arm(); }
+                if !dropped && !crate::gpu_timing::masked(class) { ctx.draw(base_element, draw.indices, 1); }
+                #[cfg(target_os = "vita")]
+                if way != gxm::Way::Vitagl {
+                    let capture = gxm::vita::take();
+                    state.after_vitagl(&capture, item.group as usize, draw.animated, draw.pipeline_class, low, draw.indices as u32, item.uniforms, bits, way);
+                }
+            }
+            totals.lap(2, &mut start);
+            *previous_end = start;
+            if previous_pipeline != Some(draw.pipeline_class) {
+                c.pipeline_changes += 1;
+                previous_pipeline = Some(draw.pipeline_class);
+            }
+            if previous_texture != Some(item.texture) {
+                c.texture_changes += 1;
+                previous_texture = Some(item.texture);
+            }
+            c.batches += 1;
+            c.triangles += draw.indices as usize / 3;
+            #[cfg(target_os = "vita")]
+            { c.static_batches += usize::from(draw.static_group); }
+        }
+        // The next vitaGL draw follows a pipeline apply, which marks uniforms dirty. This makes it
+        // not depend on that.
+        #[cfg(target_os = "vita")]
+        if way == gxm::Way::Direct { gxm::vita::uniforms_are_stale(); }
+    }
+    /// Same frame, same uniforms, twice into the target: vitaGL, then the direct path, then bytes
+    /// compared. Animation cannot differ, so any difference is the path's. The frame then starts
+    /// over on a clear of its own. Diagnostic arms only.
+    #[cfg(target_os = "vita")]
+    fn proof_frame(&mut self, scene: &Scene, time: f32) {
+        let bg = scene.atmosphere.background();
+        let (x, y, w, h) = scale::target_rect();
+        let clear = || PassAction::Clear { color: Some((bg.r, bg.g, bg.b, 1.)), depth: Some(1.), stencil: None };
+        let mut totals = crate::frame_profile::Totals::<3>::profile_only();
+        let (mut end, mut ns, mut calls) = (None, 0, 0);
+        let read = |target: &mut Vec<u8>| unsafe {
+            extern "C" { fn glReadPixels(x: i32, y: i32, w: i32, h: i32, format: u32, kind: u32, data: *mut std::ffi::c_void); }
+            target.resize((w * h * 4) as usize, 0);
+            glReadPixels(x, y, w, h, 0x1908, 0x1401, target.as_mut_ptr().cast());
+        };
+        let (mut a, mut b) = self.gxm.take_proof_buffers();
+        for (pass, target) in [(gxm::Pass::ProofVitagl, &mut a), (gxm::Pass::ProofSecond, &mut b)] {
+            begin_3d_pass(clear());
+            apply_world_viewport();
+            let mut counts = world_list::Counts::default();
+            self.submit_list(time, pass, &mut totals, &mut counts, &mut end, &mut ns, &mut calls);
+            read(target);
+        }
+        self.gxm.proof_result(&a, &b);
+        self.gxm.give_proof_buffers(a, b);
+        begin_3d_pass(clear());
+        apply_world_viewport();
+    }
     pub(super) fn begin_fx(&mut self) {
         self.prepared.clear();
     }
@@ -2107,6 +2201,9 @@ impl Renderer {
 }
 impl Drop for Renderer {
     fn drop(&mut self) {
+        #[cfg(target_os = "vita")]
+        if self.gxm.direct_used() { gxm::vita::wait_for_gpu(); }
+        gxm::withdraw(&mut self.gxm);
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
         for &(vertex,index) in &self.world_buffers {
@@ -2754,6 +2851,20 @@ mod tests {
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key: bad})).is_err(), "{key}");
             }
         }
+    }
+    #[test]
+    fn world_gxm_defaults_off_requires_the_list_and_names_its_modes() {
+        assert_eq!(Config::default().world_gxm, "off");
+        assert!(config_log_lines(&Config::default())[0].contains("\"world_gxm\":\"off\""));
+        for mode in ["shadow", "live", "proof", "proof_control", "proof_sabotage"] {
+            let without: Config = serde_json::from_value(serde_json::json!({"world_gxm": mode})).unwrap();
+            assert!(without.validate().is_err(), "{mode}");
+            let with: Config = serde_json::from_value(serde_json::json!({"world_gxm": mode, "world_list_submit": true})).unwrap();
+            with.validate().unwrap();
+        }
+        let bad: Config = serde_json::from_value(serde_json::json!({"world_gxm": "on", "world_list_submit": true})).unwrap();
+        assert!(bad.validate().is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"world_gxm": true})).is_err());
     }
     #[test]
     fn world_list_submit_rejects_each_setting_it_cannot_honour() {

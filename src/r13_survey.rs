@@ -71,6 +71,8 @@ impl Survey {
         if self.config.census {crate::phase_census::export_survey(map)?;}
         crate::gpu_timing::export(map)?;
         if let Some(line)=crate::pass_clock::summary(map) {println!("{line}");}
+        #[cfg(feature="vita_renderer")]
+        if let Some(line)=crate::render::vita_renderer::world_gxm_summary(map) {println!("{line}");}
         if self.config.tls_count {println!("{}",self.tls_line(map));}
         if self.config.tls_count {println!("{}",crate::tls_count::sites_line(map));}
         println!("[lg/r13b-survey] done map={map} samples={} warmup_frames=60 measured_frames={} died={}",self.rows.len(),self.rows.len()-60,!alive);

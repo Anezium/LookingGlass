@@ -45,6 +45,13 @@ impl ListDraw {
         }
     }
 }
+/// What a list pass did, for the counters the state-cached loop publishes.
+#[derive(Default)]
+pub(super) struct Counts {
+    pub low_draws: u64, pub pipeline_changes: u64, pub texture_changes: u64,
+    pub applications: [u64; 4], pub uniform_traffic: [u64; 3],
+    pub batches: usize, pub triangles: usize, pub static_batches: usize,
+}
 /// One visible draw of this pass, in submission order.
 #[derive(Clone, Copy)]
 pub(super) struct Item { pub group: u32, pub texture: TextureId, pub uniforms: u32 }

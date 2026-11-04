@@ -137,6 +137,11 @@ pub(super) fn prepare(bg: Color) {
         get_internal_gl().quad_context.end_render_pass();
     }
 }
+/// The 3D target's rectangle: what the world pass draws into, for a readback.
+#[cfg(target_os = "vita")]
+pub(super) fn target_rect() -> (i32, i32, i32, i32) {
+    TARGET.with(|t| t.borrow().as_ref().map_or((0, 0, screen_width() as i32, screen_height() as i32), |t| (0, 0, t.width as i32, t.height as i32)))
+}
 pub(super) fn begin(action: PassAction) {
     unsafe {
         if matches!(action, PassAction::Clear { depth: Some(_), .. }) {
