@@ -82,6 +82,86 @@ mod draw_query_hook {
     pub(super) fn begin() {}
     pub(super) fn end() {}
 }
+/// Host oracle only: every GL call that shapes a frame, into one hash per frame. Name, integer
+/// arguments, and the bytes a call reads from client memory, because those pointers are not
+/// comparable between two runs. Offsets passed as pointers are compared as integers.
+#[cfg(all(target_os="macos", not(target_os="vita"), feature="sim_maps_probe"))]
+mod gl_trace {
+    use std::{ffi::{c_char, c_void}, sync::OnceLock};
+    use crate::sim_maps::probe::gl_call;
+    fn raw(name: &str) -> *mut c_void {
+        extern "C" { fn dlopen(path: *const c_char, flags: i32) -> *mut c_void;
+                     fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void; }
+        static LIB: OnceLock<usize> = OnceLock::new();
+        let handle = *LIB.get_or_init(|| {
+            let path = c"/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL";
+            unsafe { dlopen(path.as_ptr(), 1) as usize }
+        });
+        assert_ne!(handle, 0, "OpenGL library unavailable");
+        let name = std::ffi::CString::new(name).expect("GL name");
+        unsafe { dlsym(handle as _, name.as_ptr()) }
+    }
+    unsafe fn floats<'a>(p: *const f32, n: i32, width: usize) -> &'a [u8] {
+        std::slice::from_raw_parts(p.cast(), n.max(0) as usize * width * 4)
+    }
+    macro_rules! wrappers {
+        ($($name:ident($($arg:ident: $ty:ty),*) [$($value:expr),*] [$data:expr]);* $(;)?) => {
+            $(#[allow(non_snake_case)] unsafe extern "C" fn $name($($arg: $ty),*) {
+                let data: &[u8] = $data;
+                gl_call(stringify!($name), &[$($value as u64),*], data);
+                static REAL: OnceLock<usize> = OnceLock::new();
+                let real = *REAL.get_or_init(|| raw(stringify!($name)) as usize);
+                let real: unsafe extern "C" fn($($ty),*) = std::mem::transmute(real);
+                real($($arg),*);
+            })*
+            fn wrapped(name: &str) -> Option<*mut c_void> {
+                match name { $(stringify!($name) => Some($name as *const () as *mut c_void),)* _ => None }
+            }
+            #[cfg(test)] pub(super) const NAMES: &[&str] = &[$(stringify!($name)),*];
+        };
+    }
+    wrappers! {
+        glUseProgram(p: u32) [p] [&[]];
+        glActiveTexture(t: u32) [t] [&[]];
+        glBindTexture(t: u32, p: u32) [t, p] [&[]];
+        glBindBuffer(t: u32, b: u32) [t, b] [&[]];
+        glBindFramebuffer(t: u32, b: u32) [t, b] [&[]];
+        glDepthMask(v: u8) [v] [&[]];
+        glDepthFunc(v: u32) [v] [&[]];
+        glCullFace(v: u32) [v] [&[]];
+        glFrontFace(v: u32) [v] [&[]];
+        glEnable(v: u32) [v] [&[]];
+        glDisable(v: u32) [v] [&[]];
+        glColorMask(a: u8, b: u8, c: u8, d: u8) [a, b, c, d] [&[]];
+        glBlendFuncSeparate(a: u32, b: u32, c: u32, d: u32) [a, b, c, d] [&[]];
+        glBlendEquationSeparate(a: u32, b: u32) [a, b] [&[]];
+        glViewport(x: i32, y: i32, w: i32, h: i32) [x, y, w, h] [&[]];
+        glScissor(x: i32, y: i32, w: i32, h: i32) [x, y, w, h] [&[]];
+        glClear(b: u32) [b] [&[]];
+        glUniform1i(l: i32, v: i32) [l, v] [&[]];
+        glUniform1fv(l: i32, n: i32, p: *const f32) [l, n] [floats(p, n, 1)];
+        glUniform2fv(l: i32, n: i32, p: *const f32) [l, n] [floats(p, n, 2)];
+        glUniform3fv(l: i32, n: i32, p: *const f32) [l, n] [floats(p, n, 3)];
+        glUniform4fv(l: i32, n: i32, p: *const f32) [l, n] [floats(p, n, 4)];
+        glUniformMatrix4fv(l: i32, n: i32, t: u8, p: *const f32) [l, n, t] [floats(p, n, 16)];
+        glBufferData(t: u32, n: isize, p: *const c_void, u: u32) [t, n, u] [if p.is_null() { &[] } else { std::slice::from_raw_parts(p.cast(), n as usize) }];
+        glBufferSubData(t: u32, o: isize, n: isize, p: *const c_void) [t, o, n] [std::slice::from_raw_parts(p.cast(), n as usize)];
+        glVertexAttribPointer(i: u32, n: i32, t: u32, z: u8, s: i32, p: *const c_void) [i, n, t, z, s, p] [&[]];
+        glEnableVertexAttribArray(i: u32) [i] [&[]];
+        glDisableVertexAttribArray(i: u32) [i] [&[]];
+        glVertexAttribDivisor(i: u32, d: u32) [i, d] [&[]];
+        glDrawElementsInstanced(t: u32, n: i32, k: u32, p: *const c_void, i: i32) [t, n, k, p, i] [&[]];
+    }
+    pub(super) fn install() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            macroquad::miniquad::gl::load_gl_funcs(|name| {
+                let pointer = wrapped(name).unwrap_or_else(|| raw(name));
+                (!pointer.is_null()).then(|| std::mem::transmute(pointer))
+            });
+        });
+    }
+}
 /// Framework batches have no submission site; the first one after `present`
 /// is the upscale, every later one is HUD.
 mod deferred {
@@ -108,6 +188,11 @@ pub(crate) fn unregister(program: u32) {
 pub(crate) fn install() {
     #[cfg(all(target_os="macos", not(target_os="vita"), feature="sim_maps_probe"))]
     if crate::sim_maps::probe::draw_query::table_active() { draw_query_hook::install(); }
+    #[cfg(all(target_os="macos", not(target_os="vita"), feature="sim_maps_probe"))]
+    if crate::sim_maps::probe::gl_trace_enabled() {
+        assert!(!crate::sim_maps::probe::draw_query::table_active(), "the GL trace and the draw census both own the GL table");
+        gl_trace::install();
+    }
 }
 pub(crate) fn configure() {}
 // This is the actual resolver called by the native vglGetProcAddress wrapper.

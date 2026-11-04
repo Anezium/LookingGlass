@@ -58,6 +58,8 @@ REMOVED_WORK = {
         'vita_fx_unchanged_merged_groups', 'fx_merge_range_vertices_kept',
     },
     'joint_center_cache': set(),
+    # Nothing counted moves: same GL calls, same applications. Only time goes away.
+    'world_list_submit': set(),
     'mover_advance_reuse': {'mover_publications', 'mover_far_steps', 'collider_model_calls', 'collider_local_builds', 'dynamic_bucket_builds',
                             # Under --mover-replay the on arm rebuilds what it skipped, to check it. Without it, fewer.
                             'brush_hulls_built'},
@@ -97,6 +99,10 @@ def environment(ctx, name, negative):
         env.update(LOOKING_GLASS_SKIN_MOVING_VIEW='1', LOOKING_GLASS_SKIN_DEATHS='1')
     if negative:
         env['LOOKING_GLASS_GATHER_NEGATIVE'] = negative
+    if ctx.get('gl_trace'):
+        env['LOOKING_GLASS_GL_TRACE'] = '1'
+    if ctx.get('world_packets'):
+        env['LOOKING_GLASS_WORLD_PACKETS'] = '1'
     if ctx['replay']:
         env['LOOKING_GLASS_MOVER_REPLAY'] = '1'
     if ctx['ride']:
@@ -241,12 +247,15 @@ def main():
     p.add_argument('--mover-replay', action='store_true', help='record mover transforms, collider bits and collision answers per frame')
     p.add_argument('--ride', action='store_true', help='with --mover-replay, also stand the player on a mover every 24 frames')
     p.add_argument('--dt', help='override the fixed simulation step')
+    p.add_argument('--gl-trace', action='store_true', help='compare a per-frame hash of every observed GL call, name, arguments and bytes read')
+    p.add_argument('--world-packets', action='store_true', help='compare a per-frame hash of each world draw: group, resolved geometry, texture, uniforms, program')
     a = p.parse_args()
     for k in a.lever:
         assert k in REMOVED_WORK, k
     a.output.mkdir(parents=True, exist_ok=True)
     ctx = dict(output=a.output.resolve(), binary=a.binary.resolve(), config=json.loads(a.config.read_text()), levers=a.lever,
-               frames=a.frames, still=a.still, sim=a.sim and a.sim.resolve(), keep=a.keep_logs, replay=a.mover_replay, ride=a.ride, dt=a.dt)
+               frames=a.frames, still=a.still, sim=a.sim and a.sim.resolve(), keep=a.keep_logs, replay=a.mover_replay, ride=a.ride, dt=a.dt,
+               gl_trace=a.gl_trace, world_packets=a.world_packets)
     rows = []
     for negative in a.negative:
         row = run_case(ctx, a.maps[0], negative)
@@ -263,7 +272,7 @@ def main():
             print(json.dumps({k: v for k, v in row.items() if k != 'launches'}), flush=True)
     bindings = dict(binary=str(ctx['binary']), binary_sha256=sha_file(ctx['binary']), config_sha256=sha_file(a.config),
                     sim_sha256=a.sim and sha_file(a.sim), comparator_sha256=sha_file(Path(__file__).resolve()),
-                    levers=a.lever, frames=a.frames, still=a.still)
+                    levers=a.lever, frames=a.frames, still=a.still, gl_trace=a.gl_trace, world_packets=a.world_packets)
     tag = ('negative-' if a.negative else '') + '-'.join(a.lever)
     (a.output / f'HOST-FLAG-{tag}.json').write_text(json.dumps(dict(bindings=bindings, rows=rows), indent=1) + '\n')
     bad = [r for r in rows if r['status'] in ('FAIL', 'NOT_DETECTED')]

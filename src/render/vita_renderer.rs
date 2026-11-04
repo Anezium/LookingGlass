@@ -9,6 +9,7 @@ mod depth_sentinel;
 mod pvs_cache;
 mod state_cache;
 mod submit;
+mod world_list;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -127,6 +128,10 @@ pub struct Config {
     /// School two publishes the other movers' colliders only when a rider's body trace will read
     /// them, and builds a mover's collider only when something can read it. Default off.
     pub mover_advance_reuse: bool,
+    /// Two clock reads per world pass inside the survey window, one printed line after it. Diagnostic.
+    pub world_pass_clock: bool,
+    /// Opaque world pass from dense records. Same GL calls in the same order. Default off.
+    pub world_list_submit: bool,
     /// Attached emitters that declare `sphere` send each particle along its own random direction,
     /// as the original client does, instead of along the tag's X axis. Changes pixels. Default off.
     pub fx_attached_sphere: bool,
@@ -333,6 +338,8 @@ impl Default for Config {
             fx_observe_move: true,
             fx_attached_persist: false,
             mover_advance_reuse: false,
+            world_pass_clock: false,
+            world_list_submit: false,
             gpu_timing: "off".into(), gpu_mask: Vec::new(), rt_scenes: None, param_buffer_mib: None, display_clear_skip: false,
             fx_attached_sphere: false, fx_bubble_true_size: false,
             light_gl_observers: false,
@@ -470,6 +477,8 @@ impl Config {
         ensure!(self.render_scale==1. || self.msaa_samples==1,"scaled target requires msaa_samples=1");
         ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
         ensure!(matches!(self.opaque_order.as_str(),"material"|"front_to_back"),"invalid opaque_order");
+        ensure!(!self.world_list_submit || (self.world_state_cache && self.world_view_reuse && self.world_parameter_reuse && self.uniform_field_cache && !self.world_static_merge && !self.world_binding_cache && !self.world_gl_state_cache),
+            "world_list_submit requires world_state_cache, world_view_reuse, world_parameter_reuse and uniform_field_cache, and excludes world_static_merge, world_binding_cache and world_gl_state_cache");
         ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
         for name in &self.gpu_mask { ensure!(crate::gpu_timing::mask_bit(name).is_some(),"unknown gpu_mask class {name}"); }
         if let Some(scenes)=self.rt_scenes { ensure!(scenes.iter().all(|&n|(1..=8).contains(&n)),"rt_scenes must be 1 to 8"); }
@@ -929,6 +938,11 @@ struct Parameter {
     time: u32,
     time_uv: bool,
     time_gain: bool,
+    /// The `world_list_submit` pass that last checked this parameter.
+    list_serial: u32,
+    /// Its payload's class in `world_list::Classes`, valid in `class_epoch`.
+    class: u32,
+    class_epoch: u32,
 }
 impl Parameter {
     fn update_time(&mut self, time: f32) {
@@ -975,6 +989,7 @@ pub struct Renderer {
     visibility: Vec<(u64, Option<(f32, Mat4)>)>,
     models: Vec<Option<Mat4>>,
     schedule: submit::Schedule,
+    list: Option<world_list::WorldList>,
 }
 fn blend_class(blend: Blend) -> usize {
     match blend {
@@ -1255,6 +1270,18 @@ impl Renderer {
             Some(low)
         }else{None};
         resources.pipelines.extend(low_pipelines.iter().copied());
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::sim_maps::probe::world_packets_active() {
+            use sha2::{Digest, Sha256};
+            crate::sim_maps::probe::world_geometry(pending.iter().map(|p| {
+                let mut h = Sha256::new();
+                for &index in &p.geometry.indices {
+                    let v = &p.geometry.vertices[index as usize];
+                    h.update(unsafe { std::slice::from_raw_parts((v as *const WorldVertex).cast::<u8>(), std::mem::size_of::<WorldVertex>()) });
+                }
+                format!("{:x}", h.finalize())
+            }).collect());
+        }
         let mut packed: Vec<(Option<(usize,usize)>, Vec<WorldVertex>, Vec<u16>)> = Vec::new();
         let mut allocations = Vec::with_capacity(pending.len());
         for p in &mut pending {
@@ -1417,16 +1444,19 @@ impl Renderer {
         for g in &mut groups {
             g.faces = Vec::new();
         }
+        let parameter_count = parameter_recipes.len();
         let parameters = parameter_recipes.into_iter().map(|recipe| {
             let u = uniforms(&recipe, 0., Vec3::ZERO, Mat4::IDENTITY, Mat4::IDENTITY, false, scene.atlas_grid);
             let time_uv = recipe.stage.mods.iter().any(|m| matches!(m,
                 TcMod::Scroll(_) | TcMod::Rotate(_) | TcMod::Stretch(_) | TcMod::Turb(_)));
             let time_gain = recipe.stage.rgb.is_some() || recipe.stage.alpha.is_some();
             Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0, model: [0;16],
-                time: 0_f32.to_bits(), time_uv, time_gain }
+                time: 0_f32.to_bits(), time_uv, time_gain, list_serial: 0, class: 0, class_epoch: 0 }
         }).collect();
         resources.committed = true;
+        let list = c.world_list_submit.then(|| world_list::WorldList::new(&groups, &pipelines, &low_pipelines, parameter_count));
         Ok(Self {
+            list,
             _game_thread: crate::game_thread::GameThread::new(),
             parameters, parameter_key: None, parameter_generation: 0,
             field_uniforms: std::array::from_fn(|_| super::uniform_fields::Cache::new(shader::meta())),
@@ -1462,6 +1492,7 @@ impl Renderer {
         let _owner = crate::render_tail::owner(phase);
         let _timer = crate::light_profile::render_timer(phase);
         let _span = crate::frame_profile::span("vita_world_total");
+        let _pass_clock = crate::pass_clock::scope(if alpha { crate::pass_clock::ALPHA_PREPARE } else { crate::pass_clock::WORLD_OPAQUE });
         count("vita_world_geometry_upload_bytes", 0);
         count("vita_world_retransformed_vertices", 0);
         count("vita_world_rebuilt_indices", 0);
@@ -1486,11 +1517,43 @@ impl Renderer {
             self.visibility_generation = self.visibility_generation.wrapping_add(1);
             if self.visibility_generation == 0 {
                 self.visibility.fill((0, None));
+                if let Some(list) = &mut self.list { list.forget_visibility(); }
                 self.visibility_generation = 1;
             }
         }
         let mut tests = 0u64;
         let mut hits = 0u64;
+        let list_submit = !alpha && self.list.is_some();
+        if list_submit {
+            let list = self.list.as_mut().unwrap();
+            let generation = self.visibility_generation;
+            for &id in ids {
+                let entry = &mut list.visible[id];
+                // Valid models were written by the test that set this generation.
+                if entry.static_group && entry.generation == generation {
+                    hits += 1;
+                    if entry.visible { self.alpha_order.push((entry.depth, id)); }
+                    continue;
+                }
+                let g = &self.groups[id];
+                let result = model_matrix(&g.recipe, time, transforms).and_then(|model| {
+                    tests += 1;
+                    in_frustum(projection * model, g.min, g.max).then(|| {
+                        let depth = if crate::render_fx::retained_active() {
+                            crate::render_fx::group_depth(model.transform_point3(g.center))
+                        } else { (model.transform_point3(g.center) - eye).length_squared() };
+                        (depth, model)
+                    })
+                });
+                if entry.static_group {
+                    entry.generation = generation;
+                    entry.visible = result.is_some();
+                    entry.depth = result.map_or(0., |r| r.0);
+                }
+                self.models[id] = result.map(|(_, model)| model);
+                if let Some((depth, _)) = result { self.alpha_order.push((depth, id)); }
+            }
+        } else {
         for &id in ids {
             let g = &self.groups[id];
             let static_group = g.recipe.model.is_none() && g.recipe.motion.is_none();
@@ -1513,13 +1576,17 @@ impl Renderer {
             self.models[id] = result.map(|(_, model)| model);
             if let Some((depth, _)) = result { self.alpha_order.push((depth, id)); }
         }
+        }
         crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: tests,
             visibility_cpu_ns: visibility_started.elapsed().as_nanos() as u64, ..Default::default() });
         count("vita_world_visibility_cache_hits", hits);
         drop(visibility_span);
         drop(census_visibility);
         if alpha && !config().world_alpha {self.alpha_order.clear();}
-        if !alpha && config().opaque_order=="front_to_back" {self.alpha_order.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||a.1.cmp(&b.1)));}
+        if !alpha && config().opaque_order=="front_to_back" {
+            if list_submit { self.list.as_mut().unwrap().sort.apply(&mut self.alpha_order); }
+            else { self.alpha_order.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||a.1.cmp(&b.1))); }
+        }
         if alpha && config().sort_alpha && !crate::render_fx::retained_active() {
             let _sort = crate::frame_profile::span("vita_alpha_group_sort");
             self.alpha_order
@@ -1547,6 +1614,51 @@ impl Renderer {
             }
             let mut builds = 0;
             let mut time_updates = 0;
+            if list_submit {
+                let list = self.list.as_mut().unwrap();
+                list.serial = list.serial.wrapping_add(1);
+                list.items.clear();
+                list.classes.reserve(self.parameters.len());
+                let time_bits = time.to_bits();
+                for &(_, id) in &self.alpha_order {
+                    let draw = &list.draws[id];
+                    let p = &mut self.parameters[draw.parameter as usize];
+                    // Groups sharing a parameter share a model, motion and time: the signature
+                    // names the model and gives a moving batch its own. One check a pass answers all.
+                    if p.list_serial != list.serial {
+                        p.list_serial = list.serial;
+                        let model = self.models[id].unwrap();
+                        let model_bits = model.to_cols_array().map(f32::to_bits);
+                        if p.generation != self.parameter_generation || p.model != model_bits {
+                            p.uniforms = uniforms(&p.recipe, time, eye, model, projection, fullbright, scene.atlas_grid);
+                            p.uniforms.atmosphere(&scene.atmosphere, eye);
+                            p.bits = p.uniforms.bits();
+                            p.generation = self.parameter_generation;
+                            p.model = model_bits;
+                            p.time = time_bits;
+                            p.class_epoch = 0;
+                            builds += 1;
+                        } else if split && p.time != time_bits {
+                            p.update_time(time);
+                            p.class_epoch = 0;
+                            time_updates += 1;
+                        }
+                        if p.class_epoch != list.classes.epoch {
+                            p.class = list.classes.class(&p.bits);
+                            p.class_epoch = list.classes.epoch;
+                        }
+                    }
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    assert_eq!(p.model, self.models[id].unwrap().to_cols_array().map(f32::to_bits), "groups sharing a parameter must share a model");
+                    let texture = if draw.animated {
+                        let g = &self.groups[id];
+                        g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id()
+                    } else { draw.texture };
+                    list.items.push(world_list::Item { group: id as u32, texture, uniforms: p.class });
+                }
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                if world_list::negative("world-list-swap-order") && list.items.len() > 12 { list.items.swap(5, 11); }
+            } else {
             for &(depth, id) in &self.alpha_order {
                 let g = &self.groups[id];
                 let model = if reuse { self.models[id].unwrap() }
@@ -1576,11 +1688,12 @@ impl Renderer {
                 let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
                 self.prepared.push(Prepared { depth, group: id, texture, uniforms: u, indices: g.indices });
             }
+            }
             crate::light_profile::render_add(phase, RenderMetrics {
                 parameter_cpu_ns: parameters_started.elapsed().as_nanos() as u64, ..Default::default() });
             count("vita_world_parameter_builds", builds);
             count("vita_world_parameter_time_updates", time_updates);
-            count("vita_world_parameter_reuses", self.prepared.len() as u64 - builds);
+            count("vita_world_parameter_reuses", self.alpha_order.len() as u64 - builds);
         }
         // Uniform values are program storage. These two programs are private to
         // this Renderer; sky, FX and HUD use other programs. Alpha uses this same
@@ -1683,6 +1796,81 @@ impl Renderer {
         let _submission = crate::render_tail::submission(config().world_binding_cache, config().world_gl_state_cache);
         // Schema 7: draw i's last lap to draw i+1's first read, from reads Totals already takes.
         let (mut between_ns, mut between_calls, mut previous_end) = (0u64, 0u32, None::<std::time::Instant>);
+        let _pass_submit = crate::pass_clock::scope(crate::pass_clock::WORLD_SUBMIT);
+        if list_submit {
+            let list = self.list.as_ref().unwrap();
+            // One lookup a pass. Nothing below changes what the context points at.
+            let gl = unsafe { get_internal_gl() };
+            let ctx = gl.quad_context;
+            let mut planner = world_list::Planner::new();
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let mut drawn = 0u64;
+            for item in &list.items {
+                let draw = &list.draws[item.group as usize];
+                let low = draw.low;
+                let binding = (draw.vertex, draw.index, item.texture, draw.atlas);
+                let mut plan = planner.observe(draw.pipeline, low, binding, item.uniforms);
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                { if world_list::negative("world-list-stale-uniform") && drawn % 7 == 3 { plan.uniforms = false; } drawn += 1; }
+                let _ = &mut plan;
+                let mut start = totals.start();
+                if let (Some(previous), Some(now)) = (previous_end, start) {
+                    between_ns += now.duration_since(previous).as_nanos() as u64; between_calls += 1;
+                }
+                if plan.pipeline { ctx.apply_pipeline(&draw.pipeline); applications[0] += 1; }
+                if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(1);} applications[1] += 1; }
+                if plan.pipeline { scale::log_depth(true); }
+                if low { low_draws += 1; }
+                if plan.bindings {
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    let texture = if world_list::negative("world-list-wrong-texture") && drawn % 11 == 5 { draw.atlas } else { item.texture };
+                    #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+                    let texture = item.texture;
+                    ctx.apply_bindings_from_slice(&[draw.vertex], draw.index, &[texture, draw.atlas]);
+                    applications[2] += 1;
+                }
+                totals.lap(0, &mut start);
+                if plan.uniforms {
+                    let values = self.parameters[draw.parameter as usize].uniforms.values();
+                    let traffic = self.field_uniforms[usize::from(low)].apply(ctx, values, true);
+                    applications[3] += 1;
+                    uniform_traffic[0] += u64::from(traffic.calls > 0);
+                    uniform_traffic[1] += traffic.bytes;
+                    uniform_traffic[2] += traffic.calls;
+                }
+                totals.lap(1, &mut start);
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                {
+                    let g = &self.groups[item.group as usize];
+                    if g.recipe.stage.blend != Blend::Opaque { crate::sim_maps::probe::world_order(item.group as usize, false); }
+                    crate::sim_maps::probe::draw_query::mark("world_opaque", if low {"world_low"} else {"world_full"},
+                        g.recipe.blend, Some(item.group as usize), g.recipe.stage.alpha_test,
+                        g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
+                    crate::sim_maps::probe::world_packet(item.group as usize, &item.texture,
+                        self.parameters[draw.parameter as usize].uniforms.bits_ref(), low, draw.pipeline_class);
+                }
+                let class = if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                let dropped = world_list::negative("world-list-drop-draw") && drawn % 13 == 6;
+                #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+                let dropped = false;
+                if !dropped && !crate::gpu_timing::masked(class) { ctx.draw(draw.base_element, draw.indices, 1); }
+                totals.lap(2, &mut start);
+                previous_end = start;
+                if previous_pipeline != Some(draw.pipeline_class as usize) {
+                    pipeline_changes += 1;
+                    previous_pipeline = Some(draw.pipeline_class as usize);
+                }
+                if previous_texture != Some(item.texture) {
+                    texture_changes += 1;
+                    previous_texture = Some(item.texture);
+                }
+                stats.batches += 1;
+                stats.triangles += draw.indices as usize / 3;
+                #[cfg(target_os = "vita")]
+                { static_batches += usize::from(draw.static_group); }
+            }
+        } else {
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
@@ -1732,6 +1920,8 @@ impl Renderer {
                 if low {"world_low"} else {"world_full"},
                 g.recipe.blend, Some(prepared.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::world_packet(prepared.group, &texture, u.bits_ref(), low, pi as u8);
             let class = if alpha { crate::gpu_timing::MASK_WORLD_ALPHA } else if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
             if !crate::gpu_timing::masked(class) { ctx.draw(g.base_element, prepared.indices, 1); }
             totals.lap(2, &mut start);
@@ -1780,6 +1970,9 @@ impl Renderer {
                 );
             }
         }
+        }
+        crate::pass_clock::draws(stats.batches);
+        drop(_pass_submit);
         if let Some((ns, calls)) = totals.census_values() {
             crate::phase_census::world_publish(ns, calls, totals.profile_active());
             if between_calls > 0 { crate::phase_census::world_between_publish(between_ns, between_calls); }
@@ -1830,6 +2023,7 @@ impl Renderer {
         self.prepared.clear();
     }
     pub(super) fn finish_fx(&mut self, interop_flush: bool) -> (usize, usize) {
+        let _pass_clock = crate::pass_clock::scope(crate::pass_clock::FX_FINISH);
         let mut gpu = self.fx_gpu.take().unwrap_or_else(|| {
             crate::render_fx::retained::Gpu::new().expect("retained actor shader")
         });
@@ -1873,6 +2067,8 @@ impl Renderer {
             crate::sim_maps::probe::draw_query::mark("world_alpha","world_full",
                 g.recipe.blend, Some(p.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.first().map(String::as_str));
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::world_packet(p.group, &p.texture, u.bits_ref(), false, (g.recipe.blend * 3 + g.recipe.cull) as u8);
             if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) { ctx.draw(g.base_element, g.indices, 1); }
             totals.add(2, start);
             count("vita_world_gpu_draws", 1);
@@ -2537,6 +2733,32 @@ mod tests {
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key: bad})).is_err(), "{key}");
             }
         }
+    }
+    #[test]
+    fn world_submission_keys_default_off_require_a_boolean_and_are_printed() {
+        for key in ["world_pass_clock", "world_list_submit"] {
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            assert_eq!(defaults[key], false, "{key}");
+            let on: Config = serde_json::from_value(serde_json::json!({key: true})).unwrap();
+            on.validate().unwrap();
+            assert!(config_log_lines(&on)[0].contains(&format!("\"{key}\":true")), "{key}");
+            assert!(config_log_lines(&Config::default())[0].contains(&format!("\"{key}\":false")), "{key}");
+            for bad in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
+                assert!(serde_json::from_value::<Config>(serde_json::json!({key: bad})).is_err(), "{key}");
+            }
+        }
+    }
+    #[test]
+    fn world_list_submit_rejects_each_setting_it_cannot_honour() {
+        let on = serde_json::json!({"world_list_submit": true});
+        for (key, value) in [("world_state_cache", false), ("world_view_reuse", false), ("world_parameter_reuse", false),
+                             ("uniform_field_cache", false), ("world_static_merge", true), ("world_binding_cache", true), ("world_gl_state_cache", true)] {
+            let mut bad = on.clone();
+            bad[key] = serde_json::json!(value);
+            let config: Config = serde_json::from_value(bad).unwrap();
+            assert!(config.validate().is_err(), "{key}");
+        }
+        serde_json::from_value::<Config>(on).unwrap().validate().unwrap();
     }
     #[test]
     fn audio_static_cache_is_opt_in() {

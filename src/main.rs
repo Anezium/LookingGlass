@@ -7,6 +7,7 @@ mod allocation_census;
 mod r13_survey;
 mod tls_count;
 mod gpu_timing;
+mod pass_clock;
 mod sim_maps;
 mod acting;
 mod ambient_animation;

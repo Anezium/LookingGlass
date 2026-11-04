@@ -58,6 +58,7 @@ impl Survey {
     #[cfg(target_os="vita")]
     pub(crate) fn presented(&mut self,map:&str,alive:bool,arm:bool)->anyhow::Result<()> {
         if self.armed && !self.done {crate::gpu_timing::presented(self.frames as u32+1);}
+        if self.armed && !self.done {crate::pass_clock::presented();}
         if !self.presented_at(map,alive,arm,Instant::now())? {return Ok(());}
         CENSUS.store(false,Relaxed);
         self.snapshot=true;
@@ -69,6 +70,7 @@ impl Survey {
         self.write_samples(&mut out)?;out.flush()?;
         if self.config.census {crate::phase_census::export_survey(map)?;}
         crate::gpu_timing::export(map)?;
+        if let Some(line)=crate::pass_clock::summary(map) {println!("{line}");}
         if self.config.tls_count {println!("{}",self.tls_line(map));}
         println!("[lg/r13b-survey] done map={map} samples={} warmup_frames=60 measured_frames={} died={}",self.rows.len(),self.rows.len()-60,!alive);
         self.done=true;Ok(())
@@ -86,6 +88,7 @@ impl Survey {
             if self.ready && self.pending_gameplay && arm {
                 crate::phase_census::calibrate();
                 crate::gpu_timing::arm();
+                crate::pass_clock::arm();
                 // Calibration/printing must not enter even the first warmup wall.
                 #[cfg(target_os="vita")]
                 let now=Instant::now();

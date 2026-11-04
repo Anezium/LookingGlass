@@ -11,6 +11,9 @@ thread_local! {
     static PACKETS: RefCell<Vec<serde_json::Value>> = RefCell::default();
     static JOINT_ORDER: RefCell<Vec<(u8,usize,u32)>> = RefCell::default();
     static WORLD_ORDER: RefCell<Vec<(usize,bool)>> = RefCell::default();
+    static WORLD_PACKETS: RefCell<(u64,Sha256)> = RefCell::new((0,Sha256::new()));
+    static WORLD_GEOMETRY: RefCell<Vec<String>> = RefCell::default();
+    static GL_TRACE: RefCell<(u64,Sha256)> = RefCell::new((0,Sha256::new()));
     static COUNTS: RefCell<BTreeMap<&'static str, u64>> = RefCell::default();
     static SPANS: RefCell<BTreeMap<&'static str, f64>> = RefCell::default();
     static START: RefCell<Option<Instant>> = const { RefCell::new(None) };
@@ -97,6 +100,8 @@ pub fn begin() {
         PACKETS.with(|s|s.borrow_mut().clear());
         JOINT_ORDER.with(|s|s.borrow_mut().clear());
         WORLD_ORDER.with(|s|s.borrow_mut().clear());
+        WORLD_PACKETS.with(|s|*s.borrow_mut()=(0,Sha256::new()));
+        GL_TRACE.with(|s|*s.borrow_mut()=(0,Sha256::new()));
         COUNTS.with(|c| c.borrow_mut().clear());
         SPANS.with(|c| c.borrow_mut().clear());
         NPC_DECISIONS.with(|c| c.borrow_mut().clear());
@@ -120,6 +125,8 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
         "frame": frame, "map": map, "active": active,
         "joint_alpha_order": JOINT_ORDER.with(|s|s.borrow().clone()),
         "blend_world_order": WORLD_ORDER.with(|s|s.borrow().clone()),
+        "world_packets": WORLD_PACKETS.with(|s| {let s=s.borrow();(s.0,format!("{:x}",s.1.clone().finalize()))}),
+        "gl_trace": GL_TRACE.with(|s| {let s=s.borrow();(s.0,format!("{:x}",s.1.clone().finalize()))}),
         "selected_lights_bits": crate::lighting::selected_bits(),
         "state_sha256": hash, "cpu_ms": cpu_ms, "counters": *c.borrow(),
         "world_viewport": WORLD_VIEWPORT.with(Cell::get),
@@ -151,6 +158,45 @@ fn renderer_drops() -> serde_json::Value {
 
 pub fn span(label: &'static str, ms: f64) {
     if enabled() { SPANS.with(|s| *s.borrow_mut().entry(label).or_default() += ms); }
+}
+
+fn world_packets_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_WORLD_PACKETS").is_some())
+}
+/// Set at load: per group, the hash of the vertex bytes its draw resolves to, in index order.
+/// Where a group's vertices live in which buffer does not enter it.
+pub fn world_geometry(hashes: Vec<String>) { if world_packets_enabled() { WORLD_GEOMETRY.with(|g| *g.borrow_mut() = hashes); } }
+pub fn world_packets_active() -> bool { world_packets_enabled() }
+/// One world draw as the GPU sees it, into one hash per frame: group, resolved geometry, texture,
+/// uniform words, program and pipeline class. The buffer handles and offsets do not enter it.
+pub fn world_packet(group: usize, texture: &macroquad::miniquad::TextureId, uniforms: &[u32; 143], low: bool, pipeline_class: u8) {
+    if !world_packets_enabled() { return; }
+    WORLD_PACKETS.with(|s| {
+        let mut s = s.borrow_mut();
+        s.0 += 1;
+        s.1.update((group as u64).to_le_bytes());
+        WORLD_GEOMETRY.with(|g| s.1.update(g.borrow()[group].as_bytes()));
+        s.1.update(format!("{texture:?}").as_bytes());
+        for word in uniforms { s.1.update(word.to_le_bytes()); }
+        s.1.update([u8::from(low), pipeline_class]);
+    });
+}
+pub fn gl_trace_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_GL_TRACE").is_some())
+}
+/// One observed GL call into the frame's hash: name, integer arguments, and any bytes it reads.
+pub fn gl_call(name: &str, args: &[u64], data: &[u8]) {
+    if !gl_trace_enabled() { return; }
+    GL_TRACE.with(|s| {
+        let mut s = s.borrow_mut();
+        s.0 += 1;
+        s.1.update(name.as_bytes());
+        for a in args { s.1.update(a.to_le_bytes()); }
+        s.1.update((data.len() as u64).to_le_bytes());
+        s.1.update(data);
+    });
 }
 
 pub fn world_order(id: usize, alpha: bool) {
