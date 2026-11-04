@@ -2128,6 +2128,9 @@ pub(crate) mod tests {
             for f in 0..30 { persist_step(&mut legacy, &mut persisted, 1100 + f, 50. + f as f32 * 0.05, 1., &all); }
             persist_step(&mut legacy, &mut persisted, 1131, 51., 1., &all);
             for f in 0..10 { persist_step(&mut legacy, &mut persisted, 1132 + f, 51. + f as f32 * 0.05, 1., &all); }
+            // A rewind too small to move the window: the map still forgets every pose.
+            persist_step(&mut legacy, &mut persisted, 1150, 51.4995, 1., &all);
+            persist_step(&mut legacy, &mut persisted, 1151, 51.5, 1., &all);
             // A far one.
             persist_step(&mut legacy, &mut persisted, 1002, 0.5, 1., &all);
             for f in 0..30 { persist_step(&mut legacy, &mut persisted, 1003 + f, 0.5 + f as f32 * 0.05, 1., &all); }
