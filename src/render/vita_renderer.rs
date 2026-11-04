@@ -1626,6 +1626,8 @@ impl Renderer {
             ctx.apply_uniforms(UniformsSource::table(&sky));
             totals.add(1, start);
             let start = totals.start();
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::draw_query::mark("world_opaque","sky",0,None,0,None);
             ctx.draw(0, 3, 1);
             totals.add(2, start);
             totals.publish(["vita_world_sky_state_bindings", "vita_world_sky_uniforms", "vita_world_sky_draws_time"]);
@@ -1699,6 +1701,12 @@ impl Renderer {
             if alpha || g.recipe.stage.blend != Blend::Opaque {
                 crate::sim_maps::probe::world_order(prepared.group, alpha);
             }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::draw_query::mark(
+                if alpha {"world_alpha"} else {"world_opaque"},
+                if low {"world_low"} else {"world_full"},
+                g.recipe.blend, Some(prepared.group), g.recipe.stage.alpha_test,
+                g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
             ctx.draw(g.base_element, prepared.indices, 1);
             totals.lap(2, &mut start);
             previous_end = start;
@@ -1835,6 +1843,10 @@ impl Renderer {
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::world_order(p.group,true);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::draw_query::mark("world_alpha","world_full",
+                g.recipe.blend, Some(p.group), g.recipe.stage.alpha_test,
+                g.recipe.stage.images.first().map(String::as_str));
             ctx.draw(g.base_element, g.indices, 1);
             totals.add(2, start);
             count("vita_world_gpu_draws", 1);

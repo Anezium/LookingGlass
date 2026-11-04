@@ -570,6 +570,10 @@ impl Gpu {
             self.stats.uniform_bytes += traffic.bytes;
         }
         if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        crate::sim_maps::probe::draw_query::mark(
+            if p.effect {"fx"} else {"actors"}, if p.effect {"fx"} else {"actor"},
+            p.blend_index, None, 0, None);
         #[cfg(all(feature="sim_maps_probe",target_os="macos"))]
         if crate::sim_maps::probe::skin_proof() {
             let m=p.geometry();
