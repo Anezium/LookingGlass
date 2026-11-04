@@ -31,6 +31,17 @@ pub fn uncount(name: &'static str, n: u64) {
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let _ = (name, n);
 }
+/// Host-only elapsed time as a counter whose name ends in `_ns`. Nothing in a production build.
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+pub struct Timer(&'static str, std::time::Instant);
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+impl Drop for Timer { fn drop(&mut self) { probe::count(self.0, self.1.elapsed().as_nanos() as u64); } }
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+#[inline]
+pub fn timer(name: &'static str) -> Timer { Timer(name, std::time::Instant::now()) }
+#[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+#[inline(always)]
+pub fn timer(_: &'static str) {}
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
 pub mod probe;
 

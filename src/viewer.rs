@@ -2594,7 +2594,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let mover_dt = if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt };
                 interactions.companions_for_movers(&npcs.companions());
                 interactions.actors_for_movers(&npcs.targets());
-                interactions.advance_school(mover_dt, &scene.map, &mut scene.world, &mut player)?;
+                {
+                    let _time = crate::sim_maps::timer("r26_movers_ns");
+                    interactions.advance_school(mover_dt, &scene.map, &mut scene.world, &mut player)?;
+                }
                 drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::PlayerMovement);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_movement"); }

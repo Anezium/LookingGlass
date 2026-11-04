@@ -1271,18 +1271,21 @@ impl Steam {
         #[cfg(feature="vita_renderer")]
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             if let Some(vertices) = self.quads.borrow().raw_quad(index) {
+                crate::sim_maps::count("fx_funnel_registered_raw", 1);
                 let e = &self.emitters[self.puffs[index].emitter];
                 crate::render_fx::world_puff_quad(vertices, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
                     if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
                 return;
             }
             if let Some(geometry) = self.quads.borrow().geometry(index) {
+                crate::sim_maps::count("fx_funnel_registered_publication", 1);
                 let e = &self.emitters[self.puffs[index].emitter];
                 crate::render_fx::effect_geometry(geometry, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
                     if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
                 return;
             }
         }
+        crate::sim_maps::count("fx_funnel_registered_legacy", 1);
         let e = &self.emitters[self.puffs[index].emitter];
         #[cfg(feature="vita_renderer")]
         if !crate::render_fx::retained_active(){gl_use_material(&self.materials[usize::from(e.additive)]);}
@@ -1689,7 +1692,11 @@ impl Attached {
         let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
         let _packets = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Packets);
         self.steam.prepare_draw(camera, atmosphere);
-        #[cfg(feature="vita_renderer")] self.steam.prepare_quads(camera, None);
+        #[cfg(feature="vita_renderer")] {
+            let _time = crate::sim_maps::timer("r26_attached_quads_ns");
+            self.steam.prepare_quads(camera, None);
+        }
+        let register_time = crate::sim_maps::timer("r26_attached_register_ns");
         let mut order = if self.reuse_scratch { std::mem::take(&mut self.order) } else { Vec::new() };
         order.clear();
         order.extend(self
@@ -1708,6 +1715,7 @@ impl Attached {
             );
         }
         if self.reuse_scratch { self.order = order; }
+        drop(register_time);
         gl_use_default_material();
     }
     #[cfg(test)]
@@ -1733,6 +1741,7 @@ impl Attached {
     ) {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _profile = crate::frame_profile::span("attached_sample");
+        let _time = crate::sim_maps::timer("r26_attached_sample_ns");
         self.steam.puffs.clear();
         self.live_births.clear();
         let mut previous = if self.reuse_scratch { Default::default() } else { std::mem::take(&mut self.births) };
@@ -1814,6 +1823,8 @@ impl Attached {
         if self.reuse_scratch {
             self.births.retain(|key, _| self.live_births.binary_search(key).is_ok());
         }
+        crate::sim_maps::count("fx_funnel_attached_sets", 1);
+        crate::sim_maps::count("fx_funnel_attached_sampled", self.steam.puffs.len() as u64);
 
     }
 }
