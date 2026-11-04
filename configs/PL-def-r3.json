@@ -137,5 +137,6 @@
   "fx_bubble_true_size": false,
   "mover_advance_reuse": false,
   "world_pass_clock": false,
-  "world_list_submit": false
+  "world_list_submit": false,
+  "world_shared_buffers": false
 }

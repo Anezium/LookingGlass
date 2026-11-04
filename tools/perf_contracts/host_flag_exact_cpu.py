@@ -60,6 +60,9 @@ REMOVED_WORK = {
     'joint_center_cache': set(),
     # Nothing counted moves: same GL calls, same applications. Only time goes away.
     'world_list_submit': set(),
+    # Buffer binds and attribute re-specification are what this removes. Geometry, draw order, textures
+    # and uniforms stay compared through world_packets, and pixels strictly.
+    'world_shared_buffers': {'vita_world_binding_applications'},
     'mover_advance_reuse': {'mover_publications', 'mover_far_steps', 'collider_model_calls', 'collider_local_builds', 'dynamic_bucket_builds',
                             # Under --mover-replay the on arm rebuilds what it skipped, to check it. Without it, fewer.
                             'brush_hulls_built'},

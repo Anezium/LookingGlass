@@ -132,6 +132,9 @@ pub struct Config {
     pub world_pass_clock: bool,
     /// Opaque world pass from dense records. Same GL calls in the same order. Default off.
     pub world_list_submit: bool,
+    /// All world groups in a few shared buffers, not one VBO and IBO per group. Draw order and
+    /// vertex bytes stay. Default off.
+    pub world_shared_buffers: bool,
     /// Attached emitters that declare `sphere` send each particle along its own random direction,
     /// as the original client does, instead of along the tag's X axis. Changes pixels. Default off.
     pub fx_attached_sphere: bool,
@@ -340,6 +343,7 @@ impl Default for Config {
             mover_advance_reuse: false,
             world_pass_clock: false,
             world_list_submit: false,
+            world_shared_buffers: false,
             gpu_timing: "off".into(), gpu_mask: Vec::new(), rt_scenes: None, param_buffer_mib: None, display_clear_skip: false,
             fx_attached_sphere: false, fx_bubble_true_size: false,
             light_gl_observers: false,
@@ -1282,26 +1286,22 @@ impl Renderer {
                 format!("{:x}", h.finalize())
             }).collect());
         }
-        let mut packed: Vec<(Option<(usize,usize)>, Vec<WorldVertex>, Vec<u16>)> = Vec::new();
-        let mut allocations = Vec::with_capacity(pending.len());
-        for p in &mut pending {
-            let key = (c.world_static_merge && submit::static_opaque(&p.recipe))
-                .then_some((p.parameter,p.recipe.rank));
-            let slot = key.and_then(|key| packed.iter().position(|(k,v,i)| {
-                *k==Some(key) && v.len()+p.geometry.vertices.len()<=60000
-                    && i.len()+p.geometry.indices.len()<=180000
-            }));
-            let count=p.geometry.indices.len() as i32;
-            if let Some(slot)=slot {
-                let (_,v,i)=&mut packed[slot];
-                allocations.push((slot,i.len() as i32,count));
-                let offset=v.len() as u16;
-                v.append(&mut p.geometry.vertices);
-                i.extend(p.geometry.indices.drain(..).map(|x|x.checked_add(offset).expect("packed u16 index")));
-                p.geometry.vertices=Vec::new(); p.geometry.indices=Vec::new();
-            } else {
-                allocations.push((packed.len(),0,count));
-                packed.push((key,std::mem::take(&mut p.geometry.vertices),std::mem::take(&mut p.geometry.indices)));
+        let (packed, allocations) = world_list::pack(pending.iter_mut().map(|p| {
+            let key = (c.world_static_merge && submit::static_opaque(&p.recipe)).then_some((p.parameter,p.recipe.rank));
+            (key, &mut p.geometry.vertices, &mut p.geometry.indices)
+        }), c.world_shared_buffers);
+        // Host proof: each draw's range in its shared buffer resolves to the bytes its group had.
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::sim_maps::probe::world_packets_active() && !world_list::negative("world-pack-wrong-vertex-offset") {
+            use sha2::{Digest, Sha256};
+            for (group,&(slot,base,count)) in allocations.iter().enumerate() {
+                let (_,v,i)=&packed[slot];
+                let mut h = Sha256::new();
+                for &index in &i[base as usize..(base+count) as usize] {
+                    let vertex = &v[index as usize];
+                    h.update(unsafe { std::slice::from_raw_parts((vertex as *const WorldVertex).cast::<u8>(), std::mem::size_of::<WorldVertex>()) });
+                }
+                assert_eq!(format!("{:x}", h.finalize()), crate::sim_maps::probe::world_geometry_hash(group), "group {group} resolves to other bytes in its buffer");
             }
         }
         let packing_capacity_bytes: usize = packed.iter().map(|(_,v,i)|v.capacity()*52+i.capacity()*2).sum();
@@ -1854,7 +1854,11 @@ impl Renderer {
                 let dropped = world_list::negative("world-list-drop-draw") && drawn % 13 == 6;
                 #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
                 let dropped = false;
-                if !dropped && !crate::gpu_timing::masked(class) { ctx.draw(draw.base_element, draw.indices, 1); }
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                let base_element = draw.base_element + i32::from(world_list::negative("world-pack-wrong-base") && drawn % 17 == 9) * 3;
+                #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+                let base_element = draw.base_element;
+                if !dropped && !crate::gpu_timing::masked(class) { ctx.draw(base_element, draw.indices, 1); }
                 totals.lap(2, &mut start);
                 previous_end = start;
                 if previous_pipeline != Some(draw.pipeline_class as usize) {
@@ -2736,7 +2740,7 @@ mod tests {
     }
     #[test]
     fn world_submission_keys_default_off_require_a_boolean_and_are_printed() {
-        for key in ["world_pass_clock", "world_list_submit"] {
+        for key in ["world_pass_clock", "world_list_submit", "world_shared_buffers"] {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert_eq!(defaults[key], false, "{key}");
             let on: Config = serde_json::from_value(serde_json::json!({key: true})).unwrap();
@@ -2918,7 +2922,7 @@ mod tests {
             let eye=vec3(3.,5.,7.);
             let u=uniforms(&recipe,0.,eye,model,projection,false,Vec2::ONE);
             let mut p=Parameter {recipe,bits:u.bits(),uniforms:u,generation:1,model:model.to_cols_array().map(f32::to_bits),
-                time:0,time_uv:dynamic,time_gain:true};
+                time:0,time_uv:dynamic,time_gain:true, list_serial:0, class:0, class_epoch:0 };
             for time in [-0.,0.3,3.,20.,0.,f32::from_bits(0x7fc00001)] {
                 let expected=uniforms(&p.recipe,time,eye,model,projection,false,Vec2::ONE).bits();
                 let scope=crate::kernel_alloc::Scope::begin();

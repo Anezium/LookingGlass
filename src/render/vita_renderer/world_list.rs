@@ -152,6 +152,53 @@ impl SortCache {
     }
 }
 
+/// One buffer's vertices and indices, and the key groups share it by.
+pub(super) type Packed = (Option<(usize, usize)>, Vec<WorldVertex>, Vec<u16>);
+const PACK_VERTICES: usize = 60000;
+const PACK_INDICES: usize = 180000;
+/// Groups into buffers, and per group its buffer, first index and index count. A keyed group joins
+/// the first buffer of its key with room; an unkeyed one takes a buffer of its own. `shared` gives
+/// every group one key, so a map has a few buffers instead of one per group. First fit keeps group
+/// order inside each buffer. Sizes are reserved up front, so a full buffer does not hold twice its
+/// bytes during the append.
+pub(super) fn pack<'a>(groups: impl ExactSizeIterator<Item = (Option<(usize, usize)>, &'a mut Vec<WorldVertex>, &'a mut Vec<u16>)>, shared: bool)
+    -> (Vec<Packed>, Vec<(usize, i32, i32)>) {
+    let mut groups: Vec<_> = groups.collect();
+    let shared_key = shared.then_some((usize::MAX, 0));
+    let mut unpacked_vertices: usize = groups.iter().map(|g| g.1.len()).sum();
+    let mut unpacked_indices: usize = groups.iter().map(|g| g.2.len()).sum();
+    let mut packed: Vec<Packed> = Vec::new();
+    let mut allocations = Vec::with_capacity(groups.len());
+    let wrong_offset = negative("world-pack-wrong-vertex-offset");
+    for (key, vertices, indices) in &mut groups {
+        let key = shared_key.or(*key);
+        let slot = key.and_then(|key| packed.iter().position(|(k, v, i)| {
+            *k == Some(key) && v.len() + vertices.len() <= PACK_VERTICES && i.len() + indices.len() <= PACK_INDICES
+        }));
+        let count = indices.len() as i32;
+        if slot.is_none() && shared_key.is_some() {
+            packed.push((key, Vec::with_capacity(unpacked_vertices.min(PACK_VERTICES)), Vec::with_capacity(unpacked_indices.min(PACK_INDICES))));
+        }
+        let slot = slot.or_else(|| shared_key.map(|_| packed.len() - 1));
+        unpacked_vertices -= vertices.len();
+        unpacked_indices -= indices.len();
+        if let Some(slot) = slot {
+            let (_, v, i) = &mut packed[slot];
+            allocations.push((slot, i.len() as i32, count));
+            let offset = v.len() as u16;
+            let offset = if wrong_offset && i.len() > 600 && !v.is_empty() { offset.wrapping_sub(1) } else { offset };
+            v.append(vertices);
+            i.extend(indices.drain(..).map(|x| x.checked_add(offset).expect("packed u16 index")));
+            **vertices = Vec::new();
+            **indices = Vec::new();
+        } else {
+            allocations.push((packed.len(), 0, count));
+            packed.push((key, std::mem::take(*vertices), std::mem::take(*indices)));
+        }
+    }
+    (packed, allocations)
+}
+
 /// Host oracle sabotage. The oracle must see each of these, and they exist only in probe builds.
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
 pub(super) fn negative(name: &str) -> bool { crate::sim_maps::probe::negative_control() == Some(name) }
@@ -255,10 +302,12 @@ mod tests {
         assert_eq!(classes.class(&a), ca);
         assert_eq!(classes.class(&b), cb);
         assert_eq!(classes.len(), 3);
-        // A forced hash collision must still compare words.
-        classes.hashes[cb as usize] = classes.hashes[ca as usize];
+        // A forced hash collision must still compare words: a's entry now claims b's hash.
+        classes.hashes[ca as usize] = classes.hashes[cb as usize];
         assert_eq!(classes.class(&b), cb);
-        assert_eq!(classes.class(&a), ca);
+        classes.hashes[ca as usize] = classes.hashes[cz as usize];
+        assert_eq!(classes.class(&negative_zero), cz);
+        assert_eq!(classes.len(), 3);
         let epoch = classes.epoch;
         classes.reserve(4);
         assert_eq!((classes.epoch, classes.len()), (epoch, 3), "room left: ids stay valid");
@@ -268,6 +317,67 @@ mod tests {
         classes.reserve(16);
         for i in 0..16 { let mut p = a; p[0] = i; classes.class(&p); }
         assert_eq!(classes.bits.capacity(), capacity, "a reserved pass does not reallocate");
+    }
+    fn vertex(tag: u32) -> WorldVertex {
+        WorldVertex { position: [tag as f32, 0., 0.], uv: [0.; 2], color: [0; 4], lightmap: [0.; 4], normal: [0.; 3] }
+    }
+    /// A group's vertices tagged by group, and indices that walk them from the top down.
+    fn group(id: u32, vertices: usize, indices: usize) -> (Vec<WorldVertex>, Vec<u16>) {
+        ((0..vertices).map(|v| vertex(id * 100_000 + v as u32)).collect(), (0..indices).map(|i| (vertices - 1 - i % vertices) as u16).collect())
+    }
+    fn resolved(packed: &[Packed], allocation: (usize, i32, i32)) -> Vec<f32> {
+        let (_, v, i) = &packed[allocation.0];
+        i[allocation.1 as usize..(allocation.1 + allocation.2) as usize].iter().map(|&x| v[x as usize].position[0]).collect()
+    }
+    fn expected(g: &(Vec<WorldVertex>, Vec<u16>)) -> Vec<f32> { g.1.iter().map(|&x| g.0[x as usize].position[0]).collect() }
+    #[test]
+    fn shared_packing_resolves_each_group_to_its_own_bytes_in_order() {
+        let sizes = [(3, 6), (40_000, 60_000), (20_000, 90_000), (1, 3), (15_000, 45_000), (60_000, 180_000), (5, 9), (2, 2), (1, 170_000)];
+        let originals: Vec<_> = sizes.iter().enumerate().map(|(id, s)| group(id as u32, s.0, s.1)).collect();
+        let mut groups = originals.clone();
+        let (packed, allocations) = pack(groups.iter_mut().map(|g| (None, &mut g.0, &mut g.1)), true);
+        assert_eq!(allocations.len(), sizes.len());
+        for (id, allocation) in allocations.iter().enumerate() {
+            assert_eq!(allocation.2 as usize, sizes[id].1);
+            assert_eq!(resolved(&packed, *allocation), expected(&originals[id]), "group {id}");
+        }
+        for (_, v, i) in &packed {
+            assert!(v.len() <= PACK_VERTICES && i.len() <= PACK_INDICES);
+            assert!(i.iter().all(|&x| (x as usize) < v.len()));
+            // Reserved, not grown by doubling.
+            assert!(v.capacity() <= PACK_VERTICES && i.capacity() <= PACK_INDICES);
+        }
+        // Sources are released, and later groups fill earlier gaps by first fit in group order.
+        assert!(groups.iter().all(|g| g.0.capacity() == 0 && g.1.capacity() == 0));
+        assert_eq!(allocations.iter().map(|a| a.0).collect::<Vec<_>>(), [0, 0, 1, 0, 0, 2, 0, 0, 3]);
+        assert!(packed.len() < sizes.len());
+        // Ranges inside a buffer do not overlap and keep group order.
+        for slot in 0..packed.len() {
+            let mut next = 0;
+            for a in allocations.iter().filter(|a| a.0 == slot) { assert_eq!(a.1, next); next += a.2; }
+            assert_eq!(next as usize, packed[slot].2.len());
+        }
+    }
+    #[test]
+    fn packing_keeps_one_buffer_per_group_when_off_and_keys_when_keyed() {
+        let originals: Vec<_> = (0..5).map(|id| group(id, 4, 6)).collect();
+        let mut groups = originals.clone();
+        let (packed, allocations) = pack(groups.iter_mut().map(|g| (None, &mut g.0, &mut g.1)), false);
+        assert_eq!(packed.len(), 5);
+        assert_eq!(allocations, (0..5).map(|i| (i, 0, 6)).collect::<Vec<_>>());
+        for id in 0..5 { assert_eq!(resolved(&packed, allocations[id]), expected(&originals[id])); }
+        // world_static_merge's keys, not shared: same key joins, different key and None do not.
+        let mut groups = originals.clone();
+        let keys = [Some((1, 0)), None, Some((1, 0)), Some((2, 0)), Some((1, 0))];
+        let (packed, allocations) = pack(groups.iter_mut().zip(keys).map(|(g, k)| (k, &mut g.0, &mut g.1)), false);
+        assert_eq!(packed.len(), 3);
+        assert_eq!(allocations.iter().map(|a| (a.0, a.1)).collect::<Vec<_>>(), [(0, 0), (1, 0), (0, 6), (2, 0), (0, 12)]);
+        for id in 0..5 { assert_eq!(resolved(&packed, allocations[id]), expected(&originals[id])); }
+        // Shared wins over a key.
+        let mut groups = originals.clone();
+        let (packed, _) = pack(groups.iter_mut().zip(keys).map(|(g, k)| (k, &mut g.0, &mut g.1)), true);
+        assert_eq!(packed.len(), 1);
+        assert_eq!((packed[0].1.len(), packed[0].2.len()), (20, 30));
     }
     #[test]
     fn sort_cache_gives_the_legacy_order_and_reuses_only_identical_input() {

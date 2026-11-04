@@ -168,6 +168,7 @@ fn world_packets_enabled() -> bool {
 /// Where a group's vertices live in which buffer does not enter it.
 pub fn world_geometry(hashes: Vec<String>) { if world_packets_enabled() { WORLD_GEOMETRY.with(|g| *g.borrow_mut() = hashes); } }
 pub fn world_packets_active() -> bool { world_packets_enabled() }
+pub fn world_geometry_hash(group: usize) -> String { WORLD_GEOMETRY.with(|g| g.borrow()[group].clone()) }
 /// One world draw as the GPU sees it, into one hash per frame: group, resolved geometry, texture,
 /// uniform words, program and pipeline class. The buffer handles and offsets do not enter it.
 pub fn world_packet(group: usize, texture: &macroquad::miniquad::TextureId, uniforms: &[u32; 143], low: bool, pipeline_class: u8) {
