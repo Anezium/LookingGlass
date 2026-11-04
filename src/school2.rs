@@ -1807,13 +1807,13 @@ mod mover_tests {
     }
     #[derive(PartialEq, Debug)]
     struct Frame { objects: Vec<(Vec<u32>, u32, Vec<u32>)>, feet: [u32; 3], normal: [u32; 3], grounded: bool, sweeps: Vec<u32> }
-    fn replay(reuse: bool, dts: &[f32]) -> (Vec<Frame>, usize) {
+    fn replay(reuse: bool, dts: &[f32]) -> (Vec<Frame>, usize) { replay_scene(reuse, dts, scene(), vec3(0., 0., 1.)) }
+    fn replay_scene(reuse: bool, dts: &[f32], mut objects: Vec<Object>, feet: Vec3) -> (Vec<Frame>, usize) {
         crate::sim_maps::with_mover_advance_reuse(reuse, || {
             let map = crate::interaction::tests::fixture();
-            let mut objects = scene();
             let mut world = World::fixture(&[]);
             world.dynamic_publications = Some(Vec::new());
-            let mut player = Player::new(vec3(0., 0., 1.));
+            let mut player = Player::new(feet);
             player.grounded = true;
             let fixed = [Collider::fixture(vec3(500., -8., -8.), vec3(516., 8., 8.))];
             let mut frames = Vec::new();
@@ -1855,6 +1855,23 @@ mod mover_tests {
         }
         // No bounds, no claim: such a mover is never far.
         assert_eq!(collider_reach(&Collider::from_test_hulls(), Vec3::ZERO), f32::INFINITY);
+    }
+    #[test]
+    fn a_blocked_pendulum_holds_its_far_lamp() {
+        // The pendulum's plate is inside the player's body, so it is blocked from the first step.
+        // The lamp is out of reach and free, and stays with the pendulum all the same.
+        let pendulum = || Motion::Pendulum { pivot: vec3(0., 0., 200.), roll: false, period: 3. };
+        let objects = || vec![
+            object("gym_pend1", vec3(0., 0., 40.), pendulum(), 32., true),
+            object("gym_light1", vec3(600., 0., 40.), pendulum(), 16., true),
+        ];
+        let dts = vec![0.05; 60];
+        let (off, _) = replay_scene(false, &dts, objects(), vec3(20., 0., 0.));
+        let (on, _) = replay_scene(true, &dts, objects(), vec3(20., 0., 0.));
+        assert_eq!(off, on);
+        let last = on.last().unwrap();
+        assert_eq!(last.objects[0].1, 0f32.to_bits(), "the pendulum was not blocked");
+        assert_eq!(last.objects[1].1, 0f32.to_bits(), "the lamp left its pendulum");
     }
     #[test]
     fn publishing_only_for_a_rider_replays_every_mover_rider_and_collision_bit_for_bit() {
