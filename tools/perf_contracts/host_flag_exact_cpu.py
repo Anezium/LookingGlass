@@ -41,10 +41,18 @@ REMOVED_WORK = {
         'actor_index_updates', 'actor_uploaded_indices', 'actor_uploaded_vertices', 'actor_vertex_updates',
         'vita_fx_geometry_upload_bytes', 'vita_fx_index_uploads_skipped', 'vita_fx_mesh_uploads',
         'vita_fx_prepare_upload_hits', 'vita_fx_upload_cache_hits', 'vita_fx_vertex_uploads_skipped',
-        'vita_fx_stream_capacity_bytes', 'vita_fx_buffer_growths',
+        'vita_fx_stream_capacity_bytes', 'vita_fx_buffer_growths', 'fx_index_updates', 'fx_uploaded_indices',
+        'fx_vertex_updates', 'fx_uploaded_vertices',
+        # A set with no raw quads used to skip the bank and merge in merge_cached. As raw quads it
+        # merges in the bank, with the same result. jlair2: 12 input groups become 2, 17 merged
+        # meshes become 7, and the 26 packets and their bytes stay.
+        'vita_fx_particle_input_groups', 'vita_fx_merged_meshes', 'fx_merge_copy_jobs', 'fx_merge_copy_jobs_le_4096',
+        'fx_merge_inline_jobs', 'vita_fx_pack_indices', 'vita_fx_pack_vertices', 'vita_fx_certified_indices_reused',
+        'fx_merge_local_topology_hits', 'fx_merge_local_vertex_hits', 'fx_merge_source_reusable_vertices',
+        'vita_fx_unchanged_merged_groups', 'fx_merge_range_vertices_kept',
     },
     'joint_center_cache': set(),
-    'mover_advance_reuse': set(),
+    'mover_advance_reuse': {'mover_publications', 'mover_far_steps', 'collider_model_calls', 'collider_local_builds', 'dynamic_bucket_builds'},
     'world_static_merge': {
         'vita_world_gpu_draws', 'vita_world_low_draws', 'vita_world_texture_binds', 'vita_world_buffer_binds',
     },
@@ -78,6 +86,12 @@ def environment(ctx, name, negative):
         env.update(LOOKING_GLASS_SKIN_MOVING_VIEW='1', LOOKING_GLASS_SKIN_DEATHS='1')
     if negative:
         env['LOOKING_GLASS_GATHER_NEGATIVE'] = negative
+    if ctx['replay']:
+        env['LOOKING_GLASS_MOVER_REPLAY'] = '1'
+    if ctx['ride']:
+        env['LOOKING_GLASS_MOVER_RIDE'] = '1'
+    if ctx['dt']:
+        env['LOOKING_GLASS_SIM_MAPS_DT'] = ctx['dt']
     return env
 
 
@@ -139,7 +153,7 @@ def compare(ctx, name, off, on, strict_images):
             if a['counters'].get(key, 0) != b['counters'].get(key, 0):
                 changes[key] = changes.get(key, 0) + b['counters'].get(key, 0) - a['counters'].get(key, 0)
                 if key not in removed:
-                    unexplained[key] = i
+                    unexplained[key] = dict(frame=i, off=a['counters'].get(key, 0), on=b['counters'].get(key, 0))
         if off['images'][i] != on['images'][i]:
             if strict_images:
                 raise Mismatch((name, i, 'framebuffer'))
@@ -154,7 +168,10 @@ def compare(ctx, name, off, on, strict_images):
     return dict(map=name, status='PASS', frames=ctx['frames'], packets=sum(len(f['submitted_packets']) for f in off['frames']),
                 removed_work_change=changes, final_image_sha256=off['final'], images_strict=strict_images,
                 image_mismatch_frames=image_frames, state_sha256_last=last['state_sha256'],
-                funnel_last={k: v for k, v in on['frames'][-1]['counters'].items() if k.startswith('fx_funnel_') or k.startswith('mover_')})
+                funnel_last={k: v for k, v in on['frames'][-1]['counters'].items() if k.startswith('fx_funnel_') or k.startswith('mover_')},
+                mover_totals_on={k: sum(f['counters'].get(k, 0) for f in on['frames']) for k in ('mover_group_steps', 'mover_far_steps', 'mover_support_steps', 'mover_blocked_steps', 'mover_publications', 'mover_ride_teleports', 'collider_model_calls')},
+                mover_totals_off={k: sum(f['counters'].get(k, 0) for f in off['frames']) for k in ('mover_group_steps', 'mover_support_steps', 'mover_blocked_steps', 'mover_publications', 'collider_model_calls')},
+                mover_replay_frames=sum(1 for f in off['frames'] if f.get('mover_replay')))
 
 
 def run_case(ctx, name, negative=None):
@@ -210,12 +227,15 @@ def main():
     p.add_argument('--sim', type=Path)
     p.add_argument('--negative', action='append', default=[])
     p.add_argument('--keep-logs', action='store_true')
+    p.add_argument('--mover-replay', action='store_true', help='record mover transforms, collider bits and collision answers per frame')
+    p.add_argument('--ride', action='store_true', help='with --mover-replay, also stand the player on a mover every 24 frames')
+    p.add_argument('--dt', help='override the fixed simulation step')
     a = p.parse_args()
     for k in a.lever:
         assert k in REMOVED_WORK, k
     a.output.mkdir(parents=True, exist_ok=True)
     ctx = dict(output=a.output.resolve(), binary=a.binary.resolve(), config=json.loads(a.config.read_text()), levers=a.lever,
-               frames=a.frames, still=a.still, sim=a.sim and a.sim.resolve(), keep=a.keep_logs)
+               frames=a.frames, still=a.still, sim=a.sim and a.sim.resolve(), keep=a.keep_logs, replay=a.mover_replay, ride=a.ride, dt=a.dt)
     rows = []
     for negative in a.negative:
         row = run_case(ctx, a.maps[0], negative)

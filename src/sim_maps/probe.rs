@@ -15,6 +15,7 @@ thread_local! {
     static SPANS: RefCell<BTreeMap<&'static str, f64>> = RefCell::default();
     static START: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static PROJECTION: Cell<Option<[u32; 16]>> = const { Cell::new(None) };
+    static MOVER_REPLAY: RefCell<Option<serde_json::Value>> = const { RefCell::new(None) };
     static NPC_ACTOR: RefCell<String> = RefCell::default();
     static NPC_DECISIONS: RefCell<BTreeMap<String, (Sha256, u64)>> = RefCell::default();
     /// GL viewport sampled by the host at the scaled 3D stage, once per frame.
@@ -120,7 +121,8 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
         "npc_decisions": npc_decisions(),
         "spans_ms": SPANS.with(|s| s.borrow().clone()),
         "render": crate::light_profile::render_host_report(),
-        "renderer_drops": renderer_drops()
+        "renderer_drops": renderer_drops(),
+        "mover_replay": MOVER_REPLAY.with(|m| m.borrow_mut().take()),
     })));
     if std::env::var_os("LOOKING_GLASS_SIM_MAPS_STATE").is_some() {
         std::fs::write(format!("state-{frame:05}.json"), bytes).unwrap();
@@ -168,6 +170,37 @@ pub fn negative_uv_edit(mesh: &mut macroquad::prelude::Mesh) {
     if negative_control() == Some("uv") && frame() >= 90 {
         if let Some(v) = mesh.vertices.first_mut() { v.uv.x = frame() as f32 * 0.125; }
     }
+}
+/// Mover replay proof, LOOKING_GLASS_MOVER_REPLAY: transforms, collider bits and collision answers
+/// after the movers advanced. LOOKING_GLASS_MOVER_RIDE also stands the player on one mover every
+/// 24 frames, so the rider branch runs. Both arms get the same teleports.
+pub fn mover_replay_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_MOVER_REPLAY").is_some())
+}
+pub fn mover_ride(tops: Vec<Vec3Probe>, player: &mut crate::movement::Player) {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_MOVER_RIDE").is_some()) || tops.is_empty() || frame() % 24 != 0 { return; }
+    let top = tops[(frame() / 24) as usize % tops.len()];
+    player.feet = top + macroquad::prelude::Vec3::Z * 0.5;
+    player.velocity = macroquad::prelude::Vec3::ZERO;
+    count("mover_ride_teleports", 1);
+}
+type Vec3Probe = macroquad::prelude::Vec3;
+pub fn record_movers(transforms: &[(usize, Vec3Probe, macroquad::prelude::Quat)], world: &crate::collision::World, player: &crate::movement::Player) {
+    let mut t = Sha256::new();
+    for (id, origin, rotation) in transforms {
+        t.update((*id as u64).to_le_bytes());
+        for f in origin.to_array().into_iter().chain(rotation.to_array()) { t.update(f.to_bits().to_le_bytes()); }
+    }
+    let (geometry, sweeps) = world.probe_dynamic_bits(player.feet);
+    let hash = |bits: &[u32]| { let mut h = Sha256::new(); for b in bits { h.update(b.to_le_bytes()); } format!("{:x}", h.finalize()) };
+    let feet = player.feet.to_array().map(f32::to_bits);
+    MOVER_REPLAY.with(|m| *m.borrow_mut() = Some(serde_json::json!({
+        "transforms": transforms.len(), "transforms_sha256": format!("{:x}", t.finalize()),
+        "collider_bits": geometry.len(), "colliders_sha256": hash(&geometry),
+        "sweeps": sweeps.len(), "sweeps_sha256": hash(&sweeps), "player_feet_bits": feet, "grounded": player.grounded,
+    })));
 }
 pub fn skin_proof() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();

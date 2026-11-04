@@ -159,7 +159,30 @@ pub(crate) fn with_fx_observe_move<T>(on: bool, run: impl FnOnce() -> T) -> T {
 }
 /// r26 CPU levers. Keep in step with Config and with tools/perf_contracts/host_flag_exact_cpu.py.
 #[cfg(test)]
-pub(crate) const R26_LEVERS: [&str; 1] = ["fx_attached_persist"];
+pub(crate) const R26_LEVERS: [&str; 2] = ["fx_attached_persist", "mover_advance_reuse"];
+#[cfg(test)]
+thread_local! { static MOVER_ADVANCE_REUSE_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn with_mover_advance_reuse<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset { fn drop(&mut self) { MOVER_ADVANCE_REUSE_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(MOVER_ADVANCE_REUSE_TEST.with(|s| s.replace(on)));
+    run()
+}
+/// The mover replay proof also checks each far step against the colliders it skipped.
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub fn mover_replay_checks() -> bool { probe::mover_replay_enabled() }
+#[cfg(test)]
+#[cfg(not(feature="sim_maps_probe"))]
+pub fn mover_replay_checks() -> bool { true }
+pub fn mover_advance_reuse() -> bool {
+    #[cfg(test)]
+    { MOVER_ADVANCE_REUSE_TEST.with(|s| s.get()) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().mover_advance_reuse }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
 #[cfg(test)]
 thread_local! { static FX_ATTACHED_PERSIST_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 #[cfg(test)]

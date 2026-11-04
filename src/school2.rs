@@ -120,6 +120,10 @@ struct Object {
     time: f32,
     collider: Collider,
     enabled: bool,
+    /// `mover_advance_reuse`: `collider` is older than `pose`, and nothing has asked for it yet.
+    collider_stale: bool,
+    /// `mover_advance_reuse`: no pose puts any part of this collider further from `pose.origin`.
+    reach: Option<f32>,
 }
 impl Object {
     fn sample(&self, time: f32) -> Pose {
@@ -205,6 +209,268 @@ fn path(map: &Bsp, start: &str) -> Result<Vec<Vec3>> {
     }
     anyhow::ensure!(points.len() >= 3, "Incomplete school-two path {start}");
     Ok(points)
+}
+/// Every part of a rigid collider sits at `origin + rotation * local`, and its bounds at the base
+/// pose contain those parts, so |local| is at most the bounds' furthest corner from the base
+/// origin. Bounds at another pose are a box around that ball: sqrt(3) times it. The margin covers
+/// the padding and rounding bounds may carry. A collider with no bounds is never far.
+fn collider_reach(collider: &Collider, base: Vec3) -> f32 {
+    collider.far_reach_from(base).map_or(f32::INFINITY, |r| r * 3f32.sqrt() + 8.)
+}
+/// The player's query box for the ride and touch tests stays within this of the body centre.
+fn player_query_reach() -> f32 {
+    (PLAYER_HALF + Vec3::splat(crate::collision::SKIN)).length() + 3.
+}
+/// `advance_movers` with work no result depends on left out. A group far from the player at its
+/// current and proposed poses cannot be ridden or touched, so it commits without building the
+/// proposed collider. A stale collider is built, at the pose it would have held, before anything
+/// reads it. The other movers reach the world only when a rider's body trace will read them.
+fn advance_movers_reuse(objects: &mut [Object], dt: f32, map: &Bsp, world: &mut World, player: &mut Player, fixed: &[Collider]) -> Result<()> {
+    // Only pose, time and the collider change in here, so these hold for the whole call.
+    let moving: Vec<usize> = (0..objects.len())
+        .filter(|&i| objects[i].enabled && !matches!(objects[i].motion, Motion::Still)).collect();
+    let partners: Vec<Option<usize>> = moving.iter().map(|&i| objects[i].name.strip_prefix("gym_pend")
+        .and_then(|number| objects.iter().position(|o| o.name == format!("gym_light{number}")))).collect();
+    for &i in moving.iter().chain(partners.iter().flatten()) {
+        if objects[i].reach.is_none() {
+            let o = &objects[i];
+            let reach = collider_reach(&o.shape.collider(map, o.base)?, o.base.origin);
+            objects[i].reach = Some(reach);
+        }
+    }
+    let settle = |o: &mut Object| -> Result<()> {
+        if o.collider_stale {
+            o.collider = o.shape.collider(map, o.pose)?;
+            o.collider_stale = false;
+        }
+        Ok(())
+    };
+    let query_reach = player_query_reach();
+    let mut done = vec![false; objects.len()];
+    let mut remaining = dt.clamp(0., 0.1);
+    while remaining > 0.000001 {
+        let step = remaining.min(1. / 120.);
+        remaining -= step;
+        done.fill(false);
+        for (&i, &partner) in moving.iter().zip(&partners) {
+            if std::mem::replace(&mut done[i], true) {
+                continue;
+            }
+            // A pendulum and its bound lamp are one rigid body, including when blocked.
+            let group = [Some(i), partner];
+            if let Some(j) = partner { done[j] = true; }
+            let time = objects[i].time + step;
+            crate::sim_maps::count("mover_group_steps", 1);
+            let center = player.feet + PLAYER_CENTER;
+            let far = group.iter().flatten().all(|&j| {
+                let o = &objects[j];
+                let limit = o.reach.unwrap_or(f32::INFINITY) + query_reach;
+                // A NaN or infinite limit compares false, which is the safe answer.
+                (o.pose.origin - center).length_squared() > limit * limit
+                    && (o.sample(time).origin - center).length_squared() > limit * limit
+            });
+            if far {
+                crate::sim_maps::count("mover_far_steps", 1);
+                #[cfg(any(test, all(feature="sim_maps_probe",not(target_os="vita"))))]
+                for &j in group.iter().flatten().filter(|_| cfg!(test) || crate::sim_maps::mover_replay_checks()) {
+                    let o = &objects[j];
+                    let current = o.shape.collider(map, o.pose)?;
+                    let proposed = o.shape.collider(map, o.sample(time))?;
+                    for c in [&current, &proposed] {
+                        assert!(c.trace(center, center - Vec3::Z * 3., PLAYER_HALF).fraction == 1., "far mover {} reaches the ride test", o.name);
+                        assert!(!c.touches(center, center, PLAYER_HALF), "far mover {} touches the player", o.name);
+                    }
+                }
+                for &j in group.iter().flatten() {
+                    let o = &mut objects[j];
+                    o.pose = o.sample(time);
+                    o.time = time;
+                    o.collider_stale = true;
+                }
+                continue;
+            }
+            let members: &[usize] = if let Some(j) = partner { &[i, j] } else { &[i] };
+            for &j in members { settle(&mut objects[j])?; }
+            let proposed = members.iter().map(|&j| {
+                let o = &objects[j];
+                let pose = o.sample(time);
+                Ok((j, pose, o.shape.collider(map, pose)?))
+            }).collect::<Result<Vec<_>>>()?;
+            let mut support = None;
+            let mut blocked = false;
+            for (j, pose, collider) in &proposed {
+                let o = &objects[*j];
+                let ground = o.collider.trace(
+                    player.feet + PLAYER_CENTER,
+                    player.feet + PLAYER_CENTER - Vec3::Z * 3.,
+                    PLAYER_HALF,
+                );
+                let riding = player.velocity.z <= 1.
+                    && !ground.start_solid
+                    && ground.fraction < 1.
+                    && ground.normal.z >= 0.65;
+                if riding {
+                    let carried = pose.origin
+                        + pose.rotation
+                            * o.pose.rotation.inverse()
+                            * (player.feet - o.pose.origin);
+                    if let Some((feet, normal)) = collider.rider_feet(carried) {
+                        support = Some((feet, normal));
+                    } else {
+                        blocked = true;
+                    }
+                }
+            }
+            let feet = support.map_or(player.feet, |s| s.0);
+            if let Some((feet, _)) = support {
+                crate::sim_maps::count("mover_support_steps", 1);
+                // The only reader of the world in this loop. The list after the loop replaces it.
+                if !negative_skip_publish() {
+                    for o in objects.iter_mut() { settle(o)?; }
+                    publish_others(world, fixed, objects, members);
+                }
+                let sweep = world.body_trace(player.feet, feet);
+                blocked |= sweep.start_solid || sweep.fraction < 1. || !world.body_clear(feet);
+            }
+            blocked |= proposed.iter().any(|(_, _, c)| {
+                c.touches(feet + PLAYER_CENTER, feet + PLAYER_CENTER, PLAYER_HALF)
+            });
+            if blocked {
+                crate::sim_maps::count("mover_blocked_steps", 1);
+                continue;
+            }
+            for (j, pose, collider) in proposed {
+                let o = &mut objects[j];
+                o.pose = pose;
+                o.time = time;
+                o.collider = collider;
+            }
+            if let Some((feet, normal)) = support {
+                player.feet = feet;
+                player.grounded = true;
+                player.ground_normal = normal;
+            }
+        }
+    }
+    for o in objects.iter_mut() { settle(o)?; }
+    Ok(())
+}
+/// One frame of the moving objects, in fixed substeps, ending with every collider current.
+fn advance_movers(objects: &mut [Object], dt: f32, map: &Bsp, world: &mut World, player: &mut Player, fixed: &[Collider]) -> Result<()> {
+    if crate::sim_maps::mover_advance_reuse() {
+        return advance_movers_reuse(objects, dt, map, world, player, fixed);
+    }
+    let mut remaining = dt.clamp(0., 0.1);
+    while remaining > 0.000001 {
+        let step = remaining.min(1. / 120.);
+        remaining -= step;
+        let mut done = std::collections::BTreeSet::new();
+        for i in 0..objects.len() {
+            if !done.insert(i) {
+                continue;
+            }
+            let o = &objects[i];
+            if !o.enabled || matches!(o.motion, Motion::Still) {
+                continue;
+            }
+            // A pendulum and its bound lamp are one rigid body, including when blocked.
+            let mut group = vec![i];
+            if let Some(number) = o.name.strip_prefix("gym_pend") {
+                if let Some(j) = objects
+                    .iter()
+                    .position(|o| o.name == format!("gym_light{number}"))
+                {
+                    group.push(j);
+                    done.insert(j);
+                }
+            }
+            let time = o.time + step;
+            let proposed = group
+                .iter()
+                .map(|&j| {
+                    let o = &objects[j];
+                    let pose = o.sample(time);
+                    Ok((j, pose, o.shape.collider(map, pose)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            crate::sim_maps::count("mover_group_steps", 1);
+            publish_others(world, fixed, &objects, &group);
+            let mut support = None;
+            let mut blocked = false;
+            for (j, pose, collider) in &proposed {
+                let o = &objects[*j];
+                let ground = o.collider.trace(
+                    player.feet + PLAYER_CENTER,
+                    player.feet + PLAYER_CENTER - Vec3::Z * 3.,
+                    PLAYER_HALF,
+                );
+                let riding = player.velocity.z <= 1.
+                    && !ground.start_solid
+                    && ground.fraction < 1.
+                    && ground.normal.z >= 0.65;
+                if riding {
+                    let carried = pose.origin
+                        + pose.rotation
+                            * o.pose.rotation.inverse()
+                            * (player.feet - o.pose.origin);
+                    if let Some((feet, normal)) = collider.rider_feet(carried) {
+                        support = Some((feet, normal));
+                    } else {
+                        blocked = true;
+                    }
+                }
+            }
+            let feet = support.map_or(player.feet, |s| s.0);
+            if let Some((feet, _)) = support {
+                crate::sim_maps::count("mover_support_steps", 1);
+                let sweep = world.body_trace(player.feet, feet);
+                blocked |= sweep.start_solid || sweep.fraction < 1. || !world.body_clear(feet);
+            }
+            blocked |= proposed.iter().any(|(_, _, c)| {
+                c.touches(feet + PLAYER_CENTER, feet + PLAYER_CENTER, PLAYER_HALF)
+            });
+            if blocked {
+                crate::sim_maps::count("mover_blocked_steps", 1);
+                continue;
+            }
+            for (j, pose, collider) in proposed {
+                let o = &mut objects[j];
+                o.pose = pose;
+                o.time = time;
+                o.collider = collider;
+            }
+            if let Some((feet, normal)) = support {
+                player.feet = feet;
+                player.grounded = true;
+                player.ground_normal = normal;
+            }
+        }
+    }
+    Ok(())
+}
+/// What the player's body collides with while `group` moves: everything else.
+fn publish_others(world: &mut World, fixed: &[Collider], objects: &[Object], group: &[usize]) {
+    crate::sim_maps::count("mover_publications", 1);
+    world.set_dynamic(
+        fixed
+            .iter()
+            .cloned()
+            .chain(
+                objects
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, o)| !group.contains(j) && o.enabled && o.name != "exit_portal")
+                    .map(|(_, o)| o.collider.clone()),
+            )
+            .collect(),
+    );
+}
+#[inline]
+fn negative_skip_publish() -> bool {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    { crate::sim_maps::probe::negative_control() == Some("mover-skip-publish") }
+    #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+    { false }
 }
 #[derive(Clone)]
 pub struct School2 {
@@ -318,6 +584,8 @@ impl School2 {
                 name: name.into(),
                 prop,
                 scale,
+                collider_stale: false,
+                reach: None,
                 collider: shape.collider(map, base)?,
                 shape,
                 base,
@@ -912,6 +1180,15 @@ impl School2 {
         }
         p
     }
+    /// Host probe: tops of what moves now, to stand the player on.
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub fn moving_tops(&self) -> Vec<Vec3> {
+        self.objects.iter()
+            .filter(|o| o.enabled && !matches!(o.motion, Motion::Still))
+            .filter_map(|o| o.collider.probe_bounds())
+            .map(|(min, max)| vec3((min.x + max.x) * 0.5, (min.y + max.y) * 0.5, max.z))
+            .collect()
+    }
     pub fn colliders(&self) -> impl Iterator<Item = Collider> + '_ {
         self.objects
             .iter()
@@ -935,104 +1212,7 @@ impl School2 {
         player: &mut Player,
         fixed: &[Collider],
     ) -> Result<()> {
-        let mut remaining = dt.clamp(0., 0.1);
-        while remaining > 0.000001 {
-            let step = remaining.min(1. / 120.);
-            remaining -= step;
-            let mut done = std::collections::BTreeSet::new();
-            for i in 0..self.objects.len() {
-                if !done.insert(i) {
-                    continue;
-                }
-                let o = &self.objects[i];
-                if !o.enabled || matches!(o.motion, Motion::Still) {
-                    continue;
-                }
-                // A pendulum and its bound lamp are one rigid body, including when blocked.
-                let mut group = vec![i];
-                if let Some(number) = o.name.strip_prefix("gym_pend") {
-                    if let Some(j) = self
-                        .objects
-                        .iter()
-                        .position(|o| o.name == format!("gym_light{number}"))
-                    {
-                        group.push(j);
-                        done.insert(j);
-                    }
-                }
-                let time = o.time + step;
-                let proposed = group
-                    .iter()
-                    .map(|&j| {
-                        let o = &self.objects[j];
-                        let pose = o.sample(time);
-                        Ok((j, pose, o.shape.collider(map, pose)?))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                world.set_dynamic(
-                    fixed
-                        .iter()
-                        .cloned()
-                        .chain(
-                            self.objects
-                                .iter()
-                                .enumerate()
-                                .filter(|(j, o)| {
-                                    !group.contains(j) && o.enabled && o.name != "exit_portal"
-                                })
-                                .map(|(_, o)| o.collider.clone()),
-                        )
-                        .collect(),
-                );
-                let mut support = None;
-                let mut blocked = false;
-                for (j, pose, collider) in &proposed {
-                    let o = &self.objects[*j];
-                    let ground = o.collider.trace(
-                        player.feet + PLAYER_CENTER,
-                        player.feet + PLAYER_CENTER - Vec3::Z * 3.,
-                        PLAYER_HALF,
-                    );
-                    let riding = player.velocity.z <= 1.
-                        && !ground.start_solid
-                        && ground.fraction < 1.
-                        && ground.normal.z >= 0.65;
-                    if riding {
-                        let carried = pose.origin
-                            + pose.rotation
-                                * o.pose.rotation.inverse()
-                                * (player.feet - o.pose.origin);
-                        if let Some((feet, normal)) = collider.rider_feet(carried) {
-                            support = Some((feet, normal));
-                        } else {
-                            blocked = true;
-                        }
-                    }
-                }
-                let feet = support.map_or(player.feet, |s| s.0);
-                if let Some((feet, _)) = support {
-                    let sweep = world.body_trace(player.feet, feet);
-                    blocked |= sweep.start_solid || sweep.fraction < 1. || !world.body_clear(feet);
-                }
-                blocked |= proposed.iter().any(|(_, _, c)| {
-                    c.touches(feet + PLAYER_CENTER, feet + PLAYER_CENTER, PLAYER_HALF)
-                });
-                if blocked {
-                    continue;
-                }
-                for (j, pose, collider) in proposed {
-                    let o = &mut self.objects[j];
-                    o.pose = pose;
-                    o.time = time;
-                    o.collider = collider;
-                }
-                if let Some((feet, normal)) = support {
-                    player.feet = feet;
-                    player.grounded = true;
-                    player.ground_normal = normal;
-                }
-            }
-        }
+        advance_movers(&mut self.objects, dt, map, world, player, fixed)?;
         world.set_dynamic(fixed.iter().cloned().chain(self.colliders()).collect());
         self.advance_scene(dt, world, player)?;
         Ok(())
@@ -1591,4 +1771,116 @@ pub async fn check_render(assets: &mut Assets) -> Result<()> {
     }
     println!("PASS school-two visual fixtures rendered; inspect captures separately from traversal proof");
     Ok(())
+}
+
+#[cfg(test)]
+mod mover_tests {
+    use super::*;
+    /// A plate at z=0, 400 units wide, as a mesh shape.
+    fn plate(half: f32) -> Shape {
+        let c = [vec3(-half, -half, 0.), vec3(half, -half, 0.), vec3(half, half, 0.), vec3(-half, half, 0.)];
+        let triangles = vec![[c[0], c[1], c[2]], [c[0], c[2], c[3]]];
+        let template = std::sync::Arc::new(crate::collision::model_shape::Template::triangles(&triangles));
+        Shape::Mesh { triangles: std::sync::Arc::new(triangles), template }
+    }
+    fn object(name: &str, origin: Vec3, motion: Motion, half: f32, enabled: bool) -> Object {
+        let pose = Pose { origin, rotation: Quat::IDENTITY };
+        let shape = plate(half);
+        let map = crate::interaction::tests::fixture();
+        let collider = shape.collider(&map, pose).unwrap();
+        Object { name: name.into(), prop: None, scale: 1., shape, base: pose, pose, motion, time: 0., collider, enabled, collider_stale: false, reach: None }
+    }
+    /// A lift that goes up and down under the player, a pendulum with its bound lamp, a slamming
+    /// door and a slab the lift can crush the rider against, a portal and a disabled object that
+    /// never block.
+    fn scene() -> Vec<Object> {
+        let lift = Motion::Path { points: vec![vec3(0., 0., 0.), vec3(0., 0., -30.), vec3(0., 0., 0.), vec3(0., 0., 30.), vec3(0., 0., 90.)], period: 12., spin: false };
+        vec![
+            object("lift", Vec3::ZERO, lift, 64., true),
+            object("gym_pend1", vec3(300., 0., 0.), Motion::Pendulum { pivot: vec3(300., 0., 200.), roll: false, period: 3. }, 32., true),
+            object("gym_light1", vec3(300., 0., 40.), Motion::Pendulum { pivot: vec3(300., 0., 200.), roll: false, period: 3. }, 16., true),
+            object("slamming_door1", vec3(-300., 0., 0.), Motion::Slam { angle: 90., down: 0.5, up: 1.5 }, 32., true),
+            object("slab", vec3(0., 0., 130.), Motion::Still, 200., true),
+            object("exit_portal", vec3(0., 0., 30.), Motion::Still, 200., true),
+            object("hidden", vec3(0., 0., 20.), Motion::Still, 200., false),
+        ]
+    }
+    #[derive(PartialEq, Debug)]
+    struct Frame { objects: Vec<(Vec<u32>, u32, Vec<u32>)>, feet: [u32; 3], normal: [u32; 3], grounded: bool, sweeps: Vec<u32> }
+    fn replay(reuse: bool, dts: &[f32]) -> (Vec<Frame>, usize) {
+        crate::sim_maps::with_mover_advance_reuse(reuse, || {
+            let map = crate::interaction::tests::fixture();
+            let mut objects = scene();
+            let mut world = World::fixture(&[]);
+            world.dynamic_publications = Some(Vec::new());
+            let mut player = Player::new(vec3(0., 0., 1.));
+            player.grounded = true;
+            let fixed = [Collider::fixture(vec3(500., -8., -8.), vec3(516., 8., 8.))];
+            let mut frames = Vec::new();
+            for dt in dts {
+                advance_movers(&mut objects, *dt, &map, &mut world, &mut player, &fixed).unwrap();
+                // As School2::advance does next.
+                world.set_dynamic(fixed.iter().cloned().chain(objects.iter()
+                    .filter(|o| o.enabled && o.name != "exit_portal").map(|o| o.collider.clone())).collect());
+                let mut sweeps = Vec::new();
+                for d in [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
+                    let t = world.body_trace(player.feet, player.feet + d * 48.);
+                    sweeps.push(t.fraction.to_bits());
+                    sweeps.extend(t.normal.to_array().map(f32::to_bits));
+                    sweeps.push(u32::from(t.start_solid));
+                }
+                frames.push(Frame {
+                    objects: objects.iter().map(|o| (o.pose.origin.to_array().into_iter().chain(o.pose.rotation.to_array()).map(f32::to_bits).collect(),
+                        o.time.to_bits(), o.collider.geometry_bits())).collect(),
+                    feet: player.feet.to_array().map(f32::to_bits),
+                    normal: player.ground_normal.to_array().map(f32::to_bits),
+                    grounded: player.grounded, sweeps });
+            }
+            (frames, world.dynamic_publications.take().unwrap().len())
+        })
+    }
+    #[test]
+    fn reach_covers_the_collider_at_any_rotation() {
+        let shape = plate(64.);
+        let map = crate::interaction::tests::fixture();
+        let base = Pose { origin: vec3(10., -20., 5.), rotation: Quat::from_rotation_z(0.3) };
+        let reach = collider_reach(&shape.collider(&map, base).unwrap(), base.origin);
+        for i in 0..200 {
+            let a = i as f32 * 0.37;
+            let pose = Pose { origin: vec3(a * 30., -a * 11., a), rotation: Quat::from_euler(EulerRot::XYZ, a, a * 0.7, a * 1.3) };
+            let (min, max) = shape.collider(&map, pose).unwrap().probe_test_bounds();
+            for corner in [min, max, vec3(min.x, max.y, min.z), vec3(max.x, min.y, max.z)] {
+                assert!((corner - pose.origin).length() <= reach, "{corner} beyond {reach} from {}", pose.origin);
+            }
+        }
+        // No bounds, no claim: such a mover is never far.
+        assert_eq!(collider_reach(&Collider::from_test_hulls(), Vec3::ZERO), f32::INFINITY);
+    }
+    #[test]
+    fn publishing_only_for_a_rider_replays_every_mover_rider_and_collision_bit_for_bit() {
+        // Console-like, host-like and capped frame lengths, and a zero step.
+        let dts: Vec<f32> = (0..1200).map(|i| [0.065, 0.05, 1. / 120., 0.1, 0., 0.25][i % 6]).collect();
+        let (off, off_publications) = replay(false, &dts);
+        let (on, on_publications) = replay(true, &dts);
+        assert_eq!(off.len(), on.len());
+        for (i, (a, b)) in off.iter().zip(&on).enumerate() {
+            for (j, (x, y)) in a.objects.iter().zip(&b.objects).enumerate() {
+                assert_eq!(x.0, y.0, "frame {i} object {j} pose");
+                assert_eq!(x.1, y.1, "frame {i} object {j} time");
+                assert_eq!(x.2, y.2, "frame {i} object {j} collider");
+            }
+            assert_eq!((a.feet, a.normal, a.grounded), (b.feet, b.normal, b.grounded), "frame {i} player");
+            assert_eq!(a.sweeps, b.sweeps, "frame {i} sweeps");
+        }
+        // The scene carried the rider, and the rider was stopped at least once.
+        let z: Vec<f32> = on.iter().map(|f| f32::from_bits(f.feet[2])).collect();
+        assert!(z.iter().copied().fold(0., f32::max) > 30., "the lift never carried the player");
+        let lift_times: Vec<u32> = on.iter().map(|f| f.objects[0].1).collect();
+        assert!(lift_times.windows(7).any(|w| w.iter().all(|t| *t == w[0])), "nothing ever blocked the lift");
+        // Far from the rider, a brush-free scene's pendulum and door take the far path; the
+        // probe-only asserts in advance_movers_reuse check each such step against real colliders.
+        // The lever did what it is for.
+        assert!(on_publications * 2 < off_publications, "{on_publications} against {off_publications}");
+        println!("publications: {off_publications} off, {on_publications} on");
+    }
 }

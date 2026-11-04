@@ -2594,9 +2594,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let mover_dt = if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt };
                 interactions.companions_for_movers(&npcs.companions());
                 interactions.actors_for_movers(&npcs.targets());
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                if crate::sim_maps::probe::mover_replay_enabled() {
+                    if let Some(s) = &interactions.school2 { crate::sim_maps::probe::mover_ride(s.moving_tops(), &mut player); }
+                }
                 {
                     let _time = crate::sim_maps::timer("r26_movers_ns");
                     interactions.advance_school(mover_dt, &scene.map, &mut scene.world, &mut player)?;
+                }
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                if crate::sim_maps::probe::mover_replay_enabled() {
+                    crate::sim_maps::probe::record_movers(&interactions.transforms(), &scene.world, &player);
                 }
                 drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::PlayerMovement);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]

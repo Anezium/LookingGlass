@@ -124,6 +124,9 @@ pub struct Config {
     /// Attached emitters keep each birth's constants, and an Alpha set takes the raw quad path
     /// additive sets already use. Same quads, blend and order. Default off.
     pub fx_attached_persist: bool,
+    /// School two publishes the other movers' colliders only when a rider's body trace will read
+    /// them, and builds a mover's collider only when something can read it. Default off.
+    pub mover_advance_reuse: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -311,6 +314,7 @@ impl Default for Config {
             prop_occurrence_reuse: true,
             fx_observe_move: true,
             fx_attached_persist: false,
+            mover_advance_reuse: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
