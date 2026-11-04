@@ -489,6 +489,8 @@ impl Config {
         ensure!(!self.world_list_submit || (self.world_state_cache && self.world_view_reuse && self.world_parameter_reuse && self.uniform_field_cache && !self.world_static_merge && !self.world_binding_cache && !self.world_gl_state_cache),
             "world_list_submit requires world_state_cache, world_view_reuse, world_parameter_reuse and uniform_field_cache, and excludes world_static_merge, world_binding_cache and world_gl_state_cache");
         ensure!(!self.world_shared_buffers || !self.world_static_merge,"world_shared_buffers excludes world_static_merge: its packing replaces the merge's keys and loses merges");
+        ensure!(gxm::Mode::parse(&self.world_gxm).is_some(),"world_gxm must be off, shadow, live, proof, proof_control or proof_sabotage");
+        ensure!(self.world_gxm=="off" || self.world_list_submit,"world_gxm requires world_list_submit");
         ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
         for name in &self.gpu_mask { ensure!(crate::gpu_timing::mask_bit(name).is_some(),"unknown gpu_mask class {name}"); }
         if let Some(scenes)=self.rt_scenes { ensure!(scenes.iter().all(|&n|(1..=8).contains(&n)),"rt_scenes must be 1 to 8"); }
