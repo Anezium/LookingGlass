@@ -101,6 +101,9 @@
   "sim_hatter_door_candidates": true,
   "actor_publication_occurrences": true,
   "actor_deferred_layers": true,
+  "collision_sah": true,
+  "skin_actual_consumers": true,
+  "audio_static_cache": true,
   "actor_publication_uv_reuse": true,
   "prop_occurrence_reuse": true,
   "fx_observe_move": true

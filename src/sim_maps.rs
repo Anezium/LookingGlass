@@ -31,6 +31,17 @@ pub fn uncount(name: &'static str, n: u64) {
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let _ = (name, n);
 }
+/// Host-only elapsed time as a counter whose name ends in `_ns`. Nothing in a production build.
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+pub struct Timer(&'static str, std::time::Instant);
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+impl Drop for Timer { fn drop(&mut self) { probe::count(self.0, self.1.elapsed().as_nanos() as u64); } }
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+#[inline]
+pub fn timer(name: &'static str) -> Timer { Timer(name, std::time::Instant::now()) }
+#[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+#[inline(always)]
+pub fn timer(_: &'static str) {}
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
 pub mod probe;
 
@@ -145,6 +156,49 @@ pub(crate) fn with_fx_observe_move<T>(on: bool, run: impl FnOnce() -> T) -> T {
     impl Drop for Reset { fn drop(&mut self) { FX_OBSERVE_MOVE_TEST.with(|s| s.set(self.0)); } }
     let _reset = Reset(FX_OBSERVE_MOVE_TEST.with(|s| s.replace(Some(on))));
     run()
+}
+/// r26 CPU levers. Keep in step with Config and with tools/perf_contracts/host_flag_exact_cpu.py.
+#[cfg(test)]
+pub(crate) const R26_LEVERS: [&str; 2] = ["fx_attached_persist", "mover_advance_reuse"];
+#[cfg(test)]
+thread_local! { static MOVER_ADVANCE_REUSE_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn with_mover_advance_reuse<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset { fn drop(&mut self) { MOVER_ADVANCE_REUSE_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(MOVER_ADVANCE_REUSE_TEST.with(|s| s.replace(on)));
+    run()
+}
+/// The mover replay proof also checks each far step against the colliders it skipped.
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub fn mover_replay_checks() -> bool { probe::mover_replay_enabled() }
+#[cfg(test)]
+#[cfg(not(feature="sim_maps_probe"))]
+pub fn mover_replay_checks() -> bool { true }
+pub fn mover_advance_reuse() -> bool {
+    #[cfg(test)]
+    { MOVER_ADVANCE_REUSE_TEST.with(|s| s.get()) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().mover_advance_reuse }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
+#[cfg(test)]
+thread_local! { static FX_ATTACHED_PERSIST_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn with_fx_attached_persist<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset { fn drop(&mut self) { FX_ATTACHED_PERSIST_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(FX_ATTACHED_PERSIST_TEST.with(|s| s.replace(on)));
+    run()
+}
+pub fn fx_attached_persist() -> bool {
+    #[cfg(test)]
+    { FX_ATTACHED_PERSIST_TEST.with(|s| s.get()) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().fx_attached_persist }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
 }
 // Default on since r25, like Config. Tests: a scoped override, else the shipped default;
 // LOOKING_GLASS_TEST_FX_OBSERVE_MOVE=off runs the whole suite with the lever off.

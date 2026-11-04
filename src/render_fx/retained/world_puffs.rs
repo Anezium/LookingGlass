@@ -51,10 +51,12 @@ struct Batch {
     members: Vec<Source>,
     geometry: Rc<super::super::prepared::Geometry>,
     output: usize,
+    /// Quads last packed into `geometry` when its indices are exactly that many quads in order.
+    quad_members: usize,
 }
 impl Default for Batch {
     fn default() -> Self {
-        Self { members: Vec::new(), output: 0,
+        Self { members: Vec::new(), output: 0, quad_members: 0,
             geometry: Rc::new(super::super::prepared::Geometry::new(Mesh {
                 vertices: Vec::new(), indices: Vec::new(), texture: None })) }
     }
@@ -72,8 +74,25 @@ impl Bank {
     fn plan(&mut self, groups: &[super::super::Group], puffs: &[Puff], list: &[(f32, Source)], material: bool) {
         self.live = 0;
         self.candidates.clear(); self.kept.clear();
+        // puff_key depends only on the texture and the blend, and a run shares both.
+        let reuse_key = crate::sim_maps::fx_attached_persist();
+        let mut last_puff: Option<(Option<macroquad::miniquad::TextureId>, Blend, PacketKey)> = None;
         for &(depth, source) in list {
-            let Some((key, vc, ic)) = meta(source, groups, puffs) else {
+            let puff_meta = match source {
+                Source::Puff(id) if reuse_key => {
+                    let p = &puffs[id];
+                    let texture = p.texture.as_ref().map(Texture2D::raw_miniquad_id);
+                    let hit = last_puff.as_ref().filter(|l| l.0 == texture && l.1 == p.blend).map(|l| l.2.clone());
+                    let key = hit.unwrap_or_else(|| {
+                        let key = puff_key(p);
+                        last_puff = Some((texture, p.blend, key.clone()));
+                        key
+                    });
+                    Some((key, 4, 6))
+                }
+                _ => meta(source, groups, puffs),
+            };
+            let Some((key, vc, ic)) = puff_meta else {
                 self.candidates.clear(); self.kept.push((depth, source, None)); continue;
             };
             if !material && self.candidates.len() > 1 {
@@ -95,15 +114,26 @@ impl Bank {
         }
     }
     fn pack(batch: &mut Batch, groups: &[super::super::Group], puffs: &[Puff]) -> Rc<super::super::prepared::Geometry> {
-        if Rc::get_mut(&mut batch.geometry).is_none() { batch.geometry = Batch::default().geometry; }
+        if Rc::get_mut(&mut batch.geometry).is_none() {
+            batch.geometry = Batch::default().geometry;
+            batch.quad_members = 0;
+        }
         let g = Rc::get_mut(&mut batch.geometry).unwrap();
         let mut vb = 0; let mut ib = 0;
         let mut same_vertices = true; let mut same_indices = true;
+        let persist = crate::sim_maps::fx_attached_persist();
+        let all_quads = batch.members.iter().all(|s| matches!(s, Source::Puff(_)));
+        // The same number of raw quads as last time: the index arrays are equal by construction.
+        let known_indices = persist && all_quads && batch.quad_members == batch.members.len();
         for &source in &batch.members {
             let v = vertices(source, groups, puffs); let i = indices(source, groups);
-            same_vertices &= g.vertices.get(vb..vb+v.len()).is_some_and(|old| vertices_equal(old, v));
-            same_indices &= g.indices.get(ib..ib+i.len()).is_some_and(|old|
-                old.iter().zip(i).all(|(&a,&b)| a as usize == b as usize + vb));
+            if !persist || same_vertices {
+                same_vertices &= g.vertices.get(vb..vb+v.len()).is_some_and(|old| vertices_equal(old, v));
+            }
+            if !known_indices && (!persist || same_indices) {
+                same_indices &= g.indices.get(ib..ib+i.len()).is_some_and(|old|
+                    old.iter().zip(i).all(|(&a,&b)| a as usize == b as usize + vb));
+            }
             vb += v.len(); ib += i.len();
         }
         same_vertices &= g.vertices.len() == vb;
@@ -124,6 +154,7 @@ impl Bank {
             *g = super::super::prepared::Geometry::merged(mesh, Some(old), same_indices);
             if same_vertices { g.version.vertices = old.vertices; }
         }
+        batch.quad_members = if all_quads { batch.members.len() } else { 0 };
         batch.geometry.clone()
     }
     pub(super) fn build(&mut self, groups: &mut Vec<super::super::Group>, puffs: &[Puff], list: &mut Vec<(f32, Source)>, material: bool) {
@@ -250,6 +281,104 @@ mod tests {
                 assert!(batch.geometry.indices.iter().all(|&i|(i as usize)<batch.geometry.vertices.len()));
             }
         }}
+    }
+    #[derive(Debug, PartialEq)]
+    struct Packed { draws: Vec<Draw>, vertices_new: Vec<bool>, topology_new: Vec<bool> }
+    /// The bank on a script of frames: moving quads, repeats, count changes, mixed material
+    /// runs, and a held publication. Everything the lever may not change is returned.
+    fn bank_script(persist: bool) -> Vec<Packed> {
+        crate::sim_maps::with_fx_attached_persist(persist, || {
+            let mut bank = Bank::default();
+            let mut groups = Vec::new();
+            let mut previous: Vec<(u64, u64)> = Vec::new();
+            let mut held = None;
+            let mut out = Vec::new();
+            for frame in 0..24usize {
+                let count = [40, 40, 40, 41, 41, 12, 12, 40][frame % 8];
+                let moving = frame % 5 != 1 && frame % 5 != 2;
+                let mut puffs = (0..count).map(|i| {
+                    let run = i / 7 % 3;
+                    let mut p = puff(i + if moving { frame * 1000 } else { 0 }, if run == 1 { Blend::Add } else { Blend::Alpha });
+                    p.before_group = 0;
+                    p
+                }).collect::<Vec<_>>();
+                // One late member changes in a frame that otherwise repeats the last.
+                if frame == 12 { puffs[3].vertices[2].color[1] = 9; }
+                let mut list = (0..count).map(|i| ((count - i) as f32, Source::Puff(i))).collect::<Vec<_>>();
+                bank.build(&mut groups, &puffs, &mut list, true);
+                let draws = snapshot(&groups, &list);
+                let versions = bank.batches[..bank.live].iter().map(|b| (b.geometry.version.vertices, b.geometry.version.topology)).collect::<Vec<_>>();
+                let vertices_new = versions.iter().enumerate().map(|(i, v)| previous.get(i).is_none_or(|p| p.0 != v.0)).collect();
+                let topology_new = versions.iter().enumerate().map(|(i, v)| previous.get(i).is_none_or(|p| p.1 != v.1)).collect();
+                previous = versions;
+                if frame == 9 { held = Some(bank.batches[0].geometry.clone()); }
+                if frame == 11 { held = None; }
+                for b in &bank.batches[..bank.live] { assert!(b.geometry.indices.chunks(6).enumerate().all(|(q, c)|
+                    c == [0, 1, 2, 0, 2, 3].map(|i| i + q as u16 * 4))); }
+                out.push(Packed { draws, vertices_new, topology_new });
+                recycle(&mut groups);
+            }
+            drop(held);
+            out
+        })
+    }
+    #[test]
+    fn persisted_bank_packs_the_same_bytes_with_the_same_generations() {
+        let _frame = frame();
+        let (off, on) = (bank_script(false), bank_script(true));
+        assert_eq!(off, on);
+        // The script reached the cases the lever skips work in, and the others.
+        assert!(on.iter().flat_map(|p| &p.topology_new).any(|new| *new));
+        assert!(on.iter().flat_map(|p| &p.topology_new).any(|new| !*new));
+        assert!(on.iter().flat_map(|p| &p.vertices_new).any(|new| !*new));
+    }
+    /// Two raw quads, then one effect packet of the same length with other indices, then back.
+    fn bank_mixed_script(persist: bool) -> Vec<Vec<Draw>> {
+        crate::sim_maps::with_fx_attached_persist(persist, || {
+            let mut bank = Bank::default();
+            let mut groups = Vec::new();
+            let mut out = Vec::new();
+            for frame in 0..6 {
+                let puffs = if frame % 3 == 1 { Vec::new() } else { vec![puff(1, Blend::Alpha), puff(2, Blend::Alpha)] };
+                let mut list: Vec<(f32, Source)> = puffs.iter().enumerate().map(|(i, _)| (2. - i as f32, Source::Puff(i))).collect();
+                if frame % 3 == 1 {
+                    let mut effect = pass_for(&puff(1, Blend::Alpha), true, false);
+                    effect.mesh.vertices.extend(puff(2, Blend::Alpha).vertices);
+                    effect.mesh.indices = vec![0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 3, 2];
+                    groups.push(super::super::super::Group { passes: vec![effect], transparent: true });
+                    groups.push(super::super::super::Group { passes: vec![pass_for(&puff(3, Blend::Alpha), true, false)], transparent: true });
+                    list = vec![(2., Source::Actor(0)), (1., Source::Actor(1))];
+                }
+                bank.build(&mut groups, &puffs, &mut list, true);
+                out.push(snapshot(&groups, &list));
+                recycle(&mut groups);
+            }
+            out
+        })
+    }
+    #[test]
+    fn persisted_bank_compares_indices_when_a_member_is_not_a_raw_quad() {
+        let _frame = frame();
+        assert_eq!(bank_mixed_script(false), bank_mixed_script(true));
+    }
+    #[test]
+    fn a_whole_set_registers_like_one_quad_at_a_time_up_to_the_vertex_limit() {
+        let quads = (0..6).map(|i| puff(i, if i % 2 == 0 { Blend::Alpha } else { Blend::Add })).collect::<Vec<_>>();
+        let run = |whole: bool| {
+            let _frame = frame();
+            super::super::super::test_support::set_frame_vertices(super::super::super::test_support::MAX - 12);
+            if whole {
+                super::super::super::world_puff_quads(quads.iter().map(|q| (&q.vertices, None, q.blend)));
+            } else {
+                for q in &quads { super::super::super::world_puff_quad(q.vertices, None, q.blend); }
+            }
+            FRAME.with(|f| { let f = f.borrow();
+                (f.vertices, f.dropped, f.world_puffs.iter().map(|p| (p.before_group, p.blend,
+                    p.vertices.iter().map(|v| v.position.to_array().map(f32::to_bits)).collect::<Vec<_>>())).collect::<Vec<_>>()) })
+        };
+        let (one, whole) = (run(false), run(true));
+        assert_eq!(one, whole);
+        assert_eq!((whole.1, whole.2.len()), (3, 3));
     }
     #[test]
     fn direct_puff_key_matches_existing_pass_metadata() {

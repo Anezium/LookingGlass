@@ -121,6 +121,12 @@ pub struct Config {
     /// copying it. Exact on the host oracle. Default on since r25
     /// (console ABBA: wchess2 -2.51/-1.96, skool2 -1.32/-1.66 ms).
     pub fx_observe_move: bool,
+    /// Attached emitters keep each birth's constants, and an Alpha set takes the raw quad path
+    /// additive sets already use. Same quads, blend and order. Default off.
+    pub fx_attached_persist: bool,
+    /// School two publishes the other movers' colliders only when a rider's body trace will read
+    /// them, and builds a mover's collider only when something can read it. Default off.
+    pub mover_advance_reuse: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -307,6 +313,8 @@ impl Default for Config {
             actor_publication_uv_reuse: true,
             prop_occurrence_reuse: true,
             fx_observe_move: true,
+            fx_attached_persist: false,
+            mover_advance_reuse: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -2454,6 +2462,23 @@ mod tests {
         }
     }
     #[test]
+    fn r26_levers_default_off_require_a_boolean_and_are_printed() {
+        for key in crate::sim_maps::R26_LEVERS {
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            assert_eq!(defaults[key], false, "{key}");
+            let on: Config = serde_json::from_value(serde_json::json!({key: true})).unwrap();
+            on.validate().unwrap();
+            assert_eq!(serde_json::to_value(&on).unwrap()[key], true, "{key}");
+            for c in [&on, &Config::default()] {
+                let line = &config_log_lines(c)[0];
+                assert!(line.contains(&format!("\"{key}\":")), "{key} missing from the printed record");
+            }
+            for bad in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
+                assert!(serde_json::from_value::<Config>(serde_json::json!({key: bad})).is_err(), "{key}");
+            }
+        }
+    }
+    #[test]
     fn audio_static_cache_is_opt_in() {
         assert!(!Config::default().audio_static_cache);
         assert!(serde_json::from_str::<Config>(r#"{"audio_static_cache":true}"#).unwrap().audio_static_cache);
@@ -2553,7 +2578,18 @@ mod tests {
             assert_eq!(off[key], false, "{key} off");
             assert_eq!(serde_json::to_value(Config::default()).unwrap()[key], true, "{key} shipped default");
         }
-        assert_eq!(on, r22, "r25 human is r22 human plus the three levers");
+        // What the console ABBAs measured, minus the diagnostic exports: profile_capture stays
+        // off and profiler stays light, because the human session writes no diagnostic exports.
+        const MEASURED: [&str; 3] = ["collision_sah", "skin_actual_consumers", "audio_static_cache"];
+        let mut r22_plus = r22.clone();
+        for key in MEASURED {
+            assert_eq!(on[key], true, "{key} on");
+            assert_eq!(off[key], true, "{key} is not a lever: on in both arms");
+            r22_plus[key] = serde_json::json!(true);
+        }
+        assert_eq!(on, r22_plus, "r25 human is r22 human plus the three levers and the three measured keys");
+        assert_eq!(on["profile_capture"], false);
+        assert_eq!(on["profiler"], "light");
         assert!(on["log_frame_time_every"].as_u64().unwrap_or(0) == 0, "human play runs without the frame-time log");
         assert_eq!(measure["log_frame_time_every"], 10);
         measure["log_frame_time_every"] = on["log_frame_time_every"].clone();

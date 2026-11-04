@@ -1098,6 +1098,27 @@ pub(crate) fn finish(
 ) -> (usize, usize) {
     finish_world(gpu, world, flush, &mut draw_world, None)
 }
+/// Host probe: what reaches the joint list, and how many quads cannot touch the view.
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+fn funnel_before_bank(groups: &[super::Group], puffs: &[world_puffs::Puff]) {
+    let matrix = FRAME.with(|f| f.borrow().projection).unwrap_or(Mat4::IDENTITY);
+    let outside = |quad: &[Vertex]| {
+        let clip: Vec<Vec4> = quad.iter().map(|v| matrix * v.position.extend(1.)).collect();
+        clip.iter().all(|c| c.x > c.w) || clip.iter().all(|c| c.x < -c.w) || clip.iter().all(|c| c.y > c.w)
+            || clip.iter().all(|c| c.y < -c.w) || clip.iter().all(|c| c.z > c.w) || clip.iter().all(|c| c.z < -c.w)
+    };
+    let mut quads = (0u64, 0u64);
+    for g in groups {
+        if g.transparent && g.passes.len() == 1 && g.passes[0].effect && g.passes[0].geometry().vertices.len() == 4 {
+            quads.0 += 1;
+            quads.1 += u64::from(outside(&g.passes[0].geometry().vertices));
+        }
+    }
+    crate::sim_maps::count("fx_funnel_joint_publication_quads", quads.0);
+    crate::sim_maps::count("fx_funnel_joint_publication_outside_view", quads.1);
+    crate::sim_maps::count("fx_funnel_joint_raw_quads", puffs.len() as u64);
+    crate::sim_maps::count("fx_funnel_joint_raw_outside_view", puffs.iter().filter(|p| outside(&p.vertices)).count() as u64);
+}
 pub(crate) fn finish_world(
     gpu: &mut Gpu, world: &[(f32, usize)], flush: bool, mut draw_world: impl FnMut(usize),
     world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
@@ -1134,9 +1155,13 @@ pub(crate) fn finish_world(
     let preparation_started = MetricInstant::now();
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let preparation_span = crate::frame_profile::span("fx_finish_prepare");
+    let finish_time = crate::sim_maps::timer("r26_finish_ns");
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    funnel_before_bank(&groups, &puffs);
     let mut list = {
         let _span = crate::frame_profile::span("vita_joint_alpha_sort");
         let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishSort);
+        let list_time = crate::sim_maps::timer("r26_joint_list_ns");
         let mut list = std::mem::take(&mut gpu.alpha_storage); list.clear();
         list.extend(world.iter().map(|&(d,id)| (d,Source::World(id))));
         let mut next_puff = 0;
@@ -1147,19 +1172,30 @@ pub(crate) fn finish_world(
             }
             if let Some(g) = groups.get(id).filter(|g| g.transparent &&
                 g.passes.first().is_some_and(|p| !p.geometry().vertices.is_empty())) {
+                crate::sim_maps::count("joint_center_group_scans", 1);
+                crate::sim_maps::count("joint_center_group_vertices", g.passes[0].geometry().vertices.len() as u64);
                 list.push(((center(g.passes[0].geometry()) - camera).dot(direction), Source::Actor(id)));
             }
         }
         debug_assert_eq!(next_puff, puffs.len());
+        drop(list_time);
+        let _sort_time = crate::sim_maps::timer("r26_joint_sort_ns");
         order(list, crate::render::vita_renderer::config().sort_alpha)
     };
     let merge_leaf=crate::phase_census::span(crate::phase_census::Region::FinishMergePack);
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if crate::sim_maps::fx_attached_persist() && crate::sim_maps::probe::negative_control() == Some("persist-quad-order") {
+        let puff_slots: Vec<usize> = list.iter().enumerate().filter(|(_, e)| matches!(e.1, Source::Puff(_))).map(|(i, _)| i).collect();
+        if let [.., a, b] = puff_slots[..] { list.swap(a, b); }
+    }
+    let bank_time = crate::sim_maps::timer("r26_bank_ns");
     if !puffs.is_empty() {
         let _puff_leaf=crate::phase_census::span(crate::phase_census::Region::MergePuffBuild);
         crate::phase_census::path_count(crate::phase_census::Counter::MergePuffs, puffs.len() as u64);
         gpu.puff_batches[gpu.ring_phase].build(&mut groups, &puffs, &mut list,
             crate::render::vita_renderer::config().fx_batching == "material");
     }
+    drop(bank_time);
     count("vita_fx_particle_input_groups", groups.iter()
         .filter(|g| !g.passes.is_empty() && g.passes.iter().all(|p| p.effect)).count() as u64);
     let mut recycled = std::mem::take(&mut gpu.recycle_storage); recycled.clear();
@@ -1305,7 +1341,15 @@ pub(crate) fn finish_world(
                     world_ns += world_started.elapsed().as_nanos() as u64;
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
                 },
-                Source::Actor(id) => draw_group(gpu, id),
+                Source::Actor(id) => {
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    if groups[id].passes.iter().all(|p| p.effect) {
+                        crate::sim_maps::count("fx_funnel_submit_draws", groups[id].passes.len() as u64);
+                        crate::sim_maps::count("fx_funnel_submit_quads", groups[id].passes.iter()
+                            .map(|p| p.geometry().indices.len() as u64 / 6).sum());
+                    }
+                    draw_group(gpu, id)
+                }
                 Source::Puff(_) => unreachable!("unpublished world puff"),
             }
         }
@@ -1352,6 +1396,7 @@ pub(crate) fn finish_world(
         crate::light_profile::RenderMetrics { cpu_ns: (finish_started.elapsed().as_nanos() as u64)
             .saturating_sub(world_ns + submit_ns), ..Default::default() });
     gpu.stats.report();
+    drop(finish_time);
     let list_len = list.len(); list.clear(); gpu.alpha_storage = list;
     recycled.clear(); gpu.recycle_storage = recycled;
     FRAME.with(|f| {
