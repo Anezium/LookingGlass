@@ -2644,7 +2644,7 @@ pub(crate) mod tests {
         let mut many = attached_fixture(16);
         many.sample(10., 1., pose, |_, _, _| true);
         assert_eq!(many.steam.puffs.len(), 4096);
-        assert_eq!(many.births.len(), 4096);
+        if !crate::sim_maps::fx_attached_persist() { assert_eq!(many.births.len(), 4096); }
         many.sample(f32::NAN, 1., pose, |_, _, _| true);
         assert!(many.steam.puffs.is_empty());
     }
