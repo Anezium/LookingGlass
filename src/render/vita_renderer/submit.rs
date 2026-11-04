@@ -82,6 +82,15 @@ pub(super) fn merge(draws: &mut Vec<Prepared>, groups: &[Group], parameters: &[P
     let mut previous_rect=None;
     for read in 0..draws.len() {
         let next=&draws[read]; let g=&groups[next.group];
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if write>0 {
+            let previous=&draws[write-1]; let p=&groups[previous.group];
+            let state=previous.texture==next.texture && same_uniforms(previous, next, p.parameter, g.parameter, parameters);
+            crate::sim_maps::count("world_merge_pairs", 1);
+            crate::sim_maps::count("world_merge_pairs_same_texture", u64::from(previous.texture==next.texture));
+            crate::sim_maps::count("world_merge_pairs_same_state", u64::from(state));
+            crate::sim_maps::count("world_merge_pairs_same_state_contiguous", u64::from(state && p.bindings.index_buffer==g.bindings.index_buffer && p.base_element+previous.indices==g.base_element));
+        }
         let candidate=write>0 && {
             let previous=&draws[write-1]; let p=&groups[previous.group];
             static_opaque(&g.recipe) && static_opaque(&p.recipe)
@@ -100,6 +109,7 @@ pub(super) fn merge(draws: &mut Vec<Prepared>, groups: &[Group], parameters: &[P
             previous_rect.or_else(||projected(&groups[draws[write-1].group],projection))
                 .zip(projected(g,projection)).and_then(|(a,b)|join_disjoint(a,b))
         } else {None};
+        crate::sim_maps::count("world_merge_candidates", u64::from(candidate));
         if let Some(rect)=joined {
             draws[write-1].indices+=draws[read].indices; previous_rect=Some(rect);
         } else { if write != read { draws.swap(write,read); } write+=1; previous_rect=None; }
