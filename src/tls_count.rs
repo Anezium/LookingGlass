@@ -443,6 +443,18 @@ mod tests {
         nodes
     }
     #[test]
+    fn counting_leaves_the_fast_bits_alone() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        MODE.fetch_or(FastMode::Shadow.bits(), Relaxed);
+        set_counting(true);
+        assert!(counting());
+        assert_eq!(MODE.load(Relaxed), COUNT | FastMode::Shadow.bits());
+        set_counting(false);
+        assert!(!counting());
+        assert_eq!(MODE.load(Relaxed), FastMode::Shadow.bits());
+        MODE.store(0, Relaxed);
+    }
+    #[test]
     fn fast_mode_names_and_bits() {
         for (name, mode) in [("off", FastMode::Off), ("on", FastMode::On), ("shadow", FastMode::Shadow), ("shadow_sabotage", FastMode::ShadowSabotage)] {
             assert_eq!(FastMode::parse(name), Some(mode));
