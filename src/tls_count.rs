@@ -284,9 +284,10 @@ mod vita {
         }
         unsafe { __real_pthread_getspecific(key) }
     }
-    /// Past the off path, so the off path needs no stack and matches the wrapper as it was.
+    /// Past the off path, so the off path needs no stack and matches the wrapper as it was. extern "C"
+    /// because it cannot unwind: a Rust call could, and the caller would then keep a frame to abort from.
     #[inline(never)]
-    unsafe fn active(key: *const core::ffi::c_void, pc: usize) -> *mut core::ffi::c_void {
+    unsafe extern "C" fn active(key: *const core::ffi::c_void, pc: usize) -> *mut core::ffi::c_void {
         let mode = MODE.load(Relaxed);
         if mode & COUNT != 0 { return unsafe { counted(key, pc) }; }
         let sp: usize;
