@@ -2724,10 +2724,14 @@ impl Npcs {
                 let _prepare = profile::controller(profile::Kind::Prepare, &world.npc_profile, false);
                 actors.copy_dynamic_from(world);
             }
-            let result = actors.with_npc_queries(|| self.update_cast(dt, &actors, eye));
+            let result = {
+                let _sweep_memo = actors.sweep_memo_scope();
+                actors.with_npc_queries(|| self.update_cast(dt, &actors, eye))
+            };
             self.actor_world = Some(actors);
             result
         } else {
+            let _sweep_memo = world.sweep_memo_scope();
             world.with_npc_queries(|| self.update_cast(dt, world, eye))
         }
     }

@@ -3,7 +3,6 @@
 #[macro_use]
 mod logging;
 mod allocation_census;
-#[cfg(any(target_os="vita", test))]
 mod r13_survey;
 mod tls_count;
 mod gpu_timing;
@@ -221,6 +220,7 @@ fn app_main() {
     #[cfg(feature = "vita_renderer")]
     {
         let c = render::vita_renderer::config();
+        tls_count::start_fast(tls_count::FastMode::parse(&c.tls_fast).unwrap_or(tls_count::FastMode::Off));
         #[cfg(target_os="vita")]
         light_profile::set_mode(frame_profile::Mode::read());
         character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench, c.skin_overlap);

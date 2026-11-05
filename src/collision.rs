@@ -606,6 +606,7 @@ pub struct World {
     query_cache: std::cell::RefCell<std::collections::HashMap<[u32; 9], Trace>>,
     query_cache_active: std::cell::Cell<bool>,
     sight_memo: std::cell::RefCell<SightMemo>,
+    sweep_memo: std::cell::RefCell<SweepMemo>,
     pub traversal: crate::traversal::Traversal,
     dynamic: Vec<Collider>,
     dynamic_bounds: Option<Bounds>,
@@ -632,6 +633,24 @@ pub struct World {
 /// shared borrow of its World, so no geometry can be published while entries
 /// exist; they are cleared on exit and by every solid mutation. The capacity is
 /// reserved once and kept, so steady-state frames do not allocate.
+/// A power of two. Direct mapped: a collision replaces the older entry and only costs a miss.
+const SWEEP_MEMO_SLOTS: usize = 128;
+#[derive(Clone, Copy, Debug)]
+struct SweepMemoEntry { generation: u32, key: [u32; 9], trace: Trace }
+/// `sweep` answers inside one scope. Starting a scope bumps `generation`, which forgets every entry
+/// without touching the table, so a scope with few queries pays for few entries.
+#[derive(Debug, Default)]
+struct SweepMemo { active: bool, generation: u32, slots: Vec<SweepMemoEntry>, #[cfg(test)] hits: u64, #[cfg(test)] misses: u64 }
+fn sweep_memo_slot(key: &[u32; 9]) -> usize {
+    let mut hash = 0u32;
+    for &word in key { hash = (hash ^ word).wrapping_mul(0x9E37_79B1).rotate_left(5); }
+    hash.wrapping_mul(0x9E37_79B1) as usize >> (32 - SWEEP_MEMO_SLOTS.trailing_zeros())
+}
+/// Holds the world borrowed while its entries live. Dropping it closes the scope.
+pub(crate) struct SweepMemoScope<'a>(Option<&'a World>);
+impl Drop for SweepMemoScope<'_> {
+    fn drop(&mut self) { if let Some(world) = self.0 { world.sweep_memo.borrow_mut().active = false; } }
+}
 const SIGHT_MEMO_ENTRIES: usize = 32;
 #[derive(Debug, Default)]
 struct SightMemo {
@@ -752,6 +771,59 @@ impl World {
         // mutation can never leave an entry behind, whatever the call order.
         self.sight_memo.get_mut().entries.clear();
     }
+    /// Inside the returned scope, `sweep` answers a bit-identical repeat from the first answer
+    /// when `sim_sweep_memo` is on. The scope borrows `self`, so what `sweep` reads (static, settled,
+    /// dynamic, weapon obstacles) cannot change while it lives: all of that is private and written
+    /// through `&mut self`. A nested scope shares the outer one. The trace depends on nothing else,
+    /// and sweeping leaves nothing behind but counters. A guard ticking at 120 Hz asks the same
+    /// gravity question up to six times in a 50 ms frame.
+    pub(crate) fn sweep_memo_scope(&self) -> SweepMemoScope<'_> {
+        if !crate::sim_maps::sweep_memo() { return SweepMemoScope(None); }
+        let mut memo = self.sweep_memo.borrow_mut();
+        if memo.active { return SweepMemoScope(None); }
+        memo.active = true;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::sim_maps::probe::negative_control() == Some("sweep-memo-keep") { return SweepMemoScope(Some(self)); }
+        memo.generation = memo.generation.wrapping_add(1);
+        // Entries of the last wrap would read as current, and generation zero is what a new slot holds.
+        if memo.generation == 0 { memo.slots.clear(); memo.generation = 1; }
+        SweepMemoScope(Some(self))
+    }
+    fn sweep_memoized(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        #[cfg_attr(not(all(feature="sim_maps_probe",not(target_os="vita"))), allow(unused_mut))]
+        let mut key = Self::query_key(start, end, half);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::sim_maps::probe::negative_control() == Some("sweep-memo-start-only") { key[3..].fill(0); }
+        let slot = sweep_memo_slot(&key);
+        {
+            #[cfg_attr(not(test), allow(unused_mut))]
+            let mut memo = self.sweep_memo.borrow_mut();
+            if let Some(entry) = memo.slots.get(slot).copied() {
+                if entry.generation == memo.generation && entry.key == key {
+                    #[cfg(test)]
+                    { memo.hits += 1; }
+                    crate::sim_maps::count("sweep_memo_hits", 1);
+                    return entry.trace;
+                }
+            }
+        }
+        crate::sim_maps::count("sweep_memo_misses", 1);
+        let trace = self.sweep_except(start, end, half, None);
+        let mut memo = self.sweep_memo.borrow_mut();
+        #[cfg(test)]
+        { memo.misses += 1; }
+        if memo.slots.is_empty() {
+            memo.slots.resize(SWEEP_MEMO_SLOTS, SweepMemoEntry { generation: 0, key: [0; 9], trace: Trace::default() });
+        }
+        let generation = memo.generation;
+        memo.slots[slot] = SweepMemoEntry { generation, key, trace };
+        trace
+    }
+    #[cfg(test)]
+    pub(crate) fn sweep_memo_counts(&self) -> (bool, u64, u64) {
+        let memo = self.sweep_memo.borrow();
+        (memo.active, memo.hits, memo.misses)
+    }
     /// Run `run` with exact sight-trace reuse when `sim_sight_query_reuse` is on.
     /// `&self` is borrowed for the whole call, so the solid geometry that
     /// `sweep` reads (static, settled, dynamic, weapon obstacles) cannot change
@@ -867,6 +939,7 @@ impl World {
             query_cache: std::cell::RefCell::default(),
             query_cache_active: std::cell::Cell::new(false),
             sight_memo: std::cell::RefCell::default(),
+            sweep_memo: std::cell::RefCell::default(),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
@@ -1023,6 +1096,7 @@ impl World {
             query_cache: std::cell::RefCell::default(),
             query_cache_active: std::cell::Cell::new(false),
             sight_memo: std::cell::RefCell::default(),
+            sweep_memo: std::cell::RefCell::default(),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
@@ -1073,6 +1147,7 @@ impl World {
         {
             add_counter(Counter::SweepCalls, 1);
         }
+        if self.sweep_memo.borrow().active { return self.sweep_memoized(start, end, half); }
         self.sweep_except(start, end, half, None)
     }
     /// Damage traces may contact a destructible obstacle itself, but must still
@@ -1462,6 +1537,7 @@ impl World {
             query_cache: std::cell::RefCell::default(),
             query_cache_active: std::cell::Cell::new(false),
             sight_memo: std::cell::RefCell::default(),
+            sweep_memo: std::cell::RefCell::default(),
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
@@ -1961,6 +2037,121 @@ mod sight_reuse_tests {
                 for _ in 0..3 { world.sight_sweep(Vec3::ZERO, Vec3::X * 100., HALF_SIGHT); }
                 assert_eq!(world.sight_memo_state(), (false, 0, 0));
             });
+        });
+    }
+    fn memo_world() -> World {
+        let mut world = World::fixture(&[(vec3(60., -10., -10.), vec3(70., 10., 10.))]);
+        world.set_dynamic(vec![Collider::fixture(vec3(20., 5., -10.), vec3(30., 15., 10.))]);
+        world
+    }
+    #[test]
+    fn sweep_memo_is_off_by_default_and_never_opens() {
+        let world = memo_world();
+        assert!(!crate::sim_maps::sweep_memo() || std::env::var_os("LOOKING_GLASS_TEST_SWEEP_MEMO").is_some());
+        crate::sim_maps::with_sweep_memo(false, || {
+            let _scope = world.sweep_memo_scope();
+            for _ in 0..3 { world.sweep(Vec3::ZERO, Vec3::X * 100., HALF_SIGHT); }
+            assert_eq!(world.sweep_memo_counts(), (false, 0, 0));
+        });
+    }
+    #[test]
+    fn sweep_memo_repeats_are_bit_identical_and_keys_are_exact_bits() {
+        crate::sim_maps::with_sweep_memo(true, || {
+            let world = memo_world();
+            let (start, end) = (Vec3::ZERO, Vec3::X * 100.);
+            let expected = bits(world.sweep(start, end, HALF_SIGHT));
+            assert_eq!(world.sweep_memo_counts(), (false, 0, 0), "no scope, no memo");
+            let different = [
+                (vec3(-0., 0., 0.), end, HALF_SIGHT),
+                (start, vec3(f32::from_bits(100f32.to_bits() + 1), 0., 0.), HALF_SIGHT),
+                (start, end, Vec3::splat(0.25)),
+                (start, Vec3::Y * 100., HALF_SIGHT),
+            ];
+            {
+                let _scope = world.sweep_memo_scope();
+                for _ in 0..6 { assert_eq!(bits(world.sweep(start, end, HALF_SIGHT)), expected); }
+                assert_eq!(world.sweep_memo_counts(), (true, 5, 1));
+                // A one-ulp end, -0.0 and a different extent are different questions.
+                for (a, b, h) in different {
+                    let plain = bits(world.sweep_except(a, b, h, None));
+                    assert_eq!(bits(world.sweep(a, b, h)), plain);
+                }
+                assert_eq!(world.sweep_memo_counts(), (true, 5, 5));
+            }
+            assert_eq!(world.sweep_memo_counts(), (false, 5, 5));
+            assert_eq!(bits(world.sweep(start, end, HALF_SIGHT)), expected);
+            assert_eq!(world.sweep_memo_counts(), (false, 5, 5), "closed again");
+        });
+    }
+    #[test]
+    fn sweep_memo_forgets_between_scopes_and_after_every_mutation() {
+        crate::sim_maps::with_sweep_memo(true, || {
+            let mut world = World::fixture(&[]);
+            let (start, end) = (Vec3::ZERO, Vec3::X * 100.);
+            let probe = |w: &World| {
+                let _scope = w.sweep_memo_scope();
+                let first = bits(w.sweep(start, end, HALF_SIGHT));
+                assert_eq!(bits(w.sweep(start, end, HALF_SIGHT)), first);
+                first
+            };
+            let open = probe(&world);
+            let (_, hits, misses) = world.sweep_memo_counts();
+            assert_eq!(probe(&world), open);
+            assert_eq!(world.sweep_memo_counts(), (false, hits + 1, misses + 1), "a new scope starts empty");
+            let check = |w: &World, blocked: bool| {
+                let got = probe(w);
+                let plain = bits(w.sweep_except(start, end, HALF_SIGHT, None));
+                assert_eq!(got, plain);
+                assert_eq!(got != open, blocked);
+            };
+            world.set_dynamic(vec![wall()]); check(&world, true);
+            world.set_dynamic(vec![]); check(&world, false);
+            world.set_settled_supports(vec![wall()]); check(&world, true);
+            world.set_settled_supports(vec![]); check(&world, false);
+            world.set_weapon_obstacles(vec![crate::combat::Target { id: 7, center: Vec3::X * 45., half: Vec3::splat(5.) }]);
+            check(&world, true);
+            world.set_weapon_obstacles(vec![]); check(&world, false);
+        });
+    }
+    #[test]
+    fn sweep_memo_nested_scope_shares_the_outer_and_only_the_outer_closes() {
+        crate::sim_maps::with_sweep_memo(true, || {
+            let world = memo_world();
+            let (start, end) = (Vec3::ZERO, Vec3::X * 100.);
+            let _outer = world.sweep_memo_scope();
+            world.sweep(start, end, HALF_SIGHT);
+            {
+                let _inner = world.sweep_memo_scope();
+                world.sweep(start, end, HALF_SIGHT);
+            }
+            assert_eq!(world.sweep_memo_counts(), (true, 1, 1), "still open, still known");
+            world.sweep(start, end, HALF_SIGHT);
+            assert_eq!(world.sweep_memo_counts(), (true, 2, 1));
+        });
+    }
+    #[test]
+    fn sweep_memo_collisions_only_cost_a_miss_and_the_generation_wrap_is_clean() {
+        crate::sim_maps::with_sweep_memo(true, || {
+            let world = memo_world();
+            let end = Vec3::X * 100.;
+            // More different questions than slots: each answer is still the plain answer.
+            let _scope = world.sweep_memo_scope();
+            for round in 0..2 {
+                for i in 0..(SWEEP_MEMO_SLOTS as u32 * 3) {
+                    let start = vec3(0., 0., i as f32 * 0.25);
+                    let plain = bits(world.sweep_except(start, end, HALF_SIGHT, None));
+                    assert_eq!(bits(world.sweep(start, end, HALF_SIGHT)), plain, "round {round} query {i}");
+                }
+            }
+            drop(_scope);
+            let start = Vec3::ZERO;
+            { let _scope = world.sweep_memo_scope(); world.sweep(start, end, HALF_SIGHT); }
+            world.sweep_memo.borrow_mut().generation = u32::MAX;
+            let (_, _, misses) = world.sweep_memo_counts();
+            let _scope = world.sweep_memo_scope();
+            assert_eq!(world.sweep_memo.borrow().generation, 1, "zero is what a new slot holds");
+            assert_eq!(bits(world.sweep(start, end, HALF_SIGHT)), bits(world.sweep_except(start, end, HALF_SIGHT, None)));
+            assert_eq!(world.sweep_memo_counts().2, misses + 1, "nothing survives the wrap");
         });
     }
     #[test]

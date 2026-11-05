@@ -288,6 +288,29 @@ pub(crate) fn with_sight_query_reuse<T>(enabled: bool, run: impl FnOnce() -> T) 
     run()
 }
 
+// Off by default. Same arrangement as sight_query_reuse, for the off/on comparison in one process.
+pub fn sweep_memo() -> bool {
+    #[cfg(test)]
+    { SWEEP_MEMO_TEST.with(|s| s.get()).unwrap_or_else(|| match std::env::var("LOOKING_GLASS_TEST_SWEEP_MEMO").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("off") => false,
+        Ok("on") => true,
+        _ => panic!("LOOKING_GLASS_TEST_SWEEP_MEMO must be off or on"),
+    }) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().sim_sweep_memo }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
+#[cfg(test)]
+thread_local! { static SWEEP_MEMO_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn with_sweep_memo<T>(enabled: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset { fn drop(&mut self) { SWEEP_MEMO_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(SWEEP_MEMO_TEST.with(|s| s.replace(Some(enabled))));
+    run()
+}
+
 // Independent light-cache and dynamic-bucket controls; runtime defaults live in Config.
 macro_rules! hedge_switch {
     ($name:ident, $field:ident) => {

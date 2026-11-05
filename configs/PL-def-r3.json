@@ -139,5 +139,7 @@
   "world_pass_clock": false,
   "world_list_submit": false,
   "world_shared_buffers": false,
-  "world_gxm": "off"
+  "world_gxm": "off",
+  "tls_fast": "off",
+  "sim_sweep_memo": false
 }

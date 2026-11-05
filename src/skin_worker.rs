@@ -41,6 +41,16 @@ extern "C" {
     fn sceKernelGetThreadInfo(id: i32, info: *mut ThreadInfo) -> i32;
     fn sceKernelGetCpuId() -> i32;
 }
+/// The calling thread's stack as (lowest address, size in bytes), as the kernel reports it.
+#[cfg(target_os = "vita")]
+pub(crate) fn current_stack() -> Option<(usize, usize)> {
+    unsafe {
+        let mut info: ThreadInfo = std::mem::zeroed();
+        info.size = std::mem::size_of::<ThreadInfo>() as u32;
+        let rc = sceKernelGetThreadInfo(sceKernelGetThreadId(), &mut info);
+        (rc >= 0 && info.stack != 0 && info.stack_size > 0).then_some((info.stack as usize, info.stack_size as usize))
+    }
+}
 /// Kernel readback is deliberately used instead of pthread_getaffinity_np.
 pub(crate) fn pin(worker: usize, probe: bool) {
     #[cfg(target_os = "vita")]

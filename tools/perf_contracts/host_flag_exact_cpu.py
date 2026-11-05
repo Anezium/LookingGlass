@@ -61,6 +61,9 @@ REMOVED_WORK = {
     'joint_center_cache': set(),
     # Nothing counted moves: same GL calls, same applications. Only time goes away.
     'world_list_submit': set(),
+    # A repeat asks nothing below World::sweep. What comes back is in the state hash, frame by frame.
+    'sim_sweep_memo': {'world_sweeps', 'static_queries_executed', 'static_query_hits', 'settled_hull_tests',
+        'dynamic_colliders_tested', 'dynamic_colliders_rejected', 'dynamic_buckets_tested', 'sweep_memo_hits', 'sweep_memo_misses'},
     # Buffer binds and attribute re-specification are what this removes. Geometry, draw order, textures
     # and uniforms stay compared through world_packets, and pixels strictly.
     'world_shared_buffers': {'vita_world_binding_applications'},

@@ -49,6 +49,8 @@ pub struct Config {
     /// Reuse bit-identical Ant sight traces within one immutable Ant update.
     /// Default on since r21 (console A/B r16d: centipede1 -14.4 to -15.2 ms).
     pub sim_sight_query_reuse: bool,
+    /// Answer a repeated NPC collision sweep from its first answer inside one update.
+    pub sim_sweep_memo: bool,
     /// Exact static occlusion certificates for unchanged eye/light positions.
     pub lights_static_cache: bool,
     /// Spatial AABB buckets; preserve original dynamic contact order.
@@ -139,6 +141,9 @@ pub struct Config {
     /// Opaque world draws straight to sceGxm: off, shadow, live, or a proof mode. Requires
     /// world_list_submit. Only the Vita build acts on it; a host treats it as off. Default off.
     pub world_gxm: String,
+    /// Remember each thread-local key's list node on the game thread. off, on, shadow or
+    /// shadow_sabotage. The host has no such list: there every value behaves like off.
+    pub tls_fast: String,
     /// Attached emitters that declare `sphere` send each particle along its own random direction,
     /// as the original client does, instead of along the tag's X axis. Changes pixels. Default off.
     pub fx_attached_sphere: bool,
@@ -304,6 +309,7 @@ impl Default for Config {
             sim_trigger_facts_reuse: true,
             sim_hatter_door_candidates: true,
             sim_sight_query_reuse: true,
+            sim_sweep_memo: false,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
             sim_npc_target_stack: true,
@@ -349,6 +355,7 @@ impl Default for Config {
             world_list_submit: false,
             world_shared_buffers: false,
             world_gxm: "off".into(),
+            tls_fast: "off".into(),
             gpu_timing: "off".into(), gpu_mask: Vec::new(), rt_scenes: None, param_buffer_mib: None, display_clear_skip: false,
             fx_attached_sphere: false, fx_bubble_true_size: false,
             light_gl_observers: false,
@@ -491,6 +498,7 @@ impl Config {
         ensure!(!self.world_shared_buffers || !self.world_static_merge,"world_shared_buffers excludes world_static_merge: its packing replaces the merge's keys and loses merges");
         ensure!(gxm::Mode::parse(&self.world_gxm).is_some(),"world_gxm must be off, shadow, live, proof, proof_control or proof_sabotage");
         ensure!(self.world_gxm=="off" || self.world_list_submit,"world_gxm requires world_list_submit");
+        ensure!(crate::tls_count::FastMode::parse(&self.tls_fast).is_some(),"tls_fast must be off, on, shadow or shadow_sabotage");
         ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
         for name in &self.gpu_mask { ensure!(crate::gpu_timing::mask_bit(name).is_some(),"unknown gpu_mask class {name}"); }
         if let Some(scenes)=self.rt_scenes { ensure!(scenes.iter().all(|&n|(1..=8).contains(&n)),"rt_scenes must be 1 to 8"); }
@@ -2853,6 +2861,28 @@ mod tests {
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key: bad})).is_err(), "{key}");
             }
         }
+    }
+    #[test]
+    fn sim_sweep_memo_defaults_off_and_requires_a_boolean() {
+        assert!(!Config::default().sim_sweep_memo);
+        let on: Config = serde_json::from_value(serde_json::json!({"sim_sweep_memo": true})).unwrap();
+        on.validate().unwrap();
+        assert!(on.sim_sweep_memo);
+        for bad in [r#"{"sim_sweep_memo":1}"#, r#"{"sim_sweep_memo":"on"}"#, r#"{"sim_sweep_memo":null}"#] {
+            assert!(serde_json::from_str::<Config>(bad).is_err(), "{bad}");
+        }
+    }
+    #[test]
+    fn tls_fast_defaults_off_and_names_its_modes() {
+        assert_eq!(Config::default().tls_fast, "off");
+        assert!(config_log_lines(&Config::default())[0].contains("\"tls_fast\":\"off\""));
+        for mode in ["off", "on", "shadow", "shadow_sabotage"] {
+            let config: Config = serde_json::from_value(serde_json::json!({"tls_fast": mode})).unwrap();
+            config.validate().unwrap();
+        }
+        let bad: Config = serde_json::from_value(serde_json::json!({"tls_fast": "yes"})).unwrap();
+        assert!(bad.validate().is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"tls_fast": true})).is_err());
     }
     #[test]
     fn world_gxm_defaults_off_requires_the_list_and_names_its_modes() {
