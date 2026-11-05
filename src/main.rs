@@ -223,6 +223,7 @@ fn app_main() {
         tls_count::start_fast(tls_count::FastMode::parse(&c.tls_fast).unwrap_or(tls_count::FastMode::Off));
         #[cfg(target_os="vita")]
         light_profile::set_mode(frame_profile::Mode::read());
+        skin_worker::set_spin_us(c.worker_spin_us);
         character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench, c.skin_overlap);
         gpu_timing::before_gl_init();
         frame_phases::initialize();

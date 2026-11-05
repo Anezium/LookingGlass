@@ -773,6 +773,7 @@ impl FixedClock {
     pub fn advance(&mut self, seconds: f64, world: &World, player: &mut Player, input: Controls) {
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Player);
         let _census = crate::phase_census::span(crate::phase_census::Region::FixedPhysics);
+        let _sweep_memo = world.sweep_memo_scope();
         #[cfg(target_os = "vita")]
         let _fixed_clock_profile = crate::frame_profile::span("fixed_clock");
         let ticks_before = self.ticks;

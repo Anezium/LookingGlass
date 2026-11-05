@@ -141,5 +141,6 @@
   "world_shared_buffers": false,
   "world_gxm": "off",
   "tls_fast": "off",
-  "sim_sweep_memo": false
+  "sim_sweep_memo": false,
+  "worker_spin_us": 0
 }

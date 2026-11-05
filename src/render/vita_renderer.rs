@@ -51,6 +51,8 @@ pub struct Config {
     pub sim_sight_query_reuse: bool,
     /// Answer a repeated NPC collision sweep from its first answer inside one update.
     pub sim_sweep_memo: bool,
+    /// Microseconds the skin workers and the game thread poll for each other before sleeping. Zero is off.
+    pub worker_spin_us: u32,
     /// Exact static occlusion certificates for unchanged eye/light positions.
     pub lights_static_cache: bool,
     /// Spatial AABB buckets; preserve original dynamic contact order.
@@ -310,6 +312,7 @@ impl Default for Config {
             sim_hatter_door_candidates: true,
             sim_sight_query_reuse: true,
             sim_sweep_memo: false,
+            worker_spin_us: 0,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
             sim_npc_target_stack: true,
@@ -498,6 +501,7 @@ impl Config {
         ensure!(!self.world_shared_buffers || !self.world_static_merge,"world_shared_buffers excludes world_static_merge: its packing replaces the merge's keys and loses merges");
         ensure!(gxm::Mode::parse(&self.world_gxm).is_some(),"world_gxm must be off, shadow, live, proof, proof_control or proof_sabotage");
         ensure!(self.world_gxm=="off" || self.world_list_submit,"world_gxm requires world_list_submit");
+        ensure!(self.worker_spin_us <= 5000,"worker_spin_us must be at most 5000");
         ensure!(crate::tls_count::FastMode::parse(&self.tls_fast).is_some(),"tls_fast must be off, on, shadow or shadow_sabotage");
         ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
         for name in &self.gpu_mask { ensure!(crate::gpu_timing::mask_bit(name).is_some(),"unknown gpu_mask class {name}"); }
@@ -2861,6 +2865,15 @@ mod tests {
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key: bad})).is_err(), "{key}");
             }
         }
+    }
+    #[test]
+    fn worker_spin_defaults_off_and_is_bounded() {
+        assert_eq!(Config::default().worker_spin_us, 0);
+        for (value, fine) in [(0, true), (500, true), (5000, true), (5001, false)] {
+            let config: Config = serde_json::from_value(serde_json::json!({"worker_spin_us": value})).unwrap();
+            assert_eq!(config.validate().is_ok(), fine, "{value}");
+        }
+        assert!(serde_json::from_str::<Config>(r#"{"worker_spin_us":true}"#).is_err());
     }
     #[test]
     fn sim_sweep_memo_defaults_off_and_requires_a_boolean() {

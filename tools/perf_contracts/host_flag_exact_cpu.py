@@ -33,6 +33,8 @@ FUNNEL = {'fx_funnel_registered_raw', 'fx_funnel_registered_publication', 'fx_fu
           'fx_funnel_joint_raw_outside_view', 'fx_funnel_joint_publication_quads', 'fx_funnel_joint_publication_outside_view'}
 # Work a lever removes on purpose, or moves between the raw and publication routes. Draw counts,
 # triangle counts, drops and the joint list length are not here: if those move, the case fails.
+# Levers that are not booleans: the value of the off arm and of the on arm.
+LEVER_VALUES = {'worker_spin_us': (0, 500)}
 REMOVED_WORK = {
     # A shader with no light uniforms uploads fewer bytes; packets still carry the full payload. A removed clear moves nothing counted.
     'simple_dynamic_lights': {'vita_fx_uniform_bytes'},
@@ -61,6 +63,8 @@ REMOVED_WORK = {
     'joint_center_cache': set(),
     # Nothing counted moves: same GL calls, same applications. Only time goes away.
     'world_list_submit': set(),
+    # When a thread sleeps cannot reach a frame. The worker clocks are in TIMING.
+    'worker_spin_us': set(),
     # A repeat asks nothing below World::sweep. What comes back is in the state hash, frame by frame.
     'sim_sweep_memo': {'world_sweeps', 'static_queries_executed', 'static_query_hits', 'settled_hull_tests',
         'dynamic_colliders_tested', 'dynamic_colliders_rejected', 'dynamic_buckets_tested', 'sweep_memo_hits', 'sweep_memo_misses'},
@@ -121,7 +125,7 @@ def environment(ctx, name, negative):
 
 def run_arm(ctx, name, on, arm_dir, negative):
     (arm_dir / 'private').mkdir(parents=True)
-    (arm_dir / 'private/vita_renderer.json').write_text(json.dumps(dict(ctx['config'], **{k: on for k in ctx['levers']})))
+    (arm_dir / 'private/vita_renderer.json').write_text(json.dumps(dict(ctx['config'], **{k: LEVER_VALUES.get(k, (False, True))[on] for k in ctx['levers']})))
     if ctx['sim']:
         shutil.copy(ctx['sim'], arm_dir / 'private/vita_sim.json')
     command = [str(ctx['binary']), '--data', str(DATA), '--no-audio', '--save-dir', str(arm_dir / 'private/saves'),
