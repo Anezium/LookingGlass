@@ -27,7 +27,7 @@ const COUNT: u8 = 1;
 const FAST: u8 = 2;
 const SHADOW: u8 = 4;
 const SABOTAGE: u8 = 8;
-/// Bits above. Zero is the off path: one load, one branch and a tail call.
+/// Bits above. Zero is the off path, the wrapper's first branch. It uses no stack.
 static MODE: AtomicU8 = AtomicU8::new(0);
 static MAIN_HEAD: AtomicUsize = AtomicUsize::new(0);
 static MAIN_LOOKUPS: AtomicU32 = AtomicU32::new(0);
@@ -273,17 +273,22 @@ mod vita {
     /// Link-time replacement for every `pthread_getspecific` reference (build.rs).
     /// `pthread_getspecific(NULL)` returns NULL; otherwise the key handle's first
     /// word is the OS key that the list stores at +4 (libpthread `pthread_getspecific.o`).
-    /// The off path is one load, one branch and a tail call; counting stays out of line.
+    /// The off path is one load, one branch and a tail call; everything else stays out of line.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_pthread_getspecific(key: *const core::ffi::c_void) -> *mut core::ffi::c_void {
-        let mode = MODE.load(Relaxed);
-        if mode == 0 { return unsafe { __real_pthread_getspecific(key) }; }
-        if mode & COUNT != 0 {
+        if MODE.load(Relaxed) != 0 {
             // Read first: nothing before this line can call out, so lr still holds the return address.
             let pc: usize;
             unsafe { core::arch::asm!("mov {}, lr", out(reg) pc, options(nomem, nostack, preserves_flags)); }
-            return unsafe { counted(key, pc) };
+            return unsafe { active(key, pc) };
         }
+        unsafe { __real_pthread_getspecific(key) }
+    }
+    /// Past the off path, so the off path needs no stack and matches the wrapper as it was.
+    #[inline(never)]
+    unsafe fn active(key: *const core::ffi::c_void, pc: usize) -> *mut core::ffi::c_void {
+        let mode = MODE.load(Relaxed);
+        if mode & COUNT != 0 { return unsafe { counted(key, pc) }; }
         let sp: usize;
         unsafe { core::arch::asm!("mov {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags)); }
         // Another thread's stack is never inside the game thread's, and a null handle reads as null.
@@ -358,13 +363,15 @@ pub(crate) fn start_fast(mode: FastMode) {
 /// what it could not hold, and on the console the cost per lookup with and without it.
 pub(crate) fn fast_line(map: &str, mode: FastMode) -> Option<String> {
     if mode == FastMode::Off { return None; }
+    // Read before the bench, which runs thousands of lookups of its own.
+    let (keys, overflow, unset, checks, mismatches) = (FAST_TABLE.used.load(Relaxed), FAST_OVERFLOW.load(Relaxed),
+        FAST_UNSET.load(Relaxed), FAST_CHECKS.load(Relaxed), FAST_MISMATCHES.load(Relaxed));
     #[cfg(target_os = "vita")]
     let (benched, real, fast) = if MODE.load(Relaxed) & FAST != 0 { vita::bench() } else { (0, 0., 0.) };
     #[cfg(not(target_os = "vita"))]
     let (benched, real, fast) = (0usize, 0f64, 0f64);
-    Some(format!("[lg/tls-fast] map={map} mode={} running={} keys={} overflow={} unset={} checks={} mismatches={} benched={benched} real_ns={real:.0} fast_ns={fast:.0}",
-        mode.name(), FAST_STARTED.load(Relaxed) != 0, FAST_TABLE.used.load(Relaxed), FAST_OVERFLOW.load(Relaxed),
-        FAST_UNSET.load(Relaxed), FAST_CHECKS.load(Relaxed), FAST_MISMATCHES.load(Relaxed)))
+    Some(format!("[lg/tls-fast] map={map} mode={} running={} keys={keys} overflow={overflow} unset={unset} checks={checks} mismatches={mismatches} benched={benched} real_ns={real:.0} fast_ns={fast:.0}",
+        mode.name(), FAST_STARTED.load(Relaxed) != 0))
 }
 
 /// Call once on the main thread before any survey window.

@@ -215,12 +215,16 @@ impl Worker {
                     s.result = Measurement { ns, malloc_calls };
                     s.panic = result.err();
                     s.busy = false;
-                    other.busy_hint.store(false, Ordering::Release);
-                    other.done.notify_one();
                     if other.spin_us > 0 {
+                        // Same order as in start: the mutex is free before the hint says so.
                         drop(s);
+                        other.busy_hint.store(false, Ordering::Release);
+                        other.done.notify_one();
                         spin_until(other.spin_us, || other.work_ready.load(Ordering::Acquire));
                         s = other.state.lock().unwrap();
+                    } else {
+                        other.busy_hint.store(false, Ordering::Release);
+                        other.done.notify_one();
                     }
                 }
             })
@@ -247,6 +251,8 @@ impl Worker {
         s.busy = true;
         s.work = Some((address, call));
         self.shared.busy_hint.store(true, Ordering::Relaxed);
+        // A poller that sees the hint goes straight for the mutex, so let go of it first.
+        if self.shared.spin_us > 0 { drop(s); }
         self.shared.work_ready.store(true, Ordering::Release);
         self.shared.wake.notify_one();
     }

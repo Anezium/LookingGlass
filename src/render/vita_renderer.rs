@@ -501,7 +501,8 @@ impl Config {
         ensure!(!self.world_shared_buffers || !self.world_static_merge,"world_shared_buffers excludes world_static_merge: its packing replaces the merge's keys and loses merges");
         ensure!(gxm::Mode::parse(&self.world_gxm).is_some(),"world_gxm must be off, shadow, live, proof, proof_control or proof_sabotage");
         ensure!(self.world_gxm=="off" || self.world_list_submit,"world_gxm requires world_list_submit");
-        ensure!(self.worker_spin_us <= 5000,"worker_spin_us must be at most 5000");
+        ensure!(self.world_gxm=="off" || self.gpu_mask.is_empty(),"world_gxm excludes gpu_mask: a masked draw captures nothing");
+        ensure!(self.worker_spin_us <= 1000,"worker_spin_us must be at most 1000: worker 1 shares CPU2 with the audio producer");
         ensure!(crate::tls_count::FastMode::parse(&self.tls_fast).is_some(),"tls_fast must be off, on, shadow or shadow_sabotage");
         ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
         for name in &self.gpu_mask { ensure!(crate::gpu_timing::mask_bit(name).is_some(),"unknown gpu_mask class {name}"); }
@@ -2014,6 +2015,8 @@ impl Renderer {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             if world_list::negative("world-list-stale-uniform") && drawn % 7 == 3 { plan.uniforms = false; }
             drawn += 1;
+            #[cfg(target_os = "vita")]
+            state.note_draw(pass);
             let mut start = totals.start();
             if let (Some(previous), Some(now)) = (*previous_end, start) {
                 *between_ns += now.duration_since(previous).as_nanos() as u64; *between_calls += 1;
@@ -2079,11 +2082,13 @@ impl Renderer {
                 let dropped = false;
                 #[cfg(target_os = "vita")]
                 if way != gxm::Way::Vitagl { gxm::vita::arm(); }
-                if !dropped && !crate::gpu_timing::masked(class) { ctx.draw(base_element, draw.indices, 1); }
+                let ran = !dropped && !crate::gpu_timing::masked(class);
+                if ran { ctx.draw(base_element, draw.indices, 1); }
                 #[cfg(target_os = "vita")]
                 if way != gxm::Way::Vitagl {
                     let capture = gxm::vita::take();
-                    state.after_vitagl(&capture, item.group as usize, draw.animated, draw.pipeline_class, low, draw.indices as u32, item.uniforms, bits, way);
+                    // A masked draw called nothing, so there is nothing to learn from it.
+                    if ran { state.after_vitagl(&capture, item.group as usize, draw.animated, draw.pipeline_class, low, draw.indices as u32, item.uniforms, bits, way); }
                 }
             }
             totals.lap(2, &mut start);
@@ -2122,6 +2127,13 @@ impl Renderer {
             glReadPixels(x, y, w, h, 0x1908, 0x1401, target.as_mut_ptr().cast());
         };
         let (mut a, mut b) = self.gxm.take_proof_buffers();
+        // Mid-game allocation. Short of memory, skip the proof and say so rather than abort.
+        let bytes = (w * h * 4) as usize;
+        if a.try_reserve(bytes.saturating_sub(a.len())).is_err() || b.try_reserve(bytes.saturating_sub(b.len())).is_err() {
+            self.gxm.give_proof_buffers(a, b);
+            self.gxm.proof_skipped();
+            return;
+        }
         for (pass, target) in [(gxm::Pass::ProofVitagl, &mut a), (gxm::Pass::ProofSecond, &mut b)] {
             begin_3d_pass(clear());
             apply_world_viewport();
@@ -2869,7 +2881,7 @@ mod tests {
     #[test]
     fn worker_spin_defaults_off_and_is_bounded() {
         assert_eq!(Config::default().worker_spin_us, 0);
-        for (value, fine) in [(0, true), (500, true), (5000, true), (5001, false)] {
+        for (value, fine) in [(0, true), (500, true), (1000, true), (1001, false)] {
             let config: Config = serde_json::from_value(serde_json::json!({"worker_spin_us": value})).unwrap();
             assert_eq!(config.validate().is_ok(), fine, "{value}");
         }
@@ -2907,6 +2919,8 @@ mod tests {
             let with: Config = serde_json::from_value(serde_json::json!({"world_gxm": mode, "world_list_submit": true})).unwrap();
             with.validate().unwrap();
         }
+        let masked: Config = serde_json::from_value(serde_json::json!({"world_gxm": "shadow", "world_list_submit": true, "gpu_mask": ["world_low"]})).unwrap();
+        assert!(masked.validate().unwrap_err().to_string().contains("gpu_mask"));
         let bad: Config = serde_json::from_value(serde_json::json!({"world_gxm": "on", "world_list_submit": true})).unwrap();
         assert!(bad.validate().is_err());
         assert!(serde_json::from_value::<Config>(serde_json::json!({"world_gxm": true})).is_err());

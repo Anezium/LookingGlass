@@ -64,6 +64,15 @@ pub(crate) struct State {
     frames: u64,
     proofs: Proofs,
     buffers: (Vec<u8>, Vec<u8>),
+    /// Draws and direct draws of the second trial in all proof frames, and draws `proof_sabotage` left out.
+    pub(crate) second_trial_draws: u64,
+    pub(crate) second_trial_direct: u64,
+    pub(crate) sabotage_fired: u64,
+    sabotaged_this_proof: bool,
+    /// Captures nothing was learned from, program pairs refused, proof frames skipped for memory.
+    pub(crate) refused_captures: u64,
+    layout_refused: [bool; 2],
+    pub(crate) proofs_skipped: u64,
 }
 /// What the proof frames found, for the one line after the window.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
@@ -71,7 +80,7 @@ pub(crate) struct Proofs { pub frames: u64, pub equal: u64, pub different: u64, 
 impl State {
     pub(crate) fn new(mode: Mode, groups: usize, meta: &macroquad::miniquad::ShaderMeta) -> Self {
         Self { mode, records: if mode == Mode::Off { Vec::new() } else { vec![None; groups] }, fields: field_table(meta), layouts: [None, None], programs: [None; 32],
-            direct: Direct::default(), shadow: Shadow::default(), direct_draws: 0, vitagl_draws: 0, frames: 0, proofs: Proofs::default(), buffers: (Vec::new(), Vec::new()) }
+            direct: Direct::default(), shadow: Shadow::default(), direct_draws: 0, vitagl_draws: 0, frames: 0, proofs: Proofs::default(), buffers: (Vec::new(), Vec::new()), second_trial_draws: 0, second_trial_direct: 0, sabotage_fired: 0, sabotaged_this_proof: false, refused_captures: 0, layout_refused: [false; 2], proofs_skipped: 0 }
     }
     /// Boxed so the survey's closing line can find it. Main thread only, like the renderer.
     pub(crate) fn published(mode: Mode, groups: usize, meta: &macroquad::miniquad::ShaderMeta) -> Box<Self> {
@@ -95,17 +104,35 @@ impl State {
     }
     pub(crate) fn take_proof_buffers(&mut self) -> (Vec<u8>, Vec<u8>) { std::mem::take(&mut self.buffers) }
     pub(crate) fn give_proof_buffers(&mut self, a: Vec<u8>, b: Vec<u8>) { self.buffers = (a, b); }
-    pub(crate) fn proof_result(&mut self, a: &[u8], b: &[u8]) { self.proofs.observe(a, b); }
+    pub(crate) fn proof_result(&mut self, a: &[u8], b: &[u8]) { self.proofs.observe(a, b); self.sabotaged_this_proof = false; }
+    pub(crate) fn proof_skipped(&mut self) { self.proofs_skipped += 1; }
+    /// Once per draw of a pass.
+    #[inline] pub(crate) fn note_draw(&mut self, pass: Pass) { if pass == Pass::ProofSecond { self.second_trial_draws += 1; } }
+    /// Leave out the first draw at or after `SABOTAGE_DRAW` that really went direct, once per proof frame.
+    /// A pipeline change or a group with no record at that position would otherwise hide the sabotage.
+    pub(crate) fn sabotage_due(&mut self, pass: Pass, drawn: u64) -> bool {
+        if self.mode != Mode::ProofSabotage || pass != Pass::ProofSecond || drawn < SABOTAGE_DRAW || self.sabotaged_this_proof { return false; }
+        self.sabotaged_this_proof = true;
+        self.sabotage_fired += 1;
+        true
+    }
     pub(crate) fn summary(&self, map: &str) -> Option<String> {
         if self.mode == Mode::Off { return None; }
         let p = &self.proofs;
-        Some(format!("{} mode={:?} direct_draws={} vitagl_draws={} vertex_uniform_bytes={} fragment_uniform_bytes={} proof_frames={} proof_equal={} proof_different={} proof_first_byte={:?} proof_different_bytes={} proof_frame_bytes={}",
+        Some(format!("{} mode={:?} direct_draws={} vitagl_draws={} vertex_uniform_bytes={} fragment_uniform_bytes={} second_trial_draws={} second_trial_direct={} sabotage_fired={} refused_captures={} layout_refused={} proofs_skipped={} gxm_errors={} proof_frames={} proof_equal={} proof_different={} proof_first_byte={:?} proof_different_bytes={} proof_frame_bytes={}",
             self.shadow.summary(map), self.mode, self.direct_draws, self.vitagl_draws,
             self.layouts.iter().flatten().map(|l| l.vertex.size).max().unwrap_or(0), self.layouts.iter().flatten().map(|l| l.fragment.size).max().unwrap_or(0),
+            self.second_trial_draws, self.second_trial_direct, self.sabotage_fired, self.refused_captures, self.layout_refused.iter().filter(|r| **r).count(), self.proofs_skipped, gxm_errors(),
             p.frames, p.equal, p.different, p.first_different_byte, p.different_bytes, p.bytes))
     }
 }
 static CURRENT: AtomicPtr<State> = AtomicPtr::new(std::ptr::null_mut());
+fn gxm_errors() -> u32 {
+    #[cfg(target_os = "vita")]
+    { vita::errors() }
+    #[cfg(not(target_os = "vita"))]
+    { 0 }
+}
 pub(crate) fn withdraw(state: &mut State) {
     let _ = CURRENT.compare_exchange(state, std::ptr::null_mut(), Relaxed, Relaxed);
 }
@@ -144,6 +171,15 @@ pub(crate) struct Capture {
     pub draws: u32,
 }
 impl Capture {
+    /// True when this is one whole draw a direct draw can repeat: exactly one draw call with a real
+    /// index pointer, both programs, and every set stream on one buffer. A direct draw sets all
+    /// streams to one address, so anything else stays with vitaGL.
+    pub(crate) fn learnable(&self) -> bool {
+        self.draws == 1 && self.index != 0 && self.count != 0 && self.wrap == self.count
+            && self.vertex_program != 0 && self.fragment_program != 0
+            && self.stream_mask & 1 != 0 && self.streams[0] != 0
+            && (0..MAX_STREAMS).all(|i| self.stream_mask & (1 << i) == 0 || self.streams[i] == self.streams[0])
+    }
     pub(crate) const EMPTY: Self = Self { vertex_program: 0, fragment_program: 0, textures: [0; MAX_TEXTURES], stream_mask: 0, streams: [0; MAX_STREAMS],
         vertex_uniforms: 0, fragment_uniforms: 0, primitive: 0, format: 0, index: 0, count: 0, wrap: 0, draws: 0 };
 }
@@ -172,6 +208,17 @@ impl Layout {
 /// What the direct path needs of one program pair.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub(crate) struct Program { pub vertex: Layout, pub fragment: Layout, pub diffuse_unit: u32 }
+impl Layout {
+    /// Every slot lies inside the buffer, so `write` and `image` stay inside it.
+    pub(crate) fn fits(&self) -> bool {
+        self.slots.iter().all(|s| u32::from(s.offset) + u32::from(s.words) * 4 <= self.size)
+    }
+}
+impl Program {
+    pub(crate) fn valid(&self) -> bool {
+        self.vertex.fits() && self.fragment.fits() && (self.diffuse_unit as usize) < MAX_TEXTURES
+    }
+}
 /// `shader::meta()` fields as (name, first word, word count). Pure, so a test can tie it to the struct.
 pub(crate) fn field_table(meta: &macroquad::miniquad::ShaderMeta) -> Vec<(String, u16, u16)> {
     let mut first = 0u16;
@@ -187,7 +234,7 @@ pub(crate) fn field_table(meta: &macroquad::miniquad::ShaderMeta) -> Vec<(String
 pub(crate) fn layout(fields: &[(String, u16, u16)], size: u32, mut resource: impl FnMut(&str) -> Option<u32>) -> Layout {
     let mut slots = Vec::new();
     for (name, first, words) in fields {
-        if let Some(index) = resource(name) { slots.push(FieldSlot { first: *first, words: *words, offset: (index * 4) as u16 }); }
+        if let Some(index) = resource(name) { slots.push(FieldSlot { first: *first, words: *words, offset: u16::try_from(index * 4).unwrap_or(u16::MAX) }); }
     }
     Layout { slots, size }
 }
@@ -208,9 +255,13 @@ pub(crate) struct Record { pub texture: usize, pub stream: usize, pub index: usi
 /// What the GXM context holds, as far as this pass knows. All of it is invalid after vitaGL draws,
 /// except what that draw itself set, which `after_vitagl` records.
 #[derive(Default)]
-pub(crate) struct Direct { unit: u32, texture: usize, stream: usize, uniforms: Option<(u32, bool)>, streams: u32, primitive: u32, format: u32 }
+pub(crate) struct Direct { known: bool, unit: u32, texture: usize, stream: usize, uniforms: Option<(u32, bool)>, streams: u32, primitive: u32, format: u32 }
 impl Direct {
+    /// The last vitaGL draw told nothing usable. The next draw goes through vitaGL as well.
+    pub(crate) fn forget(&mut self) { self.known = false; }
+    pub(crate) fn known(&self) -> bool { self.known }
     pub(crate) fn after_vitagl(&mut self, capture: &Capture, program: &Program, class: u32, low: bool) {
+        self.known = true;
         self.unit = program.diffuse_unit;
         self.texture = capture.textures[program.diffuse_unit as usize];
         self.stream = capture.streams[0];
@@ -246,6 +297,13 @@ pub(crate) struct Shadow {
     pub first: Option<String>,
 }
 impl Shadow {
+    /// A vitaGL draw that nothing can be learned from. Only a shadow arm counts it as wrong.
+    pub(crate) fn refused(&mut self, group: usize, capture: &Capture) {
+        self.draws += 1;
+        self.draw_args += 1;
+        self.mismatches += 1;
+        if self.first.is_none() { self.first = Some(format!("group={group} refused capture={capture:?}")); }
+    }
     /// `known` holds what this group's first draw captured; `seen` is this draw's. Returns the
     /// record to keep.
     pub(crate) fn check(&mut self, group: usize, known: Option<Record>, seen: Record, capture: &Capture, count: u32, programs: Option<(usize, usize)>,
@@ -288,7 +346,7 @@ impl Shadow {
 #[cfg(target_os = "vita")]
 pub(crate) mod vita {
     use super::*;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
     extern "C" {
         static gxm_context: *mut c_void;
         static mut dirty_shader_vert_unifs: u8;
@@ -307,10 +365,15 @@ pub(crate) mod vita {
         fn sceGxmFragmentProgramGetProgram(program: *const c_void) -> *const c_void;
         fn sceGxmProgramFindParameterByName(program: *const c_void, name: *const std::ffi::c_char) -> *const c_void;
         fn sceGxmProgramParameterGetResourceIndex(parameter: *const c_void) -> u32;
+        fn sceGxmProgramParameterGetType(parameter: *const c_void) -> u32;
         fn sceGxmProgramGetDefaultUniformBufferSize(program: *const c_void) -> u32;
         fn glFinish();
     }
     static ARMED: AtomicBool = AtomicBool::new(false);
+    /// Non-zero returns on the direct path. vitaGL ignores them too, but this path has no other signal.
+    static ERRORS: AtomicU32 = AtomicU32::new(0);
+    pub(super) fn errors() -> u32 { ERRORS.load(Relaxed) }
+    #[inline(always)] fn checked(rc: i32) { if rc != 0 { ERRORS.store(ERRORS.load(Relaxed).wrapping_add(1), Relaxed); } }
     /// Main thread only, and only between `arm` and `take`.
     static mut CAPTURED: Capture = Capture::EMPTY;
     macro_rules! captured { () => { &mut *std::ptr::addr_of_mut!(CAPTURED) }; }
@@ -360,13 +423,13 @@ pub(crate) mod vita {
         pub(crate) fn new() -> Self { Self { context: unsafe { gxm_context }, vertex_buffer: std::ptr::null_mut(), fragment_buffer: std::ptr::null_mut() } }
     }
     impl Backend for Real {
-        #[inline] fn texture(&mut self, unit: u32, texture: usize) { unsafe { __real_sceGxmSetFragmentTexture(self.context, unit, texture as _); } }
-        #[inline] fn stream(&mut self, index: u32, data: usize) { unsafe { __real_sceGxmSetVertexStream(self.context, index, data as _); } }
+        #[inline] fn texture(&mut self, unit: u32, texture: usize) { checked(unsafe { __real_sceGxmSetFragmentTexture(self.context, unit, texture as _) }); }
+        #[inline] fn stream(&mut self, index: u32, data: usize) { checked(unsafe { __real_sceGxmSetVertexStream(self.context, index, data as _) }); }
         #[inline] fn reserve_uniforms(&mut self, size: u32) -> *mut u8 { unsafe { vglReserveUniformCircularPoolBuffer(size).cast() } }
-        #[inline] fn vertex_uniforms(&mut self, buffer: *mut u8) { unsafe { vgl_def_vert_buf = buffer.cast(); __real_sceGxmSetVertexDefaultUniformBuffer(self.context, buffer as _); } }
-        #[inline] fn fragment_uniforms(&mut self, buffer: *mut u8) { unsafe { vgl_def_frag_buf = buffer.cast(); __real_sceGxmSetFragmentDefaultUniformBuffer(self.context, buffer as _); } }
+        #[inline] fn vertex_uniforms(&mut self, buffer: *mut u8) { checked(unsafe { vgl_def_vert_buf = buffer.cast(); __real_sceGxmSetVertexDefaultUniformBuffer(self.context, buffer as _) }); }
+        #[inline] fn fragment_uniforms(&mut self, buffer: *mut u8) { checked(unsafe { vgl_def_frag_buf = buffer.cast(); __real_sceGxmSetFragmentDefaultUniformBuffer(self.context, buffer as _) }); }
         #[inline] fn draw(&mut self, primitive: u32, format: u32, index: usize, count: u32, wrap: u32) {
-            unsafe { __real_sceGxmDrawInstanced(self.context, primitive, format, index as _, count, wrap); }
+            checked(unsafe { __real_sceGxmDrawInstanced(self.context, primitive, format, index as _, count, wrap) });
         }
     }
     /// vitaGL keeps uniform storage it believes the GPU has. A direct draw moved the default buffer
@@ -374,21 +437,37 @@ pub(crate) mod vita {
     #[inline] pub(crate) fn uniforms_are_stale() { unsafe { dirty_shader_vert_unifs = 1; dirty_shader_frag_unifs = 1; } }
     /// Direct draws do not touch `last_frame`, so vitaGL could free a buffer or texture the GPU still reads.
     pub(crate) fn wait_for_gpu() { unsafe { glFinish(); } }
-    /// What the direct path needs of the program pair a capture holds.
-    pub(crate) fn program(capture: &Capture, fields: &[(String, u16, u16)]) -> Program {
-        let resource = |program: *const c_void, name: &str| unsafe {
+    /// What the direct path needs of the program pair a capture holds, or None if a field is not
+    /// plain 32-bit floats, a slot falls outside its buffer, or the diffuse sampler is out of range.
+    /// `layouts` stays empty then, and every draw of that program goes through vitaGL.
+    pub(crate) fn program(capture: &Capture, fields: &[(String, u16, u16)]) -> Option<Program> {
+        const F32: u32 = 0; // SCE_GXM_PARAMETER_TYPE_F32, the first value of SceGxmParameterType.
+        let mut typed = true;
+        let parameter = |program: *const c_void, name: &str| unsafe {
             let name = std::ffi::CString::new(name).ok()?;
             let parameter = sceGxmProgramFindParameterByName(program, name.as_ptr());
-            (!parameter.is_null()).then(|| sceGxmProgramParameterGetResourceIndex(parameter))
+            (!parameter.is_null()).then_some(parameter)
         };
-        let build = |program: *const c_void| layout(fields, unsafe { sceGxmProgramGetDefaultUniformBufferSize(program) }, |name| resource(program, name));
         let (vertex, fragment) = unsafe { (sceGxmVertexProgramGetProgram(capture.vertex_program as _), sceGxmFragmentProgramGetProgram(capture.fragment_program as _)) };
-        Program { vertex: build(vertex), fragment: build(fragment), diffuse_unit: resource(fragment, "Diffuse").unwrap_or(0) }
+        if vertex.is_null() || fragment.is_null() { return None; }
+        let mut build = |program: *const c_void| layout(fields, unsafe { sceGxmProgramGetDefaultUniformBufferSize(program) }, |name| {
+            let found = parameter(program, name)?;
+            typed &= unsafe { sceGxmProgramParameterGetType(found) } == F32;
+            Some(unsafe { sceGxmProgramParameterGetResourceIndex(found) })
+        });
+        let (vertex_layout, fragment_layout) = (build(vertex), build(fragment));
+        let diffuse = parameter(fragment, "Diffuse")?;
+        let program = Program { vertex: vertex_layout, fragment: fragment_layout, diffuse_unit: unsafe { sceGxmProgramParameterGetResourceIndex(diffuse) } };
+        (typed && program.valid()).then_some(program)
     }
     /// The bytes behind the default buffers vitaGL last set. It may have left one from an earlier
     /// draw if nothing changed, which is also what the GPU reads.
     pub(crate) fn uniform_bytes(vertex: u32, fragment: u32) -> (&'static [u8], &'static [u8]) {
-        unsafe { (std::slice::from_raw_parts(vgl_def_vert_buf.cast(), vertex as usize), std::slice::from_raw_parts(vgl_def_frag_buf.cast(), fragment as usize)) }
+        // Null until vitaGL first reserves. Empty slices then read as a mismatch.
+        unsafe fn view(buffer: *mut c_void, size: u32) -> &'static [u8] {
+            if buffer.is_null() { &[] } else { std::slice::from_raw_parts(buffer.cast(), size as usize) }
+        }
+        unsafe { (view(vgl_def_vert_buf, vertex), view(vgl_def_frag_buf, fragment)) }
     }
 }
 
@@ -396,17 +475,35 @@ pub(crate) mod vita {
 impl State {
     /// One direct draw, or false if this group has no record yet and vitaGL must draw it first.
     #[inline] pub(crate) fn direct_draw(&mut self, real: &mut vita::Real, group: usize, count: u32, class: u32, low: bool, bits: &[u32; 143], pass: Pass, drawn: u64) -> bool {
+        if !self.direct.known() { return false; }
         let Some(record) = self.records[group] else { return false; };
-        let Some(program) = &self.layouts[usize::from(low)] else { return false; };
+        if self.layouts[usize::from(low)].is_none() { return false; }
         self.direct_draws += 1;
-        if self.mode == Mode::ProofSabotage && pass == Pass::ProofSecond && drawn == SABOTAGE_DRAW { return true; }
+        if pass == Pass::ProofSecond { self.second_trial_direct += 1; }
+        if self.sabotage_due(pass, drawn) { return true; }
+        let program = self.layouts[usize::from(low)].as_ref().unwrap();
         self.direct.draw(real, &record, count, class, low, program, bits);
         true
     }
     /// After vitaGL drew under capture: learn, and in shadow mode compare.
     pub(crate) fn after_vitagl(&mut self, capture: &Capture, group: usize, animated: bool, pipeline_class: u8, low: bool, count: u32, class: u32, bits: &[u32; 143], way: Way) {
         self.vitagl_draws += 1;
-        if self.layouts[usize::from(low)].is_none() { self.layouts[usize::from(low)] = Some(vita::program(capture, &self.fields)); }
+        if !capture.learnable() {
+            self.refused_captures += 1;
+            if way == Way::Shadow { self.shadow.refused(group, capture); }
+            self.direct.forget();
+            return;
+        }
+        let which = usize::from(low);
+        if self.layouts[which].is_none() && !self.layout_refused[which] {
+            self.layouts[which] = vita::program(capture, &self.fields);
+            self.layout_refused[which] = self.layouts[which].is_none();
+        }
+        if self.layouts[which].is_none() {
+            if way == Way::Shadow { self.shadow.refused(group, capture); }
+            self.direct.forget();
+            return;
+        }
         let slot = usize::from(pipeline_class) * 2 + usize::from(low);
         let programs = self.programs.get(slot).copied().flatten();
         if let Some(entry) = self.programs.get_mut(slot) { *entry = Some((capture.vertex_program, capture.fragment_program)); }
@@ -453,6 +550,78 @@ mod tests {
     fn capture(texture: usize, stream: usize, index: usize, count: u32) -> Capture {
         Capture { vertex_program: 7, fragment_program: 8, textures: [99, texture, 0, 0], stream_mask: 0b11111, streams: [stream; MAX_STREAMS],
             vertex_uniforms: 1, fragment_uniforms: 2, primitive: 3, format: 4, index, count, wrap: count, draws: 1 }
+    }
+    #[test]
+    fn only_a_whole_draw_on_one_buffer_is_learnable() {
+        assert!(capture(10, 500, 600, 12).learnable());
+        assert!(!Capture::EMPTY.learnable(), "a masked or skipped draw");
+        let cases: [fn(&mut Capture); 9] = [
+            |c| c.draws = 0, |c| c.draws = 2, |c| c.index = 0, |c| c.count = 0, |c| c.wrap = 1, |c| c.vertex_program = 0, |c| c.fragment_program = 0,
+            |c| c.stream_mask = 0, |c| c.streams[3] = 501,
+        ];
+        for (i, change) in cases.iter().enumerate() {
+            let mut c = capture(10, 500, 600, 12);
+            change(&mut c);
+            assert!(!c.learnable(), "case {i}");
+        }
+        // A stream nobody set does not count against it.
+        let mut c = capture(10, 500, 600, 12);
+        c.stream_mask = 0b00011; c.streams[3] = 999;
+        assert!(c.learnable());
+        c.streams[0] = 0; c.streams[1] = 0;
+        assert!(!c.learnable(), "a null buffer");
+    }
+    #[test]
+    fn a_layout_must_fit_and_the_diffuse_unit_must_exist() {
+        let mut p = program();
+        assert!(p.valid());
+        p.vertex.slots.push(FieldSlot { first: 0, words: 1, offset: 12 });
+        assert!(p.valid(), "ends exactly at the end of the buffer");
+        p.vertex.slots.push(FieldSlot { first: 0, words: 1, offset: 13 });
+        assert!(!p.valid(), "one byte past it");
+        let mut p = program();
+        p.fragment.slots.push(FieldSlot { first: 0, words: 3, offset: 0 });
+        assert!(!p.valid());
+        let mut p = program();
+        p.diffuse_unit = MAX_TEXTURES as u32;
+        assert!(!p.valid());
+        // An index too large for a slot's offset field cannot wrap into range.
+        let fields = vec![("A".to_string(), 0, 1)];
+        assert!(!layout(&fields, 64, |_| Some(0x8000)).fits());
+    }
+    #[test]
+    fn after_a_refused_capture_nothing_goes_direct_until_vitagl_tells_again() {
+        let p = program();
+        let mut direct = Direct::default();
+        assert!(!direct.known(), "nothing is known at the start");
+        direct.after_vitagl(&capture(10, 500, 600, 12), &p, 1, true);
+        assert!(direct.known());
+        direct.forget();
+        assert!(!direct.known());
+        direct.after_vitagl(&capture(10, 500, 600, 12), &p, 1, true);
+        assert!(direct.known());
+    }
+    #[test]
+    fn a_refused_capture_is_a_mismatch_in_the_shadow_line() {
+        let mut s = Shadow::default();
+        s.refused(4, &Capture::EMPTY);
+        assert_eq!((s.draws, s.mismatches, s.draw_args), (1, 1, 1));
+        assert!(s.first.as_deref().unwrap().starts_with("group=4 refused"));
+    }
+    #[test]
+    fn sabotage_takes_the_first_direct_draw_at_or_after_its_position_once_per_proof() {
+        let meta = super::super::shader::meta();
+        let mut state = State::new(Mode::ProofSabotage, 4, &meta);
+        assert!(!state.sabotage_due(Pass::Frame, 9), "a frame's own pass is left alone");
+        assert!(!state.sabotage_due(Pass::ProofVitagl, 9));
+        assert!(!state.sabotage_due(Pass::ProofSecond, SABOTAGE_DRAW - 1));
+        assert!(state.sabotage_due(Pass::ProofSecond, SABOTAGE_DRAW + 3), "position 5 may have been a pipeline change");
+        assert!(!state.sabotage_due(Pass::ProofSecond, SABOTAGE_DRAW + 4), "once");
+        state.proof_result(&[1], &[1]);
+        assert!(state.sabotage_due(Pass::ProofSecond, SABOTAGE_DRAW));
+        assert_eq!(state.sabotage_fired, 2);
+        let mut honest = State::new(Mode::Proof, 4, &meta);
+        assert!(!honest.sabotage_due(Pass::ProofSecond, 9));
     }
     #[test]
     fn layout_writes_the_words_its_slots_name_and_zero_elsewhere() {

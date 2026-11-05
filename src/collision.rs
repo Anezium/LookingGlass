@@ -803,6 +803,15 @@ impl World {
                     #[cfg(test)]
                     { memo.hits += 1; }
                     crate::sim_maps::count("sweep_memo_hits", 1);
+                    // Every answer a repeat gets, against the sweep it replaced. Bits, so -0.0 counts.
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    if std::env::var_os("LOOKING_GLASS_SWEEP_MEMO_VERIFY").is_some() {
+                        drop(memo);
+                        let fresh = self.sweep_except(start, end, half, None);
+                        let bits = |t: Trace| (t.fraction.to_bits(), t.normal.to_array().map(f32::to_bits), t.start_solid, t.all_solid);
+                        assert_eq!(bits(entry.trace), bits(fresh), "a memo hit differs from a fresh sweep: {start} {end} {half}");
+                        crate::sim_maps::count("sweep_memo_verified", 1);
+                    }
                     return entry.trace;
                 }
             }

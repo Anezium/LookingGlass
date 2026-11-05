@@ -67,7 +67,7 @@ REMOVED_WORK = {
     'worker_spin_us': set(),
     # A repeat asks nothing below World::sweep. What comes back is in the state hash, frame by frame.
     'sim_sweep_memo': {'world_sweeps', 'static_queries_executed', 'static_query_hits', 'settled_hull_tests',
-        'dynamic_colliders_tested', 'dynamic_colliders_rejected', 'dynamic_buckets_tested', 'sweep_memo_hits', 'sweep_memo_misses'},
+        'dynamic_colliders_tested', 'dynamic_colliders_rejected', 'dynamic_buckets_tested', 'sweep_memo_hits', 'sweep_memo_misses', 'sweep_memo_verified'},
     # Buffer binds and attribute re-specification are what this removes. Geometry, draw order, textures
     # and uniforms stay compared through world_packets, and pixels strictly.
     'world_shared_buffers': {'vita_world_binding_applications'},
@@ -112,6 +112,10 @@ def environment(ctx, name, negative):
         env['LOOKING_GLASS_GATHER_NEGATIVE'] = negative
     if ctx.get('gl_trace'):
         env['LOOKING_GLASS_GL_TRACE'] = '1'
+    if 'sim_sweep_memo' in ctx['levers']:
+        env['LOOKING_GLASS_NPC_DECISIONS'] = '1'
+    if ctx.get('sweep_verify'):
+        env['LOOKING_GLASS_SWEEP_MEMO_VERIFY'] = '1'
     if ctx.get('world_packets'):
         env['LOOKING_GLASS_WORLD_PACKETS'] = '1'
     if ctx['replay']:
@@ -170,6 +174,13 @@ def compare(ctx, name, off, on, strict_images):
                 x, y = [(e[0], e[2]) for e in x], [(e[0], e[2]) for e in y]
             if x != y:
                 raise Mismatch((name, i, key))
+        if 'sim_sweep_memo' in ctx['levers'] and not ctx.get('sweep_verify'):
+            x, y = a['counters'], b['counters']
+            if x.get('world_sweeps', 0) != y.get('world_sweeps', 0) + y.get('sweep_memo_hits', 0):
+                raise Mismatch((name, i, 'sweeps not conserved', x.get('world_sweeps'), y.get('world_sweeps'), y.get('sweep_memo_hits')))
+            for key in ('static_queries_executed', 'dynamic_colliders_tested', 'settled_hull_tests'):
+                if y.get(key, 0) > x.get(key, 0):
+                    raise Mismatch((name, i, 'removed work grew', key, x.get(key), y.get(key)))
         pa = [{k: v for k, v in p.items() if k != 'gpu_slot'} for p in a['submitted_packets']]
         pb = [{k: v for k, v in p.items() if k != 'gpu_slot'} for p in b['submitted_packets']]
         if pa != pb:
@@ -222,7 +233,7 @@ def run_case(ctx, name, negative=None):
                 raise SystemExit(f'{name} attempt {attempt}: exit {row["exit_code"]}, see {arm}')
             parsed = parse(ctx, arm, name)
             for k in ctx['levers']:
-                if parsed['printed'].get(k) is not on:
+                if parsed['printed'].get(k) != LEVER_VALUES.get(k, (False, True))[on]:
                     raise Mismatch((name, 'printed lever state', k, on, parsed['printed'].get(k)))
             runs.append(parsed)
         pair = next(((x, y) for x in offs for y in ons if not prerequisite_differences(x, y)), None)
@@ -260,6 +271,7 @@ def main():
     p.add_argument('--mover-replay', action='store_true', help='record mover transforms, collider bits and collision answers per frame')
     p.add_argument('--ride', action='store_true', help='with --mover-replay, also stand the player on a mover every 24 frames')
     p.add_argument('--dt', help='override the fixed simulation step')
+    p.add_argument('--sweep-verify', action='store_true', help='on each sweep memo hit, sweep again and assert equal bits, which panics the arm if not')
     p.add_argument('--gl-trace', action='store_true', help='compare a per-frame hash of every observed GL call, name, arguments and bytes read')
     p.add_argument('--world-packets', action='store_true', help='compare a per-frame hash of each world draw: group, resolved geometry, texture, uniforms, program')
     a = p.parse_args()
@@ -268,7 +280,7 @@ def main():
     a.output.mkdir(parents=True, exist_ok=True)
     ctx = dict(output=a.output.resolve(), binary=a.binary.resolve(), config=json.loads(a.config.read_text()), levers=a.lever,
                frames=a.frames, still=a.still, sim=a.sim and a.sim.resolve(), keep=a.keep_logs, replay=a.mover_replay, ride=a.ride, dt=a.dt,
-               gl_trace=a.gl_trace, world_packets=a.world_packets)
+               gl_trace=a.gl_trace, world_packets=a.world_packets, sweep_verify=a.sweep_verify)
     rows = []
     for negative in a.negative:
         row = run_case(ctx, a.maps[0], negative)
