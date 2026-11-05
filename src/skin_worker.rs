@@ -256,6 +256,8 @@ impl Worker {
         self.shared.work_ready.store(true, Ordering::Release);
         self.shared.wake.notify_one();
     }
+    /// No job running, by the hint. False costs a later check, never a wrong start.
+    pub(crate) fn idle(&self) -> bool { !self.shared.busy_hint.load(Ordering::Acquire) }
     pub(crate) fn wait_result(&mut self) -> Result<Measurement, Box<dyn std::any::Any + Send>> {
         if self.shared.spin_us > 0 {
             spin_until(self.shared.spin_us, || !self.shared.busy_hint.load(Ordering::Acquire));

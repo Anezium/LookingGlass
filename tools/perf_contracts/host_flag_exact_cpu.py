@@ -65,6 +65,8 @@ REMOVED_WORK = {
     'world_list_submit': set(),
     # When a thread sleeps cannot reach a frame. The worker clocks are in TIMING.
     'worker_spin_us': set(),
+    # Who skins a draw and when cannot reach a frame. Each draw's output is compared.
+    'skin_stream': set(),
     # A repeat asks nothing below World::sweep. What comes back is in the state hash, frame by frame.
     'sim_sweep_memo': {'world_sweeps', 'static_queries_executed', 'static_query_hits', 'settled_hull_tests',
         'dynamic_colliders_tested', 'dynamic_colliders_rejected', 'dynamic_buckets_tested', 'sweep_memo_hits', 'sweep_memo_misses', 'sweep_memo_verified'},

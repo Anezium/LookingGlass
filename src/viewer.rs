@@ -3947,6 +3947,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 viewer_block = crate::frame_profile::span("skin_gather");
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
             }
+            let gather_clock = crate::pass_clock::scope(crate::pass_clock::ACTOR_GATHER);
             let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherStoryPose);
             level_art.story_pose(&story);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherFrameBegin);
@@ -3967,6 +3968,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherDispatch);
             frame.dispatch();
             drop(census_leaf);
+            drop(gather_clock);
             crate::audio::game_stage(0);
             Some(frame)
         } else { None };
@@ -3996,6 +3998,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let _collect = crate::frame_profile::span("skin_collect");
             crate::audio::game_stage(2);
             let _census = crate::phase_census::span(crate::phase_census::Region::ActorCollect);
+            let _clock = crate::pass_clock::scope(crate::pass_clock::ACTOR_COLLECT);
             frame.collect();
             crate::audio::game_stage(0);
         }

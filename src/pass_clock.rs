@@ -12,7 +12,9 @@ pub(crate) const WORLD_OPAQUE: usize = 0;
 pub(crate) const WORLD_SUBMIT: usize = 1;
 pub(crate) const ALPHA_PREPARE: usize = 2;
 pub(crate) const FX_FINISH: usize = 3;
-const NAMES: [&str; 4] = ["world_opaque", "world_submit", "alpha_prepare", "fx_finish"];
+pub(crate) const ACTOR_GATHER: usize = 4;
+pub(crate) const ACTOR_COLLECT: usize = 5;
+const NAMES: [&str; 6] = ["world_opaque", "world_submit", "alpha_prepare", "fx_finish", "actor_gather", "actor_collect"];
 const SLOTS: usize = NAMES.len();
 /// The survey's window: 60 warmup frames, then 120 measured.
 const WINDOW: usize = 180;

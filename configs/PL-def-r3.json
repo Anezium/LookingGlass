@@ -142,5 +142,6 @@
   "world_gxm": "off",
   "tls_fast": "off",
   "sim_sweep_memo": false,
-  "worker_spin_us": 0
+  "worker_spin_us": 0,
+  "skin_stream": false
 }

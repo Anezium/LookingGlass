@@ -8,6 +8,7 @@ use super::{rotation, shade_arrays, Params};
 use crate::render_fx::actor_vertices::{self, PublicationMode, Revision};
 use crate::skeletal::{Skeleton, SkinSurface, Transform};
 use macroquad::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     cell::{Cell, RefCell, UnsafeCell},
     ops::Range,
@@ -49,6 +50,15 @@ pub(crate) fn single_frame() -> bool {
 pub(crate) fn ready() -> bool {
     PHASE.with(|p| p.get() == Phase::Ready)
 }
+#[cfg(feature="vita_renderer")]
+fn stream_enabled() -> bool {
+    #[cfg(test)]
+    { STREAM_TEST.with(|s| s.get()).unwrap_or_else(|| matches!(std::env::var("LOOKING_GLASS_TEST_SKIN_STREAM").as_deref(), Ok("on"))) }
+    #[cfg(not(test))]
+    { crate::render::vita_renderer::config().skin_stream }
+}
+#[cfg(all(test,feature="vita_renderer"))]
+thread_local! { static STREAM_TEST: Cell<Option<bool>> = const { Cell::new(None) }; }
 static SERIAL_FALLBACKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(crate) fn note_serial_fallback() -> u64 {
     SERIAL_FALLBACKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
@@ -199,7 +209,57 @@ struct Task {
     dirty: usize,
     census: bool,
     census_ns: u64,
+    /// `skin_stream`: claim draws from this `Stream` instead of the `draws` range. Zero is off.
+    stream: usize,
 }
+/// `skin_stream`. The game thread publishes each captured draw as it goes and the workers claim
+/// them one at a time, so skinning runs during the gather as well as during the world pass.
+/// A worker reads only what the publish released: arenas hold their capacity for the whole frame
+/// (`bounded` in `capture_single` sends anything larger down the serial path), so pushing a later
+/// element moves nothing a worker can see. It goes through these base pointers and never touches
+/// the `Vec`s, which the game thread is still writing.
+#[derive(Default)]
+struct Stream {
+    published: AtomicUsize,
+    claimed: AtomicUsize,
+    draws: AtomicUsize,
+    surfaces: AtomicUsize,
+    pose: AtomicUsize,
+    scales: AtomicUsize,
+    palette: AtomicUsize,
+}
+impl Stream {
+    /// The next published draw nobody has yet, or None.
+    fn claim(&self) -> Option<usize> {
+        loop {
+            let claimed = self.claimed.load(Ordering::Relaxed);
+            if claimed >= self.published.load(Ordering::Acquire) { return None; }
+            if self.claimed.compare_exchange_weak(claimed, claimed + 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() { return Some(claimed); }
+        }
+    }
+    fn unclaimed(&self) -> usize {
+        self.published.load(Ordering::Relaxed).saturating_sub(self.claimed.load(Ordering::Relaxed))
+    }
+    /// Run every draw this thread can claim. Each has its own output, so order cannot matter.
+    unsafe fn run(&self, output: usize) {
+        while let Some(index) = self.claim() {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if index % 7 == 3 && crate::sim_maps::probe::negative_control() == Some("skin-stream-drop") { continue; }
+            let draw = &*(self.draws.load(Ordering::Relaxed) as *const Draw).add(index);
+            let slice = |base: &AtomicUsize, range: &Range<usize>, size: usize| (base.load(Ordering::Relaxed) + range.start * size, range.len());
+            let (p, n) = slice(&self.pose, &draw.pose, std::mem::size_of::<Transform>());
+            let pose = std::slice::from_raw_parts(p as *const Transform, n);
+            let (p, n) = slice(&self.scales, &draw.scales, std::mem::size_of::<f32>());
+            let scales = std::slice::from_raw_parts(p as *const f32, n);
+            let (p, n) = slice(&self.palette, &draw.palette, std::mem::size_of::<(Mat3, Vec3)>());
+            let palette = std::slice::from_raw_parts(p as *const (Mat3, Vec3), n);
+            skin_draw(draw, pose, scales, palette, self.surfaces.load(Ordering::Relaxed) as *const Surface, output, 0, 0);
+        }
+    }
+}
+/// How many draws wait unclaimed before the game thread wakes a second worker. One draw is one
+/// worker's work, and a wake is not free.
+const STREAM_SECOND_WORKER: usize = 2;
 #[cfg(test)]
 static PANIC_INPUT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Test-only: workers of this thread's store panic while `run` executes.
@@ -219,15 +279,24 @@ impl Task {
         if task.input == PANIC_INPUT.load(std::sync::atomic::Ordering::SeqCst) { panic!("injected publication worker failure"); }
         let started=task.census.then(std::time::Instant::now);
         let input = &*(task.input as *const Inputs);
-        for draw in &input.draws[task.draws.clone()] {
-            let pose = &input.pose[draw.pose.clone()];
-            let scales = &input.scales[draw.scales.clone()];
-            let palette = &input.palette[draw.palette.clone()];
+        if task.stream != 0 {
+            (&*(task.stream as *const Stream)).run(task.output);
+        } else {
+            for draw in &input.draws[task.draws.clone()] {
+                skin_draw(draw, &input.pose[draw.pose.clone()], &input.scales[draw.scales.clone()], &input.palette[draw.palette.clone()],
+                    input.surfaces.as_ptr(), task.output, task.layers, task.dirty);
+            }
+        }
+        task.census_ns+=started.map_or(0,|t|t.elapsed().as_nanos() as u64);
+    }
+}
+/// The exact kernel for one draw, on whichever thread claimed it.
+unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[(Mat3, Vec3)], surfaces: *const Surface, task_output: usize, task_layers: usize, task_dirty: usize) {
             for surface_id in draw.surfaces.clone() {
-                let surface = &input.surfaces[surface_id];
+                let surface = &*surfaces.add(surface_id);
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
                 let output = std::slice::from_raw_parts_mut(
-                    if surface.output == 0 { (task.output as *mut Vertex).add(surface.vertices.start) }
+                    if surface.output == 0 { (task_output as *mut Vertex).add(surface.vertices.start) }
                     else { surface.output as *mut Vertex },
                     surface.vertices.len(),
                 );
@@ -277,10 +346,10 @@ impl Task {
                     let vertex_alpha = surface.mode == PublicationMode::VertexAlpha;
                     for vertex in &mut *output { *vertex = actor_vertices::normalize(*vertex, vertex_alpha); }
                 }
-                if task.layers != 0 {
+                if task_layers != 0 {
                     assert!(surface.mode != PublicationMode::Raw, "raw publication on the layer-revision path");
                     let layers = std::slice::from_raw_parts_mut(
-                        (task.layers as *mut [Vertex; 2]).add(surface.vertices.start), output.len());
+                        (task_layers as *mut [Vertex; 2]).add(surface.vertices.start), output.len());
                     let mut dirty = [false; 2];
                     for (src, dst) in output.iter().zip(layers) {
                         for variant in 0..2 {
@@ -289,19 +358,20 @@ impl Task {
                             dst[variant] = v;
                         }
                     }
-                    *(task.dirty as *mut [bool; 2]).add(surface_id) = dirty;
+                    *(task_dirty as *mut [bool; 2]).add(surface_id) = dirty;
                 }
             }
-        }
-
-        task.census_ns=started.map_or(0,|t|t.elapsed().as_nanos() as u64);
-    }
 }
 struct Store {
     // Workers drain before storage is released, also on TLS shutdown.
     workers: Vec<crate::skin_worker::Worker>,
     tasks: [UnsafeCell<Task>; 2],
     input: Box<UnsafeCell<Inputs>>,
+    stream: Box<Stream>,
+    /// This frame streams: `skin_stream` and a single-preparation frame.
+    streaming: bool,
+    /// A worker panic seen while restarting it, kept for `drain`.
+    stream_panic: Option<Box<dyn std::any::Any + Send>>,
     #[cfg(feature="vita_renderer")]
     previous_numeric: Option<Box<Inputs>>,
     output: Vec<Vertex>,
@@ -337,7 +407,7 @@ impl Store {
                 UnsafeCell::new(Task {
                     input: 0,
                     output: 0,
-                    draws: 0..0, layers: 0, dirty: 0, census:false, census_ns:0,
+                    draws: 0..0, layers: 0, dirty: 0, census:false, census_ns:0, stream:0,
                 })
             }),
             input: Box::new(UnsafeCell::new(Inputs {
@@ -349,6 +419,9 @@ impl Store {
             })),
             #[cfg(feature="vita_renderer")]
             previous_numeric:None,
+            stream: Box::default(),
+            streaming: false,
+            stream_panic: None,
             output: vec![Vertex { position: Vec3::ZERO, uv: Vec2::ZERO,
                 normal: Vec4::ZERO, color: [0; 4] }; VERTICES],
             output_len: 0,
@@ -381,6 +454,7 @@ impl Store {
         i.pose.clear();
         i.scales.clear();
         i.palette.clear();
+        self.streaming = false;
         self.output_len = 0;
         self.frame += 1;
         self.cursor = 0;
@@ -546,11 +620,56 @@ impl Store {
             i.pose.extend_from_slice(p.pose); i.scales.extend_from_slice(p.scales); i.palette.extend_from_slice(p.palette);
 
             i.draws.push(d);
+            if self.streaming { self.publish(); }
         }
         true
     }
+    /// After `reset`, once this frame is known to prepare once: base pointers of this frame's arenas.
+    fn begin_stream(&mut self) {
+        let i = unsafe { &*self.input.get() };
+        let s = &self.stream;
+        for (slot, value) in [(&s.draws, i.draws.as_ptr() as usize), (&s.surfaces, i.surfaces.as_ptr() as usize), (&s.pose, i.pose.as_ptr() as usize),
+            (&s.scales, i.scales.as_ptr() as usize), (&s.palette, i.palette.as_ptr() as usize)] { slot.store(value, Ordering::Relaxed); }
+        s.published.store(0, Ordering::Relaxed);
+        s.claimed.store(0, Ordering::Relaxed);
+        for task in &self.tasks { unsafe { (*task.get()).census_ns = 0; } }
+        self.streaming = true;
+    }
+    /// Release everything captured so far and wake who can help. The push of a draw's ranges
+    /// happens before the store, and a worker's load of it acquires them.
+    fn publish(&mut self) {
+        let i = unsafe { &*self.input.get() };
+        self.stream.published.store(i.draws.len(), Ordering::Release);
+        let want = if self.stream.unclaimed() >= STREAM_SECOND_WORKER { 2 } else { 1 };
+        let mut started = 0;
+        for index in 0..self.workers.len() {
+            if started == want { break; }
+            if !self.workers[index].idle() { started += 1; continue; }
+            // An idle worker's last job may have panicked. Its next result would lose that.
+            if let Err(panic) = self.workers[index].wait_result() { self.stream_panic.get_or_insert(panic); }
+            unsafe {
+                let task = &mut *self.tasks[index].get();
+                *task = Task { input: self.input.get() as usize, output: self.output.as_mut_ptr() as usize, draws: 0..0, layers: 0, dirty: 0,
+                    census: crate::phase_census::active(), census_ns: task.census_ns, stream: &*self.stream as *const Stream as usize };
+                self.workers[index].start(task as *mut Task as usize, Task::run);
+            }
+            started += 1;
+        }
+        self.pending = self.workers.len();
+    }
     fn dispatch(&mut self) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorWorkerDispatch);
+        if self.streaming {
+            let i = unsafe { &*self.input.get() };
+            // Nothing a worker holds may have moved. `bounded` is what promises this.
+            assert!(i.draws.as_ptr() as usize == self.stream.draws.load(Ordering::Relaxed)
+                && i.surfaces.as_ptr() as usize == self.stream.surfaces.load(Ordering::Relaxed)
+                && i.pose.as_ptr() as usize == self.stream.pose.load(Ordering::Relaxed)
+                && i.scales.as_ptr() as usize == self.stream.scales.load(Ordering::Relaxed)
+                && i.palette.as_ptr() as usize == self.stream.palette.load(Ordering::Relaxed), "a skin arena moved under the workers");
+            self.publish();
+            return;
+        }
         assert_eq!(self.pending, 0);
         let i = unsafe { &*self.input.get() };
         let draws = i.draws.len();
@@ -581,7 +700,7 @@ impl Store {
                     draws: range,
                     layers: if self.layers.is_empty() {0} else {self.layers.as_mut_ptr() as usize},
                     dirty: self.dirty.as_mut_ptr() as usize,
-                    census:crate::phase_census::active(), census_ns:0,
+                    census:crate::phase_census::active(), census_ns:0, stream:0,
                 };
             }
             // Store is boxed before this call, and cannot be moved/reset/read until drain.
@@ -594,7 +713,11 @@ impl Store {
     fn drain(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
         let start = MetricInstant::now();
         let completed = self.pending > 0;
-        let mut panic = None;
+        let mut panic = self.stream_panic.take();
+        // What nobody took yet is cheaper here than a wait. Not while unwinding.
+        if self.streaming && !std::thread::panicking() {
+            unsafe { self.stream.run(self.output.as_mut_ptr() as usize); }
+        }
         for worker in &mut self.workers[..self.pending] {
             match worker.wait_result() {
                 Ok(m) => self.service_us += m.ns / 1000,
@@ -781,6 +904,8 @@ impl Frame {
         STORE.with(|s| s.borrow_mut().as_mut().expect("overlap startup").reset());
         super::prepared::begin();
         PHASE.with(|p| p.set(Phase::Gather));
+        #[cfg(feature="vita_renderer")]
+        if single_frame() && stream_enabled() { STORE.with(|s| s.borrow_mut().as_mut().unwrap().begin_stream()); }
         Self {
             _game: crate::game_thread::GameThread::default(),
             gather_start,
@@ -1115,6 +1240,51 @@ mod tests {
         }
     }
     #[cfg(feature="vita_renderer")]
+    #[test]
+    fn stream_claims_each_published_draw_exactly_once_across_threads() {
+        let stream = std::sync::Arc::new(Stream::default());
+        assert_eq!(stream.claim(), None, "nothing published");
+        stream.published.store(2, Ordering::Release);
+        assert_eq!((stream.claim(), stream.claim(), stream.claim()), (Some(0), Some(1), None));
+        assert_eq!(stream.unclaimed(), 0);
+        stream.published.store(3, Ordering::Release);
+        assert_eq!(stream.unclaimed(), 1);
+        assert_eq!(stream.claim(), Some(2));
+        // Three threads race while a fourth publishes: nothing lost, nothing twice.
+        stream.claimed.store(0, Ordering::Relaxed);
+        stream.published.store(0, Ordering::Relaxed);
+        const N: usize = 200_000;
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let workers: Vec<_> = (0..3).map(|_| { let (s, d) = (stream.clone(), done.clone()); std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            loop {
+                match s.claim() { Some(i) => seen.push(i), None if d.load(Ordering::Acquire) => { while let Some(i) = s.claim() { seen.push(i); } return seen; } None => std::hint::spin_loop() }
+            }
+        }) }).collect();
+        for n in 1..=N { stream.published.store(n, Ordering::Release); }
+        done.store(true, Ordering::Release);
+        let mut all: Vec<usize> = workers.into_iter().flat_map(|w| w.join().unwrap()).collect();
+        all.sort_unstable();
+        assert_eq!(all, (0..N).collect::<Vec<_>>());
+    }
+    #[cfg(feature="vita_renderer")]
+    fn with_stream<T>(on: bool, run: impl FnOnce() -> T) -> T {
+        struct Reset(Option<bool>);
+        impl Drop for Reset { fn drop(&mut self) { STREAM_TEST.with(|s| s.set(self.0)); } }
+        let _reset = Reset(STREAM_TEST.with(|s| s.replace(Some(on))));
+        run()
+    }
+    #[cfg(feature="vita_renderer")]
+    #[test]
+    fn a_frame_that_never_prepares_once_does_not_stream() {
+        with_stream(true, || {
+            startup(1, false);
+            let frame = Frame::begin();
+            assert!(!single_frame());
+            assert!(!STORE.with(|s| s.borrow().as_ref().unwrap().streaming));
+            drop(frame);
+        });
+    }
     #[test]
     fn surface_revisions_track_exact_dependencies_without_unrelated_bones_or_allocations() {
         let (s,meshes,mut pose)=fixture();pose.push(pose[0]);
@@ -1642,7 +1812,18 @@ mod tests {
                 Draw(5, 0, 1.), Opacity(0.5, vec![Draw(1, 1, 1.)]), Hidden(0, 2), Puff, Draw(3, 1, 0.2)]
         }
         #[test]
-        fn deferred_layers_full_output_matches_serial_for_every_layer_kind() {
+        fn streamed_full_output_matches_serial_for_every_layer_kind() {
+            let (models, frames) = (full_matrix(), vec![matrix_frame(); 3]);
+            let plain = super::with_stream(false, || run(true, None, &models, &frames, true));
+            let streamed = super::with_stream(true, || run(true, None, &models, &frames, true));
+            assert_eq!(plain.frames.len(), streamed.frames.len());
+            assert_eq!(plain.commits, streamed.commits);
+            for (frame, (a, b)) in plain.frames.iter().zip(&streamed.frames).enumerate() {
+                assert_eq!(a, b, "plain and streamed output differ at frame {frame}");
+            }
+    }
+    #[test]
+    fn deferred_layers_full_output_matches_serial_for_every_layer_kind() {
             let models = full_matrix();
             let frames = vec![matrix_frame(); 3];
             // Per frame: models 0 (twice, once depth-read-only), 1, 2 and 5 defer. Simple model 3

@@ -53,6 +53,8 @@ pub struct Config {
     pub sim_sweep_memo: bool,
     /// Microseconds the skin workers and the game thread poll for each other before sleeping. Zero is off.
     pub worker_spin_us: u32,
+    /// Skin workers claim draws as the gather captures them, instead of starting after it.
+    pub skin_stream: bool,
     /// Exact static occlusion certificates for unchanged eye/light positions.
     pub lights_static_cache: bool,
     /// Spatial AABB buckets; preserve original dynamic contact order.
@@ -313,6 +315,7 @@ impl Default for Config {
             sim_sight_query_reuse: true,
             sim_sweep_memo: false,
             worker_spin_us: 0,
+            skin_stream: false,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
             sim_npc_target_stack: true,
@@ -502,6 +505,7 @@ impl Config {
         ensure!(gxm::Mode::parse(&self.world_gxm).is_some(),"world_gxm must be off, shadow, live, proof, proof_control or proof_sabotage");
         ensure!(self.world_gxm=="off" || self.world_list_submit,"world_gxm requires world_list_submit");
         ensure!(self.world_gxm=="off" || self.gpu_mask.is_empty(),"world_gxm excludes gpu_mask: a masked draw captures nothing");
+        ensure!(!self.skin_stream || (self.skin_overlap && self.actor_single_prepare && !self.actor_layer_reuse),"skin_stream requires skin_overlap and actor_single_prepare, and excludes actor_layer_reuse");
         ensure!(self.worker_spin_us <= 1000,"worker_spin_us must be at most 1000: worker 1 shares CPU2 with the audio producer");
         ensure!(crate::tls_count::FastMode::parse(&self.tls_fast).is_some(),"tls_fast must be off, on, shadow or shadow_sabotage");
         ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
@@ -2876,6 +2880,18 @@ mod tests {
             for bad in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key: bad})).is_err(), "{key}");
             }
+        }
+    }
+    #[test]
+    fn skin_stream_defaults_off_and_needs_its_path() {
+        assert!(!Config::default().skin_stream);
+        let on: Config = serde_json::from_value(serde_json::json!({"skin_stream": true, "skin_overlap": true, "actor_single_prepare": true, "actor_layer_reuse": false})).unwrap();
+        on.validate().unwrap();
+        for (key, value) in [("skin_overlap", false), ("actor_single_prepare", false), ("actor_layer_reuse", true)] {
+            let mut json = serde_json::json!({"skin_stream": true, "skin_overlap": true, "actor_single_prepare": true, "actor_layer_reuse": false});
+            json[key] = serde_json::json!(value);
+            let bad: Config = serde_json::from_value(json).unwrap();
+            assert!(bad.validate().is_err(), "{key}");
         }
     }
     #[test]
