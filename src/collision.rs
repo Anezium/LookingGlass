@@ -2144,8 +2144,12 @@ mod sight_reuse_tests {
                 }
             }
             drop(_scope);
+            // A new world's first scope is generation 1, the same number the wrap lands on, so an
+            // entry from it would read as current if the wrap kept the table.
+            let world = memo_world();
             let start = Vec3::ZERO;
             { let _scope = world.sweep_memo_scope(); world.sweep(start, end, HALF_SIGHT); }
+            assert_eq!(world.sweep_memo.borrow().generation, 1);
             world.sweep_memo.borrow_mut().generation = u32::MAX;
             let (_, _, misses) = world.sweep_memo_counts();
             let _scope = world.sweep_memo_scope();
