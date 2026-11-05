@@ -50,6 +50,21 @@ pub(crate) fn single_frame() -> bool {
 pub(crate) fn ready() -> bool {
     PHASE.with(|p| p.get() == Phase::Ready)
 }
+/// The line after the survey window, when the lever is on. Totals since start, warmup included.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn stream_line(map: &str) -> Option<String> {
+    if !stream_enabled() { return None; }
+    #[cfg(target_os="vita")]
+    let game = (read_fpscr() as usize & FPSCR_CONTROL) | 1;
+    #[cfg(not(target_os="vita"))]
+    let game = 1usize;
+    STORE.with(|s| s.borrow().as_ref().map(|s| {
+        let t = &s.stream;
+        format!("[lg/skin-stream] map={map} frames={} starts_in_gather={} claimed_in_gather={} game_thread_draws={} fpscr_game={game:#x} fpscr_worker={:#x} fpscr_worker_changes={}",
+            s.frame, t.starts_in_gather.load(Ordering::Relaxed), t.claimed_in_gather.load(Ordering::Relaxed), t.game_thread_draws.load(Ordering::Relaxed),
+            t.worker_fpscr.load(Ordering::Relaxed), t.worker_fpscr_differs.load(Ordering::Relaxed))
+    }))
+}
 #[cfg(feature="vita_renderer")]
 fn stream_enabled() -> bool {
     #[cfg(test)]
@@ -227,8 +242,25 @@ struct Stream {
     pose: AtomicUsize,
     scales: AtomicUsize,
     palette: AtomicUsize,
+    /// Whole-run counts for the line after the window: worker starts while still gathering, draws
+    /// a worker had claimed by the end of the gather, draws the game thread skinned at collect.
+    starts_in_gather: AtomicUsize,
+    claimed_in_gather: AtomicUsize,
+    game_thread_draws: AtomicUsize,
+    /// A worker's FPSCR, the only state that could make who skins a draw matter. Zero until seen.
+    worker_fpscr: AtomicUsize,
+    worker_fpscr_differs: AtomicUsize,
 }
 impl Stream {
+    #[cfg(target_os="vita")]
+    fn note_fpscr(&self) {
+        let value = read_fpscr() as usize;
+        // Bit 0 of the stored word marks "seen": a real FPSCR may be zero. FPSCR's low bits hold
+        // cumulative flags, which say what happened and not how the next add rounds, so they go.
+        let control = (value & FPSCR_CONTROL) | 1;
+        let known = self.worker_fpscr.swap(control, Ordering::Relaxed);
+        if known != 0 && known != control { self.worker_fpscr_differs.fetch_add(1, Ordering::Relaxed); }
+    }
     /// The next published draw nobody has yet, or None.
     fn claim(&self) -> Option<usize> {
         loop {
@@ -257,6 +289,14 @@ impl Stream {
         }
     }
 }
+/// FPSCR's mode bits: flush to zero, default NaN, rounding, stride and length. The rest are flags.
+const FPSCR_CONTROL: usize = 0x07f7_0000;
+#[cfg(target_os="vita")]
+fn read_fpscr() -> u32 {
+    let value: u32;
+    unsafe { core::arch::asm!("vmrs {}, fpscr", out(reg) value, options(nomem, nostack, preserves_flags)); }
+    value
+}
 /// How many draws wait unclaimed before the game thread wakes a second worker. One draw is one
 /// worker's work, and a wake is not free.
 const STREAM_SECOND_WORKER: usize = 2;
@@ -278,11 +318,14 @@ impl Task {
         #[cfg(test)]
         if task.input == PANIC_INPUT.load(std::sync::atomic::Ordering::SeqCst) { panic!("injected publication worker failure"); }
         let started=task.census.then(std::time::Instant::now);
-        let input = &*(task.input as *const Inputs);
+        #[cfg(target_os="vita")]
+        if task.stream != 0 { (&*(task.stream as *const Stream)).note_fpscr(); }
         if task.stream != 0 {
             (&*(task.stream as *const Stream)).run(task.output);
         } else {
+            let input = &*(task.input as *const Inputs);
             for draw in &input.draws[task.draws.clone()] {
+                assert!(draw.surfaces.end <= input.surfaces.len());
                 skin_draw(draw, &input.pose[draw.pose.clone()], &input.scales[draw.scales.clone()], &input.palette[draw.palette.clone()],
                     input.surfaces.as_ptr(), task.output, task.layers, task.dirty);
             }
@@ -372,6 +415,8 @@ struct Store {
     streaming: bool,
     /// A worker panic seen while restarting it, kept for `drain`.
     stream_panic: Option<Box<dyn std::any::Any + Send>>,
+    /// This worker has a job from this frame, so its next result is this frame's.
+    stream_ran: [bool; 2],
     #[cfg(feature="vita_renderer")]
     previous_numeric: Option<Box<Inputs>>,
     output: Vec<Vertex>,
@@ -422,6 +467,7 @@ impl Store {
             stream: Box::default(),
             streaming: false,
             stream_panic: None,
+            stream_ran: [false; 2],
             output: vec![Vertex { position: Vec3::ZERO, uv: Vec2::ZERO,
                 normal: Vec4::ZERO, color: [0; 4] }; VERTICES],
             output_len: 0,
@@ -633,12 +679,15 @@ impl Store {
         s.published.store(0, Ordering::Relaxed);
         s.claimed.store(0, Ordering::Relaxed);
         for task in &self.tasks { unsafe { (*task.get()).census_ns = 0; } }
+        self.stream_ran = [false; 2];
         self.streaming = true;
     }
     /// Release everything captured so far and wake who can help. The push of a draw's ranges
     /// happens before the store, and a worker's load of it acquires them.
     fn publish(&mut self) {
         let i = unsafe { &*self.input.get() };
+        // Before any start: whatever happens next, drain waits for every worker.
+        self.pending = self.workers.len();
         self.stream.published.store(i.draws.len(), Ordering::Release);
         let want = if self.stream.unclaimed() >= STREAM_SECOND_WORKER { 2 } else { 1 };
         let mut started = 0;
@@ -646,7 +695,12 @@ impl Store {
             if started == want { break; }
             if !self.workers[index].idle() { started += 1; continue; }
             // An idle worker's last job may have panicked. Its next result would lose that.
-            if let Err(panic) = self.workers[index].wait_result() { self.stream_panic.get_or_insert(panic); }
+            match self.workers[index].wait_result() {
+                Ok(m) => if self.stream_ran[index] { self.service_us += m.ns / 1000; }
+                Err(panic) => { self.stream_panic.get_or_insert(panic); }
+            }
+            self.stream_ran[index] = true;
+            self.stream.starts_in_gather.fetch_add(1, Ordering::Relaxed);
             unsafe {
                 let task = &mut *self.tasks[index].get();
                 *task = Task { input: self.input.get() as usize, output: self.output.as_mut_ptr() as usize, draws: 0..0, layers: 0, dirty: 0,
@@ -655,7 +709,6 @@ impl Store {
             }
             started += 1;
         }
-        self.pending = self.workers.len();
     }
     fn dispatch(&mut self) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorWorkerDispatch);
@@ -667,6 +720,7 @@ impl Store {
                 && i.pose.as_ptr() as usize == self.stream.pose.load(Ordering::Relaxed)
                 && i.scales.as_ptr() as usize == self.stream.scales.load(Ordering::Relaxed)
                 && i.palette.as_ptr() as usize == self.stream.palette.load(Ordering::Relaxed), "a skin arena moved under the workers");
+            self.stream.claimed_in_gather.fetch_add(self.stream.claimed.load(Ordering::Relaxed), Ordering::Relaxed);
             self.publish();
             return;
         }
@@ -716,11 +770,16 @@ impl Store {
         let mut panic = self.stream_panic.take();
         // What nobody took yet is cheaper here than a wait. Not while unwinding.
         if self.streaming && !std::thread::panicking() {
+            let before = self.stream.claimed.load(Ordering::Relaxed);
             unsafe { self.stream.run(self.output.as_mut_ptr() as usize); }
+            // Claims by workers landing meanwhile inflate this a little. It only says how much help mattered.
+            self.stream.game_thread_draws.fetch_add(self.stream.claimed.load(Ordering::Relaxed) - before, Ordering::Relaxed);
         }
-        for worker in &mut self.workers[..self.pending] {
+        let streaming = self.streaming;
+        for (index, worker) in self.workers[..self.pending].iter_mut().enumerate() {
             match worker.wait_result() {
-                Ok(m) => self.service_us += m.ns / 1000,
+                // A worker that got no job this frame still holds an old result.
+                Ok(m) => if !streaming || self.stream_ran[index] { self.service_us += m.ns / 1000; }
                 Err(p) => {
                     if panic.is_none() {
                         panic = Some(p);
@@ -754,6 +813,8 @@ impl Store {
             }
         }
         self.wait_us = start.elapsed().as_micros() as u64;
+        // Nothing runs after this. An unwound frame must not leave draws for a later drain.
+        self.streaming = false;
         panic
     }
     fn consume(
@@ -1239,7 +1300,6 @@ mod tests {
             alpha: 0.731,
         }
     }
-    #[cfg(feature="vita_renderer")]
     #[test]
     fn stream_claims_each_published_draw_exactly_once_across_threads() {
         let stream = std::sync::Arc::new(Stream::default());
@@ -1285,6 +1345,7 @@ mod tests {
             drop(frame);
         });
     }
+    #[cfg(feature="vita_renderer")]
     #[test]
     fn surface_revisions_track_exact_dependencies_without_unrelated_bones_or_allocations() {
         let (s,meshes,mut pose)=fixture();pose.push(pose[0]);
@@ -1818,6 +1879,10 @@ mod tests {
             let streamed = super::with_stream(true, || run(true, None, &models, &frames, true));
             assert_eq!(plain.frames.len(), streamed.frames.len());
             assert_eq!(plain.commits, streamed.commits);
+            // It really streamed: workers started while the gather was still going.
+            let (starts, line) = STORE.with(|s| { let s = s.borrow(); let s = s.as_ref().unwrap();
+                (s.stream.starts_in_gather.load(Ordering::Relaxed), s.frame) });
+            assert!(starts >= frames.len(), "{starts} starts over {line} frames");
             for (frame, (a, b)) in plain.frames.iter().zip(&streamed.frames).enumerate() {
                 assert_eq!(a, b, "plain and streamed output differ at frame {frame}");
             }

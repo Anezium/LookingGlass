@@ -75,6 +75,8 @@ impl Survey {
         if let Some(line)=crate::render::vita_renderer::world_gxm_summary(map) {println!("{line}");}
         #[cfg(feature="vita_renderer")]
         if let Some(line)=crate::tls_count::FastMode::parse(&crate::render::vita_renderer::config().tls_fast).and_then(|mode|crate::tls_count::fast_line(map,mode)) {println!("{line}");}
+        #[cfg(feature="vita_renderer")]
+        if let Some(line)=crate::character::skinning::overlap::stream_line(map) {println!("{line}");}
         if self.config.tls_count {println!("{}",self.tls_line(map));}
         if self.config.tls_count {println!("{}",crate::tls_count::sites_line(map));}
         println!("[lg/r13b-survey] done map={map} samples={} warmup_frames=60 measured_frames={} died={}",self.rows.len(),self.rows.len()-60,!alive);
