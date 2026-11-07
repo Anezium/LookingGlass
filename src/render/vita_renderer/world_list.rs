@@ -74,6 +74,19 @@ impl WorldList {
         let visible = draws.iter().map(|d| Visible { generation: 0, depth: 0., visible: false, static_group: d.static_group }).collect();
         Self { items: Vec::with_capacity(draws.len()), sort: SortCache::with_capacity(draws.len()), draws, visible, classes: Classes::new(parameters), serial: 0 }
     }
+    /// Zero marks an unchecked parameter. Before reusing any nonzero serial,
+    /// invalidate all stored marks, including entries invisible at this wrap.
+    /// Uniform generations/model/time remain intact and can still reuse payloads.
+    #[inline]
+    pub fn begin_parameter_pass(&mut self, parameters: &mut [Parameter]) {
+        let next = self.serial.wrapping_add(1);
+        if next == 0 {
+            for parameter in parameters { parameter.list_serial = 0; }
+        }
+        self.serial = next.max(1);
+        self.items.clear();
+        self.classes.begin_pass();
+    }
     pub fn forget_visibility(&mut self) { for v in &mut self.visible { v.generation = 0; } }
 }
 
@@ -408,5 +421,151 @@ mod tests {
         let mut b = vec![(-0_f32, 1), (0_f32, 0)];
         cache.apply(&mut b);
         assert!(same(&b, &legacy(&[(-0_f32, 1), (0_f32, 0)])));
+    }
+    // CPU-only test seam: no Renderer/context/assets are constructed. These tests
+    // call the production pass boundary, actual Parameter uniform functions and
+    // actual Classes. This small driver mirrors the unchanged visible-entry gate.
+    fn serial_parameter() -> Parameter {
+        let recipe = Recipe { stage: Stage::default(), textures: vec![], lit: true,
+            rank: 0, blend: 0, opaque: true, cull: 0, model: None,
+            motion: None, deform: None };
+        let u = uniforms(&recipe, 0., Vec3::ZERO, Mat4::IDENTITY,
+            Mat4::IDENTITY, false, Vec2::ONE);
+        Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0,
+            model: Mat4::IDENTITY.to_cols_array().map(f32::to_bits),
+            time: 0_f32.to_bits(), time_uv: false, time_gain: false,
+            list_serial: 0, class: 0 }
+    }
+    fn serial_list(parameters: usize) -> WorldList {
+        WorldList::new(&[], &[], &[], parameters)
+    }
+    fn serial_expected(p: &Parameter, time: f32, model: Mat4) -> [u32; 143] {
+        let mut u = uniforms(&p.recipe, time, Vec3::ZERO, model,
+            Mat4::IDENTITY, false, Vec2::ONE);
+        u.atmosphere(&crate::environment::Atmosphere::default(), Vec3::ZERO);
+        u.bits()
+    }
+    // Return (checked in this pass, rebuilt) to distinguish class assignment
+    // from real uniform reuse. A parameter appears once per model in production.
+    fn serial_visible(list: &mut WorldList, parameters: &mut [Parameter],
+        index: usize, generation: u64, time: f32, model: Mat4) -> (bool, bool) {
+        let p = &mut parameters[index];
+        if p.list_serial == list.serial { return (false, false); }
+        p.list_serial = list.serial;
+        let model_bits = model.to_cols_array().map(f32::to_bits);
+        let rebuilt = p.generation != generation || p.model != model_bits;
+        if rebuilt {
+            p.uniforms = uniforms(&p.recipe, time, Vec3::ZERO, model,
+                Mat4::IDENTITY, false, Vec2::ONE);
+            p.uniforms.atmosphere(&crate::environment::Atmosphere::default(), Vec3::ZERO);
+            p.bits = p.uniforms.bits();
+            p.generation = generation;
+            p.model = model_bits;
+            p.time = time.to_bits();
+        } else if p.time != time.to_bits() {
+            p.update_time(time);
+        }
+        let class = list.classes.class(index as u32, &parameters[index].bits,
+            |other| &parameters[other as usize].bits);
+        parameters[index].class = class;
+        (true, rebuilt)
+    }
+    #[test]
+    fn list_serial_nonwrap_preserves_payload_reuse_and_pass_local_classes() {
+        let mut list = serial_list(2);
+        let mut parameters = [serial_parameter(), serial_parameter()];
+        let model = Mat4::from_translation(Vec3::X);
+        list.begin_parameter_pass(&mut parameters);
+        assert_eq!(list.serial, 1, "LIST_SERIAL_FIRST_NONZERO");
+        assert_eq!(serial_visible(&mut list, &mut parameters, 0, 1, 2., model), (true, true));
+        let bits = parameters[0].bits;
+        let class = parameters[0].class;
+        assert_eq!(serial_visible(&mut list, &mut parameters, 0, 1, 2., model),
+            (false, false), "LIST_SERIAL_SAME_PASS_REUSES_CHECK");
+        assert_eq!((parameters[0].bits, parameters[0].class), (bits, class));
+        let capacity = list.classes.capacity();
+        list.begin_parameter_pass(&mut parameters);
+        assert_eq!(list.serial, 2);
+        assert_eq!(parameters[0].list_serial, 1, "LIST_SERIAL_NONWRAP_RETAINS_MARK");
+        assert_eq!(parameters[1].list_serial, 0, "LIST_SERIAL_UNSEEN_SENTINEL");
+        assert_eq!(list.classes.len(), 0);
+        assert_eq!(list.classes.capacity(), capacity);
+        // Old payload stays valid, but a class must be taken in the new pass.
+        parameters[0].class = u32::MAX;
+        assert_eq!(serial_visible(&mut list, &mut parameters, 0, 1, 2., model),
+            (true, false), "LIST_SERIAL_NONWRAP_REUSES_UNIFORMS");
+        assert_eq!(parameters[0].bits, bits);
+        assert_eq!(parameters[0].class, 0, "LIST_SERIAL_NEW_PASS_RECLASSES");
+    }
+    #[test]
+    fn list_serial_sparse_return_on_wrapped_one_rebuilds_payload_and_class() {
+        let mut list = serial_list(2);
+        let mut parameters = [serial_parameter(), serial_parameter()];
+        list.begin_parameter_pass(&mut parameters); // serial1, last visible A
+        serial_visible(&mut list, &mut parameters, 0, 1, 0., Mat4::IDENTITY);
+        assert_eq!(parameters[0].list_serial, 1);
+        // A is hidden for the intervening lifetime. Place the real u32 counter
+        // just before its final nonzero pass; no reduced-width counter is used.
+        list.serial = u32::MAX - 1;
+        list.begin_parameter_pass(&mut parameters);
+        assert_eq!(list.serial, u32::MAX);
+        serial_visible(&mut list, &mut parameters, 1, 2, 2., Mat4::IDENTITY);
+        assert_eq!(parameters[0].list_serial, 1, "LIST_WRAP_SPARSE_RETAINED_OLD_MARK");
+        list.begin_parameter_pass(&mut parameters); // actual MAX ->1 transition
+        assert_eq!(list.serial, 1, "LIST_WRAP_SKIPS_ZERO");
+        // B claims current class0. A's old class0 must not alias it on return.
+        serial_visible(&mut list, &mut parameters, 1, 3, 3., Mat4::IDENTITY);
+        let model = Mat4::from_translation(Vec3::Y * 8.);
+        let expected = serial_expected(&parameters[0], 7., model);
+        assert_ne!(parameters[0].bits, expected, "LIST_WRAP_FIXTURE_INPUTS_DIFFER");
+        serial_visible(&mut list, &mut parameters, 0, 3, 7., model);
+        // The omitted-invalidation mutant must fail exactly this assertion,
+        // rather than a generic panic, class-capacity or setup failure.
+        assert_eq!(parameters[0].bits, expected, "LIST_WRAP_RETURNING_UNIFORMS_FRESH");
+        assert_eq!(parameters[0].uniforms.bits(), expected);
+        assert_eq!(parameters[0].generation, 3);
+        assert_eq!(parameters[0].model, model.to_cols_array().map(f32::to_bits));
+        assert_eq!(parameters[0].time, 7_f32.to_bits());
+        assert_ne!(parameters[0].class, parameters[1].class, "LIST_WRAP_RETURNING_CLASS_FRESH");
+        assert_eq!(list.classes.len(), 2);
+    }
+    #[test]
+    fn list_serial_entry_hidden_during_wrap_can_return_on_later_reused_serial() {
+        let mut list = serial_list(2);
+        let mut parameters = [serial_parameter(), serial_parameter()];
+        list.serial = 1;
+        list.begin_parameter_pass(&mut parameters); // A last visible at2
+        serial_visible(&mut list, &mut parameters, 0, 1, 0., Mat4::IDENTITY);
+        assert_eq!(parameters[0].list_serial, 2);
+        list.serial = u32::MAX;
+        list.begin_parameter_pass(&mut parameters); // A stays hidden at1
+        serial_visible(&mut list, &mut parameters, 1, 2, 1., Mat4::IDENTITY);
+        list.begin_parameter_pass(&mut parameters); // A returns only at2
+        serial_visible(&mut list, &mut parameters, 1, 3, 2., Mat4::IDENTITY);
+        let model = Mat4::from_translation(Vec3::Z * 4.);
+        let expected = serial_expected(&parameters[0], 9., model);
+        assert_ne!(parameters[0].bits, expected);
+        serial_visible(&mut list, &mut parameters, 0, 3, 9., model);
+        assert_eq!(parameters[0].bits, expected, "LIST_WRAP_LATER_RETURN_UNIFORMS_FRESH");
+        assert_ne!(parameters[0].class, parameters[1].class, "LIST_WRAP_LATER_RETURN_CLASS_FRESH");
+    }
+    #[test]
+    fn list_serial_wrap_resets_all_marks_even_without_visible_entries() {
+        let mut list = serial_list(3);
+        let mut parameters = [serial_parameter(), serial_parameter(), serial_parameter()];
+        for old in [1, 77, u32::MAX] {
+            parameters[0].list_serial = old;
+            parameters[1].list_serial = old;
+            parameters[2].list_serial = 0;
+            list.serial = u32::MAX;
+            list.begin_parameter_pass(&mut parameters);
+            assert_eq!(list.serial, 1);
+            assert!(parameters.iter().all(|p| p.list_serial == 0), "LIST_WRAP_ALL_STORED_MARKS_INVALIDATED");
+            assert_eq!(list.classes.len(), 0);
+        }
+        let mut empty = serial_list(0);
+        empty.serial = u32::MAX;
+        empty.begin_parameter_pass(&mut []);
+        assert_eq!(empty.serial, 1, "LIST_WRAP_EMPTY_TABLE_NONZERO");
     }
 }

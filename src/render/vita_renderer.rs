@@ -1645,10 +1645,7 @@ impl Renderer {
             let mut time_updates = 0;
             if list_submit {
                 let list = self.list.as_mut().unwrap();
-                // Zero is the mark of a parameter never checked. Skip it on the wrap.
-                list.serial = list.serial.wrapping_add(1).max(1);
-                list.items.clear();
-                list.classes.begin_pass();
+                list.begin_parameter_pass(&mut self.parameters);
                 let time_bits = time.to_bits();
                 for &(_, id) in &self.alpha_order {
                     let draw = &list.draws[id];
