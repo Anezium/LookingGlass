@@ -26,6 +26,8 @@ use std::{
 
 mod billboard_check;
 mod sky_face_check;
+#[cfg(feature = "vita_renderer")]
+mod authored_sky;
 #[cfg(test)]
 mod visibility_tests;
 pub use sky_face_check::check_school_floor;
@@ -114,6 +116,8 @@ struct Batch {
 pub struct Scene {
     #[cfg(feature = "vita_renderer")]
     retained: Option<vita_renderer::Renderer>,
+    #[cfg(feature = "vita_renderer")]
+    authored_sky: bool,
     world_material_keepalive: WorldMaterialKeepalive,
     camera_portals: Vec<camera_portal::Portal>,
     rope_shapes: Vec<crate::rope::Strand>,
@@ -2016,6 +2020,8 @@ impl Scene {
         let mut scene = Self {
             #[cfg(feature = "vita_renderer")]
             retained: None,
+            #[cfg(feature = "vita_renderer")]
+            authored_sky: false,
             world_material_keepalive: Default::default(),
             camera_portals,
             face_mask_cache: FaceMaskCache::default(),
@@ -2055,10 +2061,17 @@ impl Scene {
             }
             // The retained path owns its immutable buffers and material recipes.
             // Release the old CPU geometry and unused Macroquad world materials.
-            scene.batches.clear();
-            scene.sky_props.clear();
-            scene.bound_materials.clear();
-            scene.materials.clear();
+            scene.authored_sky = authored_sky::retain_geometry(
+                vita_renderer::config().authored_sky, vita_renderer::config().sky,
+                scene.sky_origin.is_some(), &mut scene.batches, &mut scene.sky_props,
+                |b| (b.sky, b.model.is_none()));
+            if !scene.authored_sky {
+                scene.bound_materials.clear();
+                scene.materials.clear();
+            } else {
+                println!("[lg/authored-sky] map={name} legacy_batches={} sky_props={} portal={} stage_policy=legacy-unlimited correction_unqualified=true",
+                    scene.batches.len(), scene.sky_props.len(), scene.sky_origin.is_some());
+            }
         }
         timing.mark("retained_renderer");
         Ok(scene)
@@ -2067,6 +2080,66 @@ impl Scene {
     fn into_map_world(self) -> (Bsp, World) {
         (self.map, self.world)
     }
+    /// Submit the existing legacy sky into the currently selected scaled camera.
+    /// Miniature scenery first, clear only its depth, then authored aperture faces
+    /// BEFORE retained opaque geometry. A depth-only aperture submitted afterwards
+    /// could not remove already visible distant geometry.
+    #[cfg(feature = "vita_renderer")]
+    fn draw_retained_authored_sky(&mut self, camera: Vec3, time: f32,
+        transforms: &[(usize, Vec3, Quat)]) -> DrawStats {
+        crate::render_tail::end();
+        self.bind_atlas();
+        let cluster = self.map.visibility.cluster(camera, &self.map.planes);
+        let mut context = DrawContext {
+            enabled: self.optimize, required_pvs: self.sky_backdrop.is_some(),
+            faces: self.face_mask_cache.faces(&self.map.visibility, cluster), cluster,
+            visibility: &self.map.visibility, stats: DrawStats::default(),
+        };
+        if let Some(origin) = self.sky_origin {
+            context.enabled = true;
+            context.cluster = self.map.visibility.cluster(origin, &self.map.planes);
+            context.faces = self.face_mask_cache.faces(&self.map.visibility, context.cluster);
+            let motion = self.sky_motion.as_ref().map_or(Quat::IDENTITY, |m| m.transform(time).1);
+            let (offset, sky_transform) = authored_sky::portal_pose(camera, origin, self.sky_rotation, motion);
+            let plain = Atmosphere::default();
+            for m in &self.bound_materials {
+                plain.apply(m, camera);m.set_uniform("Fullbright", 1_f32);m.set_uniform("SkyFade", 0_f32);
+            }
+            for b in self.batches.iter_mut().filter(|b| !b.sky && b.model.is_none() && !b.transparent()) {
+                draw_batch(b, &self.materials, camera, time, Some(&sky_transform), offset, true, &mut context);
+            }
+            for b in self.sky_props.iter_mut().filter(|b| !b.transparent()) {
+                draw_batch(b, &self.materials, camera, time, Some(&sky_transform), offset, true, &mut context);
+            }
+            // These are immediate Macroquad sky draws, never deferred FX packets.
+            // Do not use the retained_depth_scope marker, which only affects packets.
+            immediate_depth_read_only(|| {
+                for b in self.batches.iter_mut().filter(|b| !b.sky && b.model.is_none() && b.transparent()) {
+                    draw_batch(b, &self.materials, camera, time, Some(&sky_transform), offset, true, &mut context);
+                }
+                for b in self.sky_props.iter_mut().filter(|b| b.transparent()) {
+                    draw_batch(b, &self.materials, camera, time, Some(&sky_transform), offset, true, &mut context);
+                }
+            });
+            clear_view_depth();
+        }
+        for m in &self.bound_materials {
+            self.atmosphere.apply(m, camera);m.set_uniform("Fullbright", 1_f32);
+        }
+        context.enabled = self.optimize;context.cluster = cluster;
+        context.faces = self.face_mask_cache.faces(&self.map.visibility, cluster);
+        for batch in self.batches.iter_mut().filter(|b| b.sky) {
+            let transform = batch.model.and_then(|i| transforms.iter().find(|t| t.0 == i));
+            if batch.model.is_some() && transform.is_none() { continue; }
+            draw_batch(batch, &self.materials, camera, time, transform, Vec3::ZERO, false, &mut context);
+        }
+        gl_use_default_material();
+        // Flush into the existing ScaledCamera pass before the raw retained pass.
+        // No new render target, viewport, resolve, or screen copy is introduced.
+        unsafe { get_internal_gl().flush(); }
+        context.stats
+    }
+
     pub fn update_ropes(
         &mut self,
         dt: f32,
@@ -2158,12 +2231,18 @@ impl Scene {
         let _profile = crate::frame_profile::span("world_draw");
         #[cfg(feature = "vita_renderer")]
         if let Some(mut renderer) = self.retained.take() {
+            let sky_stats = if !transparent && self.authored_sky {
+                self.draw_retained_authored_sky(camera, time, transforms)
+            } else { DrawStats::default() };
             let stats = renderer.draw(self, camera, time, fullbright, transparent, transforms);
             self.retained = Some(renderer);
             if !transparent { self.stats = DrawStats::default(); }
             self.stats.batches += stats.batches;
             self.stats.culled += stats.culled;
             self.stats.triangles += stats.triangles;
+            self.stats.batches += sky_stats.batches;
+            self.stats.culled += sky_stats.culled;
+            self.stats.triangles += sky_stats.triangles;
             return;
         }
         self.bind_atlas();
@@ -2341,6 +2420,12 @@ pub fn depth_read_only(draw: impl FnOnce()) {
         crate::render_fx::retained_depth_scope(draw);
         return;
     }
+    immediate_depth_read_only(draw);
+}
+
+// This helper is only entered at the legacy immediate boundary. The opaque
+// sky phase starts with writable depth and restores it before retained world.
+fn immediate_depth_read_only(draw: impl FnOnce()) {
     unsafe {
         {
             #[cfg(target_os = "vita")]

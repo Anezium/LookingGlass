@@ -194,6 +194,8 @@ pub struct Config {
     pub max_layers: usize,
     pub sort_alpha: bool,
     pub sky: bool,
+    /// Diagnostic authored sky bridge; no native/picture acceptance yet. Default off.
+    pub authored_sky: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -377,6 +379,7 @@ impl Default for Config {
             max_layers: 2,
             sort_alpha: true,
             sky: true,
+            authored_sky: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
@@ -1775,7 +1778,7 @@ impl Renderer {
         };
         #[cfg(target_os = "vita")]
         if list_submit && self.gxm.proof_due() { self.proof_frame(scene, time); }
-        if !alpha && config().sky {
+        if !alpha && config().sky && !scene.authored_sky {
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
             let mut totals = crate::frame_profile::Totals::<3>::profile_only();
             let bg = scene.atmosphere.background();
