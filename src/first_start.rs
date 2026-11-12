@@ -68,8 +68,11 @@ extern "C" {
 pub fn check_or_exit(base: &Path) {
     let problems = crate::data_check::check(base, &crate::data_check::REQUIRED_PACKS);
     let mut parts = Vec::new();
-    if !problems.is_empty() {
+    if crate::data_check::blocks_start(&problems) {
         parts.push(crate::data_check::message(base, &problems));
+    } else if !problems.is_empty() {
+        // Another edition of the game can have packs of other sizes and still run.
+        eprintln!("[lg/first-start] pack sizes differ from the checked edition, starting anyway: {problems:?}");
     }
     if !shader_compiler_present() {
         parts.push(format!(

@@ -36,6 +36,12 @@ pub fn check(base: &Path, required: &[(&'static str, u64)]) -> Vec<Problem> {
         .collect()
 }
 
+/// Only a missing file stops the start. A size that differs from the checked edition is reported
+/// in the log and in the dialog when one is shown, but another edition of the game may be valid.
+pub fn blocks_start(problems: &[Problem]) -> bool {
+    problems.iter().any(|problem| matches!(problem, Problem::Missing(_)))
+}
+
 /// Text for the on-screen dialog. The system message dialog takes at most 512 bytes,
 /// including the terminating NUL; the worst case (six wrong sizes) stays under 450.
 pub fn message(base: &Path, problems: &[Problem]) -> String {
@@ -126,6 +132,14 @@ mod tests {
         put(&dir, "c.pk3", 0);
         assert_eq!(check(&dir, &SMALL), vec![Problem::Missing("b.pk3")]);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_missing_file_blocks_the_start() {
+        let wrong = Problem::WrongSize { name: "pak0.pk3", expected: 2, found: 1 };
+        assert!(!blocks_start(&[]));
+        assert!(!blocks_start(&[wrong.clone()]));
+        assert!(blocks_start(&[wrong, Problem::Missing("pak2.pk3")]));
     }
 
     #[test]
