@@ -3030,6 +3030,63 @@ mod tests {
         assert_eq!(on, off);
     }
     #[test]
+    fn rc1_play_configs_are_r25_human_plus_the_rc1_keys() {
+        const LEVERS: [&str; 7] = ["world_list_submit", "world_shared_buffers", "sim_sweep_memo", "tls_fast", "world_gxm",
+            "fx_attached_persist", "mover_advance_reuse"];
+        const BUBBLE: [&str; 2] = ["fx_attached_sphere", "fx_bubble_true_size"];
+        let parse = |bytes: &[u8]| {
+            // Every runtime key is written, so no value comes from a code default.
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
+            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            written.sort(); all.sort();
+            assert_eq!(written, all, "an RC1 config must write every runtime key");
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            assert_eq!(c.log_frame_time_every, Some(10), "frame-time rows every ten frames stay on for the play session");
+            assert_eq!(c.render_scale, 0.75);
+            serde_json::to_value(&c).unwrap()
+        };
+        let mut rc1 = parse(include_bytes!("../../configs/PL-rc1.json"));
+        let mut sky = parse(include_bytes!("../../configs/PL-rc1-sky-on.json"));
+        let mut off = parse(include_bytes!("../../configs/PL-rc1-levers-off.json"));
+        let (human, _) = parse_runtime_config(include_bytes!("../../configs/PL-r25-human.json")).unwrap();
+        let mut human = serde_json::to_value(&human).unwrap();
+        for (key, on) in [("world_list_submit", serde_json::json!(true)), ("world_shared_buffers", serde_json::json!(true)),
+                          ("sim_sweep_memo", serde_json::json!(true)), ("tls_fast", serde_json::json!("on")),
+                          ("world_gxm", serde_json::json!("live")), ("fx_attached_persist", serde_json::json!(true)),
+                          ("mover_advance_reuse", serde_json::json!(true))] {
+            assert_eq!(rc1[key], on, "{key} on in RC1");
+            assert_eq!(off[key], serde_json::to_value(Config::default()).unwrap()[key], "{key} at its off default in levers-off");
+        }
+        for key in BUBBLE { assert_eq!(rc1[key], true, "{key}: bubble fix on"); assert_eq!(off[key], true, "{key}: not a lever"); }
+        for key in ["collision_sah", "skin_actual_consumers", "audio_static_cache"] { assert_eq!(rc1[key], true, "{key} as measured"); }
+        assert_eq!(rc1["skin_stream"], false);
+        assert_eq!(rc1["worker_spin_us"], 0);
+        assert_eq!(rc1["authored_sky"], false, "the default RC1 file keeps the gradient sky");
+        assert_eq!(sky["authored_sky"], true);
+        // Diagnostics stay off: no census, no exports, no GPU timing or masks, no pass clock, no GL observers.
+        assert_eq!(rc1["profiler"], "off");
+        for key in ["profile_capture", "phase_census", "world_pass_clock", "light_gl_observers", "render_draw_timing",
+                    "worker_probe", "skin_worker_bench", "frame_phase_probe", "gpu_state_probe", "pvs_verify", "depth_sentinel"] {
+            assert_eq!(rc1[key], false, "{key} off");
+        }
+        assert_eq!(rc1["gpu_timing"], "off");
+        assert_eq!(rc1["gpu_mask"], serde_json::json!([]));
+        sky["authored_sky"] = serde_json::json!(false);
+        assert_eq!(sky, rc1, "the sky file differs only in authored_sky");
+        for key in LEVERS { off[key] = rc1[key].clone(); }
+        assert_eq!(off, rc1, "the levers-off file differs only in the seven levers");
+        // Against what the human played on 2026-11-06: the levers, the bubble fix, the frame log and profiler off.
+        for key in LEVERS.iter().chain(&BUBBLE).chain(&["profiler", "log_frame_time_every"]) {
+            rc1.as_object_mut().unwrap().remove(*key);
+            human.as_object_mut().unwrap().remove(*key);
+        }
+        assert_eq!(rc1, human);
+    }
+    #[test]
     fn r25_human_play_configs_add_three_levers_to_r22() {
         const NEW: [&str; 3] = ["actor_publication_uv_reuse", "prop_occurrence_reuse", "fx_observe_move"];
         const OLD: [&str; 5] = ["sim_trigger_facts_reuse", "sim_sight_query_reuse", "sim_hatter_door_candidates",
