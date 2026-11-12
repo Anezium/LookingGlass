@@ -59,7 +59,7 @@ pub struct Config {
     pub lights_static_cache: bool,
     /// Spatial AABB buckets; preserve original dynamic contact order.
     pub sim_dynamic_buckets: bool,
-    /// Load an ordered static SAH hierarchy; experimental, default off.
+    /// Load an ordered static SAH hierarchy. Default on since RC1, as the console measured it.
     pub collision_sah: bool,
     /// Exact round-two candidates; console acceptance is still pending.
     pub fx_merge_local_reuse: bool,
@@ -323,7 +323,7 @@ impl Default for Config {
             sim_npc_target_stack: true,
             lights_static_cache: true,
             sim_dynamic_buckets: false,
-            collision_sah: false,
+            collision_sah: true,
             fx_merge_local_reuse: true,
             fx_merge_ranges: false,
             fx_cpu_inline: false,
@@ -371,7 +371,7 @@ impl Default for Config {
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             phase_census: false,
-            skin_actual_consumers: false,
+            skin_actual_consumers: true,
             mover_far_lazy: true,
             mover_lazy_publish: true,
             pickup_fx_cache: true,
@@ -398,7 +398,7 @@ impl Default for Config {
             story_film_bypass: false,
             audio_pcm_worker: false,
             audio_offmain: false,
-            audio_static_cache: false,
+            audio_static_cache: true,
             audio_block_mix: false,
             audio_preresample: false,
             audio_block_parameters: false,
@@ -2956,8 +2956,9 @@ mod tests {
         assert!(both.validate().is_err());
     }
     #[test]
-    fn audio_static_cache_is_opt_in() {
-        assert!(!Config::default().audio_static_cache);
+    fn audio_static_cache_defaults_on_as_measured() {
+        assert!(Config::default().audio_static_cache);
+        assert!(!serde_json::from_str::<Config>(r#"{"audio_static_cache":false}"#).unwrap().audio_static_cache);
         assert!(serde_json::from_str::<Config>(r#"{"audio_static_cache":true}"#).unwrap().audio_static_cache);
         assert!(serde_json::from_str::<Config>(r#"{"audio_static_cache":"on"}"#).is_err());
     }

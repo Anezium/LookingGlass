@@ -133,13 +133,14 @@ fn sah_reorders_candidates_but_preserves_raw_enter_and_all_solid_normal() {
 
 #[cfg(feature="vita_renderer")]
 #[test]
-fn sah_config_is_one_strict_default_off_boolean() {
+fn sah_config_is_one_strict_default_on_boolean() {
     use crate::render::vita_renderer::Config;
+    // collision_sah, audio_static_cache and skin_actual_consumers ship on, as the console measured them (r25 review M1).
     for c in [Config::default(),serde_json::from_str("{}").unwrap()] {
-        assert!(!c.collision_sah);assert!(!c.audio_static_cache);assert!(!c.phase_census);assert!(!c.skin_actual_consumers);
+        assert!(c.collision_sah);assert!(c.audio_static_cache);assert!(!c.phase_census);assert!(c.skin_actual_consumers);
     }
-    let c:Config=serde_json::from_str(r#"{"collision_sah":true}"#).unwrap();
-    assert!(c.collision_sah);assert!(!c.audio_static_cache);assert!(!c.phase_census);assert!(!c.skin_actual_consumers);
+    let c:Config=serde_json::from_str(r#"{"collision_sah":false}"#).unwrap();
+    assert!(!c.collision_sah);assert!(c.audio_static_cache);assert!(!c.phase_census);assert!(c.skin_actual_consumers);
     for v in [serde_json::json!(1),serde_json::json!("on"),serde_json::Value::Null] {
         assert!(serde_json::from_value::<Config>(serde_json::json!({"collision_sah":v})).is_err());
     }
