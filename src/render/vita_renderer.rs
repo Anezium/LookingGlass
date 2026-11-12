@@ -3034,6 +3034,7 @@ mod tests {
     }
     #[test]
     fn rc1_play_configs_are_r25_human_plus_the_rc1_keys() {
+        // Default file: PL-rc1.json. The sky and FX routing files each turn one key on for a by-eye A/B.
         const LEVERS: [&str; 7] = ["world_list_submit", "world_shared_buffers", "sim_sweep_memo", "tls_fast", "world_gxm",
             "fx_attached_persist", "mover_advance_reuse"];
         const BUBBLE: [&str; 2] = ["fx_attached_sphere", "fx_bubble_true_size"];
@@ -3054,6 +3055,7 @@ mod tests {
         };
         let mut rc1 = parse(include_bytes!("../../configs/PL-rc1.json"));
         let mut sky = parse(include_bytes!("../../configs/PL-rc1-sky-on.json"));
+        let mut fx = parse(include_bytes!("../../configs/PL-rc1-fx-on.json"));
         let mut off = parse(include_bytes!("../../configs/PL-rc1-levers-off.json"));
         let (human, _) = parse_runtime_config(include_bytes!("../../configs/PL-r25-human.json")).unwrap();
         let mut human = serde_json::to_value(&human).unwrap();
@@ -3070,6 +3072,8 @@ mod tests {
         assert_eq!(rc1["worker_spin_us"], 0);
         assert_eq!(rc1["authored_sky"], false, "the default RC1 file keeps the gradient sky");
         assert_eq!(sky["authored_sky"], true);
+        assert_eq!(rc1["defer_immediate_fx"], false, "the default RC1 file keeps the direct effect draws");
+        assert_eq!(fx["defer_immediate_fx"], true);
         // Diagnostics stay off: no census, no exports, no GPU timing or masks, no pass clock, no GL observers.
         assert_eq!(rc1["profiler"], "off");
         for key in ["profile_capture", "phase_census", "world_pass_clock", "light_gl_observers", "render_draw_timing",
@@ -3080,6 +3084,8 @@ mod tests {
         assert_eq!(rc1["gpu_mask"], serde_json::json!([]));
         sky["authored_sky"] = serde_json::json!(false);
         assert_eq!(sky, rc1, "the sky file differs only in authored_sky");
+        fx["defer_immediate_fx"] = serde_json::json!(false);
+        assert_eq!(fx, rc1, "the FX routing file differs only in defer_immediate_fx");
         for key in LEVERS { off[key] = rc1[key].clone(); }
         assert_eq!(off, rc1, "the levers-off file differs only in the seven levers");
         // Against what the human played on 2026-11-06: the levers, the bubble fix, the frame log and profiler off.
