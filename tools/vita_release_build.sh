@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Release build of the PS Vita SELF and VPK.
 #
-# Usage: tools/vita_release_build.sh --out DIR
+# Usage: tools/vita_release_build.sh --out DIR [--lib-dir DIR]
 #
 #   --out DIR      new or empty directory for the artifacts and BUILD.txt
+#   --lib-dir DIR  directory searched before the SDK for the C archives the link pulls in,
+#                  for example a libSceShaccCgExt.a rebuilt at its LGPL-2.1 revision
 #
 # Needs VITASDK, the pinned Rust toolchain with rust-src, and cargo-vita. Refuses a tree with
 # uncommitted or untracked files. Honours CARGO_TARGET_DIR, CARGO_BUILD_JOBS and
@@ -19,13 +21,15 @@ APP_VER=01.00
 SDK_LIBRARIES="vitaGL:libvitaGL.a vitaShaRK:libvitashark.a SceShaccCgExt:libSceShaccCgExt.a libmathneon:libmathneon.a"
 
 out=""
+lib_dir=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) out="$2"; shift 2 ;;
+        --lib-dir) lib_dir="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[ -n "$out" ] || { echo "usage: $0 --out DIR" >&2; exit 2; }
+[ -n "$out" ] || { echo "usage: $0 --out DIR [--lib-dir DIR]" >&2; exit 2; }
 : "${VITASDK:?VITASDK must point to the Vita SDK}"
 
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
@@ -39,6 +43,9 @@ head=$(git rev-parse HEAD)
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 [ -z "$(ls -A "$out")" ] || { echo "refusing to build: $out is not empty" >&2; exit 1; }
+if [ -n "$lib_dir" ]; then
+    lib_dir=$(cd "$lib_dir" && pwd)
+fi
 
 rustup run "$TOOLCHAIN" rustc --version >/dev/null
 rustup component list --toolchain "$TOOLCHAIN" --installed | grep -q '^rust-src' \
@@ -61,6 +68,11 @@ export RUSTFLAGS="$rustflags"
 export CARGO_INCREMENTAL=0
 export PATH="$VITASDK/bin:$PATH"
 export LG_VITA_LINK_MAP="$out/link.map"
+if [ -n "$lib_dir" ]; then
+    export LG_VITA_LIB_DIR="$lib_dir"
+else
+    unset LG_VITA_LIB_DIR
+fi
 target_dir=${CARGO_TARGET_DIR:-$repo/target}
 release="$target_dir/armv7-sony-vita-newlibeabihf/release"
 rm -f "$release/looking-glass.elf" "$release/looking-glass.velf" "$release/looking-glass.self" \
@@ -93,6 +105,7 @@ pacman_db="$VITASDK/var/lib/pacman/local"
     echo "cargo-vita $CARGO_VITA_VERSION"
     echo "features $FEATURES"
     echo "rustflags $RUSTFLAGS" | redact
+    echo "lib-dir ${lib_dir:-none}" | redact
     grep -A2 'source = "git+' Cargo.lock | grep '^source' | sed 's/^source = /dependency /'
     echo "sdk-build $(head -n 1 "$VITASDK/version_info.txt" 2>/dev/null || echo unknown)"
     sed -n '2,$p' "$VITASDK/version_info.txt" 2>/dev/null | sed 's/^/sdk-component /'

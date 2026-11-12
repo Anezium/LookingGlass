@@ -3,7 +3,16 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("vita") {
         // Bind persistent GPU binaries to the exact linked vitaGL archive.
         let sdk = std::env::var("VITASDK").expect("VITASDK is required for binary cache identity");
-        let archive = std::path::Path::new(&sdk).join("arm-vita-eabi/lib/libvitaGL.a");
+        // The release script can put a directory of rebuilt C archives ahead of the SDK's.
+        println!("cargo:rerun-if-env-changed=LG_VITA_LIB_DIR");
+        let lib_dir = std::env::var("LG_VITA_LIB_DIR").ok().filter(|dir| !dir.is_empty());
+        if let Some(dir) = &lib_dir {
+            println!("cargo:rustc-link-search=native={dir}");
+        }
+        let archive = lib_dir
+            .map(|dir| std::path::Path::new(&dir).join("libvitaGL.a"))
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| std::path::Path::new(&sdk).join("arm-vita-eabi/lib/libvitaGL.a"));
         let header = std::path::Path::new(&sdk).join("arm-vita-eabi/include/vitaGL.h");
         println!("cargo:rerun-if-env-changed=VITASDK");
         println!("cargo:rerun-if-changed={}", archive.display());
