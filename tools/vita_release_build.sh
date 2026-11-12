@@ -136,6 +136,22 @@ pacman_db="$VITASDK/var/lib/pacman/local"
 # The link map lists absolute archive paths; keep the record, drop the home directory.
 sed -i.bak "s|$HOME|~|g" "$out/link.map" && rm -f "$out/link.map.bak"
 
+# Notices for this exact link. The committed file must match, or the release ships stale notices.
+notices_status=0
+python3 -I "$repo/tools/vita_notices.py" --link-map "$out/link.map" --output "$out/THIRD_PARTY_NOTICES-vita.txt" \
+    || notices_status=$?
+if [ "$notices_status" -ne 0 ]; then
+    echo "FAIL notices generation" | tee -a "$out/check.txt"
+elif cmp -s "$out/THIRD_PARTY_NOTICES-vita.txt" "$repo/THIRD_PARTY_NOTICES-vita.txt"; then
+    echo "PASS THIRD_PARTY_NOTICES-vita.txt matches this link" | tee -a "$out/check.txt"
+else
+    echo "FAIL THIRD_PARTY_NOTICES-vita.txt differs from the notices generated for this link" | tee -a "$out/check.txt"
+fi
+if grep -q "linked libSceShaccCgExt.a .*package=SceShaccCgExt-1.0.1-1 same-as-package" "$out/BUILD.txt"; then
+    echo "WARN libSceShaccCgExt.a is the SDK's v1.0.1 package (GPL-3.0); release builds pass --lib-dir with a d3c83ef or later build" \
+        | tee -a "$out/check.txt"
+fi
+
 if [ "$check_status" -ne 0 ] || grep -q '^FAIL' "$out/check.txt"; then
     echo "release checks failed" >&2
     exit 1

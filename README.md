@@ -1,7 +1,9 @@
-> **Fork for the PS Vita port** ([Anezium/Alice-American-McGees-PSVita-Port](https://github.com/Anezium/Alice-American-McGees-PSVita-Port)). Branches:
-> - `main`: unmodified mirror of skulitom/LookingGlass `main`.
-> - `vita` (default): starts from skulitom/LookingGlass `main` at `0220970` (v0.32.0-preview.2); will hold the native Rust port (miniquad Vita backend).
-> - `vita-so`: starts from Player124413/Looking-Glass-android-edition `android` at `6a9b8cd`, no changes yet; source of the ARMv7 `.so` that the Vita so-loader runs.
+> **PS Vita port fork.** This fork of
+> [looking-glass-project/LookingGlass](https://github.com/looking-glass-project/LookingGlass)
+> holds an unofficial PlayStation Vita port in its `vita-*` branches; `main` is upstream as of `0220970`.
+> `tools/vita_release_build.sh` builds the Vita SELF and VPK. Notices for the Vita build are in
+> [THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt) and [LEGAL.md](LEGAL.md) covers the port.
+> The rest of this file is the upstream README.
 
 # Looking Glass — American McGee's Alice Re-Remaster
 
