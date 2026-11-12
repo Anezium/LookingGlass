@@ -41,6 +41,16 @@ extern "C" {
     fn sceKernelGetThreadInfo(id: i32, info: *mut ThreadInfo) -> i32;
     fn sceKernelGetCpuId() -> i32;
 }
+/// The calling thread's stack as (lowest address, size in bytes), as the kernel reports it.
+#[cfg(target_os = "vita")]
+pub(crate) fn current_stack() -> Option<(usize, usize)> {
+    unsafe {
+        let mut info: ThreadInfo = std::mem::zeroed();
+        info.size = std::mem::size_of::<ThreadInfo>() as u32;
+        let rc = sceKernelGetThreadInfo(sceKernelGetThreadId(), &mut info);
+        (rc >= 0 && info.stack != 0 && info.stack_size > 0).then_some((info.stack as usize, info.stack_size as usize))
+    }
+}
 /// Kernel readback is deliberately used instead of pthread_getaffinity_np.
 pub(crate) fn pin(worker: usize, probe: bool) {
     #[cfg(target_os = "vita")]
@@ -102,6 +112,7 @@ pub(crate) fn inventory(role: &str, requested: Option<i32>) {
 }
 
 use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Measurement {
     pub ns: u64,
@@ -120,6 +131,28 @@ struct Shared {
     state: Mutex<State>,
     wake: Condvar,
     done: Condvar,
+    /// Hints only, read while spinning. `state` stays the truth: a stale read costs one more round.
+    work_ready: AtomicBool,
+    busy_hint: AtomicBool,
+    spin_us: u32,
+}
+/// `worker_spin_us`. How long a worker keeps looking for its next job after finishing one, and how
+/// long the game thread looks for a result before it sleeps. A sleeping thread costs a kernel wake
+/// on another core, and the merge alone runs 13 jobs a frame on skool2 (host count). Zero is off:
+/// neither side polls and the sleeps are the only path.
+static SPIN_US: AtomicU32 = AtomicU32::new(0);
+pub(crate) fn set_spin_us(us: u32) { SPIN_US.store(us, Ordering::Relaxed); }
+/// Polls until `done` holds or about `us` microseconds passed. True when `done` held. The clock is
+/// a call on the console, so it is read once per stretch of polls.
+fn spin_until(us: u32, done: impl Fn() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        for _ in 0..64 {
+            if done() { return true; }
+            std::hint::spin_loop();
+        }
+        if start.elapsed().as_micros() >= us as u128 { return done(); }
+    }
 }
 /// One sleeping thread, fixed stack and affinity. Only CPU closures cross this boundary.
 /// Condvar uses a pthread condition/event wake on Vita; no per-dispatch allocation.
@@ -135,10 +168,16 @@ impl Worker {
         Self::create(index, probe, true)
     }
     fn create(index: usize, probe: bool, measured: bool) -> Self {
+        Self::create_spinning(index, probe, measured, SPIN_US.load(Ordering::Relaxed))
+    }
+    fn create_spinning(index: usize, probe: bool, measured: bool, spin_us: u32) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             wake: Condvar::new(),
             done: Condvar::new(),
+            work_ready: AtomicBool::new(false),
+            busy_hint: AtomicBool::new(false),
+            spin_us,
         });
         let other = shared.clone();
         let handle = std::thread::Builder::new()
@@ -162,6 +201,7 @@ impl Worker {
                         break;
                     }
                     let (address, call) = s.work.take().unwrap();
+                    other.work_ready.store(false, Ordering::Relaxed);
                     drop(s);
                     let allocations = measured.then(crate::kernel_alloc::Scope::begin);
                     let start = std::time::Instant::now();
@@ -175,7 +215,17 @@ impl Worker {
                     s.result = Measurement { ns, malloc_calls };
                     s.panic = result.err();
                     s.busy = false;
-                    other.done.notify_one();
+                    if other.spin_us > 0 {
+                        // Same order as in start: the mutex is free before the hint says so.
+                        drop(s);
+                        other.busy_hint.store(false, Ordering::Release);
+                        other.done.notify_one();
+                        spin_until(other.spin_us, || other.work_ready.load(Ordering::Acquire));
+                        s = other.state.lock().unwrap();
+                    } else {
+                        other.busy_hint.store(false, Ordering::Release);
+                        other.done.notify_one();
+                    }
                 }
             })
             .expect("start persistent skin worker");
@@ -200,9 +250,18 @@ impl Worker {
         assert!(!s.busy && !s.stop);
         s.busy = true;
         s.work = Some((address, call));
+        self.shared.busy_hint.store(true, Ordering::Relaxed);
+        // A poller that sees the hint goes straight for the mutex, so let go of it first.
+        if self.shared.spin_us > 0 { drop(s); }
+        self.shared.work_ready.store(true, Ordering::Release);
         self.shared.wake.notify_one();
     }
+    /// No job running, by the hint. False costs a later check, never a wrong start.
+    pub(crate) fn idle(&self) -> bool { !self.shared.busy_hint.load(Ordering::Acquire) }
     pub(crate) fn wait_result(&mut self) -> Result<Measurement, Box<dyn std::any::Any + Send>> {
+        if self.shared.spin_us > 0 {
+            spin_until(self.shared.spin_us, || !self.shared.busy_hint.load(Ordering::Acquire));
+        }
         let mut s = self.shared.state.lock().unwrap();
         while s.busy {
             s = self.shared.done.wait(s).unwrap();
@@ -303,6 +362,51 @@ mod persistent_tests {
         worker.execute(|| values.fill(99));
         assert_eq!(values, [99; 128]);
         drop(worker);
+    }
+    #[test]
+    fn spinning_workers_run_every_job_on_their_own_thread_and_still_sleep_and_stop() {
+        for spin_us in [1, 200, 5000] {
+            let mut worker = Worker::create_spinning(0, false, false, spin_us);
+            let id = worker.handle.as_ref().unwrap().thread().id();
+            let mut total = 0u64;
+            // Back to back, inside the spin window for the longer settings.
+            for i in 0..2000u64 {
+                worker.execute(|| { assert_eq!(std::thread::current().id(), id); total += i; });
+            }
+            assert_eq!(total, 1999 * 2000 / 2);
+            // Past every window: the worker is asleep and the next job has to wake it.
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            worker.execute(|| total = 7);
+            assert_eq!(total, 7);
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| worker.execute(|| panic!("test panic"))));
+            assert!(panicked.is_err(), "a panic still reaches the caller");
+            worker.execute(|| total = 8);
+            assert_eq!(total, 8);
+            // Dropped inside the spin window, and joined.
+            drop(worker);
+        }
+    }
+    #[test]
+    fn a_long_job_outlasts_the_spin_and_the_result_still_arrives() {
+        let mut worker = Worker::create_spinning(0, false, false, 1);
+        let mut value = 0;
+        worker.execute(|| { std::thread::sleep(std::time::Duration::from_millis(20)); value = 5; });
+        assert_eq!(value, 5);
+    }
+    #[test]
+    fn spinning_pairs_join_both_workers() {
+        let mut a = Worker::create_spinning(0, false, false, 500);
+        let mut b = Worker::create_spinning(1, false, false, 500);
+        let (mut x, mut y) = (0u64, 0u64);
+        for i in 0..500u64 {
+            Worker::pair(&mut a, &mut b, || x += i, || y += 2 * i);
+        }
+        assert_eq!((x, y), (499 * 500 / 2, 499 * 500));
+    }
+    #[test]
+    fn spin_until_returns_what_it_saw() {
+        assert!(spin_until(1, || true));
+        assert!(!spin_until(1, || false));
     }
     #[test]
     fn pair_panic_joins_both_borrowers_before_unwinding() {

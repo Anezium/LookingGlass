@@ -27,11 +27,14 @@ TIMING = {'cpu_ms', 'spans_ms'}
 ELAPSED = ('_us', '_ns', '_ms')
 HOST_MEMORY = ('actor_mem_', 'actor_publication_mem_')
 NOISY_PIXELS = {'hedge3'}  # OFF against OFF differs here, see host_flag_exact_gather.py
+NOISY_MAX_FRAMES = 5  # Runs differ on 0 to 3 isolated frames there. A real error differs on many, and hedge3 is the only map with three shared world buffers.
 PREREQ_FIELDS = ('requested_window', 'requested_high_dpi', 'screen_size_bits', 'framebuffer', 'scaled_target', 'viewport')
 FUNNEL = {'fx_funnel_registered_raw', 'fx_funnel_registered_publication', 'fx_funnel_joint_raw_quads',
           'fx_funnel_joint_raw_outside_view', 'fx_funnel_joint_publication_quads', 'fx_funnel_joint_publication_outside_view'}
 # Work a lever removes on purpose, or moves between the raw and publication routes. Draw counts,
 # triangle counts, drops and the joint list length are not here: if those move, the case fails.
+# Levers that are not booleans: the value of the off arm and of the on arm.
+LEVER_VALUES = {'worker_spin_us': (0, 500)}
 REMOVED_WORK = {
     # A shader with no light uniforms uploads fewer bytes; packets still carry the full payload. A removed clear moves nothing counted.
     'simple_dynamic_lights': {'vita_fx_uniform_bytes'},
@@ -58,6 +61,18 @@ REMOVED_WORK = {
         'vita_fx_unchanged_merged_groups', 'fx_merge_range_vertices_kept',
     },
     'joint_center_cache': set(),
+    # Nothing counted moves: same GL calls, same applications. Only time goes away.
+    'world_list_submit': set(),
+    # When a thread sleeps cannot reach a frame. The worker clocks are in TIMING.
+    'worker_spin_us': set(),
+    # Who skins a draw and when cannot reach a frame. Each draw's output is compared.
+    'skin_stream': set(),
+    # A repeat asks nothing below World::sweep. What comes back is in the state hash, frame by frame.
+    'sim_sweep_memo': {'world_sweeps', 'static_queries_executed', 'static_query_hits', 'settled_hull_tests',
+        'dynamic_colliders_tested', 'dynamic_colliders_rejected', 'dynamic_buckets_tested', 'sweep_memo_hits', 'sweep_memo_misses', 'sweep_memo_verified'},
+    # Buffer binds and attribute re-specification are what this removes. Geometry, draw order, textures
+    # and uniforms stay compared through world_packets, and pixels strictly.
+    'world_shared_buffers': {'vita_world_binding_applications'},
     'mover_advance_reuse': {'mover_publications', 'mover_far_steps', 'collider_model_calls', 'collider_local_builds', 'dynamic_bucket_builds',
                             # Under --mover-replay the on arm rebuilds what it skipped, to check it. Without it, fewer.
                             'brush_hulls_built'},
@@ -97,6 +112,14 @@ def environment(ctx, name, negative):
         env.update(LOOKING_GLASS_SKIN_MOVING_VIEW='1', LOOKING_GLASS_SKIN_DEATHS='1')
     if negative:
         env['LOOKING_GLASS_GATHER_NEGATIVE'] = negative
+    if ctx.get('gl_trace'):
+        env['LOOKING_GLASS_GL_TRACE'] = '1'
+    if 'sim_sweep_memo' in ctx['levers']:
+        env['LOOKING_GLASS_NPC_DECISIONS'] = '1'
+    if ctx.get('sweep_verify'):
+        env['LOOKING_GLASS_SWEEP_MEMO_VERIFY'] = '1'
+    if ctx.get('world_packets'):
+        env['LOOKING_GLASS_WORLD_PACKETS'] = '1'
     if ctx['replay']:
         env['LOOKING_GLASS_MOVER_REPLAY'] = '1'
     if ctx['ride']:
@@ -108,7 +131,7 @@ def environment(ctx, name, negative):
 
 def run_arm(ctx, name, on, arm_dir, negative):
     (arm_dir / 'private').mkdir(parents=True)
-    (arm_dir / 'private/vita_renderer.json').write_text(json.dumps(dict(ctx['config'], **{k: on for k in ctx['levers']})))
+    (arm_dir / 'private/vita_renderer.json').write_text(json.dumps(dict(ctx['config'], **{k: LEVER_VALUES.get(k, (False, True))[on] for k in ctx['levers']})))
     if ctx['sim']:
         shutil.copy(ctx['sim'], arm_dir / 'private/vita_sim.json')
     command = [str(ctx['binary']), '--data', str(DATA), '--no-audio', '--save-dir', str(arm_dir / 'private/saves'),
@@ -153,6 +176,13 @@ def compare(ctx, name, off, on, strict_images):
                 x, y = [(e[0], e[2]) for e in x], [(e[0], e[2]) for e in y]
             if x != y:
                 raise Mismatch((name, i, key))
+        if 'sim_sweep_memo' in ctx['levers'] and not ctx.get('sweep_verify'):
+            x, y = a['counters'], b['counters']
+            if x.get('world_sweeps', 0) != y.get('world_sweeps', 0) + y.get('sweep_memo_hits', 0):
+                raise Mismatch((name, i, 'sweeps not conserved', x.get('world_sweeps'), y.get('world_sweeps'), y.get('sweep_memo_hits')))
+            for key in ('static_queries_executed', 'dynamic_colliders_tested', 'settled_hull_tests'):
+                if y.get(key, 0) > x.get(key, 0):
+                    raise Mismatch((name, i, 'removed work grew', key, x.get(key), y.get(key)))
         pa = [{k: v for k, v in p.items() if k != 'gpu_slot'} for p in a['submitted_packets']]
         pb = [{k: v for k, v in p.items() if k != 'gpu_slot'} for p in b['submitted_packets']]
         if pa != pb:
@@ -171,6 +201,8 @@ def compare(ctx, name, off, on, strict_images):
             image_frames.append(i)
         if off['presentation'][i]['projection_bits'] != on['presentation'][i]['projection_bits']:
             raise Mismatch((name, i, 'projection'))
+    if not strict_images and len(image_frames) > NOISY_MAX_FRAMES:
+        raise Mismatch((name, 'framebuffer on more frames than noise', image_frames[:12]))
     if strict_images and off['final'] != on['final']:
         raise Mismatch((name, 'final image'))
     if unexplained:
@@ -203,7 +235,7 @@ def run_case(ctx, name, negative=None):
                 raise SystemExit(f'{name} attempt {attempt}: exit {row["exit_code"]}, see {arm}')
             parsed = parse(ctx, arm, name)
             for k in ctx['levers']:
-                if parsed['printed'].get(k) is not on:
+                if parsed['printed'].get(k) != LEVER_VALUES.get(k, (False, True))[on]:
                     raise Mismatch((name, 'printed lever state', k, on, parsed['printed'].get(k)))
             runs.append(parsed)
         pair = next(((x, y) for x in offs for y in ons if not prerequisite_differences(x, y)), None)
@@ -241,12 +273,16 @@ def main():
     p.add_argument('--mover-replay', action='store_true', help='record mover transforms, collider bits and collision answers per frame')
     p.add_argument('--ride', action='store_true', help='with --mover-replay, also stand the player on a mover every 24 frames')
     p.add_argument('--dt', help='override the fixed simulation step')
+    p.add_argument('--sweep-verify', action='store_true', help='on each sweep memo hit, sweep again and assert equal bits, which panics the arm if not')
+    p.add_argument('--gl-trace', action='store_true', help='compare a per-frame hash of every observed GL call, name, arguments and bytes read')
+    p.add_argument('--world-packets', action='store_true', help='compare a per-frame hash of each world draw: group, resolved geometry, texture, uniforms, program')
     a = p.parse_args()
     for k in a.lever:
         assert k in REMOVED_WORK, k
     a.output.mkdir(parents=True, exist_ok=True)
     ctx = dict(output=a.output.resolve(), binary=a.binary.resolve(), config=json.loads(a.config.read_text()), levers=a.lever,
-               frames=a.frames, still=a.still, sim=a.sim and a.sim.resolve(), keep=a.keep_logs, replay=a.mover_replay, ride=a.ride, dt=a.dt)
+               frames=a.frames, still=a.still, sim=a.sim and a.sim.resolve(), keep=a.keep_logs, replay=a.mover_replay, ride=a.ride, dt=a.dt,
+               gl_trace=a.gl_trace, world_packets=a.world_packets, sweep_verify=a.sweep_verify)
     rows = []
     for negative in a.negative:
         row = run_case(ctx, a.maps[0], negative)
@@ -263,7 +299,7 @@ def main():
             print(json.dumps({k: v for k, v in row.items() if k != 'launches'}), flush=True)
     bindings = dict(binary=str(ctx['binary']), binary_sha256=sha_file(ctx['binary']), config_sha256=sha_file(a.config),
                     sim_sha256=a.sim and sha_file(a.sim), comparator_sha256=sha_file(Path(__file__).resolve()),
-                    levers=a.lever, frames=a.frames, still=a.still)
+                    levers=a.lever, frames=a.frames, still=a.still, gl_trace=a.gl_trace, world_packets=a.world_packets)
     tag = ('negative-' if a.negative else '') + '-'.join(a.lever)
     (a.output / f'HOST-FLAG-{tag}.json').write_text(json.dumps(dict(bindings=bindings, rows=rows), indent=1) + '\n')
     bad = [r for r in rows if r['status'] in ('FAIL', 'NOT_DETECTED')]

@@ -423,6 +423,8 @@ impl Interactions {
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Npc);
         let _path=crate::phase_census::span(crate::phase_census::Region::NpcLevels);
         let _controller=crate::phase_census::npc_controller(true);
+        let world = combat.world;
+        let _sweep_memo = world.sweep_memo_scope();
         let mut out = level::step_controllers(&mut self.levels, combat);
         if let Some(p) = &mut self.pool {
             let f = p.combat(combat);

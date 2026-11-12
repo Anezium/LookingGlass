@@ -58,6 +58,7 @@ impl Survey {
     #[cfg(target_os="vita")]
     pub(crate) fn presented(&mut self,map:&str,alive:bool,arm:bool)->anyhow::Result<()> {
         if self.armed && !self.done {crate::gpu_timing::presented(self.frames as u32+1);}
+        if self.armed && !self.done {crate::pass_clock::presented();}
         if !self.presented_at(map,alive,arm,Instant::now())? {return Ok(());}
         CENSUS.store(false,Relaxed);
         self.snapshot=true;
@@ -69,7 +70,15 @@ impl Survey {
         self.write_samples(&mut out)?;out.flush()?;
         if self.config.census {crate::phase_census::export_survey(map)?;}
         crate::gpu_timing::export(map)?;
+        if let Some(line)=crate::pass_clock::summary(map) {println!("{line}");}
+        #[cfg(feature="vita_renderer")]
+        if let Some(line)=crate::render::vita_renderer::world_gxm_summary(map) {println!("{line}");}
+        #[cfg(feature="vita_renderer")]
+        if let Some(line)=crate::tls_count::FastMode::parse(&crate::render::vita_renderer::config().tls_fast).and_then(|mode|crate::tls_count::fast_line(map,mode)) {println!("{line}");}
+        #[cfg(feature="vita_renderer")]
+        if let Some(line)=crate::character::skinning::overlap::stream_line(map) {println!("{line}");}
         if self.config.tls_count {println!("{}",self.tls_line(map));}
+        if self.config.tls_count {println!("{}",crate::tls_count::sites_line(map));}
         println!("[lg/r13b-survey] done map={map} samples={} warmup_frames=60 measured_frames={} died={}",self.rows.len(),self.rows.len()-60,!alive);
         self.done=true;Ok(())
     }
@@ -86,6 +95,7 @@ impl Survey {
             if self.ready && self.pending_gameplay && arm {
                 crate::phase_census::calibrate();
                 crate::gpu_timing::arm();
+                crate::pass_clock::arm();
                 // Calibration/printing must not enter even the first warmup wall.
                 #[cfg(target_os="vita")]
                 let now=Instant::now();
@@ -115,7 +125,7 @@ impl Survey {
     fn tls_frame(&mut self,finished:bool) {
         let now=crate::tls_count::snapshot();
         let delta=now.main_lookups.wrapping_sub(self.tls.previous);self.tls.previous=now.main_lookups;
-        if self.frames==60 {self.tls.measured=now;crate::tls_count::reset_window_shape();}
+        if self.frames==60 {self.tls.measured=now;crate::tls_count::reset_window_shape();crate::tls_count::reset_sites();}
         else if self.frames>60 {self.tls.frame_min=self.tls.frame_min.min(delta);self.tls.frame_max=self.tls.frame_max.max(delta);}
         if finished {crate::tls_count::set_counting(false);}
     }

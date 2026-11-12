@@ -135,5 +135,13 @@
   "display_clear_skip": false,
   "fx_attached_sphere": false,
   "fx_bubble_true_size": false,
-  "mover_advance_reuse": false
+  "mover_advance_reuse": false,
+  "world_pass_clock": false,
+  "world_list_submit": false,
+  "world_shared_buffers": false,
+  "world_gxm": "off",
+  "tls_fast": "off",
+  "sim_sweep_memo": false,
+  "worker_spin_us": 0,
+  "skin_stream": false
 }

@@ -915,6 +915,7 @@ impl School2 {
     ) -> (Events, Feedback) {
         let _census = crate::phase_census::span(crate::phase_census::Region::Npc);
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Npc);
+        let _sweep_memo = world.sweep_memo_scope();
         let mut events = Events::default();
         let mut feedback = Feedback::default();
         if !self.placed {

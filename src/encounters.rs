@@ -353,6 +353,7 @@ impl Encounters {
     pub fn update(&mut self, dt: f32, world: &World, eye: Vec3) -> combat::Feedback {
         let _census = crate::phase_census::span(crate::phase_census::Region::Npc);
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Npc);
+        let _sweep_memo = world.sweep_memo_scope();
         let mut out = combat::Feedback::default();
         for a in self.actors.iter_mut().filter(|a| a.active && a.enabled) {
             let f = match &mut a.enemy {
