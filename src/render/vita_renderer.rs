@@ -127,6 +127,24 @@ pub struct Config {
     /// School two publishes the other movers' colliders only when a rider's body trace will read
     /// them, and builds a mover's collider only when something can read it. Default off.
     pub mover_advance_reuse: bool,
+    /// Attached emitters that declare `sphere` send each particle along its own random direction,
+    /// as the original client does, instead of along the tag's X axis. Changes pixels. Default off.
+    pub fx_attached_sphere: bool,
+    /// The `bubble` sprite is as wide as its 16-pixel image times the scale, and its scalerate
+    /// compounds, as in the original. Changes pixels. Default off.
+    pub fx_bubble_true_size: bool,
+    /// GPU timing through a survey window: off, backlog, poll or wait. See `gpu_timing`.
+    pub gpu_timing: String,
+    /// Diagnostic only, the picture changes: draw classes whose draw call is skipped, CPU kept.
+    pub gpu_mask: Vec<String>,
+    /// Scenes per frame for the display and framebuffer render targets, before vglInit.
+    /// None keeps vitaGL's 1 and 1. Diagnostic.
+    pub rt_scenes: Option<[u8; 2]>,
+    /// GXM parameter buffer in MiB, before vglInit. None keeps vitaGL's 16. Diagnostic.
+    pub param_buffer_mib: Option<u32>,
+    /// With a scaled 3D target, skip the display clear that opens the frame. The upscale covers
+    /// every display pixel, so its scene draws nothing that stays. Default off.
+    pub display_clear_skip: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -315,6 +333,8 @@ impl Default for Config {
             fx_observe_move: true,
             fx_attached_persist: false,
             mover_advance_reuse: false,
+            gpu_timing: "off".into(), gpu_mask: Vec::new(), rt_scenes: None, param_buffer_mib: None, display_clear_skip: false,
+            fx_attached_sphere: false, fx_bubble_true_size: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -450,6 +470,10 @@ impl Config {
         ensure!(self.render_scale==1. || self.msaa_samples==1,"scaled target requires msaa_samples=1");
         ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
         ensure!(matches!(self.opaque_order.as_str(),"material"|"front_to_back"),"invalid opaque_order");
+        ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
+        for name in &self.gpu_mask { ensure!(crate::gpu_timing::mask_bit(name).is_some(),"unknown gpu_mask class {name}"); }
+        if let Some(scenes)=self.rt_scenes { ensure!(scenes.iter().all(|&n|(1..=8).contains(&n)),"rt_scenes must be 1 to 8"); }
+        if let Some(mib)=self.param_buffer_mib { ensure!((16..=64).contains(&mib),"param_buffer_mib must be 16 to 64"); }
         ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
         ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
         ensure!(
@@ -631,6 +655,7 @@ pub(crate) fn apply_world_viewport() {
     if let Some((x,y,w,h))=world_viewport() { unsafe { get_internal_gl().quad_context.apply_viewport(x,y,w,h); } }
 }
 pub(crate) fn prepare_3d(bg:Color){scale::prepare(bg);}
+pub(crate) fn display_clear_skipped() -> bool { config().display_clear_skip && config().render_scale < 1. }
 pub(crate) fn begin_3d_pass(action:PassAction){scale::begin(action);}
 pub(crate) fn set_3d_camera(camera:&Camera3D){scale::camera(camera);}
 pub(crate) fn present_3d(){scale::present();}
@@ -1363,6 +1388,10 @@ impl Renderer {
                 m
             }).values().sum();
         let staging_bytes = groups.len() * std::mem::size_of::<Prepared>();
+        if crate::allocation_census::enabled() {crate::allocation_census::payload("retained_world",serde_json::json!({
+            "gpu_geometry_payload_bytes":bytes,"unique_pvs_capacity_bytes":pvs_with_unknown_bytes,
+            "uniform_staging_capacity_bytes":staging_bytes,"construction_geometry_capacity_bound":construction_geometry_peak_bytes,
+            "scope":"GPU payload is separate from newlib; CPU capacities exclude metadata"}));}
         let construction_buffer_peak_bytes = construction_geometry_peak_bytes.max(
             old_scene_geometry_capacity_bytes + bytes + pvs_with_unknown_bytes + staging_bytes);
         let inventory = serde_json::json!({"groups":groups.len(),"vertices":vertices,"layer_triangles":triangles,"gpu_geometry_bytes":bytes,"cpu_cluster_list_payload_bytes":pvs_bytes,
@@ -1606,7 +1635,7 @@ impl Renderer {
         };
         if !alpha && config().sky {
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
-            let mut totals = crate::frame_profile::Totals::<3>::new();
+            let mut totals = crate::frame_profile::Totals::<3>::profile_only();
             let bg = scene.atmosphere.background();
             let sky = [
                 [bg.r, bg.g, bg.b, 1.],
@@ -1622,7 +1651,9 @@ impl Renderer {
             ctx.apply_uniforms(UniformsSource::table(&sky));
             totals.add(1, start);
             let start = totals.start();
-            ctx.draw(0, 3, 1);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::draw_query::mark("world_opaque","sky",0,None,0,None);
+            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) { ctx.draw(0, 3, 1); }
             totals.add(2, start);
             totals.publish(["vita_world_sky_state_bindings", "vita_world_sky_uniforms", "vita_world_sky_draws_time"]);
             count("vita_world_gpu_draws", 1);
@@ -1636,6 +1667,8 @@ impl Renderer {
         let mut previous_pipeline = None;
         let mut previous_texture = None;
         let _census_submit = crate::phase_census::span(crate::phase_census::Region::WorldSubmit);
+        #[cfg(target_os="vita")]
+        let _commands=crate::phase_census::world_commands();
         let submit_span = crate::frame_profile::span("vita_world_submit");
         let mut totals = crate::frame_profile::Totals::<3>::new();
         // Lifetime is exactly this owned opaque pass: fresh AFTER sky/interop/
@@ -1648,6 +1681,8 @@ impl Renderer {
         let mut applications = [0u64; 4];
         let mut uniform_traffic = [0u64; 3];
         let _submission = crate::render_tail::submission(config().world_binding_cache, config().world_gl_state_cache);
+        // Schema 7: draw i's last lap to draw i+1's first read, from reads Totals already takes.
+        let (mut between_ns, mut between_calls, mut previous_end) = (0u64, 0u32, None::<std::time::Instant>);
         for prepared in &self.prepared {
             let g = &mut self.groups[prepared.group];
             let texture = prepared.texture;
@@ -1669,14 +1704,16 @@ impl Renderer {
             } else {
                 state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true }
             };
-            let start = totals.start();
+            let mut start = totals.start();
+            if let (Some(previous), Some(now)) = (previous_end, start) {
+                between_ns += now.duration_since(previous).as_nanos() as u64; between_calls += 1;
+            }
             if plan.pipeline { ctx.apply_pipeline(&pipeline); applications[0] += 1; }
             if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(if alpha {0}else{1});} applications[1] += 1; }
             scale::log_depth(!alpha);
             if low { low_draws += 1; if !cache_enabled {count("vita_world_low_draws",1);} }
             if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
-            totals.add(0, start);
-            let start = totals.start();
+            totals.lap(0, &mut start);
             if plan.uniforms {
                 let traffic = self.field_uniforms[usize::from(low)].apply(ctx, u.values(), config().uniform_field_cache);
                 applications[3] += 1;
@@ -1684,14 +1721,21 @@ impl Renderer {
                 uniform_traffic[1] += traffic.bytes;
                 uniform_traffic[2] += traffic.calls;
             }
-            totals.add(1, start);
-            let start = totals.start();
+            totals.lap(1, &mut start);
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             if alpha || g.recipe.stage.blend != Blend::Opaque {
                 crate::sim_maps::probe::world_order(prepared.group, alpha);
             }
-            ctx.draw(g.base_element, prepared.indices, 1);
-            totals.add(2, start);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::draw_query::mark(
+                if alpha {"world_alpha"} else {"world_opaque"},
+                if low {"world_low"} else {"world_full"},
+                g.recipe.blend, Some(prepared.group), g.recipe.stage.alpha_test,
+                g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
+            let class = if alpha { crate::gpu_timing::MASK_WORLD_ALPHA } else if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
+            if !crate::gpu_timing::masked(class) { ctx.draw(g.base_element, prepared.indices, 1); }
+            totals.lap(2, &mut start);
+            previous_end = start;
             if previous_pipeline != Some(pi) {
                 pipeline_changes += 1;
                 if !cache_enabled { count("vita_world_pipeline_changes", 1); }
@@ -1735,6 +1779,10 @@ impl Renderer {
                     g.recipe.model.is_none(),
                 );
             }
+        }
+        if let Some((ns, calls)) = totals.census_values() {
+            crate::phase_census::world_publish(ns, calls, totals.profile_active());
+            if between_calls > 0 { crate::phase_census::world_between_publish(between_ns, between_calls); }
         }
         if cache_enabled {
             counts(&[
@@ -1791,7 +1839,7 @@ impl Renderer {
             .enumerate()
             .map(|(id, p)| (p.depth, id))
             .collect::<Vec<_>>();
-        let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::new());
+        let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::profile_only());
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id| {
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
@@ -1821,7 +1869,11 @@ impl Renderer {
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::world_order(p.group,true);
-            ctx.draw(g.base_element, g.indices, 1);
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::sim_maps::probe::draw_query::mark("world_alpha","world_full",
+                g.recipe.blend, Some(p.group), g.recipe.stage.alpha_test,
+                g.recipe.stage.images.first().map(String::as_str));
+            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) { ctx.draw(g.base_element, g.indices, 1); }
             totals.add(2, start);
             count("vita_world_gpu_draws", 1);
             count("vita_world_alpha_triangles", g.indices as u64 / 3);
@@ -2235,6 +2287,28 @@ mod tests {
         assert!(rejected.is_none() && c.log_frame_time_every == Some(10) && c.sim_trigger_facts_reuse);
         assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","typo":true}"#).is_err());
         assert!(parse_runtime_config(br#"{"log_frame_time_every":"bad","world_state_cache":"bad"}"#).is_err());
+    }
+    #[test]
+    fn g2_keys_default_off_validate_and_are_printed() {
+        let defaults = Config::default();
+        assert_eq!(defaults.gpu_timing, "off");
+        assert!(defaults.gpu_mask.is_empty() && defaults.rt_scenes.is_none() && defaults.param_buffer_mib.is_none() && !defaults.display_clear_skip && !defaults.fx_attached_sphere && !defaults.fx_bubble_true_size);
+        defaults.validate().unwrap();
+        let record = config_log_lines(&defaults).join("\n");
+        for key in ["\"gpu_timing\":\"off\"", "\"gpu_mask\":[]", "\"rt_scenes\":null", "\"param_buffer_mib\":null", "\"display_clear_skip\":false", "\"fx_attached_sphere\":false", "\"fx_bubble_true_size\":false"] {
+            assert!(record.contains(key), "{key} missing from {record}");
+        }
+        for (good, text) in [
+            (true, r#"{"gpu_timing":"backlog"}"#), (true, r#"{"gpu_timing":"poll"}"#), (true, r#"{"gpu_timing":"wait"}"#),
+            (false, r#"{"gpu_timing":"on"}"#), (false, r#"{"gpu_timing":""}"#),
+            (true, r#"{"gpu_mask":["sky","fx_alpha"]}"#), (false, r#"{"gpu_mask":["bubbles"]}"#),
+            (true, r#"{"rt_scenes":[2,1]}"#), (false, r#"{"rt_scenes":[0,1]}"#), (false, r#"{"rt_scenes":[9,1]}"#),
+            (true, r#"{"param_buffer_mib":32}"#), (false, r#"{"param_buffer_mib":8}"#), (false, r#"{"param_buffer_mib":128}"#),
+            (true, r#"{"display_clear_skip":true}"#),
+        ] {
+            let parsed: Config = serde_json::from_str(text).unwrap();
+            assert_eq!(parsed.validate().is_ok(), good, "{text}");
+        }
     }
     #[test]
     fn config_record_stays_one_json_document_and_cadence_has_its_own_record() {

@@ -73,7 +73,12 @@ pub fn uncount(name: &'static str, n: u64) {
         });
     }
 }
-pub fn set_frame(frame: u64) { FRAME_NO.with(|c| c.set(frame)); PACKET_NO.with(|c| c.set(0)); }
+pub fn set_frame(frame: u64) {
+    // Harvest the previous frame before the next one arms: the HUD and upscale
+    // batches of frame N are flushed by the framework between the two samples.
+    draw_query::set_frame(frame);
+    FRAME_NO.with(|c| c.set(frame)); PACKET_NO.with(|c| c.set(0));
+}
 /// Frame number of the sample currently being collected.
 pub fn frame() -> u64 { FRAME_NO.with(Cell::get) }
 /// Record the scaled 3D viewport at the specified per-frame stage. This is a GL query of
@@ -347,6 +352,265 @@ pub fn record_exact_frame(case: &str, frame: u64, png: bool) -> anyhow::Result<(
     Ok(())
 }
 
+/// Per-draw `GL_SAMPLES_PASSED` census. Host only, never linked into a Vita
+/// package: one query brackets the GL draw that a submitted packet produces.
+/// A query is issued only on the requested frame, so all other frames run the
+/// unmodified path.
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+pub mod draw_query {
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+    use std::sync::OnceLock;
+
+    use macroquad::miniquad::gl;
+
+    const SAMPLES_PASSED: u32 = 0x8914;
+    const QUERY_RESULT: u32 = 0x8866;
+    const BLEND: u32 = 0x0BE2;
+    const DEPTH_TEST: u32 = 0x0B71;
+    const DEPTH_WRITEMASK: u32 = 0x0B72;
+    const BLEND_SRC_RGB: u32 = 0x80C9;
+    const BLEND_DST_RGB: u32 = 0x80C8;
+    const TEXTURE_BINDING_2D: u32 = 0x8069;
+    const ACTIVE_TEXTURE: u32 = 0x84E0;
+    const TEXTURE0: u32 = 0x84C0;
+    const CURRENT_PROGRAM: u32 = 0x8B8D;
+    const VIEWPORT: u32 = 0x0BA2;
+    const DEPTH_FUNC: u32 = 0x0B74;
+    const COLOR_WRITEMASK: u32 = 0x0C23;
+    const ALWAYS: u32 = 0x0207;
+    const MAX_ROWS: usize = 4096;
+
+    #[derive(Clone)]
+    struct Mark {
+        pass: &'static str,
+        class: &'static str,
+        blend: usize,
+        group: Option<usize>,
+        alpha_test: u8,
+        texture_name: Option<String>,
+    }
+    #[derive(Clone)]
+    struct Row {
+        seq: u64,
+        pass: String,
+        class: String,
+        program: i32,
+        program_name: String,
+        group: Option<usize>,
+        texture_name: Option<String>,
+        blend: String,
+        blend_enabled: bool,
+        blend_src: i32,
+        blend_dst: i32,
+        depth_write: bool,
+        depth_test: bool,
+        texture: i32,
+        triangles: u32,
+        samples: u64,
+        raster_samples: u64,
+        viewport: [i32; 4],
+    }
+    pub struct RasterState { depth_func: u32, depth_write: i32, color_mask: [i32; 4] }
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        static MARK: RefCell<Option<Mark>> = const { RefCell::new(None) };
+        static PENDING: RefCell<Vec<(u32, Option<u32>, Row)>> = RefCell::default();
+        static SEQUENCE: Cell<u64> = const { Cell::new(0) };
+        static SAMPLE_FRAME: Cell<u64> = const { Cell::new(0) };
+        static PROGRAMS: RefCell<BTreeMap<u32, String>> = RefCell::default();
+    }
+
+    fn target_frame() -> u64 {
+        static TARGET: OnceLock<u64> = OnceLock::new();
+        *TARGET.get_or_init(|| std::env::var("LOOKING_GLASS_DRAW_QUERY_FRAME")
+            .ok().and_then(|value| value.parse().ok()).unwrap_or(120))
+    }
+    /// The census is opt-in by environment variable, independent of the counter probe.
+    pub fn active() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_DRAW_QUERY").is_some())
+    }
+    /// Count every rasterized fragment too, by drawing the packet a second time
+    /// with depth test forced to always and colour/depth writes masked. The
+    /// framebuffer cannot change: colour and depth writes are off for that draw.
+    pub fn raster() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_DRAW_QUERY_RASTER").is_some())
+    }
+    /// The control arm selects the same GL observer table without issuing a query.
+    pub fn table_active() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| active() || std::env::var_os("LOOKING_GLASS_DRAW_QUERY_CONTROL").is_some())
+    }
+    /// True only while the requested frame is being submitted.
+    pub fn armed() -> bool { ARMED.with(Cell::get) }
+    pub fn set_frame(frame: u64) {
+        if !active() { return; }
+        if ARMED.with(Cell::get) { finish_previous(); }
+        SEQUENCE.with(|value| value.set(0));
+        static LAST: OnceLock<u64> = OnceLock::new();
+        let last = *LAST.get_or_init(|| std::env::var("LOOKING_GLASS_DRAW_QUERY_LAST")
+            .ok().and_then(|value| value.parse().ok()).unwrap_or_else(target_frame));
+        let armed = frame >= target_frame() && frame <= last;
+        if armed {
+            SAMPLE_FRAME.with(|value| value.set(frame));
+            println!("DRAW_QUERY armed frame={frame} target={}", target_frame());
+        }
+        ARMED.with(|value| value.set(armed));
+    }
+    /// Shader object identity, recorded when the program is linked.
+    pub fn program(id: u32, name: &str) {
+        if active() { PROGRAMS.with(|map| { map.borrow_mut().insert(id, name.to_string()); }); }
+    }
+    fn blend_name(index: usize) -> String {
+        match index {
+            0 => "Opaque".into(), 1 => "Alpha".into(), 2 => "Add".into(), 3 => "Filter".into(),
+            4 => "DoubleFilter".into(), 5 => "AlphaAdd".into(), 6 => "ColorAdd".into(),
+            7 => "Invisible".into(), 8 => "AlphaColor".into(), _ => format!("Factors({index})"),
+        }
+    }
+    /// Attach the submitting pass to the draw that follows. Never allocates unless armed.
+    pub fn mark(pass: &'static str, class: &'static str, blend: usize, group: Option<usize>,
+                alpha_test: u8, texture_name: Option<&str>) {
+        if armed() { MARK.with(|slot| *slot.borrow_mut() = Some(Mark {
+            pass, class, blend, group, alpha_test,
+            texture_name: texture_name.map(str::to_string),
+        })); }
+    }
+    /// Deferred framework batches have no submission site: classify by the program.
+    pub fn deferred_class(present_program: u32, current_program: u32) -> (&'static str, &'static str) {
+        if present_program != 0 && current_program == present_program { ("upscale", "upscale") } else { ("hud", "hud") }
+    }
+    fn state_i32(name: u32) -> i32 {
+        let mut value = 0i32;
+        unsafe { gl::glGetIntegerv(name, &mut value); }
+        value
+    }
+    /// Begin one query on the next draw. `count` and `instances` come from the GL call.
+    pub fn begin(count: i32, instances: i32, deferred: Option<(&'static str, &'static str)>) -> Option<u32> {
+        if !armed() { return None; }
+        let mut id = 0u32;
+        unsafe { gl::glGenQueries(1, &mut id); }
+        if id == 0 { println!("DRAW_QUERY glGenQueries returned 0"); return None; }
+        unsafe { gl::glBeginQuery(SAMPLES_PASSED, id); }
+        let mark = MARK.with(|slot| slot.borrow_mut().take());
+        let (pass, class, blend, group, texture_name) = match mark {
+            Some(m) => (m.pass.to_string(), if m.class == "world_full" && m.alpha_test > 0 {
+                format!("world_full_at{}", m.alpha_test)
+            } else { m.class.to_string() }, blend_name(m.blend), m.group, m.texture_name),
+            None => {
+                let (pass, class) = deferred.unwrap_or(("other", "other"));
+                (pass.to_string(), class.to_string(), "gl".to_string(), None, None)
+            }
+        };
+        let mut viewport = [0i32; 4];
+        unsafe { gl::glGetIntegerv(VIEWPORT, viewport.as_mut_ptr()); }
+        // The last bound image unit is not the diffuse texture; sample unit 0.
+        let active = state_i32(ACTIVE_TEXTURE) as u32;
+        unsafe { gl::glActiveTexture(TEXTURE0); }
+        let texture = state_i32(TEXTURE_BINDING_2D);
+        unsafe { gl::glActiveTexture(active); }
+        let program = state_i32(CURRENT_PROGRAM);
+        let program_name = PROGRAMS.with(|map| map.borrow().get(&(program as u32)).cloned()).unwrap_or_default();
+        let row = Row {
+            seq: SEQUENCE.with(|value| { let n = value.get(); value.set(n + 1); n }),
+            pass, class, program, program_name, group, texture_name,
+            blend, blend_enabled: state_i32(BLEND) != 0,
+            blend_src: state_i32(BLEND_SRC_RGB), blend_dst: state_i32(BLEND_DST_RGB),
+            depth_write: state_i32(DEPTH_WRITEMASK) != 0,
+            depth_test: state_i32(DEPTH_TEST) != 0,
+            texture,
+            triangles: if count > 0 && instances > 0 {
+                (count as u32 / 3).saturating_mul(instances as u32)
+            } else { 0 },
+            samples: 0,
+            raster_samples: 0,
+            viewport,
+        };
+        PENDING.with(|rows| rows.borrow_mut().push((id, None, row)));
+        if PENDING.with(|rows| rows.borrow().len() > MAX_ROWS) {
+            panic!("draw query pool exceeded {MAX_ROWS} draws in one frame");
+        }
+        Some(id)
+    }
+    pub fn end(_id: Option<u32>) {
+        if !armed() { return; }
+        unsafe { gl::glEndQuery(SAMPLES_PASSED); }
+    }
+    fn state_i32_array(name: u32) -> [i32; 4] {
+        let mut value = [0i32; 4];
+        unsafe { gl::glGetIntegerv(name, value.as_mut_ptr()); }
+        value
+    }
+    /// Start the raster-area query and mask every write of the duplicate draw.
+    pub fn begin_raster() -> Option<RasterState> {
+        if !armed() || !raster() { return None; }
+        let state = RasterState {
+            depth_func: state_i32(DEPTH_FUNC) as u32,
+            depth_write: state_i32(DEPTH_WRITEMASK),
+            color_mask: state_i32_array(COLOR_WRITEMASK),
+        };
+        unsafe {
+            gl::glDepthFunc(ALWAYS);
+            gl::glDepthMask(0);
+            gl::glColorMask(0, 0, 0, 0);
+        }
+        let mut id = 0u32;
+        unsafe { gl::glGenQueries(1, &mut id); gl::glBeginQuery(SAMPLES_PASSED, id); }
+        PENDING.with(|rows| { if let Some(last) = rows.borrow_mut().last_mut() { last.1 = Some(id); } });
+        Some(state)
+    }
+    pub fn end_raster(state: Option<RasterState>) {
+        let Some(state) = state else { return; };
+        unsafe {
+            gl::glEndQuery(SAMPLES_PASSED);
+            gl::glColorMask(state.color_mask[0] as u8, state.color_mask[1] as u8,
+                state.color_mask[2] as u8, state.color_mask[3] as u8);
+            gl::glDepthFunc(state.depth_func);
+            gl::glDepthMask(u8::from(state.depth_write != 0));
+        }
+    }
+    fn finish_previous() {
+        let rows = PENDING.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+        if rows.is_empty() { return; }
+        let draws = rows.len() as u64;
+        let frame = SAMPLE_FRAME.with(Cell::get);
+        let mut total = 0u64;
+        for (id, raster_id, mut row) in rows {
+            let mut samples = 0u64;
+            unsafe { gl::glGetQueryObjectui64v(id, QUERY_RESULT, &mut samples); }
+            row.samples = samples;
+            if let Some(raster_id) = raster_id {
+                let mut raster_samples = 0u64;
+                unsafe { gl::glGetQueryObjectui64v(raster_id, QUERY_RESULT, &mut raster_samples); }
+                row.raster_samples = raster_samples;
+                unsafe { gl::glDeleteQueries(1, &raster_id); }
+            }
+            total += samples;
+            println!("SAMPLES_DRAW {}", serde_json::json!({
+                "frame": frame, "seq": row.seq, "pass": row.pass, "class": row.class,
+                "program": row.program, "program_name": row.program_name, "group": row.group,
+                "texture_name": row.texture_name, "blend": row.blend, "blend_enabled": row.blend_enabled,
+                "blend_src": row.blend_src, "blend_dst": row.blend_dst,
+                "depth_write": row.depth_write, "depth_test": row.depth_test,
+                "texture": row.texture, "triangles": row.triangles, "samples": row.samples,
+                "raster_samples": row.raster_samples,
+                "viewport": row.viewport,
+            }));
+            unsafe { gl::glDeleteQueries(1, &id); }
+        }
+        let error = unsafe { gl::glGetError() };
+        let target = crate::render::vita_renderer::diagnostic_target();
+        println!("SAMPLES_QUERY_SUMMARY {}", serde_json::json!({
+            "frame": frame, "draws": draws, "samples": total, "raster": raster(),
+            "host_target": target, "host_display": [macroquad::prelude::screen_width() as i32, macroquad::prelude::screen_height() as i32],
+            "gl_error": error,
+        }));
+        ARMED.with(|value| value.set(false));
+    }
+}
 pub fn prepare_checkpoint()->Option<u64> {
     ALLOC_TRACKED.with(Cell::get).then(crate::kernel_alloc::Scope::calls_so_far)
 }

@@ -37,8 +37,10 @@ fn heap_sample() -> (usize, usize) {
     struct MallInfo { arena: usize, ordblks: usize, smblks: usize, hblks: usize,
         hblkhd: usize, usmblks: usize, fsmblks: usize, uordblks: usize,
         fordblks: usize, keepcost: usize }
-    extern "C" { fn mallinfo() -> MallInfo; }
-    let h = unsafe { mallinfo() };
+    // This function is reachable from allocator wrappers. The linked newlib
+    // implementation ignores reent; bypass lazy __getreent initialization.
+    extern "C" { fn _mallinfo_r(r:*mut core::ffi::c_void) -> MallInfo; }
+    let h = unsafe { _mallinfo_r(core::ptr::null_mut()) };
     (h.uordblks, h.arena)
 }
 pub(crate) fn observe() {

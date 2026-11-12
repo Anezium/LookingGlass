@@ -577,6 +577,7 @@ impl Interactions {
         Ok(())
     }
     pub fn event_facts(&self) -> Facts {
+        crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::FactBuilds,1);
         #[cfg(test)]
         FACT_BUILDS.with(|n| n.set(n.get() + 1));
         let mut facts = Facts::default();
@@ -1470,6 +1471,7 @@ impl Interactions {
         self.triggers_with(dt, before, after, crate::sim_maps::trigger_facts_reuse())
     }
     fn triggers_with(&mut self, dt: f32, before: Vec3, after: Vec3, reuse_facts: bool) -> Events {
+        let _checks=crate::phase_census::span(crate::phase_census::Region::PlayerChecks);
         let mut events = Events::default();
         if dt <= 0. || !dt.is_finite() {
             return events;
@@ -1504,6 +1506,7 @@ impl Interactions {
         // to the next fire. Nothing survives the pass.
         let mut facts: Option<Facts> = None;
         for index in 0..self.triggers.len() {
+            crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::TriggerVisits,1);
             let t = &self.triggers[index];
             // Pool's final jump owns its exit. Keep the legacy rule identity and
             // signature for existing saves, but don't let physical contact with
@@ -1521,6 +1524,7 @@ impl Interactions {
             if t.health > 0. || (t.once && t.fired) {
                 continue;
             }
+            crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::TriggerEligible,1);
             let event = Event::Entity(t.id, Input::Activate);
             let allowed = if reuse_facts {
                 let facts = facts.get_or_insert_with(|| self.event_facts());
@@ -1548,6 +1552,7 @@ impl Interactions {
                 && t.cooldown == 0.;
             t.inside = inside;
             if fire {
+                crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::TriggerFires,1);
                 events.merge(self.dispatch(event));
                 facts = None;
                 if self.scripted() {

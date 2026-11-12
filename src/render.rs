@@ -1459,8 +1459,13 @@ impl Scene {
                 if !vita_renderer::world_only() {
                     let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
                     let _render_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Fx);
+                    let _world_particles=crate::phase_census::span(crate::phase_census::Region::FxWorld);
+                    crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::WorldSets,1);
+                    crate::phase_census::path_count(crate::phase_census::Counter::WorldLive,particles.live_puffs());
                     particles.prepare_draw(camera, &self.atmosphere);
                     particles.prepare_quads(camera, Some(direction));
+                    let _registration=crate::phase_census::span(crate::phase_census::Region::FxRegistration);
+                    crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::Registrations,1);
                     for (i, _) in particles.depths(camera, direction) { particles.draw_one(i, camera, direction); }
                 }
                 return;
@@ -1542,6 +1547,7 @@ impl Scene {
         difficulty: crate::powerups::Difficulty,
     ) -> Result<Self> {
         let mut timing = crate::startup::Phase::new("map_load");
+        let _r13_memory = crate::allocation_census::Scope::new(0);
         eprintln!("[lg/startup] map_load map={name}");
         let bytes = assets.read(&format!("maps/{name}.bsp"))?;
         timing.mark("bsp_read");
@@ -1561,6 +1567,7 @@ impl Scene {
         Self::from_parts_selected(assets, name, map, world, true)
     }
     fn from_parts_selected(assets: &mut Assets, name: &str, map: Bsp, world: World, allow_retained: bool) -> Result<Self> {
+        let _r13_memory = crate::allocation_census::Scope::new(1);
         #[cfg(not(feature = "vita_renderer"))]
         let _ = allow_retained;
         #[cfg(feature="vita_renderer")]

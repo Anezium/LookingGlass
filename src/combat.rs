@@ -70,6 +70,7 @@ impl Recoil {
         }
     }
     pub fn step(&mut self, dt: f32, world: &World, body: Target) -> Vec3 {
+        let _category=crate::phase_census::query_category(crate::phase_census::QueryCategory::GravityRecoil);
     let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         if dt <= 0. { return Vec3::ZERO; }
         for push in &world.traversal.actor_pushes {
@@ -527,6 +528,7 @@ impl Guard {
             .retain_mut(|s| s.advance(dt, world, &bodies, out));
         // Authored actor starts can sit above the floor; settle with a swept body,
         // including after a platform moves away, instead of firing while suspended.
+        let _gravity_category=crate::phase_census::query_category(crate::phase_census::QueryCategory::GravityRecoil);
         let _npc_gravity = crate::npc::profile::work(crate::npc::profile::Phase::Movement);
         self.falling = (self.falling + 800. * dt).min(800.);
         let body = self.target(0);
@@ -542,6 +544,7 @@ impl Guard {
             self.falling = 0.;
         }
         drop(_npc_gravity);
+        drop(_gravity_category);
         if self.state == State::Dead {
             if self.cut {
                 let recipe = timing
@@ -608,6 +611,7 @@ impl Guard {
                 };
         // Distant actors should not trace across the entire level at 120 Hz.
         let visible = aware && {
+            let _category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Sight);
             let sight = world.sweep(self.target(0).center, eye, Vec3::splat(0.5));
             !sight.start_solid && sight.fraction >= 1.
         };

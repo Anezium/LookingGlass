@@ -14,7 +14,9 @@ fn basis(direction: Vec3) -> (Vec3, Vec3) {
     (right, right.cross(direction).normalize_or_zero())
 }
 fn recipe(p: &Puff, e: &Emitter, camera: Vec3, axes: (Vec3, Vec3)) -> Recipe {
-    Recipe { position: p.position, size: p.size, growth: e.spec.growth, age: p.age,
+    // A compounding emitter arrives with its growth already in the size.
+    let (size, growth) = if e.spec.growth_compounds { (e.spec.grown(p.size, p.age), 0.) } else { (p.size, e.spec.growth) };
+    Recipe { position: p.position, size, growth, age: p.age,
         life: p.life, roll: p.roll, alpha: e.spec.alpha, fade: e.spec.fade,
         fade_in: e.spec.fade_in, color: e.spec.color, camera, right: axes.0, up: axes.1, per_puff_basis: false }
 }
@@ -74,6 +76,8 @@ impl Buffer {
             let mid = puffs.len()/2;
             let (a,b) = self.output.split_at_mut(mid);
             let (ra,rb) = self.recipes.split_at(mid);
+            let _pair=crate::phase_census::span(crate::phase_census::Region::FxPairWait);
+            crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::PairJobs,1);
             crate::character::skinning::overlap::cpu_pair(||kernel(ra,a),||kernel(rb,b));
         } else { kernel(&self.recipes,&mut self.output); }
         if raw {

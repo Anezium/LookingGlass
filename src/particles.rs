@@ -80,6 +80,27 @@ struct Spec {
     random_roll: bool,
     sphere: bool,
     start_off: bool,
+    /// `scalerate` compounds, as the original client integrates it, instead of adding to 1.
+    growth_compounds: bool,
+}
+impl Spec {
+    /// Under `fx_bubble_true_size`, the bubble sprite only. The original draws a sprite as wide as
+    /// its image times the entity scale, so this 16-pixel image is a quarter of the 64-pixel baseline.
+    fn true_bubble_size(&mut self, width: Option<f32>) {
+        if self.image != "bubble" || !crate::sim_maps::fx_bubble_true_size() { return; }
+        let factor = width.map_or(1., |w| w / 64.);
+        self.size.low *= factor;
+        self.size.high *= factor;
+        self.growth_compounds = true;
+    }
+    /// Radius of a billboard this old, from the spawned radius.
+    fn grown(&self, size: f32, age: f32) -> f32 {
+        if self.growth_compounds { size * (self.growth * age).exp() } else { size * (1. + self.growth * age).max(0.) }
+    }
+}
+/// The original's `sphere` direction: three independent values in -1..1, not normalized.
+fn sphere_axis(seed: &mut u32) -> Vec3 {
+    vec3(random(seed) * 2. - 1., random(seed) * 2. - 1., random(seed) * 2. - 1.)
 }
 impl Default for Spec {
     fn default() -> Self {
@@ -110,6 +131,7 @@ impl Default for Spec {
             random_roll: false,
             sphere: false,
             start_off: false,
+            growth_compounds: false,
         }
     }
 }
@@ -858,6 +880,7 @@ impl Steam {
                     spec.size.low *= factor;
                     spec.size.high *= factor;
                 }
+                spec.true_bubble_size(textures.first().map(Texture2D::width));
                 let enabled = !spec.start_off;
                 emitters.push(Emitter {
                     id,
@@ -996,7 +1019,6 @@ impl Steam {
             let _hotspot = crate::frame_profile::span("particles_retain");
             self.puffs.retain(|p| p.age < p.life);
         }
-        #[cfg(target_os = "vita")]
         let retained = self.puffs.len() as u32;
         #[cfg(target_os = "vita")]
         let _emit_profile = crate::frame_profile::span("particles_emit");
@@ -1057,6 +1079,7 @@ impl Steam {
         }
         // Stable retain and append order is birth order for world puffs. Drop
         // the oldest live births first; emitter RNG/credit still run normally.
+        crate::phase_census::path_count(crate::phase_census::Counter::WorldNew,self.puffs.len() as u64 - retained as u64);
         #[cfg(target_os = "vita")]
         let births = self.puffs.len() as u32 - retained;
         let dropped = self.puffs.len().saturating_sub(config.puff_cap);
@@ -1232,6 +1255,7 @@ impl Steam {
             add_counter(Counter::PuffsBirths, self.puffs.len() as u32 - retained);
         }
     }
+    pub(crate) fn live_puffs(&self)->u64 {self.puffs.len() as u64}
     pub fn depths(&self, camera: Vec3, direction: Vec3) -> impl Iterator<Item = (usize, f32)> + '_ {
         self.puffs
             .iter()
@@ -1248,6 +1272,8 @@ impl Steam {
     }
     #[cfg(feature="vita_renderer")]
     pub(crate) fn prepare_quads(&self, camera: Vec3, direction: Option<Vec3>) {
+        let _quads=crate::phase_census::span(crate::phase_census::Region::FxQuadBuild);
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::QuadSets,1);
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             if let Some(direction) = direction.filter(|_| crate::render_fx::world_puff_batches_active()) {
                 self.quads.borrow_mut().prepare_world(&self.puffs, &self.emitters, camera, direction);
@@ -1319,7 +1345,7 @@ impl Steam {
         let up = right.cross(direction).normalize_or_zero();
         let p = &self.puffs[index];
         let e = &self.emitters[p.emitter];
-        let radius = p.size * (1. + e.spec.growth * p.age).max(0.);
+        let radius = e.spec.grown(p.size, p.age);
         let x = (right * p.roll.cos() + up * p.roll.sin()) * radius;
         let y = (-right * p.roll.sin() + up * p.roll.cos()) * radius;
         let opacity = e.spec.alpha
@@ -1698,7 +1724,7 @@ impl Attached {
             return Ok(None);
         }
         let mut emitters = Vec::new();
-        for spec in definitions {
+        for mut spec in definitions {
             let stage = materials
                 .get(&spec.image)
                 .and_then(|s| s.stages.first())
@@ -1724,6 +1750,7 @@ impl Attached {
                 stage.blend,
                 crate::materials::Blend::Add | crate::materials::Blend::AlphaAdd
             );
+            spec.true_bubble_size(textures.first().map(Texture2D::width));
             emitters.push(Emitter {
                 id: 0,
                 pickup: false,
@@ -1791,6 +1818,8 @@ impl Attached {
             self.steam.prepare_quads(camera, None);
         }
         let register_time = crate::sim_maps::timer("r26_attached_register_ns");
+        let _registration=crate::phase_census::span(crate::phase_census::Region::FxRegistration);
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::Registrations,1);
         let mut order = if self.reuse_scratch { std::mem::take(&mut self.order) } else { Vec::new() };
         order.clear();
         order.extend(self
@@ -1850,6 +1879,7 @@ impl Attached {
         self.age = age;
         self.persisted.resize_with(self.steam.emitters.len(), Default::default);
         let mut full = false;
+        let sphere = crate::sim_maps::fx_attached_sphere();
         for (index, e) in self.steam.emitters.iter().enumerate() {
             let emitter = &mut self.persisted[index];
             if full || e.spec.burst.is_some_and(|(at, _)| age < at) {
@@ -1892,6 +1922,7 @@ impl Attached {
                     continue;
                 }
                 if slot.stage == BirthStage::Life {
+                    crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::AttachedNew,1);
                     let pose = birth_pose(at, e.spec.tag.as_deref());
                     slot.translation = pose.translation;
                     slot.rotation = pose.rotation;
@@ -1902,11 +1933,12 @@ impl Attached {
                     slot.offset = sampled(e.spec.offset, &mut seed)
                         + slot.rotation * sampled(e.spec.axis_offset, &mut seed);
                     let random_velocity = sampled(e.spec.velocity, &mut seed);
+                    let forward = if sphere && e.spec.sphere { sphere_axis(&mut seed) } else { slot.rotation * Vec3::X };
                     slot.velocity = if e.spec.tag_velocity {
                         slot.rotation * random_velocity
                     } else {
                         random_velocity
-                    } + slot.rotation * Vec3::X * e.spec.forward;
+                    } + forward * e.spec.forward;
                     slot.accel = sampled(e.spec.accel, &mut seed);
                     slot.size = 32. * e.spec.size.sample(&mut seed);
                     slot.roll = if e.spec.random_roll {
@@ -1945,9 +1977,13 @@ impl Attached {
     ) {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _profile = crate::frame_profile::span("attached_sample");
+        let _sample=crate::phase_census::span(crate::phase_census::Region::FxAttachedSample);
+        let mut diagnostic_new=0u64;
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::AttachedSamples,1);
         let _time = crate::sim_maps::timer("r26_attached_sample_ns");
         if crate::sim_maps::fx_attached_persist() {
             self.sample_persisted(age, scale, birth_pose, enabled);
+            crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::AttachedLive,self.steam.puffs.len() as u64);
             crate::sim_maps::count("fx_funnel_attached_sets", 1);
             crate::sim_maps::count("fx_funnel_attached_sampled", self.steam.puffs.len() as u64);
             return;
@@ -1964,6 +2000,7 @@ impl Attached {
             self.births.clear();
         }
         self.age = age;
+        let sphere = crate::sim_maps::fx_attached_sphere();
         'emitters: for (index, e) in self.steam.emitters.iter().enumerate() {
             if e.spec.burst.is_some_and(|(at, _)| age < at) {
                 continue;
@@ -1997,17 +2034,18 @@ impl Attached {
                 }
                 let key = (index, birth);
                 let pose = if self.reuse_scratch { self.births.get(&key).copied() } else { previous.remove(&key) }
-                    .unwrap_or_else(|| birth_pose(at, e.spec.tag.as_deref()));
+                    .unwrap_or_else(|| {diagnostic_new+=1;birth_pose(at, e.spec.tag.as_deref())});
                 self.births.insert(key, pose);
                 if self.reuse_scratch { self.live_births.push(key); }
                 let offset = sampled(e.spec.offset, &mut seed)
                     + pose.rotation * sampled(e.spec.axis_offset, &mut seed);
                 let random_velocity = sampled(e.spec.velocity, &mut seed);
+                let forward = if sphere && e.spec.sphere { sphere_axis(&mut seed) } else { pose.rotation * Vec3::X };
                 let velocity = if e.spec.tag_velocity {
                     pose.rotation * random_velocity
                 } else {
                     random_velocity
-                } + pose.rotation * Vec3::X * e.spec.forward;
+                } + forward * e.spec.forward;
                 let accel = sampled(e.spec.accel, &mut seed);
                 self.steam.puffs.push(Puff {
                     sweep: PuffSweep::default(),
@@ -2030,6 +2068,8 @@ impl Attached {
                 });
             }
         }
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::AttachedLive,self.steam.puffs.len() as u64);
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::AttachedNew,diagnostic_new);
         if self.reuse_scratch {
             self.births.retain(|key, _| self.live_births.binary_search(key).is_ok());
         }
@@ -2043,6 +2083,28 @@ impl Attached {
 pub(crate) mod tests {
     use super::*;
     pub(crate) fn world_test_steam() -> Steam { attached_fixture(2).steam }
+    #[test]
+    fn sphere_axis_is_per_axis_and_growth_keeps_its_old_form_unless_compounding() {
+        let mut seed = 7;
+        let axes: Vec<Vec3> = (0..4096).map(|_| sphere_axis(&mut seed)).collect();
+        assert!(axes.iter().all(|a| a.abs().cmple(Vec3::ONE).all()));
+        assert!(axes.iter().any(|a| a.length() > 1.2) && axes.iter().any(|a| a.length() < 0.8), "not normalized");
+        let mut spec = Spec { growth: 0.1, ..Default::default() };
+        assert_eq!(spec.grown(8., 5.).to_bits(), (8. * (1. + 0.1f32 * 5.)).to_bits());
+        spec.growth = -1.;
+        assert_eq!(spec.grown(8., 5.), 0.);
+        spec.growth = 0.1;
+        spec.growth_compounds = true;
+        assert!((spec.grown(8., 5.) - 8. * 0.5f32.exp()).abs() < 1e-5);
+    }
+    #[cfg(feature="vita_renderer")]
+    pub(crate) fn census_quad_fixture(attached:&mut Attached) {
+        // CPU producer entry used by prepare_quads, no retained renderer/GL.
+        let _quads=crate::phase_census::span(crate::phase_census::Region::FxQuadBuild);
+        crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::QuadSets,1);
+        attached.steam.quads.borrow_mut().prepare(&attached.steam.puffs,&attached.steam.emitters,Vec3::Z*100.,None);
+    }
+
     /// A set that uses every per-birth branch of the sampler.
     fn persist_fixture() -> Attached {
         let mut a = attached_fixture(4);

@@ -1097,6 +1097,8 @@ pub fn guard_timing(assets: &mut Assets) -> Result<Timing> {
 impl Model {
     fn draw_electric(&mut self, remaining: f32) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
+        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorNpcOverlays);
+        crate::phase_census::overlay_call();
         if crate::character::skinning::overlap::gather_only() { return; }
         if remaining <= 0. {
             return;
@@ -1154,6 +1156,8 @@ impl Model {
     }
     fn draw_frozen(&mut self) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
+        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorNpcOverlays);
+        crate::phase_census::overlay_call();
         if crate::character::skinning::overlap::gather_only() { return; }
         if self.frozen.is_some() && self.visible.iter().any(|v|*v) { self.require_live_skin(); }
         if let Some(art) = &self.frozen {
@@ -1248,6 +1252,8 @@ impl Model {
             &scales,
         );
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
+        let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorNpcOverlays);
+        crate::phase_census::overlay_call();
         for (visible, mesh) in self.visible.iter_mut().zip(&self.meshes) {
             *visible = skin_visible && mesh.is_some();
         }
@@ -1258,6 +1264,8 @@ impl Model {
         if !attachments || crate::character::skinning::overlap::gather_only() {
             return;
         }
+        drop(_leaf);
+        let _attachments=crate::phase_census::span(crate::phase_census::Region::ActorAttachments);
         let tag_pose = |bone: usize| Transform {
             translation: transform.point(pose[bone].translation * d.def.scale * scale),
             rotation: transform.rotation * pose[bone].rotation,
@@ -2372,6 +2380,7 @@ impl Npcs {
         preview: bool,
         combat_preview: bool,
     ) -> Result<Self> {
+        let _r13_memory = crate::allocation_census::Scope::new(4);
         let spawns = if combat_preview && name == "skool1" && entry.is_none() {
             vec![Spawn {
                 resident_spawn: None,
@@ -2705,6 +2714,8 @@ impl Npcs {
     pub fn update(&mut self, dt: f32, world: &World, eye: Vec3) -> combat::Feedback {
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Npc);
         let _census = crate::phase_census::span(crate::phase_census::Region::Npc);
+        let _path=crate::phase_census::span(crate::phase_census::Region::NpcGeneric);
+        let _controller=crate::phase_census::npc_controller(false);
         let mut _profile = crate::frame_profile::span("npcs");
         if dt <= 0. { _profile.cancel(); }
         let _detail = profile::frame(dt);

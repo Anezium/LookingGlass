@@ -2,6 +2,11 @@
 // formatted engine record, including its newline, in one serialized operation.
 #[macro_use]
 mod logging;
+mod allocation_census;
+#[cfg(any(target_os="vita", test))]
+mod r13_survey;
+mod tls_count;
+mod gpu_timing;
 mod sim_maps;
 mod acting;
 mod ambient_animation;
@@ -218,6 +223,7 @@ fn app_main() {
         #[cfg(target_os="vita")]
         light_profile::set_mode(frame_profile::Mode::read());
         character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench, c.skin_overlap);
+        gpu_timing::before_gl_init();
         frame_phases::initialize();
         phase_census::initialize();
     }
@@ -237,6 +243,8 @@ fn app_main() {
                 #[cfg(not(feature="vita_renderer"))]
                 { None }
             },
+            diagnostic_active: Some(phase_census::active),
+            diagnostic_report: Some(phase_census::backend_report),
             input: InputConfig {
                 left_stick: LeftStickMode::Keys {
                     up: KeyCode::W,
