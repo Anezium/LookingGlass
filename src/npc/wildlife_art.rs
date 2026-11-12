@@ -29,7 +29,7 @@ impl Art {
         let data = &model.data;
         if let Some(anchor) = g.web {
             gl_use_default_material();
-            draw_line_3d(g.target(0).center, anchor, Color::new(0.8, 0.8, 0.8, 0.6));
+            crate::render_fx::legacy_line(g.target(0).center, anchor, Color::new(0.8, 0.8, 0.8, 0.6));
         }
         if let Some(end) = g.beam {
             gl_use_default_material();
@@ -44,7 +44,7 @@ impl Art {
             if g.kind.jabber() {
                 beams.lightning(from, end, camera, (g.time-data.clips[g.clip()].frame_time).max(0.), 1000., false, atmosphere);
             } else {
-                draw_line_3d(from, end, Color::new(0.45, 0.75, 1., 0.7));
+                crate::render_fx::legacy_line(from, end, Color::new(0.45, 0.75, 1., 0.7));
             }
         }
         if self.phase != Some(g.phase) || g.time < self.time {

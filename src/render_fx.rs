@@ -757,6 +757,32 @@ pub(crate) fn world_puff_quads<'a>(quads: impl ExactSizeIterator<Item = (&'a [Ve
         }
     });
 }
+/// Keep the original immediate path unless the diagnostic mitigation is enabled
+/// in an actual retained FX frame. The queue helpers change line/sphere geometry;
+/// this remains default off pending explicit picture/depth qualification.
+fn defer_legacy_immediate_fx() -> bool {
+    #[cfg(all(test, feature = "vita_renderer"))]
+    { routing_controls::enabled() && retained_active() }
+    #[cfg(all(not(test), feature = "vita_renderer"))]
+    { crate::render::vita_renderer::config().defer_immediate_fx && retained_active() }
+    #[cfg(not(feature = "vita_renderer"))]
+    { false }
+}
+pub fn legacy_line(a: Vec3, b: Vec3, color: Color) {
+    if defer_legacy_immediate_fx() { line(a, b, color); }
+    else {
+        #[cfg(test)] routing_controls::immediate_line(a, b, color);
+        #[cfg(not(test))] draw_line_3d(a, b, color);
+    }
+}
+pub fn legacy_sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Color) {
+    if defer_legacy_immediate_fx() { sphere(center, radius, texture, color); }
+    else {
+        #[cfg(test)] routing_controls::immediate_sphere(center, radius, texture, color);
+        #[cfg(not(test))] draw_sphere(center, radius, texture, color);
+    }
+}
+
 pub fn line(a: Vec3, b: Vec3, color: Color) {
     if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {
@@ -1776,3 +1802,7 @@ mod tests {
         assert_eq!(held[1].direct, vec![false; 3], "the single off bank has both slots referenced");
     }
 }
+
+#[cfg(test)]
+#[path = "render_fx_routing_controls.rs"]
+mod routing_controls;

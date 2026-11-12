@@ -632,7 +632,7 @@ pub fn draw_blasts(ant: &Ant) {
         gl_use_default_material();
         for b in &ant.blasts {
             let f = b.time / 0.6;
-            draw_sphere(
+            crate::render_fx::legacy_sphere(
                 b.at,
                 6. + 50. * f,
                 None,

@@ -87,7 +87,7 @@ impl Art {
         gl_use_default_material();
         for i in &g.impacts {
             if i.age < 0.3 {
-                draw_sphere(
+                crate::render_fx::legacy_sphere(
                     i.position,
                     12. * (1. - i.age / 0.3),
                     None,

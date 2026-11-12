@@ -2261,3 +2261,12 @@ mod tests {
         }
     }
 }
+
+/// Private control overlay: drive the actual gather predicate without workers/store/GL.
+#[cfg(test)]
+pub(crate) fn with_routing_control_gather<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(Phase);
+    impl Drop for Restore { fn drop(&mut self) { PHASE.with(|s| s.set(self.0)); } }
+    let _restore = Restore(PHASE.with(|s| s.replace(Phase::Gather)));
+    run()
+}

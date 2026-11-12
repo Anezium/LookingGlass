@@ -196,6 +196,8 @@ pub struct Config {
     pub sky: bool,
     /// Diagnostic authored sky bridge; no native/picture acceptance yet. Default off.
     pub authored_sky: bool,
+    /// Diagnostic direct-effect routing candidate; picture/native cost unqualified.
+    pub defer_immediate_fx: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -380,6 +382,7 @@ impl Default for Config {
             sort_alpha: true,
             sky: true,
             authored_sky: false,
+            defer_immediate_fx: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
