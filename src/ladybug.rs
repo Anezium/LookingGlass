@@ -894,12 +894,12 @@ impl Art {
             for i in 0..24 {
                 let a = i as f32 * std::f32::consts::TAU / 24.;
                 let c = (i + 1) as f32 * std::f32::consts::TAU / 24.;
-                draw_line_3d(
+                crate::render_fx::legacy_line(
                     burst.position + vec3(a.cos(), a.sin(), 0.) * r,
                     burst.position + vec3(c.cos(), c.sin(), 0.) * r,
                     color,
                 );
-                draw_line_3d(
+                crate::render_fx::legacy_line(
                     burst.position,
                     burst.position + vec3(a.cos(), a.sin(), ((i % 5) as f32 - 2.) * 0.4) * r * 0.5,
                     color,

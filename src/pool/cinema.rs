@@ -987,7 +987,7 @@ impl Art {
         if let Some(b) = &pool.state.boulders {
             for ant in &b.ants {
                 for bullet in &ant.shots {
-                    draw_line_3d(
+                    crate::render_fx::legacy_line(
                         bullet.at,
                         bullet.at - Vec3::Z * 1.5,
                         Color::new(0.6, 0.45, 0.2, 1.),

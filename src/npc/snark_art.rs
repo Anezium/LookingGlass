@@ -100,7 +100,7 @@ impl Art {
             gl_use_default_material();
             let start = g.mouth(data, g.time);
             for z in [-1., 0., 1.] {
-                draw_line_3d(
+                crate::render_fx::legacy_line(
                     start + Vec3::Z * z,
                     end + Vec3::Z * z,
                     Color::new(0.65, 0.1, 0.15, 1.),
