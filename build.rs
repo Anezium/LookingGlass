@@ -18,6 +18,11 @@ fn main() {
             println!("cargo:rustc-link-arg=-Wl,--wrap={symbol}");
         }
         // cargo-vita sets RUSTFLAGS, overriding target rustflags in .cargo/config.toml.
+        // The release script asks for a link map to record which archives were linked.
+        println!("cargo:rerun-if-env-changed=LG_VITA_LINK_MAP");
+        if let Ok(map) = std::env::var("LG_VITA_LINK_MAP") {
+            println!("cargo:rustc-link-arg=-Wl,-Map={map}");
+        }
         println!("cargo:rustc-link-arg=-Wl,--undefined=sceUserMainThreadStackSize");
         println!("cargo:rustc-link-arg=-Wl,--undefined=_newlib_heap_size_user");
         // Startup tracing and actor diagnostics grow code/exception metadata.
