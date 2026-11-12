@@ -47,6 +47,7 @@
   "max_layers": 2,
   "sort_alpha": true,
   "sky": true,
+  "authored_sky": false,
   "cell_size": 256.0,
   "alpha_interop": true,
   "actor_max_layers": 2,
