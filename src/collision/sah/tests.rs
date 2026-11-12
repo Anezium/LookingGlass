@@ -32,7 +32,15 @@ fn sah_extremes_order_solid_flags_and_fallbacks() {
 }
 #[test]
 fn sah_patches_and_mutable_completion() {
+    // `a` is the legacy reference. Its hulls change after construction, so it must not build a
+    // hierarchy from the first hull alone, which it would now that collision_sah ships on.
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) { crate::collision::set_sah_enabled_for_test(None); } }
+    let _reset = Reset;
+    crate::collision::set_sah_enabled_for_test(Some(false));
     let mut a=World::fixture(&[(Vec3::splat(50.),Vec3::splat(60.))]);
+    crate::collision::set_sah_enabled_for_test(None);
+    assert!(a.static_geometry.sah.is_none());
     let g=std::sync::Arc::get_mut(&mut a.static_geometry).unwrap();
     g.hulls.push(triangle_hull(Vec3::ZERO,Vec3::X*10.,Vec3::Y*10.).unwrap());
     g.tree=Some(Node::build(&g.hulls,&mut[0,1]));
