@@ -1259,7 +1259,8 @@ impl Steam {
             // the final immutable arrays and unchanged quad indices.
             if direction.is_none() && crate::render_fx::world_puff_batches_active()
                 && crate::render::vita_renderer::config().attached_puff_batches
-                && self.puffs.iter().all(|p| self.emitters[p.emitter].additive)
+                && (crate::sim_maps::fx_attached_persist()
+                    || self.puffs.iter().all(|p| self.emitters[p.emitter].additive))
             {
                 self.quads.borrow_mut().prepare_attached(&self.puffs, &self.emitters, camera);
                 return;
@@ -1267,22 +1268,44 @@ impl Steam {
             self.quads.borrow_mut().prepare(&self.puffs, &self.emitters, camera, direction);
         }
     }
+    /// One attached set in registration order, when `prepare_quads` took the raw path. The
+    /// frame's list receives what `draw_one` would have pushed, quad by quad.
+    #[cfg(feature="vita_renderer")]
+    fn register_raw(&self, order: &[(usize, f32)]) -> bool {
+        let quads = self.quads.borrow();
+        if !crate::sim_maps::fx_attached_persist() || !crate::render_fx::retained_active()
+            || !crate::render::vita_renderer::config().particle_producer_reuse
+            || order.iter().any(|&(i, _)| quads.raw_ref(i).is_none()) { return false; }
+        crate::sim_maps::count("fx_funnel_registered_raw", order.len() as u64);
+        crate::render_fx::world_puff_quads(order.iter().map(|&(i, _)| {
+            let p = &self.puffs[i];
+            let e = &self.emitters[p.emitter];
+            // Stage::frame is 0 for at most one image, whatever the age.
+            let frame = if e.stage.images.len() <= 1 { 0 } else { e.stage.frame(p.age) };
+            (quads.raw_ref(i).unwrap(), e.textures.get(frame).cloned(),
+                if e.additive || cfg!(all(feature="sim_maps_probe",not(target_os="vita"))) && negative("persist-blend") { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha })
+        }));
+        true
+    }
     pub fn draw_one(&self, index: usize, camera: Vec3, direction: Vec3) {
         #[cfg(feature="vita_renderer")]
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             if let Some(vertices) = self.quads.borrow().raw_quad(index) {
+                crate::sim_maps::count("fx_funnel_registered_raw", 1);
                 let e = &self.emitters[self.puffs[index].emitter];
                 crate::render_fx::world_puff_quad(vertices, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
                     if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
                 return;
             }
             if let Some(geometry) = self.quads.borrow().geometry(index) {
+                crate::sim_maps::count("fx_funnel_registered_publication", 1);
                 let e = &self.emitters[self.puffs[index].emitter];
                 crate::render_fx::effect_geometry(geometry, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
                     if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
                 return;
             }
         }
+        crate::sim_maps::count("fx_funnel_registered_legacy", 1);
         let e = &self.emitters[self.puffs[index].emitter];
         #[cfg(feature="vita_renderer")]
         if !crate::render_fx::retained_active(){gl_use_material(&self.materials[usize::from(e.additive)]);}
@@ -1499,6 +1522,7 @@ fn shared_materials() -> Result<Vec<std::rc::Rc<Material>>> {
 /// A pure sample of an animation-owned emitter. Birth IDs provide repeatable
 /// randomness; sample the tag at birth so existing particles do not follow it.
 pub struct Attached {
+    persisted: Vec<PersistedEmitter>,
     steam: Steam,
     // Keep emitted world poses while time advances: moving the owning actor
     // must not drag smoke already in the air. Rewinds rebuild cosmetic births.
@@ -1508,10 +1532,78 @@ pub struct Attached {
     order: Vec<(usize, f32)>,
     live_births: Vec<(usize, u32)>,
 }
+/// Host oracle sabotage, read through the existing control variable. False in other builds.
+#[cfg(feature="vita_renderer")]
+fn negative(_name: &str) -> bool {
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    { crate::sim_maps::probe::negative_control() == Some(_name) }
+    #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+    { false }
+}
+/// What `Attached::sample` derives from one birth, kept until the birth leaves the window.
+/// A birth's constants depend only on its number, its emitter's spec and its pose.
+#[derive(Clone, Copy)]
+struct PersistedBirth {
+    at: f32,
+    stage: BirthStage,
+    life: f32,
+    seed: u32,
+    translation: Vec3,
+    rotation: Quat,
+    offset: Vec3,
+    velocity: Vec3,
+    accel: Vec3,
+    size: f32,
+    roll: f32,
+}
+#[derive(Clone, Copy, PartialEq)]
+enum BirthStage {
+    /// Nothing known but `at`. A disabled birth returns here and forgets its pose, as the map does.
+    Unknown,
+    /// `life` and the seed after it.
+    Life,
+    /// Also the pose. A spec change falls back here: the pose survives it, the rest does not.
+    Pose,
+    Complete,
+}
+/// Consecutive births from `first`. Bounded by the sampler's own window of 1025.
+#[derive(Default)]
+struct PersistedEmitter {
+    first: u32,
+    slots: std::collections::VecDeque<PersistedBirth>,
+}
+impl PersistedEmitter {
+    fn window(&mut self, start: u32, last: u32, at: impl Fn(u32) -> f32) {
+        if start > last { self.slots.clear(); self.first = start; return; }
+        let end = self.first as u64 + self.slots.len() as u64; // exclusive
+        if self.slots.is_empty() || start as u64 >= end || start < self.first {
+            self.slots.clear();
+            self.first = start;
+        } else {
+            self.slots.drain(..(start - self.first) as usize);
+            self.first = start;
+            self.slots.truncate((last - start) as usize + 1);
+        }
+        for birth in self.first as u64 + self.slots.len() as u64..=last as u64 {
+            self.slots.push_back(PersistedBirth { at: at(birth as u32), stage: BirthStage::Unknown, life: 0., seed: 0,
+                translation: Vec3::ZERO, rotation: Quat::IDENTITY, offset: Vec3::ZERO, velocity: Vec3::ZERO,
+                accel: Vec3::ZERO, size: 0., roll: 0. });
+        }
+    }
+}
 impl Attached {
+    /// A spec edit changes what the sampler derives from a birth, never its pose.
+    fn persisted_spec_changed(&mut self) {
+        for emitter in &mut self.persisted {
+            for slot in &mut emitter.slots {
+                if slot.stage == BirthStage::Complete { slot.stage = BirthStage::Pose; }
+            }
+        }
+    }
     /// Item sprites use their image dimensions as the unscaled billboard size.
     /// Keep this opt-in: older effect owners retain their existing size tuning.
     pub(crate) fn use_sprite_dimensions(&mut self) {
+        self.persisted_spec_changed();
         for e in &mut self.steam.emitters {
             let diameter = e.textures.first().map_or(64., Texture2D::width);
             let factor = diameter / 64.; // Puff's legacy unit diameter is 64.
@@ -1521,12 +1613,14 @@ impl Attached {
     }
     /// Attenuate this instance without changing shared materials or other effects.
     pub(crate) fn attenuate(&mut self, opacity: f32) {
+        self.persisted_spec_changed();
         for e in &mut self.steam.emitters {
             e.spec.alpha *= opacity.clamp(0., 1.);
         }
     }
     /// Change only billboard size, preserving tag placement and particle travel.
     pub(crate) fn resize(&mut self, factor: f32) {
+        self.persisted_spec_changed();
         for e in &mut self.steam.emitters {
             e.spec.size.low *= factor.clamp(0., 1.);
             e.spec.size.high *= factor.clamp(0., 1.);
@@ -1534,6 +1628,7 @@ impl Attached {
     }
     /// Mouth jets use the animated attachment frame for their spread.
     pub(crate) fn orient_velocity(&mut self, name: &str) {
+        self.persisted_spec_changed();
         for e in &mut self.steam.emitters {
             if e.spec.name == name {
                 e.spec.tag_velocity = true;
@@ -1543,6 +1638,7 @@ impl Attached {
     /// A separate emitter clock sharing immutable textures/materials.
     pub(crate) fn fork(&self) -> Self {
         Self {
+            persisted: Vec::new(),
             births: Default::default(),
             age: 0.,
             reuse_scratch: false,
@@ -1650,6 +1746,7 @@ impl Attached {
             });
         }
         Ok(Some(Self {
+            persisted: Vec::new(),
             births: Default::default(),
             age: 0.,
             reuse_scratch: false,
@@ -1689,7 +1786,11 @@ impl Attached {
         let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);
         let _packets = crate::frame_profile::object_timer(crate::frame_profile::ObjectWork::Packets);
         self.steam.prepare_draw(camera, atmosphere);
-        #[cfg(feature="vita_renderer")] self.steam.prepare_quads(camera, None);
+        #[cfg(feature="vita_renderer")] {
+            let _time = crate::sim_maps::timer("r26_attached_quads_ns");
+            self.steam.prepare_quads(camera, None);
+        }
+        let register_time = crate::sim_maps::timer("r26_attached_register_ns");
         let mut order = if self.reuse_scratch { std::mem::take(&mut self.order) } else { Vec::new() };
         order.clear();
         order.extend(self
@@ -1700,14 +1801,21 @@ impl Attached {
             .map(|(i, p)| (i, p.position.distance_squared(camera)))
             );
         order.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for &(i, _) in &order {
-            self.steam.draw_one(
-                i,
-                camera,
-                (self.steam.puffs[i].position - camera).normalize_or_zero(),
-            );
+        #[cfg(feature="vita_renderer")]
+        let registered = self.steam.register_raw(&order);
+        #[cfg(not(feature="vita_renderer"))]
+        let registered = false;
+        if !registered {
+            for &(i, _) in &order {
+                self.steam.draw_one(
+                    i,
+                    camera,
+                    (self.steam.puffs[i].position - camera).normalize_or_zero(),
+                );
+            }
         }
         if self.reuse_scratch { self.order = order; }
+        drop(register_time);
         gl_use_default_material();
     }
     #[cfg(test)]
@@ -1724,6 +1832,110 @@ impl Attached {
                 "indices": mesh.indices})
         }).collect::<Vec<_>>())
     }
+    /// `sample` with each birth's constants kept. Same puffs, bits and order, and `birth_pose`
+    /// and `enabled` see the same calls. Only the position, age and scaled size are per frame.
+    fn sample_persisted(
+        &mut self,
+        age: f32,
+        scale: f32,
+        birth_pose: impl Fn(f32, Option<&str>) -> crate::skeletal::Transform,
+        enabled: impl Fn(&str, f32, bool) -> bool,
+    ) {
+        self.steam.puffs.clear();
+        if !age.is_finite() || age < 0. || !scale.is_finite() || scale <= 0. {
+            self.persisted.clear();
+            return;
+        }
+        if age < self.age { self.persisted.clear(); }
+        self.age = age;
+        self.persisted.resize_with(self.steam.emitters.len(), Default::default);
+        let mut full = false;
+        for (index, e) in self.steam.emitters.iter().enumerate() {
+            let emitter = &mut self.persisted[index];
+            if full || e.spec.burst.is_some_and(|(at, _)| age < at) {
+                emitter.slots.clear();
+                continue;
+            }
+            let last = e.spec.burst.map_or_else(
+                || (age * e.spec.rate).floor() as u32,
+                |(_, n)| n.saturating_sub(1),
+            );
+            let first = if e.spec.burst.is_some() {
+                0
+            } else {
+                ((age - e.spec.life.high).max(0.) * e.spec.rate).ceil() as u32
+            };
+            emitter.window(first.max(last.saturating_sub(1024)), last, |birth| e.spec.burst
+                .map_or(birth as f32 / e.spec.rate, |(at, _)| at));
+            let window_first = emitter.first;
+            for (position, slot) in emitter.slots.iter_mut().enumerate() {
+                if full || self.steam.puffs.len() >= 4096 {
+                    full = true;
+                    slot.stage = BirthStage::Unknown;
+                    continue;
+                }
+                let at = slot.at;
+                if !enabled(&e.spec.name, at, !e.spec.start_off) {
+                    slot.stage = BirthStage::Unknown;
+                    continue;
+                }
+                if slot.stage == BirthStage::Unknown {
+                    let birth = window_first.wrapping_add(position as u32);
+                    let mut seed =
+                        birth.wrapping_add(1).wrapping_mul(0x9e3779b9) ^ ((index as u32 + 1) * 7919);
+                    slot.life = e.spec.life.sample(&mut seed);
+                    slot.seed = seed;
+                    slot.stage = BirthStage::Life;
+                }
+                let elapsed = age - at;
+                if elapsed >= slot.life {
+                    continue;
+                }
+                if slot.stage == BirthStage::Life {
+                    let pose = birth_pose(at, e.spec.tag.as_deref());
+                    slot.translation = pose.translation;
+                    slot.rotation = pose.rotation;
+                    slot.stage = BirthStage::Pose;
+                }
+                if slot.stage == BirthStage::Pose {
+                    let mut seed = slot.seed;
+                    slot.offset = sampled(e.spec.offset, &mut seed)
+                        + slot.rotation * sampled(e.spec.axis_offset, &mut seed);
+                    let random_velocity = sampled(e.spec.velocity, &mut seed);
+                    slot.velocity = if e.spec.tag_velocity {
+                        slot.rotation * random_velocity
+                    } else {
+                        random_velocity
+                    } + slot.rotation * Vec3::X * e.spec.forward;
+                    slot.accel = sampled(e.spec.accel, &mut seed);
+                    slot.size = 32. * e.spec.size.sample(&mut seed);
+                    slot.roll = if e.spec.random_roll {
+                        random(&mut seed) * std::f32::consts::TAU
+                    } else {
+                        0.
+                    };
+                    slot.stage = BirthStage::Complete;
+                }
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                if negative("persist-size") { slot.size *= 1.0001; }
+                self.steam.puffs.push(Puff {
+                    sweep: PuffSweep::default(),
+                    constraint_center: slot.translation + slot.offset,
+                    position: slot.translation
+                        + slot.offset * scale
+                        + (e.spec.min_velocity + slot.velocity * scale) * elapsed
+                        + slot.accel * (0.5 * elapsed * elapsed),
+                    velocity: Vec3::ZERO,
+                    accel: Vec3::ZERO,
+                    age: elapsed,
+                    life: slot.life,
+                    size: slot.size * scale,
+                    roll: slot.roll,
+                    emitter: index,
+                });
+            }
+        }
+    }
     pub(crate) fn sample(
         &mut self,
         age: f32,
@@ -1733,6 +1945,13 @@ impl Attached {
     ) {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _profile = crate::frame_profile::span("attached_sample");
+        let _time = crate::sim_maps::timer("r26_attached_sample_ns");
+        if crate::sim_maps::fx_attached_persist() {
+            self.sample_persisted(age, scale, birth_pose, enabled);
+            crate::sim_maps::count("fx_funnel_attached_sets", 1);
+            crate::sim_maps::count("fx_funnel_attached_sampled", self.steam.puffs.len() as u64);
+            return;
+        }
         self.steam.puffs.clear();
         self.live_births.clear();
         let mut previous = if self.reuse_scratch { Default::default() } else { std::mem::take(&mut self.births) };
@@ -1814,6 +2033,8 @@ impl Attached {
         if self.reuse_scratch {
             self.births.retain(|key, _| self.live_births.binary_search(key).is_ok());
         }
+        crate::sim_maps::count("fx_funnel_attached_sets", 1);
+        crate::sim_maps::count("fx_funnel_attached_sampled", self.steam.puffs.len() as u64);
 
     }
 }
@@ -1822,6 +2043,138 @@ impl Attached {
 pub(crate) mod tests {
     use super::*;
     pub(crate) fn world_test_steam() -> Steam { attached_fixture(2).steam }
+    /// A set that uses every per-birth branch of the sampler.
+    fn persist_fixture() -> Attached {
+        let mut a = attached_fixture(4);
+        let range = |low: f32, high: f32| Range { low, high };
+        let spread = [range(-3., 5.), range(-1., 2.), range(0., 7.)];
+        for (i, e) in a.steam.emitters.iter_mut().enumerate() {
+            e.spec.name = format!("e{i}");
+            e.spec.rate = 40. + 17. * i as f32;
+            e.spec.life = range(0.4, 1.3 + i as f32 * 0.2);
+            e.spec.offset = spread; e.spec.axis_offset = spread; e.spec.velocity = spread; e.spec.accel = spread;
+            e.spec.size = range(0.2, 1.1);
+            e.spec.min_velocity = vec3(1., 2., 3.);
+            e.spec.forward = i as f32;
+            e.spec.tag_velocity = i % 2 == 0;
+            e.spec.random_roll = i != 1;
+            e.spec.start_off = i == 2;
+        }
+        a.steam.emitters[3].spec.burst = Some((0.9, 40));
+        a
+    }
+    fn puff_bits(a: &Attached) -> Vec<[u32; 13]> {
+        a.steam.puffs.iter().map(|p| {
+            let (x, c) = (p.position.to_array().map(f32::to_bits), p.constraint_center.to_array().map(f32::to_bits));
+            [x[0], x[1], x[2], c[0], c[1], c[2], p.age.to_bits(), p.life.to_bits(), p.size.to_bits(), p.roll.to_bits(),
+                p.velocity.length_squared().to_bits(), p.accel.length_squared().to_bits(), p.emitter as u32]
+        }).collect()
+    }
+    /// One scripted frame on both arms. The pose depends on the frame it is asked in, so a pose
+    /// kept too long or dropped too early shows in the bits, and the calls are compared too.
+    fn persist_step(legacy: &mut Attached, persisted: &mut Attached, frame: u32, age: f32, scale: f32, enabled: &dyn Fn(&str, f32, bool) -> bool) {
+        let calls = [std::cell::RefCell::new(Vec::new()), std::cell::RefCell::new(Vec::new())];
+        let pose = |arm: usize| { let calls = &calls[arm]; move |at: f32, tag: Option<&str>| {
+            calls.borrow_mut().push((at.to_bits(), tag.map(str::to_owned)));
+            let f = frame as f32;
+            crate::skeletal::Transform { translation: vec3(at * 3. + f, -f * 0.5, 2.),
+                rotation: Quat::from_rotation_z(f * 0.1 + at) }
+        }};
+        crate::sim_maps::with_fx_attached_persist(false, || legacy.sample(age, scale, pose(0), enabled));
+        crate::sim_maps::with_fx_attached_persist(true, || persisted.sample(age, scale, pose(1), enabled));
+        assert_eq!(puff_bits(legacy), puff_bits(persisted), "frame {frame} age {age}");
+        assert_eq!(*calls[0].borrow(), *calls[1].borrow(), "pose calls, frame {frame} age {age}");
+    }
+    #[test]
+    fn persisted_sample_matches_the_map_through_time_rewind_gates_scale_and_spec_edits() {
+        for reuse in [false, true] {
+            let (mut legacy, mut persisted) = (persist_fixture(), persist_fixture());
+            legacy.reuse_scratch = reuse;
+            persisted.reuse_scratch = reuse;
+            let all = |_: &str, _: f32, _: bool| true;
+            let mut frame = 0;
+            let mut clock = 0.;
+            let mut run = |legacy: &mut Attached, persisted: &mut Attached, steps: u32, dt: f32, scale: f32, enabled: &dyn Fn(&str, f32, bool) -> bool| {
+                for _ in 0..steps {
+                    clock += dt;
+                    frame += 1;
+                    persist_step(legacy, persisted, frame, clock, scale, enabled);
+                }
+            };
+            run(&mut legacy, &mut persisted, 60, 0.05, 1., &all);
+            assert!(!persisted.steam.puffs.is_empty());
+            // A repeated age, and a scale change, reuse the births.
+            run(&mut legacy, &mut persisted, 3, 0., 1., &all);
+            run(&mut legacy, &mut persisted, 5, 0.05, 1.7, &all);
+            // A gate that closes on some birth times, then opens: those births forget their poses.
+            run(&mut legacy, &mut persisted, 5, 0.05, 1., &|name, at, default| name != "e1" && (default || at > 2.));
+            run(&mut legacy, &mut persisted, 5, 0.05, 1., &all);
+            // Spec edits keep the pose and change what is derived from it.
+            legacy.resize(0.5); persisted.resize(0.5);
+            run(&mut legacy, &mut persisted, 2, 0.05, 1., &all);
+            legacy.orient_velocity("e1"); persisted.orient_velocity("e1");
+            run(&mut legacy, &mut persisted, 2, 0.05, 1., &all);
+            legacy.attenuate(0.5); persisted.attenuate(0.5);
+            run(&mut legacy, &mut persisted, 2, 0.05, 1., &all);
+            // A long jump leaves every window.
+            run(&mut legacy, &mut persisted, 1, 40., 1., &all);
+            run(&mut legacy, &mut persisted, 3, 0.05, 1., &all);
+            // Invalid input empties the set and forgets, without moving the clock.
+            persist_step(&mut legacy, &mut persisted, 1000, f32::NAN, 1., &all);
+            persist_step(&mut legacy, &mut persisted, 1001, 1.2, -1., &all);
+            assert!(persisted.steam.puffs.is_empty());
+            run(&mut legacy, &mut persisted, 2, 0.05, 1., &all);
+            // A small rewind: the window still overlaps, and the map forgets its poses anyway.
+            for f in 0..30 { persist_step(&mut legacy, &mut persisted, 1100 + f, 50. + f as f32 * 0.05, 1., &all); }
+            persist_step(&mut legacy, &mut persisted, 1131, 51., 1., &all);
+            for f in 0..10 { persist_step(&mut legacy, &mut persisted, 1132 + f, 51. + f as f32 * 0.05, 1., &all); }
+            // A rewind too small to move the window: the map still forgets every pose.
+            persist_step(&mut legacy, &mut persisted, 1150, 51.4495, 1., &all);
+            persist_step(&mut legacy, &mut persisted, 1151, 51.5, 1., &all);
+            // A far one.
+            persist_step(&mut legacy, &mut persisted, 1002, 0.5, 1., &all);
+            for f in 0..30 { persist_step(&mut legacy, &mut persisted, 1003 + f, 0.5 + f as f32 * 0.05, 1., &all); }
+        }
+    }
+    #[test]
+    fn persisted_sample_matches_the_map_at_the_puff_cap() {
+        let (mut legacy, mut persisted) = (attached_fixture(16), attached_fixture(16));
+        let all = |_: &str, _: f32, _: bool| true;
+        persist_step(&mut legacy, &mut persisted, 1, 10., 1., &all);
+        assert_eq!(persisted.steam.puffs.len(), 4096);
+        // The births past the cap forgot their poses, and the cap moves as the first emitters die.
+        for frame in 2..40 { persist_step(&mut legacy, &mut persisted, frame, 10. + frame as f32 * 0.5, 1., &all); }
+        persist_step(&mut legacy, &mut persisted, 50, 31., 1., &all);
+        // A gate moves the cap's position in the window: births past it forget their poses, so
+        // they ask again when room returns.
+        let (mut legacy, mut persisted) = (attached_fixture(5), attached_fixture(5));
+        for e in legacy.steam.emitters.iter_mut().chain(persisted.steam.emitters.iter_mut()) { e.spec.life = Range::fixed(3.); e.spec.rate = 300.; }
+        for (i, e) in legacy.steam.emitters.iter_mut().chain(persisted.steam.emitters.iter_mut()).enumerate() { e.spec.name = format!("e{}", i % 5); }
+        let closed = |name: &str, _: f32, _: bool| name != "e0";
+        persist_step(&mut legacy, &mut persisted, 100, 3., 1., &closed);
+        persist_step(&mut legacy, &mut persisted, 101, 3.01, 1., &all);
+        assert_eq!(persisted.steam.puffs.len(), 4096);
+        persist_step(&mut legacy, &mut persisted, 102, 3.02, 1., &closed);
+        persist_step(&mut legacy, &mut persisted, 103, 3.03, 1., &closed);
+    }
+    #[test]
+    fn persisted_sample_holds_one_window_and_warm_frames_do_not_allocate() {
+        let mut a = attached_fixture(1);
+        a.steam.emitters[0].spec.rate = 110.;
+        a.steam.emitters[0].spec.life = Range { low: 7., high: 11. };
+        let pose = |_: f32, _: Option<&str>| crate::skeletal::Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY };
+        crate::sim_maps::with_fx_attached_persist(true, || {
+            for f in 0..200 { a.sample(f as f32 * 0.1, 1., pose, |_, _, _| true); }
+            // 11 s of births at 110/s, bounded by the sampler's own 1025.
+            assert!(a.persisted[0].slots.len() <= 1025);
+            assert!(a.steam.puffs.len() > 500);
+            a.steam.puffs.reserve(4096);
+            a.persisted[0].slots.reserve(1100);
+            let scope = crate::kernel_alloc::Scope::begin();
+            for f in 200..240 { a.sample(f as f32 * 0.1, 1., pose, |_, _, _| true); }
+            assert_eq!(scope.finish(), 0);
+        });
+    }
     #[test]
     fn puff_sweep_cadence_covers_accumulated_segment_and_pause() {
         use crate::vita_sim::{Config, PuffCollide};
@@ -2080,6 +2433,7 @@ pub(crate) mod tests {
     }
     pub(crate) fn attached_fixture(count: usize) -> Attached {
         Attached {
+            persisted: Vec::new(),
             births: Default::default(),
             age: 0.,
             reuse_scratch: false,
@@ -2290,7 +2644,7 @@ pub(crate) mod tests {
         let mut many = attached_fixture(16);
         many.sample(10., 1., pose, |_, _, _| true);
         assert_eq!(many.steam.puffs.len(), 4096);
-        assert_eq!(many.births.len(), 4096);
+        if !crate::sim_maps::fx_attached_persist() { assert_eq!(many.births.len(), 4096); }
         many.sample(f32::NAN, 1., pose, |_, _, _| true);
         assert!(many.steam.puffs.is_empty());
     }
@@ -2406,5 +2760,228 @@ pub(crate) mod tests {
         assert!((p[0].alpha - 0.75).abs() < 0.0001);
         assert_eq!(p[0].offset, b.sample(0.45, 123)[0].offset);
         assert!(b.sample(1.21, 123).is_empty());
+    }
+    /// F1: an attached set with an animated stage takes the raw path only with the lever on, and
+    /// nothing compared which image each quad got. A frame pinned to the first image draws every
+    /// puff with image 0, whatever its age.
+    #[cfg(feature="vita_renderer")]
+    #[test]
+    fn raw_attached_set_uses_each_puffs_animated_stage_frame() {
+        let mut a = attached_fixture(1);
+        let first = crate::render_fx::test_support::texture(91);
+        let second = crate::render_fx::test_support::texture(92);
+        {
+            let e = &mut a.steam.emitters[0];
+            e.textures = vec![first.clone(), second.clone()];
+            e.stage.images = vec!["first".into(), "second".into()];
+            e.stage.fps = 7.;
+            e.spec.rate = 30.;
+            e.spec.life = Range { low: 0.7, high: 1.1 };
+            e.spec.start_off = false;
+        }
+        let pose = |_: f32, _: Option<&str>| crate::skeletal::Transform {
+            translation: Vec3::ZERO, rotation: Quat::IDENTITY };
+        crate::sim_maps::with_fx_attached_persist(true, || {
+            a.sample(2., 1., pose, |_, _, _| true);
+        });
+        let camera = vec3(17., -23., 8.);
+        let order: Vec<_> = a.steam.puffs.iter().enumerate()
+            .map(|(i, p)| (i, p.position.distance_squared(camera))).collect();
+        let frames: std::collections::BTreeSet<_> = order.iter()
+            .map(|&(i, _)| a.steam.emitters[a.steam.puffs[i].emitter].stage.frame(a.steam.puffs[i].age))
+            .collect();
+        assert_eq!(frames.into_iter().collect::<Vec<_>>(), vec![0, 1],
+            "the fixture must hold puffs on both stage frames");
+        crate::render_fx::test_support::begin_direct(camera, Vec3::Z, 0., crate::render_fx::Appearance::default());
+        crate::sim_maps::with_fx_attached_persist(true, || {
+            a.steam.prepare_quads(camera, None);
+            assert!(a.steam.register_raw(&order), "the raw path refused the set");
+        });
+        let registered = crate::render_fx::test_support::snapshot().puffs;
+        assert_eq!(registered.len(), order.len());
+        for (slot, &(i, _)) in registered.iter().zip(&order) {
+            let p = &a.steam.puffs[i];
+            let e = &a.steam.emitters[p.emitter];
+            let frame = e.stage.frame(p.age);
+            assert_eq!(slot.2.as_ref(), e.textures.get(frame),
+                "puff {i} age {} asked for stage frame {frame}", p.age);
+            assert_eq!(slot.2.as_ref(), a.steam.puff_mesh(i, camera, (p.position - camera).normalize_or_zero()).texture.as_ref(),
+                "puff {i} age {} differs from the one-quad path", p.age);
+        }
+        crate::render_fx::test_support::end_frame();
+    }
+    /// F2: once one emitter fills the 4096 cap the sampler forgets every later emitter's births,
+    /// as the map does. A slot kept across the cap replays a pose from an older frame when space
+    /// frees up, and a moving emitter asks for that pose again.
+    #[test]
+    fn a_later_emitter_relearns_poses_the_cap_hid() {
+        let (mut legacy, mut persisted) = (attached_fixture(5), attached_fixture(5));
+        for a in [&mut legacy, &mut persisted] {
+            a.reuse_scratch = false; // the old path's non-reuse mode forgets births it never reached
+            // Four capped emitters each hold 1,025 slots, so they reach 4,096 together. One
+            // emitter alone cannot: its window stops at 1,025 births.
+            for e in &mut a.steam.emitters[..4] {
+                e.spec.name = "cap".into();
+                e.spec.rate = 5000.;
+                e.spec.life = Range::fixed(10.);
+                e.spec.start_off = false;
+            }
+            a.steam.emitters[4].spec.name = "later".into();
+            a.steam.emitters[4].spec.rate = 2.;
+            a.steam.emitters[4].spec.life = Range::fixed(20.);
+            a.steam.emitters[4].spec.start_off = false;
+        }
+        for (frame, age) in [(1u32, 0.1f32), (2, 1.0), (3, 1.05)] {
+            // The capped emitters fill 4,096 at 1.0 s, and the gate closes them at 1.05 s.
+            let enabled = move |name: &str, _: f32, _: bool| name != "cap" || frame < 3;
+            let pose = move |at: f32, _: Option<&str>| crate::skeletal::Transform {
+                translation: vec3(at * 3., frame as f32, 2.),
+                rotation: Quat::from_rotation_z(frame as f32 * 0.1 + at),
+            };
+            crate::sim_maps::with_fx_attached_persist(false, || legacy.sample(age, 1., pose, enabled));
+            crate::sim_maps::with_fx_attached_persist(true, || persisted.sample(age, 1., pose, enabled));
+            assert_eq!(puff_bits(&legacy), puff_bits(&persisted), "frame {frame} age {age}");
+        }
+        assert!(persisted.steam.puffs.iter().any(|p| p.emitter == 4),
+            "the later emitter never produced a puff");
+    }
+    /// F2: the random scripts the review found this with. Emitters, gates, caps, rewinds, jumps,
+    /// spec edits, both scratch modes of the old path, and every input the sampler sees.
+    #[test]
+    fn persisted_sample_fuzz_matches_the_map_through_random_scripts() {
+        let (mut puffs_seen, mut caps, mut rewinds, mut steps, mut pose_calls) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        for case in 0..600u64 {
+            let mut r = FuzzRng(case.wrapping_mul(0x9e3779b97f4a7c15) ^ 0x5eed);
+            let seed = r.0;
+            let mut legacy = fuzz_set(&mut r);
+            let mut r2 = FuzzRng(seed);
+            let mut persisted = fuzz_set(&mut r2);
+            r = r2;
+            legacy.reuse_scratch = r.next() % 2 == 0;
+            persisted.reuse_scratch = r.next() % 2 == 0;
+            let mut clock = 0f32;
+            let mut gate_mode = 0u32;
+            for frame in 0..90u32 {
+                steps += 1;
+                let (mut age, mut scale) = (clock, 1f32);
+                match r.next() % 40 {
+                    0 => age = f32::NAN, 1 => age = f32::INFINITY, 2 => age = -1.,
+                    3 => scale = -1., 4 => scale = f32::NAN, 5 => scale = 0.,
+                    6 => { clock = (clock - r.pick(&[1e-4, 0.001, 0.05, 0.5, 3.])).max(0.); age = clock; rewinds += 1; }
+                    7 => { clock = 0.; age = 0.; rewinds += 1; }
+                    8 => { clock += r.pick(&[11., 40., 1e4, 1e7]); age = clock; }
+                    9 => scale = r.f(0.1, 3.),
+                    10 => { legacy.resize(0.5); persisted.resize(0.5); }
+                    11 => { legacy.attenuate(0.5); persisted.attenuate(0.5); }
+                    12 => { legacy.orient_velocity("e1"); persisted.orient_velocity("e1"); }
+                    13 => { legacy.use_sprite_dimensions(); persisted.use_sprite_dimensions(); }
+                    14 | 15 | 16 => gate_mode = r.next() % 6,
+                    _ => { clock += r.pick(&[0., 1. / 120., 0.0167, 0.05, 0.065, 0.25, 2.]); age = clock; }
+                }
+                let mode = gate_mode;
+                let enabled_calls = [std::cell::RefCell::new(Vec::new()), std::cell::RefCell::new(Vec::new())];
+                let pose_log = [std::cell::RefCell::new(Vec::new()), std::cell::RefCell::new(Vec::new())];
+                let enabled = |arm: usize| { let log = &enabled_calls[arm]; move |name: &str, at: f32, default: bool| {
+                    log.borrow_mut().push((name.to_owned(), at.to_bits(), default));
+                    match mode { 0 => true, 1 => default, 2 => name != "e1", 3 => default && at.to_bits() % 3 != 0,
+                        4 => (at.to_bits() ^ frame) % 5 != 0, _ => frame % 2 == 0 || name == "e0" }
+                }};
+                let pose = |arm: usize| { let log = &pose_log[arm]; move |at: f32, tag: Option<&str>| {
+                    log.borrow_mut().push((at.to_bits(), tag.map(str::to_owned)));
+                    let f = frame as f32;
+                    crate::skeletal::Transform { translation: vec3(at * 3. + f, -f * 0.5, 2.), rotation: Quat::from_rotation_z(f * 0.1 + at) }
+                }};
+                crate::sim_maps::with_fx_attached_persist(false, || legacy.sample(age, scale, pose(0), enabled(0)));
+                crate::sim_maps::with_fx_attached_persist(true, || persisted.sample(age, scale, pose(1), enabled(1)));
+                assert_eq!(puff_bits(&legacy), puff_bits(&persisted), "case {case} frame {frame} age {age} scale {scale}");
+                assert_eq!(*pose_log[0].borrow(), *pose_log[1].borrow(), "pose calls case {case} frame {frame}");
+                assert_eq!(*enabled_calls[0].borrow(), *enabled_calls[1].borrow(), "gate calls case {case} frame {frame}");
+                for e in &persisted.persisted { assert!(e.slots.len() <= 1025); }
+                puffs_seen += persisted.steam.puffs.len() as u64;
+                caps += u64::from(persisted.steam.puffs.len() == 4096);
+                pose_calls += pose_log[1].borrow().len() as u64;
+            }
+        }
+        println!("PERSIST fuzz: steps {steps} puffs {puffs_seen} frames at the cap {caps} rewinds {rewinds} pose calls {pose_calls}");
+        assert!(caps > 50 && rewinds > 100 && pose_calls > 1000);
+    }
+    struct FuzzRng(u64);
+    impl FuzzRng {
+        fn next(&mut self) -> u32 { self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (self.0 >> 33) as u32 }
+        fn pick<T: Copy>(&mut self, v: &[T]) -> T { v[self.next() as usize % v.len()] }
+        fn f(&mut self, low: f32, high: f32) -> f32 { low + (high - low) * ((self.next() % 65536) as f32 / 65536.) }
+    }
+    fn fuzz_set(r: &mut FuzzRng) -> Attached {
+        let n = 1 + r.next() as usize % 6;
+        let mut a = attached_fixture(n);
+        for (i, e) in a.steam.emitters.iter_mut().enumerate() {
+            let range = |r: &mut FuzzRng, a: f32, b: f32| { let (x, y) = (r.f(a, b), r.f(a, b)); Range { low: x, high: y } };
+            e.spec.name = format!("e{}", r.next() % 4);
+            e.spec.tag = if r.next() % 3 == 0 { None } else { Some(format!("tag{i}")) };
+            e.spec.rate = r.pick(&[0.5, 7., 40., 110., 300., 1000., 5000., 40000.]);
+            e.spec.life = match r.next() % 4 { 0 => Range::fixed(r.f(0.05, 12.)), 1 => range(r, 0.01, 2.), 2 => Range { low: 7., high: 11. }, _ => range(r, 0.5, 30.) };
+            e.spec.size = range(r, 0.1, 2.);
+            e.spec.offset = [range(r, -5., 5.), range(r, -5., 5.), range(r, -5., 5.)];
+            e.spec.axis_offset = [range(r, -5., 5.), range(r, -5., 5.), range(r, -5., 5.)];
+            e.spec.velocity = [range(r, -5., 5.), range(r, -5., 5.), range(r, -5., 5.)];
+            e.spec.accel = [range(r, -5., 5.), range(r, -5., 5.), range(r, -5., 5.)];
+            e.spec.min_velocity = vec3(r.f(-1., 1.), r.f(-1., 1.), r.f(-1., 1.));
+            e.spec.forward = r.f(-3., 3.);
+            e.spec.tag_velocity = r.next() % 2 == 0;
+            e.spec.random_roll = r.next() % 2 == 0;
+            e.spec.start_off = r.next() % 3 == 0;
+            e.spec.burst = match r.next() % 5 { 0 => Some((r.f(0., 3.), r.pick(&[0, 1, 40, 1024, 1025, 1026, 3000]))), _ => None };
+        }
+        a
+    }
+    /// F7: retained windows are bounded by the sampler's own 1,025 slots, and `VecDeque` owns the
+    /// next power of two. One slot is 88 bytes with align 4 on a scalar `Vec3` build.
+    #[test]
+    fn retained_windows_stay_bounded_after_a_full_bubble_set() {
+        assert_eq!(std::mem::size_of::<PersistedBirth>(), 88);
+        assert_eq!(std::mem::align_of::<PersistedBirth>(), 4);
+        let pose = |_: f32, _: Option<&str>| crate::skeletal::Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY };
+        let mut a = attached_fixture(1);
+        a.steam.emitters[0].spec.rate = 110.;
+        a.steam.emitters[0].spec.life = Range { low: 7., high: 11. };
+        let mut steps = Vec::new();
+        let mut capacity = 0;
+        crate::sim_maps::with_fx_attached_persist(true, || {
+            for f in 0..480 {
+                a.sample(f as f32 * 0.05, 1., pose, |_, _, _| true);
+                let now = a.persisted[0].slots.capacity();
+                if now != capacity { steps.push((f, now)); capacity = now; }
+            }
+        });
+        let e = &a.persisted[0];
+        println!("F7 window: slot {} B align {}, len {}, capacity {}, bytes {}",
+            std::mem::size_of::<PersistedBirth>(), std::mem::align_of::<PersistedBirth>(),
+            e.slots.len(), e.slots.capacity(), e.slots.capacity() * std::mem::size_of::<PersistedBirth>());
+        println!("F7 capacity steps {steps:?}");
+        assert_eq!(e.slots.len(), 1025);
+        assert_eq!(e.slots.capacity(), 2048);
+        assert_eq!(e.slots.capacity() * std::mem::size_of::<PersistedBirth>(), 180_224);
+        // A gated emitter that never draws keeps its window until the instance drops.
+        let mut g = attached_fixture(1);
+        g.steam.emitters[0].spec.rate = 110.;
+        g.steam.emitters[0].spec.life = Range::fixed(10.);
+        crate::sim_maps::with_fx_attached_persist(true, || {
+            for f in 0..480 { g.sample(f as f32 * 0.05, 1., pose, |_, _, _| false); }
+        });
+        println!("F7 gated window: puffs {}, len {}, capacity {}", g.steam.puffs.len(), g.persisted[0].slots.len(), g.persisted[0].slots.capacity());
+        assert_eq!(g.steam.puffs.len(), 0);
+        assert_eq!(g.persisted[0].slots.len(), 1025);
+        assert_eq!(g.persisted[0].slots.capacity(), 2048);
+        // A burst long dead holds only the burst's own births.
+        let mut b = attached_fixture(1);
+        b.steam.emitters[0].spec.burst = Some((0., 1000));
+        b.steam.emitters[0].spec.life = Range::fixed(1.);
+        crate::sim_maps::with_fx_attached_persist(true, || {
+            for f in 0..480 { b.sample(f as f32 * 0.05, 1., pose, |_, _, _| true); }
+        });
+        println!("F7 dead burst: puffs {}, len {}, capacity {}", b.steam.puffs.len(), b.persisted[0].slots.len(), b.persisted[0].slots.capacity());
+        assert_eq!(b.steam.puffs.len(), 0);
+        assert_eq!(b.persisted[0].slots.len(), 1000);
+        assert_eq!(b.persisted[0].slots.capacity(), 1024);
     }
 }

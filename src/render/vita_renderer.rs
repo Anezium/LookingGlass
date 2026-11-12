@@ -121,6 +121,12 @@ pub struct Config {
     /// copying it. Exact on the host oracle. Default on since r25
     /// (console ABBA: wchess2 -2.51/-1.96, skool2 -1.32/-1.66 ms).
     pub fx_observe_move: bool,
+    /// Attached emitters keep each birth's constants, and an Alpha set takes the raw quad path
+    /// additive sets already use. Same quads, blend and order. Default off.
+    pub fx_attached_persist: bool,
+    /// School two publishes the other movers' colliders only when a rider's body trace will read
+    /// them, and builds a mover's collider only when something can read it. Default off.
+    pub mover_advance_reuse: bool,
     /// None selects off in normal play and full in diagnostic modes.
     pub profiler: Option<crate::light_profile::Level>,
     /// Retain all GL observers under light profiling for matched comparisons.
@@ -307,6 +313,8 @@ impl Default for Config {
             actor_publication_uv_reuse: true,
             prop_occurrence_reuse: true,
             fx_observe_move: true,
+            fx_attached_persist: false,
+            mover_advance_reuse: false,
             light_gl_observers: false,
             profiler: Some(crate::light_profile::Level::Off), profile_capture: false, skin_worker_bench: false, fx_prepare_cache: true,
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
@@ -2436,6 +2444,23 @@ mod tests {
             for other in fields {assert_eq!(actual[other],other==field);}
             for bad in [serde_json::json!(1),serde_json::json!("on"),serde_json::Value::Null] {
                 input[field]=bad;assert!(serde_json::from_value::<Config>(input.clone()).is_err());
+            }
+        }
+    }
+    #[test]
+    fn r26_levers_default_off_require_a_boolean_and_are_printed() {
+        for key in crate::sim_maps::R26_LEVERS {
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            assert_eq!(defaults[key], false, "{key}");
+            let on: Config = serde_json::from_value(serde_json::json!({key: true})).unwrap();
+            on.validate().unwrap();
+            assert_eq!(serde_json::to_value(&on).unwrap()[key], true, "{key}");
+            for c in [&on, &Config::default()] {
+                let line = &config_log_lines(c)[0];
+                assert!(line.contains(&format!("\"{key}\":")), "{key} missing from the printed record");
+            }
+            for bad in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
+                assert!(serde_json::from_value::<Config>(serde_json::json!({key: bad})).is_err(), "{key}");
             }
         }
     }

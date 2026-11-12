@@ -7,7 +7,7 @@ use std::rc::Rc;
 struct Recipe {
     position: Vec3, size: f32, growth: f32, age: f32, life: f32, roll: f32,
     alpha: f32, fade: bool, fade_in: f32, color: Vec3, camera: Vec3,
-    right: Vec3, up: Vec3,
+    right: Vec3, up: Vec3, per_puff_basis: bool,
 }
 fn basis(direction: Vec3) -> (Vec3, Vec3) {
     let right = direction.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
@@ -16,12 +16,13 @@ fn basis(direction: Vec3) -> (Vec3, Vec3) {
 fn recipe(p: &Puff, e: &Emitter, camera: Vec3, axes: (Vec3, Vec3)) -> Recipe {
     Recipe { position: p.position, size: p.size, growth: e.spec.growth, age: p.age,
         life: p.life, roll: p.roll, alpha: e.spec.alpha, fade: e.spec.fade,
-        fade_in: e.spec.fade_in, color: e.spec.color, camera, right: axes.0, up: axes.1 }
+        fade_in: e.spec.fade_in, color: e.spec.color, camera, right: axes.0, up: axes.1, per_puff_basis: false }
 }
 fn quad(p: &Recipe) -> [Vertex; 4] {
     let radius = p.size * (1. + p.growth * p.age).max(0.);
-    let x = (p.right * p.roll.cos() + p.up * p.roll.sin()) * radius;
-    let y = (-p.right * p.roll.sin() + p.up * p.roll.cos()) * radius;
+    let (right, up) = if p.per_puff_basis { basis((p.position-p.camera).normalize_or_zero()) } else { (p.right, p.up) };
+    let x = (right * p.roll.cos() + up * p.roll.sin()) * radius;
+    let y = (-right * p.roll.sin() + up * p.roll.cos()) * radius;
     let opacity = p.alpha * if p.fade { 1. - p.age / p.life } else { 1. }
         * (p.age / p.fade_in.max(0.02)).min(1.)
         * (p.camera.distance(p.position) / 28.).min(1.);
@@ -56,8 +57,14 @@ impl Buffer {
         self.raw_live = 0;
         self.recipes.clear();
         let axes = direction.map(basis); // Shared world camera basis, exactly the old arithmetic.
-        self.recipes.extend(puffs.iter().map(|p| recipe(p, &emitters[p.emitter], camera,
-            axes.unwrap_or_else(|| basis((p.position-camera).normalize_or_zero())))));
+        // Per-puff bases are pure arithmetic on the recipe, so the kernel can do them off the game thread.
+        if raw && axes.is_none() && crate::sim_maps::fx_attached_persist() {
+            self.recipes.extend(puffs.iter().map(|p| Recipe { per_puff_basis: true,
+                ..recipe(p, &emitters[p.emitter], camera, (Vec3::ZERO, Vec3::ZERO)) }));
+        } else {
+            self.recipes.extend(puffs.iter().map(|p| recipe(p, &emitters[p.emitter], camera,
+                axes.unwrap_or_else(|| basis((p.position-camera).normalize_or_zero())))));
+        }
         self.output.resize(puffs.len(), [Vertex::new(0.,0.,0.,0.,0.,WHITE);4]);
         let config = crate::render::vita_renderer::config();
         let worker = worker_job(config.fx_worker_prep, crate::render::vita_renderer::fx_cpu_options().1, puffs.len());
@@ -95,6 +102,9 @@ impl Buffer {
     }
     pub(super) fn raw_quad(&self, index: usize) -> Option<[Vertex; 4]> {
         (index < self.raw_live).then(|| self.output[index])
+    }
+    pub(super) fn raw_ref(&self, index: usize) -> Option<&[Vertex; 4]> {
+        (index < self.raw_live).then(|| &self.output[index])
     }
 }
 #[cfg(test)]
@@ -167,6 +177,31 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn worker_basis_of_a_persisted_set_matches_the_legacy_quads_and_blend_does_not_matter() {
+        crate::character::skinning::overlap::startup(2,false);
+        let mut steam=super::super::tests::attached_fixture(4).steam;
+        steam.update(0.2,Vec3::ZERO,&crate::collision::World::fixture(&[]));
+        steam.emitters[0].additive=false;
+        assert!(steam.puffs.len()>=32);
+        for (i,p) in steam.puffs.iter_mut().enumerate() { p.roll=i as f32*0.3; p.position+=vec3(i as f32,0.,1.); p.size=2.; }
+        let camera=vec3(17.,-23.,8.);
+        let mut plain=Buffer::default();let mut deferred=Buffer::default();
+        plain.prepare_attached(&steam.puffs,&steam.emitters,camera);
+        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare_attached(&steam.puffs,&steam.emitters,camera));
+        assert!(deferred.recipes.iter().all(|r|r.per_puff_basis));
+        assert_eq!(deferred.raw_live,steam.puffs.len());
+        for i in 0..steam.puffs.len() {
+            assert!(same(deferred.raw_ref(i).unwrap(),&plain.raw_quad(i).unwrap()));
+            let direction=(steam.puffs[i].position-camera).normalize_or_zero();
+            assert!(same(deferred.raw_ref(i).unwrap(),&steam.puff_mesh(i,camera,direction).vertices));
+        }
+        // World sets keep their one shared basis; the publication path keeps its own.
+        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare_world(&steam.puffs,&steam.emitters,camera,Vec3::X));
+        assert!(deferred.recipes.iter().all(|r|!r.per_puff_basis));
+        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare(&steam.puffs,&steam.emitters,camera,None));
+        assert!(deferred.recipes.iter().all(|r|!r.per_puff_basis));
     }
     #[test]
     fn raw_world_producer_matches_legacy_without_per_quad_publications_or_warm_allocations() {

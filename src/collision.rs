@@ -256,6 +256,18 @@ impl Collider {
         self.lazy.as_ref().is_some_and(|p| p.pending())
     }
     #[cfg(test)]
+    pub(crate) fn probe_test_bounds(&self) -> (Vec3, Vec3) { self.bounds.map(|b| (b.min, b.max)).unwrap() }
+    #[cfg(test)]
+    pub(crate) fn from_test_hulls() -> Self { Self::from_hulls(Vec::new()) }
+    #[cfg(test)]
+    pub(crate) fn bounds_for_review(&self) -> Option<(Vec3, Vec3)> { self.bounds.map(|b| (b.min, b.max)) }
+    /// The bounds' furthest corner from `point`. Nothing for a collider with no bounds.
+    pub(crate) fn far_reach_from(&self, point: Vec3) -> Option<f32> {
+        self.bounds.map(|b| (b.min - point).abs().max((b.max - point).abs()).length())
+    }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(crate) fn probe_bounds(&self) -> Option<(Vec3, Vec3)> { self.bounds.map(|b| (b.min, b.max)) }
+    #[cfg(any(test, all(feature="sim_maps_probe",not(target_os="vita"))))]
     pub(crate) fn geometry_bits(&self) -> Vec<u32> {
         let mut bits = Vec::new();
         bits.push(u32::from(self.bounds.is_some()));
@@ -1215,6 +1227,28 @@ impl World {
         self.settled_supports.clone_from(&other.settled_supports);
         self.weapon_obstacles.clone_from(&other.weapon_obstacles);
         self.dynamic_liquids.clone_from(&other.dynamic_liquids);
+    }
+    /// Host probe: the bits of what the world holds, and what a fixed lattice of body sweeps
+    /// around `feet` and around every dynamic collider gets back from it.
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(crate) fn probe_dynamic_bits(&self, feet: Vec3) -> (Vec<u32>, Vec<u32>) {
+        let geometry: Vec<u32> = self.dynamic.iter().flat_map(Collider::geometry_bits).collect();
+        let mut sweeps = Vec::new();
+        let mut query = |start: Vec3, end: Vec3| {
+            let t = self.body_trace(start, end);
+            sweeps.push(t.fraction.to_bits());
+            sweeps.extend(t.normal.to_array().map(f32::to_bits));
+            sweeps.push(u32::from(t.start_solid));
+        };
+        let steps = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z].map(|d| d * 48.);
+        for d in steps { query(feet, feet + d); }
+        for c in &self.dynamic {
+            if let Some(b) = c.bounds {
+                let center = (b.min + b.max) * 0.5;
+                for d in steps { query(center + d, center); }
+            }
+        }
+        (geometry, sweeps)
     }
     pub fn set_dynamic(&mut self, colliders: Vec<Collider>) {
         self.invalidate_npc_sight();
