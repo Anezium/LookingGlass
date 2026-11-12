@@ -63,16 +63,55 @@ extern "C" {
     fn sceMsgDialogTerm() -> i32;
 }
 
-/// Checks the data folder. On failure, shows the dialog and ends the process when the
-/// player closes it; on success, returns and the normal start continues.
+/// Checks the data folder and the shader compiler. On failure, shows the dialog and ends the
+/// process when the player closes it; on success, returns and the normal start continues.
 pub fn check_or_exit(base: &Path) {
     let problems = crate::data_check::check(base, &crate::data_check::REQUIRED_PACKS);
-    if problems.is_empty() {
+    let mut parts = Vec::new();
+    if !problems.is_empty() {
+        parts.push(crate::data_check::message(base, &problems));
+    }
+    if !shader_compiler_present() {
+        parts.push(format!(
+            "The shader compiler {} is missing.\nExtract it with ShaRKBR33D, then start the game again.",
+            SHACCCG_PATHS[0]
+        ));
+    }
+    if parts.is_empty() {
         return;
     }
-    let text = crate::data_check::message(base, &problems);
+    let text = parts.join("\n\n");
     eprintln!("[lg/first-start] {}", text.replace('\n', " | "));
     show_and_exit(&text);
+}
+
+/// Where vitaShaRK (default path) and vitaGL (fallback) load Sony's shader compiler from.
+const SHACCCG_PATHS: [&str; 2] = ["ur0:data/libshacccg.suprx", "ur0:data/external/libshacccg.suprx"];
+
+extern "C" {
+    fn shark_init(path: *const core::ffi::c_char) -> i32;
+    fn shark_end();
+}
+
+/// Without the module vitaGL starts anyway: shark_init fails quietly and every compile yields no
+/// program. vitaGL compiles GLSL at link time, and glLinkProgram (dca4b9d, custom_shaders.c)
+/// then reads the parameters of that null program, so the first shader link most likely faults.
+/// Read from code, not run on the console. A file check is enough in the normal case. When neither file can be read, ask the
+/// module loader with the same calls vitaGL makes, so a permission difference between stat and
+/// module loading cannot stop a working install; unload again so vitaGL starts from its usual state.
+fn shader_compiler_present() -> bool {
+    if SHACCCG_PATHS.iter().any(|path| Path::new(path).is_file()) {
+        return true;
+    }
+    unsafe {
+        let loaded = shark_init(core::ptr::null()) >= 0
+            || shark_init(c"ur0:data/external/libshacccg.suprx".as_ptr()) >= 0;
+        if loaded {
+            shark_end();
+        }
+        eprintln!("[lg/first-start] shader compiler files not readable; module load={loaded}");
+        loaded
+    }
 }
 
 fn show_and_exit(text: &str) -> ! {
