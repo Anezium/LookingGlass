@@ -105,7 +105,8 @@ fn packets_survive_with_geometry_texture_and_disclosed_alpha_policy() {
         }
         let l=f.groups[0].passes[0].geometry();
         assert_eq!(l.vertices.len(),4); assert_eq!(l.indices,vec![0,1,2,0,2,3]);
-        assert_eq!(l.vertices[0].color,<[u8;4]>::from(Color::new(0.25,0.5,0.75,0.5)));
+        let expected_color: [u8;4] = Color::new(0.25,0.5,0.75,0.5).into();
+        assert_eq!(l.vertices[0].color,expected_color);
         let p=&f.groups[1].passes[0]; let mesh=p.geometry();
         assert_eq!(mesh.vertices.len(),117); assert_eq!(mesh.indices.len(),576);
         assert_eq!(mesh.vertices[0].position,vec3(2.,3.,4.75));
