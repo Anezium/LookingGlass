@@ -8,6 +8,10 @@ mod ambient_animation;
 mod animation_events;
 mod ant;
 mod assets;
+#[cfg(any(target_os = "vita", test))]
+mod data_check;
+#[cfg(target_os = "vita")]
+mod first_start;
 mod startup;
 mod shader_cache;
 mod audio;
@@ -640,6 +644,9 @@ fn run() -> Result<()> {
     if o.capture.is_some() && o.frames.is_none() {
         bail!("--capture requires --frames");
     }
+    // Before any archive is opened: tell the player on screen when the packs are not there.
+    #[cfg(target_os = "vita")]
+    first_start::check_or_exit(&o.data);
     vita_sim::initialize(&o.save_dir);
     let mut assets = Assets::open(&o.data)?;
     #[cfg(feature = "vita_renderer")]
