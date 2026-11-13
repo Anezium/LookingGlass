@@ -86,6 +86,27 @@ void main(){
  }
  gl_FragColor=vec4(rgb,alpha);
 }"#;
+/// FRAGMENT for an effect pass that is unlit, unclamped and uncut, with no dissolve, ghost,
+/// power tint or filter fade (`fx_lite`). For such a pass every removed line is a no-op in
+/// FRAGMENT: Lit=0 makes the lighting factor exactly 1, the packed lights are zero so
+/// dynamicLight adds 0, ClampUV=0 leaves uv as is, and SkyFade is always 0 in the retained
+/// payload. The uniform block is FRAGMENT's; the unused fields have no location.
+pub(crate) const FX_LITE_FRAGMENT: &str = r#"#version 100
+precision mediump float;
+varying highp vec2 uv; varying lowp vec4 color;
+uniform sampler2D Texture; uniform vec4 Gain; uniform float FogMode; uniform float FxModel;
+// FOG
+void main(){
+ vec4 diffuse=texture2D(Texture,uv);
+ float alpha=diffuse.a*Gain.a*color.a;
+ vec3 rgb=diffuse.rgb*Gain.rgb;
+ if(FxModel>0.5)rgb*=color.rgb;
+ if(FogMode>3.5){
+  float visible=fogged(vec3(1.0),1.0).r;
+  rgb=mix(vec3(1.0),rgb,visible);alpha*=visible;
+ }else if(FogMode>=0.0)rgb=fogged(rgb,FogMode);
+ gl_FragColor=vec4(rgb,alpha);
+}"#;
 struct Layer {
     spec: Stage,
     textures: Vec<Texture2D>,

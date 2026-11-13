@@ -861,6 +861,10 @@ impl Steam {
                     let image = texture::decode(assets, &path)?;
                     let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                     t.set_filter(FilterMode::Linear);
+                    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                    crate::sim_maps::probe::draw_query::label_texture(t.raw_miniquad_id(), &path);
+                    #[cfg(feature = "vita_renderer")]
+                    crate::render_fx::retained::note_particle_texture(&t, &image.pixels);
                     textures.push(t);
                 }
                 if spec.light.is_none()
@@ -1741,6 +1745,10 @@ impl Attached {
                 let image = texture::decode(assets, &path)?;
                 let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
                 t.set_filter(FilterMode::Linear);
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                crate::sim_maps::probe::draw_query::label_texture(t.raw_miniquad_id(), &path);
+                #[cfg(feature = "vita_renderer")]
+                crate::render_fx::retained::note_particle_texture(&t, &image.pixels);
                 textures.push(t);
             }
             if textures.is_empty() || textures.len() != stage.images.len() {

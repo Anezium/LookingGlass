@@ -7,6 +7,7 @@ use std::time::Instant as MetricInstant;
 pub(super) mod state_cache;
 pub(super) mod world_puffs;
 mod packet_cull;
+mod fill_cuts;
 use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
 use super::{Frame, Pass, FRAME};
 use crate::environment::Atmosphere;
@@ -331,6 +332,8 @@ pub(crate) struct Gpu {
     _game_thread: crate::game_thread::GameThread,
     shader: ShaderId,
     pipelines: BTreeMap<(usize, bool), Pipeline>,
+    /// `fx_lite`: the lean program, its pipelines (same keys) and its own uniform cache.
+    lite: Option<Lite>,
     buffers: Vec<Buffers>,
     white: Texture2D,
     ring_frame: usize,
@@ -351,6 +354,20 @@ pub(crate) struct Gpu {
     puff_batches: [world_puffs::Bank; 2],
     bounds: packet_cull::Bounds,
 }
+pub(crate) struct Lite {
+    shader: ShaderId,
+    pipelines: BTreeMap<(usize, bool), Pipeline>,
+    fields: crate::render::uniform_fields::Cache,
+}
+/// `fx_add_zero_alpha_cut`: particle loading reports each texture with its pixels.
+pub(crate) fn note_particle_texture(texture: &Texture2D, rgba: &[u8]) {
+    if crate::render::vita_renderer::config().fx_add_zero_alpha_cut { fill_cuts::note_texture(texture, rgba); }
+}
+/// A pass whose full-program arithmetic `FX_LITE_FRAGMENT` reproduces (see there).
+pub(crate) fn lite_pass(p: &Pass) -> bool {
+    p.effect && !p.lit && !p.clamp && p.cutout < 0.5 && !(p.appearance.dissolve > 0.)
+        && !p.appearance.ghost && !(p.appearance.power > 0.5) && p.filter_fade == 0.
+}
 impl Gpu {
     pub(crate) fn new() -> Result<Self> {
         let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
@@ -368,6 +385,14 @@ impl Gpu {
                 meta(),
             )
             .context("retained actor shader")?;
+        let lite = if crate::render::vita_renderer::config().fx_lite {
+            crate::frame_profile::shader_creation();
+            let _shader_name = crate::shader_cache::Name::new("retained-fx-lite");
+            let shader = ctx.new_shader(ShaderSource::Glsl { vertex: crate::render::VERTEX,
+                fragment: &crate::environment::fragment(crate::render::FX_LITE_FRAGMENT) }, meta())
+                .context("retained fx lite shader")?;
+            Some(Lite { shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) })
+        } else { None };
         println!(
             "[lg/vita-renderer] actor READY grouped alpha, actor_max_layers={}",
             crate::render::vita_renderer::config().actor_max_layers
@@ -376,6 +401,7 @@ impl Gpu {
             _game_thread: crate::game_thread::GameThread::new(),
             shader,
             pipelines: BTreeMap::new(),
+            lite,
             buffers: Vec::new(),
             white,
             ring_frame: 0,
@@ -399,8 +425,9 @@ impl Gpu {
             }
         }
         println!(
-            "[lg/vita-renderer] actor pipeline objects prewarmed={} programs=1",
-            gpu.pipelines.len()
+            "[lg/vita-renderer] actor pipeline objects prewarmed={} programs={}",
+            gpu.pipelines.len() + gpu.lite.as_ref().map_or(0, |l| l.pipelines.len()),
+            1 + usize::from(gpu.lite.is_some())
         );
         Ok(gpu)
     }
@@ -508,7 +535,10 @@ impl Gpu {
     }
     fn prepare_pipeline(&mut self, key: (usize, bool)) {
         let ctx = unsafe { get_internal_gl() }.quad_context;
-        self.pipelines.entry(key).or_insert_with(|| {
+        let shaders = std::iter::once((self.shader, &mut self.pipelines))
+            .chain(self.lite.as_mut().map(|l| (l.shader, &mut l.pipelines)));
+        for (shader, pipelines) in shaders {
+        pipelines.entry(key).or_insert_with(|| {
             crate::frame_profile::pipeline_creation();
             ctx.new_pipeline(
                 &[BufferLayout {
@@ -521,7 +551,7 @@ impl Gpu {
                     VertexAttribute::new("color0", VertexFormat::Byte4),
                     VertexAttribute::new("normal", VertexFormat::Float4),
                 ],
-                self.shader,
+                shader,
                 PipelineParams {
                     depth_test: if key.1 {
                         Comparison::Equal
@@ -532,15 +562,16 @@ impl Gpu {
                 },
             )
         });
+        }
     }
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
         let key = (p.blend_index, p.depth_equal);
-        let pipeline = self
-            .pipelines
-            .get(&key)
+        let lite = self.lite.is_some() && lite_pass(p);
+        if lite { count("vita_fx_lite_draws", 1); }
+        let pipeline = if lite { self.lite.as_ref().unwrap().pipelines.get(&key) } else { self.pipelines.get(&key) }
             .expect("prewarmed LG actor pipeline");
         // Several actor layers can share one uploaded vertex/index page.
         // Texture bindings still belong to the individual layer packet.
@@ -549,7 +580,8 @@ impl Gpu {
         let c = crate::render::vita_renderer::config();
         let b = &self.buffers[slot].bindings;
         let apply = if c.fx_submit_state_cache {
-            self.submit_cache.observe((key.0, key.1, depth_write),
+            // The lean program's pipelines are other state: offset its key past every blend.
+            self.submit_cache.observe((key.0 + if lite { crate::render::BLEND_COUNT } else { 0 }, key.1, depth_write),
                 (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
         } else { [true; 3] };
         if apply[0] {
@@ -569,7 +601,8 @@ impl Gpu {
         let mut traffic = crate::render::uniform_fields::Traffic::default();
         if skip { self.stats.uniform_skips += 1; }
         else {
-            traffic = self.field_uniforms.apply(ctx, u, c.uniform_field_cache);
+            let fields = if lite { &mut self.lite.as_mut().unwrap().fields } else { &mut self.field_uniforms };
+            traffic = fields.apply(ctx, u, c.uniform_field_cache);
             self.stats.uniform_bytes += traffic.bytes;
         }
         if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
@@ -636,6 +669,10 @@ impl Drop for Gpu {
             ctx.delete_pipeline(*p);
         }
         ctx.delete_shader(self.shader);
+        if let Some(l) = &self.lite {
+            for p in l.pipelines.values() { ctx.delete_pipeline(*p); }
+            ctx.delete_shader(l.shader);
+        }
     }
 }
 fn valid_mesh(mesh: &Mesh) -> bool {
@@ -1150,6 +1187,7 @@ pub(crate) fn finish_world(
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
     gpu.field_uniforms.interrupt();
+    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); }
     let (mut groups, mut puffs, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -1169,6 +1207,19 @@ pub(crate) fn finish_world(
             let _span = crate::frame_profile::span("vita_fx_packet_cut");
             let c = crate::render::vita_renderer::config();
             packet_cull::cull(&mut gpu.bounds, &mut groups, &mut puffs, matrix, cuts, c.actor_layer_reuse || c.actor_single_prepare);
+        }
+    }
+    {
+        let c = crate::render::vita_renderer::config();
+        if c.fx_add_zero_alpha_cut {
+            let (cut_groups, cut_puffs) = fill_cuts::cut_zero_alpha(&mut groups, &mut puffs, c.actor_layer_reuse || c.actor_single_prepare);
+            count("vita_fx_zero_alpha_groups_cut", cut_groups);
+            count("vita_fx_zero_alpha_puffs_cut", cut_puffs);
+        }
+        if c.fx_add_max_area > 0. {
+            if let Some(matrix) = FRAME.with(|f| f.borrow().projection) {
+                count("vita_fx_add_capped_quads", fill_cuts::cap(&mut puffs, matrix, c.fx_add_max_area));
+            }
         }
     }
     let preparation_started = MetricInstant::now();
@@ -1337,6 +1388,7 @@ pub(crate) fn finish_world(
     let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     count("vita_joint_alpha_groups", list.len() as u64);
     gpu.field_uniforms.interrupt();
+    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); }
     gpu.submit_cache.interrupt(); // External depth-mask change at the alpha boundary.
     unsafe {
         macroquad::miniquad::gl::glDepthMask(0);
@@ -1354,6 +1406,7 @@ pub(crate) fn finish_world(
                     gpu.uniform_cache.interrupt();
                     gpu.submit_cache.interrupt();
                     gpu.field_uniforms.interrupt();
+                    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); }
                     let start = world_totals.and_then(|t| t.borrow().start());
                     let world_started = MetricInstant::now();
                     draw_world(id);

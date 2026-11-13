@@ -12,6 +12,7 @@ mod submit;
 mod world_list;
 mod gxm;
 mod draw_cuts;
+mod alpha_fill;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -247,6 +248,26 @@ pub struct Config {
     /// texture and front to back inside one texture, then alpha-tested draws front to back.
     /// Only coplanar draws at equal depth can change the picture. Default off.
     pub world_texture_sort: bool,
+    /// One world surface whose filter stage (dst*src) is followed by an alpha-blended stage, both
+    /// unlit, untested and unclamped (the potears2 river and waterfall): "merge" draws both in
+    /// one pass, blending one,src_alpha with the filter's luma in place of its colour, so the
+    /// colour of the filter is lost where the second stage is transparent; "drop_filter" skips
+    /// the filter stage. "off" draws both. Halves that surface's blended pixels.
+    pub water_stage_merge: String,
+    /// World alpha draws that are unlit, unclamped and not alpha-tested use a fragment program
+    /// without the alpha-test chain, the lightmap branch and the clamp; same arithmetic, so no
+    /// pixel should change. Default off.
+    pub world_alpha_lite: bool,
+    /// Effect packets that are unlit, unclamped, uncut, with no dissolve, ghost, power tint or
+    /// filter fade use a fragment program without those paths, the dynamic lights (all zero when
+    /// unlit) and the sky fade (never set here); same arithmetic. Default off.
+    pub fx_lite: bool,
+    /// Additive effects (drawn with source alpha) whose texture has alpha 0 in every texel add
+    /// nothing; their puffs and effect groups are not drawn. No pixel changes. Default off.
+    pub fx_add_zero_alpha_cut: bool,
+    /// Additive world puffs (emitter quads such as waterfall spray) whose screen area is more than
+    /// this fraction of the screen shrink about their centre to that area. Changes pixels. 0 is off.
+    pub fx_add_max_area: f32,
     pub flat_actor_light: bool,
     pub max_texture_dimension: Option<u16>,
     pub draw_distance_cap: Option<f32>,
@@ -442,6 +463,7 @@ impl Default for Config {
             skin_frustum_cull: true,
             fast_frustum: true,
             packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
+            water_stage_merge: "off".into(), world_alpha_lite: false, fx_lite: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
             flat_actor_light: false, max_texture_dimension: None,
             draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             gpu_state_probe: false,
@@ -554,6 +576,8 @@ impl Config {
             (1..=2).contains(&self.actor_max_layers),
             "actor_max_layers must be 1 or 2"
         );
+        ensure!(matches!(self.water_stage_merge.as_str(),"off"|"merge"|"drop_filter"),"water_stage_merge must be off, merge or drop_filter");
+        ensure!(self.fx_add_max_area.is_finite() && (0. ..=1.).contains(&self.fx_add_max_area), "fx_add_max_area must be 0 to 1");
         ensure!(matches!(self.texture_cache.as_str(),"on"|"off"),"texture_cache must be on or off");
         ensure!(matches!(self.shader_cache.as_str(),"on"|"off"),"shader_cache must be on or off");
         ensure!(matches!(self.fx_batching.as_str(),"none"|"adjacent"|"material"),"invalid fx_batching");
@@ -901,6 +925,8 @@ struct Pending {
     parameter: usize,
     geometry: Geometry,
     recipe: Recipe,
+    /// (batch, chunk of that batch's layer) per append, recorded only for `water_stage_merge`.
+    origin: Vec<(u32, u32)>,
 }
 struct Group {
     base_element: i32,
@@ -1086,8 +1112,35 @@ pub struct Renderer {
     models: Vec<Option<Mat4>>,
     schedule: submit::Schedule,
     texture_sort: draw_cuts::TextureSort,
+    alpha_fill: alpha_fill::State,
     list: Option<world_list::WorldList>,
     gxm: Box<gxm::State>,
+}
+/// The world pipelines' blend, per blend class.
+fn world_blend(class: usize) -> Option<BlendState> {
+    match class {
+        0 => None,
+        1 => Some(BlendState::new(
+            Equation::Add,
+            BlendFactor::Value(BlendValue::SourceAlpha),
+            BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
+        )),
+        2 => Some(BlendState::new(
+            Equation::Add,
+            BlendFactor::One,
+            BlendFactor::One,
+        )),
+        3 => Some(BlendState::new(
+            Equation::Add,
+            BlendFactor::Value(BlendValue::DestinationColor),
+            BlendFactor::Zero,
+        )),
+        _ => Some(BlendState::new(
+            Equation::Add,
+            BlendFactor::Value(BlendValue::DestinationColor),
+            BlendFactor::Value(BlendValue::SourceColor),
+        )),
+    }
 }
 fn blend_class(blend: Blend) -> usize {
     match blend {
@@ -1217,6 +1270,7 @@ impl Renderer {
                 };
                 recipes_ms+=recipe_started.elapsed().as_secs_f64()*1000.;
                 let chunks_started=std::time::Instant::now();
+                let mut chunk = 0u32;
                 for (face, range, center) in parts {
                     let cell = (center / c.cell_size).floor();
                     let key = format!("{signature}|{}|{cell:?}", recipe.rank);
@@ -1235,11 +1289,14 @@ impl Renderer {
                                     parameter,
                                     geometry: Geometry::default(),
                                     recipe: recipe.clone(),
+                                    origin: Vec::new(),
                                 });
                                 candidates.push(id);
                                 id
                             });
                         pending[id].geometry.append(bi, b, source, face);
+                        if c.water_stage_merge != "off" { pending[id].origin.push((bi as u32, chunk)); }
+                        chunk += 1;
                     }
                 }
                 chunks_ms+=chunks_started.elapsed().as_secs_f64()*1000.;
@@ -1308,29 +1365,7 @@ impl Renderer {
         ];
         let mut pipelines = Vec::new();
         for blend in 0..5 {
-            let state = match blend {
-                0 => None,
-                1 => Some(BlendState::new(
-                    Equation::Add,
-                    BlendFactor::Value(BlendValue::SourceAlpha),
-                    BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
-                )),
-                2 => Some(BlendState::new(
-                    Equation::Add,
-                    BlendFactor::One,
-                    BlendFactor::One,
-                )),
-                3 => Some(BlendState::new(
-                    Equation::Add,
-                    BlendFactor::Value(BlendValue::DestinationColor),
-                    BlendFactor::Zero,
-                )),
-                _ => Some(BlendState::new(
-                    Equation::Add,
-                    BlendFactor::Value(BlendValue::DestinationColor),
-                    BlendFactor::Value(BlendValue::SourceColor),
-                )),
-            };
+            let state = world_blend(blend);
             for cull in [CullFace::Nothing, CullFace::Back, CullFace::Front] {
                 crate::frame_profile::pipeline_creation();
                 pipelines.push(ctx.new_pipeline(
@@ -1368,6 +1403,43 @@ impl Renderer {
             Some(low)
         }else{None};
         resources.pipelines.extend(low_pipelines.iter().copied());
+        let mut alpha_fill = alpha_fill::State::off();
+        if c.world_alpha_lite {
+            crate::frame_profile::shader_creation();
+            let _shader_name = crate::shader_cache::Name::new("retained-world-alpha-lite");
+            let lite = ctx.new_shader(ShaderSource::Glsl { vertex: shader::VERTEX,
+                fragment: &crate::environment::fragment(alpha_fill::ALPHA_LITE_FRAGMENT) }, shader::meta())
+                .context("retained world alpha lite shader")?;
+            resources.shaders.push(lite);
+            // Same blend classes as the world pipelines, in the same order.
+            let mut lite_pipelines = Vec::new();
+            for blend in 0..5 {
+                let state = world_blend(blend);
+                lite_pipelines.extend(alpha_fill::pipelines(ctx, lite, &attributes, state, state));
+            }
+            resources.pipelines.extend(lite_pipelines.iter().copied());
+            alpha_fill.lite = Some((lite, lite_pipelines, super::uniform_fields::Cache::new(shader::meta())));
+        }
+        if c.water_stage_merge != "off" {
+            let recipes = pending.iter().map(|p| &p.recipe).collect::<Vec<_>>();
+            let origins = pending.iter().map(|p| p.origin.clone()).collect::<Vec<_>>();
+            alpha_fill.partner = alpha_fill::partners(&recipes, &origins);
+            alpha_fill.drop_filter = c.water_stage_merge == "drop_filter";
+            println!("[lg/vita-renderer] water_stage_merge={} pairs={}", c.water_stage_merge,
+                alpha_fill.partner.iter().filter(|p| p.is_some()).count());
+            if c.water_stage_merge == "merge" {
+                crate::frame_profile::shader_creation();
+                let _shader_name = crate::shader_cache::Name::new("retained-world-water-merge");
+                let merge = ctx.new_shader(ShaderSource::Glsl { vertex: alpha_fill::MERGE_VERTEX,
+                    fragment: &crate::environment::fragment(alpha_fill::MERGE_FRAGMENT) }, alpha_fill::merge_meta())
+                    .context("retained world water merge shader")?;
+                resources.shaders.push(merge);
+                let (color, alpha) = alpha_fill::merge_blend();
+                let merge_pipelines = alpha_fill::pipelines(ctx, merge, &attributes, color, alpha);
+                resources.pipelines.extend(merge_pipelines.iter().copied());
+                alpha_fill.merge = Some((merge, merge_pipelines, super::uniform_fields::Cache::new(alpha_fill::merge_meta())));
+            }
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if crate::sim_maps::probe::world_packets_active() {
             use sha2::{Digest, Sha256};
@@ -1566,6 +1638,7 @@ impl Renderer {
             world_buffers: buffers,
             schedule: submit::Schedule::default(),
             texture_sort: draw_cuts::TextureSort::default(),
+            alpha_fill,
             groups,
             pvs,
             pipelines,
@@ -2229,12 +2302,20 @@ impl Renderer {
         let mut gpu = self.fx_gpu.take().unwrap_or_else(|| {
             crate::render_fx::retained::Gpu::new().expect("retained actor shader")
         });
+        // water_stage_merge: a pair draws once, at the filter stage's place ("merge"), or as
+        // the alpha stage alone ("drop_filter"). See alpha_fill::frame_pairs for the order.
+        if self.alpha_fill.partner.is_empty() { self.alpha_fill.pairs.clear(); }
+        else { alpha_fill::frame_pairs(&self.prepared, |p| (p.depth, p.group), &self.alpha_fill.partner, &mut self.alpha_fill.pairs); }
+        let drop_filter = self.alpha_fill.drop_filter;
         let world = self
             .prepared
             .iter()
             .enumerate()
+            .filter(|&(id, _)| !self.alpha_fill.pairs.iter().any(|&(f, a)| id == if drop_filter { f } else { a }))
             .map(|(id, p)| (p.depth, id))
             .collect::<Vec<_>>();
+        if !self.alpha_fill.partner.is_empty() { count("vita_world_alpha_merged_pairs", self.alpha_fill.pairs.len() as u64); }
+        if self.alpha_fill.active() { self.alpha_fill.interrupt(); }
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::profile_only());
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id| {
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
@@ -2245,19 +2326,63 @@ impl Renderer {
                     bindings: 1, texture_bind_slots: 2, uniform_uploads: 1,
                     ..Default::default() });
             let mut totals = totals.borrow_mut();
+            let merged = if drop_filter { None } else {
+                self.alpha_fill.pairs.iter().find(|&&(f, _)| f == id).map(|&(_, a)| a) };
+            if let Some(a) = merged {
+                // The filter stage and the alpha stage in one draw, over the filter's range.
+                let (pf, pa) = (&self.prepared[id], &self.prepared[a]);
+                let (gf, ga) = (&self.groups[pf.group], &self.groups[pa.group]);
+                let uf = pf.uniforms.as_ref().unwrap_or(&self.parameters[gf.parameter].uniforms);
+                let ua = pa.uniforms.as_ref().unwrap_or(&self.parameters[ga.parameter].uniforms);
+                alpha_fill::merge_payload(uf, ua, &mut self.alpha_fill.payload);
+                let (_, pipelines, fields) = self.alpha_fill.merge.as_mut().expect("merge program");
+                let ctx = unsafe { get_internal_gl() }.quad_context;
+                let start = totals.start();
+                ctx.apply_pipeline(&pipelines[gf.recipe.cull]);
+                unsafe{macroquad::miniquad::gl::glDepthMask(0);}
+                scale::log_depth(false);
+                ctx.apply_bindings(&Bindings { vertex_buffers: gf.bindings.vertex_buffers.clone(),
+                    index_buffer: gf.bindings.index_buffer, images: vec![pf.texture, pa.texture] });
+                totals.add(0, start);
+                let start = totals.start();
+                let traffic = fields.apply(ctx, &self.alpha_fill.payload[..], config().uniform_field_cache);
+                crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
+                    crate::light_profile::RenderMetrics { uniform_bytes: traffic.bytes,
+                        uniform_gl_calls: traffic.calls, ..Default::default() });
+                totals.add(1, start);
+                let start = totals.start();
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                { crate::sim_maps::probe::world_order(pf.group,true); crate::sim_maps::probe::world_order(pa.group,true);
+                  crate::sim_maps::probe::draw_query::mark("world_alpha","world_merge",
+                    gf.recipe.blend, Some(pf.group), 0, gf.recipe.stage.images.first().map(String::as_str)); }
+                if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) { ctx.draw(gf.base_element, gf.indices, 1); }
+                totals.add(2, start);
+                count("vita_world_gpu_draws", 1);
+                count("vita_world_alpha_triangles", gf.indices as u64 / 3);
+                count("vita_world_alpha_state_applications", 1);
+                return;
+            }
             let p = &self.prepared[id];
             let g = &mut self.groups[p.group];
             g.bindings.images[0] = p.texture;
             let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
             let ctx = unsafe { get_internal_gl() }.quad_context;
             let start = totals.start();
-            ctx.apply_pipeline(&self.pipelines[g.recipe.blend * 3 + g.recipe.cull]);
+            // world_alpha_lite: the same draw through the lean program when its stage allows.
+            let lite = self.alpha_fill.lite.as_mut().filter(|_| alpha_fill::lite_recipe(&g.recipe));
+            let lite_draw = lite.is_some();
+            if lite_draw { count("vita_world_alpha_lite_draws", 1); }
+            let (pipeline, fields) = match lite {
+                Some((_, pipelines, fields)) => (&pipelines[g.recipe.blend * 3 + g.recipe.cull], fields),
+                None => (&self.pipelines[g.recipe.blend * 3 + g.recipe.cull], &mut self.field_uniforms[0]),
+            };
+            ctx.apply_pipeline(pipeline);
             unsafe{macroquad::miniquad::gl::glDepthMask(0);}
             scale::log_depth(false);
             ctx.apply_bindings(&g.bindings);
             totals.add(0, start);
             let start = totals.start();
-            let traffic = self.field_uniforms[0].apply(ctx, u.values(), config().uniform_field_cache);
+            let traffic = fields.apply(ctx, u.values(), config().uniform_field_cache);
             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
                 crate::light_profile::RenderMetrics { uniform_bytes: traffic.bytes,
                     uniform_gl_calls: traffic.calls, ..Default::default() });
@@ -2266,7 +2391,7 @@ impl Renderer {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::world_order(p.group,true);
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            crate::sim_maps::probe::draw_query::mark("world_alpha","world_full",
+            crate::sim_maps::probe::draw_query::mark("world_alpha",if lite_draw {"world_lite"} else {"world_full"},
                 g.recipe.blend, Some(p.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.first().map(String::as_str));
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -2318,6 +2443,7 @@ impl Drop for Renderer {
         if let Some(shader)=self.low_shader {ctx.delete_shader(shader);}
         ctx.delete_shader(self.shader);
         ctx.delete_shader(self.sky_shader);
+        self.alpha_fill.delete(ctx);
         ctx.delete_buffer(self.sky_bindings.vertex_buffers[0]);
         ctx.delete_buffer(self.sky_bindings.index_buffer);
     }
@@ -3133,7 +3259,8 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
             // The replay keys and the A5 draw keys came after RC1; its play files keep them at their off defaults.
-            const A5: [&str; 5] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort"];
+            const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
+                "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str())).cloned().collect();
             written.sort(); all.sort();
@@ -3302,6 +3429,82 @@ mod tests {
                 variant[key] = rc2[key].clone();
             }
             assert_eq!(variant, rc2, "an A5 file differs from PL-rc2 only in its own keys");
+        }
+    }
+    #[test]
+    fn a5_alpha_fill_keys_default_off_and_validate() {
+        let c = Config::default();
+        assert_eq!(c.water_stage_merge, "off");
+        assert!(!c.world_alpha_lite && !c.fx_lite && !c.fx_add_zero_alpha_cut);
+        assert_eq!(c.fx_add_max_area, 0.);
+        for good in ["off", "merge", "drop_filter"] {
+            let c: Config = serde_json::from_value(serde_json::json!({"water_stage_merge": good})).unwrap();
+            c.validate().unwrap();
+        }
+        for bad in ["on", "", "Merge"] {
+            let c: Config = serde_json::from_value(serde_json::json!({"water_stage_merge": bad})).unwrap();
+            assert!(c.validate().is_err(), "{bad}");
+        }
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"water_stage_merge": true})).is_err());
+        for good in [0., 0.1, 1.] {
+            let c: Config = serde_json::from_value(serde_json::json!({"fx_add_max_area": good})).unwrap();
+            c.validate().unwrap();
+        }
+        for bad in [-0.1, 1.5, 1e9] {
+            let c: Config = serde_json::from_value(serde_json::json!({"fx_add_max_area": bad})).unwrap();
+            assert!(c.validate().is_err(), "{bad}");
+        }
+        for key in ["world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut"] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({key: 1})).is_err(), "{key}");
+            let c: Config = serde_json::from_value(serde_json::json!({key: true})).unwrap();
+            c.validate().unwrap();
+        }
+        let printed = config_log_lines(&Config::default())[0].clone();
+        for key in ["water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"] {
+            assert!(printed.contains(&format!("\"{key}\"")), "{key} is printed");
+        }
+    }
+    #[test]
+    fn a5_alpha_fill_configs_differ_from_a5_exact_only_in_their_keys() {
+        let parse = |bytes: &[u8]| {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
+            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            written.sort(); all.sort();
+            assert_eq!(written, all, "an A5 config must write every runtime key");
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            serde_json::to_value(&c).unwrap()
+        };
+        let exact = parse(include_bytes!("../../configs/PL-rc2-a5-exact.json"));
+        let rc2 = parse(include_bytes!("../../configs/PL-rc2.json"));
+        for config in [&exact, &rc2] {
+            assert_eq!(config["water_stage_merge"], "off");
+            for key in ["world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut"] { assert_eq!(config[key], false, "{key}"); }
+            assert_eq!(config["fx_add_max_area"], 0.);
+        }
+        let on = |key: &'static str, value: serde_json::Value| (key, value);
+        let merge = on("water_stage_merge", serde_json::json!("merge"));
+        let alpha = on("world_alpha_lite", serde_json::json!(true));
+        let fx = on("fx_lite", serde_json::json!(true));
+        let zero = on("fx_add_zero_alpha_cut", serde_json::json!(true));
+        for (bytes, keys) in [
+            (&include_bytes!("../../configs/PL-rc2-a5-water-merge.json")[..], vec![merge.clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-water-drop.json")[..], vec![on("water_stage_merge", serde_json::json!("drop_filter"))]),
+            (&include_bytes!("../../configs/PL-rc2-a5-alpha-lite.json")[..], vec![alpha.clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-fx-lite.json")[..], vec![fx.clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-zero-alpha.json")[..], vec![zero.clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-add-cap10.json")[..], vec![on("fx_add_max_area", serde_json::json!(0.1_f32))]),
+            (&include_bytes!("../../configs/PL-rc2-a5-fill.json")[..], vec![merge, alpha, fx, zero]),
+        ] {
+            let mut variant = parse(bytes);
+            for (key, value) in keys {
+                assert_eq!(variant[key], value, "{key}");
+                variant[key] = exact[key].clone();
+            }
+            assert_eq!(variant, exact, "a fill file differs from PL-rc2-a5-exact only in its own keys");
         }
     }
     #[test]

@@ -1188,6 +1188,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(feet) = options.start_at {
             pos = feet + Vec3::Z * EYE_HEIGHT;
         }
+        // Host census only: the spawn yaw, and a yaw (degrees) that replaces it, so a `--start-at`
+        // view can face the way a console tape faced.
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        if crate::sim_maps::probe::draw_query::active() || std::env::var_os("LOOKING_GLASS_START_YAW").is_some() {
+            println!("START_YAW spawn={:.4} rad", yaw);
+            if let Some(degrees) = std::env::var("LOOKING_GLASS_START_YAW").ok().and_then(|v| v.parse::<f32>().ok()) {
+                yaw = degrees.to_radians();
+                println!("START_YAW set={:.4} rad", yaw);
+            }
+        }
         if options.larva_preview && maps[current] == "centipede1" {
             (pos, yaw) = npcs.larva_preview_start(&scene.world)?;
             hud.announce("Larva encounter / WASD move, mouse attack / Home retry");
