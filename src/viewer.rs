@@ -12,6 +12,11 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
+// Recorded or replayed input when a tape is active; otherwise the macroquad calls.
+use crate::replay::input::{
+    get_char_pressed, get_frame_time, get_time, is_key_down, is_key_pressed, is_mouse_button_pressed, is_quit_requested,
+    mouse_position,
+};
 
 #[cfg(target_os = "vita")]
 #[link(name = "SceProcessmgr_stub")]
@@ -729,6 +734,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let fingerprint = assets.fingerprint()?;
     let store_start = std::time::Instant::now();
     let store = Store::new(options.save_dir.clone(), fingerprint);
+    // A tape session (src/replay) picks the start and, for a replay, the control settings.
+    let mut replay = crate::replay::Session::open(&mut options, &store, &mut preferences)?;
+    #[cfg(feature="vita_renderer")]
+    anyhow::ensure!(!(replay.is_some() && route_session.is_some()), "replay and route diagnostics are exclusive");
+    let replay_resume = replay.as_mut().and_then(|r| r.take_resume());
+    let store = if replay.as_ref().is_some_and(|r| r.replaying()) { store.discarding_writes() } else { store };
+    let mut replay_end: Option<&'static str> = None;
     eprintln!("[lg/startup] save store ready elapsed_ms={:.3} store_construct_ms={:.3} viewer_elapsed_ms={:.3}",save_store_start.elapsed().as_secs_f64()*1000.,store_start.elapsed().as_secs_f64()*1000.,startup.elapsed().as_secs_f64()*1000.);
     #[cfg(feature="vita_renderer")]
     let route_resume=route_session.as_ref().map(|r|r.resume(&store)).transpose()?.flatten();
@@ -767,7 +779,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(not(target_os = "vita"))]
     let bench_resume: Option<save::Loaded> = None;
     let mut opening_requested = options.new_game && options.map == "gvillage";
-    let resume = if let Some(loaded)=route_resume { Some(loaded) } else if let Some(loaded) = bench_resume {
+    // A tape starts like the menu's Chapter choice or a loaded save: never with the opening film.
+    if replay.is_some() { opening_requested = false; }
+    let resume = if let Some(loaded)=route_resume { Some(loaded) } else if let Some(loaded) = replay_resume { Some(loaded) } else if let Some(loaded) = bench_resume {
         Some(loaded)
     } else if let Some(slot) = options.load {
         anyhow::ensure!(
@@ -1348,6 +1362,47 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             paused=false;
         }
+        // One tape step per viewer frame, before any input or frame time is read.
+        if let Some(r) = &mut replay {
+            if r.wants_aim() {
+                let wrap = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                r.aim(npcs.targets().iter().map(|t| {
+                    let d = t.center - player.feet;
+                    (wrap(d.y.atan2(d.x) - yaw), d.truncate().length())
+                }).min_by(|a, b| a.1.total_cmp(&b.1)));
+            }
+            let targets;
+            let probe = match r.due() {
+                None => None,
+                Some(want_state) => {
+                    let gather = std::time::Instant::now();
+                    targets = npcs.targets();
+                    // The host oracle's state set: every snapshot a save or a probe covers.
+                    let state = want_state.then(|| serde_json::to_vec(&serde_json::json!({
+                        "player": player, "stats": stats, "interactions": interactions.snapshot(),
+                        "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
+                        "character": alice.snapshot(), "environment_clock": environment_clock,
+                        "pickup_clock": pickup_clock, "yaw": yaw, "pitch": pitch, "ticks": clock.ticks,
+                    }))).transpose()?;
+                    Some(crate::replay::Probe { map: &maps[current], feet: player.feet, velocity: player.velocity,
+                        yaw, pitch, sanity: stats.sanity(), will: stats.will(), alive: stats.alive(),
+                        weapon: stats.selected(), ticks: clock.ticks, environment_clock, targets: &targets, state,
+                        cost_us: gather.elapsed().as_micros() as u64 })
+                }
+            };
+            match r.begin_step(&maps[current], stats.alive(), probe)? {
+                crate::replay::Step::Run { first: true } => {
+                    // Same input state in a recording and its replay, whatever came before.
+                    input = crate::input::Input::default();
+                    input.suppress();
+                }
+                crate::replay::Step::Run { .. } | crate::replay::Step::Off => {}
+                crate::replay::Step::Finish => {
+                    replay_end = Some(if r.replaying() { "tape-end" } else { "step-limit" });
+                    break;
+                }
+            }
+        }
         #[cfg(not(target_os="vita"))]
         crate::frame_profile::begin_creation_frame();
         #[cfg(target_os = "vita")]
@@ -1445,7 +1500,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let throttle_normal = false;
         #[cfg(target_os = "vita")]
         let throttle_normal = throttle_normal && crate::frame_profile::mode() == crate::frame_profile::Mode::Full;
-        let mut quit_after_frame = is_quit_requested();
+        let mut quit_after_frame = is_quit_requested()
+            || (replay.as_ref().is_some_and(|r| r.replaying()) && macroquad::input::is_quit_requested());
         quit_after_frame |= host_transition == "quit";
         if quit_after_frame && !throttle_normal { break; }
         if physical_input && window_focused() && !console.open && !bench {
@@ -1458,6 +1514,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 menu = false;
                 inventory_menu = false;
                 escape_menu.open(crate::menu::Page::Audio, &preferences, audio.settings);
+            }
+        }
+        // Start ends a recording; the menu then runs on the live pad. A replay never opens it.
+        if escape_menu.page.is_some() {
+            if let Some(r) = replay.as_mut().filter(|r| r.running()) {
+                r.stop("menu")?;
+                if r.replaying() { break; }
             }
         }
         // A modal menu owns its own frames. Render one frozen clean world frame
@@ -1914,6 +1977,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // Retry input; neither may overwrite its selected destination/checkpoint.
         if new_campaign_memory.is_some() || pending_menu_newgame.is_some() { load_requested = None; }
         if let Some(slot) = load_requested {
+            // A load reads the slot as it is now, which a later replay cannot rely on.
+            if let Some(r) = replay.as_mut().filter(|r| r.running()) {
+                r.stop("load")?;
+                if r.replaying() { break; }
+            }
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             if saves_enabled {
@@ -4766,6 +4834,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
     }
+    if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit"))?; }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
     #[cfg(not(target_os = "vita"))]

@@ -2,6 +2,10 @@
 //! even when every gameplay action has been rebound. No original DLL is loaded.
 use crate::preferences::Preferences;
 use macroquad::prelude::*;
+// Recorded or replayed input when a tape is active; otherwise the macroquad calls.
+use crate::replay::input::{
+    get_frame_time, get_time, is_key_down, is_key_pressed, is_mouse_button_down, is_mouse_button_pressed, mouse_wheel,
+};
 use std::collections::HashSet;
 
 pub const KEYS: &[(&str, KeyCode)] = &[
@@ -231,18 +235,11 @@ fn stick(x: i16, y: i16, deadzone: f32) -> Vec2 {
 // Backend W/A/S/D still serves menus/host emulation, but not Vita gameplay movement.
 #[cfg(target_os = "vita")]
 fn vita_sticks(deadzone: f32) -> (Vec2, Vec2) {
-    // VitaSDK psp2common/ctrl.h SceCtrlData (0x20 bytes).
-    #[repr(C)]
-    struct CtrlData { timestamp: u64, buttons: u32, lx: u8, ly: u8, rx: u8, ry: u8, rest: [u8; 16] }
-    const _: [(); 0x20] = [(); std::mem::size_of::<CtrlData>()];
-    #[link(name = "SceCtrl_stub")]
-    extern "C" { fn sceCtrlPeekBufferPositive(port: i32, data: *mut CtrlData, count: i32) -> i32; }
-    let mut data: CtrlData = unsafe { std::mem::zeroed() };
-    let rc = unsafe { sceCtrlPeekBufferPositive(0, &mut data, 1) };
-    if rc <= 0 || data.buttons & 0x10000 != 0 { return (Vec2::ZERO, Vec2::ZERO); }
+    // The SceCtrl read lives in replay::input so a tape can record or supply it.
+    let Some([lx, ly, rx, ry]) = crate::replay::input::vita_pad() else { return (Vec2::ZERO, Vec2::ZERO); };
     let axis = |v: u8| (((v as f32 - 128.) / 127.).clamp(-1., 1.) * 32767.) as i16;
-    (stick(axis(data.lx), -axis(data.ly), deadzone),
-     stick(axis(data.rx), -axis(data.ry), deadzone))
+    (stick(axis(lx), -axis(ly), deadzone),
+     stick(axis(rx), -axis(ry), deadzone))
 }
 
 #[cfg(any(target_os = "vita", test))]

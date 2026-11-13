@@ -262,6 +262,18 @@ pub struct Config {
     pub route_heading_lock:bool,
     /// Input-only diagnostic: recover recorded world wishes without camera waits.
     pub route_world_wish: bool,
+    /// Record a play into this tape file (src/replay). Empty: off. Needs replay_start.
+    pub replay_record: String,
+    /// Replay this tape file instead of the pad. Empty: off.
+    pub replay_play: String,
+    /// Where a recording starts: "save:<slot>" or "chapter:<map>[$<entrance>][@<difficulty>]".
+    pub replay_start: String,
+    /// Steps between check values in a recording.
+    pub replay_check_every: u32,
+    /// Steps between full state hashes in a recording; 0 never.
+    pub replay_state_every: u32,
+    /// End a recording and the game after this many steps; 0 never (a person ends it with Start).
+    pub replay_stop_after: u32,
     pub pvs_cache: bool,
     pub pvs_method: String,
     pub pvs_verify: bool,
@@ -417,6 +429,12 @@ impl Default for Config {
             texture_cache:"off".into(),
             route_heading_lock:true,
             route_world_wish: false,
+            replay_record: String::new(),
+            replay_play: String::new(),
+            replay_start: String::new(),
+            replay_check_every: 30,
+            replay_state_every: 0,
+            replay_stop_after: 0,
             pvs_cache: false,
             pvs_method: "sources".into(),
             pvs_verify: false,
@@ -467,6 +485,9 @@ impl Config {
             && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
     }
     fn validate(&self) -> Result<()> {
+        crate::replay::validate_settings(&crate::replay::Settings { record: self.replay_record.clone(),
+            play: self.replay_play.clone(), start: self.replay_start.clone(), check_every: self.replay_check_every,
+            state_every: self.replay_state_every, stop_after: self.replay_stop_after })?;
         ensure!(!self.audio_offmain || self.audio_pcm_worker, "audio_offmain requires audio_pcm_worker");
         ensure!((160..=191).contains(&self.audio_producer_priority), "audio_producer_priority must be 160..191 (below skin workers)");
         ensure!(matches!(self.audio_producer_affinity,0x10000|0x20000|0x40000), "audio_producer_affinity must select CPU0, CPU1 or CPU2");
@@ -3043,7 +3064,8 @@ mod tests {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            // The replay keys came after RC1; its play files keep them at their off defaults.
+            let mut all: Vec<_> = defaults.as_object().unwrap().keys().filter(|k| !k.starts_with("replay_")).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3094,6 +3116,27 @@ mod tests {
             human.as_object_mut().unwrap().remove(*key);
         }
         assert_eq!(rc1, human);
+    }
+    #[test]
+    fn a2_replay_configs_are_rc1_plus_the_replay_keys() {
+        let parse = |bytes: &[u8]| {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            serde_json::to_value(&c).unwrap()
+        };
+        let rc1 = parse(include_bytes!("../../configs/PL-rc1.json"));
+        let record = parse(include_bytes!("../../configs/PL-a2-record.json"));
+        let replay = parse(include_bytes!("../../configs/PL-a2-replay.json"));
+        assert_eq!((record["replay_record"].as_str(), record["replay_start"].as_str()), (Some("a2-#.lgtape"), Some("chapter:potears2")));
+        assert_eq!(replay["replay_play"], "a2-01.lgtape");
+        for mut v in [record, replay] {
+            assert_eq!(v["log_frame_time_every"], 10, "frame-time rows stay on");
+            for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
+                v[key] = rc1[key].clone();
+            }
+            assert_eq!(v, rc1, "an A2 file differs from PL-rc1.json only in the replay keys");
+        }
     }
     #[test]
     fn r25_human_play_configs_add_three_levers_to_r22() {

@@ -223,13 +223,20 @@ pub struct Loaded {
 pub struct Store {
     pub directory: PathBuf,
     fingerprint: String,
+    /// A replay builds every save as usual but never writes it: the player's saves stay as they were.
+    discard_writes: bool,
 }
 impl Store {
     pub fn new(directory: PathBuf, fingerprint: String) -> Self {
         Self {
             directory,
             fingerprint,
+            discard_writes: false,
         }
+    }
+    pub fn discarding_writes(mut self) -> Self {
+        self.discard_writes = true;
+        self
     }
     fn path(&self, slot: Slot, backup: bool) -> PathBuf {
         self.directory.join(format!(
@@ -300,6 +307,10 @@ impl Store {
         };
         let bytes = serde_json::to_vec(&envelope)?;
         ensure!(bytes.len() as u64 <= LIMIT, "Save exceeds size limit");
+        if self.discard_writes {
+            println!("[lg/replay] save not written slot={} map={} bytes={}", slot.name(), game.current, bytes.len());
+            return Ok(());
+        }
         fs::create_dir_all(&self.directory).context("Cannot create save folder")?;
         let path = self.path(slot, false);
         // Never replace a usable backup with a damaged primary file.
@@ -463,10 +474,10 @@ impl Store {
         latest
     }
     fn finale_store(&self) -> Self {
-        Self::new(
-            self.directory.join("finale-checkpoint"),
-            self.fingerprint.clone(),
-        )
+        Self {
+            discard_writes: self.discard_writes,
+            ..Self::new(self.directory.join("finale-checkpoint"), self.fingerprint.clone())
+        }
     }
     pub fn write_finale_checkpoint(&self, game: &Game) -> Result<()> {
         self.write_finale_checkpoint_with_preview(game, None)
@@ -476,6 +487,10 @@ impl Store {
         self.write_with_preview(Slot::Auto, game, preview)
     }
     pub fn mark_complete(&self) -> Result<()> {
+        if self.discard_writes {
+            println!("[lg/replay] completion marker not written");
+            return Ok(());
+        }
         std::fs::create_dir_all(&self.directory)?;
         let at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
         atomic_write(

@@ -1,6 +1,7 @@
 //! Local in-game command console. Commands never invoke a shell or original scripts.
 pub mod gameplay;
 use macroquad::prelude::*;
+use crate::replay::input::{is_key_down, is_key_pressed};
 use std::collections::VecDeque;
 
 const COMMANDS: &[&str] = &[

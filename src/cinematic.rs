@@ -224,7 +224,8 @@ impl Skip {
         }
     }
     pub fn update(&mut self, scene: Option<&'static str>, active: bool, down: bool) -> bool {
-        self.update_at(scene, active, down, std::time::Instant::now())
+        // Tape time while a recording or replay runs, so a held skip ends on the same step.
+        self.update_at(scene, active, down, crate::replay::input::now())
     }
     fn update_at(&mut self, scene: Option<&'static str>, active: bool, down: bool,
         now: std::time::Instant) -> bool {

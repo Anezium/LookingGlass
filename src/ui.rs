@@ -2,6 +2,7 @@
 use crate::{assets::Assets, bsp, texture};
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::*;
+use crate::replay::input::{mouse_position};
 use std::{
     cell::RefCell,
     rc::{Rc, Weak},
