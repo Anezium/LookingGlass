@@ -57,7 +57,8 @@ title_id = "ALICELG01"
 title_name = "Alice Vita (Looking Glass)"
 build_std = "std,panic_unwind"
 vita_make_fself_flags = ["-s"]
-vita_mksfoex_flags = ["-d", "ATTRIBUTE2=12"]
+# APP_VER is the version LiveArea shows; TITLE stays as is until a person decides it.
+vita_mksfoex_flags = ["-d", "ATTRIBUTE2=12", "-s", "APP_VER=01.00"]
 
 [package.metadata.vita.profile.release]
 # vita-elf-create reads sceUserMainThreadStackSize by name; strip-unneeded removes it.

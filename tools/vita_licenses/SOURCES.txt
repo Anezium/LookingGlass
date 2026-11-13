@@ -1,0 +1,14 @@
+Origin of each licence text in this folder, copied verbatim. Used by tools/vita_notices.py.
+
+vitaGL-COPYING, vitaGL-COPYING.LESSER    Rinnegatamante/vitaGL at dca4b9d, COPYING and COPYING.LESSER
+vitaShaRK-LICENSE                        Rinnegatamante/vitaShaRK at df24065 (tag v.1.7), LICENSE
+SceShaccCgExt-LICENSE                    bythos14/SceShaccCgExt at d3c83ef, LICENSE
+math-neon-LICENSE                        Rinnegatamante/math-neon at 0faab81, header of source/math_neon.h
+taiHEN-LICENSE                           yifanlu/taiHEN at 309b380, LICENSE
+vita-headers-LICENSE.md                  vitasdk/vita-headers at ebc8f4f, LICENSE.md
+newlib-COPYING.NEWLIB, -COPYING.LIBGLOSS vitasdk/newlib at 64aa7aa, COPYING.NEWLIB and COPYING.LIBGLOSS
+pthread-embedded-COPYING, -COPYING.LIB, -COPYING.vita
+                                         vitasdk/pthread-embedded at 11d2e57, COPYING, COPYING.LIB, COPYING.vita
+gcc-COPYING.RUNTIME                      gcc-mirror/gcc at f595792, COPYING.RUNTIME
+symphonia-LICENSE                        pdeljanov/Symphonia tag v0.5.5, LICENSE (the crates ship none)
+dasp-LICENSE-MIT, dasp-LICENSE-APACHE    RustAudio/dasp at d089297, LICENSE-MIT and LICENSE-APACHE (dasp_sample ships none)

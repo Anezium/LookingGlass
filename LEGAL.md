@@ -1,6 +1,6 @@
 # Rights, ownership and distribution notice
 
-Updated 2 October 2026.
+Updated 21 October 2026.
 
 Looking Glass is an independent, unofficial compatibility engine for American
 McGee's Alice. **This project is not endorsed by or affiliated with EA or its
@@ -32,8 +32,11 @@ game or a licence to its content. Compatible game data is required separately.
 
 There are two important distinctions:
 
-- **External downloads:** the published v0.32.0-preview.1 setup offers an
-  optional download from Internet Archive, a third-party service. This transfers
+- **External downloads:** setup offers an optional download from Internet
+  Archive, a third-party service. Setup defaults to local files; downloading
+  requires an explicit selection and a separate entitlement confirmation that
+  defaults to No. Earlier preview packages may still preselect the download
+  when no local files are found. This transfers
   files from that service to the user's computer, not from a project-hosted
   game-data mirror. Neither that option nor a link, compatibility check or
   checksum establishes the uploader's permission or the user's entitlement.
@@ -58,6 +61,20 @@ Third-party software retains its own licences and notices; see
 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) and the notices supplied in
 the Windows package. Nothing here replaces those terms.
 
+## PlayStation Vita port
+
+The PlayStation Vita port in the `vita-*` branches of the Anezium/LookingGlass
+fork is an unofficial community port. It is not reviewed or endorsed by the
+Looking Glass maintainers, and it is not affiliated with EA or Sony Interactive
+Entertainment. Its packages contain no game data, no Internet Archive download
+option and no Sony software: players copy their own game files to
+`ux0:data/alice/base/`, and the shader compiler `libshacccg.suprx` is loaded
+from their own console. The Vita build links third-party libraries statically,
+some of them under the GNU LGPL; their licences, and the files the port changed
+in forked dependencies, are listed in
+[THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt). Concerns about the
+port go to the maintainer of that fork, not to the upstream project.
+
 ## Using game data and contributing
 
 Users must obtain and use compatible game files in accordance with the rights
@@ -68,7 +85,7 @@ law or the terms governing the original game.
 
 Do not upload original game files, extracted assets, proprietary code,
 decompiler dumps or personal saves to this repository or its issue tracker.
-The [contribution guidance](https://github.com/skulitom/LookingGlass/blob/main/CONTRIBUTING.md)
+The [contribution guidance](https://github.com/looking-glass-project/LookingGlass/blob/main/CONTRIBUTING.md)
 describes the source boundary.
 
 ## Warranty and scope of this notice
@@ -86,7 +103,7 @@ by themselves establish that every use or distribution is lawful.
 ## Rights-holder concerns
 
 Rights holders or their authorised representatives can report a concern through
-the [project issue tracker](https://github.com/skulitom/LookingGlass/issues).
+the [project issue tracker](https://github.com/looking-glass-project/LookingGlass/issues).
 Please identify the material, its project URL, the rights concerned and the
 requested action. Do not attach confidential information or original game data
 to a public report. Reports will be reviewed, and material may be restricted or
