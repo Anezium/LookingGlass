@@ -916,6 +916,11 @@ pub fn register(
             textures: vec![base.clone()],
         });
     }
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    if let Some(name) = names.first() {
+        crate::sim_maps::probe::draw_query::label_texture(base.raw_miniquad_id(), name);
+        for t in layers.iter().flat_map(|l| &l.textures) { crate::sim_maps::probe::draw_query::label_texture(t.raw_miniquad_id(), name); }
+    }
     let surface = Rc::new(Surface {
         preserve_skin: layers.iter().any(|l| skin_stage_needs_normals(&l.stage)),
         layers,

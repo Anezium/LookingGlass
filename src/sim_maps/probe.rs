@@ -553,6 +553,27 @@ pub mod draw_query {
             7 => "Invisible".into(), 8 => "AlphaColor".into(), _ => format!("Factors({index})"),
         }
     }
+    thread_local! {
+        static LABELS: RefCell<std::collections::HashMap<macroquad::miniquad::TextureId, (String, bool)>> = RefCell::default();
+        static PROP_SCOPE: Cell<bool> = const { Cell::new(false) };
+    }
+    /// Census only: a surface texture by the first name it was registered under, and whether a
+    /// Prop (a weapon, an attachment, a level object) registered it.
+    pub fn label_texture(id: macroquad::miniquad::TextureId, name: &str) {
+        if !active() { return; }
+        let prop = PROP_SCOPE.with(Cell::get);
+        LABELS.with(|labels| { labels.borrow_mut().entry(id).or_insert_with(|| (name.to_string(), prop)); });
+    }
+    /// Textures registered while this lives belong to a Prop.
+    pub struct PropScope(bool);
+    pub fn prop_scope() -> PropScope { PropScope(PROP_SCOPE.with(|s| s.replace(true))) }
+    impl Drop for PropScope { fn drop(&mut self) { PROP_SCOPE.with(|s| s.set(self.0)); } }
+    /// Whether an actor-pass texture is a Prop's, and its name. Looks only on an armed frame.
+    pub fn actor_label(texture: Option<macroquad::miniquad::TextureId>) -> (bool, Option<String>) {
+        if !armed() { return (false, None); }
+        texture.and_then(|id| LABELS.with(|labels| labels.borrow().get(&id).cloned()))
+            .map_or((false, None), |(name, prop)| (prop, Some(name)))
+    }
     /// Attach the submitting pass to the draw that follows. Never allocates unless armed.
     pub fn mark(pass: &'static str, class: &'static str, blend: usize, group: Option<usize>,
                 alpha_test: u8, texture_name: Option<&str>) {

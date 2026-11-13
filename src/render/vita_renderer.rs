@@ -11,6 +11,7 @@ mod state_cache;
 mod submit;
 mod world_list;
 mod gxm;
+mod draw_cuts;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -229,6 +230,19 @@ pub struct Config {
     pub skin_frustum_cull: bool,
     /// Conservative center/extent clip-plane test and identity bounds shortcut.
     pub fast_frustum: bool,
+    /// Actor, prop and FX packets whose vertex bounds lie wholly outside the view frustum are
+    /// neither uploaded nor drawn. Their vertices are in world space and the actor program's
+    /// model matrix is the identity, so no pixel changes. Default off.
+    pub packet_frustum_cull: bool,
+    /// Actor, prop and FX packets whose screen rectangle is shorter than this many pixels of the
+    /// 960x544 screen on its longer side are neither uploaded nor drawn. Changes pixels. 0 is off.
+    pub packet_min_pixels: f32,
+    /// The same size test for world groups, opaque and alpha. Changes pixels. 0 is off.
+    pub world_min_pixels: f32,
+    /// Opaque world draws in rank order: draws without alpha test first, grouped by pipeline and
+    /// texture and front to back inside one texture, then alpha-tested draws front to back.
+    /// Only coplanar draws at equal depth can change the picture. Default off.
+    pub world_texture_sort: bool,
     pub flat_actor_light: bool,
     pub max_texture_dimension: Option<u16>,
     pub draw_distance_cap: Option<f32>,
@@ -423,6 +437,7 @@ impl Default for Config {
             bone_palette: false,
             skin_frustum_cull: true,
             fast_frustum: true,
+            packet_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
             flat_actor_light: false, max_texture_dimension: None,
             draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             gpu_state_probe: false,
@@ -521,6 +536,8 @@ impl Config {
         ensure!(matches!(self.preview_flip.as_str(), "auto" | "on" | "off"), "preview_flip must be auto, on or off");
         ensure!(self.max_texture_dimension.is_none_or(|n| (16..=512).contains(&n)), "max_texture_dimension must be null or 16..512");
         ensure!(self.draw_distance_cap.is_none_or(|n| n.is_finite() && (128. ..=30000.).contains(&n)), "draw_distance_cap must be null or 128..30000");
+        ensure!(self.packet_min_pixels.is_finite() && (0. ..=64.).contains(&self.packet_min_pixels), "packet_min_pixels must be 0 to 64");
+        ensure!(self.world_min_pixels.is_finite() && (0. ..=64.).contains(&self.world_min_pixels), "world_min_pixels must be 0 to 64");
         ensure!(
             matches!(self.renderer.as_str(), "vita" | "legacy"),
             "renderer must be vita or legacy"
@@ -1064,6 +1081,7 @@ pub struct Renderer {
     visibility: Vec<(u64, Option<(f32, Mat4)>)>,
     models: Vec<Option<Mat4>>,
     schedule: submit::Schedule,
+    texture_sort: draw_cuts::TextureSort,
     list: Option<world_list::WorldList>,
     gxm: Box<gxm::State>,
 }
@@ -1543,6 +1561,7 @@ impl Renderer {
             models: vec![None; groups.len()],
             world_buffers: buffers,
             schedule: submit::Schedule::default(),
+            texture_sort: draw_cuts::TextureSort::default(),
             groups,
             pvs,
             pipelines,
@@ -1598,6 +1617,7 @@ impl Renderer {
         }
         let mut tests = 0u64;
         let mut hits = 0u64;
+        let world_min = config().world_min_pixels;
         let list_submit = !alpha && self.list.is_some();
         if list_submit {
             let list = self.list.as_mut().unwrap();
@@ -1613,7 +1633,8 @@ impl Renderer {
                 let g = &self.groups[id];
                 let result = model_matrix(&g.recipe, time, transforms).and_then(|model| {
                     tests += 1;
-                    in_frustum(projection * model, g.min, g.max).then(|| {
+                    let m = projection * model;
+                    (in_frustum(m, g.min, g.max) && !draw_cuts::below_pixels(m, g.min, g.max, world_min)).then(|| {
                         let depth = if crate::render_fx::retained_active() {
                             crate::render_fx::group_depth(model.transform_point3(g.center))
                         } else { (model.transform_point3(g.center) - eye).length_squared() };
@@ -1638,7 +1659,8 @@ impl Renderer {
             } else {
                 let result = model_matrix(&g.recipe, time, transforms).and_then(|model| {
                     tests += 1;
-                    in_frustum(projection * model, g.min, g.max).then(|| {
+                    let m = projection * model;
+                    (in_frustum(m, g.min, g.max) && !draw_cuts::below_pixels(m, g.min, g.max, world_min)).then(|| {
                         let depth = if crate::render_fx::retained_active() {
                             crate::render_fx::group_depth(model.transform_point3(g.center))
                         } else { (model.transform_point3(g.center) - eye).length_squared() };
@@ -1658,7 +1680,9 @@ impl Renderer {
         drop(visibility_span);
         drop(census_visibility);
         if alpha && !config().world_alpha {self.alpha_order.clear();}
-        if !alpha && config().opaque_order=="front_to_back" {
+        if !alpha && config().world_texture_sort {
+            self.texture_sort.apply(&mut self.alpha_order, &self.groups);
+        } else if !alpha && config().opaque_order=="front_to_back" {
             if list_submit { self.list.as_mut().unwrap().sort.apply(&mut self.alpha_order); }
             else { self.alpha_order.sort_unstable_by(|a,b|a.0.total_cmp(&b.0).then_with(||a.1.cmp(&b.1))); }
         }
@@ -3104,8 +3128,10 @@ mod tests {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            // The replay keys came after RC1; its play files keep them at their off defaults.
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().filter(|k| !k.starts_with("replay_")).cloned().collect();
+            // The replay keys and the A5 draw keys came after RC1; its play files keep them at their off defaults.
+            const A5: [&str; 4] = ["packet_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort"];
+            let mut all: Vec<_> = defaults.as_object().unwrap().keys()
+                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str())).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3209,6 +3235,66 @@ mod tests {
                 variant[key] = rc2[key].clone();
             }
             assert_eq!(variant, rc2, "a variant differs from PL-rc2 only in its own keys");
+        }
+    }
+    #[test]
+    fn a5_draw_cut_keys_default_off_and_validate() {
+        let c = Config::default();
+        assert!(!c.packet_frustum_cull && !c.world_texture_sort);
+        assert_eq!((c.packet_min_pixels, c.world_min_pixels), (0., 0.));
+        for key in ["packet_min_pixels", "world_min_pixels"] {
+            for good in [0., 6., 64.] {
+                let c: Config = serde_json::from_value(serde_json::json!({key: good})).unwrap();
+                c.validate().unwrap();
+            }
+            for bad in [-1., 64.5, 1e9] {
+                let c: Config = serde_json::from_value(serde_json::json!({key: bad})).unwrap();
+                assert!(c.validate().is_err(), "{key}={bad}");
+            }
+            assert!(serde_json::from_value::<Config>(serde_json::json!({key: true})).is_err());
+        }
+        for key in ["packet_frustum_cull", "world_texture_sort"] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({key: 1})).is_err(), "{key}");
+            let c: Config = serde_json::from_value(serde_json::json!({key: true})).unwrap();
+            c.validate().unwrap();
+        }
+        let printed = config_log_lines(&Config::default())[0].clone();
+        for key in ["packet_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort"] {
+            assert!(printed.contains(&format!("\"{key}\"")), "{key} is printed");
+        }
+    }
+    #[test]
+    fn a5_draw_configs_differ_from_rc2_only_in_their_keys() {
+        let parse = |bytes: &[u8]| {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
+            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            written.sort(); all.sort();
+            assert_eq!(written, all, "an A5 config must write every runtime key");
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            serde_json::to_value(&c).unwrap()
+        };
+        let rc2 = parse(include_bytes!("../../configs/PL-rc2.json"));
+        for key in ["packet_frustum_cull", "world_texture_sort"] { assert_eq!(rc2[key], false, "{key} off in RC2"); }
+        for key in ["packet_min_pixels", "world_min_pixels"] { assert_eq!(rc2[key], 0., "{key} off in RC2"); }
+        let all = vec![("packet_frustum_cull", serde_json::json!(true)), ("packet_min_pixels", serde_json::json!(6.)),
+            ("world_min_pixels", serde_json::json!(6.)), ("world_texture_sort", serde_json::json!(true))];
+        for (bytes, keys) in [
+            (&include_bytes!("../../configs/PL-rc2-a5-packet-frustum.json")[..], vec![all[0].clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-packet-min6.json")[..], vec![all[1].clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-world-min6.json")[..], vec![all[2].clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-texture-sort.json")[..], vec![all[3].clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-all.json")[..], all.clone()),
+        ] {
+            let mut variant = parse(bytes);
+            for (key, value) in keys {
+                assert_eq!(variant[key], value, "{key}");
+                variant[key] = rc2[key].clone();
+            }
+            assert_eq!(variant, rc2, "an A5 file differs from PL-rc2 only in its own keys");
         }
     }
     #[test]

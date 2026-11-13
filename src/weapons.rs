@@ -982,6 +982,8 @@ impl Prop {
             let image = texture::decode(assets, &path)?;
             let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
             tex.set_filter(FilterMode::Linear);
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _census = crate::sim_maps::probe::draw_query::prop_scope();
             material_layers.push(crate::render_fx::register(
                 assets,
                 &tex,

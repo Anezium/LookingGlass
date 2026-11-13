@@ -6,6 +6,7 @@ use crate::light_profile::InactiveInstant as MetricInstant;
 use std::time::Instant as MetricInstant;
 pub(super) mod state_cache;
 pub(super) mod world_puffs;
+mod packet_cull;
 use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
 use super::{Frame, Pass, FRAME};
 use crate::environment::Atmosphere;
@@ -348,6 +349,7 @@ pub(crate) struct Gpu {
     merge_cache: [MergeCache; 4],
     merge_meshes: [BTreeMap<usize, super::prepared::Geometry>; 2],
     puff_batches: [world_puffs::Bank; 2],
+    bounds: packet_cull::Bounds,
 }
 impl Gpu {
     pub(crate) fn new() -> Result<Self> {
@@ -387,6 +389,7 @@ impl Gpu {
             merge_cache: Default::default(),
             merge_meshes: Default::default(),
             puff_batches: Default::default(),
+            bounds: Default::default(),
         };
         // Pipeline objects share the one compiled program. Prewarm every LG blend
         // and depth key so first use of the held Blade does not create one later.
@@ -571,9 +574,12 @@ impl Gpu {
         }
         if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        crate::sim_maps::probe::draw_query::mark(
-            if p.effect {"fx"} else {"actors"}, if p.effect {"fx"} else {"actor"},
-            p.blend_index, None, 0, None);
+        {
+            let (prop, name) = crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id));
+            crate::sim_maps::probe::draw_query::mark(
+                if p.effect {"fx"} else {"actors"}, if p.effect {"fx"} else if prop {"prop"} else {"actor"},
+                p.blend_index, None, 0, name.as_deref());
+        }
         #[cfg(all(feature="sim_maps_probe",target_os="macos"))]
         if crate::sim_maps::probe::skin_proof() {
             let m=p.geometry();
@@ -1157,6 +1163,14 @@ pub(crate) fn finish_world(
     if flush {
         boundary("flush_vita_3d_packets");
     }
+    let cuts = packet_cull::Cuts::new(crate::render::vita_renderer::config());
+    if cuts.active() {
+        if let Some(matrix) = FRAME.with(|f| f.borrow().projection) {
+            let _span = crate::frame_profile::span("vita_fx_packet_cut");
+            let c = crate::render::vita_renderer::config();
+            packet_cull::cull(&mut gpu.bounds, &mut groups, &mut puffs, matrix, cuts, c.actor_layer_reuse || c.actor_single_prepare);
+        }
+    }
     let preparation_started = MetricInstant::now();
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let preparation_span = crate::frame_profile::span("fx_finish_prepare");
@@ -1228,7 +1242,7 @@ pub(crate) fn finish_world(
         let _timer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Merge);
         let _span = crate::frame_profile::span("vita_fx_merge_groups");
         let mut opaque = std::mem::take(&mut gpu.opaque_storage); opaque.clear();
-        opaque.extend(groups.iter().enumerate().filter(|(_,g)| !g.transparent).map(|(id,_)| (0.,Source::Actor(id))));
+        opaque.extend(groups.iter().enumerate().filter(|(_,g)| !g.transparent && !(cuts.active() && g.passes.is_empty())).map(|(id,_)| (0.,Source::Actor(id))));
         for (which, order) in [&mut list, &mut opaque].into_iter().enumerate() {
             let destinations = merge_cached(
                 &mut gpu.merge_cache[gpu.ring_phase * 2 + which],

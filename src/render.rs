@@ -382,6 +382,22 @@ fn corner_outside_matrix(m: Mat4, min: Vec3, max: Vec3) -> bool {
     .map(|p| m * p.extend(1.));
     (0..3).any(|a| points.iter().all(|p| p[a] < -p.w) || points.iter().all(|p| p[a] > p.w))
 }
+/// The longer side, in pixels of the 960x544 screen, of the screen rectangle around a box seen
+/// through `m`. None when a corner is not in front of the eye, so the rectangle is unbounded.
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn projected_pixels(m: Mat4, min: Vec3, max: Vec3) -> Option<f32> {
+    let (mut lo, mut hi) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+    for i in 0..8 {
+        let corner = vec3(if i & 1 == 0 { min.x } else { max.x }, if i & 2 == 0 { min.y } else { max.y },
+            if i & 4 == 0 { min.z } else { max.z });
+        let clip = m * corner.extend(1.);
+        if !clip.is_finite() || clip.w <= 1e-3 { return None; }
+        let ndc = clip.truncate().truncate() / clip.w;
+        lo = lo.min(ndc);
+        hi = hi.max(ndc);
+    }
+    Some(((hi - lo) * vec2(480., 272.)).max_element())
+}
 // Adapted from NextOs-Ports/Looking-Glass-NextOS 668de14 (felc18-blip).
 fn aabb_outside_matrix(m: Mat4, min: Vec3, max: Vec3) -> bool {
     if !(m.is_finite() && min.is_finite() && max.is_finite()) { return false; }
