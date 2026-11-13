@@ -2985,6 +2985,27 @@ mod tests {
         assert!(serde_json::from_str::<Config>(r#"{"audio_offmain":"on"}"#).is_err());
     }
     #[test]
+    fn a3_loading_config_is_rc1_with_the_two_load_keys_on() {
+        let (rc1, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc1.json")).unwrap();
+        assert!(rejected.is_none());
+        let bytes = include_bytes!("../../configs/PL-a3-loading.json");
+        let (a3, rejected) = parse_runtime_config(bytes).unwrap();
+        assert!(rejected.is_none());
+        a3.validate().unwrap();
+        let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let all = serde_json::to_value(Config::default()).unwrap();
+        let keys = |v: &serde_json::Value| { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+        assert_eq!(keys(&written), keys(&all), "the A3 config writes every runtime key");
+        assert!(!rc1.loading_screen && !rc1.collision_geometry_share, "RC1 keeps both off");
+        assert!(a3.loading_screen && a3.collision_geometry_share);
+        let (mut rc1, mut a3) = (serde_json::to_value(&rc1).unwrap(), serde_json::to_value(&a3).unwrap());
+        for key in ["loading_screen", "collision_geometry_share"] {
+            rc1.as_object_mut().unwrap().remove(key);
+            a3.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(a3, rc1, "the A3 file differs from PL-rc1 only in the two load keys");
+    }
+    #[test]
     fn packaged_r3_config_contains_exactly_all_runtime_defaults() {
         let bytes = include_bytes!("../../configs/PL-def-r3.json");
         let c: Config = serde_json::from_slice(bytes).unwrap();
