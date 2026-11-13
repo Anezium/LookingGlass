@@ -613,6 +613,12 @@ fn run() -> Result<()> {
                     args.next().context("--fog-view-capture requires an output folder")?,
                 ));
             }
+            "--fidelity-view-pick" => {
+                mode = "fidelity-view-pick";
+                water_view_dir = Some(std::path::PathBuf::from(
+                    args.next().context("--fidelity-view-pick requires an output file")?,
+                ));
+            }
             "--render-fx-check" => mode = "render-fx",
             "--billboard-check" => mode = "billboard",
             "--sky-performance-check" => mode = "sky-performance",
@@ -1624,6 +1630,11 @@ fn run() -> Result<()> {
     if mode == "physics" {
         let map = Bsp::parse(&assets.read(&format!("maps/{}.bsp", o.map))?)?;
         return movement::check_map(&map);
+    }
+    #[cfg(not(target_os = "vita"))]
+    if mode == "fidelity-view-pick" {
+        let out = water_view_dir.clone().context("--fidelity-view-pick requires an output file")?;
+        return render::fidelity_view::pick(&mut assets, &out);
     }
     if mode == "inspect" {
         let map = Bsp::parse(&assets.read(&format!("maps/{}.bsp", o.map))?)?;

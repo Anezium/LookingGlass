@@ -54,6 +54,8 @@
   "water_normals": true,
   "low_fog": false,
   "fog_sky": false,
+  "exact_blends": false,
+  "detail_layers": false,
   "cell_size": 256.0,
   "alpha_interop": true,
   "actor_max_layers": 2,

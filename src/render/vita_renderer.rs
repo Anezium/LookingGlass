@@ -223,6 +223,19 @@ pub struct Config {
     /// outlines fully fogged geometry against a brighter sky. No effect with `authored_sky`,
     /// `sky: false` or on a map without distance fog. Default off.
     pub fog_sky: bool,
+    /// Draw world layers whose blend the five world blend classes only approximate with the
+    /// desktop renderer's exact GL factors: `GL_DST_COLOR GL_ONE` (drawn as additive),
+    /// `GL_SRC_ALPHA GL_SRC_COLOR` and every other factor pair (drawn as alpha), such as the
+    /// green slime, `flatwater`, `darkflowingwater1`, grates and hanging moss. Each such blend
+    /// used by the map gets its own pipeline class from 5 on, so the draws stay the same and
+    /// only their pipelines change. Off keeps the RC3 classes. Default off.
+    pub exact_blends: bool,
+    /// Keep world `detail` stages (the fine texture tiled over walls and floors, such as the
+    /// garden4 ice, keep stone and skool2 wood) as a layer instead of dropping them. They still
+    /// count against `max_layers`; on most surfaces the detail stage is the second layer, since
+    /// the world program applies the lightmap itself. Each kept stage is one more draw of its
+    /// surface. Off keeps the RC3 world, which drops them. Default off.
+    pub detail_layers: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -470,6 +483,8 @@ impl Default for Config {
             water_normals: false,
             low_fog: false,
             fog_sky: false,
+            exact_blends: false,
+            detail_layers: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
@@ -1143,6 +1158,21 @@ pub struct Renderer {
     list: Option<world_list::WorldList>,
     gxm: Box<gxm::State>,
 }
+/// Blend classes every world renderer has; `exact_blends` adds classes from here on.
+const WORLD_BLEND_CLASSES: usize = 5;
+/// Blends the five world classes draw with other factors (see `blend_class`).
+fn approximated_blend(blend: Blend) -> bool {
+    matches!(blend, Blend::ColorAdd | Blend::AlphaColor | Blend::Factors(..))
+}
+/// The fog mode of an `exact_blends` class, as the desktop renderer picks it, except
+/// `AlphaColor`, whose desktop fade toward white has no counterpart in the world program: it
+/// fades toward black like the additive layers.
+fn exact_fog_mode(blend: Blend) -> f32 {
+    match blend {
+        Blend::ColorAdd | Blend::AlphaColor => 1.,
+        _ => 0.,
+    }
+}
 /// The world pipelines' blend, per blend class.
 fn world_blend(class: usize) -> Option<BlendState> {
     match class {
@@ -1218,6 +1248,8 @@ impl Renderer {
         let mut keys: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut recipes_ms=0.;let mut chunks_ms=0.;let mut source_chunks=0;
         let mut dropped_layers = 0;
+        // `exact_blends`: the blends of pipeline classes WORLD_BLEND_CLASSES and up, in first-seen order.
+        let mut exact_blends: Vec<Blend> = Vec::new();
         let mut frozen_deforms = 0;
         let mut frozen_models = 0;
         let (mut wave_normal_layers, mut wave_normal_triangles, mut wave_normal_skipped) = (0, 0, 0);
@@ -1234,7 +1266,7 @@ impl Renderer {
                 + b.deforms.len().saturating_sub(1);
             let mut rank = 0;
             for layer in &b.layers {
-                if layer.spec.blend == Blend::Invisible || layer.spec.detail {
+                if layer.spec.blend == Blend::Invisible || (layer.spec.detail && !c.detail_layers) {
                     dropped_layers += 1;
                     continue;
                 }
@@ -1269,7 +1301,14 @@ impl Renderer {
                     textures: layer.textures.clone(),
                     lit: layer.lit,
                     rank,
-                    blend: blend_class(layer.spec.blend),
+                    blend: if c.exact_blends && approximated_blend(layer.spec.blend) {
+                        WORLD_BLEND_CLASSES + exact_blends.iter().position(|&b| b == layer.spec.blend).unwrap_or_else(|| {
+                            exact_blends.push(layer.spec.blend);
+                            exact_blends.len() - 1
+                        })
+                    } else {
+                        blend_class(layer.spec.blend)
+                    },
                     opaque: opaque_stage(&layer.spec),
                     cull: match b.face_side {
                         FaceSide::Both => 0,
@@ -1411,8 +1450,13 @@ impl Renderer {
             VertexAttribute::new("normal", VertexFormat::Float3),
         ];
         let mut pipelines = Vec::new();
-        for blend in 0..5 {
-            let state = world_blend(blend);
+        if !exact_blends.is_empty() {
+            println!("[lg/vita-renderer] exact_blends={:?}", exact_blends);
+        }
+        let blend_states: Vec<Option<BlendState>> = (0..WORLD_BLEND_CLASSES).map(world_blend)
+            .chain(exact_blends.iter().map(|&b| crate::render::blend(crate::render::blend_index(b))))
+            .collect();
+        for &state in &blend_states {
             for cull in [CullFace::Nothing, CullFace::Back, CullFace::Front] {
                 crate::frame_profile::pipeline_creation();
                 pipelines.push(ctx.new_pipeline(
@@ -1465,8 +1509,7 @@ impl Renderer {
             resources.shaders.push(lite);
             // Same blend classes as the world pipelines, in the same order.
             let mut lite_pipelines = Vec::new();
-            for blend in 0..5 {
-                let state = world_blend(blend);
+            for &state in &blend_states {
                 lite_pipelines.extend(alpha_fill::pipelines(ctx, lite, &attributes, state, state));
             }
             resources.pipelines.extend(lite_pipelines.iter().copied());
@@ -2630,6 +2673,7 @@ fn uniforms(
                 2 => 1.,
                 3 => 2.,
                 4 => 3.,
+                b if b >= WORLD_BLEND_CLASSES => exact_fog_mode(s.blend),
                 _ => 0.,
             },
             0.,
@@ -3317,12 +3361,12 @@ mod tests {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            // The replay keys, the A5 draw and fill keys, water_normals and the fog keys came after RC1; its play files keep them
+            // The replay keys, the A5 draw and fill keys, water_normals, the fog keys, exact_blends and detail_layers came after RC1; its play files keep them
             // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
                 "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
-                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky").cloned().collect();
+                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers").cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3450,7 +3494,7 @@ mod tests {
         let defaults = serde_json::to_value(Config::default()).unwrap();
         // Keys added after RC2 that RC3 leaves at their off defaults.
         for key in ["packet_min_pixels", "world_min_pixels", "world_texture_sort", "water_stage_merge", "world_alpha_lite",
-            "fx_lite", "fx_add_max_area", "water_normals", "low_fog", "fog_sky"] {
+            "fx_lite", "fx_add_max_area", "water_normals", "low_fog", "fog_sky", "exact_blends", "detail_layers"] {
             assert_eq!(rc3[key], defaults[key], "{key} off in RC3");
         }
         for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
@@ -3468,6 +3512,10 @@ mod tests {
                 ("world_alpha_lite", serde_json::json!(true)), ("fx_lite", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-water.json")[..], vec![("water_normals", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-fog.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-fidelity.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("exact_blends", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-detail.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("exact_blends", serde_json::json!(true)), ("detail_layers", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-resolve.json")[..], vec![("scaled_target", serde_json::json!("resolve"))]),
             (&include_bytes!("../../configs/PL-rc3-record.json")[..], vec![("replay_record", serde_json::json!("a2-#.lgtape")),
                 ("replay_start", serde_json::json!("chapter:potears2"))]),
@@ -3646,6 +3694,36 @@ mod tests {
         assert_ne!(on, shader::VERTEX);
         assert!(on.contains("}else if(Deform.x>2.5&&Deform.x<3.5){") && on.contains("if(Deform.x>3.5){"));
         assert!(on.contains("vec3 n=(Model*vec4(rippled,0.0)).xyz;"), "the environment and dot terms read the rippled normal");
+    }
+    #[test]
+    fn detail_layers_defaults_off_and_parses_as_a_bool() {
+        assert!(!Config::default().detail_layers, "detail_layers defaults off");
+        assert!(serde_json::from_str::<Config>(r#"{"detail_layers":"on"}"#).is_err());
+        assert!(serde_json::from_str::<Config>(r#"{"detail_layers":true}"#).unwrap().detail_layers);
+    }
+    #[test]
+    fn exact_blends_off_keeps_the_five_classes_and_on_draws_the_desktop_factors() {
+        assert!(!Config::default().exact_blends, "exact_blends defaults off");
+        assert!(serde_json::from_str::<Config>(r#"{"exact_blends":"on"}"#).is_err());
+        // Off: the classes RC3 draws these blends with.
+        assert_eq!(blend_class(Blend::ColorAdd), 2);
+        assert_eq!(blend_class(Blend::AlphaColor), 1);
+        assert_eq!(blend_class(Blend::Factors(1, 2)), 1);
+        for b in [Blend::Opaque, Blend::Alpha, Blend::Add, Blend::AlphaAdd, Blend::Filter, Blend::DoubleFilter, Blend::Invisible] {
+            assert!(!approximated_blend(b), "{b:?} keeps its class");
+        }
+        for b in [Blend::ColorAdd, Blend::AlphaColor, Blend::Factors(1, 2), Blend::Factors(4, 7), Blend::Factors(7, 1)] {
+            assert!(approximated_blend(b), "{b:?} gets an exact class");
+        }
+        // On: the desktop renderer's factors.
+        let state = |b| format!("{:?}", crate::render::blend(crate::render::blend_index(b)).unwrap());
+        let want = |s, d| format!("{:?}", BlendState::new(Equation::Add, s, d));
+        assert_eq!(state(Blend::ColorAdd), want(BlendFactor::Value(BlendValue::DestinationColor), BlendFactor::One));
+        assert_eq!(state(Blend::AlphaColor), want(BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::Value(BlendValue::SourceColor)));
+        assert_eq!(state(Blend::Factors(1, 2)), want(BlendFactor::One, BlendFactor::Value(BlendValue::SourceColor)));
+        assert_eq!(state(Blend::Factors(4, 7)),
+            want(BlendFactor::Value(BlendValue::DestinationColor), BlendFactor::OneMinusValue(BlendValue::SourceAlpha)));
+        assert_eq!((exact_fog_mode(Blend::ColorAdd), exact_fog_mode(Blend::AlphaColor), exact_fog_mode(Blend::Factors(1, 2))), (1., 1., 0.));
     }
     #[test]
     fn low_fog_off_keeps_the_rc3_low_program_and_on_keeps_the_full_fog() {

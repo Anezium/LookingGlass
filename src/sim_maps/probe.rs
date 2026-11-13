@@ -342,6 +342,20 @@ fn fixed_view()->Option<(glam::Vec3,glam::Vec3)> {
         Some((glam::vec3(v[0],v[1],v[2]),glam::vec3(v[3],v[4],v[5])))
     })
 }
+/// `LOOKING_GLASS_FIXED_VIEWS="f ex ey ez tx ty tz;f ..."` pins the render camera from frame `f`
+/// on to each listed view in turn, so one run can photograph several spots of a map. Frames
+/// before the first `f` keep the game camera. Simulation inputs are unchanged.
+fn fixed_views(frame:u64)->Option<(glam::Vec3,glam::Vec3)> {
+    static VIEWS:OnceLock<Vec<(u64,glam::Vec3,glam::Vec3)>>=OnceLock::new();
+    VIEWS.get_or_init(||{
+        let Ok(text)=std::env::var("LOOKING_GLASS_FIXED_VIEWS") else { return Vec::new() };
+        text.split(';').filter(|v|!v.trim().is_empty()).map(|v|{
+            let n:Vec<f32>=v.split_whitespace().map(|s|s.parse().expect("LOOKING_GLASS_FIXED_VIEWS takes numbers")).collect();
+            assert_eq!(n.len(),7,"each LOOKING_GLASS_FIXED_VIEWS entry takes a frame and six numbers");
+            (n[0] as u64,glam::vec3(n[1],n[2],n[3]),glam::vec3(n[4],n[5],n[6]))
+        }).collect()
+    }).iter().rev().find(|(from,_,_)|frame>=*from).map(|&(_,eye,target)|(eye,target))
+}
 /// `LOOKING_GLASS_SHOT_FRAMES="a,b,c"` keeps those frames as `shots/frame-NNNN.png`.
 #[cfg(not(target_os = "vita"))]
 pub fn shot(frame: u64) -> anyhow::Result<()> {
@@ -355,7 +369,7 @@ pub fn shot(frame: u64) -> anyhow::Result<()> {
 }
 /// Host-only view motion leaves simulation inputs untouched.
 pub fn moving_view(frame:u64,eye:glam::Vec3,target:glam::Vec3)->(glam::Vec3,glam::Vec3) {
-    if enabled() { if let Some(view)=fixed_view() { return view; } }
+    if enabled() { if let Some(view)=fixed_view().or_else(||fixed_views(frame)) { return view; } }
     static ON:OnceLock<bool>=OnceLock::new();
     if !enabled() || !*ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_MOVING_VIEW").is_some()) {return (eye,target);}
     let t=frame as f32*0.037;let offset=glam::vec3(t.sin()*28.,t.cos()*21.,(t*0.7).sin()*12.);

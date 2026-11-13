@@ -41,6 +41,8 @@ pub use water_view::capture as capture_water_views;
 mod fog_view;
 #[cfg(not(target_os = "vita"))]
 pub use fog_view::capture as capture_fog_views;
+#[cfg(not(target_os = "vita"))]
+pub(crate) mod fidelity_view;
 mod camera_portal;
 #[cfg(feature = "vita_renderer")]
 pub(crate) mod vita_renderer;
