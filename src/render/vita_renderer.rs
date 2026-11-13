@@ -3411,6 +3411,58 @@ mod tests {
         }
     }
     #[test]
+    fn rc3_play_configs_are_rc2_plus_the_rc3_keys() {
+        // Default file: PL-rc3.json. Each variant differs from it only in the keys listed below.
+        let parse = |bytes: &[u8]| {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
+            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            written.sort(); all.sort();
+            assert_eq!(written, all, "an RC3 config must write every runtime key");
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            assert_eq!(c.log_frame_time_every, Some(10), "frame-time rows every ten frames stay on");
+            assert_eq!(c.render_scale, 0.75);
+            serde_json::to_value(&c).unwrap()
+        };
+        let rc3 = parse(include_bytes!("../../configs/PL-rc3.json"));
+        let mut rc2 = parse(include_bytes!("../../configs/PL-rc2.json"));
+        let defaults = serde_json::to_value(Config::default()).unwrap();
+        // Keys added after RC2 that RC3 leaves at their off defaults.
+        for key in ["packet_min_pixels", "world_min_pixels", "world_texture_sort", "water_stage_merge", "world_alpha_lite",
+            "fx_lite", "fx_add_max_area", "water_normals"] {
+            assert_eq!(rc3[key], defaults[key], "{key} off in RC3");
+        }
+        for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
+            assert_eq!(rc3[key], defaults[key], "{key} off in RC3");
+        }
+        // RC3 = RC2 plus the three reviewed cuts and the direct scaled target.
+        for (key, value) in [("packet_frustum_cull", serde_json::json!(true)), ("prop_frustum_cull", serde_json::json!(true)),
+            ("fx_add_zero_alpha_cut", serde_json::json!(true)), ("scaled_target", serde_json::json!("direct"))] {
+            assert_eq!(rc3[key], value, "{key} in RC3");
+            rc2[key] = value;
+        }
+        assert_eq!(rc3, rc2, "PL-rc3 differs from PL-rc2 only in the RC3 keys");
+        for (bytes, keys) in [
+            (&include_bytes!("../../configs/PL-rc3-fill.json")[..], vec![("water_stage_merge", serde_json::json!("merge")),
+                ("world_alpha_lite", serde_json::json!(true)), ("fx_lite", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-water.json")[..], vec![("water_normals", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-resolve.json")[..], vec![("scaled_target", serde_json::json!("resolve"))]),
+            (&include_bytes!("../../configs/PL-rc3-record.json")[..], vec![("replay_record", serde_json::json!("a2-#.lgtape")),
+                ("replay_start", serde_json::json!("chapter:potears2"))]),
+            (&include_bytes!("../../configs/PL-rc3-replay.json")[..], vec![("replay_play", serde_json::json!("a2-02-marked.lgtape"))]),
+        ] {
+            let mut variant = parse(bytes);
+            for (key, value) in keys {
+                assert_eq!(variant[key], value, "{key}");
+                variant[key] = rc3[key].clone();
+            }
+            assert_eq!(variant, rc3, "a variant differs from PL-rc3 only in its own keys");
+        }
+    }
+    #[test]
     fn a5_draw_cut_keys_default_off_and_validate() {
         let c = Config::default();
         assert!(!c.packet_frustum_cull && !c.prop_frustum_cull && !c.world_texture_sort);
