@@ -77,6 +77,26 @@ void main(){
  gl_FragColor=vec4(fogged(rgb,Alpha.z),a);
 }"#;
 
+/// The world vertex shader. With `water_normals` it also applies `deformVertexes wavenormal`
+/// (Deform.x = 4: spread in Deform.y, direction in MoveDir, wave in Wave) to the model-space
+/// normal before the environment and dot-alpha terms read it, as `Deform::normal` does on the
+/// desktop renderer. Without it the source is `VERTEX`, byte for byte.
+pub fn vertex(water_normals: bool) -> std::borrow::Cow<'static, str> {
+    if !water_normals {
+        return VERTEX.into();
+    }
+    let mut source = VERTEX.to_string();
+    for (old, new) in [
+        (" }else if(Deform.x>2.5){\n", " }else if(Deform.x>2.5&&Deform.x<3.5){\n"),
+        (" vec3 n=(Model*vec4(normal,0.0)).xyz;",
+         " vec3 rippled=normal;\n if(Deform.x>3.5){\n  float normalPhase=Wave.z+Deform.z*Wave.w+(position.x+position.y+position.z)/Deform.y;\n  rippled+=MoveDir.xyz*(Wave.x+Wave.y*wave(normalPhase,Deform.w));\n  float size=length(rippled);rippled=size>0.000001?rippled/size:normal;\n }\n vec3 n=(Model*vec4(rippled,0.0)).xyz;"),
+    ] {
+        assert_eq!(source.matches(old).count(), 1, "world vertex shader anchor: {old}");
+        source = source.replacen(old, new, 1);
+    }
+    source.into()
+}
+
 /// Low preset keeps diffuse/lightmaps and gain, omits fragment fog and discard
 /// for surfaces already classified opaque with no alpha test. Foliage stays full.
 pub fn low_fragment()->String {

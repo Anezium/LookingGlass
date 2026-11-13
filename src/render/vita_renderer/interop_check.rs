@@ -41,6 +41,7 @@ impl Plane {
             model: None,
             motion: None,
             deform: None,
+            wave_normal: None,
         };
         let vertices =
             [[-1., -1., 0.], [1., -1., 0.], [1., 1., 0.], [-1., 1., 0.]].map(|position| {

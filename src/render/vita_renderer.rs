@@ -208,6 +208,10 @@ pub struct Config {
     /// shares that world's immutable hulls, tree and SAH instead of building them again.
     /// Exact by construction; saves one tree and SAH build per such world. Default off.
     pub collision_geometry_share: bool,
+    /// Animate `deformVertexes wavenormal` on the GPU for world stages that read the normal
+    /// (`tcGen environment`, `alphaGen dot`), as the desktop renderer does on the CPU. Off keeps
+    /// the RC2 shader, whose normals stay still and freeze the water reflection. Default off.
+    pub water_normals: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -452,6 +456,7 @@ impl Default for Config {
             defer_immediate_fx: false,
             loading_screen: false,
             collision_geometry_share: false,
+            water_normals: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
@@ -920,6 +925,9 @@ struct Recipe {
     model: Option<usize>,
     motion: Option<crate::sky_sequence::Motion>,
     deform: Option<Deform>,
+    /// A `wavenormal` deform the shader applies to the normal. Kept apart from `deform`, which
+    /// moves vertices and so decides culling, PVS sources and scheduling; a normal ripple does not.
+    wave_normal: Option<Deform>,
 }
 struct Pending {
     parameter: usize,
@@ -1193,6 +1201,7 @@ impl Renderer {
         let mut dropped_layers = 0;
         let mut frozen_deforms = 0;
         let mut frozen_models = 0;
+        let (mut wave_normal_layers, mut wave_normal_triangles, mut wave_normal_skipped) = (0, 0, 0);
         for (bi, b) in scene.batches.iter().enumerate() {
             if b.sky {
                 continue;
@@ -1215,6 +1224,27 @@ impl Renderer {
                     continue;
                 }
                 let recipe_started=std::time::Instant::now();
+                let deform = b
+                    .deforms
+                    .iter()
+                    .find(|d| matches!(d, Deform::Wave(..) | Deform::Move(..) | Deform::Bulge(..)))
+                    .cloned();
+                let reads_normal = layer.spec.environment || layer.spec.dot_alpha.is_some();
+                let wave_normal = b.deforms.iter().find(|d| matches!(d, Deform::WaveNormal(..)));
+                // Both ride the same Deform/Wave uniforms: a stage that also moves its vertices
+                // keeps still normals, as before.
+                let wave_normal = if c.water_normals && reads_normal && wave_normal.is_some() {
+                    if deform.is_none() {
+                        wave_normal_layers += 1;
+                        wave_normal_triangles += b.full_indices.len() / 3;
+                        wave_normal.cloned()
+                    } else {
+                        wave_normal_skipped += 1;
+                        None
+                    }
+                } else {
+                    None
+                };
                 let recipe = Recipe {
                     stage: layer.spec.clone(),
                     textures: layer.textures.clone(),
@@ -1229,13 +1259,8 @@ impl Renderer {
                     },
                     model: b.model,
                     motion: b.motion.clone(),
-                    deform: b
-                        .deforms
-                        .iter()
-                        .find(|d| {
-                            matches!(d, Deform::Wave(..) | Deform::Move(..) | Deform::Bulge(..))
-                        })
-                        .cloned(),
+                    deform,
+                    wave_normal,
                 };
                 rank += 1;
                 let texture_keys = layer
@@ -1336,6 +1361,9 @@ impl Renderer {
         let material_keys = material_keys_by_group.iter().cloned().collect::<std::collections::BTreeSet<_>>();
         let material_order = material_keys.into_iter().enumerate().map(|(i,k)|(k,i)).collect::<BTreeMap<_,_>>();
         let groups_ms=started.elapsed().as_secs_f64()*1000.;
+        if c.water_normals {
+            println!("[lg/vita-renderer] water_normals=on layers={wave_normal_layers} triangles={wave_normal_triangles} skipped_vertex_deform={wave_normal_skipped}");
+        }
         println!("[lg/vita-renderer] load groups {:.3} ms recipes={recipes_ms:.3} chunks={chunks_ms:.3} source_chunks={source_chunks} groups={} vertices={} layer_triangles={}",groups_ms,pending.len(),vertices,triangles);
         let upload_start=std::time::Instant::now();
         let mut startup_timing = crate::startup::Phase::new("retained_upload");
@@ -1348,7 +1376,7 @@ impl Renderer {
         let shader = ctx
             .new_shader(
                 ShaderSource::Glsl {
-                    vertex: shader::VERTEX,
+                    vertex: &shader::vertex(c.water_normals),
                     fragment: &crate::environment::fragment(shader::FRAGMENT),
                 },
                 shader::meta(),
@@ -1393,7 +1421,7 @@ impl Renderer {
             crate::frame_profile::shader_creation();
             let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
             let _shader_name = crate::shader_cache::Name::new("retained-world-low");
-            let low=ctx.new_shader(ShaderSource::Glsl{vertex:shader::VERTEX,fragment:&shader::low_fragment()},shader::meta())?;
+            let low=ctx.new_shader(ShaderSource::Glsl{vertex:&shader::vertex(c.water_normals),fragment:&shader::low_fragment()},shader::meta())?;
             resources.shaders.push(low);
             drop(shader_timing);
             for cull in [CullFace::Nothing,CullFace::Back,CullFace::Front] {
@@ -2631,6 +2659,13 @@ fn uniforms(
         }
         _ => {}
     }
+    if let (None, Some(Deform::WaveNormal(spread, direction, w))) = (&recipe.deform, &recipe.wave_normal) {
+        u.deform[0] = 4.;
+        u.deform[1] = *spread;
+        u.move_dir = direction.extend(0.).to_array();
+        u.wave = w.values;
+        u.deform[3] = wave_kind(&w.kind);
+    }
     u
 }
 fn stage_gain(s: &Stage, time: f32) -> [f32;4] {
@@ -3264,11 +3299,12 @@ mod tests {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            // The replay keys and the A5 draw keys came after RC1; its play files keep them at their off defaults.
+            // The replay keys, the A5 draw and fill keys and water_normals came after RC1; its play files keep them
+            // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
                 "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
-                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str())).cloned().collect();
+                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals").cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3514,6 +3550,59 @@ mod tests {
         }
     }
     #[test]
+    fn a3_water_config_is_rc2_with_water_normals_on() {
+        assert!(!Config::default().water_normals, "water_normals defaults off");
+        assert!(serde_json::from_str::<Config>(r#"{"water_normals":"on"}"#).is_err());
+        let bytes = include_bytes!("../../configs/PL-a3-water.json");
+        let (water, rejected) = parse_runtime_config(bytes).unwrap();
+        assert!(rejected.is_none());
+        water.validate().unwrap();
+        let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let keys = |v: &serde_json::Value| { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+        assert_eq!(keys(&written), keys(&serde_json::to_value(Config::default()).unwrap()), "the A3 water config writes every runtime key");
+        let (rc2, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc2.json")).unwrap();
+        assert!(rejected.is_none());
+        assert!(!rc2.water_normals && water.water_normals);
+        let (mut rc2, mut water) = (serde_json::to_value(&rc2).unwrap(), serde_json::to_value(&water).unwrap());
+        rc2.as_object_mut().unwrap().remove("water_normals");
+        water.as_object_mut().unwrap().remove("water_normals");
+        assert_eq!(water, rc2, "PL-a3-water differs from PL-rc2 only in water_normals");
+    }
+    #[test]
+    fn water_normals_off_keeps_the_rc2_vertex_shader() {
+        assert_eq!(shader::vertex(false), shader::VERTEX);
+        let on = shader::vertex(true);
+        assert_ne!(on, shader::VERTEX);
+        assert!(on.contains("}else if(Deform.x>2.5&&Deform.x<3.5){") && on.contains("if(Deform.x>3.5){"));
+        assert!(on.contains("vec3 n=(Model*vec4(rippled,0.0)).xyz;"), "the environment and dot terms read the rippled normal");
+    }
+    #[test]
+    fn wave_normal_rides_the_deform_uniforms_and_never_displaces_vertices() {
+        let wave = crate::materials::Wave { kind: "sin".into(), values: [0., 1., 0., 0.3] };
+        let normal = Deform::WaveNormal(512., vec3(0.04, 0.03, 0.), wave.clone());
+        let stage = Stage { environment: true, ..Default::default() };
+        let mut recipe = Recipe {
+            stage, textures: vec![], lit: false, rank: 1, blend: 1, opaque: false,
+            cull: 0, model: None, motion: None, deform: None, wave_normal: None,
+        };
+        let still = uniforms(&recipe, 1.5, Vec3::ZERO, Mat4::IDENTITY, Mat4::IDENTITY, false, Vec2::ONE);
+        assert_eq!((still.deform, still.wave, still.move_dir), ([0., 0., 1.5, 0.], [0.; 4], [0.; 4]));
+        recipe.wave_normal = Some(normal);
+        let u = uniforms(&recipe, 1.5, Vec3::ZERO, Mat4::IDENTITY, Mat4::IDENTITY, false, Vec2::ONE);
+        assert_eq!(u.deform, [4., 512., 1.5, 0.]);
+        assert_eq!(u.move_dir, [0.04, 0.03, 0., 0.]);
+        assert_eq!(u.wave, wave.values);
+        // Every other uniform word is the frozen recipe's.
+        let (a, b) = (still.bits(), u.bits());
+        let changed: Vec<_> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+        assert!(changed.iter().all(|&i| (96..108).contains(&i)), "{changed:?}");
+        // A vertex deform owns the shared uniforms: the normal stays still.
+        recipe.deform = Some(Deform::Move(Vec3::Z, wave.clone()));
+        let moved = uniforms(&recipe, 1.5, Vec3::ZERO, Mat4::IDENTITY, Mat4::IDENTITY, false, Vec2::ONE);
+        assert_eq!((moved.deform[0], moved.move_dir), (2., [0., 0., 1., 0.]));
+        assert!(deform_extent(&None) == Vec3::ZERO && !Deform::WaveNormal(1., Vec3::X, wave).moves_vertices());
+    }
+    #[test]
     fn r25_human_play_configs_add_three_levers_to_r22() {
         const NEW: [&str; 3] = ["actor_publication_uv_reuse", "prop_occurrence_reuse", "fx_observe_move"];
         const OLD: [&str; 5] = ["sim_trigger_facts_reuse", "sim_sight_query_reuse", "sim_hatter_door_candidates",
@@ -3627,7 +3716,7 @@ mod tests {
             let recipe = Recipe { stage:Stage {mods,rgb:Some(wave.clone()),alpha:Some(wave.clone()),
                 constant_rgb:Some(vec3(0.8,0.7,0.4)),..Default::default()}, textures:vec![],lit:true,
                 rank:0,blend:1,opaque:false,cull:0,model:None,motion:None,
-                deform:Some(Deform::Move(Vec3::Z,wave.clone())) };
+                deform:Some(Deform::Move(Vec3::Z,wave.clone())), wave_normal: None };
             let model=Mat4::from_translation(Vec3::X*32.);
             let projection=Mat4::from_scale(Vec3::splat(0.3));
             let eye=vec3(3.,5.,7.);
@@ -3798,7 +3887,7 @@ mod tests {
         let stage = Stage::default();
         let recipe = Recipe {
             stage, textures: vec![], lit: false, rank: 0, blend: 0, opaque: true,
-            cull: 0, model: None, motion: None, deform: None,
+            cull: 0, model: None, motion: None, deform: None, wave_normal: None,
         };
         let mut u = uniforms(&recipe,0.,Vec3::ZERO,Mat4::IDENTITY,Mat4::IDENTITY,false,Vec2::ONE);
         let mut next = 1u32;
