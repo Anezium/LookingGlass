@@ -121,6 +121,24 @@ fn mouse_button(name: &str) -> Option<MouseButton> {
         _ => None,
     }
 }
+/// Host probe only: `LOOKING_GLASS_SCRIPT_KEYS="frame:key:hold,..."` presses `key` (a binding
+/// name such as `3` or `Mouse 2`) at `frame` and holds it for `hold` frames (default 1).
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+fn scripted(name: &str, edge: bool) -> bool {
+    use std::sync::OnceLock;
+    static KEYS: OnceLock<Vec<(u64, String, u64)>> = OnceLock::new();
+    let keys = KEYS.get_or_init(|| std::env::var("LOOKING_GLASS_SCRIPT_KEYS").map_or_else(|_| Vec::new(), |text| {
+        text.split(',').filter(|s| !s.is_empty()).map(|entry| {
+            let parts: Vec<&str> = entry.split(':').collect();
+            let frame = parts[0].trim().parse().expect("LOOKING_GLASS_SCRIPT_KEYS frame");
+            let hold = parts.get(2).map_or(1, |h| h.trim().parse().expect("LOOKING_GLASS_SCRIPT_KEYS hold"));
+            (frame, parts[1].trim().to_string(), hold)
+        }).collect()
+    }));
+    if keys.is_empty() || !crate::sim_maps::probe::enabled() { return false; }
+    let now = crate::sim_maps::probe::frame();
+    keys.iter().any(|(frame, key, hold)| key == name && if edge { now == *frame } else { (*frame..*frame + hold).contains(&now) })
+}
 fn physical(name: &str, edge: bool) -> bool {
     if let Some(k) = key_code(name) {
         return if edge {
@@ -468,13 +486,18 @@ impl Input {
     }
     fn action_with(&self, prefs: &Preferences, original: &str, edge: bool,
         physical: impl Fn(&str, bool) -> bool) -> bool {
-        if !self.focused {
-            return false;
-        }
         let row = crate::preferences::BINDINGS
             .iter()
             .position(|(_, key)| *key == original);
         let name = row.map_or(original, |i| prefs.bindings[i].as_str());
+        // Scripted host keys stand in for a focused window.
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        if scripted(name, edge) {
+            return true;
+        }
+        if !self.focused {
+            return false;
+        }
         // The backend quantizes the Vita stick to W/A/S/D; use its analog read instead.
         if cfg!(target_os = "vita") && matches!(name, "W" | "S" | "A" | "D") { return false; }
         (!self.blocked.contains(name) && physical(name, edge))

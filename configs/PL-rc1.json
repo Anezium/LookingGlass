@@ -93,6 +93,7 @@
   "world_viewport_scale": 1.0,
   "depth_sentinel": false,
   "scaled_depth_fix": true,
+  "scaled_target": "resolve",
   "render_scale": 0.75,
   "msaa_samples": 1,
   "quality": "low",

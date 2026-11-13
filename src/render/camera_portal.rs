@@ -335,6 +335,7 @@ impl Portal {
         }
         self.mesh.texture = self.target.as_ref().map(|t| t.texture.clone());
         gl_use_material(&self.material);
+        crate::sim_maps::count("imm_camera_portal", 1);
         draw_mesh(&self.mesh);
         gl_use_default_material();
     }

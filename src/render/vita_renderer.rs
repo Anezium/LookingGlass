@@ -280,6 +280,14 @@ pub struct Config {
     pub depth_sentinel: bool,
     /// Preserve scaled world depth until the direct FX pass completes.
     pub scaled_depth_fix: bool,
+    /// How the scaled 3D target is built. `resolve` (default, historical): a one-sample
+    /// Macroquad target with a resolve copy, so every end of a pass on it runs
+    /// `glBlitFramebuffer`. The pinned vitaGL ends the GXM scene at each blit and keeps no
+    /// depth between scenes, so a Macroquad flush inside the frame (one pass per queued
+    /// draw) leaves later world alpha, FX and actors without world depth.
+    /// `direct`: no resolve copy; the upscale samples the drawn texture.
+    /// `direct_flip`: as `direct`, with the upscale V axis inverted relative to `resolve`.
+    pub scaled_target: String,
     pub msaa_samples:i32,
     pub quality:String,
     pub opaque_order:String,
@@ -432,7 +440,7 @@ impl Default for Config {
             pvs_verify: false,
             gpu_experiment: "gpu222".into(),
             world_viewport_scale: 1.,
-            depth_sentinel: false, scaled_depth_fix: true,
+            depth_sentinel: false, scaled_depth_fix: true, scaled_target: "resolve".into(),
             render_scale:0.75,msaa_samples:1,quality:"low".into(),opaque_order:"front_to_back".into(),world_alpha:true,
         }
     }
@@ -513,6 +521,7 @@ impl Config {
         ensure!(self.render_scale.is_finite()&&(0.25..=1.).contains(&self.render_scale),"invalid render_scale");
         ensure!(matches!(self.msaa_samples,1|2|4),"msaa_samples must be 1, 2 or 4");
         ensure!(self.render_scale==1. || self.msaa_samples==1,"scaled target requires msaa_samples=1");
+        ensure!(matches!(self.scaled_target.as_str(),"resolve"|"direct"|"direct_flip"),"scaled_target must be resolve, direct or direct_flip");
         ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
         ensure!(matches!(self.opaque_order.as_str(),"material"|"front_to_back"),"invalid opaque_order");
         ensure!(!self.world_list_submit || (self.world_state_cache && self.world_view_reuse && self.world_parameter_reuse && self.uniform_field_cache && !self.world_static_merge && !self.world_binding_cache && !self.world_gl_state_cache),
@@ -3185,6 +3194,41 @@ mod tests {
             for value in [serde_json::json!(1),serde_json::json!("on"),serde_json::Value::Null] {
                 assert!(serde_json::from_value::<Config>(serde_json::json!({name:value})).is_err());
             }
+        }
+    }
+    #[test]
+    fn scaled_target_defaults_to_resolve_and_names_its_modes() {
+        assert_eq!(Config::default().scaled_target, "resolve");
+        for mode in ["resolve", "direct", "direct_flip"] {
+            let c: Config = serde_json::from_value(serde_json::json!({"scaled_target": mode})).unwrap();
+            c.validate().unwrap();
+        }
+        let bad: Config = serde_json::from_value(serde_json::json!({"scaled_target": "none"})).unwrap();
+        assert!(bad.validate().is_err());
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"scaled_target": true})).is_err());
+    }
+    #[test]
+    fn a3_variant_configs_differ_from_rc1_only_in_their_keys() {
+        let parse = |bytes: &[u8]| {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            serde_json::to_value(&c).unwrap()
+        };
+        let rc1 = parse(include_bytes!("../../configs/PL-rc1.json"));
+        assert_eq!(rc1["scaled_target"], "resolve");
+        for (bytes, keys) in [
+            (&include_bytes!("../../configs/PL-rc1-a3-direct.json")[..], vec![("scaled_target", serde_json::json!("direct"))]),
+            (&include_bytes!("../../configs/PL-rc1-a3-direct-flip.json")[..], vec![("scaled_target", serde_json::json!("direct_flip"))]),
+            (&include_bytes!("../../configs/PL-rc1-a3-direct-fx-on.json")[..], vec![("scaled_target", serde_json::json!("direct")),
+                ("defer_immediate_fx", serde_json::json!(true))]),
+        ] {
+            let mut variant = parse(bytes);
+            for (key, value) in keys {
+                assert_eq!(variant[key], value, "{key}");
+                variant[key] = rc1[key].clone();
+            }
+            assert_eq!(variant, rc1);
         }
     }
     #[test]

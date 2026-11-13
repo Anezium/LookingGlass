@@ -185,7 +185,16 @@ pub(crate) fn unregister(program: u32) {
     draw_query_hook::unregister(program);
     let _ = program;
 }
+#[cfg(all(target_os="macos", not(target_os="vita"), feature="sim_maps_probe"))]
+#[path = "render_tail/vgl_scenes.rs"]
+mod vgl_scenes;
 pub(crate) fn install() {
+    #[cfg(all(target_os="macos", not(target_os="vita"), feature="sim_maps_probe"))]
+    if vgl_scenes::active() {
+        assert!(!crate::sim_maps::probe::draw_query::table_active() && !crate::sim_maps::probe::gl_trace_enabled(),
+            "the vitaGL scene model owns the GL table alone");
+        vgl_scenes::install_raw();
+    }
     #[cfg(all(target_os="macos", not(target_os="vita"), feature="sim_maps_probe"))]
     if crate::sim_maps::probe::draw_query::table_active() { draw_query_hook::install(); }
     #[cfg(all(target_os="macos", not(target_os="vita"), feature="sim_maps_probe"))]

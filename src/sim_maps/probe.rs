@@ -331,8 +331,31 @@ pub fn packet(gpu_slot:usize,gpu_vertices:&[macroquad::prelude::Vertex],gpu_indi
         }
     }
 }
+/// `LOOKING_GLASS_FIXED_VIEW="ex ey ez tx ty tz"` pins the render camera, for pictures
+/// of a fight seen from behind a wall. Simulation inputs are unchanged.
+fn fixed_view()->Option<(glam::Vec3,glam::Vec3)> {
+    static VIEW:OnceLock<Option<(glam::Vec3,glam::Vec3)>>=OnceLock::new();
+    *VIEW.get_or_init(||{
+        let text=std::env::var("LOOKING_GLASS_FIXED_VIEW").ok()?;
+        let v:Vec<f32>=text.split_whitespace().map(|s|s.parse().expect("LOOKING_GLASS_FIXED_VIEW takes six numbers")).collect();
+        assert_eq!(v.len(),6,"LOOKING_GLASS_FIXED_VIEW takes six numbers");
+        Some((glam::vec3(v[0],v[1],v[2]),glam::vec3(v[3],v[4],v[5])))
+    })
+}
+/// `LOOKING_GLASS_SHOT_FRAMES="a,b,c"` keeps those frames as `shots/frame-NNNN.png`.
+#[cfg(not(target_os = "vita"))]
+pub fn shot(frame: u64) -> anyhow::Result<()> {
+    static FRAMES: OnceLock<Vec<u64>> = OnceLock::new();
+    let frames = FRAMES.get_or_init(|| std::env::var("LOOKING_GLASS_SHOT_FRAMES").map_or_else(|_| Vec::new(),
+        |t| t.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().expect("LOOKING_GLASS_SHOT_FRAMES takes frame numbers")).collect()));
+    if enabled() && frames.contains(&frame) {
+        crate::viewer::save_capture(std::path::Path::new(&format!("shots/frame-{frame:04}.png")))?;
+    }
+    Ok(())
+}
 /// Host-only view motion leaves simulation inputs untouched.
 pub fn moving_view(frame:u64,eye:glam::Vec3,target:glam::Vec3)->(glam::Vec3,glam::Vec3) {
+    if enabled() { if let Some(view)=fixed_view() { return view; } }
     static ON:OnceLock<bool>=OnceLock::new();
     if !enabled() || !*ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_MOVING_VIEW").is_some()) {return (eye,target);}
     let t=frame as f32*0.037;let offset=glam::vec3(t.sin()*28.,t.cos()*21.,(t*0.7).sin()*12.);
@@ -358,7 +381,12 @@ impl Drop for NumericAlloc { fn drop(&mut self) {if let Some(scope)=self.0.take(
 pub fn script_hits(frame:u64,npcs:&mut crate::npc::Npcs) {
     static ON:OnceLock<bool>=OnceLock::new();
     if !enabled() || !*ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_DEATHS").is_some()) {return;}
-    let (damage,kind)=match frame {70=>(1.,crate::combat::DamageKind::Electric),100=>(10000.,crate::combat::DamageKind::Ice),130=>(10000.,crate::combat::DamageKind::Other),_=>return};
+    // LOOKING_GLASS_SKIN_DEATH_KIND=other kills with ordinary damage at frame 100 instead of ice.
+    static OTHER:OnceLock<bool>=OnceLock::new();
+    let other=*OTHER.get_or_init(||std::env::var("LOOKING_GLASS_SKIN_DEATH_KIND").as_deref()==Ok("other"));
+    let (damage,kind)=match frame {70=>(1.,crate::combat::DamageKind::Electric),
+        100=>(10000.,if other {crate::combat::DamageKind::Other} else {crate::combat::DamageKind::Ice}),
+        130=>(10000.,crate::combat::DamageKind::Other),_=>return};
     let targets=npcs.targets();let mut accepted=0;
     for t in &targets {accepted+=usize::from(npcs.hit(crate::combat::Hit {id:t.id,damage,kind,knockback:glam::Vec3::ZERO}).is_some());}
     println!("SIM_SKIN_HITS {}",serde_json::json!({"frame":frame,"targets":targets.len(),"accepted":accepted,"kind":format!("{kind:?}")}));
@@ -656,7 +684,10 @@ pub mod draw_query {
             unsafe { gl::glDeleteQueries(1, &id); }
         }
         let error = unsafe { gl::glGetError() };
+        #[cfg(feature = "vita_renderer")]
         let target = crate::render::vita_renderer::diagnostic_target();
+        #[cfg(not(feature = "vita_renderer"))]
+        let target: Option<[u32; 2]> = None;
         println!("SAMPLES_QUERY_SUMMARY {}", serde_json::json!({
             "frame": frame, "draws": draws, "samples": total, "raster": raster(),
             "host_target": target, "host_display": [macroquad::prelude::screen_width() as i32, macroquad::prelude::screen_height() as i32],
