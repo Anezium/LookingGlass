@@ -145,6 +145,7 @@ mod render_tail;
 mod kernel_alloc;
 #[cfg(feature="vita_renderer")]
 mod route_replay;
+mod replay;
 mod vita_sim;
 mod viewmodel;
 mod village;

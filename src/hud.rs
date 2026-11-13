@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::Result;
 use macroquad::prelude::*;
+use crate::replay::input::{is_key_down, is_key_released, is_mouse_button_pressed, mouse_position};
 
 const METER_SCALE: f32 = 0.78;
 
