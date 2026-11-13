@@ -1559,7 +1559,7 @@ pub struct Attached {
     live_births: Vec<(usize, u32)>,
 }
 /// Host oracle sabotage, read through the existing control variable. False in other builds.
-#[cfg(feature="vita_renderer")]
+#[cfg(any(feature="vita_renderer", all(feature="sim_maps_probe", not(target_os="vita"))))]
 fn negative(_name: &str) -> bool {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     { crate::sim_maps::probe::negative_control() == Some(_name) }

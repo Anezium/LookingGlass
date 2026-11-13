@@ -684,7 +684,10 @@ pub mod draw_query {
             unsafe { gl::glDeleteQueries(1, &id); }
         }
         let error = unsafe { gl::glGetError() };
+        #[cfg(feature = "vita_renderer")]
         let target = crate::render::vita_renderer::diagnostic_target();
+        #[cfg(not(feature = "vita_renderer"))]
+        let target: Option<[u32; 2]> = None;
         println!("SAMPLES_QUERY_SUMMARY {}", serde_json::json!({
             "frame": frame, "draws": draws, "samples": total, "raster": raster(),
             "host_target": target, "host_display": [macroquad::prelude::screen_width() as i32, macroquad::prelude::screen_height() as i32],
