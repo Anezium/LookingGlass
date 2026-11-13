@@ -43,6 +43,10 @@ A recording goes straight to its start, without the menu. Play, then press Start
 closed and the menu works as usual. A replay goes to the same start, plays the tape, prints a
 summary and quits. It uses the recorded control preferences and writes no save.
 
+If the tape cannot be opened at startup, the launch fails with the reason in the log. If a write
+fails later, the recording ends there (`reason=error`, the steps written so far stay replayable)
+and the game goes on with the live pad.
+
 ## Log lines
 
 ```
@@ -70,3 +74,4 @@ UTF-8 text, one record per line; see the comment at the top of `src/replay/tape.
 `LOOKING_GLASS_REPLAY_SYNTH=1` makes a host recording play itself: it walks toward the nearest
 hostile, turns, runs, jumps, attacks, presses Enter now and then (Retry), and presses Escape at the
 step in `LOOKING_GLASS_REPLAY_SYNTH_MENU`. Use `replay_stop_after` to end it.
+`LOOKING_GLASS_REPLAY_FAIL_AT=<step>` makes a host recording fail its write at that step.
