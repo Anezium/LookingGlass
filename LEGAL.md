@@ -1,6 +1,6 @@
 # Rights, ownership and distribution notice
 
-Updated 21 October 2026.
+Updated 13 November 2026.
 
 Looking Glass is an independent, unofficial compatibility engine for American
 McGee's Alice. **This project is not endorsed by or affiliated with EA or its
@@ -73,7 +73,9 @@ from their own console. The Vita build links third-party libraries statically,
 some of them under the GNU LGPL; their licences, and the files the port changed
 in forked dependencies, are listed in
 [THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt). Concerns about the
-port go to the maintainer of that fork, not to the upstream project.
+port go to the maintainer of that fork through its
+[issue tracker](https://github.com/Anezium/LookingGlass/issues), not to the
+upstream project.
 
 ## Using game data and contributing
 
@@ -103,7 +105,7 @@ by themselves establish that every use or distribution is lawful.
 ## Rights-holder concerns
 
 Rights holders or their authorised representatives can report a concern through
-the [project issue tracker](https://github.com/looking-glass-project/LookingGlass/issues).
+the [issue tracker](https://github.com/Anezium/LookingGlass/issues).
 Please identify the material, its project URL, the rights concerned and the
 requested action. Do not attach confidential information or original game data
 to a public report. Reports will be reviewed, and material may be restricted or

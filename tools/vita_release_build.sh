@@ -93,6 +93,7 @@ cp "$release/looking-glass.vpk" "$out/looking-glass.vpk"
 python3 -I "$repo/tools/vita_release_check.py" \
     --elf "$out/looking-glass.elf" --self "$out/eboot.bin" --sfo "$out/param.sfo" --vpk "$out/looking-glass.vpk" \
     --heap "$HEAP_BYTES" --forbid "$HOME" --sfo-field "APP_VER=$APP_VER" --sfo-field TITLE_ID=ALICELG01 \
+    --sfo-field "TITLE=American McGee's Alice" --sfo-field "STITLE=American McGee's Alice" \
     | tee "$out/check.txt" || true
 check_status=${PIPESTATUS[0]}
 
