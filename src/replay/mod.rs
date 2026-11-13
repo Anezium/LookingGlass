@@ -280,8 +280,22 @@ impl Session {
                 .then(|| self.settings.state_every > 0 && self.step % u64::from(self.settings.state_every) == 0),
         }
     }
-    /// Call at the top of every viewer frame, before any input is read.
-    pub fn begin_step(&mut self, map: &str, alive: bool, probe: Option<Probe>) -> Result<Step> {
+    /// Call at the top of every viewer frame, before any input is read. A failing recording
+    /// (a full memory card, say) ends with a log line and play goes on without a tape; a failing
+    /// replay ends the replay.
+    pub fn begin_step(&mut self, map: &str, alive: bool, probe: Option<Probe>) -> Step {
+        match self.try_step(map, alive, probe) {
+            Ok(step) => step,
+            Err(e) => {
+                println!("[lg/replay] {} failed at step {}: {e:#}", if self.replaying() { "replay" } else { "recording" }, self.step);
+                let replaying = self.replaying();
+                self.step += 1;
+                self.stop("error");
+                if replaying { Step::Finish } else { Step::Off }
+            }
+        }
+    }
+    fn try_step(&mut self, map: &str, alive: bool, probe: Option<Probe>) -> Result<Step> {
         if self.ended { return Ok(Step::Off); }
         let step = self.step;
         let mut events = Vec::new();
@@ -296,6 +310,10 @@ impl Session {
         match &mut self.mode {
             Mode::Record { writer, pending, synthetic, aim } => {
                 let w = writer.as_mut().context("recording writer closed")?;
+                // Host test of the failure path: LOOKING_GLASS_REPLAY_FAIL_AT=<step>.
+                #[cfg(not(target_os = "vita"))]
+                ensure!(std::env::var("LOOKING_GLASS_REPLAY_FAIL_AT").ok().and_then(|v| v.parse::<u64>().ok()) != Some(step),
+                    "injected tape write failure");
                 if let Some(mut f) = pending.take() {
                     f.pad = input::last_pad();
                     w.frame(&f)?;
@@ -361,8 +379,13 @@ impl Session {
         self.step += 1;
         Ok(Step::Run { first: step == 0 })
     }
-    /// End now, inside a step: the step in progress is not part of the tape.
-    pub fn stop(&mut self, reason: &str) -> Result<()> {
+    /// End now, inside a step: the step in progress is not part of the tape. Never fails the game.
+    pub fn stop(&mut self, reason: &str) {
+        if let Err(e) = self.try_stop(reason) {
+            println!("[lg/replay] closing {} failed: {e:#}", self.name);
+        }
+    }
+    fn try_stop(&mut self, reason: &str) -> Result<()> {
         if self.ended { return Ok(()); }
         self.ended = true;
         input::deactivate();
@@ -372,7 +395,7 @@ impl Session {
         match &mut self.mode {
             Mode::Record { writer, pending, .. } => {
                 pending.take();
-                let w = writer.take().context("recording writer closed")?;
+                let w = writer.take().context("recording writer already closed")?;
                 let frames = w.frames;
                 w.end(&serde_json::json!({"steps": frames, "reason": reason, "checks": self.checks,
                     "events": self.events, "seconds": seconds}))?;
@@ -391,9 +414,9 @@ impl Session {
         Ok(())
     }
     /// End after the viewer loop: the tape ran out, the step limit was hit, or the game quit.
-    pub fn finish(&mut self, reason: &str) -> Result<()> {
+    pub fn finish(&mut self, reason: &str) {
         // A clean end from begin_step left no step in progress.
-        if reason == "tape-end" || reason == "step-limit" { self.step += 1; }
+        if !self.ended && (reason == "tape-end" || reason == "step-limit") { self.step += 1; }
         self.stop(reason)
     }
 }

@@ -1390,7 +1390,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         cost_us: gather.elapsed().as_micros() as u64 })
                 }
             };
-            match r.begin_step(&maps[current], stats.alive(), probe)? {
+            match r.begin_step(&maps[current], stats.alive(), probe) {
                 crate::replay::Step::Run { first: true } => {
                     // Same input state in a recording and its replay, whatever came before.
                     input = crate::input::Input::default();
@@ -1519,7 +1519,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // Start ends a recording; the menu then runs on the live pad. A replay never opens it.
         if escape_menu.page.is_some() {
             if let Some(r) = replay.as_mut().filter(|r| r.running()) {
-                r.stop("menu")?;
+                r.stop("menu");
                 if r.replaying() { break; }
             }
         }
@@ -1979,7 +1979,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(slot) = load_requested {
             // A load reads the slot as it is now, which a later replay cannot rely on.
             if let Some(r) = replay.as_mut().filter(|r| r.running()) {
-                r.stop("load")?;
+                r.stop("load");
                 if r.replaying() { break; }
             }
             #[cfg(feature = "native_timing")]
@@ -4834,7 +4834,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
     }
-    if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit"))?; }
+    if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
     #[cfg(not(target_os = "vita"))]

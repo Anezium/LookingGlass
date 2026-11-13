@@ -170,8 +170,14 @@ pub struct Writer {
 impl Writer {
     /// Fails if the file exists: a recording never replaces another one.
     pub fn create(path: &std::path::Path, header: &Header, game: Option<&[u8]>) -> Result<Self> {
-        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)
-            .with_context(|| format!("create {}", path.display()))?;
+        ensure!(!path.exists(), "{} exists; a recording never replaces a tape", path.display());
+        let file = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e).with_context(|| format!("create {}", path.display())),
+            // A file system without exclusive create: the path was absent a moment ago.
+            Err(_) => std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)
+                .with_context(|| format!("create {}", path.display()))?,
+        };
         let mut w = Self { file: std::io::BufWriter::with_capacity(64 * 1024, file), previous: Frame::default(), bytes: 0, frames: 0 };
         w.line(MAGIC)?;
         w.line(&format!("H {}", serde_json::to_string(header)?))?;
@@ -202,7 +208,10 @@ impl Writer {
     pub fn end(mut self, summary: &serde_json::Value) -> Result<()> {
         self.line(&format!("END {summary}"))?;
         self.file.flush()?;
-        self.file.get_ref().sync_all()?;
+        // The bytes are written; a file system without fsync only loses the durability promise.
+        if let Err(e) = self.file.get_ref().sync_all() {
+            println!("[lg/replay] tape fsync failed ({e}); the tape is written");
+        }
         Ok(())
     }
 }
