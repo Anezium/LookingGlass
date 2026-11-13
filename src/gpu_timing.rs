@@ -223,11 +223,13 @@ static LOG: AtomicPtr<Log> = AtomicPtr::new(std::ptr::null_mut());
 static SPIKE: AtomicBool = AtomicBool::new(false);
 static SPIKE_BEGIN_US: AtomicU32 = AtomicU32::new(0);
 static SPIKE_END_US: AtomicU32 = AtomicU32::new(0);
+static SPIKE_END_CALLS: AtomicU32 = AtomicU32::new(0);
 pub(crate) fn spike_enable() { SPIKE.store(true, Relaxed); }
-/// The two sums since the previous call, or None while a survey window owns the wrappers.
-pub(crate) fn spike_take() -> Option<[u32; 2]> {
+/// Running totals (Begin microseconds, End microseconds, End calls), which wrap; callers take
+/// differences. None while a survey window owns the wrappers.
+pub(crate) fn spike_peek() -> Option<[u32; 3]> {
     if armed() { return None; }
-    Some([SPIKE_BEGIN_US.swap(0, Relaxed), SPIKE_END_US.swap(0, Relaxed)])
+    Some([SPIKE_BEGIN_US.load(Relaxed), SPIKE_END_US.load(Relaxed), SPIKE_END_CALLS.load(Relaxed)])
 }
 
 #[cfg(target_os = "vita")]
@@ -289,6 +291,7 @@ mod vita {
             let enter = now();
             let result = __real_sceGxmEndScene(context, vertex, fragment);
             SPIKE_END_US.fetch_add(now().wrapping_sub(enter), Relaxed);
+            SPIKE_END_CALLS.fetch_add(1, Relaxed);
             return result;
         };
         let enter = now();

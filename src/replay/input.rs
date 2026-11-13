@@ -240,6 +240,25 @@ pub fn now() -> std::time::Instant {
     origin + std::time::Duration::from_secs_f64(f64::from_bits(CLOCK.load(Relaxed)))
 }
 
+/// Host only, for diagnostics: `LOOKING_GLASS_REPLAY_CROSS` lets a host replay a tape recorded on a
+/// Vita. The gameplay input then takes the Vita stick path with the recorded stick reads. Float
+/// functions differ between newlib and the host libm, so the check lines say how long it stays in step.
+/// Always false on a Vita.
+pub fn cross() -> bool {
+    #[cfg(target_os = "vita")]
+    { false }
+    #[cfg(not(target_os = "vita"))]
+    {
+        static CROSS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CROSS.get_or_init(|| std::env::var_os("LOOKING_GLASS_REPLAY_CROSS").is_some())
+    }
+}
+/// The host side of a cross replay: the recorded stick read, or none outside a replay.
+#[cfg(not(target_os = "vita"))]
+pub fn vita_pad() -> Option<[u8; 4]> {
+    if mode() == REPLAY { bits_pad(PAD.load(Relaxed)) } else { None }
+}
+
 /// The Vita stick read used by gameplay (lx, ly, rx, ry). Recording reads the console and keeps
 /// the value for the tape; replay returns the recorded value and never reads the pad.
 #[cfg(target_os = "vita")]

@@ -70,6 +70,8 @@ impl CollisionCounts {
 #[derive(Default)]
 struct State {
     active: bool,
+    /// The full profiler asked for this frame; otherwise only `spike_log_ms` did.
+    full: bool,
     current: Option<(usize, usize, Instant)>,
     times: [[f64; 4]; LABELS.len()],
     children: [[f64; 4]; LABELS.len()],
@@ -87,13 +89,15 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
 pub(crate) struct Frame(bool);
 pub(crate) fn frame(dt: f32) -> Frame {
-    let active = dt.is_finite() && dt > 0. && crate::frame_profile::enabled();
+    let full = crate::frame_profile::enabled();
+    let active = dt.is_finite() && dt > 0. && (full || crate::spike_log::on());
     if active {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             assert!(!s.active, "nested NPC profile frame");
             *s = State {
                 active: true,
+                full,
                 ..State::default()
             };
         });
@@ -111,7 +115,12 @@ impl Drop for Frame {
             let mut s = s.borrow_mut();
             debug_assert!(s.current.is_none());
             s.active = false;
-            crate::frame_profile::npc_frame(LABELS, &s.times, &s.children, &s.counts);
+            if s.full { crate::frame_profile::npc_frame(LABELS, &s.times, &s.children, &s.counts); }
+            for (kind, times) in s.times.iter().enumerate() {
+                if times.iter().any(|ms| *ms > 0.) {
+                    crate::spike_log::npc(&LABELS[kind].0["npc_".len()..], s.counts[kind][0], *times);
+                }
+            }
         });
     }
 }

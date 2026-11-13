@@ -288,6 +288,25 @@ pub(crate) fn with_sight_query_reuse<T>(enabled: bool, run: impl FnOnce() -> T) 
     run()
 }
 
+/// `sim_sweep_blocked`: yes/no collision questions stop at the first blocking hull. Off by default.
+pub fn sweep_blocked() -> bool {
+    #[cfg(test)]
+    { SWEEP_BLOCKED_TEST.with(|s| s.get()) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().sim_sweep_blocked }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
+#[cfg(test)]
+thread_local! { static SWEEP_BLOCKED_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn with_sweep_blocked<T>(enabled: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset { fn drop(&mut self) { SWEEP_BLOCKED_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(SWEEP_BLOCKED_TEST.with(|s| s.replace(enabled)));
+    run()
+}
+
 // Off by default. Same arrangement as sight_query_reuse, for the off/on comparison in one process.
 pub fn sweep_memo() -> bool {
     #[cfg(test)]

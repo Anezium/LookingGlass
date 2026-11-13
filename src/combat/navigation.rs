@@ -83,6 +83,23 @@ fn edge(world: &World, from: Vec3, goal: Vec3, half: Vec3) -> Option<Vec3> {
 }
 
 fn plan(world: &World, feet: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
+    let timer = crate::spike_log::on().then(std::time::Instant::now);
+    let mut tests = 0u32;
+    let mut edge = |from: Vec3, aim: Vec3| { tests += 1; edge(world, from, aim, half) };
+    let (path, expanded) = search(feet, goal, &mut edge);
+    if let Some(t) = timer {
+        crate::spike_log::planner(crate::spike_log::NAV_PLAN, t.elapsed().as_secs_f64() * 1000., expanded, tests);
+    }
+    #[cfg(not(target_os = "vita"))]
+    if std::env::var_os("LOOKING_GLASS_ROUTE_TRACE").is_some() {
+        println!("[lg/route-trace] ground start={:?} goal={:?} half={:?} expanded={expanded} tests={tests} path={}",
+            feet.to_array().map(f32::to_bits), goal.to_array().map(f32::to_bits), half.to_array(), path.len());
+    }
+    path
+}
+/// The plan search, with `edge` walking every grid edge. Returns the path and the number of
+/// nodes expanded.
+fn search(feet: Vec3, goal: Vec3, edge: &mut impl FnMut(Vec3, Vec3) -> Option<Vec3>) -> (Vec<Vec3>, u32) {
     crate::phase_census::path_count(crate::phase_census::Counter::NavigationPlans,1);
     crate::sim_maps::count("navigation_plans", 1);
     struct Node {
@@ -102,6 +119,7 @@ fn plan(world: &World, feet: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
     }];
     let mut seen = std::collections::BTreeSet::from([(0, 0, (feet.z / 16.).round() as i32)]);
     let mut best = 0;
+    let mut expanded = 0u32;
     for _ in 0..96 {
         let Some(i) = (0..nodes.len())
             .filter(|&i| !nodes[i].closed)
@@ -113,12 +131,13 @@ fn plan(world: &World, feet: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
             break;
         };
         nodes[i].closed = true;
+        expanded += 1;
         let at = nodes[i].p;
         if remaining(at) < remaining(nodes[best].p) {
             best = i;
         }
         if remaining(at) < 72. && (at.z - goal.z).abs() < 80. {
-            if let Some(p) = edge(world, at, goal, half) {
+            if let Some(p) = edge(at, goal) {
                 nodes.push(Node {
                     p,
                     parent: i,
@@ -152,7 +171,7 @@ fn plan(world: &World, feet: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
             if seen.contains(&(cell.0, cell.1, (at.z / 16.).round() as i32)) {
                 continue;
             }
-            if let Some(p) = edge(world, at, aim, half) {
+            if let Some(p) = edge(at, aim) {
                 if seen.insert((cell.0, cell.1, (p.z / 16.).round() as i32)) {
                     nodes.push(Node {
                         p,
@@ -166,7 +185,7 @@ fn plan(world: &World, feet: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
         }
     }
     if remaining(nodes[best].p) + 12. >= remaining(feet) {
-        return Vec::new();
+        return (Vec::new(), expanded);
     }
     let mut path = Vec::new();
     while best != 0 && path.len() < 32 {
@@ -174,10 +193,10 @@ fn plan(world: &World, feet: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
         best = nodes[best].parent;
     }
     if best != 0 {
-        return Vec::new();
+        return (Vec::new(), expanded);
     }
     path.reverse();
-    path
+    (path, expanded)
 }
 
 #[cfg(test)]

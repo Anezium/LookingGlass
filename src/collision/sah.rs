@@ -141,6 +141,25 @@ impl Hierarchy {
         Some(result)
     }
 }
+impl Hierarchy {
+    /// `trace` that returns at the first admitted candidate changing the result. Every change
+    /// `clip_hull` makes is a start in solid or a fraction below 1, so this is `trace`'s yes/no answer.
+    pub fn blocked(&self,g:&StaticGeometry,a:Vec3,b:Vec3,h:Vec3,q:&SweepBounds,c:&mut Counts)->Option<bool> {
+        if !self.finite||!a.is_finite()||!b.is_finite()||!h.is_finite()||h.cmplt(Vec3::ZERO).any()||!(b-a).is_finite()||
+            !q.inverse.is_finite()||!q.padding.is_finite()||!q.bounds.min.is_finite()||!q.bounds.max.is_finite(){return None;}
+        let mut candidates=[0u32;CANDIDATES];let mut len=0;
+        if !self.gather(0,g,q,&mut candidates,&mut len,c){return None;}
+        candidates[..len].sort_unstable();
+        let mut cache=[NONE;CERT_CACHE];let none=bits(Trace::default());
+        for &rank in &candidates[..len] {
+            let original=self.order[rank as usize];let hull=&g.hulls[original.hull as usize];
+            c.clipped+=1;let mut proposed=Trace::default();
+            clip_hull_counted(hull,a,b,h,&mut proposed,c);
+            if bits(proposed)!=none&&self.admitted(original.leaf,q,&mut cache,c){return Some(true);}
+        }
+        Some(false)
+    }
+}
 pub(super) fn bits(t:Trace)->[u32;6] {
     [t.fraction.to_bits(),t.normal.x.to_bits(),t.normal.y.to_bits(),t.normal.z.to_bits(),t.start_solid as u32,t.all_solid as u32]
 }

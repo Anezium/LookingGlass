@@ -64,6 +64,12 @@ pub struct Config {
     /// pain cries and the weapon flesh hits, so the first hit or death does not read and decode a clip
     /// in a frame (`audio.rs`, `combat_preload`).
     pub audio_combat_preload: bool,
+    /// Yes/no collision questions (flying route clearance, the ground walk's horizontal move) stop at the
+    /// first hull that blocks instead of finding the nearest one. Same answers (`collision.rs`, `sweep_blocked`).
+    pub sim_sweep_blocked: bool,
+    /// Do not draw a dead Ant whose body centre is closer to the camera than this many units. A corpse
+    /// against the low camera covers the screen several times over (`npc.rs`, `near_culled`). 0 is off.
+    pub actor_near_cull: f32,
     /// Exact static occlusion certificates for unchanged eye/light positions.
     pub lights_static_cache: bool,
     /// Spatial AABB buckets; preserve original dynamic contact order.
@@ -400,6 +406,8 @@ impl Default for Config {
             skin_stream: false,
             spike_log_ms: 0.,
             audio_combat_preload: false,
+            sim_sweep_blocked: false,
+            actor_near_cull: 0.,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
             sim_npc_target_stack: true,
@@ -612,6 +620,7 @@ impl Config {
         ensure!(self.world_gxm=="off" || self.gpu_mask.is_empty(),"world_gxm excludes gpu_mask: a masked draw captures nothing");
         ensure!(!self.skin_stream || (self.skin_overlap && self.actor_single_prepare && !self.actor_layer_reuse),"skin_stream requires skin_overlap and actor_single_prepare, and excludes actor_layer_reuse");
         ensure!(self.spike_log_ms.is_finite() && (0. ..=10000.).contains(&self.spike_log_ms),"spike_log_ms must be 0 (off) to 10000");
+        ensure!(self.actor_near_cull.is_finite() && (0. ..=1000.).contains(&self.actor_near_cull),"actor_near_cull must be 0 (off) to 1000");
         ensure!(self.worker_spin_us <= 1000,"worker_spin_us must be at most 1000: worker 1 shares CPU2 with the audio producer");
         ensure!(crate::tls_count::FastMode::parse(&self.tls_fast).is_some(),"tls_fast must be off, on, shadow or shadow_sabotage");
         ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
@@ -3314,7 +3323,7 @@ mod tests {
             // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
                 "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
-            const A5_FIGHT: [&str; 2] = ["spike_log_ms", "audio_combat_preload"];
+            const A5_FIGHT: [&str; 4] = ["spike_log_ms", "audio_combat_preload", "sim_sweep_blocked", "actor_near_cull"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals"
                     && !A5_FIGHT.contains(&k.as_str())).cloned().collect();
@@ -3552,8 +3561,21 @@ mod tests {
             assert!(c.validate().is_err(), "{bad}");
         }
         assert!(serde_json::from_value::<Config>(serde_json::json!({"audio_combat_preload": 1})).is_err());
+        assert!(!c.sim_sweep_blocked);
+        assert_eq!(c.actor_near_cull, 0.);
+        for good in [0., 80., 1000.] {
+            let c: Config = serde_json::from_value(serde_json::json!({"actor_near_cull": good})).unwrap();
+            c.validate().unwrap();
+        }
+        for bad in [-1., 1001., f32::MAX] {
+            let c: Config = serde_json::from_value(serde_json::json!({"actor_near_cull": bad})).unwrap();
+            assert!(c.validate().is_err(), "{bad}");
+        }
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"sim_sweep_blocked": 1})).is_err());
         let printed = config_log_lines(&Config::default())[0].clone();
-        for key in ["spike_log_ms", "audio_combat_preload"] { assert!(printed.contains(&format!("\"{key}\"")), "{key} is printed"); }
+        for key in ["spike_log_ms", "audio_combat_preload", "sim_sweep_blocked", "actor_near_cull"] {
+            assert!(printed.contains(&format!("\"{key}\"")), "{key} is printed");
+        }
     }
     #[test]
     fn a5_fight_configs_differ_from_rc3_only_in_their_keys() {
@@ -3572,12 +3594,18 @@ mod tests {
         let rc3 = parse(include_bytes!("../../configs/PL-rc3.json"));
         assert_eq!(rc3["spike_log_ms"], 0.);
         assert_eq!(rc3["audio_combat_preload"], false);
+        assert_eq!(rc3["sim_sweep_blocked"], false);
+        assert_eq!(rc3["actor_near_cull"], 0.);
         let spike = ("spike_log_ms", serde_json::json!(40.));
         let audio = ("audio_combat_preload", serde_json::json!(true));
+        let blocked = ("sim_sweep_blocked", serde_json::json!(true));
+        let near = ("actor_near_cull", serde_json::json!(80.));
         for (bytes, keys) in [
             (&include_bytes!("../../configs/PL-rc3-spike.json")[..], vec![spike.clone()]),
             (&include_bytes!("../../configs/PL-rc3-audio.json")[..], vec![audio.clone()]),
-            (&include_bytes!("../../configs/PL-rc3-fight.json")[..], vec![spike, audio]),
+            (&include_bytes!("../../configs/PL-rc3-blocked.json")[..], vec![blocked.clone()]),
+            (&include_bytes!("../../configs/PL-rc3-near.json")[..], vec![near.clone()]),
+            (&include_bytes!("../../configs/PL-rc3-fight.json")[..], vec![spike, audio, blocked, near]),
         ] {
             let mut variant = parse(bytes);
             for (key, value) in keys {

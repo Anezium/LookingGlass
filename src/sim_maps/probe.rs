@@ -348,7 +348,8 @@ pub fn shot(frame: u64) -> anyhow::Result<()> {
     static FRAMES: OnceLock<Vec<u64>> = OnceLock::new();
     let frames = FRAMES.get_or_init(|| std::env::var("LOOKING_GLASS_SHOT_FRAMES").map_or_else(|_| Vec::new(),
         |t| t.split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().expect("LOOKING_GLASS_SHOT_FRAMES takes frame numbers")).collect()));
-    if enabled() && frames.contains(&frame) {
+    // A cross replay keeps the tape's frame times, so it runs without the probe and still takes shots.
+    if (enabled() || crate::replay::input::cross()) && frames.contains(&frame) {
         crate::viewer::save_capture(std::path::Path::new(&format!("shots/frame-{frame:04}.png")))?;
     }
     Ok(())

@@ -193,7 +193,7 @@ impl Session {
             let path = root().join(&settings.play);
             let mut reader = tape::Reader::open(&path).with_context(|| format!("replay {}", path.display()))?;
             let h = reader.tape.header.clone();
-            ensure!(h.platform == tape::platform(), "tape recorded on {} cannot replay on {}", h.platform, tape::platform());
+            ensure!(h.platform == tape::platform() || input::cross(), "tape recorded on {} cannot replay on {}", h.platform, tape::platform());
             // The recorded control settings decide how sticks turn into motion. In memory only.
             *preferences = serde_json::from_value(h.preferences.clone()).context("tape preferences")?;
             if let Some(bytes) = reader.take_game() {

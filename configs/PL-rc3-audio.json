@@ -167,5 +167,7 @@
   "worker_spin_us": 0,
   "skin_stream": false,
   "spike_log_ms": 0.0,
-  "audio_combat_preload": true
+  "audio_combat_preload": true,
+  "sim_sweep_blocked": false,
+  "actor_near_cull": 0.0
 }
