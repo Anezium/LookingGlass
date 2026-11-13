@@ -221,7 +221,7 @@ mod tests {
     use super::*;
     fn recipe(blend: Blend, rank: usize) -> Recipe {
         Recipe { stage: Stage { blend, ..Default::default() }, textures: Vec::new(), lit: false, rank,
-            blend: blend_class(blend), opaque: false, cull: 0, model: None, motion: None, deform: None }
+            blend: blend_class(blend), opaque: false, cull: 0, model: None, motion: None, deform: None, wave_normal: None }
     }
     #[test]
     fn partners_pair_only_a_filter_then_alpha_over_the_same_faces() {

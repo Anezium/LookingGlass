@@ -1436,7 +1436,8 @@ impl Renderer {
         let lite = c.world_alpha_lite.then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name = crate::shader_cache::Name::new("retained-world-alpha-lite");
-            ctx.new_shader(ShaderSource::Glsl { vertex: shader::VERTEX,
+            // The world's vertex shader, so a stage with a wave normal ripples here too.
+            ctx.new_shader(ShaderSource::Glsl { vertex: &shader::vertex(c.water_normals),
                 fragment: &crate::environment::fragment(alpha_fill::ALPHA_LITE_FRAGMENT) }, shader::meta())
                 .map_err(|e| eprintln!("[lg/vita-renderer] warning world_alpha_lite program failed, key off: {e:?}")).ok()
         }).flatten();
