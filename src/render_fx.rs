@@ -202,6 +202,10 @@ pub fn projection() -> Option<Mat4> {
 pub(crate) fn set_projection(matrix: Mat4) {
     FRAME.with(|f| f.borrow_mut().projection = Some(matrix));
 }
+/// Put back a projection read with `projection()`, including none, after a temporary view.
+pub(crate) fn restore_projection(matrix: Option<Mat4>) {
+    FRAME.with(|f| f.borrow_mut().projection = matrix);
+}
 pub fn projected_error(center: Vec3, radius: f32, error: f32) -> f32 {
     FRAME.with(|f| {
         let f = f.borrow();

@@ -13,6 +13,7 @@ mod world_list;
 mod gxm;
 mod draw_cuts;
 mod alpha_fill;
+mod sky_surfaces;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -236,6 +237,23 @@ pub struct Config {
     /// the world program applies the lightmap itself. Each kept stage is one more draw of its
     /// surface. Off keeps the RC3 world, which drops them. Default off.
     pub detail_layers: bool,
+    /// Draw the authored sky from a cube map captured once from the sky camera, instead of the
+    /// gradient: the sky room (portal maps) and the sky shader layers are drawn by the legacy path
+    /// into six faces of one render target on the first frame, and the map's sky surfaces sample it
+    /// by view direction in one opaque, depth-writing draw before the world. The legacy sky geometry
+    /// is released after the capture unless the map moves its sky camera or `sky_cube_refresh` is on.
+    /// Animated sky content stays as captured. Takes precedence over `sky_depth`. No effect with
+    /// `authored_sky` or `sky: false`. Default off.
+    pub sky_cube: bool,
+    /// Face size in pixels of the `sky_cube` capture, 32 to 1024. The target is 3 by 2 faces of RGBA8.
+    pub sky_cube_size: u32,
+    /// With `sky_cube`: redraw one face every this many frames, in turn, so animated sky content
+    /// moves. Keeps the legacy sky geometry for the whole map. 0 never redraws. Default 0.
+    pub sky_cube_refresh: u32,
+    /// With the gradient sky, draw the map's sky surfaces into depth before the world (colour writes
+    /// off), so scenery placed behind the sky stays hidden, as on the desktop renderer.
+    /// No effect with `authored_sky` or `sky: false`. Default off.
+    pub sky_depth: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -485,6 +503,10 @@ impl Default for Config {
             fog_sky: false,
             exact_blends: false,
             detail_layers: false,
+            sky_cube: false,
+            sky_cube_size: 256,
+            sky_cube_refresh: 0,
+            sky_depth: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
@@ -638,6 +660,7 @@ impl Config {
         if let Some(mib)=self.param_buffer_mib { ensure!((16..=64).contains(&mib),"param_buffer_mib must be 16 to 64"); }
         ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
         ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
+        ensure!((32..=1024).contains(&self.sky_cube_size), "sky_cube_size must be 32..1024");
         ensure!(
             self.cell_size.is_finite() && (64. ..=2048.).contains(&self.cell_size),
             "invalid cell_size"
@@ -1145,6 +1168,8 @@ pub struct Renderer {
     sky_pipeline: Pipeline,
     sky_shader: ShaderId,
     sky_bindings: Bindings,
+    /// `sky_depth` and `sky_cube`: the map's static sky surfaces.
+    sky_surfaces: Option<sky_surfaces::SkySurfaces>,
     alpha_order: Vec<(f32, usize)>,
     prepared: Vec<Prepared>,
     fx_gpu: Option<crate::render_fx::retained::Gpu>,
@@ -1643,6 +1668,7 @@ impl Renderer {
         };
         resources.buffers.extend(sky_bindings.vertex_buffers.iter().copied());
         resources.buffers.push(sky_bindings.index_buffer);
+        let sky_surfaces = sky_surfaces::SkySurfaces::new(scene, ctx, &mut resources)?;
         #[cfg(not(target_os = "vita"))]
         ensure!(std::env::var("LOOKING_GLASS_RETAINED_FAIL").as_deref() != Ok("after-upload"), "host diagnostic construction failure after upload");
         let upload_ms=upload_start.elapsed().as_secs_f64()*1000.;
@@ -1744,6 +1770,7 @@ impl Renderer {
             sky_pipeline,
             sky_shader,
             sky_bindings,
+            sky_surfaces,
         })
     }
     pub(super) fn draw(
@@ -2021,29 +2048,71 @@ impl Renderer {
         #[cfg(target_os = "vita")]
         if list_submit && self.gxm.proof_due() { self.proof_frame(scene, time); }
         if !alpha && config().sky && !scene.authored_sky {
+            #[cfg(not(target_os = "vita"))]
+            let probe = super::sky_stats::begin(false);
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
             let mut totals = crate::frame_profile::Totals::<3>::profile_only();
             let bg = scene.atmosphere.background();
             let sky = sky_gradient(bg, config().fog_sky && scene.atmosphere.distance.w > 0.);
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
+            let cube = scene.sky_cube.as_ref().filter(|c| c.ready()).filter(|_| self.sky_surfaces.is_some()).map(|c| {
+                let rotation = if scene.sky_origin.is_some() {
+                    scene.sky_rotation * scene.sky_motion.as_ref().map_or(Quat::IDENTITY, |m| m.transform(time).1)
+                } else { Quat::IDENTITY };
+                use super::sky_cube::Set;
+                sky_surfaces::CubeView {
+                    texture: c.target.texture.raw_miniquad_id(),
+                    rotation: Mat4::from_quat(rotation),
+                    inset: 0.5 / c.size as f32,
+                    // The Vita copy of a target is stored top row first, as `scale.rs` upscales it.
+                    flip: cfg!(target_os = "vita") != (config().scaled_target == "direct_flip"),
+                    rows: c.rows(), room_row: c.row(Set::Room), layers_row: c.row(Set::Layers),
+                }
+            });
+            let background = self.sky_surfaces.as_ref().is_some_and(|s| s.has_background(cube.as_ref()));
             let start = totals.start();
-            ctx.apply_pipeline(&self.sky_pipeline);
-            ctx.apply_bindings(&self.sky_bindings);
+            if !background {
+                ctx.apply_pipeline(&self.sky_pipeline);
+                ctx.apply_bindings(&self.sky_bindings);
+            }
             totals.add(0, start);
             let start = totals.start();
-            ctx.apply_uniforms(UniformsSource::table(&sky));
+            if !background { ctx.apply_uniforms(UniformsSource::table(&sky)); }
             totals.add(1, start);
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::draw_query::mark("world_opaque","sky",0,None,0,None);
-            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) { ctx.draw(0, 3, 1); }
+            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) {
+                match (&self.sky_surfaces, &cube) {
+                    (Some(s), Some(c)) if background => s.draw_background(ctx, &self.sky_bindings, projection, eye, c),
+                    _ => ctx.draw(0, 3, 1),
+                }
+            }
             totals.add(2, start);
             totals.publish(["vita_world_sky_state_bindings", "vita_world_sky_uniforms", "vita_world_sky_draws_time"]);
             count("vita_world_gpu_draws", 1);
             count("vita_world_sky_draws", 1);
             crate::light_profile::render_add(phase, RenderMetrics { draws: 1, pipelines: 1,
                 bindings: 1, uniform_uploads: 1, uniform_bytes: 32, uniform_gl_calls: 2, ..Default::default() });
+            let mode = match (&self.sky_surfaces, &cube) {
+                (Some(_), Some(_)) => "cube",
+                (Some(_), None) if config().sky_depth => "depth",
+                _ => "gradient",
+            };
+            if let (Some(sky), true) = (&self.sky_surfaces, mode != "gradient") {
+                let _span = crate::frame_profile::span("vita_world_sky_surfaces");
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                crate::sim_maps::probe::draw_query::mark("world_opaque","sky_surfaces",0,None,0,None);
+                let draws = sky.draw(ctx, projection, eye, cube.as_ref());
+                count("vita_world_gpu_draws", draws);
+                count("vita_world_sky_surface_draws", draws);
+                crate::light_profile::render_add(phase, RenderMetrics { draws, pipelines: 1,
+                    bindings: draws, uniform_uploads: 1, ..Default::default() });
+            }
+            #[cfg(not(target_os = "vita"))]
+            super::sky_stats::end(probe, mode, &format!("sky_surface_triangles={}",
+                self.sky_surfaces.as_ref().map_or(0, |s| s.triangles)));
         }
         if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
@@ -2541,6 +2610,7 @@ impl Drop for Renderer {
         self.alpha_fill.delete(ctx);
         ctx.delete_buffer(self.sky_bindings.vertex_buffers[0]);
         ctx.delete_buffer(self.sky_bindings.index_buffer);
+        if let Some(sky) = &self.sky_surfaces { sky.delete(ctx); }
     }
 }
 fn count(name: &'static str, n: u64) {
@@ -3361,12 +3431,13 @@ mod tests {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            // The replay keys, the A5 draw and fill keys, water_normals, the fog keys, exact_blends and detail_layers came after RC1; its play files keep them
+            // The replay keys, the A5 draw and fill keys, water_normals, the fog keys, exact_blends, detail_layers and the sky keys came after RC1; its play files keep them
             // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
                 "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
-                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers").cloned().collect();
+                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
+                    && !k.starts_with("sky_cube") && *k != "sky_depth").cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3494,7 +3565,8 @@ mod tests {
         let defaults = serde_json::to_value(Config::default()).unwrap();
         // Keys added after RC2 that RC3 leaves at their off defaults.
         for key in ["packet_min_pixels", "world_min_pixels", "world_texture_sort", "water_stage_merge", "world_alpha_lite",
-            "fx_lite", "fx_add_max_area", "water_normals", "low_fog", "fog_sky", "exact_blends", "detail_layers"] {
+            "fx_lite", "fx_add_max_area", "water_normals", "low_fog", "fog_sky", "exact_blends", "detail_layers",
+            "sky_cube", "sky_cube_size", "sky_cube_refresh", "sky_depth"] {
             assert_eq!(rc3[key], defaults[key], "{key} off in RC3");
         }
         for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
@@ -3516,6 +3588,10 @@ mod tests {
                 ("exact_blends", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-detail.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
                 ("exact_blends", serde_json::json!(true)), ("detail_layers", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-sky.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("sky_cube", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-sky-depth.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("sky_depth", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-resolve.json")[..], vec![("scaled_target", serde_json::json!("resolve"))]),
             (&include_bytes!("../../configs/PL-rc3-record.json")[..], vec![("replay_record", serde_json::json!("a2-#.lgtape")),
                 ("replay_start", serde_json::json!("chapter:potears2"))]),
@@ -3744,6 +3820,19 @@ mod tests {
         let full = crate::environment::fragment(shader::FRAGMENT);
         let fog_code = |s: &str| s[s.find("uniform highp vec3 FogEye;").unwrap()..s.find("void main()").unwrap()].to_string();
         assert_eq!(fog_code(&on), fog_code(&full), "the same fog code as quality full");
+    }
+    #[test]
+    fn sky_cube_and_sky_depth_default_off_and_bound_the_face_size() {
+        let c = Config::default();
+        assert!(!c.sky_cube && !c.sky_depth && c.sky_cube_refresh == 0, "both sky keys default off");
+        assert_eq!(c.sky_cube_size, 256);
+        let (c, rejected) = parse_runtime_config(br#"{"sky_cube":true,"sky_cube_size":128,"sky_depth":true}"#).unwrap();
+        assert!(rejected.is_none() && c.sky_cube && c.sky_depth && c.sky_cube_size == 128);
+        c.validate().unwrap();
+        for size in [16, 2048] {
+            let c = Config { sky_cube_size: size, ..Config::default() };
+            assert!(c.validate().is_err(), "face size {size} rejected");
+        }
     }
     #[test]
     fn fog_sky_keeps_the_rc3_gradient_off_and_draws_the_fog_colour_flat_on() {

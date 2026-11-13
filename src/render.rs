@@ -28,6 +28,10 @@ mod billboard_check;
 mod sky_face_check;
 #[cfg(feature = "vita_renderer")]
 mod authored_sky;
+#[cfg(feature = "vita_renderer")]
+pub(crate) mod sky_cube;
+#[cfg(all(feature = "vita_renderer", not(target_os = "vita")))]
+mod sky_stats;
 #[cfg(test)]
 mod visibility_tests;
 pub use sky_face_check::check_school_floor;
@@ -149,6 +153,8 @@ pub struct Scene {
     retained: Option<vita_renderer::Renderer>,
     #[cfg(feature = "vita_renderer")]
     authored_sky: bool,
+    #[cfg(feature = "vita_renderer")]
+    sky_cube: Option<sky_cube::SkyCube>,
     world_material_keepalive: WorldMaterialKeepalive,
     camera_portals: Vec<camera_portal::Portal>,
     rope_shapes: Vec<crate::rope::Strand>,
@@ -967,6 +973,55 @@ fn select_batch_indices_for(
     Some(selection)
 }
 
+/// CPU bytes of the legacy geometry arrays kept for the sky, counted as the retained renderer's
+/// load record counts `old_scene_geometry_capacity_bytes`. Excludes materials and textures.
+#[cfg(feature = "vita_renderer")]
+fn legacy_geometry_bytes(batches: &[Batch], props: &[Batch]) -> usize {
+    batches.iter().chain(props).map(|b| {
+        (b.base.capacity() + b.mesh.vertices.capacity()) * std::mem::size_of::<Vertex>()
+            + (b.full_indices.capacity() + b.mesh.indices.capacity()) * 2
+            + b.normals.capacity() * std::mem::size_of::<Vec3>()
+            + b.detail.iter().map(|d| d.indices.capacity() * 2).sum::<usize>()
+            + b.animation.as_ref().map_or(0, |a| a.positions.iter().map(|f| f.capacity() * std::mem::size_of::<Vec3>()).sum::<usize>())
+    }).sum()
+}
+/// `sky_cube`: draw `batch`'s sky shader on a closed cube around `camera` instead of its own
+/// faces, so every direction gets the sky projection. The batch's geometry is put back after.
+#[cfg(feature = "vita_renderer")]
+fn draw_sky_dome(batch: &mut Batch, materials: &[Rc<Material>], camera: Vec3, time: f32, context: &mut DrawContext<'_>) {
+    const HALF: f32 = 4096.;
+    let (vertices, indices) = sky_cube::dome(camera, HALF, 16);
+    let normals = vec![Vec3::Z; vertices.len()];
+    let saved_mesh = std::mem::replace(&mut batch.mesh.vertices, vertices.clone());
+    let saved_mesh_indices = std::mem::replace(&mut batch.mesh.indices, indices.clone());
+    let saved_base = std::mem::replace(&mut batch.base, vertices);
+    let saved_indices = std::mem::replace(&mut batch.full_indices, indices);
+    let saved_normals = std::mem::replace(&mut batch.normals, normals);
+    let saved_parts = std::mem::take(&mut batch.parts);
+    let saved_detail = std::mem::take(&mut batch.detail);
+    let saved_animation = batch.animation.take();
+    let saved_motion = batch.motion.take();
+    let saved_model = batch.model.take();
+    let saved_side = std::mem::replace(&mut batch.face_side, crate::materials::FaceSide::Both);
+    let saved_bounds = std::mem::replace(&mut batch.bounds, (camera - Vec3::splat(HALF), camera + Vec3::splat(HALF)));
+    #[cfg(target_os = "vita")]
+    let saved_offset = batch.static_offset.take();
+    draw_batch(batch, materials, camera, time, None, Vec3::ZERO, false, context);
+    batch.mesh.vertices = saved_mesh;
+    batch.mesh.indices = saved_mesh_indices;
+    batch.base = saved_base;
+    batch.full_indices = saved_indices;
+    batch.normals = saved_normals;
+    batch.parts = saved_parts;
+    batch.detail = saved_detail;
+    batch.animation = saved_animation;
+    batch.motion = saved_motion;
+    batch.model = saved_model;
+    batch.face_side = saved_side;
+    batch.bounds = saved_bounds;
+    #[cfg(target_os = "vita")]
+    { batch.static_offset = saved_offset; }
+}
 #[allow(clippy::too_many_arguments)]
 fn draw_batch(
     batch: &mut Batch,
@@ -1005,6 +1060,8 @@ fn draw_batch(
     let retransform = true;
     #[cfg(target_os = "vita")]
     let prep_profile = crate::frame_profile::world_span("world_prep", static_batch);
+    #[cfg(all(feature = "vita_renderer", not(target_os = "vita")))]
+    if sky_stats::enabled() { sky_stats::add_vertices(batch.mesh.vertices.len() * (usize::from(retransform) + batch.layers.len())); }
     if retransform {
         for (j, (v, base)) in batch.mesh.vertices.iter_mut().zip(&batch.base).enumerate() {
             // Billboards use source UV corners to build geometry. Animated layer
@@ -2069,6 +2126,8 @@ impl Scene {
             retained: None,
             #[cfg(feature = "vita_renderer")]
             authored_sky: false,
+            #[cfg(feature = "vita_renderer")]
+            sky_cube: None,
             world_material_keepalive: Default::default(),
             camera_portals,
             face_mask_cache: FaceMaskCache::default(),
@@ -2108,16 +2167,41 @@ impl Scene {
             }
             // The retained path owns its immutable buffers and material recipes.
             // Release the old CPU geometry and unused Macroquad world materials.
-            scene.authored_sky = authored_sky::retain_geometry(
-                vita_renderer::config().authored_sky, vita_renderer::config().sky,
+            let c = vita_renderer::config();
+            // `sky_cube` keeps the same legacy sky geometry until its first capture.
+            let cube = c.sky_cube && !c.authored_sky;
+            let legacy = authored_sky::retain_geometry(
+                c.authored_sky || cube, c.sky,
                 scene.sky_origin.is_some(), &mut scene.batches, &mut scene.sky_props,
                 |b| (b.sky, b.model.is_none()));
-            if !scene.authored_sky {
+            scene.authored_sky = legacy && !cube;
+            if legacy && cube {
+                let keep = sky_cube::keeps_geometry(name, c.sky_cube_refresh);
+                // The sky shader drawn on the dome: the one on the most sky triangles, told apart by
+                // first texture. Entries: (first texture, first batch, triangles).
+                let mut shaders: Vec<(Option<macroquad::miniquad::TextureId>, usize, usize)> = Vec::new();
+                for (i, b) in scene.batches.iter().enumerate() {
+                    if !b.sky || b.layers.iter().all(|l| l.spec.blend == Blend::Invisible) { continue; }
+                    let key = b.layers.first().and_then(|l| l.textures.first()).map(|t| t.raw_miniquad_id());
+                    match shaders.iter_mut().find(|e| e.0 == key) {
+                        Some(e) => e.2 += b.full_indices.len() / 3,
+                        None => shaders.push((key, i, b.full_indices.len() / 3)),
+                    }
+                }
+                let layer_batch = shaders.iter().max_by_key(|e| e.2).map(|e| e.1);
+                let mut sky = sky_cube::SkyCube::new(name, c.sky_cube_size, keep, scene.sky_origin.is_some(), layer_batch.is_some());
+                sky.layer_batch = layer_batch;
+                println!("[lg/sky-cube] map={name} legacy_batches={} sky_props={} legacy_geometry_bytes={} portal={} layer_shaders={} face={} target={}x{} keep_geometry={keep} refresh={}",
+                    scene.batches.len(), scene.sky_props.len(), legacy_geometry_bytes(&scene.batches, &scene.sky_props),
+                    scene.sky_origin.is_some(), shaders.len(), c.sky_cube_size,
+                    3 * c.sky_cube_size, sky.rows() * c.sky_cube_size, c.sky_cube_refresh);
+                scene.sky_cube = Some(sky);
+            } else if !scene.authored_sky {
                 scene.bound_materials.clear();
                 scene.materials.clear();
             } else {
-                println!("[lg/authored-sky] map={name} legacy_batches={} sky_props={} portal={} stage_policy=legacy-unlimited correction_unqualified=true",
-                    scene.batches.len(), scene.sky_props.len(), scene.sky_origin.is_some());
+                println!("[lg/authored-sky] map={name} legacy_batches={} sky_props={} legacy_geometry_bytes={} portal={} stage_policy=legacy-unlimited correction_unqualified=true",
+                    scene.batches.len(), scene.sky_props.len(), legacy_geometry_bytes(&scene.batches, &scene.sky_props), scene.sky_origin.is_some());
             }
         }
         timing.mark("retained_renderer");
@@ -2134,6 +2218,16 @@ impl Scene {
     #[cfg(feature = "vita_renderer")]
     fn draw_retained_authored_sky(&mut self, camera: Vec3, time: f32,
         transforms: &[(usize, Vec3, Quat)]) -> DrawStats {
+        self.draw_legacy_sky(camera, time, transforms, None, &|| clear_view_depth())
+    }
+    /// The legacy sky as `authored_sky` draws it. `capture` (`sky_cube`): no sky rotation, so the
+    /// picture is in the sky room's own frame; then for `Set::Room` nothing more, for
+    /// `Set::Layers` the dome in the map's sky shader instead of the sky faces. `clear_depth`
+    /// clears the depth of the target being drawn between the sky room and the sky faces.
+    #[cfg(feature = "vita_renderer")]
+    fn draw_legacy_sky(&mut self, camera: Vec3, time: f32, transforms: &[(usize, Vec3, Quat)],
+        set: Option<sky_cube::Set>, clear_depth: &dyn Fn()) -> DrawStats {
+        let capture = set.is_some();
         crate::render_tail::end();
         self.bind_atlas();
         let cluster = self.map.visibility.cluster(camera, &self.map.planes);
@@ -2142,12 +2236,16 @@ impl Scene {
             faces: self.face_mask_cache.faces(&self.map.visibility, cluster), cluster,
             visibility: &self.map.visibility, stats: DrawStats::default(),
         };
+        #[cfg(not(target_os = "vita"))]
+        let mut phases = sky_stats::Phases::new();
         if let Some(origin) = self.sky_origin {
             context.enabled = true;
             context.cluster = self.map.visibility.cluster(origin, &self.map.planes);
             context.faces = self.face_mask_cache.faces(&self.map.visibility, context.cluster);
-            let motion = self.sky_motion.as_ref().map_or(Quat::IDENTITY, |m| m.transform(time).1);
-            let (offset, sky_transform) = authored_sky::portal_pose(camera, origin, self.sky_rotation, motion);
+            let (rotation, motion) = if capture { (Quat::IDENTITY, Quat::IDENTITY) } else {
+                (self.sky_rotation, self.sky_motion.as_ref().map_or(Quat::IDENTITY, |m| m.transform(time).1))
+            };
+            let (offset, sky_transform) = authored_sky::portal_pose(camera, origin, rotation, motion);
             let plain = Atmosphere::default();
             for m in &self.bound_materials {
                 plain.apply(m, camera);m.set_uniform("Fullbright", 1_f32);m.set_uniform("SkyFade", 0_f32);
@@ -2158,6 +2256,8 @@ impl Scene {
             for b in self.sky_props.iter_mut().filter(|b| !b.transparent()) {
                 draw_batch(b, &self.materials, camera, time, Some(&sky_transform), offset, true, &mut context);
             }
+            #[cfg(not(target_os = "vita"))]
+            if let Some(p) = &mut phases { p.mark("room_opaque", &context.stats); }
             // These are immediate Macroquad sky draws, never deferred FX packets.
             // Do not use the retained_depth_scope marker, which only affects packets.
             immediate_depth_read_only(|| {
@@ -2168,23 +2268,93 @@ impl Scene {
                     draw_batch(b, &self.materials, camera, time, Some(&sky_transform), offset, true, &mut context);
                 }
             });
-            clear_view_depth();
+            #[cfg(not(target_os = "vita"))]
+            if let Some(p) = &mut phases { p.mark("room_alpha", &context.stats); }
+            clear_depth();
+            #[cfg(not(target_os = "vita"))]
+            if let Some(p) = &mut phases { p.mark("depth_clear", &context.stats); }
         }
         for m in &self.bound_materials {
             self.atmosphere.apply(m, camera);m.set_uniform("Fullbright", 1_f32);
         }
-        context.enabled = self.optimize;context.cluster = cluster;
+        context.enabled = self.optimize && !capture;context.cluster = cluster;
+        context.required_pvs &= !capture;
         context.faces = self.face_mask_cache.faces(&self.map.visibility, cluster);
-        for batch in self.batches.iter_mut().filter(|b| b.sky) {
-            let transform = batch.model.and_then(|i| transforms.iter().find(|t| t.0 == i));
-            if batch.model.is_some() && transform.is_none() { continue; }
-            draw_batch(batch, &self.materials, camera, time, transform, Vec3::ZERO, false, &mut context);
+        if set == Some(sky_cube::Set::Layers) {
+            if let Some(batch) = self.sky_cube.as_ref().and_then(|c| c.layer_batch).and_then(|i| self.batches.get_mut(i)) {
+                draw_sky_dome(batch, &self.materials, camera, time, &mut context);
+            }
+        } else if set.is_none() {
+            for batch in self.batches.iter_mut().filter(|b| b.sky) {
+                let transform = batch.model.and_then(|i| transforms.iter().find(|t| t.0 == i));
+                if batch.model.is_some() && transform.is_none() { continue; }
+                draw_batch(batch, &self.materials, camera, time, transform, Vec3::ZERO, false, &mut context);
+            }
         }
+        #[cfg(not(target_os = "vita"))]
+        if let Some(p) = &mut phases { p.mark("sky_faces", &context.stats); }
         gl_use_default_material();
         // Flush into the existing ScaledCamera pass before the raw retained pass.
         // No new render target, viewport, resolve, or screen copy is introduced.
         unsafe { get_internal_gl().flush(); }
+        #[cfg(not(target_os = "vita"))]
+        if let Some(p) = &mut phases { p.mark("flush", &context.stats); }
         context.stats
+    }
+    /// `sky_cube`: draw the planned faces of the capture target with the legacy sky, then restore
+    /// the world camera, viewport and frustum. A full capture of a map whose sky camera never moves
+    /// releases the legacy sky geometry and materials, which nothing else draws.
+    #[cfg(feature = "vita_renderer")]
+    fn capture_sky_cube(&mut self, camera: Vec3, time: f32, transforms: &[(usize, Vec3, Quat)], plan: sky_cube::Plan) {
+        let faces: Vec<usize> = match plan {
+            sky_cube::Plan::Nothing => return,
+            sky_cube::Plan::All => (0..6).collect(),
+            sky_cube::Plan::Face(face) => vec![face],
+        };
+        let started = std::time::Instant::now();
+        crate::render_tail::end();
+        unsafe { get_internal_gl().flush(); }
+        let saved = crate::render_fx::projection();
+        push_camera_state();
+        let cube = self.sky_cube.as_ref().unwrap();
+        let pass = cube.target.render_pass.raw_miniquad_id();
+        let clear = move |color: Option<(f32, f32, f32, f32)>| unsafe {
+            let mut gl = get_internal_gl();
+            gl.flush();
+            macroquad::miniquad::gl::glDepthMask(1);
+            gl.quad_context.begin_pass(Some(pass), macroquad::miniquad::PassAction::Clear { color, depth: Some(1.), stencil: None });
+            gl.quad_context.end_render_pass();
+        };
+        if plan == sky_cube::Plan::All {
+            let bg = self.atmosphere.background();
+            clear(Some((bg.r, bg.g, bg.b, 1.)));
+        }
+        let cameras = cube.sets().flat_map(|set| faces.iter().map(move |&f| (set, f)))
+            .map(|(set, f)| (set, cube.camera(camera, set, f, draw_distance_far(30000.)))).collect::<Vec<_>>();
+        let mut stats = DrawStats::default();
+        for (set, view) in &cameras {
+            set_camera(view);
+            crate::render_fx::set_projection(view.matrix());
+            // Faces never overlap, so clearing the whole depth between a face's two parts is safe.
+            let s = self.draw_legacy_sky(camera, time, transforms, Some(*set), &|| clear(None));
+            stats.batches += s.batches; stats.culled += s.culled; stats.triangles += s.triangles;
+        }
+        pop_camera_state();
+        unsafe { get_internal_gl().quad_gl.viewport(vita_renderer::world_viewport()); }
+        crate::render_fx::restore_projection(saved);
+        let cube = self.sky_cube.as_mut().unwrap();
+        let release = plan == sky_cube::Plan::All && !cube.keep_geometry;
+        println!("[lg/sky-cube] capture faces={} ms={:.3} batches={} culled={} triangles={} captures={} face_draws={} release_geometry={release}",
+            faces.len(), started.elapsed().as_secs_f64() * 1000., stats.batches, stats.culled, stats.triangles,
+            cube.captures, cube.face_draws);
+        #[cfg(not(target_os = "vita"))]
+        if plan == sky_cube::Plan::All { sky_stats::dump_cube(&cube.target.texture, &cube.map, cube.captures); }
+        if release {
+            self.batches = Vec::new();
+            self.sky_props = Vec::new();
+            self.bound_materials = Vec::new();
+            self.materials = Vec::new();
+        }
     }
 
     pub fn update_ropes(
@@ -2278,8 +2448,19 @@ impl Scene {
         let _profile = crate::frame_profile::span("world_draw");
         #[cfg(feature = "vita_renderer")]
         if let Some(mut renderer) = self.retained.take() {
+            if !transparent {
+                let refresh = vita_renderer::config().sky_cube_refresh;
+                if let Some(plan) = self.sky_cube.as_mut().map(|c| c.plan(self.sky_origin, refresh)) {
+                    self.capture_sky_cube(camera, time, transforms, plan);
+                }
+            }
             let sky_stats = if !transparent && self.authored_sky {
-                self.draw_retained_authored_sky(camera, time, transforms)
+                #[cfg(not(target_os = "vita"))]
+                let probe = sky_stats::begin(true);
+                let stats = self.draw_retained_authored_sky(camera, time, transforms);
+                #[cfg(not(target_os = "vita"))]
+                sky_stats::end(probe, "legacy", &format!("batches={} culled={} layer_triangles={}{}", stats.batches, stats.culled, stats.triangles, sky_stats::phases()));
+                stats
             } else { DrawStats::default() };
             let stats = renderer.draw(self, camera, time, fullbright, transparent, transforms);
             self.retained = Some(renderer);
