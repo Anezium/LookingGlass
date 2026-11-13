@@ -108,10 +108,11 @@ impl Hud {
             self.announce(WEAPONS[selected].1);
         }
     }
-    pub fn draw_notice(&self) {
+    pub fn draw_notice(&self, input: &crate::input::Input, prefs: &crate::preferences::Preferences) {
         if self.remaining > 0. && !self.message.is_empty() {
+            let text = crate::prompts::shown(&self.message, input, prefs);
             // Leave the top-center encounter meter unobstructed.
-            self.ui.toast(&self.message, 80. * crate::ui::overlay_scale());
+            self.ui.toast(&text, 80. * crate::ui::overlay_scale());
         }
     }
     fn icon(&self, index: usize, r: Rect, color: Color) {
@@ -496,7 +497,7 @@ pub(crate) async fn check_presentation(assets: &mut Assets) -> Result<()> {
                 if page == "pause" {
                     hud.ui.paused("P or click to resume");
                 } else if page == "play" {
-                    hud.draw_notice();
+                    hud.draw_notice(&input, &prefs);
                     boss_meter(&hud.ui, "Encounter", 0.6);
                     crate::story::draw_subtitle(
                         "The path winds through the room. Look around carefully, then choose where to go next.",
