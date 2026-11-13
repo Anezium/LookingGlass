@@ -70,6 +70,7 @@
   "skin_frustum_cull": true,
   "fast_frustum": true,
   "packet_frustum_cull": false,
+  "prop_frustum_cull": false,
   "packet_min_pixels": 0.0,
   "world_min_pixels": 0.0,
   "world_texture_sort": false,

@@ -234,6 +234,10 @@ pub struct Config {
     /// neither uploaded nor drawn. Their vertices are in world space and the actor program's
     /// model matrix is the identity, so no pixel changes. Default off.
     pub packet_frustum_cull: bool,
+    /// A Prop draw (weapon, attachment, level object) whose model box, placed at its attachment,
+    /// lies outside the view frustum is neither animated nor drawn. Saves the animation as well
+    /// as the draw; no pixel changes. Default off.
+    pub prop_frustum_cull: bool,
     /// Actor, prop and FX packets whose screen rectangle is shorter than this many pixels of the
     /// 960x544 screen on its longer side are neither uploaded nor drawn. Changes pixels. 0 is off.
     pub packet_min_pixels: f32,
@@ -437,7 +441,7 @@ impl Default for Config {
             bone_palette: false,
             skin_frustum_cull: true,
             fast_frustum: true,
-            packet_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
+            packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
             flat_actor_light: false, max_texture_dimension: None,
             draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             gpu_state_probe: false,
@@ -3129,7 +3133,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
             // The replay keys and the A5 draw keys came after RC1; its play files keep them at their off defaults.
-            const A5: [&str; 4] = ["packet_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort"];
+            const A5: [&str; 5] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str())).cloned().collect();
             written.sort(); all.sort();
@@ -3240,7 +3244,7 @@ mod tests {
     #[test]
     fn a5_draw_cut_keys_default_off_and_validate() {
         let c = Config::default();
-        assert!(!c.packet_frustum_cull && !c.world_texture_sort);
+        assert!(!c.packet_frustum_cull && !c.prop_frustum_cull && !c.world_texture_sort);
         assert_eq!((c.packet_min_pixels, c.world_min_pixels), (0., 0.));
         for key in ["packet_min_pixels", "world_min_pixels"] {
             for good in [0., 6., 64.] {
@@ -3253,13 +3257,13 @@ mod tests {
             }
             assert!(serde_json::from_value::<Config>(serde_json::json!({key: true})).is_err());
         }
-        for key in ["packet_frustum_cull", "world_texture_sort"] {
+        for key in ["packet_frustum_cull", "prop_frustum_cull", "world_texture_sort"] {
             assert!(serde_json::from_value::<Config>(serde_json::json!({key: 1})).is_err(), "{key}");
             let c: Config = serde_json::from_value(serde_json::json!({key: true})).unwrap();
             c.validate().unwrap();
         }
         let printed = config_log_lines(&Config::default())[0].clone();
-        for key in ["packet_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort"] {
+        for key in ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort"] {
             assert!(printed.contains(&format!("\"{key}\"")), "{key} is printed");
         }
     }
@@ -3278,15 +3282,17 @@ mod tests {
             serde_json::to_value(&c).unwrap()
         };
         let rc2 = parse(include_bytes!("../../configs/PL-rc2.json"));
-        for key in ["packet_frustum_cull", "world_texture_sort"] { assert_eq!(rc2[key], false, "{key} off in RC2"); }
+        for key in ["packet_frustum_cull", "prop_frustum_cull", "world_texture_sort"] { assert_eq!(rc2[key], false, "{key} off in RC2"); }
         for key in ["packet_min_pixels", "world_min_pixels"] { assert_eq!(rc2[key], 0., "{key} off in RC2"); }
         let all = vec![("packet_frustum_cull", serde_json::json!(true)), ("packet_min_pixels", serde_json::json!(6.)),
-            ("world_min_pixels", serde_json::json!(6.)), ("world_texture_sort", serde_json::json!(true))];
+            ("world_min_pixels", serde_json::json!(6.)), ("world_texture_sort", serde_json::json!(true)),
+            ("prop_frustum_cull", serde_json::json!(true))];
         for (bytes, keys) in [
             (&include_bytes!("../../configs/PL-rc2-a5-packet-frustum.json")[..], vec![all[0].clone()]),
             (&include_bytes!("../../configs/PL-rc2-a5-packet-min6.json")[..], vec![all[1].clone()]),
             (&include_bytes!("../../configs/PL-rc2-a5-world-min6.json")[..], vec![all[2].clone()]),
             (&include_bytes!("../../configs/PL-rc2-a5-texture-sort.json")[..], vec![all[3].clone()]),
+            (&include_bytes!("../../configs/PL-rc2-a5-prop-frustum.json")[..], vec![all[4].clone()]),
             (&include_bytes!("../../configs/PL-rc2-a5-all.json")[..], all.clone()),
         ] {
             let mut variant = parse(bytes);

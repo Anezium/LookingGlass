@@ -818,6 +818,27 @@ pub(crate) struct Prop {
     meshes: Vec<Mesh>,
     scale: f32,
     occurrences: PropOccurrences,
+    /// Model-space box of every vertex of every frame, for `prop_frustum_cull`.
+    bounds: (Vec3, Vec3),
+    /// The last draw_frame was cut by `prop_frustum_cull`: no mesh holds this frame's vertices.
+    culled: bool,
+}
+/// The world box of every vertex `animate_meshes` can write for this placement: the model box's
+/// eight corners through the same linear map, `attachment.point(p * scale)`.
+fn placed_box((lo, hi): (Vec3, Vec3), scale: f32, attachment: Transform) -> (Vec3, Vec3) {
+    let (mut a, mut b) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for i in 0..8 {
+        let corner = vec3(if i & 1 == 0 { lo.x } else { hi.x }, if i & 2 == 0 { lo.y } else { hi.y }, if i & 4 == 0 { lo.z } else { hi.z });
+        let p = attachment.point(corner * scale);
+        a = a.min(p);
+        b = b.max(p);
+    }
+    (a, b)
+}
+/// Model-space box of every vertex of every frame. Empty (min above max) for a model without one.
+fn model_bounds(model: &tan::Model) -> (Vec3, Vec3) {
+    model.surfaces.iter().flat_map(|s| s.frames.iter().flatten())
+        .fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(lo, hi), &p| (lo.min(p), hi.max(p)))
 }
 /// Bound on the draws of one Prop per frame that get their own copy.
 #[cfg(feature="vita_renderer")]
@@ -922,9 +943,22 @@ impl Prop {
             art.draw(mesh, remaining);
         }
     }
-    /// The vertices of the last draw that wrote any, wherever they live.
+    /// The vertices of the last draw that wrote any, wherever they live. None after a draw that
+    /// `prop_frustum_cull` cut: that draw, and an overlay on it, could not reach the view.
     fn last_meshes(&self) -> &[Mesh] {
+        if self.culled { return &[]; }
         self.occurrences.last.map_or(&self.meshes, |i| &self.occurrences.entries[i].meshes)
+    }
+    /// `prop_frustum_cull`: true when every vertex this draw could write lies outside the view.
+    /// Vertices are `attachment.point(frame position * scale)`, frame positions sit in the model
+    /// box (a blend of two frames stays in it), and the map is linear, so the eight transformed
+    /// corners bound them. The view is the one the retained actor pass will draw with.
+    #[cfg(feature = "vita_renderer")]
+    fn outside_view(&self, attachment: Transform, scale: f32) -> bool {
+        if !crate::render::vita_renderer::config().prop_frustum_cull || !crate::render_fx::retained_active() { return false; }
+        if !self.bounds.0.cmple(self.bounds.1).all() { return false; }
+        let (a, b) = placed_box(self.bounds, self.scale * scale, attachment);
+        crate::render::outside_bounds(a, b)
     }
     /// Centre world pickup art independently of the first-person hand anchor.
     pub(crate) fn draw_pickup(&mut self, center: Vec3, angle: f32) {
@@ -1006,6 +1040,8 @@ impl Prop {
             });
         }
         Ok(Self {
+            bounds: model_bounds(&model),
+            culled: false,
             model,
             _material_layers: material_layers,
             meshes,
@@ -1036,6 +1072,14 @@ impl Prop {
         looping: bool,
     ) {
         if crate::character::skinning::overlap::gather_only() { return; }
+        #[cfg(feature="vita_renderer")]
+        {
+            self.culled = self.outside_view(attachment, scale);
+            if self.culled {
+                crate::sim_maps::count("prop_draws_cut_outside", 1);
+                return;
+            }
+        }
         #[cfg(feature="vita_renderer")]
         if self.draw_occurrence(attachment, scale, fullbright, time, looping) { return; }
         for mesh in self.animate(attachment, scale, fullbright, time, looping) {
@@ -1137,6 +1181,7 @@ impl Prop {
         if scale <= 0. || crate::character::skinning::overlap::gather_only() {
             return &mut self.meshes[..0];
         }
+        self.culled = false;
         animate_meshes(&self.model, &mut self.meshes, self.scale, attachment, scale, fullbright, time, looping);
         self.occurrences.last = None;
         &mut self.meshes
@@ -3603,9 +3648,32 @@ mod prop_occurrence_tests {
         let meshes = model.surfaces.iter().map(|s| Mesh {
             vertices: s.uv.iter().map(|&uv| Vertex { position: Vec3::ZERO, uv, color: [255; 4], normal: Vec4::ZERO }).collect(),
             indices: s.indices.clone(), texture: Some(base.clone()) }).collect();
-        (Prop { _material_layers: Vec::new(), model, meshes, scale: 1.25, occurrences: PropOccurrences::default() }, vec![keep, swapped])
+        (Prop { _material_layers: Vec::new(), bounds: model_bounds(&model), culled: false, model, meshes, scale: 1.25, occurrences: PropOccurrences::default() }, vec![keep, swapped])
     }
     fn at(x: f32) -> Transform { Transform { translation: vec3(x, 2., 3.), rotation: Quat::from_rotation_z(x * 0.1) } }
+    #[test]
+    fn prop_frustum_box_holds_every_animated_vertex() {
+        let (mut p, _keep) = prop(5, 7100);
+        let model_box = p.bounds;
+        assert!(model_box.0.cmple(model_box.1).all());
+        for (i, time) in [0., 0.03, 0.17, 0.26, 0.41, 0.49, 0.77].into_iter().enumerate() {
+            let attachment = Transform { translation: vec3(i as f32 * 37. - 50., 9., -4.),
+                rotation: Quat::from_euler(EulerRot::XYZ, 0.3 * i as f32, -0.7, 1.1 * i as f32) };
+            for (scale, looping) in [(1., true), (0.4, false), (2.5, true)] {
+                let (lo, hi) = placed_box(p.bounds, p.scale * scale, attachment);
+                let meshes = p.meshes_at(attachment, scale, true, time, looping);
+                for v in meshes.iter().flat_map(|m| &m.vertices) {
+                    let slack = 1e-4 * (1. + v.position.abs().max_element());
+                    assert!(v.position.cmpge(lo - slack).all() && v.position.cmple(hi + slack).all(), "{:?} outside {lo:?}..{hi:?}", v.position);
+                }
+            }
+        }
+        // A cut draw leaves no stale vertices for an overlay such as draw_electric.
+        p.culled = true;
+        assert!(p.last_meshes().is_empty());
+        let _ = p.meshes_at(at(1.), 1., true, 0., true);
+        assert!(!p.culled && !p.last_meshes().is_empty(), "the next written draw clears the cut");
+    }
     fn call(x: f32, time: f32, looping: bool) -> Call { Call { pose: at(x), scale: 1., bright: false, time, looping, opacity: 1. } }
     fn with_arm<T>(on: bool, run: impl FnOnce() -> T) -> T {
         struct Reset(Option<bool>);
