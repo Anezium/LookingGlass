@@ -241,6 +241,10 @@ fn literals(root: &std::path::Path) -> Vec<(String, usize, String)> {
 /// Literals that name a desktop key but never reach a Vita screen as written, with the
 /// reason. Matched on the exact literal text.
 const NOT_ON_VITA: &[(&str, &str)] = &[
+    // Play tape line formats (src/replay/tape.rs): file records, never shown to a player.
+    ("C {} {} {} {} {:.2},{:.2},{:.2} {:.1} {}", "play tape check record, not player text"),
+    ("H {}", "play tape header record, not player text"),
+    ("E {step} {kind}", "play tape event record, not player text"),
     // Desktop branch of a choice that already has a Vita branch.
     ("{} or click to resume", "pause panel; Vita branch says Cross or Start"),
     ("P or click to resume", "HUD presentation check page, host only"),
