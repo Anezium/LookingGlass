@@ -577,6 +577,7 @@ fn tan_picture(
                 }
             })
             .collect();
+        crate::sim_maps::count("imm_hud_mesh", 1);
         draw_mesh(&Mesh {
             vertices,
             indices,

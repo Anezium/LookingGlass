@@ -98,6 +98,8 @@ fn draw() {
     if let Some((phase,m))=packet {crate::light_profile::render_add(phase,m);crate::light_profile::deferred_cpu(m.cpu_ns);}
 }
 
+#[cfg(all(target_os="macos", feature="sim_maps_probe"))]
+mod vgl_scenes;
 #[cfg(any(target_os="vita", target_os="macos"))]
 mod hooks {
     use super::*;
@@ -291,10 +293,15 @@ mod hooks {
         {
             static ONCE:std::sync::Once=std::sync::Once::new();
             ONCE.call_once(||macroquad::miniquad::gl::load_gl_funcs(|name|unsafe {
+                let base=|n:&str|lookup(n.as_bytes()).unwrap_or_else(||api::raw(n));
+                #[cfg(feature="sim_maps_probe")]
+                let wrapped=super::vgl_scenes::wrap(name,&base);
+                #[cfg(not(feature="sim_maps_probe"))]
+                let wrapped=None;
                 let p=match name {
                     "glLinkProgram"=>link as *const () as _,
                     "glDeleteProgram"=>delete as *const () as _,
-                    _=>lookup(name.as_bytes()).unwrap_or_else(||api::raw(name)),
+                    _=>wrapped.unwrap_or_else(||base(name)),
                 };
                 (!p.is_null()).then(||std::mem::transmute(p))
             }));

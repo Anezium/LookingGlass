@@ -2368,6 +2368,7 @@ impl Visuals {
         }
         if !vertices.is_empty() {
             gl_use_material(&self.effect_material);
+            crate::sim_maps::count("imm_weapon_mesh", 1);
             draw_mesh(&Mesh {
                 indices: (0..vertices.len() as u16).collect(),
                 vertices,
@@ -2399,6 +2400,7 @@ impl Visuals {
         let mut vertices = Vec::new();
         append_swing(&mut vertices, &self.trail, false);
         if !vertices.is_empty() {
+            crate::sim_maps::count("imm_weapon_mesh", 1);
             draw_mesh(&Mesh {
                 indices: (0..vertices.len() as u16).collect(),
                 vertices,
@@ -2492,6 +2494,7 @@ impl Visuals {
             }
         }
         if !vertices.is_empty() {
+            crate::sim_maps::count("imm_weapon_mesh", 1);
             draw_mesh(&Mesh {
                 indices: (0..vertices.len() as u16).collect(),
                 vertices,

@@ -168,6 +168,7 @@ impl Art {
                     continue;
                 }
                 gl_use_material(&self.materials[usize::from(layer.spec.blend == Blend::Filter)]);
+                crate::sim_maps::count("imm_loot", 1);
                 draw_mesh(mesh);
             }
             if !queued.is_empty() {

@@ -4703,6 +4703,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Every frame's pixels are hashed; the domain edges also keep a PNG.
             #[cfg(feature = "vita_renderer")]
             crate::sim_maps::probe::record_exact_frame(&maps[current], frame, matches!(frame, 0 | 59 | 60 | 119 | 120 | 179))?;
+            crate::sim_maps::probe::shot(frame)?;
             crate::sim_maps::probe::end(frame, &maps[current], active, &serde_json::json!({
                 "player": player, "stats": stats, "interactions": interactions.snapshot(),
                 "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),

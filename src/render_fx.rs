@@ -354,6 +354,7 @@ fn draw_pass(p: &Pass, indices: Option<&[u16]>) {
             crate::frame_profile::counts(&[("lg_fx_submissions", 1)]);
             #[cfg(target_os = "vita")]
             crate::frame_profile::record_lg_submission();
+            crate::sim_maps::count("imm_fx_pass", 1);
             draw_mesh(&p.mesh);
         }
     });
@@ -683,6 +684,7 @@ pub fn effect(mesh: &Mesh, blend: Blend) {
     if !active() {
         #[cfg(target_os = "vita")]
         crate::frame_profile::record_lg_submission();
+        crate::sim_maps::count("imm_effect", 1);
         draw_mesh(mesh);
         return;
     }
@@ -772,14 +774,14 @@ pub fn legacy_line(a: Vec3, b: Vec3, color: Color) {
     if defer_legacy_immediate_fx() { line(a, b, color); }
     else {
         #[cfg(test)] routing_controls::immediate_line(a, b, color);
-        #[cfg(not(test))] draw_line_3d(a, b, color);
+        #[cfg(not(test))] { crate::sim_maps::count("imm_legacy_line", 1); draw_line_3d(a, b, color); }
     }
 }
 pub fn legacy_sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Color) {
     if defer_legacy_immediate_fx() { sphere(center, radius, texture, color); }
     else {
         #[cfg(test)] routing_controls::immediate_sphere(center, radius, texture, color);
-        #[cfg(not(test))] draw_sphere(center, radius, texture, color);
+        #[cfg(not(test))] { crate::sim_maps::count("imm_legacy_sphere", 1); draw_sphere(center, radius, texture, color); }
     }
 }
 
@@ -1006,6 +1008,7 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
         let _submit_profile = crate::frame_profile::characters_span("characters_submit");
         #[cfg(target_os = "vita")]
         crate::frame_profile::record_lg_submission();
+        crate::sim_maps::count("imm_skin", 1);
         draw_mesh(mesh);
         return;
     }
