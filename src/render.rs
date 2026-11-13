@@ -33,6 +33,10 @@ mod visibility_tests;
 pub use sky_face_check::check_school_floor;
 mod water_check;
 pub use water_check::check as check_water;
+#[cfg(not(target_os = "vita"))]
+mod water_view;
+#[cfg(not(target_os = "vita"))]
+pub use water_view::capture as capture_water_views;
 mod camera_portal;
 #[cfg(feature = "vita_renderer")]
 pub(crate) mod vita_renderer;

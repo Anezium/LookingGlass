@@ -428,7 +428,7 @@ mod tests {
     fn serial_parameter() -> Parameter {
         let recipe = Recipe { stage: Stage::default(), textures: vec![], lit: true,
             rank: 0, blend: 0, opaque: true, cull: 0, model: None,
-            motion: None, deform: None };
+            motion: None, deform: None, wave_normal: None };
         let u = uniforms(&recipe, 0., Vec3::ZERO, Mat4::IDENTITY,
             Mat4::IDENTITY, false, Vec2::ONE);
         Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0,
