@@ -3158,24 +3158,57 @@ mod tests {
         assert_eq!(rc1, human);
     }
     #[test]
-    fn a2_replay_configs_are_rc1_plus_the_replay_keys() {
+    fn rc2_play_configs_are_rc1_plus_the_rc2_keys() {
+        // Default file: PL-rc2.json. Each variant differs from it only in the keys listed below.
         let parse = |bytes: &[u8]| {
+            // Every runtime key is written, so no value comes from a code default.
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
+            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            written.sort(); all.sort();
+            assert_eq!(written, all, "an RC2 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none());
             c.validate().unwrap();
+            assert_eq!(c.log_frame_time_every, Some(10), "frame-time rows every ten frames stay on");
+            assert_eq!(c.render_scale, 0.75);
             serde_json::to_value(&c).unwrap()
         };
-        let rc1 = parse(include_bytes!("../../configs/PL-rc1.json"));
-        let record = parse(include_bytes!("../../configs/PL-a2-record.json"));
-        let replay = parse(include_bytes!("../../configs/PL-a2-replay.json"));
-        assert_eq!((record["replay_record"].as_str(), record["replay_start"].as_str()), (Some("a2-#.lgtape"), Some("chapter:potears2")));
-        assert_eq!(replay["replay_play"], "a2-01.lgtape");
-        for mut v in [record, replay] {
-            assert_eq!(v["log_frame_time_every"], 10, "frame-time rows stay on");
-            for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
-                v[key] = rc1[key].clone();
+        let rc2 = parse(include_bytes!("../../configs/PL-rc2.json"));
+        let (rc1, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc1.json")).unwrap();
+        assert!(rejected.is_none());
+        let mut rc1 = serde_json::to_value(&rc1).unwrap();
+        assert_eq!(rc2["scaled_target"], "resolve");
+        assert_eq!(rc2["authored_sky"], false, "RC2 keeps the gradient sky");
+        assert_eq!(rc2["defer_immediate_fx"], false, "RC2 keeps the direct effect draws");
+        assert_eq!((rc2["texture_cache"].as_str(), rc2["pvs_cache"].as_bool()), (Some("off"), Some(false)));
+        let defaults = serde_json::to_value(Config::default()).unwrap();
+        for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
+            assert_eq!(rc2[key], defaults[key], "{key} off in RC2");
+        }
+        // RC2 = RC1 plus the two A3 load keys on.
+        for key in ["loading_screen", "collision_geometry_share"] {
+            assert_eq!(rc2[key], true, "{key} on in RC2");
+            rc1[key] = serde_json::json!(true);
+        }
+        assert_eq!(rc2, rc1, "PL-rc2 differs from PL-rc1 only in the two load keys");
+        for (bytes, keys) in [
+            (&include_bytes!("../../configs/PL-rc2-direct.json")[..], vec![("scaled_target", serde_json::json!("direct"))]),
+            (&include_bytes!("../../configs/PL-rc2-direct-flip.json")[..], vec![("scaled_target", serde_json::json!("direct_flip"))]),
+            (&include_bytes!("../../configs/PL-rc2-texcache.json")[..], vec![("texture_cache", serde_json::json!("on")), ("pvs_cache", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc2-loading-off.json")[..], vec![("loading_screen", serde_json::json!(false)),
+                ("collision_geometry_share", serde_json::json!(false))]),
+            (&include_bytes!("../../configs/PL-a2-record.json")[..], vec![("replay_record", serde_json::json!("a2-#.lgtape")),
+                ("replay_start", serde_json::json!("chapter:potears2"))]),
+            (&include_bytes!("../../configs/PL-a2-replay.json")[..], vec![("replay_play", serde_json::json!("a2-01.lgtape"))]),
+        ] {
+            let mut variant = parse(bytes);
+            for (key, value) in keys {
+                assert_eq!(variant[key], value, "{key}");
+                variant[key] = rc2[key].clone();
             }
-            assert_eq!(v, rc1, "an A2 file differs from PL-rc1.json only in the replay keys");
+            assert_eq!(variant, rc2, "a variant differs from PL-rc2 only in its own keys");
         }
     }
     #[test]
