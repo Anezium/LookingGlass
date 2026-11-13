@@ -3294,6 +3294,7 @@ mod tests {
             (&include_bytes!("../../configs/PL-rc2-a5-texture-sort.json")[..], vec![all[3].clone()]),
             (&include_bytes!("../../configs/PL-rc2-a5-prop-frustum.json")[..], vec![all[4].clone()]),
             (&include_bytes!("../../configs/PL-rc2-a5-all.json")[..], all.clone()),
+            (&include_bytes!("../../configs/PL-rc2-a5-exact.json")[..], vec![all[0].clone(), all[4].clone()]),
         ] {
             let mut variant = parse(bytes);
             for (key, value) in keys {
