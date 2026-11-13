@@ -390,6 +390,8 @@ impl Session {
         self.ended = true;
         input::deactivate();
         let seconds = self.started.elapsed().as_secs_f64();
+        // Spike lines buffered during the run come out before its result line.
+        crate::spike_log::flush("replay-end");
         // Steps begun minus the one in progress.
         let steps = self.step.saturating_sub(1);
         match &mut self.mode {

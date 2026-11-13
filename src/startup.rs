@@ -39,6 +39,8 @@ pub(crate) struct Phase {
 }
 impl Phase {
     pub fn new(scope: &'static str) -> Self {
+        // A load is starting: write the spike lines buffered during play before its own time is taken.
+        crate::spike_log::flush(scope);
         let previous = STATE.with(|s| { let mut s = s.borrow_mut(); s.0 += 1; s.1 });
         let now = Instant::now();
         eprintln!("[lg/startup] {scope} begin elapsed_ms=0");

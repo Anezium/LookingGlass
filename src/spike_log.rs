@@ -14,8 +14,17 @@
 //! (`gxm_end_in`, milliseconds and calls), and gives the NPC update per actor kind (`npc`: actors
 //! updated, total, then think, movement, animation and combat milliseconds).
 //!
+//! The lines are not written during play. On the Vita a write to stdout costs about 17.5 us per byte on
+//! the calling thread (a2-08 log: a 450-byte spike line cost the next frame 7.5 ms, made that frame
+//! slow in turn, and every frame printed). While a gameplay frame is open, `[lg/spike]` and
+//! `[lg/late-work]` lines are appended to a buffer reserved once (`OUT_CAP`) and written at the next
+//! flush point: a replay ending, a load phase opening, or the viewer loop ending. A frame's line then
+//! costs only its formatting, which the next line reports as `log=` (milliseconds). Lines that do not
+//! fit are counted and the flush says how many were dropped. Lines still buffered when the game
+//! crashes are lost.
+//!
 //! Nothing here runs when the key is 0 beyond one config load per call site.
-use std::{cell::RefCell, time::Instant};
+use std::{cell::RefCell, fmt::Write as _, time::Instant};
 
 pub(crate) const KINDS: [&str; 7] = ["texture_read", "texture_decode", "texture_upload", "shader", "asset_read",
     "material_parse", "audio_clip"];
@@ -61,10 +70,38 @@ struct Frame {
     npc: [Option<Npc>; NPC_ROWS],
     /// Path searches: Ant ground plans and flying routes, as (calls, milliseconds, expansions, clearance tests).
     planners: [(u32, f64, u32, u32); 2],
+    /// Milliseconds this frame spent formatting the previous frame's line into the buffer.
+    log_ms: f64,
 }
 #[derive(Clone, Copy)]
 struct Npc { name: &'static str, updated: u64, ms: [f64; 4] }
 thread_local! { static FRAME: RefCell<Frame> = RefCell::default(); }
+
+/// Buffered lines, written at the next flush point.
+#[derive(Default)]
+struct Out { text: String, lines: u32, dropped: u32 }
+/// Buffer size, reserved on the first buffered line. About 2,000 spike lines.
+const OUT_CAP: usize = 1 << 20;
+/// Room kept for the line being written, so the buffer never reallocates. Spike lines are under 2 KiB.
+const LINE_MAX: usize = 4096;
+thread_local! { static OUT: RefCell<Out> = RefCell::default(); }
+impl Out {
+    /// Appends one line written by `write`, or counts it as dropped when it does not fit.
+    fn push(&mut self, write: impl FnOnce(&mut String)) {
+        if self.text.capacity() == 0 { self.text.reserve_exact(OUT_CAP); }
+        let mark = self.text.len();
+        if mark + LINE_MAX > OUT_CAP { self.dropped += 1; return; }
+        write(&mut self.text);
+        self.text.push('\n');
+        if self.text.len() - mark > LINE_MAX {
+            self.text.truncate(mark);
+            self.dropped += 1;
+        } else {
+            self.lines += 1;
+        }
+    }
+
+}
 
 #[inline]
 pub(crate) fn threshold_ms() -> f32 {
@@ -98,37 +135,53 @@ impl Frame {
             self.sim_ms[block] += now.saturating_duration_since(since).as_secs_f64() * 1000.;
         }
     }
-    fn line(&self, now: Instant, [begin, render, hud, cpu_end]: [Instant; 4]) -> String {
+    #[cfg(test)]
+    fn line(&self, now: Instant, marks: [Instant; 4]) -> String {
+        let mut line = String::new();
+        self.write_line(&mut line, now, marks);
+        line
+    }
+    /// Appends the frame's line to `out` without allocating beyond `out` itself.
+    fn write_line(&self, out: &mut String, now: Instant, [begin, render, hud, cpu_end]: [Instant; 4]) {
         let ms = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64() * 1000.;
-        let mut line = format!("[lg/spike] frame={} ms={:.2} sim={:.2} render={:.2} hud={:.2} present={:.2}",
+        let _ = write!(out, "[lg/spike] frame={} ms={:.2} sim={:.2} render={:.2} hud={:.2} present={:.2}",
             self.number, ms(begin, now), ms(begin, render), ms(render, hud), ms(hud, cpu_end), ms(cpu_end, now));
+        if self.log_ms > 0. { let _ = write!(out, " log={:.2}", self.log_ms); }
         let gxm = self.gxm_start.zip(self.gxm_mark);
         if let Some((start, end)) = gxm {
-            line.push_str(&format!(" gxm_begin={:.2} gxm_end={:.2}", f64::from(end[0].wrapping_sub(start[0])) / 1000.,
-                f64::from(end[1].wrapping_sub(start[1])) / 1000.));
+            let _ = write!(out, " gxm_begin={:.2} gxm_end={:.2}", f64::from(end[0].wrapping_sub(start[0])) / 1000.,
+                f64::from(end[1].wrapping_sub(start[1])) / 1000.);
         }
         for (i, name) in KINDS.iter().enumerate() {
-            if self.calls[i] > 0 { line.push_str(&format!(" {name}={}/{:.2}", self.calls[i], self.ms[i])); }
+            if self.calls[i] > 0 { let _ = write!(out, " {name}={}/{:.2}", self.calls[i], self.ms[i]); }
         }
-        let split: Vec<String> = SIM.iter().zip(self.sim_ms).filter(|(_, ms)| *ms >= 0.05)
-            .map(|(name, ms)| format!("{name}:{ms:.2}")).collect();
-        line.push_str(&format!(" sim_split={}", if split.is_empty() { "-".into() } else { split.join(",") }));
+        out.push_str(" sim_split=");
+        let mut any = false;
+        for (name, ms) in SIM.iter().zip(self.sim_ms).filter(|(_, ms)| *ms >= 0.05) {
+            let _ = write!(out, "{}{name}:{ms:.2}", if any { "," } else { "" });
+            any = true;
+        }
+        if !any { out.push('-'); }
         if gxm.is_some() {
-            let places: Vec<String> = (0..REGIONS).filter(|&r| self.end_calls[r] > 0)
-                .map(|r| format!("{}:{:.2}/{}", if r < SIM.len() { SIM[r] } else { REGION_NAMES[r - SIM.len()] },
-                    f64::from(self.end_us[r]) / 1000., self.end_calls[r]))
-                .collect();
-            line.push_str(&format!(" gxm_end_in={}", if places.is_empty() { "-".into() } else { places.join(",") }));
+            out.push_str(" gxm_end_in=");
+            let mut any = false;
+            for r in (0..REGIONS).filter(|&r| self.end_calls[r] > 0) {
+                let _ = write!(out, "{}{}:{:.2}/{}", if any { "," } else { "" },
+                    if r < SIM.len() { SIM[r] } else { REGION_NAMES[r - SIM.len()] },
+                    f64::from(self.end_us[r]) / 1000., self.end_calls[r]);
+                any = true;
+            }
+            if !any { out.push('-'); }
         }
-        let npcs: Vec<String> = self.npc.iter().flatten().filter(|n| n.ms.iter().sum::<f64>() >= 0.05)
-            .map(|n| format!("{}:{}/{:.2}/{:.2}/{:.2}/{:.2}/{:.2}", n.name, n.updated, n.ms.iter().sum::<f64>(),
-                n.ms[0], n.ms[1], n.ms[2], n.ms[3]))
-            .collect();
-        if !npcs.is_empty() { line.push_str(&format!(" npc={}", npcs.join(","))); }
+        let mut any = false;
+        for n in self.npc.iter().flatten().filter(|n| n.ms.iter().sum::<f64>() >= 0.05) {
+            let _ = write!(out, "{}{}:{}/{:.2}/{:.2}/{:.2}/{:.2}/{:.2}", if any { "," } else { " npc=" }, n.name, n.updated,
+                n.ms.iter().sum::<f64>(), n.ms[0], n.ms[1], n.ms[2], n.ms[3]);
+            any = true;
+        }
         for (name, (calls, ms, expanded, tests)) in PLANNERS.iter().zip(self.planners) {
-            if calls > 0 { line.push_str(&format!(" {name}={calls}/{ms:.2}/{expanded}/{tests}")); }
+            if calls > 0 { let _ = write!(out, " {name}={calls}/{ms:.2}/{expanded}/{tests}"); }
         }
-        line
     }
 }
 
@@ -143,16 +196,43 @@ pub(crate) fn begin_frame() {
         let mut f = f.borrow_mut();
         f.close_block(now);
         f.gxm_switch(0);
+        // The new frame starts at `now`, so formatting the previous line is charged to it (`log=`).
+        let mut log_ms = 0.;
         if let (Some(begin), Some(render), Some(hud), Some(cpu_end)) = (f.begin, f.render, f.hud, f.cpu_end) {
             if now.saturating_duration_since(begin).as_secs_f64() * 1000. >= f64::from(limit) {
-                println!("{}", f.line(now, [begin, render, hud, cpu_end]));
+                OUT.with(|o| o.borrow_mut().push(|text| f.write_line(text, now, [begin, render, hud, cpu_end])));
+                log_ms = now.elapsed().as_secs_f64() * 1000.;
             }
         }
         let number = f.number + 1;
         let mark = f.gxm_mark;
         *f = Frame { number, begin: Some(now), block: Some((Sim::Input as usize, now)), gxm_start: mark,
-            gxm_mark: mark, ..Frame::default() };
+            gxm_mark: mark, log_ms, ..Frame::default() };
     });
+}
+/// Writes the buffered lines, one record each, then one `[lg/spike] flushed` line with the count,
+/// the drops and the time the writes took. `at` names the flush point. Called outside play.
+pub(crate) fn flush(at: &str) {
+    if !on() { return; }
+    let (mut text, lines, dropped) = OUT.with(|o| {
+        let mut o = o.borrow_mut();
+        (std::mem::take(&mut o.text), std::mem::take(&mut o.lines), std::mem::take(&mut o.dropped))
+    });
+    if lines > 0 || dropped > 0 {
+        let start = Instant::now();
+        for line in text.lines() { println!("{line}"); }
+        println!("[lg/spike] flushed at={at} lines={lines} dropped={dropped} bytes={} ms={:.1}", text.len(),
+            start.elapsed().as_secs_f64() * 1000.);
+    }
+    // Keep the reserved buffer for the next lines.
+    text.clear();
+    OUT.with(|o| { let mut o = o.borrow_mut(); if o.text.capacity() == 0 { o.text = text; } });
+}
+/// The viewer loop ended: flush, and print later lines at once until the next `begin_frame`.
+pub(crate) fn end_play() {
+    if !on() { return; }
+    FRAME.with(|f| { let mut f = f.borrow_mut(); let number = f.number; *f = Frame { number, ..Frame::default() }; });
+    flush("viewer-end");
 }
 /// The simulation enters `block`.
 pub(crate) fn sim(block: Sim) {
@@ -210,17 +290,25 @@ pub(crate) fn planner(kind: usize, ms: f64, expanded: u32, tests: u32) {
 /// A loader call outside any load phase. `name` is printed when given.
 pub(crate) fn late(kind: usize, ms: f64, name: Option<&str>, bytes: Option<usize>) {
     if !on() { return; }
-    FRAME.with(|f| {
+    let (number, playing) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         f.calls[kind] += 1;
         f.ms[kind] += ms;
-        let number = f.number;
-        drop(f);
-        let mut line = format!("[lg/late-work] frame={number} kind={} ms={ms:.2}", KINDS[kind]);
-        if let Some(b) = bytes { line.push_str(&format!(" bytes={b}")); }
-        if let Some(n) = name { line.push_str(&format!(" name={n}")); }
-        println!("{line}");
+        (f.number, f.begin.is_some())
     });
+    let write = |line: &mut String| {
+        let _ = write!(line, "[lg/late-work] frame={number} kind={} ms={ms:.2}", KINDS[kind]);
+        if let Some(b) = bytes { let _ = write!(line, " bytes={b}"); }
+        if let Some(n) = name { let _ = write!(line, " name={n}"); }
+    };
+    // Outside play (before the first frame, or after the viewer loop) the line is written at once.
+    if playing {
+        OUT.with(|o| o.borrow_mut().push(write));
+    } else {
+        let mut line = String::new();
+        write(&mut line);
+        println!("{line}");
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +326,30 @@ mod tests {
             let f = f.borrow();
             assert!(f.begin.is_none() && f.block.is_none() && f.calls.iter().all(|&c| c == 0) && f.npc[0].is_none());
         });
+    }
+    #[test]
+    fn buffered_lines_stay_whole_and_overflow_is_counted() {
+        let mut out = Out::default();
+        out.push(|t| t.push_str("[lg/spike] frame=1"));
+        out.push(|t| t.push_str("[lg/late-work] frame=1 kind=audio_clip"));
+        assert_eq!(out.text, "[lg/spike] frame=1\n[lg/late-work] frame=1 kind=audio_clip\n");
+        assert_eq!((out.lines, out.dropped), (2, 0));
+        assert_eq!(out.text.capacity(), OUT_CAP);
+        let long = "x".repeat(1000);
+        while out.dropped == 0 { out.push(|t| t.push_str(&long)); }
+        assert!(out.text.len() + LINE_MAX > OUT_CAP && out.text.ends_with('\n'), "a dropped line leaves no fragment");
+        out.push(|t| t.push_str(&"y".repeat(LINE_MAX + 1)));
+        assert_eq!(out.dropped, 2, "an over-long line is dropped too");
+        assert_eq!(out.text.capacity(), OUT_CAP, "the buffer never grows during play");
+        assert_eq!(out.text.lines().count() as u32, out.lines);
+    }
+    #[test]
+    fn log_field_reports_the_previous_line_cost() {
+        let at = Instant::now();
+        let t = |ms: u64| at + std::time::Duration::from_millis(ms);
+        let f = Frame { number: 8, begin: Some(t(0)), log_ms: 0.126, ..Frame::default() };
+        assert!(f.line(t(40), [t(0), t(12), t(30), t(31)])
+            .starts_with("[lg/spike] frame=8 ms=40.00 sim=12.00 render=18.00 hud=1.00 present=9.00 log=0.13 sim_split="));
     }
     #[test]
     fn spike_line_splits_simulation_blocks_and_npc_kinds() {

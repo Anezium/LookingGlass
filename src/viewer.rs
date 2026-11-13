@@ -4933,6 +4933,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
     }
+    crate::spike_log::end_play();
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
