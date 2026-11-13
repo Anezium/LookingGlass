@@ -249,6 +249,18 @@ pub fn load_visit(
     difficulty: Difficulty,
     play_entry: bool,
 ) -> Result<Loaded> {
+    crate::loading_screen::run_ready(load_visit_async(assets, name, entry, cached, difficulty, play_entry))
+}
+
+/// `load_visit` with its two stage boundaries open to a loading frame.
+pub async fn load_visit_async(
+    assets: &mut Assets,
+    name: &str,
+    entry: Option<&str>,
+    cached: Option<&Level>,
+    difficulty: Difficulty,
+    play_entry: bool,
+) -> Result<Loaded> {
     let mut timing = crate::startup::Phase::new("campaign_map_load");
     let bytes = assets.read(&format!("maps/{name}.bsp"))?;
     timing.mark("bsp_read");
@@ -259,6 +271,7 @@ pub fn load_visit(
     map.difficulty = difficulty;
     let mut world = World::from_bsp(&map)?;
     timing.mark("collision_world");
+    crate::loading_screen::between("collision_world").await;
     save::validate_entry(&map, entry)?;
     let (mut interactions, mut story, hints) = if let Some(saved) = cached {
         let mut saved = saved.clone();
@@ -278,6 +291,7 @@ pub fn load_visit(
     }
     interactions.sync(&mut world);
     timing.mark("entities_logic_story");
+    crate::loading_screen::between("entities_logic_story").await;
     Ok(Loaded {
         map,
         world,
@@ -324,10 +338,22 @@ pub fn arrive(
     exit: &Exit,
     strict: bool,
 ) -> Result<NextVisit> {
+    crate::loading_screen::run_ready(arrive_async(assets, stats, ledger, leaving, exit, strict))
+}
+
+/// `arrive` with `load_visit`'s stage boundaries open to a loading frame.
+pub async fn arrive_async(
+    assets: &mut Assets,
+    stats: &mut Stats,
+    ledger: &mut Campaign,
+    leaving: Level,
+    exit: &Exit,
+    strict: bool,
+) -> Result<NextVisit> {
     let (name, entry) = (exit.0.as_str(), exit.1.as_deref());
     let key = save::visit_key(name, entry);
     let cached = ledger.levels.get(&key).cloned();
-    let loaded = load_visit(assets, name, entry, cached.as_ref(), stats.difficulty, true)?;
+    let loaded = load_visit_async(assets, name, entry, cached.as_ref(), stats.difficulty, true).await?;
     let (eye, yaw) = interaction::spawn(&loaded.map, entry);
     let player = clear_entrance(&loaded.world, eye, &key)?;
     ledger.completed.insert(leaving.key());

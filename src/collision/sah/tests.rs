@@ -179,3 +179,58 @@ fn shared_footing_matches_legacy_and_builds_sah_once() {
     assert_eq!(bits(landed), bits(foot.actor_footing(origin, PLAYER_CENTER, PLAYER_HALF, 64.)));
     assert_eq!(bits(landed), bits(legacy.actor_footing(origin, PLAYER_CENTER, PLAYER_HALF, 64.)));
 }
+#[test]
+fn geometry_share_reuses_only_a_live_bit_identical_geometry() {
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) {
+        crate::collision::set_sah_enabled_for_test(None);
+        crate::collision::set_geometry_share_for_test(None);
+    } }
+    let _reset = Reset;
+    crate::collision::set_sah_enabled_for_test(Some(true));
+    let boxes: Vec<_> = (0..40).map(|i| { let p = Vec3::new(i as f32 * 8., 0., (i % 3) as f32); (p, p + Vec3::splat(5.)) }).collect();
+    let hulls = || World::box_hulls(&boxes);
+    let bits = |t: Trace| (t.fraction.to_bits(), t.normal.to_array().map(f32::to_bits), t.start_solid, t.all_solid);
+    // Off: every world builds its own tree and hierarchy, as before.
+    crate::collision::set_geometry_share_for_test(Some(false));
+    let before = builds();
+    let a = StaticGeometry::shared_or_built(hulls(), true);
+    let b = StaticGeometry::shared_or_built(hulls(), true);
+    assert_eq!(builds(), before + 2);
+    assert!(!std::sync::Arc::ptr_eq(&a, &b));
+    drop((a, b));
+    // On: the second identical request shares the live first one.
+    crate::collision::set_geometry_share_for_test(Some(true));
+    let before = builds();
+    let first = StaticGeometry::shared_or_built(hulls(), true);
+    let second = StaticGeometry::shared_or_built(hulls(), true);
+    assert_eq!(builds(), before + 1, "one hierarchy for two identical worlds");
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    // The shared geometry answers exactly what an independent build answers.
+    crate::collision::set_geometry_share_for_test(Some(false));
+    let independent = StaticGeometry::shared_or_built(hulls(), true);
+    crate::collision::set_geometry_share_for_test(Some(true));
+    for (s, e, h) in [(Vec3::new(-10., 2., 2.), Vec3::new(400., 2., 2.), Vec3::ZERO),
+                      (Vec3::new(3., 3., 50.), Vec3::new(3., 3., -50.), PLAYER_HALF),
+                      (Vec3::new(100., -20., 1.), Vec3::new(130., 30., 4.), Vec3::splat(2.))] {
+        let q = SweepBounds::new(s, e, h);
+        assert_eq!(bits(second.trace(s, e, h, &q).0), bits(independent.trace(s, e, h, &q).0));
+    }
+    // A different hull set, a one-bit change, or a different acceleration builds anew.
+    let mut moved = hulls();
+    moved[7].planes[0].distance = f32::from_bits(moved[7].planes[0].distance.to_bits() ^ 1);
+    let before = builds();
+    let other = StaticGeometry::shared_or_built(moved, true);
+    assert_eq!(builds(), before + 1);
+    assert!(!std::sync::Arc::ptr_eq(&other, &first));
+    let plain = StaticGeometry::shared_or_built(hulls(), false);
+    assert!(plain.sah.is_none() && !std::sync::Arc::ptr_eq(&plain, &first), "accelerate=false never takes a hierarchy");
+    // A geometry no world owns any more is never revived.
+    let weak = std::sync::Arc::downgrade(&first);
+    drop((first, second));
+    assert!(weak.upgrade().is_none(), "the share list holds no strong reference");
+    let before = builds();
+    let fresh = StaticGeometry::shared_or_built(hulls(), true);
+    assert_eq!(builds(), before + 1);
+    drop(fresh);
+}

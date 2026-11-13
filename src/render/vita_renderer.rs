@@ -198,6 +198,14 @@ pub struct Config {
     pub authored_sky: bool,
     /// Diagnostic direct-effect routing candidate; picture/native cost unqualified.
     pub defer_immediate_fx: bool,
+    /// Present a Loading frame with the destination title and a step bar at the existing load
+    /// stage boundaries of chapter, console, natural-exit, save-load and death-retry transitions,
+    /// instead of a black screen. Frames only between stages. Default off.
+    pub loading_screen: bool,
+    /// A collision world built from the same map with a hull set bit-identical to a live world's
+    /// shares that world's immutable hulls, tree and SAH instead of building them again.
+    /// Exact by construction; saves one tree and SAH build per such world. Default off.
+    pub collision_geometry_share: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -383,6 +391,8 @@ impl Default for Config {
             sky: true,
             authored_sky: false,
             defer_immediate_fx: false,
+            loading_screen: false,
+            collision_geometry_share: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
@@ -2973,6 +2983,27 @@ mod tests {
         let c:Config=serde_json::from_str(r#"{"audio_offmain":true,"audio_pcm_worker":true}"#).unwrap();
         c.validate().unwrap();
         assert!(serde_json::from_str::<Config>(r#"{"audio_offmain":"on"}"#).is_err());
+    }
+    #[test]
+    fn a3_loading_config_is_rc1_with_the_two_load_keys_on() {
+        let (rc1, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc1.json")).unwrap();
+        assert!(rejected.is_none());
+        let bytes = include_bytes!("../../configs/PL-a3-loading.json");
+        let (a3, rejected) = parse_runtime_config(bytes).unwrap();
+        assert!(rejected.is_none());
+        a3.validate().unwrap();
+        let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let all = serde_json::to_value(Config::default()).unwrap();
+        let keys = |v: &serde_json::Value| { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+        assert_eq!(keys(&written), keys(&all), "the A3 config writes every runtime key");
+        assert!(!rc1.loading_screen && !rc1.collision_geometry_share, "RC1 keeps both off");
+        assert!(a3.loading_screen && a3.collision_geometry_share);
+        let (mut rc1, mut a3) = (serde_json::to_value(&rc1).unwrap(), serde_json::to_value(&a3).unwrap());
+        for key in ["loading_screen", "collision_geometry_share"] {
+            rc1.as_object_mut().unwrap().remove(key);
+            a3.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(a3, rc1, "the A3 file differs from PL-rc1 only in the two load keys");
     }
     #[test]
     fn packaged_r3_config_contains_exactly_all_runtime_defaults() {

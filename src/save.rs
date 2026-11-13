@@ -829,13 +829,18 @@ pub fn rebuild_headless(assets: &mut Assets, mut game: Game) -> Result<Headless>
     })
 }
 impl Restored {
-    pub fn build(assets: &mut Assets, mut game: Game) -> Result<Self> {
+    pub fn build(assets: &mut Assets, game: Game) -> Result<Self> {
+        crate::loading_screen::run_ready(Self::build_async(assets, game))
+    }
+    /// `build` with its stage boundaries open to a loading frame.
+    pub async fn build_async(assets: &mut Assets, mut game: Game) -> Result<Self> {
         let mut timing = crate::startup::Phase::new("save_restore");
         let (level, migrate) = prepare(assets, &mut game, true)?;
         timing.mark("prepare_migrate");
         crate::transition_memory::fault("prepare")?;
         let mut scene = Scene::load(assets, &level.map)?;
         timing.mark("scene_ready");
+        crate::loading_screen::between("scene_ready").await;
         crate::transition_memory::fault("scene")?;
         scene.map.difficulty = game.stats.difficulty;
         let Logic {
@@ -851,6 +856,7 @@ impl Restored {
             migrate,
         )?;
         timing.mark("logic_story_hints");
+        crate::loading_screen::between("logic_story_hints").await;
         crate::transition_memory::fault("logic")?;
         let mut npcs = Npcs::load(
             assets,
@@ -862,12 +868,14 @@ impl Restored {
         )?;
         npcs.restore(&level.npcs)?;
         timing.mark("npc_models_restore");
+        crate::loading_screen::between("npc_models_restore").await;
         crate::transition_memory::fault("npcs")?;
         let mut alice = Character::load(assets)?;
         alice.restore(&game.character)?;
         scene.world.set_weapon_obstacles(alice.ice_targets());
         alice.power_appearance(&game.stats);
         timing.mark("alice_models_restore");
+        crate::loading_screen::between("alice_models_restore").await;
         crate::transition_memory::fault("alice")?;
         let steam = crate::particles::Steam::load(assets, &scene.map)?;
         timing.mark("steam_textures");

@@ -352,14 +352,25 @@ fn enter_level(
     options: &Options,
     play_entry: bool,
 ) -> Result<Entered> {
+    crate::loading_screen::run_ready(enter_level_async(assets, name, entry, cached, options, play_entry))
+}
+/// `enter_level` with its stage boundaries open to a loading frame.
+async fn enter_level_async(
+    assets: &mut Assets,
+    name: &str,
+    entry: Option<&str>,
+    cached: Option<&Level>,
+    options: &Options,
+    play_entry: bool,
+) -> Result<Entered> {
     crate::transition_memory::fault("level")?;
     let loaded =
-        crate::campaign::load_visit(assets, name, entry, cached, options.difficulty, play_entry)?;
-    finish_entered(assets, loaded, name, entry, cached, options)
+        crate::campaign::load_visit_async(assets, name, entry, cached, options.difficulty, play_entry).await?;
+    finish_entered(assets, loaded, name, entry, cached, options).await
 }
 /// The window half of entering a level: the scene, the cast, the particles and the art, built on
 /// logic that `campaign::load_visit` or `campaign::arrive` already prepared.
-fn finish_entered(
+async fn finish_entered(
     assets: &mut Assets,
     loaded: crate::campaign::Loaded,
     name: &str,
@@ -377,6 +388,7 @@ fn finish_entered(
     let mut timing = crate::startup::Phase::new("entered_resources");
     let scene = Scene::from_parts(assets, name, map, world)?;
     timing.mark("scene");
+    crate::loading_screen::between("scene").await;
     crate::transition_memory::fault("scene")?;
     if options.npc_preview || options.combat_preview || options.larva_preview {
         interactions.encounters = None;
@@ -396,6 +408,7 @@ fn finish_entered(
         npcs.restore(&saved.npcs)?;
     }
     timing.mark("npcs");
+    crate::loading_screen::between("npcs").await;
     crate::transition_memory::fault("npcs")?;
     let steam = crate::particles::Steam::load(assets, &scene.map)?;
     timing.mark("steam");
@@ -405,6 +418,7 @@ fn finish_entered(
     let mut art = LevelArt::default();
     art.prepare(assets, &scene, &interactions, true)?;
     timing.mark("level_art");
+    crate::loading_screen::between("level_art").await;
     crate::transition_memory::fault("level_art")?;
     Ok(Entered {
         art,
@@ -421,7 +435,7 @@ fn finish_entered(
 
 // Present before the synchronous resource work starts. This overlay remains
 // visible until the first destination frame; it does not claim animated progress.
-fn draw_transition_loading(name: &str) {
+pub(crate) fn draw_transition_loading(name: &str) {
     set_default_camera();
     clear_background(BLACK);
     let text = "Loading";
@@ -434,7 +448,7 @@ fn draw_transition_loading(name: &str) {
 }
 async fn present_transition_loading(name: &str) {
     crate::frame_profile::exclude_transition_frame();
-    draw_transition_loading(name);
+    crate::loading_screen::draw_or(|| draw_transition_loading(name));
     #[cfg(not(target_os="vita"))]
     if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_CAPTURE") {
         save_capture(std::path::Path::new(&path)).expect("loading indicator capture");
@@ -443,14 +457,14 @@ async fn present_transition_loading(name: &str) {
     eprintln!("[lg/transition] loading_indicator=presented destination={name}");
 }
 
-fn enter_natural(
+async fn enter_natural(
     assets: &mut Assets, stats: &mut Stats, campaign: &mut Campaign,
     leaving: Level, exit: &crate::campaign::Exit, options: &Options,
 ) -> Result<(Entered, crate::movement::Player, Vec3, f32)> {
     crate::transition_memory::fault("level")?;
-    let visit = crate::campaign::arrive(assets, stats, campaign, leaving, exit, false)?;
+    let visit = crate::campaign::arrive_async(assets, stats, campaign, leaving, exit, false).await?;
     let crate::campaign::NextVisit { map, entry, cached, loaded, player, eye, yaw, .. } = visit;
-    let entered = finish_entered(assets, loaded, &map, entry.as_deref(), cached.as_ref(), options)?;
+    let entered = finish_entered(assets, loaded, &map, entry.as_deref(), cached.as_ref(), options).await?;
     Ok((entered, player, eye, yaw))
 }
 
@@ -463,9 +477,55 @@ pub(crate) async fn check_transition_loading(assets: &mut Assets, options: &Opti
     let exit = ("pandemonium".to_string(), Some("player_start".to_string()));
     present_transition_loading(&exit.0).await;
     let start = std::time::Instant::now();
-    let (next, _, _, _) = enter_natural(assets, &mut game.stats, &mut game.campaign, leaving, &exit, options)?;
+    let (next, _, _, _) = Box::pin(enter_natural(assets, &mut game.stats, &mut game.campaign, leaving, &exit, options)).await?;
     anyhow::ensure!(next.interactions.pandemonium.is_some() && next.art.pandemonium.is_some(), "natural destination cast");
     println!("PASS natural transition loading indicator and destination; host_load_ms={:.3}", start.elapsed().as_secs_f64()*1000.);
+    Ok(())
+}
+
+/// The chapter and the restore loads, as the viewer runs them, with whatever `loading_screen`
+/// the renderer config sets: on, each load presents one frame per stage boundary (five) and the
+/// release frames show step zero; off, none. Prints host wall times for both loads.
+#[cfg(all(feature="vita_renderer", not(target_os="vita")))]
+pub(crate) async fn check_loading_screen(assets: &mut Assets, options: &Options) -> Result<()> {
+    let on = crate::loading_screen::enabled();
+    let maps: Vec<String> = std::env::var("LOOKING_GLASS_LOADING_SCREEN_MAPS").ok()
+        .map(|m| m.split(',').map(str::to_owned).collect())
+        .unwrap_or_else(|| vec!["gvillage".into(), "hatter1".into()]);
+    let expect = |kind: &str, map: &str| -> Result<()> {
+        let counts = crate::loading_screen::counts();
+        if on {
+            anyhow::ensure!(counts == Some((5, 5)), "{kind} {map}: expected five presented stage frames, got {counts:?}");
+        } else {
+            anyhow::ensure!(counts.is_none(), "{kind} {map}: loading_screen off must not start a load");
+        }
+        Ok(())
+    };
+    for map in &maps {
+        let load = crate::loading_screen::begin("chapter-or-console", map);
+        anyhow::ensure!(load.is_some() == on, "begin follows the key");
+        crate::loading_screen::released().await;
+        let start = std::time::Instant::now();
+        let next = Box::pin(enter_level_async(assets, map, None, None, options, true)).await?;
+        let chapter_ms = start.elapsed().as_secs_f64() * 1000.;
+        expect("chapter-or-console", map)?;
+        drop(load);
+        drop(next);
+        // A restore of the same visit, as death retry and save load run it.
+        let saved = crate::recovery::retry_check::capture(&crate::recovery::retry_check::fixture(assets, map, "entry")?);
+        let load = crate::loading_screen::begin("death-retry", map);
+        crate::loading_screen::released().await;
+        let start = std::time::Instant::now();
+        let restored = Box::pin(save::Restored::build_async(assets, saved)).await?;
+        let mut art = LevelArt::default();
+        art.prepare(assets, &restored.scene, &restored.interactions, true)?;
+        crate::loading_screen::between("level_art_models_textures").await;
+        let restore_ms = start.elapsed().as_secs_f64() * 1000.;
+        expect("death-retry", map)?;
+        drop(load);
+        println!("PASS loading screen {} map={map} chapter_host_ms={chapter_ms:.1} restore_host_ms={restore_ms:.1}",
+            if on { "on: five stage frames per load" } else { "off: no load frames" });
+    }
     Ok(())
 }
 
@@ -957,6 +1017,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let mut install_timing = crate::startup::Phase::new("restore_install");
             level_art.prepare(&mut assets, &scene, &interactions, true)?;
             install_timing.mark("level_art_models_textures");
+            crate::loading_screen::between("level_art_models_textures").await;
             skip_scene = crate::cinematic::Skip::default();
             audio.load(&mut assets, &maps[current], &scene.map);
             install_timing.mark("audio_load");
@@ -1299,11 +1360,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let particles = steam.runtime();
                 let audio_checkpoint = audio.transition_checkpoint();
                 let mut memory = crate::transition_memory::Transition::begin($kind, &maps[current], &destination);
+                let _loading = crate::loading_screen::begin($kind, &destination);
                 let mut outgoing = unload_scene!();
                 let outgoing_alice = if crate::transition_memory::legacy_overlap() { Some(alice) } else { drop(alice); None };
-                crate::transition_memory::released().await;
+                crate::loading_screen::released().await;
                 memory.after_release();
-                let result = match save::Restored::build(&mut assets, incoming) {
+                let result = match Box::pin(save::Restored::build_async(&mut assets, incoming)).await {
                     Ok(restored) => {
                         apply_loaded!(restored, $pause, $install);
                         Ok(())
@@ -2382,17 +2444,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let mut memory = if let Some(memory) = new_campaign_memory.take() { memory } else {
                     crate::transition_memory::Transition::begin("chapter-or-console", &maps[current], &maps[selected])
                 };
+                let _loading = crate::loading_screen::begin("chapter-or-console", &maps[selected]);
                 let mut outgoing = unload_scene!();
-                crate::transition_memory::released().await;
+                crate::loading_screen::released().await;
                 memory.after_release();
-                match enter_level(
+                match Box::pin(enter_level_async(
                     &mut assets,
                     &maps[selected],
                     selected_entry.as_deref(),
                     None,
                     &options,
                     !options.fly,
-                ) {
+                )).await {
                     Ok(next) => {
                         #[cfg(feature = "native_timing")]
                         timing.with(|r| r.before_install());
@@ -3045,6 +3108,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::log_report_error(crate::frame_profile::report(&maps[current]));
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::TransitionBegin, crate::native_timing::TRANSITION));
+            let _loading = crate::loading_screen::begin("natural-exit", &name);
             present_transition_loading(&name).await;
             let transition_started = std::time::Instant::now();
             let checkpoint = game_snapshot!();
@@ -3053,7 +3117,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let mut memory = crate::transition_memory::Transition::begin("natural-exit", &maps[current], &name);
             let mut outgoing = unload_scene!();
             crate::transition_memory::released_with(|| {
-                draw_transition_loading(&name);
+                crate::loading_screen::draw_or(|| draw_transition_loading(&name));
                 // Inspect the submitted loading frame before the swap. Reading
                 // the next back buffer after next_frame only sees its clear.
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -3068,7 +3132,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
             memory.after_release();
-            let arrived = enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options);
+            let arrived = Box::pin(enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options)).await;
             match arrived {
                 Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {
                     #[cfg(feature = "native_timing")]
