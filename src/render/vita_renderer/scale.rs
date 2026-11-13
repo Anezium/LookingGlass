@@ -52,11 +52,14 @@ pub(super) fn prepare(bg: Color) {
     TARGET.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.as_ref().is_none_or(|t| t.width != w || t.height != h) {
+            // `resolve` keeps the historical one-sample target and its resolve copy.
+            // Sample count 0 builds no resolve target, so ending a pass never blits.
+            let direct = config().scaled_target != "resolve";
             let mut rt = render_target_ex(
                 w,
                 h,
                 RenderTargetParams {
-                    sample_count: 1,
+                    sample_count: if direct { 0 } else { 1 },
                     depth: false,
                 },
             );
@@ -100,10 +103,12 @@ pub(super) fn prepare(bg: Color) {
             };
             #[cfg(target_os = "vita")]
             let depth: Option<TextureId> = None;
+            // The Vita copy inverts V; `direct_flip` inverts that choice.
+            let invert = cfg!(target_os = "vita") != (config().scaled_target == "direct_flip");
             let upscale = crate::frame_profile::load_material(
                 ShaderSource::Glsl {
                     vertex: UPSCALE_VERTEX,
-                    fragment: UPSCALE_FRAGMENT,
+                    fragment: if invert { UPSCALE_FRAGMENT_INVERT_V } else { UPSCALE_FRAGMENT },
                 },
                 MaterialParams {
                     pipeline_params: PipelineParams {
@@ -123,8 +128,8 @@ pub(super) fn prepare(bg: Color) {
                 upscale,
             });
             println!(
-                "[lg/vita-renderer] 3d target {w}x{h} RGBA8/depth32 samples=1 scale={} copy_v_inverted={}",
-                config().render_scale, cfg!(target_os = "vita")
+                "[lg/vita-renderer] 3d target {w}x{h} RGBA8/depth32 samples={} scale={} copy_v_inverted={invert} scaled_target={} resolve_blit={}",
+                if direct { 0 } else { 1 }, config().render_scale, config().scaled_target, !direct
             );
         }
     });
@@ -212,7 +217,6 @@ const UPSCALE_VERTEX: &str = r#"#version 100
 attribute vec3 position; attribute vec2 texcoord; attribute vec4 color0; attribute vec4 normal;
 varying mediump vec2 uv; uniform mat4 Model; uniform mat4 Projection;
 void main(){gl_Position=Projection*Model*vec4(position,1.);uv=texcoord;}"#;
-#[cfg(not(target_os = "vita"))]
 const UPSCALE_FRAGMENT: &str = r#"#version 100
 varying mediump vec2 uv; uniform sampler2D Texture;
 void main(){gl_FragColor=vec4(texture2D(Texture,uv).rgb,1.);}"#;
@@ -220,8 +224,7 @@ void main(){gl_FragColor=vec4(texture2D(Texture,uv).rgb,1.);}"#;
 // The pinned VitaGL build uses HAVE_UNFLIPPED_FBOS. Invert sampled V once
 // relative to the existing Macroquad copy quad; the desktop FBO convention
 // differs. This shader exists only for scaled targets, before the native HUD.
-#[cfg(target_os = "vita")]
-const UPSCALE_FRAGMENT: &str = r#"#version 100
+const UPSCALE_FRAGMENT_INVERT_V: &str = r#"#version 100
 varying mediump vec2 uv; uniform sampler2D Texture;
 void main(){gl_FragColor=vec4(texture2D(Texture,vec2(uv.x,1.-uv.y)).rgb,1.);}"#;
 
