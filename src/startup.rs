@@ -5,23 +5,32 @@ use std::{cell::RefCell, time::Instant};
 struct Counters { calls: [u64; 6], ms: [f64; 6] }
 thread_local! { static STATE: RefCell<(usize, Counters)> = RefCell::new((0, Counters::default())); }
 pub(crate) enum Work { TextureRead, TextureDecode, TextureUpload, ShaderCreation, AssetRead, MaterialParse }
-pub(crate) struct WorkTimer { start: Option<Instant>, index: usize }
+/// `phase` is false for work done outside any load phase; `spike_log_ms` reports that work, except asset
+/// reads, which `Assets::read` reports with their name.
+pub(crate) struct WorkTimer { start: Option<Instant>, index: usize, phase: bool }
 impl WorkTimer {
     pub fn new(work: Work) -> Self {
-        Self { start: STATE.with(|s| (s.borrow().0 > 0).then(Instant::now)), index: work as usize }
+        let index = work as usize;
+        let phase = in_phase();
+        let late = !phase && index != Work::AssetRead as usize && crate::spike_log::on();
+        Self { start: (phase || late).then(Instant::now), index, phase }
     }
 }
 impl Drop for WorkTimer {
     fn drop(&mut self) {
         if let Some(start) = self.start {
+            let ms = start.elapsed().as_secs_f64() * 1000.;
+            if !self.phase { crate::spike_log::late(self.index, ms, None, None); return; }
             STATE.with(|s| {
                 let mut state = s.borrow_mut();
                 state.1.calls[self.index] += 1;
-                state.1.ms[self.index] += start.elapsed().as_secs_f64() * 1000.;
+                state.1.ms[self.index] += ms;
             });
         }
     }
 }
+/// True while a load phase is open on this thread.
+pub(crate) fn in_phase() -> bool { STATE.with(|s| s.borrow().0 > 0) }
 pub(crate) struct Phase {
     scope: &'static str,
     start: Instant,

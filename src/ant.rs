@@ -14,6 +14,29 @@ fn unit_scale() -> f32 {
 pub fn is_ant(model: &str) -> bool {
     matches!(model, "c_armyant" | "c_armyantcorp")
 }
+const ANT_SOUNDS: [&str; 7] = [
+    "sound/character/army_ant/pain1.wav",
+    "sound/character/army_ant/pain2.wav",
+    "sound/character/army_ant/pain3.wav",
+    "sound/character/army_ant/death1.wav",
+    "sound/character/army_ant/death2.wav",
+    "sound/character/army_ant/death3.wav",
+    "sound/character/army_ant/gunshot2.wav",
+];
+const CORPORAL_SOUNDS: [&str; 7] = [
+    "sound/character/army_ant_corp/pain1.wav",
+    "sound/character/army_ant_corp/pain2.wav",
+    "sound/character/army_ant_corp/pain3.wav",
+    "sound/character/army_ant_corp/death1.wav",
+    "sound/character/army_ant_corp/death2.wav",
+    "sound/character/army_ant_corp/death3.wav",
+    "sound/character/army_ant_corp/grenade.wav",
+];
+/// Every sound an Ant can request: three pain cries, three death cries, then its attack (a rifle
+/// shot, or the corporal's grenade).
+pub fn sounds(corporal: bool) -> &'static [&'static str; 7] {
+    if corporal { &CORPORAL_SOUNDS } else { &ANT_SOUNDS }
+}
 /// Placed actors whose source scene owns AI activation. They remain damageable.
 pub fn script_wait(map: &str, name: &str) -> bool {
     match map {
@@ -243,28 +266,8 @@ impl Ant {
         }
     }
     fn sound(&self, death: bool) -> &'static str {
-        (match (self.corporal, death) {
-            (false, false) => [
-                "sound/character/army_ant/pain1.wav",
-                "sound/character/army_ant/pain2.wav",
-                "sound/character/army_ant/pain3.wav",
-            ],
-            (false, true) => [
-                "sound/character/army_ant/death1.wav",
-                "sound/character/army_ant/death2.wav",
-                "sound/character/army_ant/death3.wav",
-            ],
-            (true, false) => [
-                "sound/character/army_ant_corp/pain1.wav",
-                "sound/character/army_ant_corp/pain2.wav",
-                "sound/character/army_ant_corp/pain3.wav",
-            ],
-            (true, true) => [
-                "sound/character/army_ant_corp/death1.wav",
-                "sound/character/army_ant_corp/death2.wav",
-                "sound/character/army_ant_corp/death3.wav",
-            ],
-        })[self.variant.min(2)]
+        let sounds = sounds(self.corporal);
+        sounds[usize::from(death) * 3 + self.variant.min(2)]
     }
     fn chance(&mut self) -> bool {
         self.random = self.random.wrapping_mul(1664525).wrapping_add(1013904223);
@@ -361,8 +364,7 @@ impl Ant {
                 if self.blasts.len() < 32 {
                     self.blasts.push(Blast { at: b.at, time: 0. });
                 }
-                out.spatial_sounds
-                    .push(("sound/character/army_ant_corp/grenade.wav", b.at));
+                out.spatial_sounds.push((CORPORAL_SOUNDS[6], b.at));
                 for body in &bodies {
                     let distance = body.center.distance(b.at);
                     let _sight_category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Sight);
@@ -500,8 +502,7 @@ impl Ant {
                             age: 0.,
                         });
                         if !self.corporal {
-                            out.spatial_sounds
-                                .push(("sound/character/army_ant/gunshot2.wav", at));
+                            out.spatial_sounds.push((ANT_SOUNDS[6], at));
                         }
                     }
                 }

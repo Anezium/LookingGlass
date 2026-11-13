@@ -130,6 +130,15 @@ impl Assets {
     }
     pub fn read(&mut self, name: &str) -> Result<Vec<u8>> {
         let _timing = crate::startup::WorkTimer::new(crate::startup::Work::AssetRead);
+        let late = (crate::spike_log::on() && !crate::startup::in_phase()).then(std::time::Instant::now);
+        let result = self.read_entry(name);
+        if let Some(start) = late {
+            crate::spike_log::late(crate::startup::Work::AssetRead as usize, start.elapsed().as_secs_f64() * 1000.,
+                Some(name), result.as_ref().ok().map(Vec::len));
+        }
+        result
+    }
+    fn read_entry(&mut self, name: &str) -> Result<Vec<u8>> {
         let &(p, i, _, _) = self
             .entries
             .get(&normalize(name))

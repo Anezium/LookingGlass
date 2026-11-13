@@ -165,5 +165,7 @@
   "tls_fast": "off",
   "sim_sweep_memo": false,
   "worker_spin_us": 0,
-  "skin_stream": false
+  "skin_stream": false,
+  "spike_log_ms": 0.0,
+  "audio_combat_preload": false
 }

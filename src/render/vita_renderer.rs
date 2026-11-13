@@ -57,6 +57,13 @@ pub struct Config {
     pub worker_spin_us: u32,
     /// Skin workers claim draws as the gather captures them, instead of starting after it.
     pub skin_stream: bool,
+    /// Diagnostic: print every gameplay frame slower than this many milliseconds with its main-thread
+    /// split, and every load done outside a load phase (`spike_log.rs`). 0 is off.
+    pub spike_log_ms: f32,
+    /// Preload, with the level's sounds, the combat sounds of the enemy kinds placed in the map, Alice's
+    /// pain cries and the weapon flesh hits, so the first hit or death does not read and decode a clip
+    /// in a frame (`audio.rs`, `combat_preload`).
+    pub audio_combat_preload: bool,
     /// Exact static occlusion certificates for unchanged eye/light positions.
     pub lights_static_cache: bool,
     /// Spatial AABB buckets; preserve original dynamic contact order.
@@ -391,6 +398,8 @@ impl Default for Config {
             sim_sweep_memo: false,
             worker_spin_us: 0,
             skin_stream: false,
+            spike_log_ms: 0.,
+            audio_combat_preload: false,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
             sim_npc_target_stack: true,
@@ -602,6 +611,7 @@ impl Config {
         ensure!(self.world_gxm=="off" || self.world_list_submit,"world_gxm requires world_list_submit");
         ensure!(self.world_gxm=="off" || self.gpu_mask.is_empty(),"world_gxm excludes gpu_mask: a masked draw captures nothing");
         ensure!(!self.skin_stream || (self.skin_overlap && self.actor_single_prepare && !self.actor_layer_reuse),"skin_stream requires skin_overlap and actor_single_prepare, and excludes actor_layer_reuse");
+        ensure!(self.spike_log_ms.is_finite() && (0. ..=10000.).contains(&self.spike_log_ms),"spike_log_ms must be 0 (off) to 10000");
         ensure!(self.worker_spin_us <= 1000,"worker_spin_us must be at most 1000: worker 1 shares CPU2 with the audio producer");
         ensure!(crate::tls_count::FastMode::parse(&self.tls_fast).is_some(),"tls_fast must be off, on, shadow or shadow_sabotage");
         ensure!(crate::gpu_timing::Mode::parse(&self.gpu_timing).is_some(),"gpu_timing must be off, backlog, poll or wait");
@@ -3304,8 +3314,10 @@ mod tests {
             // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
                 "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
+            const A5_FIGHT: [&str; 2] = ["spike_log_ms", "audio_combat_preload"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
-                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals").cloned().collect();
+                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals"
+                    && !A5_FIGHT.contains(&k.as_str())).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3524,6 +3536,55 @@ mod tests {
                 variant[key] = rc2[key].clone();
             }
             assert_eq!(variant, rc2, "an A5 file differs from PL-rc2 only in its own keys");
+        }
+    }
+    #[test]
+    fn a5_fight_keys_default_off_validate_and_print() {
+        let c = Config::default();
+        assert_eq!(c.spike_log_ms, 0.);
+        assert!(!c.audio_combat_preload);
+        for good in [0., 34., 10000.] {
+            let c: Config = serde_json::from_value(serde_json::json!({"spike_log_ms": good})).unwrap();
+            c.validate().unwrap();
+        }
+        for bad in [-1., 10001., 1e30] {
+            let c: Config = serde_json::from_value(serde_json::json!({"spike_log_ms": bad})).unwrap();
+            assert!(c.validate().is_err(), "{bad}");
+        }
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"audio_combat_preload": 1})).is_err());
+        let printed = config_log_lines(&Config::default())[0].clone();
+        for key in ["spike_log_ms", "audio_combat_preload"] { assert!(printed.contains(&format!("\"{key}\"")), "{key} is printed"); }
+    }
+    #[test]
+    fn a5_fight_configs_differ_from_rc3_only_in_their_keys() {
+        let parse = |bytes: &[u8]| {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
+            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            written.sort(); all.sort();
+            assert_eq!(written, all, "an A5 fight config must write every runtime key");
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            c.validate().unwrap();
+            serde_json::to_value(&c).unwrap()
+        };
+        let rc3 = parse(include_bytes!("../../configs/PL-rc3.json"));
+        assert_eq!(rc3["spike_log_ms"], 0.);
+        assert_eq!(rc3["audio_combat_preload"], false);
+        let spike = ("spike_log_ms", serde_json::json!(40.));
+        let audio = ("audio_combat_preload", serde_json::json!(true));
+        for (bytes, keys) in [
+            (&include_bytes!("../../configs/PL-rc3-spike.json")[..], vec![spike.clone()]),
+            (&include_bytes!("../../configs/PL-rc3-audio.json")[..], vec![audio.clone()]),
+            (&include_bytes!("../../configs/PL-rc3-fight.json")[..], vec![spike, audio]),
+        ] {
+            let mut variant = parse(bytes);
+            for (key, value) in keys {
+                assert_eq!(variant[key], value, "{key}");
+                variant[key] = rc3[key].clone();
+            }
+            assert_eq!(variant, rc3, "an A5 fight file differs from PL-rc3 only in its own keys");
         }
     }
     #[test]

@@ -1418,6 +1418,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut census_block = crate::phase_census::span(crate::phase_census::Region::Input);
         crate::frame_profile::begin_viewer_frame();
         crate::frame_phases::begin();
+        crate::spike_log::begin_frame();
         #[cfg(feature="vita_renderer")]
         let route_running=route_session.is_some();
         #[cfg(not(feature="vita_renderer"))]
@@ -4042,6 +4043,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         interactions.place_level_particles(&mut steam);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
+        crate::spike_log::render_begin();
         #[cfg(target_os = "vita")]
         let _lights_profile = crate::frame_profile::span("lights_build");
         let mut lights = steam.lights();
@@ -4355,6 +4357,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if freeze_capture { paused = pause_before_capture; clock.pause(); }
         if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
         drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Hud);
+        crate::spike_log::hud_begin();
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_hud"); }
         #[cfg(target_os = "vita")]
@@ -4815,6 +4818,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let census_tail=crate::phase_census::span(crate::phase_census::Region::FrameworkTail);
         crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
+        crate::spike_log::cpu_end();
         #[cfg(target_os = "vita")]
         {
             crate::frame_phases::mark(3);
