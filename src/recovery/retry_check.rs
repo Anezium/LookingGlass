@@ -15,7 +15,7 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::*;
 
-fn capture(r: &Restored) -> Game {
+pub(crate) fn capture(r: &Restored) -> Game {
     let mut game = r.game.clone();
     let level = game.campaign.levels.get_mut(&game.current).unwrap();
     level.interactions = r.interactions.snapshot();
@@ -27,7 +27,7 @@ fn capture(r: &Restored) -> Game {
     game
 }
 
-fn fixture(a: &mut Assets, name: &str, case: &str) -> Result<Restored> {
+pub(crate) fn fixture(a: &mut Assets, name: &str, case: &str) -> Result<Restored> {
     let mut scene = Scene::load(a, name)?;
     let mut interactions = Interactions::load(&scene.map)?;
     interactions.set_entry(a, &scene.map, name, None)?;

@@ -198,6 +198,14 @@ pub struct Config {
     pub authored_sky: bool,
     /// Diagnostic direct-effect routing candidate; picture/native cost unqualified.
     pub defer_immediate_fx: bool,
+    /// Present a Loading frame with the destination title and a step bar at the existing load
+    /// stage boundaries of chapter, console, natural-exit, save-load and death-retry transitions,
+    /// instead of a black screen. Frames only between stages. Default off.
+    pub loading_screen: bool,
+    /// A collision world built from the same map with a hull set bit-identical to a live world's
+    /// shares that world's immutable hulls, tree and SAH instead of building them again.
+    /// Exact by construction; saves one tree and SAH build per such world. Default off.
+    pub collision_geometry_share: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -383,6 +391,8 @@ impl Default for Config {
             sky: true,
             authored_sky: false,
             defer_immediate_fx: false,
+            loading_screen: false,
+            collision_geometry_share: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,

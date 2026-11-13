@@ -49,6 +49,8 @@
   "sky": true,
   "authored_sky": true,
   "defer_immediate_fx": false,
+  "loading_screen": false,
+  "collision_geometry_share": false,
   "cell_size": 256.0,
   "alpha_interop": true,
   "actor_max_layers": 2,

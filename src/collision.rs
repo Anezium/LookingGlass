@@ -682,6 +682,35 @@ fn sah_switch() -> bool {
     #[cfg(not(feature="vita_renderer"))]
     { false }
 }
+#[cfg(test)]
+thread_local! {
+    static SHARE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn set_geometry_share_for_test(enabled: Option<bool>) {
+    SHARE_OVERRIDE.with(|cell| cell.set(enabled));
+}
+fn share_switch() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = SHARE_OVERRIDE.with(|cell| cell.get()) { return enabled; }
+    #[cfg(feature="vita_renderer")]
+    { crate::render::vita_renderer::config().collision_geometry_share }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
+thread_local! {
+    /// Static geometries still owned by some world on this thread. Weak, so a geometry is never
+    /// kept alive by this list: a world dropped before the next build cannot be shared.
+    static LIVE_GEOMETRY: std::cell::RefCell<Vec<std::sync::Weak<StaticGeometry>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+fn same_bits(a: &[Hull], b: &[Hull]) -> bool {
+    let v = |x: Vec3| x.to_array().map(f32::to_bits);
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| {
+        v(a.bounds.min) == v(b.bounds.min) && v(a.bounds.max) == v(b.bounds.max)
+            && a.planes.len() == b.planes.len()
+            && a.planes.iter().zip(&b.planes).all(|(p, q)| v(p.normal) == v(q.normal) && p.distance.to_bits() == q.distance.to_bits())
+    })
+}
 static R13_GEOMETRIES:std::sync::atomic::AtomicUsize=std::sync::atomic::AtomicUsize::new(0);
 static R13_GEOMETRY_BYTES:[std::sync::atomic::AtomicUsize;3]=[const{std::sync::atomic::AtomicUsize::new(0)};3];
 impl StaticGeometry {
@@ -693,6 +722,36 @@ impl StaticGeometry {
         [self.hulls.capacity()*std::mem::size_of::<Hull>()
             +self.hulls.iter().map(|h|h.planes.capacity()*std::mem::size_of::<crate::bsp::Plane>()).sum::<usize>(),
             self.tree.as_ref().map_or(0,tree),self.sah.as_ref().map_or(0,|h|h.storage_bytes())]
+    }
+    /// The tree and the SAH are pure functions of the hull list and the acceleration switches,
+    /// and nothing mutates a built geometry, so a live geometry over bit-identical hulls with
+    /// the same acceleration is the geometry this build would produce.
+    fn shared_or_built(hulls: Vec<Hull>, accelerate: bool) -> std::sync::Arc<Self> {
+        let share = share_switch();
+        if share {
+            let accelerated = accelerate && sah_switch() && !hulls.is_empty();
+            let found = LIVE_GEOMETRY.with(|live| {
+                let mut live = live.borrow_mut();
+                live.retain(|g| g.strong_count() > 0);
+                live.iter().filter_map(std::sync::Weak::upgrade)
+                    .find(|g| g.sah.is_some() == accelerated && same_bits(&g.hulls, &hulls))
+            });
+            if let Some(found) = found {
+                eprintln!("[lg/collision] geometry_share hit hulls={} sah={accelerated}", hulls.len());
+                return found;
+            }
+        }
+        let tree = if hulls.is_empty() {
+            None
+        } else {
+            Some(Node::build(
+                &hulls,
+                &mut (0..hulls.len()).collect::<Vec<_>>(),
+            ))
+        };
+        let built = std::sync::Arc::new(Self::with_acceleration(hulls, tree, accelerate));
+        if share { LIVE_GEOMETRY.with(|live| live.borrow_mut().push(std::sync::Arc::downgrade(&built))); }
+        built
     }
     fn new(hulls: Vec<Hull>, tree: Option<Node>) -> Self {
         Self::with_acceleration(hulls, tree, true)
@@ -1091,14 +1150,7 @@ impl World {
             }
         }
         let patch_count = hulls.len() - brush_count;
-        let tree = if hulls.is_empty() {
-            None
-        } else {
-            Some(Node::build(
-                &hulls,
-                &mut (0..hulls.len()).collect::<Vec<_>>(),
-            ))
-        };
+        let static_geometry = StaticGeometry::shared_or_built(hulls, accelerate);
         Ok(Self {
             traversal: crate::traversal::Traversal::load(map)?,
             npc_sight_cache: std::cell::RefCell::default(),
@@ -1120,7 +1172,7 @@ impl World {
             camera_obstacles: Vec::new(),
             liquids,
             dynamic_liquids: Vec::new(),
-            static_geometry: std::sync::Arc::new(StaticGeometry::with_acceleration(hulls, tree, accelerate)),
+            static_geometry,
             brush_count,
             patch_count,
             min: map.world_min,
