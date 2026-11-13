@@ -1403,13 +1403,16 @@ impl Renderer {
             Some(low)
         }else{None};
         resources.pipelines.extend(low_pipelines.iter().copied());
+        // A key whose program does not build is turned off with a warning; the frame stays whole.
         let mut alpha_fill = alpha_fill::State::off();
-        if c.world_alpha_lite {
+        let lite = c.world_alpha_lite.then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name = crate::shader_cache::Name::new("retained-world-alpha-lite");
-            let lite = ctx.new_shader(ShaderSource::Glsl { vertex: shader::VERTEX,
+            ctx.new_shader(ShaderSource::Glsl { vertex: shader::VERTEX,
                 fragment: &crate::environment::fragment(alpha_fill::ALPHA_LITE_FRAGMENT) }, shader::meta())
-                .context("retained world alpha lite shader")?;
+                .map_err(|e| eprintln!("[lg/vita-renderer] warning world_alpha_lite program failed, key off: {e:?}")).ok()
+        }).flatten();
+        if let Some(lite) = lite {
             resources.shaders.push(lite);
             // Same blend classes as the world pipelines, in the same order.
             let mut lite_pipelines = Vec::new();
@@ -1420,25 +1423,28 @@ impl Renderer {
             resources.pipelines.extend(lite_pipelines.iter().copied());
             alpha_fill.lite = Some((lite, lite_pipelines, super::uniform_fields::Cache::new(shader::meta())));
         }
-        if c.water_stage_merge != "off" {
+        if c.water_stage_merge == "merge" {
+            crate::frame_profile::shader_creation();
+            let _shader_name = crate::shader_cache::Name::new("retained-world-water-merge");
+            match ctx.new_shader(ShaderSource::Glsl { vertex: alpha_fill::MERGE_VERTEX,
+                fragment: &crate::environment::fragment(alpha_fill::MERGE_FRAGMENT) }, alpha_fill::merge_meta()) {
+                Ok(merge) => {
+                    resources.shaders.push(merge);
+                    let (color, alpha) = alpha_fill::merge_blend();
+                    let merge_pipelines = alpha_fill::pipelines(ctx, merge, &attributes, color, alpha);
+                    resources.pipelines.extend(merge_pipelines.iter().copied());
+                    alpha_fill.merge = Some((merge, merge_pipelines, super::uniform_fields::Cache::new(alpha_fill::merge_meta())));
+                }
+                Err(e) => eprintln!("[lg/vita-renderer] warning water_stage_merge program failed, key off: {e:?}"),
+            }
+        }
+        if c.water_stage_merge == "drop_filter" || alpha_fill.merge.is_some() {
             let recipes = pending.iter().map(|p| &p.recipe).collect::<Vec<_>>();
             let origins = pending.iter().map(|p| p.origin.clone()).collect::<Vec<_>>();
             alpha_fill.partner = alpha_fill::partners(&recipes, &origins);
             alpha_fill.drop_filter = c.water_stage_merge == "drop_filter";
             println!("[lg/vita-renderer] water_stage_merge={} pairs={}", c.water_stage_merge,
                 alpha_fill.partner.iter().filter(|p| p.is_some()).count());
-            if c.water_stage_merge == "merge" {
-                crate::frame_profile::shader_creation();
-                let _shader_name = crate::shader_cache::Name::new("retained-world-water-merge");
-                let merge = ctx.new_shader(ShaderSource::Glsl { vertex: alpha_fill::MERGE_VERTEX,
-                    fragment: &crate::environment::fragment(alpha_fill::MERGE_FRAGMENT) }, alpha_fill::merge_meta())
-                    .context("retained world water merge shader")?;
-                resources.shaders.push(merge);
-                let (color, alpha) = alpha_fill::merge_blend();
-                let merge_pipelines = alpha_fill::pipelines(ctx, merge, &attributes, color, alpha);
-                resources.pipelines.extend(merge_pipelines.iter().copied());
-                alpha_fill.merge = Some((merge, merge_pipelines, super::uniform_fields::Cache::new(alpha_fill::merge_meta())));
-            }
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if crate::sim_maps::probe::world_packets_active() {

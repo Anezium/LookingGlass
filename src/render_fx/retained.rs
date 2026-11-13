@@ -385,14 +385,14 @@ impl Gpu {
                 meta(),
             )
             .context("retained actor shader")?;
-        let lite = if crate::render::vita_renderer::config().fx_lite {
+        // A lean program that does not build turns `fx_lite` off with a warning.
+        let lite = crate::render::vita_renderer::config().fx_lite.then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name = crate::shader_cache::Name::new("retained-fx-lite");
-            let shader = ctx.new_shader(ShaderSource::Glsl { vertex: crate::render::VERTEX,
+            ctx.new_shader(ShaderSource::Glsl { vertex: crate::render::VERTEX,
                 fragment: &crate::environment::fragment(crate::render::FX_LITE_FRAGMENT) }, meta())
-                .context("retained fx lite shader")?;
-            Some(Lite { shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) })
-        } else { None };
+                .map_err(|e| eprintln!("[lg/vita-renderer] warning fx_lite program failed, key off: {e:?}")).ok()
+        }).flatten().map(|shader| Lite { shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
         println!(
             "[lg/vita-renderer] actor READY grouped alpha, actor_max_layers={}",
             crate::render::vita_renderer::config().actor_max_layers
