@@ -37,6 +37,10 @@ pub use water_check::check as check_water;
 mod water_view;
 #[cfg(not(target_os = "vita"))]
 pub use water_view::capture as capture_water_views;
+#[cfg(not(target_os = "vita"))]
+mod fog_view;
+#[cfg(not(target_os = "vita"))]
+pub use fog_view::capture as capture_fog_views;
 mod camera_portal;
 #[cfg(feature = "vita_renderer")]
 pub(crate) mod vita_renderer;

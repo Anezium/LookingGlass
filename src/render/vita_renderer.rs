@@ -212,6 +212,17 @@ pub struct Config {
     /// (`tcGen environment`, `alphaGen dot`), as the desktop renderer does on the CPU. Off keeps
     /// the RC2 shader, whose normals stay still and freeze the water reflection. Default off.
     pub water_normals: bool,
+    /// With `quality: low`, keep the authored fog (map `setfarplane` distance fog, fog volumes,
+    /// liquid fog) in the lean opaque world program, as `quality: full` and the desktop renderer
+    /// draw it. Off keeps the RC3 low program, which leaves opaque walls and floors unfogged.
+    /// No effect in `quality: full`. Default off.
+    pub low_fog: bool,
+    /// On a map with authored distance fog (`setfarplane`), draw the gradient sky flat in the fog
+    /// colour, as the desktop renderer shows potears2 (its sky shader draws nothing over the fog
+    /// colour clear). Off keeps the RC3 gradient from the fog colour up to 1.5 times it, which
+    /// outlines fully fogged geometry against a brighter sky. No effect with `authored_sky`,
+    /// `sky: false` or on a map without distance fog. Default off.
+    pub fog_sky: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -457,6 +468,8 @@ impl Default for Config {
             loading_screen: false,
             collision_geometry_share: false,
             water_normals: false,
+            low_fog: false,
+            fog_sky: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
@@ -616,6 +629,12 @@ impl Config {
         );
         Ok(())
     }
+}
+/// Bottom and top colours of the gradient sky. `flat` (`fog_sky` on a fogged map) keeps the
+/// background colour at the top too.
+fn sky_gradient(bg: Color, flat: bool) -> [[f32; 4]; 2] {
+    let top = if flat { 1. } else { 1.5 };
+    [[bg.r, bg.g, bg.b, 1.], [bg.r * top, bg.g * top, bg.b * top, 1.]]
 }
 /// The effective miniquad report cadence, as printed: `off` or a frame count.
 fn report_cadence(c: &Config) -> String {
@@ -1421,8 +1440,9 @@ impl Renderer {
             crate::frame_profile::shader_creation();
             let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
             let _shader_name = crate::shader_cache::Name::new("retained-world-low");
-            let low=ctx.new_shader(ShaderSource::Glsl{vertex:&shader::vertex(c.water_normals),fragment:&shader::low_fragment()},shader::meta())?;
+            let low=ctx.new_shader(ShaderSource::Glsl{vertex:&shader::vertex(c.water_normals),fragment:&shader::low_fragment(c.low_fog)},shader::meta())?;
             resources.shaders.push(low);
+            if c.low_fog { println!("[lg/vita-renderer] low_fog=on"); }
             drop(shader_timing);
             for cull in [CullFace::Nothing,CullFace::Back,CullFace::Front] {
                 crate::frame_profile::pipeline_creation();
@@ -1961,10 +1981,7 @@ impl Renderer {
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
             let mut totals = crate::frame_profile::Totals::<3>::profile_only();
             let bg = scene.atmosphere.background();
-            let sky = [
-                [bg.r, bg.g, bg.b, 1.],
-                [bg.r * 1.5, bg.g * 1.5, bg.b * 1.5, 1.],
-            ];
+            let sky = sky_gradient(bg, config().fog_sky && scene.atmosphere.distance.w > 0.);
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
             let start = totals.start();
@@ -3300,12 +3317,12 @@ mod tests {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            // The replay keys, the A5 draw and fill keys and water_normals came after RC1; its play files keep them
+            // The replay keys, the A5 draw and fill keys, water_normals and the fog keys came after RC1; its play files keep them
             // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
                 "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
-                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals").cloned().collect();
+                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky").cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3433,7 +3450,7 @@ mod tests {
         let defaults = serde_json::to_value(Config::default()).unwrap();
         // Keys added after RC2 that RC3 leaves at their off defaults.
         for key in ["packet_min_pixels", "world_min_pixels", "world_texture_sort", "water_stage_merge", "world_alpha_lite",
-            "fx_lite", "fx_add_max_area", "water_normals"] {
+            "fx_lite", "fx_add_max_area", "water_normals", "low_fog", "fog_sky"] {
             assert_eq!(rc3[key], defaults[key], "{key} off in RC3");
         }
         for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
@@ -3450,6 +3467,7 @@ mod tests {
             (&include_bytes!("../../configs/PL-rc3-fill.json")[..], vec![("water_stage_merge", serde_json::json!("merge")),
                 ("world_alpha_lite", serde_json::json!(true)), ("fx_lite", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-water.json")[..], vec![("water_normals", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-fog.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-resolve.json")[..], vec![("scaled_target", serde_json::json!("resolve"))]),
             (&include_bytes!("../../configs/PL-rc3-record.json")[..], vec![("replay_record", serde_json::json!("a2-#.lgtape")),
                 ("replay_start", serde_json::json!("chapter:potears2"))]),
@@ -3628,6 +3646,33 @@ mod tests {
         assert_ne!(on, shader::VERTEX);
         assert!(on.contains("}else if(Deform.x>2.5&&Deform.x<3.5){") && on.contains("if(Deform.x>3.5){"));
         assert!(on.contains("vec3 n=(Model*vec4(rippled,0.0)).xyz;"), "the environment and dot terms read the rippled normal");
+    }
+    #[test]
+    fn low_fog_off_keeps_the_rc3_low_program_and_on_keeps_the_full_fog() {
+        assert!(!Config::default().low_fog, "low_fog defaults off");
+        assert!(serde_json::from_str::<Config>(r#"{"low_fog":"on"}"#).is_err());
+        // Off: the RC3 program, byte for byte, built the way RC3 built it.
+        let mut rc3 = shader::FRAGMENT.to_string();
+        let start = rc3.find(" float cut=Surface.z;").unwrap();
+        let end = rc3.find(" vec3 lighting=").unwrap();
+        rc3.replace_range(start..end, "");
+        let off = shader::low_fragment(false);
+        assert_eq!(off, rc3.replace("fogged(rgb,Alpha.z)", "rgb"));
+        assert!(!off.contains("fogged(") && !off.contains("discard"));
+        // On: the full program's fog code and call, still without the alpha-test discards.
+        let on = shader::low_fragment(true);
+        assert!(on.contains("gl_FragColor=vec4(fogged(rgb,Alpha.z),a);") && !on.contains("discard"));
+        assert!(on.contains("uniform vec4 DistanceFog;") && !on.contains("// FOG"));
+        let full = crate::environment::fragment(shader::FRAGMENT);
+        let fog_code = |s: &str| s[s.find("uniform highp vec3 FogEye;").unwrap()..s.find("void main()").unwrap()].to_string();
+        assert_eq!(fog_code(&on), fog_code(&full), "the same fog code as quality full");
+    }
+    #[test]
+    fn fog_sky_keeps_the_rc3_gradient_off_and_draws_the_fog_colour_flat_on() {
+        assert!(!Config::default().fog_sky, "fog_sky defaults off");
+        let bg = Color::new(0.5, 0.5, 0.5, 1.);
+        assert_eq!(sky_gradient(bg, false), [[0.5, 0.5, 0.5, 1.], [0.75, 0.75, 0.75, 1.]], "the RC3 gradient");
+        assert_eq!(sky_gradient(bg, true), [[0.5, 0.5, 0.5, 1.], [0.5, 0.5, 0.5, 1.]]);
     }
     #[test]
     fn wave_normal_rides_the_deform_uniforms_and_never_displaces_vertices() {

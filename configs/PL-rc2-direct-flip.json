@@ -52,6 +52,8 @@
   "loading_screen": true,
   "collision_geometry_share": true,
   "water_normals": false,
+  "low_fog": false,
+  "fog_sky": false,
   "cell_size": 256.0,
   "alpha_interop": true,
   "actor_max_layers": 2,

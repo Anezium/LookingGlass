@@ -607,6 +607,12 @@ fn run() -> Result<()> {
                     args.next().context("--water-view-capture requires an output folder")?,
                 ));
             }
+            "--fog-view-capture" => {
+                mode = "fog-view";
+                water_view_dir = Some(std::path::PathBuf::from(
+                    args.next().context("--fog-view-capture requires an output folder")?,
+                ));
+            }
             "--render-fx-check" => mode = "render-fx",
             "--billboard-check" => mode = "billboard",
             "--sky-performance-check" => mode = "sky-performance",
@@ -1488,6 +1494,21 @@ fn run() -> Result<()> {
         macroquad::Window::from_config(conf, async move {
             if let Err(e) = render::capture_water_views(&mut assets, &out).await {
                 eprintln!("Water view capture failed: {e:#}");
+                std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
+    #[cfg(not(target_os = "vita"))]
+    if mode == "fog-view" {
+        let out = water_view_dir.clone().context("--fog-view-capture requires an output folder")?;
+        let mut conf = viewer::config();
+        conf.miniquad_conf.window_width = 960;
+        conf.miniquad_conf.window_height = 544;
+        conf.miniquad_conf.high_dpi = false;
+        macroquad::Window::from_config(conf, async move {
+            if let Err(e) = render::capture_fog_views(&mut assets, &out).await {
+                eprintln!("Fog view capture failed: {e:#}");
                 std::process::exit(1);
             }
         });

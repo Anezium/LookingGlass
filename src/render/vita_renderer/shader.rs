@@ -97,13 +97,15 @@ pub fn vertex(water_normals: bool) -> std::borrow::Cow<'static, str> {
     source.into()
 }
 
-/// Low preset keeps diffuse/lightmaps and gain, omits fragment fog and discard
-/// for surfaces already classified opaque with no alpha test. Foliage stays full.
-pub fn low_fragment()->String {
+/// Low preset keeps diffuse/lightmaps and gain and omits discard for surfaces already
+/// classified opaque with no alpha test. Foliage stays full. Without `fog` (the RC3 program)
+/// it also omits fragment fog, so opaque walls and floors ignore the map's fog; with `fog`
+/// (`low_fog`) it keeps the same fog code as the full program.
+pub fn low_fragment(fog: bool)->String {
     let mut result=FRAGMENT.to_string();
     let start=result.find(" float cut=Surface.z;").unwrap();
     let end=result.find(" vec3 lighting=").unwrap();result.replace_range(start..end,"");
-    result.replace("fogged(rgb,Alpha.z)","rgb")
+    if fog { crate::environment::fragment(&result) } else { result.replace("fogged(rgb,Alpha.z)","rgb") }
 }
 
 #[repr(C)]
