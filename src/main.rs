@@ -89,6 +89,7 @@ mod power_pose;
 mod powerups;
 mod pickup_effects;
 mod preferences;
+mod prompts;
 mod progression_check;
 mod progression_render;
 mod recovery;

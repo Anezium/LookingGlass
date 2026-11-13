@@ -142,7 +142,7 @@ async fn rebuild_outgoing(
                 loop {
                     escape_menu.backdrop();
                     ui.toast("Could not restore the current map", screen_height() - 110.);
-                    ui.toast("Enter / Cross: retry    Escape / Circle: quit", screen_height() - 70.);
+                    ui.toast(&crate::prompts::shown("Enter / Cross: retry    Escape / Circle: quit", &recovery_input, preferences), screen_height() - 70.);
                     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                     crate::transition_memory::host_recovery_capture(attempts, screen_frame + 1);
                     next_frame().await;
@@ -4262,9 +4262,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 hud_path=crate::phase_census::span(crate::phase_census::Region::HudDraw);
                 crate::phase_census::count_under(crate::phase_census::Region::Hud,crate::phase_census::Counter::HudDraw,1);
                 if let Some(prompt) = prompt {
-                    let prompt = prompt
-                        .replace("E  ", &format!("{}  ", input.label(&preferences, "E")))
-                        .replace("E /", &format!("{} /", input.label(&preferences, "E")));
+                    let prompt = crate::prompts::world_prompt(&prompt, &input, &preferences);
                     ui.toast(&prompt, screen_height() - 112.);
                 }
             }
@@ -4333,7 +4331,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     crate::ui::INK,
                 );
                 if let Some(objective) = &objective {
-                    let rows = crate::story::wrap(objective, 548., |t| ui.body.width(t, 14.));
+                    let objective = crate::prompts::shown(objective, &input, &preferences);
+                    let rows = crate::story::wrap(&objective, 548., |t| ui.body.width(t, 14.));
                     for (i, line) in rows.iter().take(3).enumerate() {
                         ui.body.draw_left(
                             canvas,
@@ -4429,7 +4428,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 #[cfg(feature = "vita_renderer")]
                 { hud_submitted = true; }
                 if !paused && !inventory_menu && !console_input && stats.alive() {
-                    hud.draw_notice();
+                    hud.draw_notice(&input, &preferences);
                 }
             }
             if !menu && !inventory_menu && !console_input && stats.alive() {
@@ -4539,7 +4538,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
             if audio.settings.muted && help && !inventory_menu && !console_input {
-                ui.toast("Sound muted - M to restore", 18.);
+                ui.toast(&crate::prompts::shown("Sound muted - M to restore", &input, &preferences), 18.);
             }
             if !notice.is_empty() {
                 ui.toast(&notice, 74.);

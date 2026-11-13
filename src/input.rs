@@ -544,7 +544,7 @@ impl Input {
     pub fn label(&self, prefs: &Preferences, original: &str) -> String {
         self.label_with(prefs, original, Preferences::vita_emulation())
     }
-    fn label_with(&self, prefs: &Preferences, original: &str, handheld: bool) -> String {
+    pub(crate) fn label_with(&self, prefs: &Preferences, original: &str, handheld: bool) -> String {
         let label = crate::preferences::BINDINGS
             .iter()
             .position(|(_, key)| *key == original)
