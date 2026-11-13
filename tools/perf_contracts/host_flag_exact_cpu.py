@@ -61,6 +61,11 @@ REMOVED_WORK = {
         'fx_merge_inline_jobs', 'vita_fx_pack_indices', 'vita_fx_pack_vertices', 'vita_fx_certified_indices_reused',
         'fx_merge_local_topology_hits', 'fx_merge_local_vertex_hits', 'fx_merge_source_reusable_vertices',
         'vita_fx_unchanged_merged_groups', 'fx_merge_range_vertices_kept',
+        # With packet_frustum_cull on, persisted sets reach the cut as other groups: the same puffs are cut
+        # whole or one by one, and the cut probes other vertices. utemple, frame 179: 4 packets and 139 puffs
+        # cut off, 2 and 141 on; 1018 probed vertices off, 88 on. The submitted packets stay compared.
+        'vita_fx_packets_cut_outside', 'vita_fx_puffs_cut_outside', 'vita_fx_packet_cut_probed_vertices',
+        'vita_fx_packet_cut_scanned_vertices',
     },
     'joint_center_cache': set(),
     # Nothing counted moves: same GL calls, same applications. Only time goes away.
