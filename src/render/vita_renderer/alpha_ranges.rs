@@ -1,5 +1,8 @@
 //! Exact index gathering for consecutive same-state alpha commands in the final joint list.
 //! No vertex rebasing or material/depth sorting occurs here. Actors and puffs are fences.
+//! Only BSP-face-backed world surfaces participate. Frozen model meshes preserve their
+//! original draw barriers: strict host pixels found those meshes sensitive to joining,
+//! even with equal state/indices and disjoint projected bounds.
 use super::*;
 use crate::render_fx::retained::Source;
 use std::ops::Range;
@@ -423,6 +426,10 @@ impl Gather {
             let p = &prepared[member];
             let g = &groups[p.group];
             let original = self.originals[p.group].as_ref().unwrap();
+            assert!(
+                !g.faces.is_empty(),
+                "gathered alpha source lacks BSP face provenance"
+            );
             let u = p
                 .uniforms
                 .as_ref()
@@ -470,7 +477,7 @@ impl Gather {
                     .append(true)
                     .open(path)
                     .unwrap();
-                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"wave_normal":groups[prepared[id].group].recipe.wave_normal.is_some(),"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
+                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"bsp_faces":members.iter().map(|&m|groups[prepared[m].group].faces.len()).collect::<Vec<_>>(),"wave_normal":groups[prepared[id].group].recipe.wave_normal.is_some(),"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
             }
         }
     }

@@ -105,8 +105,8 @@ pub struct Config {
     /// Experimental exact submission levers; independently default off.
     pub world_material_sort: bool,
     pub world_static_merge: bool,
-    /// Coalesce certified adjacent opaque ranges and reuse uninterrupted world-alpha state.
-    /// Never changes the order of world groups or crosses an actor/FX callback. Default off.
+    /// Coalesce certified opaque ranges, gather disjoint BSP alpha ranges, and reuse world-alpha state.
+    /// Preserves world order and actor/FX fences; frozen model meshes keep original draws. Default off.
     pub world_adjacent_batch: bool,
     pub world_uniform_persist: bool,
     pub world_binding_cache: bool,
@@ -1549,7 +1549,8 @@ impl Renderer {
         let mut alpha_ranges = if c.world_adjacent_batch && source_ranges.try_reserve_exact(packed.len()).is_ok() {
             source_ranges.extend(packed.iter().map(|(_,v,i)| (v.len(), i.as_slice())));
             alpha_ranges::Gather::new(&source_ranges, &allocations,
-                pending.iter().map(|p| alpha_ranges::eligible(&p.recipe)))
+                pending.iter().map(|p| alpha_ranges::eligible(&p.recipe)
+                    && (!p.geometry.faces.is_empty() || world_list::negative("alpha-range-model-source"))))
         } else { None };
         drop(source_ranges);
         let buffers = packed.into_iter().map(|(_,v,i)| {
