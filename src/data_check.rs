@@ -2,7 +2,7 @@
 //!
 //! `Assets::open` mounts whatever `*.pk3` it finds and checks no name or size, so a missing
 //! or truncated pack fails later, far from the cause. This check runs before that and
-//! compares names and sizes only: hashing 660 MB at every start would cost seconds.
+//! checks names, sizes and SHA-256 before opening the archives.
 //! The table comes from `docs/validation/ALICE-DATA-VALIDATION.md` in the port repository
 //! (2011 PC release, hashed on 2026-10-11).
 use std::path::Path;
@@ -17,9 +17,19 @@ pub const REQUIRED_PACKS: [(&str, u64); 6] = [
     ("pak5_mod.pk3", 18_133_775),
 ];
 
+pub const REQUIRED_HASHES: [&str; 6] = [
+    "6a63b59cd627902660bd4261461f904bf984e05891eb749d47bcc7fc8cedda62",
+    "eac773ca4012842c63738f348d03b2604f6d0798ad26536f7256c659ff7cdfc7",
+    "936d16c2311613c46b3167772b1c22aac693f96814cd70e3224a110884613864",
+    "a779bf348edcfb1d8711d1aad08537b30cf5794e6f8149168f4ca7a415aab8e4",
+    "ca30b395f770c0b5676d42b0ab81582f17976b526ed44c137512014a88672121",
+    "cc36d55ed798fe9ff793c2cfb19551de0611acfa1f70cbf56b41caa068d22340",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     Missing(&'static str),
+    WrongHash(&'static str),
     WrongSize { name: &'static str, expected: u64, found: u64 },
 }
 
@@ -36,10 +46,36 @@ pub fn check(base: &Path, required: &[(&'static str, u64)]) -> Vec<Problem> {
         .collect()
 }
 
-/// Only a missing file stops the start. A size that differs from the checked edition is reported
-/// in the log and in the dialog when one is shown, but another edition of the game may be valid.
+/// Hash only packs whose names and sizes passed the cheap check.
+pub fn check_hashes(base: &Path, required: &[(&'static str, u64)], hashes: &[&str]) -> Vec<Problem> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, BufReader};
+    assert_eq!(required.len(), hashes.len());
+    let mut problems = check(base, required);
+    for (&(name, _), &expected) in required.iter().zip(hashes) {
+        if problems.iter().any(|p| match p {
+            Problem::Missing(n) | Problem::WrongHash(n) => *n == name,
+            Problem::WrongSize { name: n, .. } => *n == name,
+        }) { continue; }
+        let digest = (|| -> std::io::Result<String> {
+            let mut file = BufReader::new(std::fs::File::open(base.join(name))?);
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 32768];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 { break; }
+                hasher.update(&buffer[..count]);
+            }
+            Ok(format!("{:x}", hasher.finalize()))
+        })();
+        if digest.as_deref().ok() != Some(expected) { problems.push(Problem::WrongHash(name)); }
+    }
+    problems
+}
+
+/// Invalid or unreadable required data stops startup.
 pub fn blocks_start(problems: &[Problem]) -> bool {
-    problems.iter().any(|problem| matches!(problem, Problem::Missing(_)))
+    !problems.is_empty()
 }
 
 /// Text for the on-screen dialog. The system message dialog takes at most 512 bytes,
@@ -66,6 +102,10 @@ pub fn message(base: &Path, problems: &[Problem]) -> String {
     if !wrong.is_empty() {
         text.push_str(&format!("Wrong size: {}\n", wrong.join(", ")));
     }
+    let invalid: Vec<_> = problems.iter().filter_map(|p| match p {
+        Problem::WrongHash(name) => Some(*name), _ => None,
+    }).collect();
+    if !invalid.is_empty() { text.push_str(&format!("Wrong data: {}\n", invalid.join(", "))); }
     text.push_str("Copy the six .pk3 files from the base folder of your own copy of the game.");
     text
 }
@@ -85,6 +125,20 @@ mod tests {
 
     fn put(dir: &Path, name: &str, len: usize) {
         std::fs::write(dir.join(name), vec![0u8; len]).unwrap();
+    }
+
+    #[test]
+    fn same_size_corruption_is_rejected() {
+        use sha2::{Digest, Sha256};
+        let dir = folder("hash");
+        put(&dir, "a.pk3", 3);
+        let hash = format!("{:x}", Sha256::digest([0u8; 3]));
+        assert!(check_hashes(&dir, &SMALL[..1], &[&hash]).is_empty());
+        std::fs::write(dir.join("a.pk3"), b"bad").unwrap();
+        let problems = check_hashes(&dir, &SMALL[..1], &[&hash]);
+        assert_eq!(problems, vec![Problem::WrongHash("a.pk3")]);
+        assert!(message(Path::new("ux0:data/alice/base"), &problems).contains("Wrong data: a.pk3"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -135,10 +189,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_missing_file_blocks_the_start() {
+    fn invalid_data_blocks_the_start() {
         let wrong = Problem::WrongSize { name: "pak0.pk3", expected: 2, found: 1 };
         assert!(!blocks_start(&[]));
-        assert!(!blocks_start(&[wrong.clone()]));
+        assert!(blocks_start(&[wrong.clone()]));
+        assert!(blocks_start(&[Problem::WrongHash("pak0.pk3")]));
         assert!(blocks_start(&[wrong, Problem::Missing("pak2.pk3")]));
     }
 
@@ -158,7 +213,7 @@ mod tests {
         let Ok(home) = std::env::var("HOME") else { return };
         let dir = Path::new(&home).join("vita-work/alice-data/Alice1/bin/base");
         if dir.is_dir() {
-            assert!(check(&dir, &REQUIRED_PACKS).is_empty(), "{}", dir.display());
+            assert!(check_hashes(&dir, &REQUIRED_PACKS, &REQUIRED_HASHES).is_empty(), "{}", dir.display());
         }
     }
 }

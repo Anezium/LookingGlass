@@ -1576,6 +1576,8 @@ impl Menu {
                 }
             }
             next_frame().await;
+            #[cfg(feature = "load_timing")]
+            crate::load_timing::menu();
         }
     }
 }

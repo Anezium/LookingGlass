@@ -883,6 +883,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     } else {
         None
     };
+    #[cfg(feature = "load_timing")]
+    crate::load_timing::begin_map();
     escape_menu.frontend = false;
     escape_menu.close();
     if let Some(loaded) = &resume {
@@ -4926,6 +4928,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         next_frame().await;
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }
+        #[cfg(feature = "load_timing")]
+        crate::load_timing::map(&maps[current]);
         audio.scene_presented();
         #[cfg(target_os="vita")]
         if let Some(s)=&mut r13_survey {

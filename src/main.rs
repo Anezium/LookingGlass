@@ -16,6 +16,8 @@ mod ant;
 mod assets;
 #[cfg(any(target_os = "vita", test))]
 mod data_check;
+#[cfg(feature = "load_timing")]
+mod load_timing;
 #[cfg(target_os = "vita")]
 mod first_start;
 mod startup;
@@ -226,6 +228,8 @@ fn main() {
 }
 
 fn app_main() {
+    #[cfg(feature = "load_timing")]
+    load_timing::start();
     // Read the renderer policy and apply clocks before run() mounts archives.
     #[cfg(feature = "vita_renderer")]
     {
@@ -247,6 +251,13 @@ fn app_main() {
         use macroquad::miniquad::KeyCode;
         set_config(VitaConfig {
             compact_stream_buffers: true,
+            // Release diagnostics stay off; profiling configurations may opt in.
+            log_memory_every: {
+                #[cfg(feature = "vita_renderer")]
+                { if render::vita_renderer::config().profiler == Some(light_profile::Level::Off) { None } else { Some(10) } }
+                #[cfg(not(feature = "vita_renderer"))]
+                { None }
+            },
             // Every 10 frames unless the runtime config says otherwise. The r12c-era runners use
             // these lines as a hang heartbeat; measurement configs set 0 (r15b: +3-5 ms p95).
             log_frame_time_every: {

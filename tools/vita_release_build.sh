@@ -21,6 +21,8 @@ set -euo pipefail
 TOOLCHAIN=nightly-2026-10-11
 CARGO_VITA_VERSION=0.2.2
 FEATURES=native_timing,vita_renderer,frame_total_only
+# A4 measurement builds only; normal release has no load-timing code.
+if [ "${LG_LOAD_TIMING:-0}" = 1 ]; then FEATURES="$FEATURES,load_timing"; fi
 HEAP_BYTES=$((192 * 1024 * 1024))
 APP_VER=01.00
 # vdpm package and archive name of each C library linked statically.
