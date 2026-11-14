@@ -103,7 +103,7 @@ fn span<K: Eq>(
     joint: &[(f32, Source)],
     start: usize,
     limit: usize,
-    item: impl Fn(usize) -> Option<(K, usize)>,
+    mut item: impl FnMut(usize) -> Option<(K, usize)>,
 ) -> (usize, usize) {
     let Source::World(id) = joint[start].1 else {
         return (start + 1, 0);
@@ -268,6 +268,8 @@ impl Gather {
                 cursor += 1;
                 continue;
             }
+            let mut coverage = None;
+            let projection = crate::render_fx::projection().expect("world alpha projection");
             let (end, size) = span(
                 joint,
                 cursor,
@@ -275,6 +277,11 @@ impl Gather {
                 |next| {
                     let p = &prepared[next];
                     let original = self.originals[p.group].as_ref()?;
+                    let rect = submit::projected(&groups[p.group], projection)?;
+                    coverage = Some(match coverage {
+                        Some(previous) => submit::join_disjoint(previous, rect)?,
+                        None => rect,
+                    });
                     (p.indices == groups[p.group].indices).then(|| {
                         (
                             key(next, prepared, groups, parameters, pipelines),
@@ -404,11 +411,19 @@ impl Gather {
         let actual = &self.scratch[base as usize
             ..checked_end(base as usize, count as usize, self.scratch.len()).unwrap()];
         let mut offset = 0;
+        let mut coverage = None;
+        let projection = crate::render_fx::projection().expect("world alpha projection");
         let first_original = self.originals[prepared[id].group].as_ref().unwrap();
         for &member in members {
             let p = &prepared[member];
             let g = &groups[p.group];
             let original = self.originals[p.group].as_ref().unwrap();
+            let rect = submit::projected(g, projection).expect("uncertified alpha coverage");
+            coverage = Some(match coverage {
+                Some(previous) => submit::join_disjoint(previous, rect)
+                    .expect("gathered draws share padded coverage"),
+                None => rect,
+            });
             assert!(
                 key(member, prepared, groups, parameters, pipelines) == state,
                 "gathered member state"
