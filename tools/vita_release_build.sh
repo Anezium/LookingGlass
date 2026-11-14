@@ -15,6 +15,7 @@
 # Needs VITASDK, the pinned Rust toolchain with rust-src, and cargo-vita. Refuses a tree with
 # uncommitted or untracked files. Honours CARGO_TARGET_DIR, CARGO_BUILD_JOBS and
 # CARGO_NET_OFFLINE from the caller. Prints the SHA-256 of the ELF, SELF and VPK.
+# LiveArea validation also needs Python3 with Pillow (11.3.0 is pinned for art regeneration).
 set -euo pipefail
 
 TOOLCHAIN=nightly-2026-10-11
@@ -56,6 +57,7 @@ if [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then
     echo "refusing to build: the tree has uncommitted or untracked files" >&2
     exit 1
 fi
+python3 "$repo/tools/vita_livearea.py"
 head=$(git rev-parse HEAD)
 
 mkdir -p "$out"
@@ -114,6 +116,7 @@ cp "$release/looking-glass.elf" "$out/looking-glass.elf"
 cp "$release/looking-glass.self" "$out/eboot.bin"
 cp "$release/looking-glass.sfo" "$out/param.sfo"
 cp "$release/looking-glass.vpk" "$out/looking-glass.vpk"
+python3 "$repo/tools/vita_livearea.py" --vpk "$out/looking-glass.vpk" | tee "$out/livearea.txt"
 
 set +e
 python3 -I "$repo/tools/vita_release_check.py" \

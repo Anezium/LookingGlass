@@ -127,7 +127,8 @@ def check(vpk=None):
             for relative in expected:
                 if archive.read(relative) != (ASSETS / relative).read_bytes():
                     raise ValueError(f'VPK asset differs: {relative}')
-    print('PASS LiveArea images, palette, dimensions, XML' + (' and actual VPK member bytes' if vpk else ''))
+    print('PASS LiveArea images, palette, dimensions, XML' + (' and actual VPK member bytes' if vpk else '') +
+          f' (Pillow {PIL.__version__})')
 
 
 def main():

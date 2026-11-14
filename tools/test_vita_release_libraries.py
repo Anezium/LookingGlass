@@ -92,7 +92,9 @@ class WrapperControls(unittest.TestCase):
                 "cargo": "#!/bin/sh\nif [ \"$1\" = install ]; then echo 'cargo-vita v0.2.2:'; exit 0; fi\n" +
                     "r=\"$CARGO_TARGET_DIR/armv7-sony-vita-newlibeabihf/release\"\nmkdir -p \"$r\"\n" +
                     "for n in elf self sfo vpk; do echo fixture > \"$r/looking-glass.$n\"; done\necho fixture-map > \"$LG_VITA_LINK_MAP\"\n",
-                "python3": "#!/bin/sh\ncase \"$2\" in *vita_release_check.py) echo 'checker fixture without FAIL marker'; exit " +
+                # Image validation has separate real-package controls; this inert
+                # wrapper fixture tests only checker propagation/private-mode flow.
+                "python3": "#!/bin/sh\ncase \"$*\" in *vita_livearea.py*) exit 0;; esac\ncase \"$2\" in *vita_release_check.py) echo 'checker fixture without FAIL marker'; exit " +
                     str(checker_status) + ";; *) exec '" + sys.executable + "' \"$@\";; esac\n",
             }
             for name, contents in stubs.items():
