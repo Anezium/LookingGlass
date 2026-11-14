@@ -381,7 +381,7 @@ impl Art {
             );
         }
     }
-    fn ribbon(&self, name: &str, a: Vec3, b: Vec3, c: Vec3, d: Vec3, alpha: f32) {
+    fn ribbon(&self, name: &str, a: Vec3, b: Vec3, c: Vec3, d: Vec3, alpha: f32, decal: bool) {
         let Some(texture) = self.textures.get(name) else {
             return;
         };
@@ -398,7 +398,8 @@ impl Art {
             indices: vec![0, 1, 2, 0, 2, 3],
             texture: Some(texture.clone()),
         };
-        crate::render_fx::skin_effect(&mesh, crate::render_fx::time(), alpha);
+        if decal { crate::render_fx::skin_decal(&mesh,crate::render_fx::time(),alpha); }
+        else { crate::render_fx::skin_effect(&mesh,crate::render_fx::time(),alpha); }
     }
     pub fn draw(&mut self, q: &Queen, camera: Vec3, atmosphere: &Atmosphere) {
         for p in &q.saved.debris {
@@ -424,6 +425,7 @@ impl Art {
             };
             self.effect(&impact.model, pose, impact.age, 1., 0.5, camera, atmosphere);
             if let Some(mark) = &impact.mark {
+                if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) { continue; }
                 let r = impact.mark_radius;
                 self.ribbon(
                     mark,
@@ -431,7 +433,7 @@ impl Art {
                     pose.point(vec3(r, -r, 0.)),
                     pose.point(vec3(r, r, 0.)),
                     pose.point(vec3(-r, r, 0.)),
-                    (1. - impact.age / 8.).min(0.8),
+                    (1. - impact.age / 8.).min(0.8), true,
                 );
             }
         }
@@ -444,7 +446,7 @@ impl Art {
                     end - side,
                     end + side,
                     shot.at + side,
-                    1.,
+                    1., false,
                 );
             }
         }
@@ -474,7 +476,7 @@ impl Art {
                     b,
                     c,
                     d,
-                    1. - i as f32 / 10.,
+                    1. - i as f32 / 10., false,
                 );
             }
         }

@@ -302,6 +302,25 @@ pub(crate) fn with_sight_query_reuse<T>(enabled: bool, run: impl FnOnce() -> T) 
     run()
 }
 
+/// Direct SAH traversal for yes/no sweeps; exact legacy admission, no ordered candidate buffer.
+pub fn sweep_any() -> bool {
+    #[cfg(test)]
+    { SWEEP_ANY_TEST.with(|s| s.get()) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().sim_sweep_any }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
+#[cfg(test)]
+thread_local! { static SWEEP_ANY_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn with_sweep_any<T>(enabled: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset { fn drop(&mut self) { SWEEP_ANY_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(SWEEP_ANY_TEST.with(|s| s.replace(enabled)));
+    run()
+}
+
 /// `sim_sweep_blocked`: yes/no collision questions stop at the first blocking hull. Off by default.
 pub fn sweep_blocked() -> bool {
     #[cfg(test)]

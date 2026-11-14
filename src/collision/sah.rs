@@ -27,6 +27,8 @@ pub(super) struct Hierarchy {
     legacy:Box<[Certificate]>, order:Box<[Original]>,
     finite:bool,
 }
+#[derive(Clone, Debug, Default)]
+pub(super) struct BlockHint { rank: u32, path: Vec<Bounds> }
 impl Hierarchy {
     pub fn build(hulls:&[Hull],tree:&Node)->Self {
         BUILDS.fetch_add(1, Ordering::Relaxed);
@@ -142,11 +144,91 @@ impl Hierarchy {
     }
 }
 impl Hierarchy {
+    /// A boolean answer does not depend on candidate order. Keep every spatial and legacy
+    /// certificate predicate, but stop the traversal on the first admitted blocking hull.
+    /// The tree is immutable and its build depth is capped at 48; no scratch buffer can overflow.
+    fn blocked_any(&self, id: u32, g: &StaticGeometry, a: Vec3, b: Vec3, h: Vec3,
+                   q: &SweepBounds, cache: &mut [u32; CERT_CACHE], c: &mut Counts) -> bool {
+        c.nodes += 1;
+        let n = &self.nodes[id as usize];
+        if !q.overlaps(n.bounds) { return false; }
+        if n.second & LEAF == 0 {
+            return self.blocked_any(n.first, g, a, b, h, q, cache, c)
+                || self.blocked_any(n.second, g, a, b, h, q, cache, c);
+        }
+        for &rank in &self.indices[n.first as usize..n.first as usize + (n.second & !LEAF) as usize] {
+            c.tested += 1;
+            let original = self.order[rank as usize];
+            let hull = &g.hulls[original.hull as usize];
+            if !q.overlaps(hull.bounds) { continue; }
+            c.clipped += 1;
+            let mut result = Trace::default();
+            clip_hull_counted(hull, a, b, h, &mut result, c);
+            if (result.start_solid || result.fraction < 1.) && self.admitted(original.leaf, q, cache, c) {
+                return true;
+            }
+        }
+        false
+    }
+    /// Re-test one previously blocking hull before traversing. It is a positive witness,
+    /// never a cached answer: all spatial ancestors, legacy ancestors and clipping run again.
+    pub(super) fn blocked_hinted(&self, g: &StaticGeometry, a: Vec3, b: Vec3, h: Vec3,
+        q: &SweepBounds, hint: &mut Option<BlockHint>) -> Option<(bool,bool)> {
+        if !self.finite || !a.is_finite() || !b.is_finite() || !h.is_finite() || h.cmplt(Vec3::ZERO).any()
+            || !(b-a).is_finite() || !q.inverse.is_finite() || !q.padding.is_finite()
+            || !q.bounds.min.is_finite() || !q.bounds.max.is_finite() { return None; }
+        let mut counts=Counts::default();
+        let mut cache=[NONE;CERT_CACHE];
+        // Short lattice edges are usually clear. Re-testing a distant blocker adds work
+        // there and evicts a useful long-ray witness, so traverse directly and retain it.
+        if (b-a).length_squared()<=160.*160. {
+            return Some((self.blocked_any(0,g,a,b,h,q,&mut cache,&mut counts),false));
+        }
+        if let Some(witness)=hint.as_ref() {
+            let original=self.order[witness.rank as usize];
+            let hull=&g.hulls[original.hull as usize];
+            if witness.path.iter().all(|&bounds|q.overlaps(bounds)) && q.overlaps(hull.bounds) {
+                let mut t=Trace::default();
+                clip_hull_counted(hull,a,b,h,&mut t,&mut counts);
+                if (t.start_solid || t.fraction<1.) && self.admitted(original.leaf,q,&mut cache,&mut counts) {
+                    return Some((true,true));
+                }
+            }
+        }
+        let mut path=[Bounds{min:Vec3::ZERO,max:Vec3::ZERO};49];
+        let blocked=self.find_blocker(0,g,a,b,h,q,&mut cache,&mut counts,&mut path,0,hint);
+        Some((blocked,false))
+    }
+    fn find_blocker(&self,id:u32,g:&StaticGeometry,a:Vec3,b:Vec3,h:Vec3,q:&SweepBounds,
+        cache:&mut[u32;CERT_CACHE],counts:&mut Counts,path:&mut[Bounds;49],depth:usize,
+        hint:&mut Option<BlockHint>) -> bool {
+        let n=&self.nodes[id as usize];
+        if !q.overlaps(n.bounds) { return false; }
+        path[depth]=n.bounds;
+        if n.second&LEAF==0 {
+            return self.find_blocker(n.first,g,a,b,h,q,cache,counts,path,depth+1,hint)
+                || self.find_blocker(n.second,g,a,b,h,q,cache,counts,path,depth+1,hint);
+        }
+        for &rank in &self.indices[n.first as usize..n.first as usize+(n.second&!LEAF) as usize] {
+            let original=self.order[rank as usize]; let hull=&g.hulls[original.hull as usize];
+            if !q.overlaps(hull.bounds) { continue; }
+            let mut t=Trace::default();clip_hull_counted(hull,a,b,h,&mut t,counts);
+            if (t.start_solid || t.fraction<1.) && self.admitted(original.leaf,q,cache,counts) {
+                let witness=hint.get_or_insert_with(BlockHint::default);
+                witness.rank=rank;witness.path.clear();witness.path.extend_from_slice(&path[..=depth]);
+                return true;
+            }
+        }
+        false
+    }
     /// `trace` that returns at the first admitted candidate changing the result. Every change
     /// `clip_hull` makes is a start in solid or a fraction below 1, so this is `trace`'s yes/no answer.
     pub fn blocked(&self,g:&StaticGeometry,a:Vec3,b:Vec3,h:Vec3,q:&SweepBounds,c:&mut Counts)->Option<bool> {
         if !self.finite||!a.is_finite()||!b.is_finite()||!h.is_finite()||h.cmplt(Vec3::ZERO).any()||!(b-a).is_finite()||
             !q.inverse.is_finite()||!q.padding.is_finite()||!q.bounds.min.is_finite()||!q.bounds.max.is_finite(){return None;}
+        if crate::sim_maps::sweep_any() {
+            return Some(self.blocked_any(0, g, a, b, h, q, &mut [NONE; CERT_CACHE], c));
+        }
         let mut candidates=[0u32;CANDIDATES];let mut len=0;
         if !self.gather(0,g,q,&mut candidates,&mut len,c){return None;}
         candidates[..len].sort_unstable();

@@ -4,6 +4,7 @@ pub mod model_shape;
 mod sah;
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
 pub(crate) mod sah_probe;
+mod flight_grid;
 use crate::bsp::{Bsp, Plane};
 #[cfg(target_os = "vita")]
 use crate::frame_profile::{add_counter, Counter};
@@ -611,6 +612,8 @@ pub struct World {
     dynamic: Vec<Collider>,
     dynamic_bounds: Option<Bounds>,
     dynamic_buckets: std::sync::Arc<Vec<DynamicBucket>>,
+    flight_hint: std::cell::RefCell<Option<sah::BlockHint>>,
+    flight_counts: std::cell::Cell<[u32;4]>,
     light_certificates: std::cell::RefCell<LightCertificates>,
     pub(crate) npc_profile: crate::npc::profile::CollisionCounts,
     #[cfg(test)]
@@ -665,7 +668,7 @@ struct SightMemo {
 /// Immutable backing shared by main-thread collision and acoustic packets.
 /// No caches, lazy colliders or traversal state cross the producer boundary.
 #[derive(Debug)]
-pub(crate) struct StaticGeometry { hulls: Vec<Hull>, tree: Option<Node>, sah: Option<sah::Hierarchy> }
+pub(crate) struct StaticGeometry { hulls: Vec<Hull>, tree: Option<Node>, sah: Option<sah::Hierarchy>, flight_grid: Option<flight_grid::FlightGrid> }
 #[cfg(test)]
 thread_local! {
     static SAH_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -719,7 +722,7 @@ impl StaticGeometry {
             Node::Leaf{hulls,..}=>hulls.capacity()*std::mem::size_of::<usize>(),
             Node::Branch{left,right,..}=>2*std::mem::size_of::<Node>()+tree(left)+tree(right),
         }}
-        [self.hulls.capacity()*std::mem::size_of::<Hull>()
+        [self.flight_grid.as_ref().map_or(0,|g|g.bytes())+self.hulls.capacity()*std::mem::size_of::<Hull>()
             +self.hulls.iter().map(|h|h.planes.capacity()*std::mem::size_of::<crate::bsp::Plane>()).sum::<usize>(),
             self.tree.as_ref().map_or(0,tree),self.sah.as_ref().map_or(0,|h|h.storage_bytes())]
     }
@@ -758,7 +761,11 @@ impl StaticGeometry {
     }
     fn with_acceleration(hulls: Vec<Hull>, tree: Option<Node>, accelerate: bool) -> Self {
         let sah = if accelerate && sah_switch() { tree.as_ref().map(|t| sah::Hierarchy::build(&hulls,t)) } else {None};
-        let out=Self {hulls,tree,sah};
+        #[cfg(feature="vita_renderer")]
+        let flight_grid=crate::render::vita_renderer::config().sim_flight_memo.then(||flight_grid::FlightGrid::build(&hulls)).flatten();
+        #[cfg(not(feature="vita_renderer"))]
+        let flight_grid=None;
+        let out=Self {hulls,tree,sah,flight_grid};
         if crate::allocation_census::enabled(){
             use std::sync::atomic::Ordering::Relaxed;
             for (counter,n) in R13_GEOMETRY_BYTES.iter().zip(out.census_capacities()){counter.fetch_add(n,Relaxed);}
@@ -1020,6 +1027,8 @@ impl World {
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
+            flight_hint: std::cell::RefCell::new(None),
+            flight_counts: std::cell::Cell::new([0;4]),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1170,6 +1179,8 @@ impl World {
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
+            flight_hint: std::cell::RefCell::new(None),
+            flight_counts: std::cell::Cell::new([0;4]),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1224,11 +1235,13 @@ impl World {
     /// With `sim_sweep_blocked` it stops at the first hull that blocks, where `sweep` keeps clipping to
     /// find the nearest one. It visits the same geometry in the same order with the same broad phase, and
     /// every change `clip_hull` makes to a trace is a block, so the first change answers. A trace's
+    /// `sim_sweep_any` also enables this path, using unordered static traversal with the same hull
+    /// and legacy admission tests. Only the boolean answer is used. A trace's
     /// fraction is never NaN (`clip_hull` stores only finite values), so `fraction < 1` and
     /// `!(fraction >= 1)` are the same test.
     pub(crate) fn sweep_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
         let full = |t: Trace| t.start_solid || t.fraction < 1.;
-        if !crate::sim_maps::sweep_blocked() { return full(self.sweep(start, end, half)); }
+        if !crate::sim_maps::sweep_blocked() && !crate::sim_maps::sweep_any() { return full(self.sweep(start, end, half)); }
         let _census = crate::phase_census::query_sweep(self,start,end,half,1,None);
         if self.sweep_memo.borrow().active {
             let key = Self::query_key(start, end, half);
@@ -1245,14 +1258,40 @@ impl World {
         }
         blocked
     }
-    /// `sweep_except(.., None)` reduced to its yes/no answer, in the same order: static hulls,
-    /// settled supports, dynamic colliders, weapon obstacles.
+    /// Re-test a static positive witness on long sweeps, without caching mutable answers.
+    /// Counts are full static traversals, successful witnesses, direct short queries, empty-grid certificates.
+    pub(crate) fn flight_counts(&self) -> [u32;4] { self.flight_counts.get() }
+    pub(crate) fn flight_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
+        let q=SweepBounds::new(start,end,half);
+        let free=self.static_geometry.flight_grid.as_ref().is_some_and(|grid|grid.proves_clear(start,end,half));
+        let (blocked,hit)=if free {(false,false)} else {
+            self.static_geometry.sah.as_ref().and_then(|sah|
+                sah.blocked_hinted(&self.static_geometry,start,end,half,&q,&mut self.flight_hint.borrow_mut()))
+                .unwrap_or_else(||(self.static_geometry.blocked(start,end,half,&q),false))
+        };
+        let mut counts=self.flight_counts.get();
+        let index=if free {3} else {usize::from(hit)};
+        counts[index]=counts[index].wrapping_add(1);
+        if (end-start).length_squared()<=160.*160. {counts[2]=counts[2].wrapping_add(1);}
+        self.flight_counts.set(counts);
+        let answer=blocked || self.blocked_mutable(start,end,half,&q);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var_os("LOOKING_GLASS_FLIGHT_VERIFY").is_some() {
+            let full=self.sweep_except(start,end,half,None);
+            assert_eq!(answer,full.start_solid || full.fraction<1.,"flight certificate differs {start} {end} {half}");
+        }
+        answer
+    }
+    /// Full boolean sweep: immutable static geometry, then every mutable geometry class.
     fn blocked_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
         self.npc_profile.sweep();
         crate::sim_maps::count("world_sweeps_blocked", 1);
-        let full = |t: Trace| t.start_solid || t.fraction < 1.;
         let query = SweepBounds::new(start, end, half);
         if self.static_geometry.blocked(start, end, half, &query) { return true; }
+        self.blocked_mutable(start, end, half, &query)
+    }
+    fn blocked_mutable(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> bool {
+        let full = |t: Trace| t.start_solid || t.fraction < 1.;
         let clips = |h: &Hull| { let mut t = Trace::default(); clip_hull(h, start, end, half, &mut t); full(t) };
         for c in &self.settled_supports {
             if crate::sim_maps::npc_queries() && c.bounds.is_none_or(|b| !query.overlaps(b)) { continue; }
@@ -1660,6 +1699,8 @@ impl World {
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
+            flight_hint: std::cell::RefCell::new(None),
+            flight_counts: std::cell::Cell::new([0;4]),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1827,6 +1868,24 @@ mod dynamic_tests;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn flight_witness_does_not_cache_mutable_geometry() {
+        use super::*;
+        let mut world=World::fixture(&[]);
+        let a=Vec3::ZERO; let b=Vec3::X*100.; let h=Vec3::splat(2.);
+        assert!(!world.flight_blocked(a,b,h));
+        world.set_dynamic(vec![Collider::box_bounds(vec3(40.,-20.,-20.),vec3(60.,20.,20.))]);
+        assert!(world.flight_blocked(a,b,h));
+        world.set_dynamic(vec![]);
+        assert!(!world.flight_blocked(a,b,h));
+        world.set_settled_supports(vec![Collider::box_bounds(vec3(40.,-20.,-20.),vec3(60.,20.,20.))]);
+        assert!(world.flight_blocked(a,b,h));
+        world.set_settled_supports(vec![]);
+        world.set_weapon_obstacles(vec![crate::combat::Target{id:1,center:Vec3::X*50.,half:Vec3::splat(10.)}]);
+        assert!(world.flight_blocked(a,b,h));
+        world.set_weapon_obstacles(vec![]);
+        assert!(!world.flight_blocked(a,b,h));
+    }
+    #[test]
     fn sweep_blocked_answers_as_the_full_sweep_on_every_kind_of_geometry() {
         use super::*;
         for sah in [false, true] {
@@ -1838,6 +1897,8 @@ mod tests {
                 boxes.push((vec3(x, y, 0.), vec3(x + 30. + (i % 5) as f32 * 9., y + 25., 40. + (i % 7) as f32 * 30.)));
             }
             let mut world = World::fixture(&boxes);
+            let geometry=std::sync::Arc::get_mut(&mut world.static_geometry).unwrap();
+            geometry.flight_grid=flight_grid::FlightGrid::build(&geometry.hulls);
             world.set_settled_supports(vec![Collider::box_bounds(vec3(-50., 300., 0.), vec3(50., 340., 90.))]);
             world.set_dynamic(vec![Collider::box_bounds(vec3(200., -50., 0.), vec3(230., 50., 150.))]);
             world.set_weapon_obstacles(vec![crate::combat::Target { id: 9, center: vec3(-200., 100., 60.), half: Vec3::splat(20.) }]);
@@ -1851,7 +1912,10 @@ mod tests {
                 let t = world.sweep(a, b, half);
                 let full = t.start_solid || t.fraction < 1.;
                 assert_eq!(crate::sim_maps::with_sweep_blocked(true, || world.sweep_blocked(a, b, half)), full, "{a} {b} {half} sah={sah}");
+                assert_eq!(crate::sim_maps::with_sweep_any(true, || world.sweep_blocked(a, b, half)), full, "unordered {a} {b} {half} sah={sah}");
                 assert_eq!(world.sweep_blocked(a, b, half), full);
+                assert_eq!(world.flight_blocked(a,b,half),full);
+                assert_eq!(world.flight_blocked(a,b,half),full);
                 checked += 1; blocked += usize::from(full);
             }
             assert!(blocked > 500 && checked - blocked > 500, "both answers are exercised: {blocked} of {checked}");

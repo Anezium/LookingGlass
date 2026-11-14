@@ -1033,6 +1033,10 @@ fn draw_batch(
     backdrop: bool,
     context: &mut DrawContext<'_>,
 ) {
+    #[cfg(feature="vita_renderer")]
+    if (backdrop || batch.sky) && vita_renderer::config().diag_skip_sky { return; }
+    #[cfg(feature="vita_renderer")]
+    if vita_renderer::config().diag_skip_alpha_world && batch.transparent() && !backdrop { return; }
     let _visibility_profile = crate::frame_profile::span("world_visibility");
     context.stats.batches += 1;
     let Some(selection) = select_batch_indices(batch, transform, offset, backdrop, context) else {
@@ -2463,13 +2467,13 @@ impl Scene {
         let _profile = crate::frame_profile::span("world_draw");
         #[cfg(feature = "vita_renderer")]
         if let Some(mut renderer) = self.retained.take() {
-            if !transparent {
+            if !transparent && !vita_renderer::config().diag_skip_sky {
                 let refresh = vita_renderer::config().sky_cube_refresh;
                 if let Some(plan) = self.sky_cube.as_mut().map(|c| c.plan(self.sky_origin, refresh)) {
                     self.capture_sky_cube(camera, time, transforms, plan);
                 }
             }
-            let sky_stats = if !transparent && self.authored_sky {
+            let sky_stats = if !transparent && self.authored_sky && !vita_renderer::config().diag_skip_sky {
                 #[cfg(not(target_os = "vita"))]
                 let probe = sky_stats::begin(true);
                 let stats = self.draw_retained_authored_sky(camera, time, transforms);
