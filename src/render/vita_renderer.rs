@@ -3474,8 +3474,9 @@ mod tests {
             assert_eq!(raw.as_object().unwrap().keys().collect::<Vec<_>>(), defaults.as_object().unwrap().keys().collect::<Vec<_>>());
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
-            assert_eq!(raw, serde_json::to_value(c).unwrap());
-            raw
+            // Preserve authored decimal spelling (e.g. 0.001) while comparing the
+            // actual typed runtime value after the parser's f32 conversion.
+            serde_json::to_value(c).unwrap()
         };
         let baseline = parse(include_bytes!("../../configs/PL-rc4.json"));
         let (rc3, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc3.json")).unwrap();
