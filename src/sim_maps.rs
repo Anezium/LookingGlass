@@ -1,5 +1,18 @@
 //! Exact simulation optimizations, independently selectable at startup.
 //! The host probe is excluded from production packages.
+/// Backward-compatible packet tag for legacy classes, with a separate wide namespace.
+#[cfg(any(test, all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+pub(crate) fn world_pipeline_tag(low: bool, class: usize) -> ([u8; 9], usize) {
+    let mut bytes = [0; 9];
+    if let Ok(class) = u8::try_from(class) {
+        bytes[0] = u8::from(low); bytes[1] = class;
+        (bytes, 2)
+    } else {
+        bytes[0] = 0x80 | u8::from(low);
+        bytes[1..].copy_from_slice(&(class as u64).to_le_bytes());
+        (bytes, 9)
+    }
+}
 macro_rules! switch {
     ($name:ident, $field:ident, $index:expr) => {
         pub fn $name() -> bool {
@@ -373,4 +386,22 @@ pub(crate) fn with_think_switches<T>(switches: [bool; 3], run: impl FnOnce() -> 
     impl Drop for Reset { fn drop(&mut self) { THINK_TEST.with(|s| s.set(self.0)); } }
     let _reset = Reset(THINK_TEST.with(|s| s.replace(Some(switches))));
     run()
+}
+
+#[cfg(test)]
+mod river_pipeline_tag_tests {
+    #[test]
+    fn wide_world_packet_classes_never_alias_legacy_or_low_programs() {
+        use super::world_pipeline_tag as tag;
+        for low in [false,true] {
+            for class in 0..=255 {
+                let (bytes,len)=tag(low,class);
+                assert_eq!(&bytes[..len],&[u8::from(low),class as u8]);
+                let wide=tag(low,class+256);
+                assert_ne!(wide.0[..wide.1],bytes[..len]);
+            }
+        }
+        assert_ne!(tag(false,257),tag(true,257));
+        assert_ne!(tag(false,257),tag(false,513));
+    }
 }

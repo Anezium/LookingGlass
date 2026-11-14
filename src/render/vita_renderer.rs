@@ -2099,7 +2099,7 @@ impl Renderer {
                 g.recipe.blend, Some(prepared.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            crate::sim_maps::probe::world_packet(prepared.group, g.base_element, prepared.indices, &texture, u.bits_ref(), low, pi as u8);
+            crate::sim_maps::probe::world_packet(prepared.group, g.base_element, prepared.indices, &texture, u.bits_ref(), low, pi);
             let class = if alpha { crate::gpu_timing::MASK_WORLD_ALPHA } else if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
             if !crate::gpu_timing::masked(class) { ctx.draw(g.base_element, prepared.indices, 1); }
             totals.lap(2, &mut start);
@@ -2459,15 +2459,12 @@ impl Renderer {
                                 let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
                                 crate::sim_maps::probe::world_order(p.group, true);
                                 crate::sim_maps::probe::world_packet(p.group, g.base_element, g.indices, &p.texture,
-                                    u.bits_ref(), false, (g.recipe.blend * 3 + g.recipe.cull) as u8);
+                                    u.bits_ref(), false, g.recipe.blend * 3 + g.recipe.cull);
                             }
                             let mut actual_base = base; let mut actual_count = indices;
-                            let mut actual_vertex = bindings.vertex_buffers[0];
+                            let actual_vertex = bindings.vertex_buffers[0];
                             if world_list::negative("alpha-range-wrong-base") { actual_base += 3; }
                             if world_list::negative("alpha-range-short-count") { actual_count -= 3; }
-                            if world_list::negative("alpha-range-wrong-bank") {
-                                if let Some(&(vertex,_)) = self.world_buffers.iter().find(|&&(vertex,_)| vertex != actual_vertex) { actual_vertex = vertex; }
-                            }
                             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                             ranges.verify(id, actual_vertex, buffer, actual_base, actual_count,
                                 &self.prepared, &self.groups, &self.parameters, &self.pipelines, joint);
@@ -2584,7 +2581,7 @@ impl Renderer {
                 g.recipe.blend, Some(p.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.first().map(String::as_str));
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            crate::sim_maps::probe::world_packet(p.group, g.base_element, g.indices, &p.texture, u.bits_ref(), false, (g.recipe.blend * 3 + g.recipe.cull) as u8);
+            crate::sim_maps::probe::world_packet(p.group, g.base_element, g.indices, &p.texture, u.bits_ref(), false, g.recipe.blend * 3 + g.recipe.cull);
             if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) { ctx.draw(g.base_element, g.indices, 1); }
             totals.add(2, start);
             count("vita_world_gpu_draws", 1);
