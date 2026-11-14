@@ -44,6 +44,20 @@ REMOVED_WORK = {
     'fx_bubble_true_size': set(),
     # Moves the water's environment map on purpose. Same packets and draws; the oracle reports which frames change.
     'water_normals': set(),
+    # Fogs opaque walls in quality low on purpose. Same packets and draws; pixels change on fogged maps.
+    'low_fog': set(),
+    'fog_sky': set(),
+    # Gives approximated world blends their exact factors on purpose. Same packets and draws in the same
+    # order; a map with such blends gets more pipeline classes, so pipeline changes can grow.
+    'exact_blends': set(),
+    # Keeps world detail stages on purpose: more world draws and pixels change. Not a CPU-exact lever.
+    'detail_layers': set(),
+    # Draw the sky surfaces before the world on purpose (sky_cube also captures the sky once):
+    # more draws and pixels change. Not CPU-exact levers.
+    'sky_cube': set(),
+    'sky_cube_size': set(),
+    'sky_cube_refresh': set(),
+    'sky_depth': set(),
     'fx_attached_persist': FUNNEL | {
         'particle_direct_quads', 'particle_reused_quads', 'vita_world_puff_quads', 'vita_world_puff_batches',
         'vita_world_puff_batch_storage_bytes', 'vita_fx_merge_plan_hits', 'vita_fx_merge_plan_builds',

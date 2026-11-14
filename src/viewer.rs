@@ -773,7 +773,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut input = crate::input::Input::default();
     let mut weapon_buttons = crate::weapon_rules::Buttons::default();
     weapon_buttons.block();
-    preferences.display();
+    // Host fidelity captures keep the probe's 960x544 window, the Vita's screen, instead of
+    // the saved display size. Opt-in, so other probe baselines keep their window.
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let keep_window = crate::sim_maps::probe::enabled() && std::env::var_os("LOOKING_GLASS_PROBE_KEEP_WINDOW").is_some();
+    #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+    let keep_window = false;
+    if !keep_window { preferences.display(); }
     escape_menu.backdrop();
     ui.toast("Opening Wonderland...", screen_height() - 70.);
     next_frame().await;

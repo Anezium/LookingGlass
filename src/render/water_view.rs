@@ -15,7 +15,7 @@ fn draw(scene: &mut Scene, camera: &Camera3D, time: f32) {
     set_camera(camera);
     crate::lighting::select(vec![], camera.position, &scene.world);
     crate::render_fx::begin_view(camera, time, &scene.atmosphere, false);
-    #[cfg(not(target_os = "vita"))]
+    #[cfg(feature = "vita_renderer")]
     crate::render_fx::retained::host_reset();
     scene.draw(camera.position, time, false, false, &[]);
     if scene.retained_active() {

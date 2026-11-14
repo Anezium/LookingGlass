@@ -13,6 +13,7 @@ mod world_list;
 mod gxm;
 mod draw_cuts;
 mod alpha_fill;
+mod sky_surfaces;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -212,6 +213,60 @@ pub struct Config {
     /// (`tcGen environment`, `alphaGen dot`), as the desktop renderer does on the CPU. Off keeps
     /// the RC2 shader, whose normals stay still and freeze the water reflection. Default off.
     pub water_normals: bool,
+    /// With `quality: low`, keep the authored fog (map `setfarplane` distance fog, fog volumes,
+    /// liquid fog) in the lean opaque world program, as `quality: full` and the desktop renderer
+    /// draw it. Off keeps the RC3 low program, which leaves opaque walls and floors unfogged.
+    /// No effect in `quality: full`. Default off.
+    pub low_fog: bool,
+    /// On a map with authored distance fog (`setfarplane`), draw the gradient sky flat in the fog
+    /// colour, as the desktop renderer shows potears2 (its sky shader draws nothing over the fog
+    /// colour clear). Off keeps the RC3 gradient from the fog colour up to 1.5 times it, which
+    /// outlines fully fogged geometry against a brighter sky. No effect with `authored_sky`,
+    /// `sky: false` or on a map without distance fog. Default off.
+    pub fog_sky: bool,
+    /// Draw world layers whose blend the five world blend classes only approximate with the
+    /// desktop renderer's exact GL factors: `GL_DST_COLOR GL_ONE` (drawn as additive),
+    /// `GL_SRC_ALPHA GL_SRC_COLOR` and every other factor pair (drawn as alpha), such as the
+    /// green slime, `flatwater`, `darkflowingwater1`, grates and hanging moss. Each such blend
+    /// used by the map gets its own pipeline class from 5 on, so the draws stay the same and
+    /// only their pipelines change. Off keeps the RC3 classes. Default off.
+    pub exact_blends: bool,
+    /// Keep world `detail` stages (the fine texture tiled over walls and floors, such as the
+    /// garden4 ice, keep stone and skool2 wood) as a layer instead of dropping them. They still
+    /// count against `max_layers`; on most surfaces the detail stage is the second layer, since
+    /// the world program applies the lightmap itself. Each kept stage is one more draw of its
+    /// surface. Off keeps the RC3 world, which drops them. Default off.
+    pub detail_layers: bool,
+    /// Draw the authored sky from a cube map captured once from the sky camera, instead of the
+    /// gradient: the sky room (portal maps) and the sky shader layers are drawn by the legacy path
+    /// into six faces of one render target on the first frame, and the map's sky surfaces sample it
+    /// by view direction in one opaque, depth-writing draw before the world. The legacy sky geometry
+    /// is released after the capture unless the map moves its sky camera or `sky_cube_refresh` is on.
+    /// Animated sky content stays as captured. Takes precedence over `sky_depth`. No effect with
+    /// `authored_sky` or `sky: false`. Default off.
+    pub sky_cube: bool,
+    /// Face size in pixels of the `sky_cube` capture, 32 to 1024. The target is 3 by 2 faces of RGBA8.
+    pub sky_cube_size: u32,
+    /// With `sky_cube`: redraw one face every this many frames, in turn, so animated sky content
+    /// moves. Keeps the legacy sky geometry for the whole map. 0 never redraws. Default 0.
+    pub sky_cube_refresh: u32,
+    /// Diagnostic for the sky cube's first-frame GPU crash: keep the legacy resources after
+    /// capture. This does not enable animated refresh. Default off.
+    pub sky_cube_retain: bool,
+    /// Complete the offscreen capture before sampling its atlas or retiring its materials.
+    /// On vitaGL, glDeleteProgram waits for submitted scenes but does not close the current one;
+    /// glFinish closes it first. This wait runs only when a capture is made. Default off.
+    pub sky_cube_finish: bool,
+    /// Diagnostic: capture the cube normally but draw the gradient and sky depth instead of
+    /// sampling it. Used to separate capture/resource lifetime from atlas sampling. Default off.
+    pub sky_cube_capture_only: bool,
+    /// Diagnostic: clear the cube atlas without drawing the legacy sky into it, then sample it
+    /// normally (unless capture_only is on). Used to isolate atlas sampling. Default off.
+    pub sky_cube_clear_only: bool,
+    /// With the gradient sky, draw the map's sky surfaces into depth before the world (colour writes
+    /// off), so scenery placed behind the sky stays hidden, as on the desktop renderer.
+    /// No effect with `authored_sky` or `sky: false`. Default off.
+    pub sky_depth: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -457,6 +512,18 @@ impl Default for Config {
             loading_screen: false,
             collision_geometry_share: false,
             water_normals: false,
+            low_fog: false,
+            fog_sky: false,
+            exact_blends: false,
+            detail_layers: false,
+            sky_cube: false,
+            sky_cube_size: 256,
+            sky_cube_refresh: 0,
+            sky_cube_retain: false,
+            sky_cube_finish: false,
+            sky_cube_capture_only: false,
+            sky_cube_clear_only: false,
+            sky_depth: false,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
@@ -610,12 +677,19 @@ impl Config {
         if let Some(mib)=self.param_buffer_mib { ensure!((16..=64).contains(&mib),"param_buffer_mib must be 16 to 64"); }
         ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
         ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
+        ensure!((32..=1024).contains(&self.sky_cube_size), "sky_cube_size must be 32..1024");
         ensure!(
             self.cell_size.is_finite() && (64. ..=2048.).contains(&self.cell_size),
             "invalid cell_size"
         );
         Ok(())
     }
+}
+/// Bottom and top colours of the gradient sky. `flat` (`fog_sky` on a fogged map) keeps the
+/// background colour at the top too.
+fn sky_gradient(bg: Color, flat: bool) -> [[f32; 4]; 2] {
+    let top = if flat { 1. } else { 1.5 };
+    [[bg.r, bg.g, bg.b, 1.], [bg.r * top, bg.g * top, bg.b * top, 1.]]
 }
 /// The effective miniquad report cadence, as printed: `off` or a frame count.
 fn report_cadence(c: &Config) -> String {
@@ -1111,6 +1185,8 @@ pub struct Renderer {
     sky_pipeline: Pipeline,
     sky_shader: ShaderId,
     sky_bindings: Bindings,
+    /// `sky_depth` and `sky_cube`: the map's static sky surfaces.
+    sky_surfaces: Option<sky_surfaces::SkySurfaces>,
     alpha_order: Vec<(f32, usize)>,
     prepared: Vec<Prepared>,
     fx_gpu: Option<crate::render_fx::retained::Gpu>,
@@ -1123,6 +1199,21 @@ pub struct Renderer {
     alpha_fill: alpha_fill::State,
     list: Option<world_list::WorldList>,
     gxm: Box<gxm::State>,
+}
+/// Blend classes every world renderer has; `exact_blends` adds classes from here on.
+const WORLD_BLEND_CLASSES: usize = 5;
+/// Blends the five world classes draw with other factors (see `blend_class`).
+fn approximated_blend(blend: Blend) -> bool {
+    matches!(blend, Blend::ColorAdd | Blend::AlphaColor | Blend::Factors(..))
+}
+/// The fog mode of an `exact_blends` class, as the desktop renderer picks it, except
+/// `AlphaColor`, whose desktop fade toward white has no counterpart in the world program: it
+/// fades toward black like the additive layers.
+fn exact_fog_mode(blend: Blend) -> f32 {
+    match blend {
+        Blend::ColorAdd | Blend::AlphaColor => 1.,
+        _ => 0.,
+    }
 }
 /// The world pipelines' blend, per blend class.
 fn world_blend(class: usize) -> Option<BlendState> {
@@ -1199,6 +1290,8 @@ impl Renderer {
         let mut keys: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut recipes_ms=0.;let mut chunks_ms=0.;let mut source_chunks=0;
         let mut dropped_layers = 0;
+        // `exact_blends`: the blends of pipeline classes WORLD_BLEND_CLASSES and up, in first-seen order.
+        let mut exact_blends: Vec<Blend> = Vec::new();
         let mut frozen_deforms = 0;
         let mut frozen_models = 0;
         let (mut wave_normal_layers, mut wave_normal_triangles, mut wave_normal_skipped) = (0, 0, 0);
@@ -1215,7 +1308,7 @@ impl Renderer {
                 + b.deforms.len().saturating_sub(1);
             let mut rank = 0;
             for layer in &b.layers {
-                if layer.spec.blend == Blend::Invisible || layer.spec.detail {
+                if layer.spec.blend == Blend::Invisible || (layer.spec.detail && !c.detail_layers) {
                     dropped_layers += 1;
                     continue;
                 }
@@ -1250,7 +1343,14 @@ impl Renderer {
                     textures: layer.textures.clone(),
                     lit: layer.lit,
                     rank,
-                    blend: blend_class(layer.spec.blend),
+                    blend: if c.exact_blends && approximated_blend(layer.spec.blend) {
+                        WORLD_BLEND_CLASSES + exact_blends.iter().position(|&b| b == layer.spec.blend).unwrap_or_else(|| {
+                            exact_blends.push(layer.spec.blend);
+                            exact_blends.len() - 1
+                        })
+                    } else {
+                        blend_class(layer.spec.blend)
+                    },
                     opaque: opaque_stage(&layer.spec),
                     cull: match b.face_side {
                         FaceSide::Both => 0,
@@ -1392,8 +1492,13 @@ impl Renderer {
             VertexAttribute::new("normal", VertexFormat::Float3),
         ];
         let mut pipelines = Vec::new();
-        for blend in 0..5 {
-            let state = world_blend(blend);
+        if !exact_blends.is_empty() {
+            println!("[lg/vita-renderer] exact_blends={:?}", exact_blends);
+        }
+        let blend_states: Vec<Option<BlendState>> = (0..WORLD_BLEND_CLASSES).map(world_blend)
+            .chain(exact_blends.iter().map(|&b| crate::render::blend(crate::render::blend_index(b))))
+            .collect();
+        for &state in &blend_states {
             for cull in [CullFace::Nothing, CullFace::Back, CullFace::Front] {
                 crate::frame_profile::pipeline_creation();
                 pipelines.push(ctx.new_pipeline(
@@ -1421,8 +1526,9 @@ impl Renderer {
             crate::frame_profile::shader_creation();
             let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
             let _shader_name = crate::shader_cache::Name::new("retained-world-low");
-            let low=ctx.new_shader(ShaderSource::Glsl{vertex:&shader::vertex(c.water_normals),fragment:&shader::low_fragment()},shader::meta())?;
+            let low=ctx.new_shader(ShaderSource::Glsl{vertex:&shader::vertex(c.water_normals),fragment:&shader::low_fragment(c.low_fog)},shader::meta())?;
             resources.shaders.push(low);
+            if c.low_fog { println!("[lg/vita-renderer] low_fog=on"); }
             drop(shader_timing);
             for cull in [CullFace::Nothing,CullFace::Back,CullFace::Front] {
                 crate::frame_profile::pipeline_creation();
@@ -1445,8 +1551,7 @@ impl Renderer {
             resources.shaders.push(lite);
             // Same blend classes as the world pipelines, in the same order.
             let mut lite_pipelines = Vec::new();
-            for blend in 0..5 {
-                let state = world_blend(blend);
+            for &state in &blend_states {
                 lite_pipelines.extend(alpha_fill::pipelines(ctx, lite, &attributes, state, state));
             }
             resources.pipelines.extend(lite_pipelines.iter().copied());
@@ -1580,6 +1685,7 @@ impl Renderer {
         };
         resources.buffers.extend(sky_bindings.vertex_buffers.iter().copied());
         resources.buffers.push(sky_bindings.index_buffer);
+        let sky_surfaces = sky_surfaces::SkySurfaces::new(scene, ctx, &mut resources)?;
         #[cfg(not(target_os = "vita"))]
         ensure!(std::env::var("LOOKING_GLASS_RETAINED_FAIL").as_deref() != Ok("after-upload"), "host diagnostic construction failure after upload");
         let upload_ms=upload_start.elapsed().as_secs_f64()*1000.;
@@ -1681,6 +1787,7 @@ impl Renderer {
             sky_pipeline,
             sky_shader,
             sky_bindings,
+            sky_surfaces,
         })
     }
     pub(super) fn draw(
@@ -1958,32 +2065,72 @@ impl Renderer {
         #[cfg(target_os = "vita")]
         if list_submit && self.gxm.proof_due() { self.proof_frame(scene, time); }
         if !alpha && config().sky && !scene.authored_sky {
+            #[cfg(not(target_os = "vita"))]
+            let probe = super::sky_stats::begin(false);
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
             let mut totals = crate::frame_profile::Totals::<3>::profile_only();
             let bg = scene.atmosphere.background();
-            let sky = [
-                [bg.r, bg.g, bg.b, 1.],
-                [bg.r * 1.5, bg.g * 1.5, bg.b * 1.5, 1.],
-            ];
+            let sky = sky_gradient(bg, config().fog_sky && scene.atmosphere.distance.w > 0.);
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
+            let cube = scene.sky_cube.as_ref().filter(|c| c.ready())
+                .filter(|_| !config().sky_cube_capture_only && self.sky_surfaces.is_some()).map(|c| {
+                let rotation = if scene.sky_origin.is_some() {
+                    scene.sky_rotation * scene.sky_motion.as_ref().map_or(Quat::IDENTITY, |m| m.transform(time).1)
+                } else { Quat::IDENTITY };
+                use super::sky_cube::Set;
+                sky_surfaces::CubeView {
+                    texture: c.target.texture.raw_miniquad_id(),
+                    rotation: Mat4::from_quat(rotation),
+                    inset: 0.5 / c.size as f32,
+                    // The Vita copy of a target is stored top row first, as `scale.rs` upscales it.
+                    flip: cfg!(target_os = "vita") != (config().scaled_target == "direct_flip"),
+                    rows: c.rows(), room_row: c.row(Set::Room), layers_row: c.row(Set::Layers),
+                }
+            });
+            let background = self.sky_surfaces.as_ref().is_some_and(|s| s.has_background(cube.as_ref()));
             let start = totals.start();
-            ctx.apply_pipeline(&self.sky_pipeline);
-            ctx.apply_bindings(&self.sky_bindings);
+            if !background {
+                ctx.apply_pipeline(&self.sky_pipeline);
+                ctx.apply_bindings(&self.sky_bindings);
+            }
             totals.add(0, start);
             let start = totals.start();
-            ctx.apply_uniforms(UniformsSource::table(&sky));
+            if !background { ctx.apply_uniforms(UniformsSource::table(&sky)); }
             totals.add(1, start);
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::draw_query::mark("world_opaque","sky",0,None,0,None);
-            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) { ctx.draw(0, 3, 1); }
+            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) {
+                match (&self.sky_surfaces, &cube) {
+                    (Some(s), Some(c)) if background => s.draw_background(ctx, &self.sky_bindings, projection, eye, c),
+                    _ => ctx.draw(0, 3, 1),
+                }
+            }
             totals.add(2, start);
             totals.publish(["vita_world_sky_state_bindings", "vita_world_sky_uniforms", "vita_world_sky_draws_time"]);
             count("vita_world_gpu_draws", 1);
             count("vita_world_sky_draws", 1);
             crate::light_profile::render_add(phase, RenderMetrics { draws: 1, pipelines: 1,
                 bindings: 1, uniform_uploads: 1, uniform_bytes: 32, uniform_gl_calls: 2, ..Default::default() });
+            let mode = match (&self.sky_surfaces, &cube) {
+                (Some(_), Some(_)) => "cube",
+                (Some(_), None) if config().sky_depth => "depth",
+                _ => "gradient",
+            };
+            if let (Some(sky), true) = (&self.sky_surfaces, mode != "gradient") {
+                let _span = crate::frame_profile::span("vita_world_sky_surfaces");
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                crate::sim_maps::probe::draw_query::mark("world_opaque","sky_surfaces",0,None,0,None);
+                let draws = sky.draw(ctx, projection, eye, cube.as_ref());
+                count("vita_world_gpu_draws", draws);
+                count("vita_world_sky_surface_draws", draws);
+                crate::light_profile::render_add(phase, RenderMetrics { draws, pipelines: 1,
+                    bindings: draws, uniform_uploads: 1, ..Default::default() });
+            }
+            #[cfg(not(target_os = "vita"))]
+            super::sky_stats::end(probe, mode, &format!("sky_surface_triangles={}",
+                self.sky_surfaces.as_ref().map_or(0, |s| s.triangles)));
         }
         if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
@@ -2481,6 +2628,7 @@ impl Drop for Renderer {
         self.alpha_fill.delete(ctx);
         ctx.delete_buffer(self.sky_bindings.vertex_buffers[0]);
         ctx.delete_buffer(self.sky_bindings.index_buffer);
+        if let Some(sky) = &self.sky_surfaces { sky.delete(ctx); }
     }
 }
 fn count(name: &'static str, n: u64) {
@@ -2613,6 +2761,7 @@ fn uniforms(
                 2 => 1.,
                 3 => 2.,
                 4 => 3.,
+                b if b >= WORLD_BLEND_CLASSES => exact_fog_mode(s.blend),
                 _ => 0.,
             },
             0.,
@@ -3300,12 +3449,13 @@ mod tests {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
             let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            // The replay keys, the A5 draw and fill keys and water_normals came after RC1; its play files keep them
+            // The replay keys, the A5 draw and fill keys, water_normals, the fog keys, exact_blends, detail_layers and the sky keys came after RC1; its play files keep them
             // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
                 "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
-                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals").cloned().collect();
+                .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
+                    && !k.starts_with("sky_cube") && *k != "sky_depth").cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3433,7 +3583,9 @@ mod tests {
         let defaults = serde_json::to_value(Config::default()).unwrap();
         // Keys added after RC2 that RC3 leaves at their off defaults.
         for key in ["packet_min_pixels", "world_min_pixels", "world_texture_sort", "water_stage_merge", "world_alpha_lite",
-            "fx_lite", "fx_add_max_area", "water_normals"] {
+            "fx_lite", "fx_add_max_area", "water_normals", "low_fog", "fog_sky", "exact_blends", "detail_layers",
+            "sky_cube", "sky_cube_size", "sky_cube_refresh", "sky_cube_retain", "sky_cube_finish",
+            "sky_cube_capture_only", "sky_cube_clear_only", "sky_depth"] {
             assert_eq!(rc3[key], defaults[key], "{key} off in RC3");
         }
         for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
@@ -3450,6 +3602,17 @@ mod tests {
             (&include_bytes!("../../configs/PL-rc3-fill.json")[..], vec![("water_stage_merge", serde_json::json!("merge")),
                 ("world_alpha_lite", serde_json::json!(true)), ("fx_lite", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-water.json")[..], vec![("water_normals", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-fog.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-fidelity.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("exact_blends", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-detail.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("exact_blends", serde_json::json!(true)), ("detail_layers", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-sky.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("sky_cube", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-sky-finish.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("sky_cube", serde_json::json!(true)), ("sky_cube_finish", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-sky-depth.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("sky_depth", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-resolve.json")[..], vec![("scaled_target", serde_json::json!("resolve"))]),
             (&include_bytes!("../../configs/PL-rc3-record.json")[..], vec![("replay_record", serde_json::json!("a2-#.lgtape")),
                 ("replay_start", serde_json::json!("chapter:potears2"))]),
@@ -3628,6 +3791,81 @@ mod tests {
         assert_ne!(on, shader::VERTEX);
         assert!(on.contains("}else if(Deform.x>2.5&&Deform.x<3.5){") && on.contains("if(Deform.x>3.5){"));
         assert!(on.contains("vec3 n=(Model*vec4(rippled,0.0)).xyz;"), "the environment and dot terms read the rippled normal");
+    }
+    #[test]
+    fn detail_layers_defaults_off_and_parses_as_a_bool() {
+        assert!(!Config::default().detail_layers, "detail_layers defaults off");
+        assert!(serde_json::from_str::<Config>(r#"{"detail_layers":"on"}"#).is_err());
+        assert!(serde_json::from_str::<Config>(r#"{"detail_layers":true}"#).unwrap().detail_layers);
+    }
+    #[test]
+    fn exact_blends_off_keeps_the_five_classes_and_on_draws_the_desktop_factors() {
+        assert!(!Config::default().exact_blends, "exact_blends defaults off");
+        assert!(serde_json::from_str::<Config>(r#"{"exact_blends":"on"}"#).is_err());
+        // Off: the classes RC3 draws these blends with.
+        assert_eq!(blend_class(Blend::ColorAdd), 2);
+        assert_eq!(blend_class(Blend::AlphaColor), 1);
+        assert_eq!(blend_class(Blend::Factors(1, 2)), 1);
+        for b in [Blend::Opaque, Blend::Alpha, Blend::Add, Blend::AlphaAdd, Blend::Filter, Blend::DoubleFilter, Blend::Invisible] {
+            assert!(!approximated_blend(b), "{b:?} keeps its class");
+        }
+        for b in [Blend::ColorAdd, Blend::AlphaColor, Blend::Factors(1, 2), Blend::Factors(4, 7), Blend::Factors(7, 1)] {
+            assert!(approximated_blend(b), "{b:?} gets an exact class");
+        }
+        // On: the desktop renderer's factors.
+        let state = |b| format!("{:?}", crate::render::blend(crate::render::blend_index(b)).unwrap());
+        let want = |s, d| format!("{:?}", BlendState::new(Equation::Add, s, d));
+        assert_eq!(state(Blend::ColorAdd), want(BlendFactor::Value(BlendValue::DestinationColor), BlendFactor::One));
+        assert_eq!(state(Blend::AlphaColor), want(BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::Value(BlendValue::SourceColor)));
+        assert_eq!(state(Blend::Factors(1, 2)), want(BlendFactor::One, BlendFactor::Value(BlendValue::SourceColor)));
+        assert_eq!(state(Blend::Factors(4, 7)),
+            want(BlendFactor::Value(BlendValue::DestinationColor), BlendFactor::OneMinusValue(BlendValue::SourceAlpha)));
+        assert_eq!((exact_fog_mode(Blend::ColorAdd), exact_fog_mode(Blend::AlphaColor), exact_fog_mode(Blend::Factors(1, 2))), (1., 1., 0.));
+    }
+    #[test]
+    fn low_fog_off_keeps_the_rc3_low_program_and_on_keeps_the_full_fog() {
+        assert!(!Config::default().low_fog, "low_fog defaults off");
+        assert!(serde_json::from_str::<Config>(r#"{"low_fog":"on"}"#).is_err());
+        // Off: the RC3 program, byte for byte, built the way RC3 built it.
+        let mut rc3 = shader::FRAGMENT.to_string();
+        let start = rc3.find(" float cut=Surface.z;").unwrap();
+        let end = rc3.find(" vec3 lighting=").unwrap();
+        rc3.replace_range(start..end, "");
+        let off = shader::low_fragment(false);
+        assert_eq!(off, rc3.replace("fogged(rgb,Alpha.z)", "rgb"));
+        assert!(!off.contains("fogged(") && !off.contains("discard"));
+        // On: the full program's fog code and call, still without the alpha-test discards.
+        let on = shader::low_fragment(true);
+        assert!(on.contains("gl_FragColor=vec4(fogged(rgb,Alpha.z),a);") && !on.contains("discard"));
+        assert!(on.contains("uniform vec4 DistanceFog;") && !on.contains("// FOG"));
+        let full = crate::environment::fragment(shader::FRAGMENT);
+        let fog_code = |s: &str| s[s.find("uniform highp vec3 FogEye;").unwrap()..s.find("void main()").unwrap()].to_string();
+        assert_eq!(fog_code(&on), fog_code(&full), "the same fog code as quality full");
+    }
+    #[test]
+    fn sky_cube_and_sky_depth_default_off_and_bound_the_face_size() {
+        let c = Config::default();
+        assert!(!c.sky_cube && !c.sky_depth && c.sky_cube_refresh == 0, "both sky keys default off");
+        assert_eq!(c.sky_cube_size, 256);
+        assert!(!c.sky_cube_retain && !c.sky_cube_finish && !c.sky_cube_capture_only && !c.sky_cube_clear_only,
+            "capture diagnostics must not affect existing configurations");
+        let (diagnostic, rejected) = parse_runtime_config(br#"{"sky_cube_retain":true,"sky_cube_finish":true,"sky_cube_capture_only":true,"sky_cube_clear_only":true}"#).unwrap();
+        assert!(rejected.is_none() && diagnostic.sky_cube_retain && diagnostic.sky_cube_finish
+            && diagnostic.sky_cube_capture_only && diagnostic.sky_cube_clear_only);
+        let (c, rejected) = parse_runtime_config(br#"{"sky_cube":true,"sky_cube_size":128,"sky_depth":true}"#).unwrap();
+        assert!(rejected.is_none() && c.sky_cube && c.sky_depth && c.sky_cube_size == 128);
+        c.validate().unwrap();
+        for size in [16, 2048] {
+            let c = Config { sky_cube_size: size, ..Config::default() };
+            assert!(c.validate().is_err(), "face size {size} rejected");
+        }
+    }
+    #[test]
+    fn fog_sky_keeps_the_rc3_gradient_off_and_draws_the_fog_colour_flat_on() {
+        assert!(!Config::default().fog_sky, "fog_sky defaults off");
+        let bg = Color::new(0.5, 0.5, 0.5, 1.);
+        assert_eq!(sky_gradient(bg, false), [[0.5, 0.5, 0.5, 1.], [0.75, 0.75, 0.75, 1.]], "the RC3 gradient");
+        assert_eq!(sky_gradient(bg, true), [[0.5, 0.5, 0.5, 1.], [0.5, 0.5, 0.5, 1.]]);
     }
     #[test]
     fn wave_normal_rides_the_deform_uniforms_and_never_displaces_vertices() {

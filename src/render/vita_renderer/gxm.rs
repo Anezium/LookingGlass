@@ -56,7 +56,9 @@ pub(crate) struct State {
     /// For the full program and the low one.
     layouts: [Option<Program>; 2],
     /// The vertex and fragment program vitaGL used, per pipeline class and program.
-    programs: [Option<(usize, usize)>; 32],
+    /// Room for 10 blend classes (`exact_blends` adds classes from 5 on); a slot past the end
+    /// is not recorded and that draw is checked without its programs.
+    programs: [Option<(usize, usize)>; 64],
     direct: Direct,
     pub(crate) shadow: Shadow,
     pub(crate) direct_draws: u64,
@@ -79,7 +81,7 @@ pub(crate) struct State {
 pub(crate) struct Proofs { pub frames: u64, pub equal: u64, pub different: u64, pub first_different_byte: Option<usize>, pub different_bytes: usize, pub bytes: usize }
 impl State {
     pub(crate) fn new(mode: Mode, groups: usize, meta: &macroquad::miniquad::ShaderMeta) -> Self {
-        Self { mode, records: if mode == Mode::Off { Vec::new() } else { vec![None; groups] }, fields: field_table(meta), layouts: [None, None], programs: [None; 32],
+        Self { mode, records: if mode == Mode::Off { Vec::new() } else { vec![None; groups] }, fields: field_table(meta), layouts: [None, None], programs: [None; 64],
             direct: Direct::default(), shadow: Shadow::default(), direct_draws: 0, vitagl_draws: 0, frames: 0, proofs: Proofs::default(), buffers: (Vec::new(), Vec::new()), second_trial_draws: 0, second_trial_direct: 0, sabotage_fired: 0, sabotaged_this_proof: false, refused_captures: 0, layout_refused: [false; 2], proofs_skipped: 0 }
     }
     /// Boxed so the survey's closing line can find it. Main thread only, like the renderer.
