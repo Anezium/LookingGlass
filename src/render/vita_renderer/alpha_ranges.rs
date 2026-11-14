@@ -597,7 +597,7 @@ impl PixelProbe {
         let mut viewport = [0_i32; 4];
         unsafe {
             macroquad::miniquad::gl::glGetIntegerv(
-                macroquad::miniquad::gl::GL_VIEWPORT,
+                0x0ba2, // GL_VIEWPORT (not exported by the pinned GL bindings)
                 viewport.as_mut_ptr(),
             );
         }
