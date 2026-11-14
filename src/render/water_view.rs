@@ -14,7 +14,7 @@ fn draw(scene: &mut Scene, camera: &Camera3D, time: f32) {
     clear_background(scene.atmosphere.background());
     set_camera(camera);
     crate::lighting::select(vec![], camera.position, &scene.world);
-    crate::render_fx::begin_view(camera, time, &scene.atmosphere, false);
+    scene.begin_fx_view(camera, time, false, true);
     #[cfg(not(target_os = "vita"))]
     crate::render_fx::retained::host_reset();
     scene.draw(camera.position, time, false, false, &[]);
@@ -23,7 +23,7 @@ fn draw(scene: &mut Scene, camera: &Camera3D, time: f32) {
     } else {
         depth_read_only(|| scene.draw(camera.position, time, false, true, &[]));
     }
-    crate::render_fx::finish();
+    scene.finish_fx(true);
     set_default_camera();
 }
 
@@ -41,6 +41,9 @@ pub async fn capture(assets: &mut Assets, out: &std::path::Path) -> Result<()> {
             draw(&mut scene, &camera, time);
             images.push(get_screen_data());
             crate::viewer::save_capture(&out.join(format!("{name}-{label}.png")))?;
+            #[cfg(feature="vita_renderer")]
+            println!("[lg/water-view] sample_report {}",serde_json::json!({"view":name,"time":time,
+                "renderer":crate::render::vita_renderer::report()}));
             next_frame().await;
         }
         let changed = images[0].bytes.chunks_exact(4).zip(images[1].bytes.chunks_exact(4))
