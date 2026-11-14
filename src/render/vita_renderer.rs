@@ -744,6 +744,26 @@ fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
     config.validate()?;
     Ok((config, rejected))
 }
+/// The production read/parse path. Only NotFound may select the compiled release
+/// input; serde defaults for supplied partial files and error recovery stay original.
+fn read_runtime_config(path: &std::path::Path, missing: crate::config_input::MissingFile) -> Result<Config> {
+    let start = std::time::Instant::now();
+    eprintln!("[lg/startup] renderer_config read begin path={}", path.display());
+    let Some(bytes) = crate::config_input::read(path, missing, include_bytes!("../../configs/PL-release.json"))?
+        else { return Ok(Config::default()) };
+    if matches!(bytes, std::borrow::Cow::Borrowed(_)) {
+        eprintln!("[lg/vita-renderer] missing config {}; source=compiled-release", path.display());
+    }
+    eprintln!("[lg/startup] renderer_config read done bytes={} elapsed_ms={:.3}; parse begin", bytes.len(), start.elapsed().as_secs_f64()*1000.);
+    let (c, rejected) = parse_runtime_config(&bytes)?;
+    if let Some(message) = rejected {
+        eprintln!("[lg/vita-renderer] invalid config key {}: {message}", path.display());
+    }
+    eprintln!("[lg/startup] renderer_config parse done elapsed_ms={:.3}; validate begin", start.elapsed().as_secs_f64()*1000.);
+    c.validate()?;
+    eprintln!("[lg/startup] renderer_config validate done elapsed_ms={:.3}", start.elapsed().as_secs_f64()*1000.);
+    Ok(c)
+}
 #[cfg(target_os = "vita")]
 const CONFIG_PATH: &str = "ux0:data/alice/private/vita_renderer.json";
 #[cfg(not(target_os = "vita"))]
@@ -765,24 +785,7 @@ pub fn config() -> &'static Config {
 pub fn config() -> &'static Config {
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(|| {
-        let start=std::time::Instant::now();
-        eprintln!("[lg/startup] renderer_config read begin path={CONFIG_PATH}");
-        let parsed = (|| -> Result<Config> {
-            let bytes = match std::fs::read(CONFIG_PATH) {
-                Ok(bytes) => bytes,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
-                Err(e) => return Err(e.into()),
-            };
-            eprintln!("[lg/startup] renderer_config read done bytes={} elapsed_ms={:.3}; parse begin",bytes.len(),start.elapsed().as_secs_f64()*1000.);
-            let (c, rejected) = parse_runtime_config(&bytes)?;
-            if let Some(message) = rejected {
-                eprintln!("[lg/vita-renderer] invalid config key {CONFIG_PATH}: {message}");
-            }
-            eprintln!("[lg/startup] renderer_config parse done elapsed_ms={:.3}; validate begin",start.elapsed().as_secs_f64()*1000.);
-            c.validate()?;
-            eprintln!("[lg/startup] renderer_config validate done elapsed_ms={:.3}",start.elapsed().as_secs_f64()*1000.);
-            Ok(c)
-        })();
+        let parsed = read_runtime_config(std::path::Path::new(CONFIG_PATH), crate::config_input::MissingFile::for_platform());
         let c = parsed.unwrap_or_else(|e| {
             eprintln!("[lg/vita-renderer] invalid config {CONFIG_PATH}: {e:#}; using defaults");
             Config::default()
@@ -3020,6 +3023,95 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn release_fallback_renderer_missing_only_and_read_only() {
+        use crate::config_input::{MissingFile, TestDir};
+        let dir = TestDir::new("renderer");
+        let missing = dir.0.join("absent-parent/vita_renderer.json");
+        let value = |config: Config| serde_json::to_value(config).unwrap();
+        let release = include_bytes!("../../configs/PL-release.json");
+        let expected = value(parse_runtime_config(release).unwrap().0);
+        assert_eq!(value(read_runtime_config(&missing, MissingFile::CompiledRelease).unwrap()), expected);
+        assert_eq!(value(read_runtime_config(&missing, MissingFile::OriginalDefaults).unwrap()), value(Config::default()));
+        #[cfg(not(target_os = "vita"))]
+        assert_eq!(value(read_runtime_config(&missing, MissingFile::for_platform()).unwrap()), value(Config::default()));
+        assert!(!missing.parent().unwrap().exists(), "the fallback must not create private directories or files");
+
+        let supplied = dir.0.join("supplied.json");
+        for bytes in [b"{}".as_slice(), br#"{"world_list_submit":false,"audio_music_thread":false,"water_normals":true,"log_frame_time_every":10}"#, release] {
+            std::fs::write(&supplied, bytes).unwrap();
+            let expected = value(parse_runtime_config(bytes).unwrap().0);
+            for policy in [MissingFile::OriginalDefaults, MissingFile::CompiledRelease] {
+                assert_eq!(value(read_runtime_config(&supplied, policy).unwrap()), expected);
+                assert_eq!(std::fs::read(&supplied).unwrap(), bytes);
+            }
+        }
+        // Existing cadence salvage uses the original serde defaults, even on Vita.
+        let bad_cadence = br#"{"log_frame_time_every":"bad","world_list_submit":true}"#;
+        std::fs::write(&supplied, bad_cadence).unwrap();
+        let recovered = read_runtime_config(&supplied, MissingFile::CompiledRelease).unwrap();
+        assert_eq!(recovered.log_frame_time_every, Config::default().log_frame_time_every);
+        assert!(recovered.world_list_submit);
+        assert_eq!(std::fs::read(&supplied).unwrap(), bad_cadence);
+        for bytes in [b"{".as_slice(), br#"{"unknown_release_key":true}"#, br#"{"render_scale":0}"#] {
+            std::fs::write(&supplied, bytes).unwrap();
+            for policy in [MissingFile::OriginalDefaults, MissingFile::CompiledRelease] {
+                assert!(read_runtime_config(&supplied, policy).is_err());
+                assert_eq!(value(read_runtime_config(&supplied, policy).unwrap_or_default()), value(Config::default()));
+                assert_eq!(std::fs::read(&supplied).unwrap(), bytes);
+            }
+        }
+        for policy in [MissingFile::OriginalDefaults, MissingFile::CompiledRelease] {
+            assert!(read_runtime_config(&dir.0, policy).is_err(), "non-NotFound I/O errors must propagate");
+        }
+    }
+    #[test]
+    fn release_fallback_renderer_is_explicit_played_baseline_without_recording() {
+        use sha2::{Digest, Sha256};
+        let played_bytes = include_bytes!("../../configs/PL-played-rc3.json");
+        assert_eq!(format!("{:x}", Sha256::digest(played_bytes)), "61f48046a65b578d345a7eeab5704e0f5cd3a7c05dfd361ee4c3576b947a429f");
+        let bytes = include_bytes!("../../configs/PL-release.json");
+        let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let defaults = serde_json::to_value(Config::default()).unwrap();
+        assert_eq!(raw.as_object().unwrap().keys().collect::<Vec<_>>(), defaults.as_object().unwrap().keys().collect::<Vec<_>>(), "every release input must be explicit");
+        let (parsed, rejected) = parse_runtime_config(bytes).unwrap();
+        assert!(rejected.is_none());
+        let played_raw: serde_json::Value = serde_json::from_slice(played_bytes).unwrap();
+        for (key, value) in played_raw.as_object().unwrap() {
+            let expected = if key == "log_frame_time_every" { serde_json::json!(0) } else { value.clone() };
+            assert_eq!(raw[key], expected, "{key}");
+        }
+        let mut played = serde_json::to_value(parse_runtime_config(played_bytes).unwrap().0).unwrap();
+        assert_eq!(played["log_frame_time_every"], 10);
+        played["log_frame_time_every"] = 0.into();
+        // Compare typed values on both sides: to_value widens f32 (e.g. the
+        // played audio gain 0.001), unlike its original JSON decimal spelling.
+        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the deliberate frame-report shutdown may change parsed played values");
+        let added = raw.as_object().unwrap().iter().filter(|(key, _)| played_raw.get(*key).is_none()).map(|(key, value)| (key.clone(), value.clone())).collect::<serde_json::Map<_, _>>();
+        assert_eq!(serde_json::Value::Object(added), serde_json::json!({
+            "world_adjacent_batch":false,"exact_blends":false,"sky_cube_finish":false,
+            "fog_sky":false,"sky_cube_size":256,"low_fog":false,"actor_near_cull":0.0,
+            "sky_cube_clear_only":false,"sim_sweep_blocked":false,"sky_cube_retain":false,
+            "spike_log_ms":0.0,"detail_layers":false,"sky_depth":false,
+            "sky_cube_capture_only":false,"sky_cube_refresh":0,"audio_combat_preload":false,"sky_cube":false
+        }));
+        for key in ["render_draw_timing", "worker_probe", "light_gl_observers", "skin_worker_bench", "frame_phase_probe", "phase_census", "profile_capture", "gpu_state_probe", "depth_sentinel", "pvs_verify", "world_pass_clock", "water_normals", "world_adjacent_batch"] {
+            assert_eq!(raw[key], false, "{key}");
+        }
+        assert_eq!(raw["profiler"], "off");
+        assert_eq!(raw["gpu_timing"], "off");
+        assert_eq!(raw["gpu_mask"], serde_json::json!([]));
+        assert_eq!(raw["spike_log_ms"], 0.0);
+        for key in ["replay_record", "replay_play", "replay_start"] { assert_eq!(raw[key], "", "{key}"); }
+        for key in ["replay_state_every", "replay_stop_after"] { assert_eq!(raw[key], 0, "{key}"); }
+        // This chooses the proven asynchronous reporting route; it is not a log enable.
+        assert_eq!(raw["audio_log_thread"], true);
+        assert_eq!(raw["audio_music_thread"], true);
+        assert_eq!(raw["world_list_submit"], true);
+        assert_eq!(raw["world_shared_buffers"], true);
+        assert_eq!(raw["world_gxm"], "live");
+        assert_eq!(raw["tls_fast"], "on");
+    }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {

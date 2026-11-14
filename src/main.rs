@@ -2,6 +2,7 @@
 // formatted engine record, including its newline, in one serialized operation.
 #[macro_use]
 mod logging;
+mod config_input;
 mod allocation_census;
 mod r13_survey;
 mod tls_count;

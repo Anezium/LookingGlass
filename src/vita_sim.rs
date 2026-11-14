@@ -55,10 +55,19 @@ impl Config {
         Ok(config)
     }
     fn read(path: &Path) -> Result<Self> {
-        match std::fs::read(path) {
-            Ok(bytes) => Self::parse(&bytes).with_context(|| format!("Invalid {}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e).with_context(|| format!("Cannot read {}", path.display())),
+        Self::read_with_missing(path, crate::config_input::MissingFile::for_platform())
+    }
+    fn read_with_missing(path: &Path, missing: crate::config_input::MissingFile) -> Result<Self> {
+        match crate::config_input::read(path, missing, include_bytes!("../configs/vita-sim/vita-sim-release.json"))
+            .with_context(|| format!("Cannot read {}", path.display()))?
+        {
+            Some(bytes) => {
+                if matches!(bytes, std::borrow::Cow::Borrowed(_)) {
+                    eprintln!("[lg/vita-sim] missing config {}; source=compiled-release", path.display());
+                }
+                Self::parse(&bytes).with_context(|| format!("Invalid {}", path.display()))
+            }
+            None => Ok(Self::default()),
         }
     }
 }
@@ -86,6 +95,51 @@ pub fn initialize(save_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn release_fallback_sim_missing_only_and_read_only() {
+        use crate::config_input::{MissingFile, TestDir};
+        let dir = TestDir::new("sim");
+        let missing = dir.0.join("absent-parent/vita_sim.json");
+        let release = include_bytes!("../configs/vita-sim/vita-sim-release.json");
+        assert_eq!(Config::read_with_missing(&missing, MissingFile::CompiledRelease).unwrap(), Config::parse(release).unwrap());
+        assert_eq!(Config::read_with_missing(&missing, MissingFile::OriginalDefaults).unwrap(), Config::default());
+        #[cfg(not(target_os = "vita"))]
+        assert_eq!(Config::read(&missing).unwrap(), Config::default());
+        assert!(!missing.parent().unwrap().exists());
+        let supplied = dir.0.join("supplied.json");
+        for bytes in [b"{}".as_slice(), br#"{"puff_cap":256,"puff_collide":"moving"}"#, release] {
+            std::fs::write(&supplied, bytes).unwrap();
+            for policy in [MissingFile::OriginalDefaults, MissingFile::CompiledRelease] {
+                assert_eq!(Config::read_with_missing(&supplied, policy).unwrap(), Config::parse(bytes).unwrap());
+                assert_eq!(std::fs::read(&supplied).unwrap(), bytes);
+            }
+        }
+        for bytes in [b"{".as_slice(), br#"{"unknown_release_key":true}"#, br#"{"puff_cap":4097}"#] {
+            std::fs::write(&supplied, bytes).unwrap();
+            for policy in [MissingFile::OriginalDefaults, MissingFile::CompiledRelease] {
+                assert!(Config::read_with_missing(&supplied, policy).is_err());
+                assert_eq!(Config::read_with_missing(&supplied, policy).unwrap_or_default(), Config::default());
+                assert_eq!(std::fs::read(&supplied).unwrap(), bytes);
+            }
+        }
+        for policy in [MissingFile::OriginalDefaults, MissingFile::CompiledRelease] {
+            assert!(Config::read_with_missing(&dir.0, policy).is_err());
+        }
+    }
+    #[test]
+    fn release_fallback_sim_is_complete_and_exact_owner_input() {
+        use sha2::{Digest, Sha256};
+        let bytes = include_bytes!("../configs/vita-sim/vita-sim-release.json");
+        assert_eq!(format!("{:x}", Sha256::digest(bytes)), "fa64b0c5b79c52d8e028f7fc9d0d3dd2eec57b7641dfc8f76b34212bdcb3334b");
+        assert_eq!(bytes, include_bytes!("../configs/vita-sim/vita-sim-all.json"));
+        let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let defaults = serde_json::to_value(Config::default()).unwrap();
+        assert_eq!(raw.as_object().unwrap().keys().collect::<Vec<_>>(), defaults.as_object().unwrap().keys().collect::<Vec<_>>());
+        assert_eq!(Config::parse(bytes).unwrap(), Config {
+            puff_cap: 128, puff_collide: PuffCollide::None, puff_sweep_every: 4,
+            anim_cull: true, anim_far_distance: Some(800.), anim_far_every: 4, mover_far_every: 4,
+        });
+    }
     #[test]
     fn strict_config_defaults_and_partial_override() {
         assert_eq!(Config::parse(b"{}").unwrap(), Config::default());

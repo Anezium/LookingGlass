@@ -1,0 +1,9 @@
+{
+  "puff_cap": 128,
+  "puff_collide": "none",
+  "puff_sweep_every": 4,
+  "anim_cull": true,
+  "anim_far_distance": 800,
+  "anim_far_every": 4,
+  "mover_far_every": 4
+}
