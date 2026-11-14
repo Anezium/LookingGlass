@@ -2439,9 +2439,8 @@ impl Renderer {
                             let mut bindings = g.bindings.clone(); bindings.index_buffer = buffer;
                             bindings.images[0] = p.texture;
                             if world_list::negative("alpha-range-wrong-bank") {
-                                if let Some(&(vertex,_)) = self.world_buffers.iter().find(|&&(vertex,_)| vertex != bindings.vertex_buffers[0]) {
-                                    bindings.vertex_buffers[0] = vertex;
-                                }
+                                // Even a one-bank map has a separately allocated sky VBO.
+                                bindings.vertex_buffers[0] = self.sky_bindings.vertex_buffers[0];
                             }
                             let ctx = unsafe { get_internal_gl() }.quad_context;
                             let start = totals.start();
