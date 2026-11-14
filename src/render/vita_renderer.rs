@@ -74,6 +74,10 @@ pub struct Config {
     pub sim_flight_memo: bool,
     /// Draw omission diagnostics only; these never belong in a release config.
     pub diag_skip_ant_corpses: bool,
+    /// Reject dead Ant triangles strictly outside the homogeneous view before GPU submission.
+    pub ant_corpse_triangle_cull: bool,
+    /// Use the same fragment arithmetic without discard for certified opaque dead Ants.
+    pub ant_corpse_opaque_shader: bool,
     pub diag_skip_live_actors: bool,
     pub diag_skip_fx: bool,
     pub diag_skip_decals: bool,
@@ -482,6 +486,8 @@ impl Default for Config {
             sim_sweep_blocked: false,
             sim_sweep_any: false,
             diag_skip_ant_corpses: false,
+            ant_corpse_triangle_cull: false,
+            ant_corpse_opaque_shader: false,
             diag_skip_live_actors: false,
             diag_skip_fx: false,
             diag_skip_decals: false,
@@ -3156,7 +3162,7 @@ mod tests {
     fn round5_keys_are_strict_and_off_in_historical_configs() {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
-            if key.starts_with("diag_skip_") || key == "sim_flight_memo" {
+            if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -3173,7 +3179,7 @@ mod tests {
     }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

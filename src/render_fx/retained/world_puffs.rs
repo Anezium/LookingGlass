@@ -188,7 +188,7 @@ impl Bank {
             } else {
                 let mut passes = FRAME.with(|f| f.borrow_mut().group_pool.pop().unwrap_or_default());
                 passes.push(p); batch.output = groups.len();
-                groups.push(super::super::Group { passes, transparent: true });
+                groups.push(super::super::Group {ant_dead: None, passes, transparent: true });
             }
         }
         list.clear();
@@ -231,10 +231,10 @@ mod tests {
             first.mesh.indices = vec![0,1,2];
         }
         vec![
-            super::super::super::Group { passes: vec![first], transparent: true },
-            super::super::super::Group { passes: vec![pass_for(&puff(101, Blend::Alpha), false, false)], transparent: true },
-            super::super::super::Group { passes: vec![pass_for(&puff(102, Blend::Add), true, false)], transparent: true },
-            super::super::super::Group { passes: vec![pass_for(&puff(103, Blend::Alpha), true, false),
+            super::super::super::Group {ant_dead: None, passes: vec![first], transparent: true },
+            super::super::super::Group {ant_dead: None, passes: vec![pass_for(&puff(101, Blend::Alpha), false, false)], transparent: true },
+            super::super::super::Group {ant_dead: None, passes: vec![pass_for(&puff(102, Blend::Add), true, false)], transparent: true },
+            super::super::super::Group {ant_dead: None, passes: vec![pass_for(&puff(103, Blend::Alpha), true, false),
                 pass_for(&puff(103, Blend::Alpha), true, true)], transparent: true },
         ]
     }
@@ -269,7 +269,7 @@ mod tests {
                 (3.4,Source::Puff(4)),(3.,Source::Actor(3)),(-0.,Source::Puff(5)),
                 (0.,Source::Puff(6))],true);
             let mut old_groups=groups(large);
-            for p in &puffs {old_groups.push(super::super::super::Group {passes:vec![pass_for(p,true,false)],transparent:true});}
+            for p in &puffs {old_groups.push(super::super::super::Group {ant_dead: None,passes:vec![pass_for(p,true,false)],transparent:true});}
             let mut old_list=list.iter().map(|&(d,s)|(d,match s{Source::Puff(id)=>Source::Actor(4+id),_=>s})).collect();
             merge_cached_mode(&mut MergeCache::default(),&mut old_groups,&mut old_list,material,false,&mut BTreeMap::new(),false);
             let mut new_groups=groups(large);let mut new_list=list;let mut bank=Bank::default();
@@ -346,8 +346,8 @@ mod tests {
                     let mut effect = pass_for(&puff(1, Blend::Alpha), true, false);
                     effect.mesh.vertices.extend(puff(2, Blend::Alpha).vertices);
                     effect.mesh.indices = vec![0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 3, 2];
-                    groups.push(super::super::super::Group { passes: vec![effect], transparent: true });
-                    groups.push(super::super::super::Group { passes: vec![pass_for(&puff(3, Blend::Alpha), true, false)], transparent: true });
+                    groups.push(super::super::super::Group {ant_dead: None, passes: vec![effect], transparent: true });
+                    groups.push(super::super::super::Group {ant_dead: None, passes: vec![pass_for(&puff(3, Blend::Alpha), true, false)], transparent: true });
                     list = vec![(2., Source::Actor(0)), (1., Source::Actor(1))];
                 }
                 bank.build(&mut groups, &puffs, &mut list, true);

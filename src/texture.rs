@@ -13,13 +13,12 @@ pub const VITA_TEXTURE_MAX_DIM: u16 = 512;
 /// separate upload helper so ordinary subimage updates remain valid.
 pub(crate) fn upload_rgba8(width: u16, height: u16, pixels: &[u8]) -> Texture2D {
     #[cfg(target_os = "vita")]
-    {
-        return macroquad::miniquad::native::vita::with_dxt5_uploads(|| {
-            upload_pixels(width, height, pixels, true)
-        });
-    }
+    let texture = macroquad::miniquad::native::vita::with_dxt5_uploads(|| upload_pixels(width,height,pixels,true));
     #[cfg(not(target_os = "vita"))]
-    upload_pixels(width, height, pixels, true)
+    let texture = upload_pixels(width,height,pixels,true);
+    #[cfg(feature="vita_renderer")]
+    crate::render_fx::corpse_opaque::note_texture(&texture,pixels);
+    texture
 }
 
 /// Upload RGBA8 pixels. On Vita, images larger than [`VITA_TEXTURE_MAX_DIM`] are
