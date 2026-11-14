@@ -1534,6 +1534,16 @@ impl Renderer {
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::world_ranges(allocations.iter().map(|&(_,base,count)|(base,count)).collect());
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        for (group,&(slot,base,count)) in allocations.iter().enumerate() {
+            if !alpha_ranges::eligible(&pending[group].recipe) {continue;}
+            let geometry=&pending[group].geometry;let (_,vertices,indices)=&packed[slot];
+            for &index in &indices[base as usize..(base+count) as usize] {
+                let position=Vec3::from_array(vertices[index as usize].position);
+                assert!(position.is_finite() && position.cmpge(geometry.min).all() && position.cmple(geometry.max).all(),
+                    "alpha source group {group} bounds do not contain actual immutable vertex {index}");
+            }
+        }
         let packing_capacity_bytes: usize = packed.iter().map(|(_,v,i)|v.capacity()*52+i.capacity()*2).sum();
         let mut source_ranges = Vec::new();
         let mut alpha_ranges = if c.world_adjacent_batch && source_ranges.try_reserve_exact(packed.len()).is_ok() {
@@ -2422,7 +2432,7 @@ impl Renderer {
         let mut planned = false;
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id, continuation, joint| {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            let _pixels = alpha_ranges::PixelProbe::new(id,&self.prepared,&self.groups);
+            let _pixels = alpha_ranges::PixelProbe::new(id,&self.prepared,&self.groups,&self.parameters);
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);

@@ -269,7 +269,6 @@ impl Gather {
                 continue;
             }
             let mut coverage = None;
-            let projection = crate::render_fx::projection().expect("world alpha projection");
             let (end, size) = span(
                 joint,
                 cursor,
@@ -277,7 +276,12 @@ impl Gather {
                 |next| {
                     let p = &prepared[next];
                     let original = self.originals[p.group].as_ref()?;
-                    let rect = submit::projected(&groups[p.group], projection)?;
+                    let g = &groups[p.group];
+                    let u = p
+                        .uniforms
+                        .as_ref()
+                        .unwrap_or(&parameters[g.parameter].uniforms);
+                    let rect = submit::projected(g, Mat4::from_cols_array(&u.mvp))?;
                     coverage = Some(match coverage {
                         Some(previous) if !world_list::negative("alpha-range-overlap") => {
                             submit::join_disjoint(previous, rect)?
@@ -414,13 +418,17 @@ impl Gather {
             ..checked_end(base as usize, count as usize, self.scratch.len()).unwrap()];
         let mut offset = 0;
         let mut coverage = None;
-        let projection = crate::render_fx::projection().expect("world alpha projection");
         let first_original = self.originals[prepared[id].group].as_ref().unwrap();
         for &member in members {
             let p = &prepared[member];
             let g = &groups[p.group];
             let original = self.originals[p.group].as_ref().unwrap();
-            let rect = submit::projected(g, projection).expect("uncertified alpha coverage");
+            let u = p
+                .uniforms
+                .as_ref()
+                .unwrap_or(&parameters[g.parameter].uniforms);
+            let rect = submit::projected(g, Mat4::from_cols_array(&u.mvp))
+                .expect("uncertified alpha coverage");
             coverage = Some(match coverage {
                 Some(previous) => submit::join_disjoint(previous, rect)
                     .expect("gathered draws share padded coverage"),
@@ -578,10 +586,18 @@ pub(super) struct PixelProbe {
     group: usize,
     image: String,
     alpha_test: u8,
+    mvp: [u32; 16],
+    finish_projection: Option<[u32; 16]>,
+    bounds: [[f32; 3]; 2],
 }
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
 impl PixelProbe {
-    pub fn new(id: usize, prepared: &[Prepared], groups: &[Group]) -> Option<Self> {
+    pub fn new(
+        id: usize,
+        prepared: &[Prepared],
+        groups: &[Group],
+        parameters: &[Parameter],
+    ) -> Option<Self> {
         static ENABLED: OnceLock<bool> = OnceLock::new();
         if !*ENABLED.get_or_init(|| std::env::var_os("LOOKING_GLASS_ALPHA_PIXELS").is_some()) {
             return None;
@@ -604,6 +620,15 @@ impl PixelProbe {
             group,
             image: recipe.stage.images.join(";"),
             alpha_test: recipe.stage.alpha_test,
+            mvp: prepared[id]
+                .uniforms
+                .as_ref()
+                .unwrap_or(&parameters[groups[group].parameter].uniforms)
+                .mvp
+                .map(f32::to_bits),
+            finish_projection: crate::render_fx::projection()
+                .map(|m| m.to_cols_array().map(f32::to_bits)),
+            bounds: [groups[group].min.to_array(), groups[group].max.to_array()],
         };
         probe.record("before");
         Some(probe)
@@ -635,7 +660,7 @@ impl PixelProbe {
             .append(true)
             .open(std::env::var_os("LOOKING_GLASS_ALPHA_PIXELS").unwrap())
             .unwrap();
-        writeln!(file,"{}",serde_json::json!({"frame":crate::sim_maps::probe::frame(),"phase":phase,"id":self.id,"group":self.group,"image":self.image,"alpha_test":self.alpha_test,"viewport":viewport,"sha256":format!("{:x}",Sha256::digest(&pixels))})).unwrap();
+        writeln!(file,"{}",serde_json::json!({"frame":crate::sim_maps::probe::frame(),"phase":phase,"id":self.id,"group":self.group,"image":self.image,"alpha_test":self.alpha_test,"mvp":self.mvp,"finish_projection":self.finish_projection,"bounds":self.bounds,"viewport":viewport,"sha256":format!("{:x}",Sha256::digest(&pixels))})).unwrap();
     }
 }
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
