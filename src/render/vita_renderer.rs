@@ -2239,7 +2239,7 @@ impl Renderer {
                 g.recipe.blend, Some(prepared.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            crate::sim_maps::probe::world_packet(prepared.group, g.base_element, prepared.indices, &texture, u.bits_ref(), low, pi as u8);
+            crate::sim_maps::probe::world_packet(prepared.group, g.base_element, prepared.indices, &texture, u.bits_ref(), low, pi);
             let class = if alpha { crate::gpu_timing::MASK_WORLD_ALPHA } else if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
             if !crate::gpu_timing::masked(class) { ctx.draw(g.base_element, prepared.indices, 1); }
             totals.lap(2, &mut start);
