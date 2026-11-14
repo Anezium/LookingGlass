@@ -50,7 +50,7 @@ lto = "thin"
 macroquad = { git = "https://github.com/Anezium/macroquad", rev = "90f0fe456c40f0b9751c30307feca066ae177db7" }
 cpal = { git = "https://github.com/Anezium/cpal", rev = "512acf2e66667059eda67b265ce9d80f68e02b3f" }
 # Texture metadata reclamation and idempotent managed deletion, based on 6f89180.
-miniquad = { git = "https://github.com/Anezium/miniquad", rev = "0731e2c0437880a4698dc0f597af4237428e0c30" }
+miniquad = { git = "https://github.com/Anezium/miniquad", rev = "b753b73c6030e6a39943342587d7efe97aef300d" }
 
 [package.metadata.vita]
 title_id = "ALICELG01"
