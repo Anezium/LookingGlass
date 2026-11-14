@@ -200,8 +200,20 @@ impl Gather {
             seen,
         })
     }
-    pub fn bind_sources(&mut self, banks: &[(BufferId, BufferId)]) {
+    pub fn bind_sources(&mut self, banks: &[(BufferId, BufferId)]) -> bool {
+        if banks.len() > MAX_GROUPS || self.banks.try_reserve_exact(banks.len()).is_err() {
+            return false;
+        }
         self.banks.extend_from_slice(banks);
+        let metadata = self.originals.capacity() * std::mem::size_of::<Option<Original>>()
+            + self.emissions.capacity() * std::mem::size_of::<Emission>()
+            + self.members.capacity() * std::mem::size_of::<usize>()
+            + self.seen.capacity() * std::mem::size_of::<bool>()
+            + self.banks.capacity() * std::mem::size_of::<(BufferId, BufferId)>();
+        eprintln!("[lg/alpha-ranges] metadata_capacity_bytes={} cpu_index_capacity_bytes={} five_gpu_store_bound_bytes={} payload_bound_with_metadata_bytes={}",
+            metadata,(self.indices.capacity()+self.scratch.capacity())*2,self.limit*2*5,
+            metadata+(self.indices.capacity()+self.scratch.capacity())*2+self.limit*2*5);
+        true
     }
     pub fn buffer(&self) -> Option<BufferId> {
         self.buffer

@@ -1535,9 +1535,13 @@ impl Renderer {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::world_ranges(allocations.iter().map(|&(_,base,count)|(base,count)).collect());
         let packing_capacity_bytes: usize = packed.iter().map(|(_,v,i)|v.capacity()*52+i.capacity()*2).sum();
-        let mut alpha_ranges = c.world_adjacent_batch.then(|| alpha_ranges::Gather::new(
-            &packed.iter().map(|(_,v,i)| (v.len(), i.as_slice())).collect::<Vec<_>>(),
-            &allocations, pending.iter().map(|p| alpha_ranges::eligible(&p.recipe)))).flatten();
+        let mut source_ranges = Vec::new();
+        let mut alpha_ranges = if c.world_adjacent_batch && source_ranges.try_reserve_exact(packed.len()).is_ok() {
+            source_ranges.extend(packed.iter().map(|(_,v,i)| (v.len(), i.as_slice())));
+            alpha_ranges::Gather::new(&source_ranges, &allocations,
+                pending.iter().map(|p| alpha_ranges::eligible(&p.recipe)))
+        } else { None };
+        drop(source_ranges);
         let buffers = packed.into_iter().map(|(_,v,i)| {
             let vertex = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Immutable, BufferSource::slice(&v));
             let index = ctx.new_buffer(BufferType::IndexBuffer, BufferUsage::Immutable, BufferSource::slice(&i));
@@ -1547,7 +1551,7 @@ impl Renderer {
         }).collect::<Vec<_>>();
         construction_geometry_peak_bytes = construction_geometry_peak_bytes.max(
             old_scene_geometry_capacity_bytes + pending_geometry_capacity_bytes + packing_capacity_bytes + uploaded_geometry_bytes);
-        if let Some(ranges) = &mut alpha_ranges { ranges.bind_sources(&buffers); }
+        if alpha_ranges.as_mut().is_some_and(|ranges| !ranges.bind_sources(&buffers)) { alpha_ranges = None; }
         let mut groups = Vec::new();
         for (((p, texture), (slot, base_element, indices)), material_key) in pending.into_iter().zip(first_textures).zip(allocations).zip(material_keys_by_group) {
             let extent = deform_extent(&p.recipe.deform);
