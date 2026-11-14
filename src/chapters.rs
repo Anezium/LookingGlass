@@ -47,7 +47,12 @@ impl Chapters {
         let hit = self.pointer_click(pointer_allowed, is_mouse_button_pressed(MouseButton::Left),
             ui::Canvas::new(screen_width(), screen_height()).pointer(Vec2::from(mouse_position())),
             get_time(), count);
-        if is_key_pressed(KeyCode::D) || input.pad_pressed("Y") || hit == Some(Hit::Difficulty) {
+        if difficulty_requested(
+            hit,
+            is_key_pressed(KeyCode::D),
+            input.pad_pressed("Y"),
+            cfg!(target_os = "vita"),
+        ) {
             *difficulty = Difficulty::ALL[(*difficulty as usize + 1) % 4];
         }
         hit
@@ -240,6 +245,18 @@ impl Chapters {
     }
 }
 
+/// The Vita backend reports the left stick as W/A/S/D, and this chooser is browsed
+/// with that stick. A synthesized D is navigation, not the desktop difficulty
+/// shortcut. Touch/click and controller Y stay explicit requests.
+fn difficulty_requested(
+    hit: Option<Hit>,
+    keyboard_d: bool,
+    pad_y: bool,
+    stick_emits_keys: bool,
+) -> bool {
+    (keyboard_d && !stick_emits_keys) || pad_y || hit == Some(Hit::Difficulty)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -258,6 +275,21 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn vita_stick_right_cannot_cycle_difficulty_but_explicit_changes_still_do() {
+        let mut difficulty = Difficulty::Normal;
+        if difficulty_requested(None, true, false, true) {
+            difficulty = Difficulty::ALL[(difficulty as usize + 1) % 4];
+        }
+        assert_eq!(difficulty, Difficulty::Normal, "left stick right is navigation");
+        if difficulty_requested(None, true, false, false) {
+            difficulty = Difficulty::ALL[(difficulty as usize + 1) % 4];
+        }
+        assert_eq!(difficulty, Difficulty::Hard, "desktop D keeps the shortcut");
+        assert!(difficulty_requested(None, false, true, true), "pad Y");
+        assert!(difficulty_requested(Some(Hit::Difficulty), false, false, true), "touch/click");
+    }
 
     #[test]
     fn clicks_do_not_recentre_rows_and_double_click_requires_same_visit() {
