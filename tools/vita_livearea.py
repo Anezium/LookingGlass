@@ -110,7 +110,8 @@ def check(vpk=None):
             if len(im.getcolors() or []) > 128 or len(data) > 420 * 1024:
                 raise ValueError(f'Palette or size exceeds LiveArea bound: {relative}')
     xml = (ASSETS / TEMPLATE).read_bytes()
-    if len(xml) > 32 * 1024 or b'\n' in xml.replace(b'\r\n', b''):
+    other = xml.replace(b'\r\n', b'')
+    if len(xml) > 32 * 1024 or b'\n' in other or b'\r' in other:
         raise ValueError('Template must be UTF-8 CRLF and below32KiB')
     tree = ET.fromstring(xml.decode('utf-8'))
     if tree.tag != 'livearea' or tree.attrib != {'style': 'a1', 'format-ver': '01.00', 'content-rev': '1'}:
