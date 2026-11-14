@@ -105,6 +105,9 @@ pub struct Config {
     /// Experimental exact submission levers; independently default off.
     pub world_material_sort: bool,
     pub world_static_merge: bool,
+    /// Coalesce certified adjacent opaque ranges and reuse uninterrupted world-alpha state.
+    /// Never changes the order of world groups or crosses an actor/FX callback. Default off.
+    pub world_adjacent_batch: bool,
     pub world_uniform_persist: bool,
     pub world_binding_cache: bool,
     pub world_gl_state_cache: bool,
@@ -486,6 +489,7 @@ impl Default for Config {
             preview_flip: "auto".into(),
             world_material_sort: false,
             world_static_merge: false,
+            world_adjacent_batch: false,
             world_uniform_persist: false,
             world_binding_cache: false,
             world_gl_state_cache: false,
@@ -684,6 +688,8 @@ impl Config {
         ensure!(!self.world_shared_buffers || !self.world_static_merge,"world_shared_buffers excludes world_static_merge: its packing replaces the merge's keys and loses merges");
         ensure!(gxm::Mode::parse(&self.world_gxm).is_some(),"world_gxm must be off, shadow, live, proof, proof_control or proof_sabotage");
         ensure!(self.world_gxm=="off" || self.world_list_submit,"world_gxm requires world_list_submit");
+        ensure!(!self.world_adjacent_batch || (self.world_list_submit && self.world_shared_buffers),
+            "world_adjacent_batch requires world_list_submit and world_shared_buffers");
         ensure!(self.world_gxm=="off" || self.gpu_mask.is_empty(),"world_gxm excludes gpu_mask: a masked draw captures nothing");
         ensure!(!self.skin_stream || (self.skin_overlap && self.actor_single_prepare && !self.actor_layer_reuse),"skin_stream requires skin_overlap and actor_single_prepare, and excludes actor_layer_reuse");
         ensure!(self.spike_log_ms.is_finite() && (0. ..=10000.).contains(&self.spike_log_ms),"spike_log_ms must be 0 (off) to 10000");
@@ -2349,8 +2355,17 @@ impl Renderer {
         let mut last_written = [None::<usize>; 2];
         #[cfg(target_os = "vita")]
         let mut real = gxm::vita::Real::new();
-        for item in &list.items {
+        let batch = config().world_adjacent_batch;
+        let projection = crate::render_fx::projection().expect("world camera projection");
+        let mut position = 0;
+        while position < list.items.len() {
+            let first = position;
+            let item = &list.items[first];
             let draw = &list.draws[item.group as usize];
+            let (end, indices) = if batch { list.adjacent_run(first, groups, projection) }
+                else { (first + 1, draw.indices) };
+            position = end;
+            if end > first + 1 { count("vita_world_adjacent_draws_saved", (end - first - 1) as u64); }
             let low = draw.low;
             let binding = (draw.vertex, draw.index, item.texture, draw.atlas);
             let mut plan = planner.observe(draw.pipeline, low, binding, item.uniforms);
@@ -2374,7 +2389,7 @@ impl Renderer {
             let class = if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
             #[cfg(target_os = "vita")]
             let direct = way == gxm::Way::Direct && !plan.pipeline && !draw.animated && !crate::gpu_timing::masked(class)
-                && state.direct_draw(&mut real, item.group as usize, draw.indices as u32, item.uniforms, low, bits, pass, drawn - 1);
+                && state.direct_draw(&mut real, item.group as usize, indices as u32, item.uniforms, low, bits, pass, drawn - 1);
             #[cfg(not(target_os = "vita"))]
             let direct = false;
             if !direct {
@@ -2422,8 +2437,14 @@ impl Renderer {
             #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
             let base_element = draw.base_element;
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            crate::sim_maps::probe::world_packet(item.group as usize, base_element, draw.indices, &item.texture,
-                parameters[draw.parameter as usize].uniforms.bits_ref(), low, draw.pipeline_class);
+            for member in &list.items[first..end] {
+                let part = &list.draws[member.group as usize];
+                // Canonical logical packets keep every original range. The run certificate checked
+                // that the one actual draw covers exactly their ordered concatenation.
+                crate::sim_maps::probe::world_packet(member.group as usize,
+                    part.base_element + (base_element - draw.base_element), part.indices, &member.texture,
+                    parameters[part.parameter as usize].uniforms.bits_ref(), part.low, part.pipeline_class);
+            }
             if !direct {
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 let dropped = world_list::negative("world-list-drop-draw") && drawn % 13 == 6;
@@ -2432,12 +2453,23 @@ impl Renderer {
                 #[cfg(target_os = "vita")]
                 if way != gxm::Way::Vitagl { gxm::vita::arm(); }
                 let ran = !dropped && !crate::gpu_timing::masked(class);
-                if ran { ctx.draw(base_element, draw.indices, 1); }
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                let (actual_base, actual_indices) = if end > first + 1 {
+                    (base_element + i32::from(world_list::negative("world-adjacent-wrong-base")) * 3,
+                        indices - i32::from(world_list::negative("world-adjacent-short-range")) * 3)
+                } else { (base_element, indices) };
+                #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+                let (actual_base, actual_indices) = (base_element, indices);
+                if ran {
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    list.verify_emission(first, end, actual_base, actual_indices, parameters);
+                    ctx.draw(actual_base, actual_indices, 1);
+                }
                 #[cfg(target_os = "vita")]
                 if way != gxm::Way::Vitagl {
                     let capture = gxm::vita::take();
                     // A masked draw called nothing, so there is nothing to learn from it.
-                    if ran { state.after_vitagl(&capture, item.group as usize, draw.animated, draw.pipeline_class, low, draw.indices as u32, item.uniforms, bits, way); }
+                    if ran { state.after_vitagl(&capture, item.group as usize, draw.animated, draw.pipeline_class, low, indices as u32, item.uniforms, bits, way); }
                 }
             }
             totals.lap(2, &mut start);
@@ -2451,7 +2483,7 @@ impl Renderer {
                 previous_texture = Some(item.texture);
             }
             c.batches += 1;
-            c.triangles += draw.indices as usize / 3;
+            c.triangles += indices as usize / 3;
             #[cfg(target_os = "vita")]
             { c.static_batches += usize::from(draw.static_group); }
         }
@@ -2518,18 +2550,21 @@ impl Renderer {
         if !self.alpha_fill.partner.is_empty() { count("vita_world_alpha_merged_pairs", self.alpha_fill.pairs.len() as u64); }
         if self.alpha_fill.active() { self.alpha_fill.interrupt(); }
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::profile_only());
-        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id| {
+        let mut adjacent_state = state_cache::Cache::new();
+        let adjacent = config().world_adjacent_batch;
+        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id, continuation| {
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
-            crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
-                crate::light_profile::RenderMetrics { draws: 1, pipelines: 1, depth_states: 1,
-                    bindings: 1, texture_bind_slots: 2, uniform_uploads: 1,
-                    ..Default::default() });
+            if !adjacent || !continuation { adjacent_state = state_cache::Cache::new(); }
             let mut totals = totals.borrow_mut();
             let merged = if drop_filter { None } else {
                 self.alpha_fill.pairs.iter().find(|&&(f, _)| f == id).map(|&(_, a)| a) };
             if let Some(a) = merged {
+                adjacent_state = state_cache::Cache::new();
+                crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
+                    crate::light_profile::RenderMetrics { draws: 1, pipelines: 1, depth_states: 1,
+                        bindings: 1, texture_bind_slots: 2, uniform_uploads: 1, ..Default::default() });
                 // The filter stage and the alpha stage in one draw, over the filter's range.
                 let (pf, pa) = (&self.prepared[id], &self.prepared[a]);
                 let (gf, ga) = (&self.groups[pf.group], &self.groups[pa.group]);
@@ -2577,13 +2612,28 @@ impl Renderer {
                 Some((_, pipelines, fields)) => (&pipelines[g.recipe.blend * 3 + g.recipe.cull], fields),
                 None => (&self.pipelines[g.recipe.blend * 3 + g.recipe.cull], &mut self.field_uniforms[0]),
             };
-            ctx.apply_pipeline(pipeline);
-            unsafe{macroquad::miniquad::gl::glDepthMask(0);}
-            scale::log_depth(false);
-            ctx.apply_bindings(&g.bindings);
+            let mut plan = if adjacent {
+                adjacent_state.observe(*pipeline, lite_draw, false,
+                    (g.bindings.vertex_buffers[0], g.bindings.index_buffer, p.texture, g.bindings.images[1]), u.bits())
+            } else { state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true } };
+            // Conservatively treat every pipeline transition as a program transition, including
+            // future blend-specific variants. A matching pipeline always names the same program.
+            plan.uniforms |= plan.pipeline;
+            if plan.pipeline { ctx.apply_pipeline(pipeline); }
+            if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(0);} }
+            if plan.pipeline || plan.depth { scale::log_depth(false); }
+            if plan.bindings { ctx.apply_bindings(&g.bindings); }
+            if adjacent { count("vita_world_alpha_adjacent_state_skips", u64::from(!plan.pipeline) + u64::from(!plan.depth)
+                + u64::from(!plan.bindings) + u64::from(!plan.uniforms)); }
+            crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
+                crate::light_profile::RenderMetrics { draws: 1, pipelines: u64::from(plan.pipeline),
+                    depth_states: u64::from(plan.depth), bindings: u64::from(plan.bindings),
+                    texture_bind_slots: 2 * u64::from(plan.bindings), uniform_uploads: u64::from(plan.uniforms),
+                    ..Default::default() });
             totals.add(0, start);
             let start = totals.start();
-            let traffic = fields.apply(ctx, u.values(), config().uniform_field_cache);
+            let traffic = if plan.uniforms { fields.apply(ctx, u.values(), config().uniform_field_cache) }
+                else { super::uniform_fields::Traffic::default() };
             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
                 crate::light_profile::RenderMetrics { uniform_bytes: traffic.bytes,
                     uniform_gl_calls: traffic.calls, ..Default::default() });
@@ -2970,6 +3020,14 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Historical console configs must stay usable by their original SELF. Their omitted
+    // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
+    fn historical_keys(v: &serde_json::Value) -> Vec<String> {
+        assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
+        let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch").cloned().collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
     #[test]
     fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {
         let fields = ["lights_static_cache", "sim_npc_sight_candidates",
@@ -3349,6 +3407,15 @@ mod tests {
         assert!(serde_json::from_value::<Config>(serde_json::json!({"world_gxm": true})).is_err());
     }
     #[test]
+    fn adjacent_batch_requires_the_shipped_list_and_shared_geometry() {
+        assert!(!Config::default().world_adjacent_batch);
+        for list in [false, true] { for buffers in [false, true] {
+            let c = Config { world_adjacent_batch: true, world_list_submit: list,
+                world_shared_buffers: buffers, world_gxm: "live".into(), ..Config::default() };
+            assert_eq!(c.validate().is_ok(), list && buffers);
+        } }
+    }
+    #[test]
     fn world_list_submit_rejects_each_setting_it_cannot_honour() {
         let on = serde_json::json!({"world_list_submit": true});
         for (key, value) in [("world_state_cache", false), ("world_view_reuse", false), ("world_parameter_reuse", false),
@@ -3388,7 +3455,7 @@ mod tests {
         a3.validate().unwrap();
         let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         let all = serde_json::to_value(Config::default()).unwrap();
-        let keys = |v: &serde_json::Value| { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+        let keys = historical_keys;
         assert_eq!(keys(&written), keys(&all), "the A3 config writes every runtime key");
         assert!(!rc1.loading_screen && !rc1.collision_geometry_share, "RC1 keeps both off");
         assert!(a3.loading_screen && a3.collision_geometry_share);
@@ -3464,18 +3531,18 @@ mod tests {
             "fx_attached_persist", "mover_advance_reuse"];
         const BUBBLE: [&str; 2] = ["fx_attached_sphere", "fx_bubble_true_size"];
         let parse = |bytes: &[u8]| {
-            // Every runtime key is written, so no value comes from a code default.
+            // Earlier runtime keys are written; the later adjacent opt-in remains off.
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            // The replay keys, the A5 draw and fill keys, water_normals, the fog keys, exact_blends, detail_layers and the sky keys came after RC1; its play files keep them
+            let mut written = historical_keys(&raw);
+            // All later optional families remain at off defaults in the frozen RC1 files.
             // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
                 "water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"];
             const A5_FIGHT: [&str; 4] = ["spike_log_ms", "audio_combat_preload", "sim_sweep_blocked", "actor_near_cull"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
-                    && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str())).cloned().collect();
+                    && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch").cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3531,11 +3598,11 @@ mod tests {
     fn rc2_play_configs_are_rc1_plus_the_rc2_keys() {
         // Default file: PL-rc2.json. Each variant differs from it only in the keys listed below.
         let parse = |bytes: &[u8]| {
-            // Every runtime key is written, so no value comes from a code default.
+            // Earlier runtime keys are written; the later adjacent opt-in remains off.
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC2 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3587,8 +3654,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC3 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3677,8 +3744,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an A5 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3744,8 +3811,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an A5 fight config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3815,8 +3882,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an A5 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3862,7 +3929,7 @@ mod tests {
         assert!(rejected.is_none());
         water.validate().unwrap();
         let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        let keys = |v: &serde_json::Value| { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+        let keys = historical_keys;
         assert_eq!(keys(&written), keys(&serde_json::to_value(Config::default()).unwrap()), "the A3 water config writes every runtime key");
         let (rc2, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc2.json")).unwrap();
         assert!(rejected.is_none());

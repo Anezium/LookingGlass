@@ -1,6 +1,8 @@
 //! Dense opaque submission behind `world_list_submit`. Default off.
 //!
-//! Same GL calls, in the same order, as the state-cached loop in `Renderer::draw`. What goes away
+//! With `world_adjacent_batch` off: same GL calls, in the same order, as the state-cached loop in
+//! `Renderer::draw`. The opt-in coalesces only certified already-adjacent disjoint ranges.
+//! What goes away
 //! is the work around them: a macroquad context lookup per draw, the 143-word uniform copy and
 //! compare per draw, a 596-byte `Prepared`, a texture id lookup through the context, a per-draw
 //! model matrix compare, and a re-sort of an unchanged list. Records are built once at load, so
@@ -88,6 +90,70 @@ impl WorldList {
         self.classes.begin_pass();
     }
     pub fn forget_visibility(&mut self) { for v in &mut self.visible { v.generation = 0; } }
+
+    /// A run never moves an item. Its existing shared IBO ranges must already follow one another
+    /// in the submitted order. Disjoint padded screen bounds also preserve draw-boundary effects
+    /// (equal depth and implicit derivatives); the union includes every group already joined.
+    pub fn adjacent_run(&self, start: usize, groups: &[Group], projection: Mat4) -> (usize, i32) {
+        let first = self.items[start];
+        let draw = self.draws[first.group as usize];
+        let group = &groups[first.group as usize];
+        let mut end = start + 1;
+        let mut indices = draw.indices;
+        if !submit::static_opaque(&group.recipe) { return (end, indices); }
+        let mut coverage = None;
+        for next in &self.items[end..] {
+            let other = self.draws[next.group as usize];
+            let other_group = &groups[next.group as usize];
+            if !adjacent_state(draw, first, indices, other, *next)
+                || group.recipe.rank != other_group.recipe.rank
+                || !submit::static_opaque(&other_group.recipe) { break; }
+            // Most neighbours differ in state or IBO range. Do not project eight corners for
+            // those; certify coverage only after the cheap range/state test succeeds.
+            let Some(joined) = coverage.or_else(|| submit::projected(group, projection))
+                .zip(submit::projected(other_group, projection))
+                .and_then(|(a,b)| submit::join_disjoint(a,b)) else { break };
+            coverage = Some(joined);
+            indices += other.indices;
+            end += 1;
+        }
+        (end, indices)
+    }
+    /// Check the physical command, not its canonical packet hash. This runs immediately before
+    /// the host GL call, after negative controls can corrupt its base/count. Occlusion cannot
+    /// hide a wrong range. Native builds contain neither this observer nor the mutations.
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub fn verify_emission(&self, start: usize, end: usize, base: i32, count: i32, parameters: &[Parameter]) {
+        assert!(start < end && end <= self.items.len(), "invalid adjacent member interval");
+        let item = self.items[start];
+        let first = self.draws[item.group as usize];
+        let mut cursor = first.base_element;
+        for member in &self.items[start..end] {
+            let part = self.draws[member.group as usize];
+            assert!(first.vertex == part.vertex && first.index == part.index && first.atlas == part.atlas
+                && first.pipeline == part.pipeline && first.low == part.low
+                && first.pipeline_class == part.pipeline_class && item.texture == member.texture,
+                "adjacent command changed state at group {}", member.group);
+            assert_eq!(parameters[first.parameter as usize].bits, parameters[part.parameter as usize].bits,
+                "adjacent command changed uniform bits at group {}", member.group);
+            assert_eq!(part.base_element, cursor, "adjacent command changed primitive order at group {}", member.group);
+            assert!(part.indices > 0 && part.indices % 3 == 0);
+            cursor = cursor.checked_add(part.indices).expect("adjacent command range overflow");
+        }
+        assert_eq!(base, first.base_element, "physical adjacent command base differs from original ranges");
+        assert_eq!(count, cursor - first.base_element, "physical adjacent command count differs from original ranges");
+    }
+}
+
+fn adjacent_state(first: ListDraw, item: Item, indices: i32, next: ListDraw, other: Item) -> bool {
+    first.vertex == next.vertex && first.index == next.index && first.atlas == next.atlas
+        && first.pipeline == next.pipeline && first.low == next.low
+        && first.pipeline_class == next.pipeline_class && item.texture == other.texture
+        && item.uniforms == other.uniforms && adjacent_ranges(first.base_element, indices, next.base_element, next.indices)
+}
+fn adjacent_ranges(base: i32, count: i32, next_base: i32, next_count: i32) -> bool {
+    base >= 0 && count > 0 && next_count > 0 && count % 3 == 0 && next_count % 3 == 0
+        && base.checked_add(count) == Some(next_base) && count.checked_add(next_count).is_some()
 }
 
 /// Uniform payloads by value inside one pass, so a draw can compare one integer instead of 143 words.
@@ -221,6 +287,15 @@ pub(super) fn negative(name: &str) -> bool { crate::sim_maps::probe::negative_co
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn adjacent_ranges_keep_primitive_order_and_reject_gaps_reverse_and_overflow() {
+        assert!(adjacent_ranges(12, 6, 18, 9));
+        for args in [(12,6,21,9), (12,6,6,6), (12,6,15,9), (-3,6,3,6),
+            (12,0,12,6), (12,6,18,0), (12,5,17,6), (12,6,18,5),
+            (i32::MAX-2,6,3,6), (0,2147483646,2147483646,6)] {
+            assert!(!adjacent_ranges(args.0,args.1,args.2,args.3), "{args:?}");
+        }
+    }
     struct Rng(u32);
     impl Rng { fn next(&mut self, n: u32) -> u32 { self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223); (self.0 >> 8) % n } }
 
