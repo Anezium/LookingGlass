@@ -7,3 +7,5 @@
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.yml text eol=lf
+# Preserve the LiveArea format's CRLF bytes in checkouts and source archives.
+vita/sce_sys/livearea/contents/template.xml -text
