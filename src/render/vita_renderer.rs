@@ -8,6 +8,7 @@ mod scale;
 mod depth_sentinel;
 mod pvs_cache;
 mod state_cache;
+mod alpha_ranges;
 mod submit;
 mod world_list;
 mod gxm;
@@ -1124,6 +1125,7 @@ pub struct Renderer {
     _game_thread: crate::game_thread::GameThread,
     groups: Vec<Group>,
     world_buffers: Vec<(BufferId,BufferId)>,
+    alpha_ranges: Option<alpha_ranges::Gather>,
     parameters: Vec<Parameter>,
     parameter_key: Option<[u32; 51]>,
     parameter_generation: u64,
@@ -1533,6 +1535,9 @@ impl Renderer {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::world_ranges(allocations.iter().map(|&(_,base,count)|(base,count)).collect());
         let packing_capacity_bytes: usize = packed.iter().map(|(_,v,i)|v.capacity()*52+i.capacity()*2).sum();
+        let mut alpha_ranges = c.world_adjacent_batch.then(|| alpha_ranges::Gather::new(
+            &packed.iter().map(|(_,v,i)| (v.len(), i.as_slice())).collect::<Vec<_>>(),
+            &allocations, pending.iter().map(|p| alpha_ranges::eligible(&p.recipe)))).flatten();
         let buffers = packed.into_iter().map(|(_,v,i)| {
             let vertex = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Immutable, BufferSource::slice(&v));
             let index = ctx.new_buffer(BufferType::IndexBuffer, BufferUsage::Immutable, BufferSource::slice(&i));
@@ -1542,6 +1547,7 @@ impl Renderer {
         }).collect::<Vec<_>>();
         construction_geometry_peak_bytes = construction_geometry_peak_bytes.max(
             old_scene_geometry_capacity_bytes + pending_geometry_capacity_bytes + packing_capacity_bytes + uploaded_geometry_bytes);
+        if let Some(ranges) = &mut alpha_ranges { ranges.bind_sources(&buffers); }
         let mut groups = Vec::new();
         for (((p, texture), (slot, base_element, indices)), material_key) in pending.into_iter().zip(first_textures).zip(allocations).zip(material_keys_by_group) {
             let extent = deform_extent(&p.recipe.deform);
@@ -1696,6 +1702,7 @@ impl Renderer {
             visibility: vec![(0, None); groups.len()],
             models: vec![None; groups.len()],
             world_buffers: buffers,
+            alpha_ranges,
             schedule: submit::Schedule::default(),
             texture_sort: draw_cuts::TextureSort::default(),
             alpha_fill,
@@ -2405,12 +2412,90 @@ impl Renderer {
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::profile_only());
         let mut adjacent_state = state_cache::Cache::new();
         let adjacent = config().world_adjacent_batch;
-        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id, continuation| {
+        // Other alpha programs keep their existing path and form an explicit fallback.
+        let mut ranges = self.alpha_ranges.take();
+        let gather = adjacent && !self.alpha_fill.active();
+        let mut planned = false;
+        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id, continuation, joint| {
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
             if !adjacent || !continuation { adjacent_state = state_cache::Cache::new(); }
             let mut totals = totals.borrow_mut();
+            if gather {
+                if let Some(ranges) = ranges.as_mut() {
+                    if !planned {
+                        ranges.prepare(joint, &self.prepared, &self.groups, &self.parameters, &self.pipelines);
+                        planned = true;
+                    }
+                    match ranges.emission(id) {
+                        alpha_ranges::Emission::Skip => return,
+                        alpha_ranges::Emission::Joined { base, count: indices, first, end } => {
+                            let members = ranges.members(first, end);
+                            let p = &self.prepared[id]; let g = &self.groups[p.group];
+                            let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
+                            let pipeline = self.pipelines[g.recipe.blend * 3 + g.recipe.cull];
+                            let buffer = ranges.buffer().expect("prepared gathered index buffer");
+                            let mut bindings = g.bindings.clone(); bindings.index_buffer = buffer;
+                            bindings.images[0] = p.texture;
+                            if world_list::negative("alpha-range-wrong-bank") {
+                                if let Some(&(vertex,_)) = self.world_buffers.iter().find(|&&(vertex,_)| vertex != bindings.vertex_buffers[0]) {
+                                    bindings.vertex_buffers[0] = vertex;
+                                }
+                            }
+                            let ctx = unsafe { get_internal_gl() }.quad_context;
+                            let start = totals.start();
+                            ctx.apply_pipeline(&pipeline);
+                            unsafe { macroquad::miniquad::gl::glDepthMask(0); }
+                            scale::log_depth(false); ctx.apply_bindings(&bindings);
+                            totals.add(0, start);
+                            let start = totals.start();
+                            let traffic = self.field_uniforms[0].apply(ctx, u.values(), config().uniform_field_cache);
+                            totals.add(1, start);
+                            let start = totals.start();
+                            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                            for &member in members {
+                                let p = &self.prepared[member]; let g = &self.groups[p.group];
+                                let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
+                                crate::sim_maps::probe::world_order(p.group, true);
+                                crate::sim_maps::probe::world_packet(p.group, g.base_element, g.indices, &p.texture,
+                                    u.bits_ref(), false, (g.recipe.blend * 3 + g.recipe.cull) as u8);
+                            }
+                            let mut actual_base = base; let mut actual_count = indices;
+                            let mut actual_vertex = bindings.vertex_buffers[0];
+                            if world_list::negative("alpha-range-wrong-base") { actual_base += 3; }
+                            if world_list::negative("alpha-range-short-count") { actual_count -= 3; }
+                            if world_list::negative("alpha-range-wrong-bank") {
+                                if let Some(&(vertex,_)) = self.world_buffers.iter().find(|&&(vertex,_)| vertex != actual_vertex) { actual_vertex = vertex; }
+                            }
+                            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                            ranges.verify(id, actual_vertex, buffer, actual_base, actual_count,
+                                &self.prepared, &self.groups, &self.parameters, &self.pipelines, joint);
+                            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) {
+                                ctx.draw(actual_base, actual_count, 1);
+                            }
+                            totals.add(2, start);
+                            count("vita_world_gpu_draws", 1);
+                            count("vita_world_alpha_ranges_saved", (members.len()-1) as u64);
+                            count("vita_world_alpha_range_commands", 1);
+                            count("vita_world_alpha_triangles", indices as u64 / 3);
+                            count("vita_world_alpha_state_applications", 1);
+                            crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
+                                crate::light_profile::RenderMetrics { draws:1, pipelines:1, depth_states:1,
+                                    bindings:1, texture_bind_slots:2, uniform_uploads:1,
+                                    uniform_bytes:traffic.bytes, uniform_gl_calls:traffic.calls, ..Default::default() });
+                            #[cfg(target_os="vita")]
+                            { crate::frame_profile::record_batch(true, false);
+                              crate::frame_profile::record_world_submission();
+                              crate::frame_profile::record_geometry(indices as usize/3,0,true); }
+                            // The gathered IBO differs from the immutable bank used by singles.
+                            adjacent_state = state_cache::Cache::new();
+                            return;
+                        }
+                        alpha_ranges::Emission::Single => (),
+                    }
+                }
+            }
             let merged = if drop_filter { None } else {
                 self.alpha_fill.pairs.iter().find(|&&(f, _)| f == id).map(|&(_, a)| a) };
             if let Some(a) = merged {
@@ -2526,6 +2611,7 @@ impl Renderer {
         }, Some(&totals));
         self.prepared.clear();
         self.fx_gpu = Some(gpu);
+        self.alpha_ranges = ranges;
         result
     }
 }
@@ -2533,9 +2619,14 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         #[cfg(target_os = "vita")]
         if self.gxm.direct_used() { gxm::vita::wait_for_gpu(); }
+        // Complete outstanding draws before destroying the optional gathered bank. Stream
+        // orphan stores themselves are retired by VitaGL's existing four-frame purge queue.
+        #[cfg(target_os = "vita")]
+        if self.alpha_ranges.as_ref().is_some_and(|r| r.buffer().is_some()) { gxm::vita::wait_for_gpu(); }
         gxm::withdraw(&mut self.gxm);
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
+        if let Some(ranges) = &mut self.alpha_ranges { ranges.delete(ctx); }
         for &(vertex,index) in &self.world_buffers {
             ctx.delete_buffer(vertex); ctx.delete_buffer(index);
         }
