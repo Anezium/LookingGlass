@@ -169,5 +169,17 @@
   "spike_log_ms": 0.0,
   "audio_combat_preload": false,
   "sim_sweep_blocked": true,
-  "actor_near_cull": 0.0
+  "actor_near_cull": 0.0,
+  "low_fog": false,
+  "fog_sky": false,
+  "exact_blends": false,
+  "detail_layers": false,
+  "sky_cube": false,
+  "sky_cube_size": 256,
+  "sky_cube_refresh": 0,
+  "sky_cube_retain": false,
+  "sky_cube_finish": false,
+  "sky_cube_capture_only": false,
+  "sky_cube_clear_only": false,
+  "sky_depth": false
 }

@@ -174,7 +174,7 @@ pub fn world_geometry_hash(group: usize) -> String { WORLD_GEOMETRY.with(|g| g.b
 /// One world draw as the GPU sees it, into one hash per frame: group, resolved geometry and whether
 /// the range sent is the checked one, texture, uniform words, program and pipeline class. The buffer
 /// handles and offsets do not enter it.
-pub fn world_packet(group: usize, base: i32, count: i32, texture: &macroquad::miniquad::TextureId, uniforms: &[u32; 143], low: bool, pipeline_class: u8) {
+pub fn world_packet(group: usize, base: i32, count: i32, texture: &macroquad::miniquad::TextureId, uniforms: &[u32; 143], low: bool, pipeline_class: usize) {
     if !world_packets_enabled() { return; }
     WORLD_PACKETS.with(|s| {
         let mut s = s.borrow_mut();
@@ -187,7 +187,8 @@ pub fn world_packet(group: usize, base: i32, count: i32, texture: &macroquad::mi
         WORLD_GEOMETRY.with(|g| s.1.update(g.borrow()[group].as_bytes()));
         s.1.update(format!("{texture:?}").as_bytes());
         for word in uniforms { s.1.update(word.to_le_bytes()); }
-        s.1.update([u8::from(low), pipeline_class]);
+        let (tag, len) = super::world_pipeline_tag(low, pipeline_class);
+        s.1.update(&tag[..len]);
     });
 }
 pub fn gl_trace_enabled() -> bool {

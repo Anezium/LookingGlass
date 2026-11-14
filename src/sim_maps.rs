@@ -1,5 +1,19 @@
 //! Exact simulation optimizations, independently selectable at startup.
 //! The host probe is excluded from production packages.
+
+/// Backward-compatible packet tag for legacy classes, with a separate wide namespace.
+#[cfg(any(test, all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+pub(crate) fn world_pipeline_tag(low: bool, class: usize) -> ([u8; 9], usize) {
+    let mut bytes = [0; 9];
+    if let Ok(class) = u8::try_from(class) {
+        bytes[0] = u8::from(low); bytes[1] = class;
+        (bytes, 2)
+    } else {
+        bytes[0] = 0x80 | u8::from(low);
+        bytes[1..].copy_from_slice(&(class as u64).to_le_bytes());
+        (bytes, 9)
+    }
+}
 macro_rules! switch {
     ($name:ident, $field:ident, $index:expr) => {
         pub fn $name() -> bool {

@@ -2646,7 +2646,7 @@ impl Renderer {
                 g.recipe.blend, Some(p.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.first().map(String::as_str));
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            crate::sim_maps::probe::world_packet(p.group, g.base_element, g.indices, &p.texture, u.bits_ref(), false, (g.recipe.blend * 3 + g.recipe.cull) as u8);
+            crate::sim_maps::probe::world_packet(p.group, g.base_element, g.indices, &p.texture, u.bits_ref(), false, world_list::pipeline_class(g.recipe.blend, g.recipe.cull));
             if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) { ctx.draw(g.base_element, g.indices, 1); }
             totals.add(2, start);
             count("vita_world_gpu_draws", 1);
@@ -3465,6 +3465,47 @@ mod tests {
             a3.as_object_mut().unwrap().remove(key);
         }
         assert_eq!(a3, rc1, "the A3 file differs from PL-rc1 only in the two load keys");
+    }
+    #[test]
+    fn rc4_baseline_and_isolated_variants_write_every_key_without_optional_activation() {
+        let parse = |bytes: &[u8]| {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            assert_eq!(raw.as_object().unwrap().keys().collect::<Vec<_>>(), defaults.as_object().unwrap().keys().collect::<Vec<_>>());
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none()); c.validate().unwrap();
+            assert_eq!(raw, serde_json::to_value(c).unwrap());
+            raw
+        };
+        let baseline = parse(include_bytes!("../../configs/PL-rc4.json"));
+        let (rc3, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc3.json")).unwrap();
+        assert!(rejected.is_none());
+        assert_eq!(baseline, serde_json::to_value(rc3).unwrap(), "RC4 baseline preserves played RC3 plus later off defaults");
+        for key in ["low_fog", "fog_sky", "exact_blends", "detail_layers", "water_normals", "world_alpha_lite", "fx_lite",
+                    "authored_sky", "sky_cube", "sky_depth", "sky_cube_finish", "sky_cube_retain", "sky_cube_capture_only", "sky_cube_clear_only",
+                    "audio_combat_preload", "sim_sweep_blocked", "world_adjacent_batch"] { assert_eq!(baseline[key], false, "{key}"); }
+        for key in ["actor_near_cull", "spike_log_ms"] { assert_eq!(baseline[key], 0.); }
+        assert_eq!(baseline["sky_cube_refresh"], 0);
+        assert_eq!(baseline["water_stage_merge"], "off");
+        assert_eq!(baseline["scaled_target"], "direct");
+        for key in ["sky", "packet_frustum_cull", "prop_frustum_cull", "fx_add_zero_alpha_cut", "world_list_submit", "world_shared_buffers"] {
+            assert_eq!(baseline[key], true, "proven RC3 key {key} remains enabled");
+        }
+        let variants: &[(&[u8], &[(&str, serde_json::Value)])] = &[
+            (include_bytes!("../../configs/PL-rc4-fog.json"), &[("low_fog", true.into()), ("fog_sky", true.into())]),
+            (include_bytes!("../../configs/PL-rc4-exact-fog.json"), &[("low_fog", true.into()), ("fog_sky", true.into()), ("exact_blends", true.into())]),
+            (include_bytes!("../../configs/PL-rc4-water.json"), &[("water_normals", true.into())]),
+            (include_bytes!("../../configs/PL-rc4-fill.json"), &[("water_stage_merge", "merge".into()), ("world_alpha_lite", true.into()), ("fx_lite", true.into())]),
+            (include_bytes!("../../configs/PL-rc4-sky-finish-fog.json"), &[("low_fog", true.into()), ("fog_sky", true.into()), ("sky_cube", true.into()), ("sky_cube_finish", true.into())]),
+            (include_bytes!("../../configs/PL-rc4-river.json"), &[("world_adjacent_batch", true.into())]),
+            (include_bytes!("../../configs/PL-rc4-record.json"), &[("replay_record", "a2-#.lgtape".into()), ("replay_start", "chapter:potears2".into())]),
+            (include_bytes!("../../configs/PL-rc4-replay.json"), &[("replay_play", "a2-04.lgtape".into())]),
+        ];
+        for &(bytes, changes) in variants {
+            let mut variant = parse(bytes);
+            for (key, expected) in changes { assert_eq!(&variant[*key], expected, "{key}"); variant[*key] = baseline[*key].clone(); }
+            assert_eq!(variant, baseline, "an isolated RC4 variant changes only its declared keys");
+        }
     }
     #[test]
     fn packaged_r3_config_contains_exactly_all_runtime_defaults() {

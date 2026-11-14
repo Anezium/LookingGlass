@@ -10,6 +10,9 @@
 //! which fall back to the full work when their inputs moved.
 use super::*;
 
+/// Preserve the full dynamic blend class through list submission and GXM lookup.
+pub(super) fn pipeline_class(blend: usize, cull: usize) -> usize { blend * 3 + cull }
+
 /// What one group's draw needs, resolved at load.
 #[derive(Clone, Copy)]
 pub(super) struct ListDraw {
@@ -22,7 +25,7 @@ pub(super) struct ListDraw {
     pub base_element: i32,
     pub indices: i32,
     pub parameter: u32,
-    pub pipeline_class: u8,
+    pub pipeline_class: usize,
     pub low: bool,
     pub animated: bool,
     pub static_group: bool,
@@ -30,7 +33,7 @@ pub(super) struct ListDraw {
 impl ListDraw {
     pub fn new(g: &Group, pipelines: &[Pipeline], low_pipelines: &[Pipeline]) -> Self {
         let low = g.recipe.stage.alpha_test == 0 && !low_pipelines.is_empty();
-        let pipeline_class = g.recipe.blend * 3 + g.recipe.cull;
+        let pipeline_class = pipeline_class(g.recipe.blend, g.recipe.cull);
         Self {
             vertex: g.bindings.vertex_buffers[0],
             index: g.bindings.index_buffer,
@@ -40,7 +43,7 @@ impl ListDraw {
             base_element: g.base_element,
             indices: g.indices,
             parameter: g.parameter as u32,
-            pipeline_class: pipeline_class as u8,
+            pipeline_class,
             low,
             animated: g.recipe.textures.len() > 1 || g.recipe.stage.images.len() > 1,
             static_group: g.recipe.model.is_none() && g.recipe.motion.is_none(),

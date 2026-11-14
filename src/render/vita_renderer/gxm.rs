@@ -80,6 +80,10 @@ pub(crate) struct State {
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Proofs { pub frames: u64, pub equal: u64, pub different: u64, pub first_different_byte: Option<usize>, pub different_bytes: usize, pub bytes: usize }
 impl State {
+    /// A class outside the finite program table stays unrecorded, without aliasing.
+    fn program_slot(&self, pipeline_class: usize, low: bool) -> Option<usize> {
+        pipeline_class.checked_mul(2)?.checked_add(usize::from(low)).filter(|&slot| slot < self.programs.len())
+    }
     pub(crate) fn new(mode: Mode, groups: usize, meta: &macroquad::miniquad::ShaderMeta) -> Self {
         Self { mode, records: if mode == Mode::Off { Vec::new() } else { vec![None; groups] }, fields: field_table(meta), layouts: [None, None], programs: [None; 64],
             direct: Direct::default(), shadow: Shadow::default(), direct_draws: 0, vitagl_draws: 0, frames: 0, proofs: Proofs::default(), buffers: (Vec::new(), Vec::new()), second_trial_draws: 0, second_trial_direct: 0, sabotage_fired: 0, sabotaged_this_proof: false, refused_captures: 0, layout_refused: [false; 2], proofs_skipped: 0 }
@@ -488,7 +492,7 @@ impl State {
         true
     }
     /// After vitaGL drew under capture: learn, and in shadow mode compare.
-    pub(crate) fn after_vitagl(&mut self, capture: &Capture, group: usize, animated: bool, pipeline_class: u8, low: bool, count: u32, class: u32, bits: &[u32; 143], way: Way) {
+    pub(crate) fn after_vitagl(&mut self, capture: &Capture, group: usize, animated: bool, pipeline_class: usize, low: bool, count: u32, class: u32, bits: &[u32; 143], way: Way) {
         self.vitagl_draws += 1;
         if !capture.learnable() {
             self.refused_captures += 1;
@@ -506,9 +510,9 @@ impl State {
             self.direct.forget();
             return;
         }
-        let slot = usize::from(pipeline_class) * 2 + usize::from(low);
-        let programs = self.programs.get(slot).copied().flatten();
-        if let Some(entry) = self.programs.get_mut(slot) { *entry = Some((capture.vertex_program, capture.fragment_program)); }
+        let slot = self.program_slot(pipeline_class, low);
+        let programs = slot.and_then(|slot| self.programs[slot]);
+        if let Some(slot) = slot { self.programs[slot] = Some((capture.vertex_program, capture.fragment_program)); }
         let program = self.layouts[usize::from(low)].as_ref().unwrap();
         let seen = Record { texture: capture.textures[program.diffuse_unit as usize], stream: capture.streams[0], index: capture.index, textures: capture.textures };
         // An animated group's texture changes by design. It always draws through vitaGL.
@@ -528,6 +532,29 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dynamic_world_class_remains_distinct_in_packets_and_finite_gxm_lookup() {
+        let meta = super::super::shader::meta();
+        let mut state = State::new(Mode::Live, 1, &meta);
+        state.programs[0] = Some((7, 8));
+        let class = super::super::world_list::pipeline_class(85, 1);
+        assert_eq!(class, 256);
+        let (wide, len) = crate::sim_maps::world_pipeline_tag(false, class);
+        let (legacy, old_len) = crate::sim_maps::world_pipeline_tag(false, 0);
+        assert_ne!(&wide[..len], &legacy[..old_len]);
+        assert_eq!(u64::from_le_bytes(wide[1..].try_into().unwrap()), class as u64);
+        assert_eq!(state.program_slot(class, false), None, "high class cannot alias recorded class zero");
+        assert_eq!(state.program_slot(31, true), Some(63));
+        assert_eq!(state.program_slot(32, false), None);
+        assert_eq!(state.program_slot(usize::MAX, true), None);
+        assert_eq!(state.programs[0], Some((7, 8)));
+        for low in [false, true] {
+            for class in 0..=255 {
+                let (tag, len) = crate::sim_maps::world_pipeline_tag(low, class);
+                assert_eq!(&tag[..len], &[u8::from(low), class as u8], "legacy packet hashes stay unchanged");
+            }
+        }
+    }
     #[derive(Default)]
     struct Tape { calls: Vec<String>, memory: Vec<Box<[u8]>> }
     impl Backend for Tape {
