@@ -99,16 +99,19 @@ impl WorldList {
         let mut end = start + 1;
         let mut indices = draw.indices;
         if !submit::static_opaque(&group.recipe) { return (end, indices); }
-        let Some(mut coverage) = submit::projected(group, projection) else { return (end, indices) };
+        let mut coverage = None;
         for next in &self.items[end..] {
             let other = self.draws[next.group as usize];
             let other_group = &groups[next.group as usize];
             if !adjacent_state(draw, first, indices, other, *next)
                 || group.recipe.rank != other_group.recipe.rank
                 || !submit::static_opaque(&other_group.recipe) { break; }
-            let Some(joined) = submit::projected(other_group, projection)
-                .and_then(|r| submit::join_disjoint(coverage, r)) else { break };
-            coverage = joined;
+            // Most neighbours differ in state or IBO range. Do not project eight corners for
+            // those; certify coverage only after the cheap range/state test succeeds.
+            let Some(joined) = coverage.or_else(|| submit::projected(group, projection))
+                .zip(submit::projected(other_group, projection))
+                .and_then(|(a,b)| submit::join_disjoint(a,b)) else { break };
+            coverage = Some(joined);
             indices += other.indices;
             end += 1;
         }
