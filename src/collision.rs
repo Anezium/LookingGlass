@@ -614,6 +614,9 @@ pub struct World {
     dynamic_buckets: std::sync::Arc<Vec<DynamicBucket>>,
     flight_hint: std::cell::RefCell<Option<sah::BlockHint>>,
     flight_counts: std::cell::Cell<[u32;4]>,
+    /// Host-only class split of the flight clearance work (`LOOKING_GLASS_FLIGHT_SPLIT`).
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    flight_probe: std::cell::Cell<FlightProbe>,
     light_certificates: std::cell::RefCell<LightCertificates>,
     pub(crate) npc_profile: crate::npc::profile::CollisionCounts,
     #[cfg(test)]
@@ -669,6 +672,25 @@ struct SightMemo {
 /// No caches, lazy colliders or traversal state cross the producer boundary.
 #[derive(Debug)]
 pub(crate) struct StaticGeometry { hulls: Vec<Hull>, tree: Option<Node>, sah: Option<sah::Hierarchy>, flight_grid: Option<flight_grid::FlightGrid> }
+/// Host-only per-class totals for one flight route search. `ns` buckets: grid
+/// certificate, short static traversal, witness recheck, long fallback traversal,
+/// mutable geometry, liquid probes, whole clear call. `count` buckets: calls, blocked answers, grid,
+/// short traversals, blocked short traversals, witness hits, long fallbacks, liquid
+/// probes, liquid blocks.
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+#[derive(Clone,Copy,Default,Debug)]
+pub(crate) struct FlightProbe { pub ns: [u64;7], pub count: [u64;16] }
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) fn flight_split_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_FLIGHT_SPLIT").is_some())
+}
+/// Host-only, expensive ceiling probe for a rebuilt grid; runs only with its own flag.
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) fn flight_grid_probe_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_FLIGHT_GRID_PROBE").is_some())
+}
 #[cfg(test)]
 thread_local! {
     static SAH_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
@@ -1029,6 +1051,8 @@ impl World {
             dynamic_buckets: std::sync::Arc::default(),
             flight_hint: std::cell::RefCell::new(None),
             flight_counts: std::cell::Cell::new([0;4]),
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            flight_probe: std::cell::Cell::default(),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1181,6 +1205,8 @@ impl World {
             dynamic_buckets: std::sync::Arc::default(),
             flight_hint: std::cell::RefCell::new(None),
             flight_counts: std::cell::Cell::new([0;4]),
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            flight_probe: std::cell::Cell::default(),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1261,24 +1287,93 @@ impl World {
     /// Re-test a static positive witness on long sweeps, without caching mutable answers.
     /// Counts are full static traversals, successful witnesses, direct short queries, empty-grid certificates.
     pub(crate) fn flight_counts(&self) -> [u32;4] { self.flight_counts.get() }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(crate) fn flight_probe(&self) -> FlightProbe { self.flight_probe.get() }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(crate) fn reset_flight_probe(&self) { self.flight_probe.set(FlightProbe::default()); }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(crate) fn add_flight_probe(&self, class: usize, ns: u64) {
+        let mut probe = self.flight_probe.get();
+        probe.ns[class] = probe.ns[class].wrapping_add(ns);
+        self.flight_probe.set(probe);
+    }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(crate) fn count_flight_probe(&self, index: usize, add: u64) {
+        let mut probe = self.flight_probe.get();
+        probe.count[index] = probe.count[index].wrapping_add(add);
+        self.flight_probe.set(probe);
+    }
     pub(crate) fn flight_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
+        // Host-only class split: each lap reads one clock; the shipped path has no timer.
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let split = flight_split_on();
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let mut mark = split.then(std::time::Instant::now);
+        macro_rules! lap { ($class:expr) => {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if let Some(t) = mark {
+                self.add_flight_probe($class, t.elapsed().as_nanos() as u64);
+                mark = split.then(std::time::Instant::now);
+            }
+        }; }
         let q=SweepBounds::new(start,end,half);
         let free=self.static_geometry.flight_grid.as_ref().is_some_and(|grid|grid.proves_clear(start,end,half));
+        lap!(0);
         let (blocked,hit)=if free {(false,false)} else {
             self.static_geometry.sah.as_ref().and_then(|sah|
                 sah.blocked_hinted(&self.static_geometry,start,end,half,&q,&mut self.flight_hint.borrow_mut()))
                 .unwrap_or_else(||(self.static_geometry.blocked(start,end,half,&q),false))
         };
-        let mut counts=self.flight_counts.get();
-        let index=if free {3} else {usize::from(hit)};
-        counts[index]=counts[index].wrapping_add(1);
-        if (end-start).length_squared()<=160.*160. {counts[2]=counts[2].wrapping_add(1);}
-        self.flight_counts.set(counts);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if split {
+            lap!(if free { 0 } else if hit { 2 } else if (end-start).length_squared()<=160.*160. { 1 } else { 3 });
+            let mut probe=self.flight_probe.get();
+            probe.count[0]+=1; probe.count[1]+=u64::from(blocked);
+            let short=(end-start).length_squared()<=160.*160.;
+            probe.count[if free {2} else if hit {5} else if short {3} else {6}]+=1;
+            if !free && !hit && short && blocked { probe.count[4]+=1; }
+            if !free && hit && short { probe.count[14]+=1; }
+            self.flight_probe.set(probe);
+        }
+        // Counts feed only the spike line; the release path skips the cell writes.
+        if crate::spike_log::on() {
+            let mut counts=self.flight_counts.get();
+            let index=if free {3} else {usize::from(hit)};
+            counts[index]=counts[index].wrapping_add(1);
+            if (end-start).length_squared()<=160.*160. {counts[2]=counts[2].wrapping_add(1);}
+            self.flight_counts.set(counts);
+        }
         let answer=blocked || self.blocked_mutable(start,end,half,&q);
+        lap!(4);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if split {
+            self.count_flight_probe(7,1);
+            let short=(end-start).length_squared()<=160.*160.;
+            if !free && !hit && short && flight_grid_probe_on() {
+                // Ceiling for the same grid rebuilt with a finer cell or a tighter pad.
+                // Measured outside the class laps so its scan cost lands in no class.
+                let hulls=&self.static_geometry.hulls;
+                let fine=flight_grid::FlightGrid::would_certify(hulls,start,end,32.,33.);
+                let tight=flight_grid::FlightGrid::would_certify(hulls,start,end,64.,32.0625);
+                let mut probe=self.flight_probe.get();
+                probe.count[11]+=u64::from(fine);
+                probe.count[12]+=u64::from(tight);
+                self.flight_probe.set(probe);
+            }
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if std::env::var_os("LOOKING_GLASS_FLIGHT_VERIFY").is_some() {
             let full=self.sweep_except(start,end,half,None);
-            assert_eq!(answer,full.start_solid || full.fraction<1.,"flight certificate differs {start} {end} {half}");
+            let solid=full.start_solid || full.fraction<1.;
+            assert_eq!(answer,solid,"flight certificate differs {start} {end} {half}");
+            // The full clearance predicate also tests five liquid probes shifted down by
+            // half.z. Check the memoised certificate against the original probe loop.
+            let shift=Vec3::Z*half.z;
+            let probes=(0..=4).all(|i| self.liquid_at(start.lerp(end,i as f32/4.)-shift)==0);
+            let memo=crate::flight::liquid_clear(self,start,end,half);
+            assert_eq!(memo,probes,"flight liquid certificate differs {start} {end} {half}");
+            assert_eq!(answer||!memo,solid||!probes,
+                "flight full clearance differs {start} {end} {half}");
         }
         answer
     }
@@ -1556,9 +1651,20 @@ impl World {
     pub fn set_dynamic_liquids(&mut self, liquids: Vec<Liquid>) {
         self.dynamic_liquids = liquids;
     }
+    /// True when every point of the box `[min, max]` is outside every liquid.
+    /// `liquid_at` tests a liquid's AABB before its planes, so an AABB that misses the
+    /// box proves every point of the box is outside that liquid. Dynamic liquids are not
+    /// excluded here; the caller falls back to exact per-point probes when any exist.
+    pub(crate) fn liquid_box_clear(&self, min: Vec3, max: Vec3) -> bool {
+        self.dynamic_liquids.is_empty() && self.liquids.iter().all(|(_, hull)| {
+            let b = hull.bounds;
+            min.x > b.max.x || max.x < b.min.x
+                || min.y > b.max.y || max.y < b.min.y
+                || min.z > b.max.z || max.z < b.min.z
+        })
+    }
     /// Exact convex-volume membership, including sloped liquid faces. Liquids are not solids.
-    pub fn liquid_at(&self, point: Vec3) -> i32 {
-        let map_liquid = self.liquids.iter().fold(0, |mask, (contents, hull)| {
+    pub fn liquid_at(&self, point: Vec3) -> i32 {        let map_liquid = self.liquids.iter().fold(0, |mask, (contents, hull)| {
             if point.cmpge(hull.bounds.min).all()
                 && point.cmple(hull.bounds.max).all()
                 && hull
@@ -1701,6 +1807,8 @@ impl World {
             dynamic_buckets: std::sync::Arc::default(),
             flight_hint: std::cell::RefCell::new(None),
             flight_counts: std::cell::Cell::new([0;4]),
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            flight_probe: std::cell::Cell::default(),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1884,6 +1992,30 @@ mod tests {
         assert!(world.flight_blocked(a,b,h));
         world.set_weapon_obstacles(vec![]);
         assert!(!world.flight_blocked(a,b,h));
+    }
+    #[test]
+    fn liquid_box_clear_proves_all_five_probes_without_touching_liquid_at() {
+        use super::*;
+        let mut world=World::fixture(&[(vec3(-400.,-400.,-50.),vec3(400.,400.,0.))]);
+        world.add_liquid(vec3(100.,-100.,-100.),vec3(200.,100.,150.),8,None);
+        let shift=Vec3::Z*24.;
+        let mut proved=0;
+        for x in [-500.,0.,50.,99.9,100.,150.,200.,260.,400.] {
+            for z in [-60.,0.,40.,160.] {
+                let a=vec3(x,-150.,z);let b=a+vec3(160.,300.,0.);
+                let clear=world.liquid_box_clear(a.min(b)-shift,a.max(b)-shift);
+                let probes=(0..=4).all(|i| world.liquid_at(a.lerp(b,i as f32/4.)-shift)==0);
+                assert!(!clear||probes,"box certificate skipped a liquid probe at {a} {b} {z}");
+                proved+=u64::from(clear);
+            }
+        }
+        assert!(proved>10,"exercise real box certificates: {proved}");
+        assert!(!world.liquid_box_clear(vec3(120.,0.,0.),vec3(180.,10.,10.)));
+        assert!(!world.liquid_box_clear(vec3(150.,-10.,150.),vec3(160.,10.,170.)));
+        assert!(world.liquid_box_clear(vec3(-500.,-500.,-500.),vec3(-450.,-450.,-450.)));
+        world.set_dynamic_liquids(vec![Liquid{contents:8,volume:Collider::box_bounds(vec3(-900.,-900.,-900.),vec3(-800.,-800.,-800.))}]);
+        assert!(!world.liquid_box_clear(vec3(-500.,-500.,-500.),vec3(-450.,-450.,-450.)),
+            "dynamic liquids must fall back to exact probes");
     }
     #[test]
     fn sweep_blocked_answers_as_the_full_sweep_on_every_kind_of_geometry() {
