@@ -70,6 +70,19 @@ pub struct Config {
     pub sim_sweep_blocked: bool,
     /// Answer solid yes/no sweeps during SAH traversal without collecting and sorting candidates.
     pub sim_sweep_any: bool,
+    /// Exact static flight-clearance cache and compact route node storage. Default off.
+    pub sim_flight_memo: bool,
+    /// Draw omission diagnostics only; these never belong in a release config.
+    pub diag_skip_ant_corpses: bool,
+    pub diag_skip_live_actors: bool,
+    pub diag_skip_fx: bool,
+    pub diag_skip_decals: bool,
+    pub diag_skip_alpha_world: bool,
+    pub diag_skip_water: bool,
+    pub diag_skip_sky: bool,
+    /// Inclusive spike output window; zero upper bound means no upper limit.
+    pub spike_log_first_frame: u32,
+    pub spike_log_last_frame: u32,
     /// Do not draw a dead Ant whose body centre is closer to the camera than this many units. A corpse
     /// against the low camera covers the screen several times over (`npc.rs`, `near_culled`). 0 is off.
     pub actor_near_cull: f32,
@@ -468,6 +481,16 @@ impl Default for Config {
             audio_combat_preload: false,
             sim_sweep_blocked: false,
             sim_sweep_any: false,
+            diag_skip_ant_corpses: false,
+            diag_skip_live_actors: false,
+            diag_skip_fx: false,
+            diag_skip_decals: false,
+            diag_skip_alpha_world: false,
+            diag_skip_water: false,
+            diag_skip_sky: false,
+            sim_flight_memo: false,
+            spike_log_first_frame: 0,
+            spike_log_last_frame: 0,
             actor_near_cull: 0.,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
@@ -640,6 +663,7 @@ impl Config {
             && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
     }
     fn validate(&self) -> Result<()> {
+        ensure!(self.spike_log_last_frame == 0 || self.spike_log_last_frame >= self.spike_log_first_frame, "invalid spike frame window");
         crate::replay::validate_settings(&crate::replay::Settings { record: self.replay_record.clone(),
             play: self.replay_play.clone(), start: self.replay_start.clone(), check_every: self.replay_check_every,
             state_every: self.replay_state_every, stop_after: self.replay_stop_after })?;
@@ -1310,6 +1334,15 @@ impl Drop for ConstructionResources {
         for id in self.shaders.drain(..) { ctx.delete_shader(id); }
     }
 }
+fn diagnostic_batch_skip(b: &super::Batch, scene: &Scene, c: &Config) -> bool {
+    if c.diag_skip_alpha_world && b.transparent() { return true; }
+    if !c.diag_skip_water && !c.diag_skip_decals { return false; }
+    b.parts.iter().any(|part| {
+        let shader=&scene.map.shaders[scene.map.surfaces[part.face].shader];
+        (c.diag_skip_water && shader.contents & crate::collision::LIQUID_MASK != 0)
+            || (c.diag_skip_decals && shader.name.to_ascii_lowercase().contains("decal"))
+    })
+}
 impl Renderer {
     pub(super) fn new(scene: &Scene, corpus: &str) -> Result<Self> {
         crate::render_tail::install();
@@ -1321,12 +1354,14 @@ impl Renderer {
         let mut keys: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut recipes_ms=0.;let mut chunks_ms=0.;let mut source_chunks=0;
         let mut dropped_layers = 0;
+        let mut diagnostic_batches = 0;
         // `exact_blends`: the blends of pipeline classes WORLD_BLEND_CLASSES and up, in first-seen order.
         let mut exact_blends: Vec<Blend> = Vec::new();
         let mut frozen_deforms = 0;
         let mut frozen_models = 0;
         let (mut wave_normal_layers, mut wave_normal_triangles, mut wave_normal_skipped) = (0, 0, 0);
         for (bi, b) in scene.batches.iter().enumerate() {
+            if diagnostic_batch_skip(b, scene, c) { diagnostic_batches+=1; continue; }
             if b.sky {
                 continue;
             }
@@ -1462,6 +1497,7 @@ impl Renderer {
             !pending.is_empty(),
             "retained world has no drawable geometry"
         );
+        if c.diag_skip_water || c.diag_skip_decals || c.diag_skip_alpha_world { println!("[lg/draw-diag] omitted_world_batches={diagnostic_batches} water={} decals={} alpha={}",c.diag_skip_water,c.diag_skip_decals,c.diag_skip_alpha_world); }
         // Buffer payload accounting, not allocator/driver/process high-water RAM.
         let old_scene_geometry_capacity_bytes: usize = scene.batches.iter().chain(&scene.sky_props).map(|b| {
             (b.base.capacity() + b.mesh.vertices.capacity()) * std::mem::size_of::<Vertex>()
@@ -2095,7 +2131,7 @@ impl Renderer {
         };
         #[cfg(target_os = "vita")]
         if list_submit && self.gxm.proof_due() { self.proof_frame(scene, time); }
-        if !alpha && config().sky && !scene.authored_sky {
+        if !alpha && config().sky && !scene.authored_sky && !config().diag_skip_sky {
             #[cfg(not(target_os = "vita"))]
             let probe = super::sky_stats::begin(false);
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
@@ -3117,6 +3153,18 @@ mod tests {
         assert_eq!(raw["tls_fast"], "on");
     }
     #[test]
+    fn round5_keys_are_strict_and_off_in_historical_configs() {
+        let defaults=serde_json::to_value(Config::default()).unwrap();
+        for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
+            if key.starts_with("diag_skip_") || key == "sim_flight_memo" {
+                assert_eq!(value, false);
+                assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
+                assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
+            } else { assert_eq!(value, 0); }
+        }
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"spike_log_first_frame":20,"spike_log_last_frame":10})).unwrap().validate().is_err());
+    }
+    #[test]
     fn sweep_any_is_default_off_and_strict() {
         assert!(!Config::default().sim_sweep_any);
         assert!(!serde_json::from_str::<Config>("{}").unwrap().sim_sweep_any);
@@ -3125,10 +3173,11 @@ mod tests {
     }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
-        let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any").cloned().collect::<Vec<_>>();
+        let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any" && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -3577,7 +3626,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any").cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -3623,6 +3672,9 @@ mod tests {
         let mut written = serde_json::from_slice::<serde_json::Value>(bytes).unwrap();
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
+        for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
+            if round5_key(key) { written[key] = value.clone(); }
+        }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
     #[test]
@@ -3694,7 +3746,7 @@ mod tests {
             const A5_FIGHT: [&str; 4] = ["spike_log_ms", "audio_combat_preload", "sim_sweep_blocked", "actor_near_cull"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
-                    && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any").cloned().collect();
+                    && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();

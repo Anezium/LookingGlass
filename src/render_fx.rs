@@ -684,6 +684,7 @@ fn pass_at(
     })
 }
 pub fn effect(mesh: &Mesh, blend: Blend) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {
         #[cfg(target_os = "vita")]
@@ -717,6 +718,7 @@ pub fn effect(mesh: &Mesh, blend: Blend) {
 /// A producer publication already owns its persistent CPU arrays.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn effect_geometry(geometry: Rc<prepared::Geometry>, texture: Option<Texture2D>, blend: Blend) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     debug_assert!(retained_active());
     let blend = if blend == Blend::Add { Blend::AlphaAdd } else { blend };
     if let Ok(mut p) = pass(Mesh { vertices: Vec::new(), indices: Vec::new(), texture },
@@ -736,6 +738,7 @@ pub(crate) fn world_puff_batches_active() -> bool {
 /// Registration position preserves ties with packets submitted later in the view.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>, blend: Blend) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if crate::character::skinning::overlap::gather_only() { return; }
     debug_assert!(world_puff_batches_active());
     FRAME.with(|f| {
@@ -749,6 +752,7 @@ pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>,
 /// `world_puff_quad` for a whole set, in order, under one borrow of the frame.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn world_puff_quads<'a>(quads: impl ExactSizeIterator<Item = (&'a [Vertex; 4], Option<Texture2D>, Blend)>) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if crate::character::skinning::overlap::gather_only() { return; }
     debug_assert!(world_puff_batches_active());
     FRAME.with(|f| {
@@ -775,6 +779,7 @@ fn defer_legacy_immediate_fx() -> bool {
     { false }
 }
 pub fn legacy_line(a: Vec3, b: Vec3, color: Color) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if defer_legacy_immediate_fx() { line(a, b, color); }
     else {
         #[cfg(test)] routing_controls::immediate_line(a, b, color);
@@ -782,6 +787,7 @@ pub fn legacy_line(a: Vec3, b: Vec3, color: Color) {
     }
 }
 pub fn legacy_sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Color) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if defer_legacy_immediate_fx() { sphere(center, radius, texture, color); }
     else {
         #[cfg(test)] routing_controls::immediate_sphere(center, radius, texture, color);
@@ -790,6 +796,7 @@ pub fn legacy_sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, col
 }
 
 pub fn line(a: Vec3, b: Vec3, color: Color) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {
         draw_line_3d(a, b, color);
@@ -816,6 +823,7 @@ pub fn line(a: Vec3, b: Vec3, color: Color) {
     );
 }
 pub fn sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Color) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if crate::character::skinning::overlap::gather_only() { return; }
     if !active() {
         draw_sphere(center, radius, texture, color);
@@ -997,7 +1005,12 @@ pub fn with_skin_opacity(alpha: f32, draw: impl FnOnce()) {
 }
 
 /// Spawned TAN effects animate from their birth clock and carry entity alpha.
+pub(crate) fn skin_decal(mesh: &Mesh, age: f32, alpha: f32) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) { return; }
+    skin_timed(mesh,Some(age),alpha.clamp(0.,1.));
+}
 pub(crate) fn skin_effect(mesh: &Mesh, age: f32, alpha: f32) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     skin_timed(mesh, Some(age), alpha.clamp(0., 1.));
 }
 

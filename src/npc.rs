@@ -3320,6 +3320,12 @@ impl Npcs {
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for (id, actor) in self.actors.iter().enumerate() {
+            let corpse = actor.ant.as_ref().is_some_and(|a| a.health <= 0.);
+            let dead = corpse || actor.resident.as_ref().is_some_and(|p|p.health()<=0.)
+                || actor.clock.as_ref().is_some_and(|p|p.health<=0.) || actor.imp.as_ref().is_some_and(|p|p.health<=0.)
+                || actor.chess.as_ref().is_some_and(|p|p.health<=0.) || actor.guard.as_ref().is_some_and(|p|p.health<=0.);
+            if (corpse && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::AntCorpses))
+                || (!dead && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors)) { continue; }
             let _identity = actor.skin_identity.scope();
             let _skin_guard = crate::character::skinning::CullGuard::preserve(actor.electric > 0.);
             if actor.ant.as_ref().is_some_and(|a| !a.enabled) { continue; }

@@ -1212,6 +1212,7 @@ impl Character {
         gl_use_default_material();
     }
     pub fn draw_ghost(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
+        if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors) { return; }
         let material = self.material.clone();
         material.draw(
             Appearance {

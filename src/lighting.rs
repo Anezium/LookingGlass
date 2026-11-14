@@ -197,6 +197,7 @@ pub fn croquet(position: Vec3) -> Vec<Light> {
     })
 }
 pub fn shadow(world: &World, feet: Vec3, radius: f32) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) { return; }
     let Some(texture) = SHADOW.with(|s| s.borrow().clone()) else {
         return;
     };
@@ -255,6 +256,7 @@ pub fn shadow(world: &World, feet: Vec3, radius: f32) {
     );
 }
 pub fn flares(eye: Vec3, direction: Vec3) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     let Some(texture) = FLARE.with(|s| s.borrow().clone()) else {
         return;
     };

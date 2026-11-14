@@ -1318,6 +1318,7 @@ impl Steam {
         true
     }
     pub fn draw_one(&self, index: usize, camera: Vec3, direction: Vec3) {
+        if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
         #[cfg(feature="vita_renderer")]
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             if let Some(vertices) = self.quads.borrow().raw_quad(index) {
@@ -1430,6 +1431,7 @@ impl PickupBurst {
         Ok(Self { texture, material })
     }
     pub fn draw(&self, origin: Vec3, age: f32, camera: Vec3, atmosphere: &Atmosphere) {
+        if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
         if !(0. ..4.).contains(&age) {
             return;
         }
@@ -1816,6 +1818,7 @@ impl Attached {
     #[cfg(not(target_os="vita"))]
     pub(crate) fn live_puffs(&self) -> usize { self.steam.puffs.len() }
     pub(crate) fn draw_sampled(&mut self, camera: Vec3, atmosphere: &Atmosphere) {
+        if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
         if crate::character::skinning::overlap::gathering() { return; }
         #[cfg(feature="vita_renderer")]
         let _producer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::Producer);

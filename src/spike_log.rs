@@ -51,6 +51,7 @@ const NPC_ROWS: usize = 24;
 #[derive(Default)]
 struct Frame {
     number: u64,
+    flight_work: [u32;5],
     begin: Option<Instant>,
     render: Option<Instant>,
     hud: Option<Instant>,
@@ -179,6 +180,10 @@ impl Frame {
                 n.ms.iter().sum::<f64>(), n.ms[0], n.ms[1], n.ms[2], n.ms[3]);
             any = true;
         }
+        if self.flight_work[0] > 0 {
+            let [calls,tests,misses,hits,hints]=self.flight_work;
+            let _=write!(out," flight_work={calls}/{tests}/{misses}/{hits}/{hints}");
+        }
         for (name, (calls, ms, expanded, tests)) in PLANNERS.iter().zip(self.planners) {
             if calls > 0 { let _ = write!(out, " {name}={calls}/{ms:.2}/{expanded}/{tests}"); }
         }
@@ -199,7 +204,13 @@ pub(crate) fn begin_frame() {
         // The new frame starts at `now`, so formatting the previous line is charged to it (`log=`).
         let mut log_ms = 0.;
         if let (Some(begin), Some(render), Some(hud), Some(cpu_end)) = (f.begin, f.render, f.hud, f.cpu_end) {
-            if now.saturating_duration_since(begin).as_secs_f64() * 1000. >= f64::from(limit) {
+            let in_window = {
+                #[cfg(feature="vita_renderer")]
+                { let c=crate::render::vita_renderer::config(); f.number >= u64::from(c.spike_log_first_frame) && (c.spike_log_last_frame == 0 || f.number <= u64::from(c.spike_log_last_frame)) }
+                #[cfg(not(feature="vita_renderer"))]
+                { true }
+            };
+            if in_window && now.saturating_duration_since(begin).as_secs_f64() * 1000. >= f64::from(limit) {
                 OUT.with(|o| o.borrow_mut().push(|text| f.write_line(text, now, [begin, render, hud, cpu_end])));
                 log_ms = now.elapsed().as_secs_f64() * 1000.;
             }
@@ -276,6 +287,10 @@ pub(crate) fn npc(name: &'static str, updated: u64, ms: [f64; 4]) {
 }
 /// Path searches the spike line counts: `nav_plan` is the ground detour of Ants
 /// (`combat::navigation::plan`), `flight_route` the flying route of Ladybugs (`flight::route`).
+pub(crate) fn flight_work(work: [u32;5]) {
+    if !on() { return; }
+    FRAME.with(|f| { for (a,b) in f.borrow_mut().flight_work.iter_mut().zip(work) { *a+=b; } });
+}
 pub(crate) const NAV_PLAN: usize = 0;
 pub(crate) const FLIGHT_ROUTE: usize = 1;
 const PLANNERS: [&str; 2] = ["nav_plan", "flight_route"];

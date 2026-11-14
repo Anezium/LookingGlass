@@ -243,7 +243,7 @@ impl LevelArt for Art {
             }
             for s in &b.shots {
                 if let Some(end) = s.ended {
-                    if s.normal.length_squared() < 0.9 {
+                    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) || s.normal.length_squared() < 0.9 {
                         continue;
                     }
                     let radius = if s.fragment { 16. } else { 24. };
@@ -263,7 +263,7 @@ impl LevelArt for Art {
                         indices: vec![0, 1, 2, 0, 2, 3],
                         texture: Some(self.mark.clone()),
                     };
-                    crate::render_fx::skin_effect(&mesh, o.saved.clock, alpha);
+                    crate::render_fx::skin_decal(&mesh, o.saved.clock, alpha);
                 }
             }
         }

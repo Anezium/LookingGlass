@@ -446,6 +446,8 @@ impl Art {
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for a in s.actors.iter().filter(|a| a.active && a.enabled) {
+            let alive = match &a.enemy { Enemy::Ladybug(b)=>b.health>0., Enemy::Guard(g)=>g.health>0., Enemy::Boojum(b)=>b.health>0. };
+            if alive && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors) { continue; }
             match &a.enemy {
                 Enemy::Ladybug(b) => self.ladybug.draw(b, s.ladybug.unwrap(), fullbright),
                 Enemy::Guard(g) => {

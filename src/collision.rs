@@ -611,6 +611,9 @@ pub struct World {
     dynamic: Vec<Collider>,
     dynamic_bounds: Option<Bounds>,
     dynamic_buckets: std::sync::Arc<Vec<DynamicBucket>>,
+    flight_hint: std::cell::RefCell<Option<sah::BlockHint>>,
+    flight_counts: std::cell::Cell<[u32;3]>,
+    flight_static: std::cell::RefCell<std::collections::HashMap<[u32; 9], bool>>,
     light_certificates: std::cell::RefCell<LightCertificates>,
     pub(crate) npc_profile: crate::npc::profile::CollisionCounts,
     #[cfg(test)]
@@ -1020,6 +1023,9 @@ impl World {
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
+            flight_hint: std::cell::RefCell::new(None),
+            flight_counts: std::cell::Cell::new([0;3]),
+            flight_static: std::cell::RefCell::default(),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1170,6 +1176,9 @@ impl World {
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
+            flight_hint: std::cell::RefCell::new(None),
+            flight_counts: std::cell::Cell::new([0;3]),
+            flight_static: std::cell::RefCell::default(),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1247,14 +1256,45 @@ impl World {
         }
         blocked
     }
-    /// `sweep_except(.., None)` reduced to its yes/no answer, in the same order: static hulls,
-    /// settled supports, dynamic colliders, weapon obstacles.
+    /// Only exact directed endpoint/extents bits identify an immutable static answer.
+    /// The bounded cache belongs to this World, so map changes cannot reuse certificates.
+    pub(crate) fn flight_counts(&self) -> [u32;3] { self.flight_counts.get() }
+    pub(crate) fn flight_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
+        let key = Self::query_key(start, end, half);
+        let cached = self.flight_static.borrow().get(&key).copied();
+        let mut counts = self.flight_counts.get();
+        let index=usize::from(cached.is_some());
+        counts[index]=counts[index].wrapping_add(1);
+        self.flight_counts.set(counts);
+        let blocked = cached.unwrap_or_else(|| {
+            let q = SweepBounds::new(start, end, half);
+            let hinted=self.static_geometry.sah.as_ref().and_then(|sah|sah.blocked_hinted(&self.static_geometry,start,end,half,&q,&mut self.flight_hint.borrow_mut()));
+            let blocked=if let Some((blocked,hit))=hinted {
+                if hit {let mut counts=self.flight_counts.get();counts[2]=counts[2].wrapping_add(1);self.flight_counts.set(counts);}
+                blocked
+            } else {self.static_geometry.blocked(start,end,half,&q)};
+            let mut cache = self.flight_static.borrow_mut();
+            if cache.len() < 8192 { cache.insert(key, blocked); }
+            blocked
+        });
+        let answer=blocked || self.blocked_mutable(start, end, half, &SweepBounds::new(start, end, half));
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var_os("LOOKING_GLASS_FLIGHT_VERIFY").is_some() {
+            let full=self.sweep_except(start,end,half,None);
+            assert_eq!(answer,full.start_solid || full.fraction<1.,"flight certificate differs {start} {end} {half}");
+        }
+        answer
+    }
+    /// Full boolean sweep: immutable static geometry, then every mutable geometry class.
     fn blocked_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
         self.npc_profile.sweep();
         crate::sim_maps::count("world_sweeps_blocked", 1);
-        let full = |t: Trace| t.start_solid || t.fraction < 1.;
         let query = SweepBounds::new(start, end, half);
         if self.static_geometry.blocked(start, end, half, &query) { return true; }
+        self.blocked_mutable(start, end, half, &query)
+    }
+    fn blocked_mutable(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> bool {
+        let full = |t: Trace| t.start_solid || t.fraction < 1.;
         let clips = |h: &Hull| { let mut t = Trace::default(); clip_hull(h, start, end, half, &mut t); full(t) };
         for c in &self.settled_supports {
             if crate::sim_maps::npc_queries() && c.bounds.is_none_or(|b| !query.overlaps(b)) { continue; }
@@ -1662,6 +1702,9 @@ impl World {
             dynamic: Vec::new(),
             dynamic_bounds: None,
             dynamic_buckets: std::sync::Arc::default(),
+            flight_hint: std::cell::RefCell::new(None),
+            flight_counts: std::cell::Cell::new([0;3]),
+            flight_static: std::cell::RefCell::default(),
             light_certificates: std::cell::RefCell::default(),
             npc_profile: Default::default(),
             #[cfg(test)]
@@ -1829,6 +1872,24 @@ mod dynamic_tests;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn flight_static_cache_does_not_cache_mutable_geometry() {
+        use super::*;
+        let mut world=World::fixture(&[]);
+        let a=Vec3::ZERO; let b=Vec3::X*100.; let h=Vec3::splat(2.);
+        assert!(!world.flight_blocked(a,b,h));
+        world.set_dynamic(vec![Collider::box_bounds(vec3(40.,-20.,-20.),vec3(60.,20.,20.))]);
+        assert!(world.flight_blocked(a,b,h));
+        world.set_dynamic(vec![]);
+        assert!(!world.flight_blocked(a,b,h));
+        world.set_settled_supports(vec![Collider::box_bounds(vec3(40.,-20.,-20.),vec3(60.,20.,20.))]);
+        assert!(world.flight_blocked(a,b,h));
+        world.set_settled_supports(vec![]);
+        world.set_weapon_obstacles(vec![crate::combat::Target{id:1,center:Vec3::X*50.,half:Vec3::splat(10.)}]);
+        assert!(world.flight_blocked(a,b,h));
+        world.set_weapon_obstacles(vec![]);
+        assert!(!world.flight_blocked(a,b,h));
+    }
+    #[test]
     fn sweep_blocked_answers_as_the_full_sweep_on_every_kind_of_geometry() {
         use super::*;
         for sah in [false, true] {
@@ -1855,6 +1916,8 @@ mod tests {
                 assert_eq!(crate::sim_maps::with_sweep_blocked(true, || world.sweep_blocked(a, b, half)), full, "{a} {b} {half} sah={sah}");
                 assert_eq!(crate::sim_maps::with_sweep_any(true, || world.sweep_blocked(a, b, half)), full, "unordered {a} {b} {half} sah={sah}");
                 assert_eq!(world.sweep_blocked(a, b, half), full);
+                assert_eq!(world.flight_blocked(a,b,half),full);
+                assert_eq!(world.flight_blocked(a,b,half),full);
                 checked += 1; blocked += usize::from(full);
             }
             assert!(blocked > 500 && checked - blocked > 500, "both answers are exercised: {blocked} of {checked}");

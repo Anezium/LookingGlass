@@ -58,6 +58,7 @@ mod facial;
 mod falling_rock;
 mod fire_imp;
 mod flight;
+mod draw_diagnostics;
 mod footing;
 mod fortress;
 mod fortress_route;
