@@ -2313,7 +2313,11 @@ impl Renderer {
                 } else { (base_element, indices) };
                 #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
                 let (actual_base, actual_indices) = (base_element, indices);
-                if ran { ctx.draw(actual_base, actual_indices, 1); }
+                if ran {
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    list.verify_emission(first, end, actual_base, actual_indices, parameters);
+                    ctx.draw(actual_base, actual_indices, 1);
+                }
                 #[cfg(target_os = "vita")]
                 if way != gxm::Way::Vitagl {
                     let capture = gxm::vita::take();

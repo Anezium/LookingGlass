@@ -117,6 +117,30 @@ impl WorldList {
         }
         (end, indices)
     }
+    /// Check the physical command, not its canonical packet hash. This runs immediately before
+    /// the host GL call, after negative controls can corrupt its base/count. Occlusion cannot
+    /// hide a wrong range. Native builds contain neither this observer nor the mutations.
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub fn verify_emission(&self, start: usize, end: usize, base: i32, count: i32, parameters: &[Parameter]) {
+        assert!(start < end && end <= self.items.len(), "invalid adjacent member interval");
+        let item = self.items[start];
+        let first = self.draws[item.group as usize];
+        let mut cursor = first.base_element;
+        for member in &self.items[start..end] {
+            let part = self.draws[member.group as usize];
+            assert!(first.vertex == part.vertex && first.index == part.index && first.atlas == part.atlas
+                && first.pipeline == part.pipeline && first.low == part.low
+                && first.pipeline_class == part.pipeline_class && item.texture == member.texture,
+                "adjacent command changed state at group {}", member.group);
+            assert_eq!(parameters[first.parameter as usize].bits, parameters[part.parameter as usize].bits,
+                "adjacent command changed uniform bits at group {}", member.group);
+            assert_eq!(part.base_element, cursor, "adjacent command changed primitive order at group {}", member.group);
+            assert!(part.indices > 0 && part.indices % 3 == 0);
+            cursor = cursor.checked_add(part.indices).expect("adjacent command range overflow");
+        }
+        assert_eq!(base, first.base_element, "physical adjacent command base differs from original ranges");
+        assert_eq!(count, cursor - first.base_element, "physical adjacent command count differs from original ranges");
+    }
 }
 
 fn adjacent_state(first: ListDraw, item: Item, indices: i32, next: ListDraw, other: Item) -> bool {
