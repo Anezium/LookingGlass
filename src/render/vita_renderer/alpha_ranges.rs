@@ -303,7 +303,11 @@ impl Gather {
             return;
         }
         if world_list::negative("alpha-range-index-order") && self.scratch.len() >= 6 {
-            self.scratch.swap(0, 3);
+            // A quad often repeats index zero at offsets0 and3. Pick a distinct
+            // value so this control actually corrupts the submitted index order.
+            if let Some(other) = self.scratch.iter().position(|&v| v != self.scratch[0]) {
+                self.scratch.swap(0, other);
+            }
         }
         let ctx = unsafe { get_internal_gl() }.quad_context;
         // Miniquad's pinned Vita compact_stream path issues glBufferData with the actual
