@@ -366,14 +366,21 @@ impl Ant {
                 }
                 out.spatial_sounds.push((CORPORAL_SOUNDS[6], b.at));
                 for body in &bodies {
+                    // Reference convention: the direct victim takes 5 only, and the
+                    // explosion excludes it with radius `radiusdamage + 60` = 140
+                    // (`src/levels/funhouse/battle.rs`, `src/levels/qlair/projectile.rs`,
+                    // `docs/MALLET_JACKBOMB.md`).
+                    if Some(body.id) == hit.map(|(id, _)| id) {
+                        continue;
+                    }
                     let distance = body.center.distance(b.at);
                     let _sight_category=crate::phase_census::query_category(crate::phase_census::QueryCategory::Sight);
                     let sight = world.sight_sweep(b.at, body.center, Vec3::splat(0.5));
-                    if distance < 160. && !sight.start_solid && sight.fraction == 1. {
+                    if distance < 140. && !sight.start_solid && sight.fraction == 1. {
                         let direction = (body.center - b.at).normalize_or_zero();
                         out.strike(
                             body.id,
-                            80. * (1. - distance / 160.),
+                            80. * (1. - distance / 140.),
                             direction * 100.,
                             DamageKind::Other,
                         );
@@ -691,7 +698,7 @@ mod tests {
     #[test]
     fn ant_damage_review_grenade_contact_and_radius_happen_once_with_cover() {
         for fps in [10, 30, 60, 144] {
-            for (at, age, expected) in [(vec3(0., 0., 28.), 0., 85.), (vec3(40., 0., 28.), 1.999, 60.)] {
+            for (at, age, expected) in [(vec3(0., 0., 28.), 0., 5.), (vec3(40., 0., 28.), 1.999, 57.142856)] {
                 let mut ant = damage_review_shot(true, at, age);
                 let mut total = 0.;
                 let mut hit_frames = 0;
@@ -703,7 +710,8 @@ mod tests {
                     hit_frames += usize::from(feedback.damage > 0.);
                     explosions += feedback.spatial_sounds.len();
                 }
-                assert_eq!((total, hit_frames, explosions), (expected, 1, 1), "{fps}Hz at {at:?}");
+                assert_eq!((hit_frames, explosions), (1, 1), "{fps}Hz at {at:?}");
+                assert!((total - expected).abs() < 0.0001, "{fps}Hz at {at:?}: {total}");
                 assert!(ant.shots.is_empty() && ant.blasts.is_empty());
             }
         }
@@ -712,6 +720,37 @@ mod tests {
             (vec3(20., -100., 0.), vec3(25., 100., 100.)),
         ]);
         let mut ant = damage_review_shot(true, vec3(40., 0., 28.), 1.999);
+        let mut feedback = Feedback::default();
+        ant.update(0.1, &wall, vec3(0., 0., 48.), &Clips, &mut feedback);
+        assert_eq!(feedback.damage, 0.);
+        assert_eq!(feedback.spatial_sounds.len(), 1);
+        assert!(ant.shots.is_empty());
+    }
+    #[test]
+    fn ant_damage_review_grenade_radius_edge_and_cover() {
+        // 139 units is inside the reference 140 radius, 141 is outside.
+        for fps in [10, 60, 144] {
+            for (x, inside) in [(139., true), (141., false)] {
+                let mut ant = damage_review_shot(true, vec3(x, 0., 28.), 1.999);
+                let mut total = 0.;
+                let mut explosions = 0;
+                for _ in 0..fps {
+                    let mut feedback = Feedback::default();
+                    ant.update(1. / fps as f32, &floor(), vec3(0., 0., 48.), &Clips, &mut feedback);
+                    total += feedback.damage;
+                    explosions += feedback.spatial_sounds.len();
+                }
+                let expected = if inside { 80. * (1. - 139. / 140.) } else { 0. };
+                assert!((total - expected).abs() < 0.0001, "{fps}Hz at {x}: {total}");
+                assert_eq!(explosions, 1, "{fps}Hz at {x}");
+                assert!(ant.shots.is_empty() && ant.blasts.is_empty());
+            }
+        }
+        let wall = World::fixture(&[
+            (vec3(-2000., -2000., -20.), vec3(2000., 2000., 0.)),
+            (vec3(60., -100., 0.), vec3(65., 100., 100.)),
+        ]);
+        let mut ant = damage_review_shot(true, vec3(139., 0., 28.), 1.999);
         let mut feedback = Feedback::default();
         ant.update(0.1, &wall, vec3(0., 0., 48.), &Clips, &mut feedback);
         assert_eq!(feedback.damage, 0.);
