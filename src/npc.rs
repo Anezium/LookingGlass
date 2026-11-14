@@ -4281,12 +4281,22 @@ impl Model {
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
+        #[cfg(feature="vita_renderer")]
+        let _corpse = crate::render_fx::corpse_triangles::scope(ant.health <= 0.);
         let _consumer = crate::character::skinning::CullGuard::publication_reason(ant.frozen,crate::phase_census::FROZEN);
         let scale = ant.visual_scale(&self.data);
         if scale <= 0. {
             return;
         }
         let clip = &self.data.clips[ant.clip()];
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var_os("LOOKING_GLASS_CORPSE_PROBE").is_some()
+            && matches!(crate::sim_maps::probe::frame(), 1400 | 1980 | 2030 | 2100..=2120)
+            && !crate::character::skinning::overlap::gather_only() {
+            println!("[lg/corpse-pose] frame={} dead={} clip={} time={} duration={} scale={} frozen={} electric={}",
+                crate::sim_maps::probe::frame(),ant.health<=0.,ant.clip(),ant.time,clip.duration(),scale,ant.frozen,ant.electric);
+        }
+
         let time = if ant.frozen {
             ant.time.min(clip.frame_time * 5.)
         } else {

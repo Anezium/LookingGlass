@@ -334,6 +334,7 @@ pub(crate) struct Gpu {
     pipelines: BTreeMap<(usize, bool), Pipeline>,
     /// `fx_lite`: the lean program, its pipelines (same keys) and its own uniform cache.
     lite: Option<Lite>,
+    corpse_opaque: Option<Lite>,
     buffers: Vec<Buffers>,
     white: Texture2D,
     ring_frame: usize,
@@ -355,6 +356,7 @@ pub(crate) struct Gpu {
     bounds: packet_cull::Bounds,
 }
 pub(crate) struct Lite {
+    uniforms: UniformCache<UNIFORM_FLOATS>,
     shader: ShaderId,
     pipelines: BTreeMap<(usize, bool), Pipeline>,
     fields: crate::render::uniform_fields::Cache,
@@ -392,7 +394,14 @@ impl Gpu {
             ctx.new_shader(ShaderSource::Glsl { vertex: crate::render::VERTEX,
                 fragment: &crate::environment::fragment(crate::render::FX_LITE_FRAGMENT) }, meta())
                 .map_err(|e| eprintln!("[lg/vita-renderer] warning fx_lite program failed, key off: {e:?}")).ok()
-        }).flatten().map(|shader| Lite { shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
+        }).flatten().map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
+        let corpse_opaque = crate::render::vita_renderer::config().ant_corpse_opaque_shader.then(|| {
+            crate::frame_profile::shader_creation();
+            let _shader_name=crate::shader_cache::Name::new("retained-ant-corpse-opaque");
+            let fragment=crate::lighting::fragment(&crate::environment::fragment(&super::corpse_opaque::fragment()));
+            ctx.new_shader(ShaderSource::Glsl {vertex:crate::render::VERTEX,fragment:&fragment},meta())
+                .map_err(|e|eprintln!("[lg/vita-renderer] corpse opaque program failed, using original: {e:?}")).ok()
+        }).flatten().map(|shader|Lite {uniforms:UniformCache::default(),shader,pipelines:BTreeMap::new(),fields:crate::render::uniform_fields::Cache::new(meta())});
         println!(
             "[lg/vita-renderer] actor READY grouped alpha, actor_max_layers={}",
             crate::render::vita_renderer::config().actor_max_layers
@@ -402,6 +411,7 @@ impl Gpu {
             shader,
             pipelines: BTreeMap::new(),
             lite,
+            corpse_opaque,
             buffers: Vec::new(),
             white,
             ring_frame: 0,
@@ -426,8 +436,8 @@ impl Gpu {
         }
         println!(
             "[lg/vita-renderer] actor pipeline objects prewarmed={} programs={}",
-            gpu.pipelines.len() + gpu.lite.as_ref().map_or(0, |l| l.pipelines.len()),
-            1 + usize::from(gpu.lite.is_some())
+            gpu.pipelines.len() + gpu.lite.as_ref().map_or(0, |l| l.pipelines.len()) + gpu.corpse_opaque.as_ref().map_or(0,|l|l.pipelines.len()),
+            1 + usize::from(gpu.lite.is_some()) + usize::from(gpu.corpse_opaque.is_some())
         );
         Ok(gpu)
     }
@@ -536,7 +546,8 @@ impl Gpu {
     fn prepare_pipeline(&mut self, key: (usize, bool)) {
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let shaders = std::iter::once((self.shader, &mut self.pipelines))
-            .chain(self.lite.as_mut().map(|l| (l.shader, &mut l.pipelines)));
+            .chain(self.lite.as_mut().map(|l| (l.shader, &mut l.pipelines)))
+            .chain(self.corpse_opaque.as_mut().filter(|_|key==(0,false)).map(|l|(l.shader,&mut l.pipelines)));
         for (shader, pipelines) in shaders {
         pipelines.entry(key).or_insert_with(|| {
             crate::frame_profile::pipeline_creation();
@@ -564,14 +575,23 @@ impl Gpu {
         });
         }
     }
-    fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool) {
+    fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool, ant_dead: Option<bool>) {
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
         let key = (p.blend_index, p.depth_equal);
-        let lite = self.lite.is_some() && lite_pass(p);
+        let opaque = ant_dead==Some(true) && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
+        if opaque {count("vita_ant_corpse_opaque_draws",1);}
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if ant_dead.is_some() && std::env::var_os("LOOKING_GLASS_CORPSE_PROBE").is_some()
+            && matches!(crate::sim_maps::probe::frame(),1400 | 1980 | 2030 | 2100..=2120) {
+            println!("[lg/corpse-program] frame={} dead={} opaque={} triangles={} vertices={}",
+                crate::sim_maps::probe::frame(),ant_dead.unwrap(),opaque,p.geometry().indices.len()/3,p.geometry().vertices.len());
+        }
+
+        let lite = !opaque && self.lite.is_some() && lite_pass(p);
         if lite { count("vita_fx_lite_draws", 1); }
-        let pipeline = if lite { self.lite.as_ref().unwrap().pipelines.get(&key) } else { self.pipelines.get(&key) }
+        let pipeline = if opaque {self.corpse_opaque.as_ref().unwrap().pipelines.get(&key)} else if lite { self.lite.as_ref().unwrap().pipelines.get(&key) } else { self.pipelines.get(&key) }
             .expect("prewarmed LG actor pipeline");
         // Several actor layers can share one uploaded vertex/index page.
         // Texture bindings still belong to the individual layer packet.
@@ -581,7 +601,7 @@ impl Gpu {
         let b = &self.buffers[slot].bindings;
         let apply = if c.fx_submit_state_cache {
             // The lean program's pipelines are other state: offset its key past every blend.
-            self.submit_cache.observe((key.0 + if lite { crate::render::BLEND_COUNT } else { 0 }, key.1, depth_write),
+            self.submit_cache.observe((key.0 + if opaque {2*crate::render::BLEND_COUNT} else if lite { crate::render::BLEND_COUNT } else { 0 }, key.1, depth_write),
                 (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
         } else { [true; 3] };
         if apply[0] {
@@ -592,7 +612,11 @@ impl Gpu {
         if apply[1] { ctx.apply_bindings(b); self.stats.binding_sets += 1; }
         // The old uniform-only probe remains independently selectable with the
         // new cache disabled. Both observe the complete bit-exact payload.
-        let same = (c.gpu_state_probe || c.gpu_uniform_dedupe) && self.uniform_cache.observe(u);
+        let same = (c.gpu_state_probe || c.gpu_uniform_dedupe) && {
+            let cache=if opaque {&mut self.corpse_opaque.as_mut().unwrap().uniforms}
+                else if lite {&mut self.lite.as_mut().unwrap().uniforms} else {&mut self.uniform_cache};
+            cache.observe(u)
+        };
         if c.gpu_state_probe || c.gpu_uniform_dedupe {
             self.stats.uniform_requests += 1;
             self.stats.identical_uniforms += u64::from(same);
@@ -601,7 +625,7 @@ impl Gpu {
         let mut traffic = crate::render::uniform_fields::Traffic::default();
         if skip { self.stats.uniform_skips += 1; }
         else {
-            let fields = if lite { &mut self.lite.as_mut().unwrap().fields } else { &mut self.field_uniforms };
+            let fields = if opaque {&mut self.corpse_opaque.as_mut().unwrap().fields} else if lite { &mut self.lite.as_mut().unwrap().fields } else { &mut self.field_uniforms };
             traffic = fields.apply(ctx, u, c.uniform_field_cache);
             self.stats.uniform_bytes += traffic.bytes;
         }
@@ -669,6 +693,10 @@ impl Drop for Gpu {
             ctx.delete_pipeline(*p);
         }
         ctx.delete_shader(self.shader);
+        if let Some(l)=&self.corpse_opaque {
+            for p in l.pipelines.values() {ctx.delete_pipeline(*p);}
+            ctx.delete_shader(l.shader);
+        }
         if let Some(l) = &self.lite {
             for p in l.pipelines.values() { ctx.delete_pipeline(*p); }
             ctx.delete_shader(l.shader);
@@ -1197,7 +1225,8 @@ pub(crate) fn finish_world(
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
     gpu.field_uniforms.interrupt();
-    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); }
+    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
+    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
     let (mut groups, mut puffs, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -1211,6 +1240,7 @@ pub(crate) fn finish_world(
     if flush {
         boundary("flush_vita_3d_packets");
     }
+    super::corpse_triangles::process(&mut groups);
     let cuts = packet_cull::Cuts::new(crate::render::vita_renderer::config());
     if cuts.active() {
         if let Some(matrix) = FRAME.with(|f| f.borrow().projection) {
@@ -1219,6 +1249,8 @@ pub(crate) fn finish_world(
             packet_cull::cull(&mut gpu.bounds, &mut groups, &mut puffs, matrix, cuts, c.actor_layer_reuse || c.actor_single_prepare);
         }
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    super::corpse_triangles::report(&groups);
     {
         let c = crate::render::vita_renderer::config();
         if c.fx_add_zero_alpha_cut {
@@ -1379,7 +1411,7 @@ pub(crate) fn finish_world(
         let _census = crate::phase_census::span(if groups[id].passes.iter().all(|p| p.effect) {crate::phase_census::Region::FxSubmit} else {crate::phase_census::Region::ActorSubmit});
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
-            gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent);
+            gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent, groups[id].ant_dead);
         }
     };
     let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
@@ -1398,7 +1430,8 @@ pub(crate) fn finish_world(
     let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     count("vita_joint_alpha_groups", list.len() as u64);
     gpu.field_uniforms.interrupt();
-    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); }
+    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
+    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
     gpu.submit_cache.interrupt(); // External depth-mask change at the alpha boundary.
     unsafe {
         macroquad::miniquad::gl::glDepthMask(0);
@@ -1418,7 +1451,8 @@ pub(crate) fn finish_world(
                     gpu.uniform_cache.interrupt();
                     gpu.submit_cache.interrupt();
                     gpu.field_uniforms.interrupt();
-                    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); }
+                    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
+                    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
                     let start = world_totals.and_then(|t| t.borrow().start());
                     let world_started = MetricInstant::now();
                     // Only immediately adjacent world callbacks share state. An actor, even one
@@ -1907,6 +1941,7 @@ mod tests {
     }
     fn fixture_group() -> super::super::Group {
         super::super::Group {
+            ant_dead: None,
             transparent: true,
             passes: vec![Pass {
                 _game_thread: crate::game_thread::GameThread::default(),

@@ -1,5 +1,9 @@
 //! One transparent queue for world, skin, pickup and effect geometry.
 //! Packets own their uniforms: shared pipeline state never leaks across actors.
+#[cfg(feature="vita_renderer")]
+pub(crate) mod corpse_triangles;
+#[cfg(feature="vita_renderer")]
+pub(crate) mod corpse_opaque;
 use crate::{
     assets::Assets,
     environment::Atmosphere,
@@ -67,6 +71,8 @@ impl Pass {
     }
 }
 struct Group {
+    #[cfg(feature="vita_renderer")]
+    ant_dead: Option<bool>,
     #[cfg(feature = "vita_renderer")]
     transparent: bool,
     passes: Vec<Pass>,
@@ -388,6 +394,7 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
             f.vertices += count;
             let transparent = transparent || f.depth_read_only;
             f.groups.push(Group {
+                ant_dead: corpse_triangles::active(),
                 passes,
                 transparent,
             });
@@ -414,6 +421,8 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
         }
         f.vertices += count;
         f.groups.push(Group {
+            #[cfg(feature="vita_renderer")]
+            ant_dead: corpse_triangles::active(),
             passes,
             #[cfg(feature = "vita_renderer")]
             transparent: true,
