@@ -9,6 +9,28 @@ use std::ops::Range;
 const MAX_INDEX_BYTES: usize = 512 * 1024;
 const MAX_GROUPS: usize = 16 * 1024;
 
+fn claim_frame(previous: &std::cell::Cell<Option<u32>>, frame: u32) -> bool {
+    if previous.get() == Some(frame) {
+        return false;
+    }
+    previous.set(Some(frame));
+    true
+}
+#[cfg(target_os = "vita")]
+fn claim_upload_frame() -> bool {
+    // This is the linked VitaGL swap counter, NOT a diagnostic/gameplay counter.
+    // A thread-local token covers all renderers, including replacement/preview loads.
+    unsafe extern "C" {
+        static vgl_framecount: u32;
+    }
+    thread_local! { static PREVIOUS: std::cell::Cell<Option<u32>>=const { std::cell::Cell::new(None) }; }
+    PREVIOUS.with(|previous| claim_frame(previous, unsafe { vgl_framecount }))
+}
+#[cfg(not(target_os = "vita"))]
+fn claim_upload_frame() -> bool {
+    true
+}
+
 pub(super) fn eligible(r: &Recipe) -> bool {
     !r.opaque && r.model.is_none() && r.motion.is_none() && r.deform.is_none()
 }
@@ -273,6 +295,13 @@ impl Gather {
         if self.scratch.is_empty() {
             return;
         }
+        if !claim_upload_frame() {
+            self.emissions.fill(Emission::Single);
+            self.scratch.clear();
+            self.members.clear();
+            count("vita_world_alpha_range_same_frame_fallback", 1);
+            return;
+        }
         if world_list::negative("alpha-range-index-order") && self.scratch.len() >= 6 {
             self.scratch.swap(0, 3);
         }
@@ -407,6 +436,14 @@ impl Gather {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn one_upload_token_covers_same_frame_and_counter_wrap() {
+        let previous = std::cell::Cell::new(None);
+        for frame in [0, 1, u32::MAX, 0, 1] {
+            assert!(claim_frame(&previous, frame));
+            assert!(!claim_frame(&previous, frame));
+        }
+    }
     #[test]
     fn byte_count_and_triangle_arithmetic_is_checked() {
         assert_eq!(checked_end(0, 6, 6), Some(6));
