@@ -68,6 +68,8 @@ pub struct Config {
     /// Yes/no collision questions (flying route clearance, the ground walk's horizontal move) stop at the
     /// first hull that blocks instead of finding the nearest one. Same answers (`collision.rs`, `sweep_blocked`).
     pub sim_sweep_blocked: bool,
+    /// Answer solid yes/no sweeps during SAH traversal without collecting and sorting candidates.
+    pub sim_sweep_any: bool,
     /// Do not draw a dead Ant whose body centre is closer to the camera than this many units. A corpse
     /// against the low camera covers the screen several times over (`npc.rs`, `near_culled`). 0 is off.
     pub actor_near_cull: f32,
@@ -465,6 +467,7 @@ impl Default for Config {
             spike_log_ms: 0.,
             audio_combat_preload: false,
             sim_sweep_blocked: false,
+            sim_sweep_any: false,
             actor_near_cull: 0.,
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
@@ -3112,11 +3115,19 @@ mod tests {
         assert_eq!(raw["world_gxm"], "live");
         assert_eq!(raw["tls_fast"], "on");
     }
+    #[test]
+    fn sweep_any_is_default_off_and_strict() {
+        assert!(!Config::default().sim_sweep_any);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().sim_sweep_any);
+        assert!(serde_json::from_str::<Config>(r#"{"sim_sweep_any":true}"#).unwrap().sim_sweep_any);
+        assert!(serde_json::from_str::<Config>(r#"{"sim_sweep_any":1}"#).is_err());
+    }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
-        let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch").cloned().collect::<Vec<_>>();
+        assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
+        let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any").cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -3676,7 +3687,7 @@ mod tests {
             const A5_FIGHT: [&str; 4] = ["spike_log_ms", "audio_combat_preload", "sim_sweep_blocked", "actor_near_cull"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
-                    && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch").cloned().collect();
+                    && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any").cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();

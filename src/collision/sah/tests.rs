@@ -3,6 +3,13 @@ fn check(g:&StaticGeometry,a:Vec3,b:Vec3,h:Vec3)->Counts {
     let q=SweepBounds::new(a,b,h);let mut c=Counts::default();
     let expected=g.legacy_trace(a,b,h,&q,&mut Counts::default());
     let actual=g.trace_inner(a,b,h,&q,&mut c);
+    let blocked = crate::sim_maps::with_sweep_any(true, || {
+        g.sah.as_ref().unwrap().blocked(g, a, b, h, &q, &mut Counts::default())
+    }).unwrap_or_else(|| {
+        let t = g.legacy_trace(a, b, h, &q, &mut Counts::default());
+        t.start_solid || t.fraction < 1.
+    });
+    assert_eq!(blocked, expected.start_solid || expected.fraction < 1., "unordered a={a:?} b={b:?} half={h:?}");
     assert_eq!(bits(actual),bits(expected),"a={a:?} b={b:?} half={h:?}");c
 }
 fn accelerated(mut w:World)->World {
@@ -233,4 +240,28 @@ fn geometry_share_reuses_only_a_live_bit_identical_geometry() {
     let fresh = StaticGeometry::shared_or_built(hulls(), true);
     assert_eq!(builds(), before + 1);
     drop(fresh);
+}
+
+#[test]
+fn unordered_boolean_traversal_stops_before_collecting_a_dense_query() {
+    let boxes: Vec<_> = (0..300).map(|i| {
+        let p = Vec3::new((i % 10) as f32 * 4., ((i / 10) % 10) as f32 * 4., (i / 100) as f32 * 4.);
+        (p, p + Vec3::splat(3.))
+    }).collect();
+    let w = accelerated(World::fixture(&boxes));
+    let g = &w.static_geometry;
+    let a = Vec3::splat(-1.);
+    let b = Vec3::splat(40.);
+    let h = Vec3::splat(100.);
+    let q = SweepBounds::new(a, b, h);
+    let scope = crate::kernel_alloc::Scope::begin();
+    let mut counts = Counts::default();
+    let answer = crate::sim_maps::with_sweep_any(true, || {
+        g.sah.as_ref().unwrap().blocked(g, a, b, h, &q, &mut counts)
+    });
+    assert_eq!(scope.finish(), 0);
+    assert_eq!(answer, Some(true), "no candidate-buffer overflow fallback");
+    assert!(counts.tested < 8 && counts.clipped == 1, "{counts:?}");
+    let expected = g.legacy_trace(a, b, h, &q, &mut Counts::default());
+    assert!(expected.start_solid || expected.fraction < 1.);
 }

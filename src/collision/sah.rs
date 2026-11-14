@@ -142,11 +142,40 @@ impl Hierarchy {
     }
 }
 impl Hierarchy {
+    /// A boolean answer does not depend on candidate order. Keep every spatial and legacy
+    /// certificate predicate, but stop the traversal on the first admitted blocking hull.
+    /// The tree is immutable and its build depth is capped at 48; no scratch buffer can overflow.
+    fn blocked_any(&self, id: u32, g: &StaticGeometry, a: Vec3, b: Vec3, h: Vec3,
+                   q: &SweepBounds, cache: &mut [u32; CERT_CACHE], c: &mut Counts) -> bool {
+        c.nodes += 1;
+        let n = &self.nodes[id as usize];
+        if !q.overlaps(n.bounds) { return false; }
+        if n.second & LEAF == 0 {
+            return self.blocked_any(n.first, g, a, b, h, q, cache, c)
+                || self.blocked_any(n.second, g, a, b, h, q, cache, c);
+        }
+        for &rank in &self.indices[n.first as usize..n.first as usize + (n.second & !LEAF) as usize] {
+            c.tested += 1;
+            let original = self.order[rank as usize];
+            let hull = &g.hulls[original.hull as usize];
+            if !q.overlaps(hull.bounds) { continue; }
+            c.clipped += 1;
+            let mut result = Trace::default();
+            clip_hull_counted(hull, a, b, h, &mut result, c);
+            if (result.start_solid || result.fraction < 1.) && self.admitted(original.leaf, q, cache, c) {
+                return true;
+            }
+        }
+        false
+    }
     /// `trace` that returns at the first admitted candidate changing the result. Every change
     /// `clip_hull` makes is a start in solid or a fraction below 1, so this is `trace`'s yes/no answer.
     pub fn blocked(&self,g:&StaticGeometry,a:Vec3,b:Vec3,h:Vec3,q:&SweepBounds,c:&mut Counts)->Option<bool> {
         if !self.finite||!a.is_finite()||!b.is_finite()||!h.is_finite()||h.cmplt(Vec3::ZERO).any()||!(b-a).is_finite()||
             !q.inverse.is_finite()||!q.padding.is_finite()||!q.bounds.min.is_finite()||!q.bounds.max.is_finite(){return None;}
+        if crate::sim_maps::sweep_any() {
+            return Some(self.blocked_any(0, g, a, b, h, q, &mut [NONE; CERT_CACHE], c));
+        }
         let mut candidates=[0u32;CANDIDATES];let mut len=0;
         if !self.gather(0,g,q,&mut candidates,&mut len,c){return None;}
         candidates[..len].sort_unstable();

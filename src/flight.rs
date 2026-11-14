@@ -83,6 +83,18 @@ fn route(world: &World, start: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
     if let Some(t) = timer {
         crate::spike_log::planner(crate::spike_log::FLIGHT_ROUTE, t.elapsed().as_secs_f64() * 1000., expanded, tests);
     }
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    if std::env::var_os("LOOKING_GLASS_FLIGHT_BENCH").is_some() {
+        // Host-only repetitions of this immutable snapshot, excluded from console builds.
+        for trial in 0..24 {
+            let now = std::time::Instant::now();
+            let answer = search(start, goal, &mut |a, b| clear(world, a, b, half));
+            let ms = now.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(answer, (path.clone(), expanded));
+            println!("[lg/flight-bench] trial={trial} any={} blocked={} ms={ms:.4}",
+                crate::sim_maps::sweep_any(), crate::sim_maps::sweep_blocked());
+        }
+    }
     // Host diagnostics: every search with its inputs, to see which ones repeat.
     #[cfg(not(target_os = "vita"))]
     if std::env::var_os("LOOKING_GLASS_ROUTE_TRACE").is_some() {

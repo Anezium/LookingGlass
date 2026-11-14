@@ -1224,11 +1224,13 @@ impl World {
     /// With `sim_sweep_blocked` it stops at the first hull that blocks, where `sweep` keeps clipping to
     /// find the nearest one. It visits the same geometry in the same order with the same broad phase, and
     /// every change `clip_hull` makes to a trace is a block, so the first change answers. A trace's
+    /// `sim_sweep_any` also enables this path, using unordered static traversal with the same hull
+    /// and legacy admission tests. Only the boolean answer is used. A trace's
     /// fraction is never NaN (`clip_hull` stores only finite values), so `fraction < 1` and
     /// `!(fraction >= 1)` are the same test.
     pub(crate) fn sweep_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
         let full = |t: Trace| t.start_solid || t.fraction < 1.;
-        if !crate::sim_maps::sweep_blocked() { return full(self.sweep(start, end, half)); }
+        if !crate::sim_maps::sweep_blocked() && !crate::sim_maps::sweep_any() { return full(self.sweep(start, end, half)); }
         let _census = crate::phase_census::query_sweep(self,start,end,half,1,None);
         if self.sweep_memo.borrow().active {
             let key = Self::query_key(start, end, half);
@@ -1851,6 +1853,7 @@ mod tests {
                 let t = world.sweep(a, b, half);
                 let full = t.start_solid || t.fraction < 1.;
                 assert_eq!(crate::sim_maps::with_sweep_blocked(true, || world.sweep_blocked(a, b, half)), full, "{a} {b} {half} sah={sah}");
+                assert_eq!(crate::sim_maps::with_sweep_any(true, || world.sweep_blocked(a, b, half)), full, "unordered {a} {b} {half} sah={sah}");
                 assert_eq!(world.sweep_blocked(a, b, half), full);
                 checked += 1; blocked += usize::from(full);
             }
