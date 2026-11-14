@@ -1364,7 +1364,16 @@ impl World {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if std::env::var_os("LOOKING_GLASS_FLIGHT_VERIFY").is_some() {
             let full=self.sweep_except(start,end,half,None);
-            assert_eq!(answer,full.start_solid || full.fraction<1.,"flight certificate differs {start} {end} {half}");
+            let solid=full.start_solid || full.fraction<1.;
+            assert_eq!(answer,solid,"flight certificate differs {start} {end} {half}");
+            // The full clearance predicate also tests five liquid probes shifted down by
+            // half.z. Check the memoised certificate against the original probe loop.
+            let shift=Vec3::Z*half.z;
+            let probes=(0..=4).all(|i| self.liquid_at(start.lerp(end,i as f32/4.)-shift)==0);
+            let memo=crate::flight::liquid_clear(self,start,end,half);
+            assert_eq!(memo,probes,"flight liquid certificate differs {start} {end} {half}");
+            assert_eq!(answer||!memo,solid||!probes,
+                "flight full clearance differs {start} {end} {half}");
         }
         answer
     }

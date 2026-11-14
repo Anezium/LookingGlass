@@ -18,6 +18,24 @@ fn memo_enabled() -> bool {
     #[cfg(not(feature="vita_renderer"))]
     { false }
 }
+/// The five liquid probes the original predicate tests, with exactly its `lerp` and
+/// subtraction. Rounding can put the last one outside `[a, b]`, so certificates must
+/// bound these computed points, not the endpoints.
+fn liquid_probes(a: Vec3, b: Vec3, half: Vec3) -> [Vec3; 5] {
+    let shift = Vec3::Z * half.z;
+    std::array::from_fn(|i| a.lerp(b, i as f32 / 4.) - shift)
+}
+/// The memoised liquid test. A liquid AABB that misses the box around the five computed
+/// probes proves every probe is 0 exactly; otherwise the original probes answer.
+pub(crate) fn liquid_clear(world: &World, a: Vec3, b: Vec3, half: Vec3) -> bool {
+    let probes = liquid_probes(a, b, half);
+    let (mut min, mut max) = (probes[0], probes[0]);
+    for p in &probes[1..] {
+        min = min.min(*p);
+        max = max.max(*p);
+    }
+    world.liquid_box_clear(min, max) || probes.iter().all(|p| world.liquid_at(*p) == 0)
+}
 fn clear(world: &World, a: Vec3, b: Vec3, half: Vec3, memo: bool) -> bool {
     if !memo { return !world.sweep_blocked(a, b, half)
         && (0..=4).all(|i| world.liquid_at(a.lerp(b, i as f32 / 4.) - Vec3::Z * half.z) == 0); }
@@ -28,11 +46,7 @@ fn clear(world: &World, a: Vec3, b: Vec3, half: Vec3, memo: bool) -> bool {
     if split { world.count_flight_probe(9, 1); }
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let mark = split.then(std::time::Instant::now);
-    // The five probes lie on the segment shifted down by half.z, so their box is the
-    // segment's box. If no liquid AABB reaches that box, every probe is 0 exactly.
-    let shift = Vec3::Z * half.z;
-    let liquid = world.liquid_box_clear(a.min(b) - shift, a.max(b) - shift)
-        || (0..=4).all(|i| world.liquid_at(a.lerp(b, i as f32 / 4.) - shift) == 0);
+    let liquid = liquid_clear(world, a, b, half);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     if let Some(mark) = mark {
         world.add_flight_probe(5, mark.elapsed().as_nanos() as u64);
@@ -336,5 +350,55 @@ mod tests {
             assert_eq!(world.liquid_at(at - Vec3::Z * 24.), 0);
         }
         assert!(at.distance(vec3(300., 0., 50.)) < 1.);
+    }
+    #[test]
+    fn liquid_certificate_bounds_the_computed_probes() {
+        let mut world = World::fixture(&[]);
+        world.add_liquid(vec3(0., -10., -10.), vec3(10., 10., 10.), 8, None);
+        let a = vec3(-8192., 0., 24.);
+        let b = vec3(-0.0001, 0., 24.);
+        let half = Vec3::splat(24.);
+        let shift = Vec3::Z * half.z;
+        // f32 cancellation puts the t=1 probe at the origin, outside the endpoint box.
+        let probe = a.lerp(b, 1.) - shift;
+        assert_eq!(probe, Vec3::ZERO);
+        assert_ne!(world.liquid_at(probe), 0);
+        assert!(world.liquid_box_clear(a.min(b) - shift, a.max(b) - shift));
+        assert!(!liquid_clear(&world, a, b, half));
+        assert!(!clear(&world, a, b, half, true));
+        assert!(!clear(&world, a, b, half, false));
+    }
+    #[test]
+    fn liquid_certificate_cases_on_shipped_maps() {
+        // These are the review's targeted real-map counterexamples. The host copy is used
+        // when present; the suite still runs without the private game data.
+        let dir = std::env::var_os("LOOKING_GLASS_TEST_DATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(
+                "/Users/anezium/vita-work/alice-data/Alice1/bin/base"));
+        if !dir.is_dir() {
+            println!("skipping shipped map liquid cases: {} absent", dir.display());
+            return;
+        }
+        let mut assets = crate::assets::Assets::open(&dir).unwrap();
+        for (name, a, b, hz) in [
+            ("hatter1", vec3(-7552., 3996., 88.), vec3(-7552., 3996., 8.000001), 24.),
+            ("hedge3", vec3(3612., -2048., 224.), vec3(3612., -2048., 64.00001), 32.),
+        ] {
+            let map = crate::bsp::Bsp::parse(&assets.read(&format!("maps/{name}.bsp")).unwrap()).unwrap();
+            let world = World::actor_world(&map).unwrap();
+            let half = Vec3::splat(hz);
+            let trace = world.sweep_except(a, b, half, None);
+            assert!(!trace.start_solid && trace.fraction >= 1.,
+                "{name}: the solid sweep must be clear");
+            let shift = Vec3::Z * half.z;
+            assert!(world.liquid_box_clear(a.min(b) - shift, a.max(b) - shift),
+                "{name}: the endpoint box must still be the counterexample");
+            assert!(!clear(&world, a, b, half, false),
+                "{name}: the original probes must reject");
+            assert!(!clear(&world, a, b, half, true),
+                "{name}: the liquid certificate must reject");
+            println!("liquid certificate case {name} rejected by the computed probes");
+        }
     }
 }
