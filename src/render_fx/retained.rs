@@ -395,7 +395,8 @@ impl Gpu {
                 fragment: &crate::environment::fragment(crate::render::FX_LITE_FRAGMENT) }, meta())
                 .map_err(|e| eprintln!("[lg/vita-renderer] warning fx_lite program failed, key off: {e:?}")).ok()
         }).flatten().map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
-        let corpse_opaque = crate::render::vita_renderer::config().ant_corpse_opaque_shader.then(|| {
+        let c=crate::render::vita_renderer::config();
+        let corpse_opaque = (c.ant_corpse_opaque_shader || c.actor_opaque_shader).then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name=crate::shader_cache::Name::new("retained-ant-corpse-opaque");
             let fragment=crate::lighting::fragment(&crate::environment::fragment(&super::corpse_opaque::fragment()));
@@ -580,8 +581,12 @@ impl Gpu {
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
         let key = (p.blend_index, p.depth_equal);
-        let opaque = ant_dead==Some(true) && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
-        if opaque {count("vita_ant_corpse_opaque_draws",1);}
+        let c=crate::render::vita_renderer::config();
+        let opaque = (ant_dead==Some(true) && c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+            && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
+        if opaque {
+            count(if ant_dead==Some(true) {"vita_ant_corpse_opaque_draws"} else {"vita_actor_opaque_draws"},1);
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if ant_dead.is_some() && std::env::var_os("LOOKING_GLASS_CORPSE_PROBE").is_some()
             && matches!(crate::sim_maps::probe::frame(),1400 | 1980 | 2030 | 2100..=2120) {

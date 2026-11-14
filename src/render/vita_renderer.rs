@@ -79,6 +79,9 @@ pub struct Config {
     /// Use the same fragment arithmetic without discard for certified opaque dead Ants.
     pub ant_corpse_opaque_shader: bool,
     pub diag_skip_live_actors: bool,
+    /// Use the discard-free program for every certified opaque actor/prop packet.
+    /// Draw order, geometry and fragment arithmetic stay unchanged. Default off.
+    pub actor_opaque_shader: bool,
     pub diag_skip_fx: bool,
     pub diag_skip_decals: bool,
     pub diag_skip_alpha_world: bool,
@@ -489,6 +492,7 @@ impl Default for Config {
             ant_corpse_triangle_cull: false,
             ant_corpse_opaque_shader: false,
             diag_skip_live_actors: false,
+            actor_opaque_shader: false,
             diag_skip_fx: false,
             diag_skip_decals: false,
             diag_skip_alpha_world: false,
