@@ -3665,6 +3665,31 @@ mod tests {
         }
     }
     #[test]
+    fn rc7_release_inputs_are_the_rc5_bytes_and_play_config_is_their_only_variant() {
+        use sha2::{Digest, Sha256};
+        let release_bytes = include_bytes!("../../configs/PL-release.json");
+        let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "e30b3000f223ff146585a813aeac331d1cbb76349c592e8b8e25b9a77ae2804b");
+        assert_eq!(format!("{:x}", Sha256::digest(sim_bytes)), "fa64b0c5b79c52d8e028f7fc9d0d3dd2eec57b7641dfc8f76b34212bdcb3334b");
+        let (release, rejected) = parse_runtime_config(release_bytes).unwrap();
+        assert!(rejected.is_none());
+        let baseline = serde_json::to_value(release).unwrap();
+        let bytes = include_bytes!("../../configs/PL-rc7-release-play04.json");
+        let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(historical_keys(&raw), historical_keys(&serde_json::to_value(Config::default()).unwrap()));
+        assert!(raw.get("sim_sweep_any").is_none() && raw.get("sim_flight_memo").is_none());
+        assert!(!raw.as_object().unwrap().keys().any(|key| key.starts_with("diag_skip_")
+            || matches!(key.as_str(), "spike_log_first_frame" | "spike_log_last_frame")));
+        let (play, rejected) = parse_runtime_config(bytes).unwrap();
+        assert!(rejected.is_none());
+        let mut variant = serde_json::to_value(play).unwrap();
+        assert_eq!(variant["replay_play"], "a2-04.lgtape");
+        assert_eq!(variant["log_frame_time_every"], 10);
+        variant["replay_play"] = baseline["replay_play"].clone();
+        variant["log_frame_time_every"] = baseline["log_frame_time_every"].clone();
+        assert_eq!(variant, baseline, "the RC7 play config changes only its two declared keys");
+    }
+    #[test]
     fn packaged_r3_config_contains_exactly_all_runtime_defaults() {
         let bytes = include_bytes!("../../configs/PL-def-r3.json");
         let c: Config = serde_json::from_slice(bytes).unwrap();
