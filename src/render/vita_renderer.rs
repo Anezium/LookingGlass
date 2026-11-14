@@ -2421,6 +2421,8 @@ impl Renderer {
         let gather = adjacent && !self.alpha_fill.active();
         let mut planned = false;
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id, continuation, joint| {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let _pixels = alpha_ranges::PixelProbe::new(id,&self.prepared,&self.groups);
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
@@ -2471,17 +2473,27 @@ impl Renderer {
                             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                             ranges.verify(id, actual_vertex, buffer, actual_base, actual_count,
                                 &self.prepared, &self.groups, &self.parameters, &self.pipelines, joint);
+                            let split = world_list::negative("alpha-range-split-draws");
+                            let physical_draws = if split { members.len() } else { 1 };
                             if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) {
-                                ctx.draw(actual_base, actual_count, 1);
+                                if split {
+                                    let mut cursor=actual_base;
+                                    for &member in members {
+                                        let count=self.groups[self.prepared[member].group].indices;
+                                        assert!(cursor.checked_add(count).is_some_and(|end|end<=actual_base+actual_count));
+                                        ctx.draw(cursor,count,1);cursor+=count;
+                                    }
+                                    assert_eq!(cursor,actual_base+actual_count);
+                                } else { ctx.draw(actual_base, actual_count, 1); }
                             }
                             totals.add(2, start);
-                            count("vita_world_gpu_draws", 1);
-                            count("vita_world_alpha_ranges_saved", (members.len()-1) as u64);
-                            count("vita_world_alpha_range_commands", 1);
+                            count("vita_world_gpu_draws", physical_draws as u64);
+                            count("vita_world_alpha_ranges_saved", (members.len()-physical_draws) as u64);
+                            count("vita_world_alpha_range_commands", physical_draws as u64);
                             count("vita_world_alpha_triangles", indices as u64 / 3);
                             count("vita_world_alpha_state_applications", 1);
                             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
-                                crate::light_profile::RenderMetrics { draws:1, pipelines:1, depth_states:1,
+                                crate::light_profile::RenderMetrics { draws:physical_draws as u64, pipelines:1, depth_states:1,
                                     bindings:1, texture_bind_slots:2, uniform_uploads:1,
                                     uniform_bytes:traffic.bytes, uniform_gl_calls:traffic.calls, ..Default::default() });
                             #[cfg(target_os="vita")]

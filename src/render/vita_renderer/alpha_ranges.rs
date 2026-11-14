@@ -445,7 +445,7 @@ impl Gather {
                     .append(true)
                     .open(path)
                     .unwrap();
-                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
+                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
             }
         }
     }
@@ -550,5 +550,80 @@ mod tests {
         assert!(g.originals[1].is_none());
         assert!(Gather::new(&[(60000, &a)], &[(0, 0, 3)], [true].into_iter()).is_none());
         assert!(Gather::new(&[(60001, &a)], &[(0, 7, 3)], [true].into_iter()).is_none());
+    }
+}
+
+/// Explicit host-only framebuffer checkpoint. Capture at every logical callback endpoint;
+/// compare the last original member against its joined run, not its early leader callback.
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+pub(super) struct PixelProbe {
+    id: usize,
+    group: usize,
+    image: String,
+    alpha_test: u8,
+}
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+impl PixelProbe {
+    pub fn new(id: usize, prepared: &[Prepared], groups: &[Group]) -> Option<Self> {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        if !*ENABLED.get_or_init(|| std::env::var_os("LOOKING_GLASS_ALPHA_PIXELS").is_some()) {
+            return None;
+        }
+        static FRAME: OnceLock<u64> = OnceLock::new();
+        if crate::sim_maps::probe::frame()
+            != *FRAME.get_or_init(|| {
+                std::env::var("LOOKING_GLASS_ALPHA_PIXELS_FRAME")
+                    .unwrap_or("120".into())
+                    .parse()
+                    .unwrap()
+            })
+        {
+            return None;
+        }
+        let group = prepared[id].group;
+        let recipe = &groups[group].recipe;
+        let probe = Self {
+            id,
+            group,
+            image: recipe.stage.images.join(";"),
+            alpha_test: recipe.stage.alpha_test,
+        };
+        probe.record("before");
+        Some(probe)
+    }
+    fn record(&self, phase: &str) {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let mut viewport = [0_i32; 4];
+        unsafe {
+            macroquad::miniquad::gl::glGetIntegerv(
+                macroquad::miniquad::gl::GL_VIEWPORT,
+                viewport.as_mut_ptr(),
+            );
+        }
+        let mut pixels = vec![0_u8; viewport[2] as usize * viewport[3] as usize * 4];
+        unsafe {
+            macroquad::miniquad::gl::glReadPixels(
+                viewport[0],
+                viewport[1],
+                viewport[2],
+                viewport[3],
+                macroquad::miniquad::gl::GL_RGBA,
+                macroquad::miniquad::gl::GL_UNSIGNED_BYTE,
+                pixels.as_mut_ptr().cast(),
+            );
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(std::env::var_os("LOOKING_GLASS_ALPHA_PIXELS").unwrap())
+            .unwrap();
+        writeln!(file,"{}",serde_json::json!({"frame":crate::sim_maps::probe::frame(),"phase":phase,"id":self.id,"group":self.group,"image":self.image,"alpha_test":self.alpha_test,"viewport":viewport,"sha256":format!("{:x}",Sha256::digest(&pixels))})).unwrap();
+    }
+}
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+impl Drop for PixelProbe {
+    fn drop(&mut self) {
+        self.record("after");
     }
 }
