@@ -14,12 +14,20 @@ performance opt-ins remain off. `replay_check_every=30` is inert without replay.
 `audio_log_thread=true` preserves the proven asynchronous reporting route; it is
 not an audio logging enable. Music threading and all live audio values are kept.
 
-The 17 renderer keys added after the played RC3 input are explicit neutral
+RC8 additionally enables three keys measured on the Vita on 2026-11-14:
+`sim_flight_memo` (route search 206 to 38 ms), `ant_corpse_opaque_shader` and
+`ant_corpse_triangle_cull` (the corpse GPU wait is gone). `sim_sweep_any`, the
+`diag_skip_*` keys, the spike window and every other opt-in stay off.
+`PL-rc7-release.json` keeps the RC7 release bytes for comparison; the RC8
+release differs from it only in those three keys.
+
+The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
 `detail_layers`, `sky_depth`, `sky_cube_capture_only`, `audio_combat_preload` and
 `sky_cube` are false; `sky_cube_size=256`, `actor_near_cull=0.0`,
-`spike_log_ms=0.0` and `sky_cube_refresh=0`. Water normals remain off.
+`spike_log_ms=0.0` and `sky_cube_refresh=0`. Water normals remain off. The three
+RC8 keys are true.
 
 `PL-played-rc3.json` is a test fixture, copied byte-for-byte from the played input
 `rc3/configs/PL-rc3.json` (SHA-256
