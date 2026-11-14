@@ -3576,7 +3576,9 @@ mod tests {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
-            assert_eq!(historical_keys(&raw), historical_keys(&defaults));
+            let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
+                .filter(|k| *k != "sim_sweep_any").cloned().collect::<Vec<_>>();
+            assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
             // Preserve authored decimal spelling (e.g. 0.001) while comparing the
