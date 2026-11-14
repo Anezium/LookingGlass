@@ -55,6 +55,7 @@ miniquad = { git = "https://github.com/Anezium/miniquad", rev = "41882db2507828d
 [package.metadata.vita]
 title_id = "ALICELG01"
 title_name = "American McGee's Alice"
+assets = "vita"
 build_std = "std,panic_unwind"
 vita_make_fself_flags = ["-s"]
 # APP_VER is the version LiveArea shows. vita-mksfoex writes title_name to both TITLE (128-byte
