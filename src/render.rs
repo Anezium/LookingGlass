@@ -2176,7 +2176,7 @@ impl Scene {
                 |b| (b.sky, b.model.is_none()));
             scene.authored_sky = legacy && !cube;
             if legacy && cube {
-                let keep = sky_cube::keeps_geometry(name, c.sky_cube_refresh);
+                let keep = c.sky_cube_retain || sky_cube::keeps_geometry(name, c.sky_cube_refresh);
                 // The sky shader drawn on the dome: the one on the most sky triangles, told apart by
                 // first texture. Entries: (first texture, first batch, triangles).
                 let mut shaders: Vec<(Option<macroquad::miniquad::TextureId>, usize, usize)> = Vec::new();
@@ -2312,6 +2312,7 @@ impl Scene {
             sky_cube::Plan::Face(face) => vec![face],
         };
         let started = std::time::Instant::now();
+        let config = vita_renderer::config();
         crate::render_tail::end();
         unsafe { get_internal_gl().flush(); }
         let saved = crate::render_fx::projection();
@@ -2325,7 +2326,7 @@ impl Scene {
             gl.quad_context.begin_pass(Some(pass), macroquad::miniquad::PassAction::Clear { color, depth: Some(1.), stencil: None });
             gl.quad_context.end_render_pass();
         };
-        if plan == sky_cube::Plan::All {
+        if plan == sky_cube::Plan::All || config.sky_cube_clear_only {
             let bg = self.atmosphere.background();
             clear(Some((bg.r, bg.g, bg.b, 1.)));
         }
@@ -2333,6 +2334,7 @@ impl Scene {
             .map(|(set, f)| (set, cube.camera(camera, set, f, draw_distance_far(30000.)))).collect::<Vec<_>>();
         let mut stats = DrawStats::default();
         for (set, view) in &cameras {
+            if config.sky_cube_clear_only { break; }
             set_camera(view);
             crate::render_fx::set_projection(view.matrix());
             // Faces never overlap, so clearing the whole depth between a face's two parts is safe.
@@ -2342,11 +2344,24 @@ impl Scene {
         pop_camera_state();
         unsafe { get_internal_gl().quad_gl.viewport(vita_renderer::world_viewport()); }
         crate::render_fx::restore_projection(saved);
+        // pop_camera_state submits the last face, but miniquad end_render_pass only changes the
+        // GL binding. vitaGL still has that GXM scene open until the next draw/clear or glFinish.
+        // Deleting a legacy material here calls glDeleteProgram -> sceGxmFinish without first
+        // closing that scene. Close and complete it before its shaders/textures can be retired.
+        // Keeping this explicit also isolates a capture-to-sampler dependency from retirement.
+        let finish_ms = if config.sky_cube_finish {
+            let start = std::time::Instant::now();
+            unsafe {
+                get_internal_gl().flush();
+                macroquad::miniquad::gl::glFinish();
+            }
+            start.elapsed().as_secs_f64() * 1000.
+        } else { 0. };
         let cube = self.sky_cube.as_mut().unwrap();
         let release = plan == sky_cube::Plan::All && !cube.keep_geometry;
-        println!("[lg/sky-cube] capture faces={} ms={:.3} batches={} culled={} triangles={} captures={} face_draws={} release_geometry={release}",
+        println!("[lg/sky-cube] capture faces={} ms={:.3} batches={} culled={} triangles={} captures={} face_draws={} release_geometry={release} finish={} finish_ms={finish_ms:.3} capture_only={} clear_only={}",
             faces.len(), started.elapsed().as_secs_f64() * 1000., stats.batches, stats.culled, stats.triangles,
-            cube.captures, cube.face_draws);
+            cube.captures, cube.face_draws, config.sky_cube_finish, config.sky_cube_capture_only, config.sky_cube_clear_only);
         #[cfg(not(target_os = "vita"))]
         if plan == sky_cube::Plan::All { sky_stats::dump_cube(&cube.target.texture, &cube.map, cube.captures); }
         if release {

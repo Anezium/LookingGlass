@@ -10,7 +10,7 @@
 //! the host picture shows what the Vita draws. `LOOKING_GLASS_VGL_SCENES=trace` prints
 //! every restart of frames 60 and 61 with its call site. Off unless the variable is set.
 #![allow(dead_code)] // `active` and `install_raw` serve only the frame-total table.
-use std::{cell::RefCell, collections::HashMap, ffi::c_void, sync::OnceLock};
+use std::{cell::RefCell, collections::{HashMap, HashSet}, ffi::c_void, sync::OnceLock};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode { Log, Emulate, Trace }
@@ -33,6 +33,10 @@ struct State {
     not_flushed: bool,
     /// The scene in use has received at least one draw.
     drawn: bool,
+    program: u32,
+    /// Programs submitted since the last modeled scene end. Host GL defers their deletion;
+    /// vitaGL's glDeleteProgram instead calls sceGxmFinish without ending an open scene.
+    scene_programs: HashSet<u32>,
     ended: HashMap<u32, Ended>,
     lost: Option<Ended>,
     sites: HashMap<String, u64>,
@@ -60,6 +64,7 @@ next! {
     BIND: fn(u32, u32), CLEAR: fn(u32), ELEMENTS: fn(u32, i32, u32, *const c_void),
     ARRAYS: fn(u32, i32, i32), ELEMENTS_I: fn(u32, i32, u32, *const c_void, i32),
     ARRAYS_I: fn(u32, i32, i32, i32), FLUSH: fn(), FINISH: fn(),
+    USE_PROGRAM: fn(u32), DELETE_PROGRAM: fn(u32),
     READ: fn(i32, i32, i32, i32, u32, u32, *mut c_void),
     BLIT: fn(i32, i32, i32, i32, i32, i32, i32, i32, u32, u32),
 }
@@ -100,7 +105,7 @@ fn scene(forced: Option<&str>, depth_cleared: bool, draws: bool) {
         s.draws += u64::from(draws);
         let target = s.bound;
         if s.in_use == Some(target) && forced.is_none() {
-            if draws { s.drawn = true; report(&mut s, target); }
+            if draws { let program = s.program; s.scene_programs.insert(program); s.drawn = true; report(&mut s, target); }
             return None;
         }
         let previous = s.in_use;
@@ -120,6 +125,8 @@ fn scene(forced: Option<&str>, depth_cleared: bool, draws: bool) {
             s.ended.insert(fb, Ended { frame: now, cause, trace: trace() });
         }
         s.drawn = false;
+        s.scene_programs.clear();
+        if draws { let program = s.program; s.scene_programs.insert(program); }
         if target == 0 { return None; }
         s.lost = None;
         if depth_cleared { s.ended.remove(&target); }
@@ -148,6 +155,22 @@ fn report(s: &mut State, target: u32) {
 unsafe extern "C" fn bind(target: u32, fb: u32) {
     if target == 0x8D40 || target == 0x8CA9 { STATE.with(|s| s.borrow_mut().bound = fb); }
     BIND.get().unwrap()(target, fb);
+}
+unsafe extern "C" fn use_program(program: u32) {
+    STATE.with(|s| s.borrow_mut().program = program);
+    USE_PROGRAM.get().unwrap()(program);
+}
+unsafe extern "C" fn delete_program(program: u32) {
+    STATE.with(|s| {
+        let s = s.borrow();
+        if s.scene_programs.contains(&program) {
+            println!("VGL_SCENE_PROGRAM_RETIRE {}", serde_json::json!({
+                "frame": frame(), "program": program, "open_scene_target": s.in_use,
+                "currently_bound_target": s.bound, "submitted_in_open_scene": true,
+            }));
+        }
+    });
+    DELETE_PROGRAM.get().unwrap()(program);
 }
 unsafe extern "C" fn clear(mask: u32) {
     scene(None, mask & 0x0100 != 0, false);
@@ -211,6 +234,8 @@ pub(super) fn wrap(name: &str, base: &dyn Fn(&str) -> *mut c_void) -> Option<*mu
         set(&DEPTH_MASK, base("glDepthMask")); set(&CLEAR_DEPTH, base("glClearDepth"));
         Some(match name {
             "glBindFramebuffer" => { set(&BIND, base(name)); bind as *const () as _ }
+            "glUseProgram" => { set(&USE_PROGRAM, base(name)); use_program as *const () as _ }
+            "glDeleteProgram" => { set(&DELETE_PROGRAM, base(name)); delete_program as *const () as _ }
             "glClear" => { set(&CLEAR, base(name)); clear as *const () as _ }
             "glDrawElements" => { set(&ELEMENTS, base(name)); elements as *const () as _ }
             "glDrawArrays" => { set(&ARRAYS, base(name)); arrays as *const () as _ }

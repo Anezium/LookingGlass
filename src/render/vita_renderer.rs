@@ -250,6 +250,19 @@ pub struct Config {
     /// With `sky_cube`: redraw one face every this many frames, in turn, so animated sky content
     /// moves. Keeps the legacy sky geometry for the whole map. 0 never redraws. Default 0.
     pub sky_cube_refresh: u32,
+    /// Diagnostic for the sky cube's first-frame GPU crash: keep the legacy resources after
+    /// capture. This does not enable animated refresh. Default off.
+    pub sky_cube_retain: bool,
+    /// Complete the offscreen capture before sampling its atlas or retiring its materials.
+    /// On vitaGL, glDeleteProgram waits for submitted scenes but does not close the current one;
+    /// glFinish closes it first. This wait runs only when a capture is made. Default off.
+    pub sky_cube_finish: bool,
+    /// Diagnostic: capture the cube normally but draw the gradient and sky depth instead of
+    /// sampling it. Used to separate capture/resource lifetime from atlas sampling. Default off.
+    pub sky_cube_capture_only: bool,
+    /// Diagnostic: clear the cube atlas without drawing the legacy sky into it, then sample it
+    /// normally (unless capture_only is on). Used to isolate atlas sampling. Default off.
+    pub sky_cube_clear_only: bool,
     /// With the gradient sky, draw the map's sky surfaces into depth before the world (colour writes
     /// off), so scenery placed behind the sky stays hidden, as on the desktop renderer.
     /// No effect with `authored_sky` or `sky: false`. Default off.
@@ -506,6 +519,10 @@ impl Default for Config {
             sky_cube: false,
             sky_cube_size: 256,
             sky_cube_refresh: 0,
+            sky_cube_retain: false,
+            sky_cube_finish: false,
+            sky_cube_capture_only: false,
+            sky_cube_clear_only: false,
             sky_depth: false,
             cell_size: 256.,
             alpha_interop: true,
@@ -2056,7 +2073,8 @@ impl Renderer {
             let sky = sky_gradient(bg, config().fog_sky && scene.atmosphere.distance.w > 0.);
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
-            let cube = scene.sky_cube.as_ref().filter(|c| c.ready()).filter(|_| self.sky_surfaces.is_some()).map(|c| {
+            let cube = scene.sky_cube.as_ref().filter(|c| c.ready())
+                .filter(|_| !config().sky_cube_capture_only && self.sky_surfaces.is_some()).map(|c| {
                 let rotation = if scene.sky_origin.is_some() {
                     scene.sky_rotation * scene.sky_motion.as_ref().map_or(Quat::IDENTITY, |m| m.transform(time).1)
                 } else { Quat::IDENTITY };
@@ -3566,7 +3584,8 @@ mod tests {
         // Keys added after RC2 that RC3 leaves at their off defaults.
         for key in ["packet_min_pixels", "world_min_pixels", "world_texture_sort", "water_stage_merge", "world_alpha_lite",
             "fx_lite", "fx_add_max_area", "water_normals", "low_fog", "fog_sky", "exact_blends", "detail_layers",
-            "sky_cube", "sky_cube_size", "sky_cube_refresh", "sky_depth"] {
+            "sky_cube", "sky_cube_size", "sky_cube_refresh", "sky_cube_retain", "sky_cube_finish",
+            "sky_cube_capture_only", "sky_cube_clear_only", "sky_depth"] {
             assert_eq!(rc3[key], defaults[key], "{key} off in RC3");
         }
         for key in ["replay_record", "replay_play", "replay_start", "replay_check_every", "replay_state_every", "replay_stop_after"] {
@@ -3590,6 +3609,8 @@ mod tests {
                 ("exact_blends", serde_json::json!(true)), ("detail_layers", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-sky.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
                 ("sky_cube", serde_json::json!(true))]),
+            (&include_bytes!("../../configs/PL-rc3-sky-finish.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
+                ("sky_cube", serde_json::json!(true)), ("sky_cube_finish", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-sky-depth.json")[..], vec![("low_fog", serde_json::json!(true)), ("fog_sky", serde_json::json!(true)),
                 ("sky_depth", serde_json::json!(true))]),
             (&include_bytes!("../../configs/PL-rc3-resolve.json")[..], vec![("scaled_target", serde_json::json!("resolve"))]),
@@ -3826,6 +3847,11 @@ mod tests {
         let c = Config::default();
         assert!(!c.sky_cube && !c.sky_depth && c.sky_cube_refresh == 0, "both sky keys default off");
         assert_eq!(c.sky_cube_size, 256);
+        assert!(!c.sky_cube_retain && !c.sky_cube_finish && !c.sky_cube_capture_only && !c.sky_cube_clear_only,
+            "capture diagnostics must not affect existing configurations");
+        let (diagnostic, rejected) = parse_runtime_config(br#"{"sky_cube_retain":true,"sky_cube_finish":true,"sky_cube_capture_only":true,"sky_cube_clear_only":true}"#).unwrap();
+        assert!(rejected.is_none() && diagnostic.sky_cube_retain && diagnostic.sky_cube_finish
+            && diagnostic.sky_cube_capture_only && diagnostic.sky_cube_clear_only);
         let (c, rejected) = parse_runtime_config(br#"{"sky_cube":true,"sky_cube_size":128,"sky_depth":true}"#).unwrap();
         assert!(rejected.is_none() && c.sky_cube && c.sky_depth && c.sky_cube_size == 128);
         c.validate().unwrap();
