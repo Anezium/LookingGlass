@@ -5,15 +5,20 @@ use super::*;
 pub(super) struct FlightGrid { origin: [i32;3], dims: [usize;3], bits: Vec<u64> }
 impl FlightGrid {
     const CELL: f64 = 64.;
+    /// Hull padding. `proves_clear` admits half extents up to 32 and the sweep adds
+    /// SKIN = 1/32; the covered cell box always contains the segment, so any true hit
+    /// puts a covered cell within `half + SKIN` of the hull. 33 covers that with margin
+    /// and was verified on the tape; the old 64 only kept fewer cells empty.
+    const PAD: f64 = 33.;
     const LIMIT: f32 = 1_000_000.;
     pub(super) fn build(hulls: &[Hull]) -> Option<Self> {
         if hulls.is_empty() || hulls.iter().any(|h| !h.bounds.min.is_finite() || !h.bounds.max.is_finite()
             || h.bounds.min.cmpgt(h.bounds.max).any() || h.bounds.min.abs().max_element()>Self::LIMIT || h.bounds.max.abs().max_element()>Self::LIMIT) { return None; }
-        // Query half extents are at most 32, with SKIN=1/32. Padding 64 also covers float
-        // rounding at the admitted coordinate limit (ulp <= 1/16). Quantization here is f64.
+        // The covered cell box contains the segment; padding covers half + SKIN at the
+        // admitted coordinate limit (f32 ulp there is 1/16, and cell() is exact).
         let range=|h:&Hull| {
-            let lo=h.bounds.min.to_array().map(|x|((f64::from(x)-64.)/Self::CELL).floor() as i32);
-            let hi=h.bounds.max.to_array().map(|x|((f64::from(x)+64.)/Self::CELL).floor() as i32);
+            let lo=h.bounds.min.to_array().map(|x|((f64::from(x)-Self::PAD)/Self::CELL).floor() as i32);
+            let hi=h.bounds.max.to_array().map(|x|((f64::from(x)+Self::PAD)/Self::CELL).floor() as i32);
             (lo,hi)
         };
         let mut origin=[i32::MAX;3];let mut end=[i32::MIN;3];
@@ -41,11 +46,31 @@ impl FlightGrid {
         Some(out)
     }
     pub(super) fn bytes(&self)->usize {self.bits.capacity()*8}
+    /// Host-only: would an otherwise identical grid with `cell` and hull `padding` certify
+    /// this segment? Same quantization as the built grid.
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    pub(super) fn would_certify(hulls:&[Hull],a:Vec3,b:Vec3,cell:f32,pad:f64)->bool {
+        let q=|x:f32|{let scaled=x/cell;let i=scaled as i32;i-i32::from(scaled<i as f32||(i==0&&x<0.))};
+        let mut lo=[0i32;3];let mut hi=[0i32;3];
+        for axis in 0..3 {lo[axis]=q(a[axis].min(b[axis]));hi[axis]=q(a[axis].max(b[axis]));}
+        for h in hulls {
+            let mut hit=true;
+            for axis in 0..3 {
+                let hlo=((f64::from(h.bounds.min[axis])-pad)/f64::from(cell)).floor() as i32;
+                let hhi=((f64::from(h.bounds.max[axis])+pad)/f64::from(cell)).floor() as i32;
+                if hhi<lo[axis]||hlo>hi[axis] {hit=false;break;}
+            }
+            if hit {return false;}
+        }
+        true
+    }
     fn index(&self,x:usize,y:usize,z:usize)->usize {(x*self.dims[1]+y)*self.dims[2]+z}
     pub(super) fn proves_clear(&self,a:Vec3,b:Vec3,half:Vec3)->bool {
+        // Long queries are the majority in a capped search and can never certify; the
+        // length test is exact and cheapest first.
+        if (a-b).length_squared()>160.*160. {return false;}
         if !a.is_finite() || !b.is_finite() || !half.is_finite() || half.cmplt(Vec3::ZERO).any()
             || half.cmpgt(Vec3::splat(32.)).any() || a.abs().max_element()>Self::LIMIT || b.abs().max_element()>Self::LIMIT
-            || (a-b).length_squared()>160.*160.
             || (0..3).filter(|&axis|a[axis]!=b[axis]).count()>1 {return false;}
         // Power-of-two scaling is exact apart from tiny underflow near zero. Keep
         // the original sign for that case; avoid per-query double/libm on the Vita.
@@ -91,5 +116,30 @@ mod tests {
         assert!(!grid.proves_clear(Vec3::ZERO,Vec3::X,Vec3::splat(33.)));
         assert!(!grid.proves_clear(Vec3::NAN,Vec3::ZERO,Vec3::ZERO));
         assert!(!grid.proves_clear(Vec3::ZERO,Vec3::ONE,Vec3::ZERO));
+    }
+    #[test]
+    fn padding_covers_the_admitted_half_extents_but_no_more() {
+        // A hull whose padded cell range misses the query's cell proves the segment clear.
+        // 64-unit padding marked that cell and refused the certificate; 33 must not.
+        let world=World::fixture(&[(vec3(100.,-50.,-50.),vec3(110.,50.,50.))]);
+        let grid=FlightGrid::build(&world.static_geometry.hulls).unwrap();
+        let a=vec3(0.,5.,5.);let b=vec3(10.,5.,5.);let half=Vec3::splat(32.);
+        assert!(grid.proves_clear(a,b,half),"a clear segment in an empty cell must certify");
+        assert!(!world.sweep(a,b,half).start_solid && world.sweep(a,b,half).fraction==1.);
+        // Just short of half + SKIN the sweep reaches the hull; neither the trace nor the
+        // grid may call that clear.
+        let near=vec3(100.0-half.x+0.5,5.,5.);
+        assert!(world.sweep(a,near,half).fraction<1.);
+        assert!(!grid.proves_clear(a,near,half));
+        // Just past half + SKIN the sweep is clear, but the cells are still shared here.
+        let past=vec3(100.0-half.x-SKIN-0.5,5.,5.);
+        let t=world.sweep(a,past,half);
+        assert!(!t.start_solid && t.fraction==1.);
+        // A segment through the hull is never certified and is a hit.
+        let through=vec3(110.,5.,5.);
+        assert!(world.sweep(a,through,half).fraction<1.);
+        assert!(!grid.proves_clear(a,through,half));
+        // Half extents beyond the admitted maximum are never certified.
+        assert!(!grid.proves_clear(a,b,Vec3::splat(32.5)));
     }
 }
