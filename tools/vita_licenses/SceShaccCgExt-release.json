@@ -1,0 +1,10 @@
+{
+  "archive": "libSceShaccCgExt.a",
+  "source": "https://github.com/bythos14/SceShaccCgExt",
+  "revision": "d3c83efceedeca3be863d0c1f19bb145daf1685f",
+  "license": "LGPL-2.1",
+  "license_file": "SceShaccCgExt-LICENSE",
+  "license_sha256": "20c17d8b8c48a600800dfd14f95d5cb9ff47066a9641ddeab48dc54aec96e331",
+  "archive_sha256": "a5f9a3d0e5134bbfe144bdca52e4897aeae3c33edd6966da51e1ffc20cb8eb05",
+  "known_sdk_gpl_sha256": "42448da6ebfdc679458702492da467481b3dbcacfd2c254b28f08dba539d2a4a"
+}
