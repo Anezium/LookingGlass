@@ -88,7 +88,7 @@ fn route(world: &World, start: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
         // Host-only repetitions of this immutable snapshot, excluded from console builds.
         for trial in 0..24 {
             let now = std::time::Instant::now();
-            let answer = search(start, goal, &mut |a, b| clear(world, a, b, half));
+            let answer = search(start, goal, &mut |a, b| crate::flight::clear(world, a, b, half));
             let ms = now.elapsed().as_secs_f64() * 1000.;
             assert_eq!(answer, (path.clone(), expanded));
             println!("[lg/flight-bench] trial={trial} any={} blocked={} ms={ms:.4}",

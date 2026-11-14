@@ -3076,7 +3076,8 @@ mod tests {
         let bytes = include_bytes!("../../configs/PL-release.json");
         let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         let defaults = serde_json::to_value(Config::default()).unwrap();
-        assert_eq!(raw.as_object().unwrap().keys().collect::<Vec<_>>(), defaults.as_object().unwrap().keys().collect::<Vec<_>>(), "every release input must be explicit");
+        assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
+        assert_eq!(historical_keys(&raw), historical_keys(&defaults), "every original release input remains explicit");
         let (parsed, rejected) = parse_runtime_config(bytes).unwrap();
         assert!(rejected.is_none());
         let played_raw: serde_json::Value = serde_json::from_slice(played_bytes).unwrap();
@@ -3574,7 +3575,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            assert_eq!(raw.as_object().unwrap().keys().collect::<Vec<_>>(), defaults.as_object().unwrap().keys().collect::<Vec<_>>());
+            assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
+            assert_eq!(historical_keys(&raw), historical_keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
             // Preserve authored decimal spelling (e.g. 0.001) while comparing the
@@ -3616,7 +3618,10 @@ mod tests {
         let bytes = include_bytes!("../../configs/PL-def-r3.json");
         let c: Config = serde_json::from_slice(bytes).unwrap();
         c.validate().unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(bytes).unwrap(), serde_json::to_value(Config::default()).unwrap());
+        let mut written = serde_json::from_slice::<serde_json::Value>(bytes).unwrap();
+        assert!(!c.sim_sweep_any);
+        written["sim_sweep_any"] = false.into();
+        assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
     #[test]
     fn human_play_configs_differ_only_in_the_two_reuse_levers() {
