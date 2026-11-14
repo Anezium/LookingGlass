@@ -692,6 +692,16 @@ enum Source {
     Actor(usize),
     Puff(usize),
 }
+#[derive(Default)]
+struct WorldContinuity(bool);
+impl WorldContinuity {
+    fn observe(&mut self, source: Source) -> bool {
+        let world = matches!(source, Source::World(_));
+        let continuation = self.0 && world;
+        self.0 = world;
+        continuation
+    }
+}
 fn order(mut list: Vec<(f32, Source)>, sort: bool) -> Vec<(f32, Source)> {
     // Stable sort keeps authored world layer ties and actor group submission ties.
     if sort {
@@ -1144,7 +1154,7 @@ pub(crate) fn finish(
     flush: bool,
     mut draw_world: impl FnMut(usize),
 ) -> (usize, usize) {
-    finish_world(gpu, world, flush, &mut draw_world, None)
+    finish_world(gpu, world, flush, |id, _| draw_world(id), None)
 }
 /// Host probe: what reaches the joint list, and how many quads cannot touch the view.
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1168,7 +1178,7 @@ fn funnel_before_bank(groups: &[super::Group], puffs: &[world_puffs::Puff]) {
     crate::sim_maps::count("fx_funnel_joint_raw_outside_view", puffs.iter().filter(|p| outside(&p.vertices)).count() as u64);
 }
 pub(crate) fn finish_world(
-    gpu: &mut Gpu, world: &[(f32, usize)], flush: bool, mut draw_world: impl FnMut(usize),
+    gpu: &mut Gpu, world: &[(f32, usize)], flush: bool, mut draw_world: impl FnMut(usize, bool),
     world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
@@ -1397,10 +1407,12 @@ pub(crate) fn finish_world(
     {
         let _span = crate::frame_profile::span("vita_joint_alpha_submit");
         let mut world_ms = 0.;
+        let mut continuity = WorldContinuity::default();
         for (_depth, source) in &list {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             { let (kind,id)=match *source {Source::World(id)=>(0,id),Source::Actor(id)=>(1,id),Source::Puff(id)=>(2,id)};
               crate::sim_maps::probe::joint_order(kind,id,*_depth); }
+            let continuation = continuity.observe(*source);
             match *source {
                 Source::World(id) => {
                     gpu.uniform_cache.interrupt();
@@ -1409,7 +1421,9 @@ pub(crate) fn finish_world(
                     if let Some(l) = &mut gpu.lite { l.fields.interrupt(); }
                     let start = world_totals.and_then(|t| t.borrow().start());
                     let world_started = MetricInstant::now();
-                    draw_world(id);
+                    // Only immediately adjacent world callbacks share state. An actor, even one
+                    // ultimately skipped by its own submitter, remains an interruption fence.
+                    draw_world(id, continuation);
                     world_ns += world_started.elapsed().as_nanos() as u64;
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
                 },
@@ -1487,6 +1501,14 @@ pub(crate) fn finish_world(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn world_state_reuse_never_crosses_actor_puff_or_frame_boundaries() {
+        let mut run = WorldContinuity::default();
+        let input = [Source::World(0), Source::World(1), Source::Actor(7), Source::World(2),
+            Source::World(3), Source::Puff(0), Source::World(4), Source::World(4)];
+        assert_eq!(input.map(|s| run.observe(s)), [false,true,false,false,true,false,false,true]);
+        assert!(!WorldContinuity::default().observe(Source::World(4)));
+    }
     #[test]
     fn inline_merge_boundary_retains_workers_for_large_jobs() {
         for n in [0,255,256,4095,4096] { assert!(!merge_worker(true,n));assert!(merge_worker(false,n)); }

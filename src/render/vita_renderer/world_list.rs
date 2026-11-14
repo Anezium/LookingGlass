@@ -88,6 +88,43 @@ impl WorldList {
         self.classes.begin_pass();
     }
     pub fn forget_visibility(&mut self) { for v in &mut self.visible { v.generation = 0; } }
+
+    /// A run never moves an item. Its existing shared IBO ranges must already follow one another
+    /// in the submitted order. Disjoint padded screen bounds also preserve draw-boundary effects
+    /// (equal depth and implicit derivatives); the union includes every group already joined.
+    pub fn adjacent_run(&self, start: usize, groups: &[Group], projection: Mat4) -> (usize, i32) {
+        let first = self.items[start];
+        let draw = self.draws[first.group as usize];
+        let group = &groups[first.group as usize];
+        let mut end = start + 1;
+        let mut indices = draw.indices;
+        if !submit::static_opaque(&group.recipe) { return (end, indices); }
+        let Some(mut coverage) = submit::projected(group, projection) else { return (end, indices) };
+        for next in &self.items[end..] {
+            let other = self.draws[next.group as usize];
+            let other_group = &groups[next.group as usize];
+            if !adjacent_state(draw, first, indices, other, *next)
+                || group.recipe.rank != other_group.recipe.rank
+                || !submit::static_opaque(&other_group.recipe) { break; }
+            let Some(joined) = submit::projected(other_group, projection)
+                .and_then(|r| submit::join_disjoint(coverage, r)) else { break };
+            coverage = joined;
+            indices += other.indices;
+            end += 1;
+        }
+        (end, indices)
+    }
+}
+
+fn adjacent_state(first: ListDraw, item: Item, indices: i32, next: ListDraw, other: Item) -> bool {
+    first.vertex == next.vertex && first.index == next.index && first.atlas == next.atlas
+        && first.pipeline == next.pipeline && first.low == next.low
+        && first.pipeline_class == next.pipeline_class && item.texture == other.texture
+        && item.uniforms == other.uniforms && adjacent_ranges(first.base_element, indices, next.base_element, next.indices)
+}
+fn adjacent_ranges(base: i32, count: i32, next_base: i32, next_count: i32) -> bool {
+    base >= 0 && count > 0 && next_count > 0 && count % 3 == 0 && next_count % 3 == 0
+        && base.checked_add(count) == Some(next_base) && count.checked_add(next_count).is_some()
 }
 
 /// Uniform payloads by value inside one pass, so a draw can compare one integer instead of 143 words.
@@ -221,6 +258,15 @@ pub(super) fn negative(name: &str) -> bool { crate::sim_maps::probe::negative_co
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn adjacent_ranges_keep_primitive_order_and_reject_gaps_reverse_and_overflow() {
+        assert!(adjacent_ranges(12, 6, 18, 9));
+        for args in [(12,6,21,9), (12,6,6,6), (12,6,15,9), (-3,6,3,6),
+            (12,0,12,6), (12,6,18,0), (12,5,17,6), (12,6,18,5),
+            (i32::MAX-2,6,3,6), (0,2147483646,2147483646,6)] {
+            assert!(!adjacent_ranges(args.0,args.1,args.2,args.3), "{args:?}");
+        }
+    }
     struct Rng(u32);
     impl Rng { fn next(&mut self, n: u32) -> u32 { self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223); (self.0 >> 8) % n } }
 

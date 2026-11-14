@@ -6,16 +6,16 @@ pub(super) fn static_opaque(r: &Recipe) -> bool {
         && r.motion.is_none() && r.deform.is_none()
 }
 #[derive(Clone, Copy, Debug)]
-struct Rect { min: Vec2, max: Vec2 }
+pub(super) struct Rect { min: Vec2, max: Vec2 }
 impl Rect {
     fn disjoint(self, b: Self) -> bool {
         self.max.x < b.min.x || b.max.x < self.min.x || self.max.y < b.min.y || b.max.y < self.min.y
     }
 }
-fn join_disjoint(a: Rect, b: Rect) -> Option<Rect> {
+pub(super) fn join_disjoint(a: Rect, b: Rect) -> Option<Rect> {
     a.disjoint(b).then_some(Rect {min:a.min.min(b.min),max:a.max.max(b.max)})
 }
-fn projected(g: &Group, matrix: Mat4) -> Option<Rect> {
+pub(super) fn projected(g: &Group, matrix: Mat4) -> Option<Rect> {
     let mut rect = Rect { min: Vec2::splat(f32::INFINITY), max: Vec2::splat(f32::NEG_INFINITY) };
     for x in [g.min.x,g.max.x] { for y in [g.min.y,g.max.y] { for z in [g.min.z,g.max.z] {
         let p = matrix * vec4(x,y,z,1.);
