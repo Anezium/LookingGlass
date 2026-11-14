@@ -97,7 +97,7 @@ fn route(world: &World, start: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
     if std::env::var_os("LOOKING_GLASS_ROUTE_TRACE").is_some() { println!("[lg/flight-work] calls={calls} tests={tests} expanded={expanded}"); }
     if let Some(t) = timer {
         let after=world.flight_counts();
-        crate::spike_log::flight_work([calls,tests,after[0].wrapping_sub(before[0]),after[1].wrapping_sub(before[1]),after[2].wrapping_sub(before[2])]);
+        crate::spike_log::flight_work([calls,tests,after[0].wrapping_sub(before[0]),after[1].wrapping_sub(before[1]),after[2].wrapping_sub(before[2]),after[3].wrapping_sub(before[3])]);
         crate::spike_log::planner(crate::spike_log::FLIGHT_ROUTE, t.elapsed().as_secs_f64() * 1000., expanded, tests);
     }
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]

@@ -179,6 +179,11 @@ impl Hierarchy {
             || !q.bounds.min.is_finite() || !q.bounds.max.is_finite() { return None; }
         let mut counts=Counts::default();
         let mut cache=[NONE;CERT_CACHE];
+        // Short lattice edges are usually clear. Re-testing a distant blocker adds work
+        // there and evicts a useful long-ray witness, so traverse directly and retain it.
+        if (b-a).length_squared()<=160.*160. {
+            return Some((self.blocked_any(0,g,a,b,h,q,&mut cache,&mut counts),false));
+        }
         if let Some(witness)=hint.as_ref() {
             let original=self.order[witness.rank as usize];
             let hull=&g.hulls[original.hull as usize];

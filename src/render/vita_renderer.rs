@@ -70,7 +70,7 @@ pub struct Config {
     pub sim_sweep_blocked: bool,
     /// Answer solid yes/no sweeps during SAH traversal without collecting and sorting candidates.
     pub sim_sweep_any: bool,
-    /// Exact static flight-clearance cache and compact route node storage. Default off.
+    /// Map-load empty-space certificates, re-tested flight blockers and compact route nodes. Default off.
     pub sim_flight_memo: bool,
     /// Draw omission diagnostics only; these never belong in a release config.
     pub diag_skip_ant_corpses: bool,

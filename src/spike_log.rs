@@ -51,7 +51,7 @@ const NPC_ROWS: usize = 24;
 #[derive(Default)]
 struct Frame {
     number: u64,
-    flight_work: [u32;5],
+    flight_work: [u32;6],
     begin: Option<Instant>,
     render: Option<Instant>,
     hud: Option<Instant>,
@@ -181,8 +181,8 @@ impl Frame {
             any = true;
         }
         if self.flight_work[0] > 0 {
-            let [calls,tests,misses,hits,hints]=self.flight_work;
-            let _=write!(out," flight_work={calls}/{tests}/{misses}/{hits}/{hints}");
+            let [calls,tests,traversals,witnesses,short,free]=self.flight_work;
+            let _=write!(out," flight_work={calls}/{tests}/{traversals}/{witnesses}/{short}/{free}");
         }
         for (name, (calls, ms, expanded, tests)) in PLANNERS.iter().zip(self.planners) {
             if calls > 0 { let _ = write!(out, " {name}={calls}/{ms:.2}/{expanded}/{tests}"); }
@@ -287,7 +287,7 @@ pub(crate) fn npc(name: &'static str, updated: u64, ms: [f64; 4]) {
 }
 /// Path searches the spike line counts: `nav_plan` is the ground detour of Ants
 /// (`combat::navigation::plan`), `flight_route` the flying route of Ladybugs (`flight::route`).
-pub(crate) fn flight_work(work: [u32;5]) {
+pub(crate) fn flight_work(work: [u32;6]) {
     if !on() { return; }
     FRAME.with(|f| { for (a,b) in f.borrow_mut().flight_work.iter_mut().zip(work) { *a+=b; } });
 }
