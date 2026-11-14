@@ -2619,8 +2619,9 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         #[cfg(target_os = "vita")]
         if self.gxm.direct_used() { gxm::vita::wait_for_gpu(); }
-        // Complete outstanding draws before destroying the optional gathered bank. Stream
-        // orphan stores themselves are retired by VitaGL's existing four-frame purge queue.
+        // Request the existing GL finish before deleting the optional gathered bank.
+        // Referenced orphan/deleted stores also retain VitaGL's four-frame purge policy;
+        // glFinish itself waits only when that library has an unflushed scene.
         #[cfg(target_os = "vita")]
         if self.alpha_ranges.as_ref().is_some_and(|r| r.buffer().is_some()) { gxm::vita::wait_for_gpu(); }
         gxm::withdraw(&mut self.gxm);

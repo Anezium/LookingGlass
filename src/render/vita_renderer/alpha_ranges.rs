@@ -21,10 +21,11 @@ fn claim_upload_frame() -> bool {
     // This is the linked VitaGL swap counter, NOT a diagnostic/gameplay counter.
     // A thread-local token covers all renderers, including replacement/preview loads.
     unsafe extern "C" {
-        static vgl_framecount: u32;
+        static mut vgl_framecount: u32;
     }
     thread_local! { static PREVIOUS: std::cell::Cell<Option<u32>>=const { std::cell::Cell::new(None) }; }
-    PREVIOUS.with(|previous| claim_frame(previous, unsafe { vgl_framecount }))
+    let frame = unsafe { std::ptr::read_volatile(std::ptr::addr_of!(vgl_framecount)) };
+    PREVIOUS.with(|previous| claim_frame(previous, frame))
 }
 #[cfg(not(target_os = "vita"))]
 fn claim_upload_frame() -> bool {
