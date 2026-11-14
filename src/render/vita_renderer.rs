@@ -712,6 +712,8 @@ impl Config {
         );
         ensure!(matches!(self.water_stage_merge.as_str(),"off"|"merge"|"drop_filter"),"water_stage_merge must be off, merge or drop_filter");
         ensure!(!self.water_draw_join || self.world_shared_buffers, "water_draw_join needs world_shared_buffers");
+        ensure!(!self.water_draw_join || self.world_parameter_reuse,
+            "water_draw_join needs world_parameter_reuse: with reuse off the parameter table keeps its construction-time uniforms, so a joined run would submit a stale payload");
         ensure!(!self.water_draw_join || self.water_stage_merge == "off", "water_draw_join and water_stage_merge are exclusive");
         ensure!(self.fx_add_max_area.is_finite() && (0. ..=1.).contains(&self.fx_add_max_area), "fx_add_max_area must be 0 to 1");
         ensure!(matches!(self.texture_cache.as_str(),"on"|"off"),"texture_cache must be on or off");
@@ -771,10 +773,11 @@ fn config_log_lines(c: &Config) -> [String; 2] {
         format!("[lg/vita-renderer] report_cadence effective_log_frame_time_every={}", report_cadence(c)),
     ]
 }
-/// Reject a malformed report cadence without discarding unrelated flags.
+/// Reject a malformed report cadence, or a join without a live parameter table, without
+/// discarding unrelated flags.
 fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
     let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
-    let rejected = if let Some(object) = value.as_object_mut() {
+    let mut rejected = if let Some(object) = value.as_object_mut() {
         if let Some(raw) = object.get("log_frame_time_every") {
             if serde_json::from_value::<Option<u32>>(raw.clone()).is_err() {
                 let message = format!("log_frame_time_every={raw}: expected null or u32; rejecting key, effective value={}; preserving other config keys", report_cadence(&Config::default()));
@@ -783,7 +786,18 @@ fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
             } else { None }
         } else { None }
     } else { None };
-    let config: Config = serde_json::from_value(value)?;
+    let mut config: Config = serde_json::from_value(value)?;
+    // The join submits the parameter table's payload. Without reuse that table keeps its
+    // construction-time uniforms, so the key cannot take effect; refuse it alone rather
+    // than discard the rest of the configuration.
+    if config.water_draw_join && !config.world_parameter_reuse {
+        let message = "water_draw_join requires world_parameter_reuse: with reuse off the parameter table keeps its construction-time uniforms and a joined run would submit a stale payload; rejecting key, effective value=false; preserving other config keys";
+        config.water_draw_join = false;
+        rejected = Some(match rejected {
+            Some(previous) => format!("{previous}; {message}"),
+            None => message.into(),
+        });
+    }
     config.validate()?;
     Ok((config, rejected))
 }
@@ -1914,56 +1928,53 @@ impl Renderer {
         use crate::render_fx::retained::Source;
         let Some(state) = self.water_join.as_mut() else { return; };
         state.begin_frame(self.prepared.len());
-        let mut open: Option<usize> = None;
         for (_, source) in list {
-            let Source::World(id) = *source else { open = None; continue; };
-            let group = self.prepared[id].group;
-            let g = &self.groups[group];
-            let key = (g.liquid && state.indices[group].is_some()
-                && !(self.alpha_fill.lite.is_some() && alpha_fill::lite_recipe(&g.recipe)))
-                .then(|| (self.pipelines[g.recipe.blend * 3 + g.recipe.cull], g.bindings.vertex_buffers[0],
-                    g.bindings.images[1], self.prepared[id].texture, g.parameter));
-            let Some((pipeline, vertex, atlas, texture, parameter)) = key else { open = None; continue; };
-            let water_join::State { scratch, indices, runs, members, member, capacity, .. } = state;
-            let items = indices[group].as_ref().expect("a join key has an index copy");
-            let continue_run = open.is_some_and(|run| {
-                let run = &runs[run];
-                run.pipeline == pipeline && run.vertex == vertex && run.atlas == atlas
-                    && run.texture == texture && run.parameter == parameter
-            });
-            let offset = scratch.len();
-            if !continue_run || offset + items.len() > *capacity {
-                if offset + items.len() > *capacity { open = None; continue; }
-                runs.push(water_join::Run { pipeline, vertex, atlas, texture, parameter,
-                    offset, count: 0, first: id, groups: 0 });
-                members.push(Vec::new());
-                open = Some(runs.len() - 1);
-            }
-            let run = open.expect("an open run");
-            member[id] = run as u32;
-            runs[run].count += items.len();
-            runs[run].groups += 1;
-            members[run].push(id);
-            scratch.extend_from_slice(items);
+            let entry = match *source {
+                Source::Actor(_) => water_join::Entry::Fence(water_join::Fence::Actor),
+                Source::Puff(_) => water_join::Entry::Fence(water_join::Fence::Puff),
+                Source::World(id) => {
+                    let group = self.prepared[id].group;
+                    let g = &self.groups[group];
+                    let fence = if !g.liquid { Some(water_join::Fence::NonLiquid) }
+                        else if state.indices[group].is_none() { Some(water_join::Fence::NoIndices) }
+                        else if self.alpha_fill.lite.is_some() && alpha_fill::lite_recipe(&g.recipe) {
+                            Some(water_join::Fence::AlphaLite)
+                        } else { None };
+                    match fence {
+                        Some(fence) => water_join::Entry::Fence(fence),
+                        None => water_join::Entry::Join {
+                            key: water_join::Key {
+                                pipeline: self.pipelines[g.recipe.blend * 3 + g.recipe.cull],
+                                vertex: g.bindings.vertex_buffers[0], atlas: g.bindings.images[1],
+                                texture: self.prepared[id].texture, parameter: g.parameter,
+                            },
+                            first: id,
+                            items: state.indices[group].as_ref().expect("a join key has an index copy"),
+                        },
+                    }
+                }
+            };
+            state.plan.entry(entry, state.capacity);
         }
-        if state.scratch.is_empty() { return; }
+        let scratch = &state.plan.scratch;
+        if scratch.is_empty() { return; }
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let upload = water_probe::tick();
-        ctx.buffer_update(state.buffer, BufferSource::slice(&state.scratch[..]));
+        ctx.buffer_update(state.buffer, BufferSource::slice(&scratch[..]));
         water_probe::add(|f| &mut f.water_upload_time, upload);
-        water_probe::add_n(|f| &mut f.water_upload_bytes, (state.scratch.len() * 2) as u64);
-        count("vita_world_alpha_join_runs", state.runs.len() as u64);
-        count("vita_world_alpha_join_upload_bytes", (state.scratch.len() * 2) as u64);
-        state.upload_bytes += (state.scratch.len() * 2) as u64;
+        water_probe::add_n(|f| &mut f.water_upload_bytes, (scratch.len() * 2) as u64);
+        count("vita_world_alpha_join_runs", state.plan.runs.len() as u64);
+        count("vita_world_alpha_join_upload_bytes", (scratch.len() * 2) as u64);
+        state.upload_bytes += (scratch.len() * 2) as u64;
     }
     /// Submit one planned `water_draw_join` run as a single indexed draw. The host probe still
     /// sees one canonical packet per original draw, in the same order, so the oracle compares
     /// logical submissions and the joined physical command separately.
     fn draw_water_run(&mut self, index: usize) {
-        let Some(run) = self.water_join.as_ref().map(|state| state.runs[index]) else { return; };
+        let Some(run) = self.water_join.as_ref().map(|state| state.plan.runs[index]) else { return; };
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         {
-            let members = self.water_join.as_ref().expect("join state").members[index].clone();
+            let members = self.water_join.as_ref().expect("join state").plan.members[index].clone();
             for member in &members {
                 let group = self.prepared[*member].group;
                 let g = &self.groups[group];
@@ -1978,17 +1989,17 @@ impl Renderer {
             }
         }
         let ctx = unsafe { get_internal_gl() }.quad_context;
-        let uniforms = &self.parameters[run.parameter].uniforms;
+        let uniforms = &self.parameters[run.key.parameter].uniforms;
         let buffer = self.water_join.as_ref().expect("join state").buffer;
         let probe_submit = if water_probe::in_window() { water_probe::tick() } else { None };
         let probe_pipeline = water_probe::tick();
-        ctx.apply_pipeline(&run.pipeline);
+        ctx.apply_pipeline(&run.key.pipeline);
         unsafe { macroquad::miniquad::gl::glDepthMask(0); }
         scale::log_depth(false);
         water_probe::add(|f| &mut f.water_pipeline_time, probe_pipeline);
         let probe_bindings = water_probe::tick();
-        ctx.apply_bindings(&Bindings { vertex_buffers: vec![run.vertex], index_buffer: buffer,
-            images: vec![run.texture, run.atlas] });
+        ctx.apply_bindings(&Bindings { vertex_buffers: vec![run.key.vertex], index_buffer: buffer,
+            images: vec![run.key.texture, run.key.atlas] });
         water_probe::add(|f| &mut f.water_binding_time, probe_bindings);
         let probe_uniform = water_probe::tick();
         let traffic = self.field_uniforms[0].apply(ctx, uniforms.values(), config().uniform_field_cache);
@@ -2821,12 +2832,12 @@ impl Renderer {
             // water_draw_join: the run is drawn at its first member's place, in primitive order.
             if self.water_join.is_some() {
                 let run = self.water_join.as_ref()
-                    .and_then(|state| state.member.get(id).copied().filter(|&m| m != u32::MAX));
+                    .and_then(|state| state.plan.member.get(id).copied().filter(|&m| m != u32::MAX));
                 if let Some(run) = run {
                     // The joined command changes pipeline, bindings and uniforms outside the
                     // adjacent state cache; the next draw must observe a fresh one.
                     adjacent_state = state_cache::Cache::new();
-                    if self.water_join.as_ref().unwrap().runs[run as usize].first == id {
+                    if self.water_join.as_ref().unwrap().plan.runs[run as usize].first == id {
                         self.draw_water_run(run as usize);
                     }
                     return;
@@ -4430,6 +4441,30 @@ mod tests {
         c.validate().unwrap();
         let printed = config_log_lines(&Config::default())[0].clone();
         assert!(printed.contains("\"water_draw_join\""), "the key is printed");
+    }
+    #[test]
+    fn a5_water_draw_join_refuses_a_stale_parameter_table() {
+        let bytes = serde_json::to_vec(&serde_json::json!({"water_draw_join": true,
+            "world_shared_buffers": true, "world_parameter_reuse": false, "world_list_submit": false,
+            "world_gxm": "off"})).unwrap();
+        let c: Config = serde_json::from_slice(&bytes).unwrap();
+        let error = c.validate().unwrap_err().to_string();
+        assert!(error.contains("world_parameter_reuse"), "a clear rejection names the missing prerequisite: {error}");
+        assert!(error.contains("stale"), "the rejection says why reuse is required: {error}");
+        let (refused, rejected) = parse_runtime_config(&bytes).unwrap();
+        let message = rejected.expect("the join key is refused");
+        assert!(message.contains("water_draw_join requires world_parameter_reuse"), "{message}");
+        assert!(!refused.water_draw_join, "the key does not take effect");
+        assert!(!refused.world_parameter_reuse, "unrelated keys are preserved");
+        assert!(refused.world_shared_buffers && !refused.world_list_submit && refused.world_gxm == "off",
+            "unrelated keys are preserved");
+        refused.validate().unwrap();
+        let c: Config = serde_json::from_value(serde_json::json!({"water_draw_join": true,
+            "world_shared_buffers": true, "world_parameter_reuse": true})).unwrap();
+        c.validate().unwrap();
+        let packaged = parse_runtime_config(include_bytes!("../../configs/PL-a5-water-join.json")).unwrap().0;
+        assert!(packaged.water_draw_join && packaged.world_parameter_reuse,
+            "the packaged join key is valid only with the prerequisite it requires");
     }
     #[test]
     fn a5_alpha_fill_configs_differ_from_a5_exact_only_in_their_keys() {
