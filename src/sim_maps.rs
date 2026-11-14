@@ -388,3 +388,21 @@ pub(crate) fn with_think_switches<T>(switches: [bool; 3], run: impl FnOnce() -> 
     let _reset = Reset(THINK_TEST.with(|s| s.replace(Some(switches))));
     run()
 }
+
+#[cfg(test)]
+mod river_pipeline_tag_tests {
+    #[test]
+    fn wide_world_packet_classes_never_alias_legacy_or_low_programs() {
+        use super::world_pipeline_tag as tag;
+        for low in [false,true] {
+            for class in 0..=255 {
+                let (bytes,len)=tag(low,class);
+                assert_eq!(&bytes[..len],&[u8::from(low),class as u8]);
+                let wide=tag(low,class+256);
+                assert_ne!(wide.0[..wide.1],bytes[..len]);
+            }
+        }
+        assert_ne!(tag(false,257),tag(true,257));
+        assert_ne!(tag(false,257),tag(false,513));
+    }
+}

@@ -687,7 +687,7 @@ fn valid_mesh(mesh: &Mesh) -> bool {
             .all(|&i| (i as usize) < mesh.vertices.len())
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
+pub(crate) enum Source {
     World(usize),
     Actor(usize),
     Puff(usize),
@@ -1154,7 +1154,7 @@ pub(crate) fn finish(
     flush: bool,
     mut draw_world: impl FnMut(usize),
 ) -> (usize, usize) {
-    finish_world(gpu, world, flush, |id, _| draw_world(id), None)
+    finish_world(gpu, world, flush, |id, _, _| draw_world(id), None)
 }
 /// Host probe: what reaches the joint list, and how many quads cannot touch the view.
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1178,7 +1178,7 @@ fn funnel_before_bank(groups: &[super::Group], puffs: &[world_puffs::Puff]) {
     crate::sim_maps::count("fx_funnel_joint_raw_outside_view", puffs.iter().filter(|p| outside(&p.vertices)).count() as u64);
 }
 pub(crate) fn finish_world(
-    gpu: &mut Gpu, world: &[(f32, usize)], flush: bool, mut draw_world: impl FnMut(usize, bool),
+    gpu: &mut Gpu, world: &[(f32, usize)], flush: bool, mut draw_world: impl FnMut(usize, bool, &[(f32, Source)]),
     world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
@@ -1423,7 +1423,7 @@ pub(crate) fn finish_world(
                     let world_started = MetricInstant::now();
                     // Only immediately adjacent world callbacks share state. An actor, even one
                     // ultimately skipped by its own submitter, remains an interruption fence.
-                    draw_world(id, continuation);
+                    draw_world(id, continuation, &list);
                     world_ns += world_started.elapsed().as_nanos() as u64;
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
                 },

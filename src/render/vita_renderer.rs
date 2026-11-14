@@ -8,6 +8,7 @@ mod scale;
 mod depth_sentinel;
 mod pvs_cache;
 mod state_cache;
+mod alpha_ranges;
 mod submit;
 mod world_list;
 mod gxm;
@@ -105,8 +106,8 @@ pub struct Config {
     /// Experimental exact submission levers; independently default off.
     pub world_material_sort: bool,
     pub world_static_merge: bool,
-    /// Coalesce certified adjacent opaque ranges and reuse uninterrupted world-alpha state.
-    /// Never changes the order of world groups or crosses an actor/FX callback. Default off.
+    /// Coalesce certified opaque ranges, gather disjoint BSP alpha ranges, and reuse world-alpha state.
+    /// Preserves world order and actor/FX fences; frozen model meshes keep original draws. Default off.
     pub world_adjacent_batch: bool,
     pub world_uniform_persist: bool,
     pub world_binding_cache: bool,
@@ -966,6 +967,7 @@ struct Geometry {
     indices: Vec<u16>,
     remap: BTreeMap<(usize, u16), u16>,
     faces: Vec<usize>,
+    all_bsp_faces: bool,
     min: Vec3,
     max: Vec3,
 }
@@ -976,6 +978,7 @@ impl Default for Geometry {
             indices: Vec::new(),
             remap: BTreeMap::new(),
             faces: Vec::new(),
+            all_bsp_faces: true,
             min: Vec3::splat(f32::INFINITY),
             max: Vec3::splat(f32::NEG_INFINITY),
         }
@@ -993,6 +996,9 @@ impl Geometry {
         source: &[u16],
         face: Option<usize>,
     ) {
+        // Identical material/cell keys can mix BSP and frozen-model source batches.
+        // Provenance must cover every append, not merely the presence of one face ID.
+        self.all_bsp_faces &= face.is_some();
         if let Some(face) = face {
             self.faces.push(face);
         }
@@ -1038,6 +1044,14 @@ struct Pending {
     /// (batch, chunk of that batch's layer) per append, recorded only for `water_stage_merge`.
     origin: Vec<(u32, u32)>,
 }
+fn bsp_polygon_source(geometry:&Geometry,surfaces:&[crate::bsp::Surface])->bool {
+    geometry.all_bsp_faces && !geometry.faces.is_empty()
+        && geometry.faces.iter().all(|&face|surfaces.get(face).is_some_and(|surface|surface.kind==1))
+}
+fn bsp_kind_mask(geometry:&Geometry,surfaces:&[crate::bsp::Surface])->u8 {
+    geometry.faces.iter().fold(0,|mask,&face|mask|surfaces.get(face).map_or(0,|surface|
+        u32::try_from(surface.kind).ok().and_then(|kind|1_u8.checked_shl(kind)).unwrap_or(0)))
+}
 struct Group {
     base_element: i32,
     material_order: usize,
@@ -1049,6 +1063,8 @@ struct Group {
     center: Vec3,
     recipe: Recipe,
     faces: Vec<usize>,
+    bsp_polygons_only: bool,
+    bsp_kinds: u8,
 }
 #[derive(Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Lists {
@@ -1201,6 +1217,7 @@ pub struct Renderer {
     _game_thread: crate::game_thread::GameThread,
     groups: Vec<Group>,
     world_buffers: Vec<(BufferId,BufferId)>,
+    alpha_ranges: Option<alpha_ranges::Gather>,
     parameters: Vec<Parameter>,
     parameter_key: Option<[u32; 51]>,
     parameter_generation: u64,
@@ -1640,7 +1657,25 @@ impl Renderer {
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::world_ranges(allocations.iter().map(|&(_,base,count)|(base,count)).collect());
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        for (group,&(slot,base,count)) in allocations.iter().enumerate() {
+            if !alpha_ranges::eligible(&pending[group].recipe) {continue;}
+            let geometry=&pending[group].geometry;let (_,vertices,indices)=&packed[slot];
+            for &index in &indices[base as usize..(base+count) as usize] {
+                let position=Vec3::from_array(vertices[index as usize].position);
+                assert!(position.is_finite() && position.cmpge(geometry.min).all() && position.cmple(geometry.max).all(),
+                    "alpha source group {group} bounds do not contain actual immutable vertex {index}");
+            }
+        }
         let packing_capacity_bytes: usize = packed.iter().map(|(_,v,i)|v.capacity()*52+i.capacity()*2).sum();
+        let mut source_ranges = Vec::new();
+        let mut alpha_ranges = if c.world_adjacent_batch && source_ranges.try_reserve_exact(packed.len()).is_ok() {
+            source_ranges.extend(packed.iter().map(|(_,v,i)| (v.len(), i.as_slice())));
+            alpha_ranges::Gather::new(&source_ranges, &allocations,
+                pending.iter().map(|p| alpha_ranges::eligible(&p.recipe)
+                    && (bsp_polygon_source(&p.geometry,&scene.map.surfaces) || world_list::negative("alpha-range-model-source"))))
+        } else { None };
+        drop(source_ranges);
         let buffers = packed.into_iter().map(|(_,v,i)| {
             let vertex = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Immutable, BufferSource::slice(&v));
             let index = ctx.new_buffer(BufferType::IndexBuffer, BufferUsage::Immutable, BufferSource::slice(&i));
@@ -1650,6 +1685,7 @@ impl Renderer {
         }).collect::<Vec<_>>();
         construction_geometry_peak_bytes = construction_geometry_peak_bytes.max(
             old_scene_geometry_capacity_bytes + pending_geometry_capacity_bytes + packing_capacity_bytes + uploaded_geometry_bytes);
+        if alpha_ranges.as_mut().is_some_and(|ranges| !ranges.bind_sources(&buffers)) { alpha_ranges = None; }
         let mut groups = Vec::new();
         for (((p, texture), (slot, base_element, indices)), material_key) in pending.into_iter().zip(first_textures).zip(allocations).zip(material_keys_by_group) {
             let extent = deform_extent(&p.recipe.deform);
@@ -1667,6 +1703,8 @@ impl Renderer {
                 max: p.geometry.max + extent,
                 center: (p.geometry.min + p.geometry.max) * 0.5,
                 recipe: p.recipe,
+                bsp_polygons_only: bsp_polygon_source(&p.geometry,&scene.map.surfaces),
+                bsp_kinds: bsp_kind_mask(&p.geometry,&scene.map.surfaces),
                 faces: p.geometry.faces,
             });
         }
@@ -1805,6 +1843,7 @@ impl Renderer {
             visibility: vec![(0, None); groups.len()],
             models: vec![None; groups.len()],
             world_buffers: buffers,
+            alpha_ranges,
             schedule: submit::Schedule::default(),
             texture_sort: draw_cuts::TextureSort::default(),
             alpha_fill,
@@ -2555,12 +2594,98 @@ impl Renderer {
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::profile_only());
         let mut adjacent_state = state_cache::Cache::new();
         let adjacent = config().world_adjacent_batch;
-        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id, continuation| {
+        // Other alpha programs keep their existing path and form an explicit fallback.
+        let mut ranges = self.alpha_ranges.take();
+        let gather = adjacent && !self.alpha_fill.active();
+        let mut planned = false;
+        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id, continuation, joint| {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let _pixels = alpha_ranges::PixelProbe::new(id,&self.prepared,&self.groups,&self.parameters);
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
             if !adjacent || !continuation { adjacent_state = state_cache::Cache::new(); }
             let mut totals = totals.borrow_mut();
+            if gather {
+                if let Some(ranges) = ranges.as_mut() {
+                    if !planned {
+                        ranges.prepare(joint, &self.prepared, &self.groups, &self.parameters, &self.pipelines);
+                        planned = true;
+                    }
+                    match ranges.emission(id) {
+                        alpha_ranges::Emission::Skip => return,
+                        alpha_ranges::Emission::Joined { base, count: indices, first, end } => {
+                            let members = ranges.members(first, end);
+                            let p = &self.prepared[id]; let g = &self.groups[p.group];
+                            let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
+                            let pipeline = self.pipelines[g.recipe.blend * 3 + g.recipe.cull];
+                            let buffer = ranges.buffer().expect("prepared gathered index buffer");
+                            let mut bindings = g.bindings.clone(); bindings.index_buffer = buffer;
+                            bindings.images[0] = p.texture;
+                            if world_list::negative("alpha-range-wrong-bank") {
+                                // Even a one-bank map has a separately allocated sky VBO.
+                                bindings.vertex_buffers[0] = self.sky_bindings.vertex_buffers[0];
+                            }
+                            let ctx = unsafe { get_internal_gl() }.quad_context;
+                            let start = totals.start();
+                            ctx.apply_pipeline(&pipeline);
+                            unsafe { macroquad::miniquad::gl::glDepthMask(0); }
+                            scale::log_depth(false); ctx.apply_bindings(&bindings);
+                            totals.add(0, start);
+                            let start = totals.start();
+                            let traffic = self.field_uniforms[0].apply(ctx, u.values(), config().uniform_field_cache);
+                            totals.add(1, start);
+                            let start = totals.start();
+                            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                            for &member in members {
+                                let p = &self.prepared[member]; let g = &self.groups[p.group];
+                                let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
+                                crate::sim_maps::probe::world_order(p.group, true);
+                                crate::sim_maps::probe::world_packet(p.group, g.base_element, g.indices, &p.texture,
+                                    u.bits_ref(), false, g.recipe.blend * 3 + g.recipe.cull);
+                            }
+                            let mut actual_base = base; let mut actual_count = indices;
+                            let actual_vertex = bindings.vertex_buffers[0];
+                            if world_list::negative("alpha-range-wrong-base") { actual_base += 3; }
+                            if world_list::negative("alpha-range-short-count") { actual_count -= 3; }
+                            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                            ranges.verify(id, actual_vertex, buffer, actual_base, actual_count,
+                                &self.prepared, &self.groups, &self.parameters, &self.pipelines, joint);
+                            let split = world_list::negative("alpha-range-split-draws");
+                            let physical_draws = if split { members.len() } else { 1 };
+                            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) {
+                                if split {
+                                    let mut cursor=actual_base;
+                                    for &member in members {
+                                        let count=self.groups[self.prepared[member].group].indices;
+                                        assert!(cursor.checked_add(count).is_some_and(|end|end<=actual_base+actual_count));
+                                        ctx.draw(cursor,count,1);cursor+=count;
+                                    }
+                                    assert_eq!(cursor,actual_base+actual_count);
+                                } else { ctx.draw(actual_base, actual_count, 1); }
+                            }
+                            totals.add(2, start);
+                            count("vita_world_gpu_draws", physical_draws as u64);
+                            count("vita_world_alpha_ranges_saved", (members.len()-physical_draws) as u64);
+                            count("vita_world_alpha_range_commands", physical_draws as u64);
+                            count("vita_world_alpha_triangles", indices as u64 / 3);
+                            count("vita_world_alpha_state_applications", 1);
+                            crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
+                                crate::light_profile::RenderMetrics { draws:physical_draws as u64, pipelines:1, depth_states:1,
+                                    bindings:1, texture_bind_slots:2, uniform_uploads:1,
+                                    uniform_bytes:traffic.bytes, uniform_gl_calls:traffic.calls, ..Default::default() });
+                            #[cfg(target_os="vita")]
+                            { crate::frame_profile::record_batch(true, false);
+                              crate::frame_profile::record_world_submission();
+                              crate::frame_profile::record_geometry(indices as usize/3,0,true); }
+                            // The gathered IBO differs from the immutable bank used by singles.
+                            adjacent_state = state_cache::Cache::new();
+                            return;
+                        }
+                        alpha_ranges::Emission::Single => (),
+                    }
+                }
+            }
             let merged = if drop_filter { None } else {
                 self.alpha_fill.pairs.iter().find(|&&(f, _)| f == id).map(|&(_, a)| a) };
             if let Some(a) = merged {
@@ -2676,6 +2801,7 @@ impl Renderer {
         }, Some(&totals));
         self.prepared.clear();
         self.fx_gpu = Some(gpu);
+        self.alpha_ranges = ranges;
         result
     }
 }
@@ -2683,9 +2809,15 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         #[cfg(target_os = "vita")]
         if self.gxm.direct_used() { gxm::vita::wait_for_gpu(); }
+        // Request the existing GL finish before deleting the optional gathered bank.
+        // Referenced orphan/deleted stores also retain VitaGL's four-frame purge policy;
+        // glFinish itself waits only when that library has an unflushed scene.
+        #[cfg(target_os = "vita")]
+        if self.alpha_ranges.as_ref().is_some_and(|r| r.buffer().is_some()) { gxm::vita::wait_for_gpu(); }
         gxm::withdraw(&mut self.gxm);
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
+        if let Some(ranges) = &mut self.alpha_ranges { ranges.delete(ctx); }
         for &(vertex,index) in &self.world_buffers {
             ctx.delete_buffer(vertex); ctx.delete_buffer(index);
         }
@@ -4155,6 +4287,36 @@ mod tests {
         let bg = Color::new(0.5, 0.5, 0.5, 1.);
         assert_eq!(sky_gradient(bg, false), [[0.5, 0.5, 0.5, 1.], [0.75, 0.75, 0.75, 1.]], "the RC3 gradient");
         assert_eq!(sky_gradient(bg, true), [[0.5, 0.5, 0.5, 1.], [0.5, 0.5, 0.5, 1.]]);
+    }
+    #[test]
+    fn alpha_geometry_keeps_mixed_model_provenance_after_later_bsp_appends() {
+        let base=vec![
+            Vertex {position:Vec3::ZERO,uv:Vec2::ZERO,color:[255;4],normal:Vec4::ZERO},
+            Vertex {position:Vec3::X,uv:Vec2::X,color:[255;4],normal:Vec4::ZERO},
+            Vertex {position:Vec3::Y,uv:Vec2::Y,color:[255;4],normal:Vec4::ZERO},
+        ];
+        let batch=super::super::Batch {
+            #[cfg(target_os="vita")] static_offset:None,
+            face_side:FaceSide::Both,motion:None,full_indices:vec![0,1,2],parts:Vec::new(),
+            visibility_work:Default::default(),bounds:(Vec3::ZERO,Vec3::ONE),detail:Vec::new(),animation:None,
+            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:None},base,normals:vec![Vec3::Z;3],
+            deforms:Vec::new(),sky:false,portal:false,layers:Vec::new(),center:Vec3::ZERO,model:None,
+        };
+        let mut geometry=Geometry::default();
+        geometry.append(0,&batch,&[0,1,2],Some(17));
+        assert!(geometry.all_bsp_faces);
+        let surface=|kind|crate::bsp::Surface {shader:0,kind,first_vertex:0,vertex_count:3,first_index:0,index_count:3,lightmap:-1,patch_width:0,patch_height:0};
+        let mut surfaces=(0..20).map(|_|surface(1)).collect::<Vec<_>>();
+        assert!(bsp_polygon_source(&geometry,&surfaces));
+        surfaces[17]=surface(3);assert!(!bsp_polygon_source(&geometry,&surfaces)); // baked triangle soup
+        surfaces[17]=surface(2);assert!(!bsp_polygon_source(&geometry,&surfaces)); // curved patch
+        surfaces[17]=surface(1);
+        geometry.append(1,&batch,&[0,1,2],None); // frozen source with the same material/cell
+        geometry.append(2,&batch,&[0,1,2],Some(19));
+        assert!(!geometry.all_bsp_faces);
+        assert!(!bsp_polygon_source(&geometry,&surfaces));
+        assert_eq!(geometry.faces,[17,19]);
+        assert_eq!(geometry.indices,[0,1,2,3,4,5,6,7,8]); // no original draw geometry removed
     }
     #[test]
     fn wave_normal_rides_the_deform_uniforms_and_never_displaces_vertices() {
