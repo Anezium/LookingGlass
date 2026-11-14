@@ -6,9 +6,11 @@ The shader compiler `ur0:data/libshacccg.suprx` must already be installed
 (for example using ShaRKBR33D).
 
 Copy these six files from your own compatible PC game to `ux0:data/alice/base/`.
-Keep the names unchanged. Startup checks their sizes and SHA-256; invalid data
-shows a message with the folder and affected files. Press OK to exit and fix them.
-Hashing all packs adds startup work; its Vita cost has not been measured.
+Keep the names unchanged. At startup the game checks that all six are present
+and compares their sizes with the edition below. A missing file shows a message
+with the folder and file names; press OK to exit and copy it. A size difference
+is only logged, since other editions may work. The hashes below are the tested
+edition, for checking your copy on a computer.
 
 | File | SHA-256 |
 | --- | --- |

@@ -2,7 +2,8 @@
 //!
 //! `Assets::open` mounts whatever `*.pk3` it finds and checks no name or size, so a missing
 //! or truncated pack fails later, far from the cause. This check runs before that and
-//! checks names, sizes and SHA-256 before opening the archives.
+//! compares names and sizes only: hashing 660 MB at every start would cost seconds.
+//! `check_hashes` is the full SHA-256 check for host tools and tests, not for startup.
 //! The table comes from `docs/validation/ALICE-DATA-VALIDATION.md` in the port repository
 //! (2011 PC release, hashed on 2026-10-11).
 use std::path::Path;
@@ -17,6 +18,7 @@ pub const REQUIRED_PACKS: [(&str, u64); 6] = [
     ("pak5_mod.pk3", 18_133_775),
 ];
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub const REQUIRED_HASHES: [&str; 6] = [
     "6a63b59cd627902660bd4261461f904bf984e05891eb749d47bcc7fc8cedda62",
     "eac773ca4012842c63738f348d03b2604f6d0798ad26536f7256c659ff7cdfc7",
@@ -47,6 +49,7 @@ pub fn check(base: &Path, required: &[(&'static str, u64)]) -> Vec<Problem> {
 }
 
 /// Hash only packs whose names and sizes passed the cheap check.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn check_hashes(base: &Path, required: &[(&'static str, u64)], hashes: &[&str]) -> Vec<Problem> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, BufReader};
@@ -73,9 +76,10 @@ pub fn check_hashes(base: &Path, required: &[(&'static str, u64)], hashes: &[&st
     problems
 }
 
-/// Invalid or unreadable required data stops startup.
+/// Only a missing file stops the start. A size that differs from the checked edition is reported
+/// in the log and in the dialog when one is shown, but another edition of the game may be valid.
 pub fn blocks_start(problems: &[Problem]) -> bool {
-    !problems.is_empty()
+    problems.iter().any(|problem| matches!(problem, Problem::Missing(_)))
 }
 
 /// Text for the on-screen dialog. The system message dialog takes at most 512 bytes,
@@ -189,11 +193,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_data_blocks_the_start() {
+    fn only_a_missing_file_blocks_the_start() {
         let wrong = Problem::WrongSize { name: "pak0.pk3", expected: 2, found: 1 };
         assert!(!blocks_start(&[]));
-        assert!(blocks_start(&[wrong.clone()]));
-        assert!(blocks_start(&[Problem::WrongHash("pak0.pk3")]));
+        assert!(!blocks_start(&[wrong.clone()]));
+        assert!(!blocks_start(&[Problem::WrongHash("pak0.pk3")]));
         assert!(blocks_start(&[wrong, Problem::Missing("pak2.pk3")]));
     }
 

@@ -11,6 +11,6 @@ The 20 fps playing floor has not been established across every map.
 - Earlier play found geometry and smoke visible through walls and a missing
   death/reload interface once. Broad visual rechecking is still needed.
 - Fortress2 has a reported camera problem; its current status is unknown.
-- Startup checks about 660 MB of game data. Cold-start and first-map times on
-  this package are unknown. Shader compilation can add load time.
+- Startup checks pack names and sizes only, not their contents. Cold-start and
+  first-map times on this package are unknown. Shader compilation can add load time.
 - Original PC saves are not compatible. Game assets are supplied by the player.
