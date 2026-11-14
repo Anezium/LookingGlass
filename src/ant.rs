@@ -661,6 +661,98 @@ mod tests {
     fn floor() -> World {
         World::fixture(&[(vec3(-2000., -2000., -20.), vec3(2000., 2000., 0.))])
     }
+    /// Isolate one real projectile from AI spawning another attack. Dead owners
+    /// still advance their existing shots through the same production path.
+    fn damage_review_shot(grenade: bool, at: Vec3, age: f32) -> Ant {
+        let mut ant = Ant::new(1, grenade, vec3(500., 0., 0.1), 0.);
+        ant.health = 0.;
+        ant.phase = Phase::Dead;
+        ant.shots.push(Bullet {
+            at, grenade, direction: if grenade { Vec3::ZERO } else { Vec3::X }, age,
+        });
+        ant
+    }
+    #[test]
+    fn ant_damage_review_musket_contact_is_single_across_substeps_and_frames() {
+        for fps in [10, 30, 60, 144] {
+            let mut ant = damage_review_shot(false, vec3(-40., 0., 28.), 0.);
+            let mut total = 0.;
+            let mut hit_frames = 0;
+            for _ in 0..fps {
+                let mut feedback = Feedback::default();
+                ant.update(1. / fps as f32, &floor(), vec3(0., 0., 48.), &Clips, &mut feedback);
+                total += feedback.damage;
+                hit_frames += usize::from(feedback.damage > 0.);
+            }
+            assert_eq!((total, hit_frames), (10., 1), "{fps}Hz");
+            assert!(ant.shots.is_empty() && ant.blasts.is_empty());
+        }
+    }
+    #[test]
+    fn ant_damage_review_grenade_contact_and_radius_happen_once_with_cover() {
+        for fps in [10, 30, 60, 144] {
+            for (at, age, expected) in [(vec3(0., 0., 28.), 0., 85.), (vec3(40., 0., 28.), 1.999, 60.)] {
+                let mut ant = damage_review_shot(true, at, age);
+                let mut total = 0.;
+                let mut hit_frames = 0;
+                let mut explosions = 0;
+                for _ in 0..fps {
+                    let mut feedback = Feedback::default();
+                    ant.update(1. / fps as f32, &floor(), vec3(0., 0., 48.), &Clips, &mut feedback);
+                    total += feedback.damage;
+                    hit_frames += usize::from(feedback.damage > 0.);
+                    explosions += feedback.spatial_sounds.len();
+                }
+                assert_eq!((total, hit_frames, explosions), (expected, 1, 1), "{fps}Hz at {at:?}");
+                assert!(ant.shots.is_empty() && ant.blasts.is_empty());
+            }
+        }
+        let wall = World::fixture(&[
+            (vec3(-2000., -2000., -20.), vec3(2000., 2000., 0.)),
+            (vec3(20., -100., 0.), vec3(25., 100., 100.)),
+        ]);
+        let mut ant = damage_review_shot(true, vec3(40., 0., 28.), 1.999);
+        let mut feedback = Feedback::default();
+        ant.update(0.1, &wall, vec3(0., 0., 48.), &Clips, &mut feedback);
+        assert_eq!(feedback.damage, 0.);
+        assert_eq!(feedback.spatial_sounds.len(), 1);
+        assert!(ant.shots.is_empty());
+    }
+    #[test]
+    fn ant_damage_review_attended_sequence_matches_hard_without_hit_immunity() {
+        use crate::{inventory::Stats, powerups::Difficulty};
+        for (difficulty, expected) in [
+            (Difficulty::Normal, [90., 80., 60., 30.030235, 20.030235]),
+            (Difficulty::Hard, [86., 72., 44., 2.0423317, 0.]),
+        ] {
+            let mut stats = Stats::for_level("potears2", None);
+            stats.difficulty = difficulty;
+            assert_eq!(stats.sanity(), 100.);
+            for (damage, sanity) in [10., 10., 20., 29.969765, 10.].into_iter().zip(expected) {
+                stats.damage(damage);
+                assert!((stats.sanity() - sanity).abs() < 0.0001);
+            }
+            let mut stats = Stats::for_level("potears2", None);
+            stats.difficulty = difficulty;
+            stats.damage(10.);
+            stats.damage(65.83009);
+            assert_eq!(stats.alive(), difficulty == Difficulty::Normal);
+        }
+        // Ordinary damage does not arm a cooldown. Only explicit scripted
+        // protection suppresses it, until Stats' gameplay clock consumes it.
+        let mut stats = Stats::default();
+        stats.damage(10.);
+        stats.damage(10.);
+        assert_eq!(stats.sanity(), 80.);
+        stats.scripted_immunity = 1.;
+        stats.damage(10.);
+        stats.update(0.5);
+        stats.damage(10.);
+        assert_eq!(stats.sanity(), 80.);
+        stats.update(0.5);
+        stats.damage(10.);
+        assert_eq!(stats.sanity(), 70.);
+    }
     #[test]
     fn ant_detours_without_oscillating_at_obstacle_corners() {
         let world=World::fixture(&[(vec3(-500.,-500.,-20.),vec3(500.,500.,0.)),(vec3(90.,-65.,0.),vec3(150.,65.,120.))]);
