@@ -427,7 +427,7 @@ impl Gather {
             let g = &groups[p.group];
             let original = self.originals[p.group].as_ref().unwrap();
             assert!(
-                g.all_bsp_faces && !g.faces.is_empty(),
+                g.all_bsp_faces,
                 "gathered alpha source lacks BSP face provenance"
             );
             let u = p
@@ -477,7 +477,7 @@ impl Gather {
                     .append(true)
                     .open(path)
                     .unwrap();
-                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"bsp_faces":members.iter().map(|&m|groups[prepared[m].group].faces.len()).collect::<Vec<_>>(),"wave_normal":groups[prepared[id].group].recipe.wave_normal.is_some(),"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
+                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"bsp_only":members.iter().map(|&m|groups[prepared[m].group].all_bsp_faces).collect::<Vec<_>>(),"wave_normal":groups[prepared[id].group].recipe.wave_normal.is_some(),"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
             }
         }
     }

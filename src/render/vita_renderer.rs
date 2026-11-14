@@ -1586,8 +1586,8 @@ impl Renderer {
                 max: p.geometry.max + extent,
                 center: (p.geometry.min + p.geometry.max) * 0.5,
                 recipe: p.recipe,
+                all_bsp_faces: p.geometry.all_bsp_faces && !p.geometry.faces.is_empty(),
                 faces: p.geometry.faces,
-                all_bsp_faces: p.geometry.all_bsp_faces,
             });
         }
         crate::frame_profile::shader_creation();
