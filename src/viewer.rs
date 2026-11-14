@@ -1424,6 +1424,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut census_block = crate::phase_census::span(crate::phase_census::Region::Input);
         crate::frame_profile::begin_viewer_frame();
         crate::frame_phases::begin();
+        crate::spike_log::begin_frame();
         #[cfg(feature="vita_renderer")]
         let route_running=route_session.is_some();
         #[cfg(not(feature="vita_renderer"))]
@@ -2621,7 +2622,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 #[cfg(target_os = "vita")]
                 input.vita_look(&preferences, elapsed, &mut yaw, &mut pitch);
                 #[cfg(not(target_os = "vita"))]
-                {
+                if crate::replay::input::cross() {
+                    input.vita_look(&preferences, elapsed, &mut yaw, &mut pitch);
+                } else {
                 let look = input.look(&preferences);
                 yaw -= look.x * dt * 2.5;
                 pitch += look.y * dt * 2.;
@@ -2687,6 +2690,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_interaction_search"); }
+                crate::spike_log::sim(crate::spike_log::Sim::Search);
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2719,6 +2723,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Objects);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_interactions"); }
+                crate::spike_log::sim(crate::spike_log::Sim::Interactions);
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2750,6 +2755,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Movers);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_movers"); }
+                crate::spike_log::sim(crate::spike_log::Sim::Movers);
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2776,6 +2782,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::PlayerMovement);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_movement"); }
+                crate::spike_log::sim(crate::spike_log::Sim::Movement);
                 #[cfg(target_os = "vita")]
                 {
                     drop(viewer_block);
@@ -2997,6 +3004,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::StoryWeapons);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_story"); }
+        crate::spike_log::sim(crate::spike_log::Sim::Story);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3296,6 +3304,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if simulate {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_particles"); }
+        crate::spike_log::sim(crate::spike_log::Sim::Particles);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3337,6 +3346,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         } // simulation: particles
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::StoryWeapons);
+        crate::spike_log::sim(crate::spike_log::Sim::Combat);
         #[cfg(target_os = "vita")]
         if simulate {
             drop(viewer_block);
@@ -3404,6 +3414,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_combat"); }
+        crate::spike_log::sim(crate::spike_log::Sim::Encounters);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3438,6 +3449,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             player.knockback(f.impulse);
             audio.feedback(&f);
         }
+        crate::spike_log::sim(crate::spike_log::Sim::Levels);
         if interactions.has_level_combat() {
             // Pool's scene-owned ants and registered controllers share the route's combat hook.
             let notarget = stats.ignores_alice();
@@ -3469,6 +3481,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             player.knockback(f.impulse);
             audio.feedback(&f);
         }
+        crate::spike_log::sim(crate::spike_log::Sim::Npcs);
         npcs.summon(alice.ally_target());
         npcs.activate_levels(&interactions.levels);
         npcs.notarget(stats.ignores_alice());
@@ -3489,6 +3502,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             &scene.world,
             player.eye(),
         );
+        crate::spike_log::sim(crate::spike_log::Sim::CombatRest);
         alice.story_pose(&story, if story_active { dt } else { 0. });
         npcs.story_pose(
             &story,
@@ -3526,6 +3540,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         } // simulation: combat, encounters and NPC poses
         let death_animation =
             !stats.alive() && focused && !paused && !menu && !inventory_menu && !console_input;
+        crate::spike_log::sim(crate::spike_log::Sim::Alice);
         #[cfg(target_os = "vita")]
         if simulate {
             drop(viewer_block);
@@ -3707,6 +3722,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_audio"); }
+        crate::spike_log::sim(crate::spike_log::Sim::Audio);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3741,6 +3757,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::CameraScene);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_camera"); }
+        crate::spike_log::sim(crate::spike_log::Sim::Camera);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3898,6 +3915,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if simulate {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_audio_mix"); }
+        crate::spike_log::sim(crate::spike_log::Sim::AudioMix);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -3924,6 +3942,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         } // simulation: audio listener and clocks
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_scene"); }
+        crate::spike_log::sim(crate::spike_log::Sim::Scene);
         #[cfg(target_os = "vita")]
         {
             drop(viewer_block);
@@ -4013,6 +4032,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             });
         scene.update_ropes(world_dt, rope_hand, &transforms);
         drop(census_leaf);
+        crate::spike_log::sim(crate::spike_log::Sim::Particles2);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Particles);
         {
             #[cfg(target_os = "vita")]
@@ -4048,6 +4068,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         interactions.place_level_particles(&mut steam);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
+        crate::spike_log::render_begin();
         #[cfg(target_os = "vita")]
         let _lights_profile = crate::frame_profile::span("lights_build");
         let mut lights = steam.lights();
@@ -4361,6 +4382,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if freeze_capture { paused = pause_before_capture; clock.pause(); }
         if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
         drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Hud);
+        crate::spike_log::hud_begin();
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_hud"); }
         #[cfg(target_os = "vita")]
@@ -4821,6 +4843,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let census_tail=crate::phase_census::span(crate::phase_census::Region::FrameworkTail);
         crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
+        crate::spike_log::cpu_end();
         #[cfg(target_os = "vita")]
         {
             crate::frame_phases::mark(3);
@@ -4844,6 +4867,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && !interactions.school.as_ref().is_some_and(|s|s.cinematic()));}
         #[cfg(not(target_os="vita"))]
         if !route_running {crate::frame_profile::end_creation_frame();}
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        if !crate::sim_maps::probe::enabled() && crate::replay::input::cross() { crate::sim_maps::probe::shot(frame)?; }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         if crate::sim_maps::probe::enabled() {
             drop(host_block);
@@ -4914,6 +4939,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
     }
+    crate::spike_log::end_play();
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);

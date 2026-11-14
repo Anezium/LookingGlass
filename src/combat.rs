@@ -735,8 +735,7 @@ pub(crate) fn walk_body_liquids(
         return feet;
     }
     let raised = center.lerp(center + lift, up.fraction);
-    let across = world.sweep(raised, raised + delta, half);
-    if across.start_solid || across.fraction < 1. {
+    if world.sweep_blocked(raised, raised + delta, half) {
         return feet;
     }
     let down = world.sweep(raised + delta, raised + delta - Vec3::Z * 34., half);

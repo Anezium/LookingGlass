@@ -218,6 +218,20 @@ static LOG: AtomicPtr<Log> = AtomicPtr::new(std::ptr::null_mut());
 }
 #[inline] pub(crate) fn armed() -> bool { ARMED.load(Relaxed) }
 
+/// `spike_log_ms`: microseconds the main thread spent in BeginScene and EndScene while the survey log is
+/// not armed. Set once by the first spike-logged frame, never cleared.
+static SPIKE: AtomicBool = AtomicBool::new(false);
+static SPIKE_BEGIN_US: AtomicU32 = AtomicU32::new(0);
+static SPIKE_END_US: AtomicU32 = AtomicU32::new(0);
+static SPIKE_END_CALLS: AtomicU32 = AtomicU32::new(0);
+pub(crate) fn spike_enable() { SPIKE.store(true, Relaxed); }
+/// Running totals (Begin microseconds, End microseconds, End calls), which wrap; callers take
+/// differences. None while a survey window owns the wrappers.
+pub(crate) fn spike_peek() -> Option<[u32; 3]> {
+    if armed() { return None; }
+    Some([SPIKE_BEGIN_US.load(Relaxed), SPIKE_END_US.load(Relaxed), SPIKE_END_CALLS.load(Relaxed)])
+}
+
 #[cfg(target_os = "vita")]
 mod vita {
     use super::*;
@@ -256,7 +270,13 @@ mod vita {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_sceGxmBeginScene(context: *mut c_void, flags: u32, target: *const c_void, region: *const c_void,
         vertex_sync: *mut c_void, fragment_sync: *mut c_void, color: *const c_void, depth: *const c_void) -> i32 {
-        if !armed() { return __real_sceGxmBeginScene(context, flags, target, region, vertex_sync, fragment_sync, color, depth); }
+        if !armed() {
+            if !SPIKE.load(Relaxed) { return __real_sceGxmBeginScene(context, flags, target, region, vertex_sync, fragment_sync, color, depth); }
+            let enter = now();
+            let result = __real_sceGxmBeginScene(context, flags, target, region, vertex_sync, fragment_sync, color, depth);
+            SPIKE_BEGIN_US.fetch_add(now().wrapping_sub(enter), Relaxed);
+            return result;
+        }
         let enter = now();
         let waiting = inflight();
         let result = __real_sceGxmBeginScene(context, flags, target, region, vertex_sync, fragment_sync, color, depth);
@@ -266,7 +286,14 @@ mod vita {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_sceGxmEndScene(context: *mut c_void, vertex: *const Notification, fragment: *const Notification) -> i32 {
         let log_now = if armed() { log() } else { None };
-        let Some(log) = log_now else { return __real_sceGxmEndScene(context, vertex, fragment); };
+        let Some(log) = log_now else {
+            if !SPIKE.load(Relaxed) { return __real_sceGxmEndScene(context, vertex, fragment); }
+            let enter = now();
+            let result = __real_sceGxmEndScene(context, vertex, fragment);
+            SPIKE_END_US.fetch_add(now().wrapping_sub(enter), Relaxed);
+            SPIKE_END_CALLS.fetch_add(1, Relaxed);
+            return result;
+        };
         let enter = now();
         let waiting = inflight();
         let threaded = log.mode.threaded() && vertex.is_null();

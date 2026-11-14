@@ -775,6 +775,15 @@ impl StaticGeometry {
         sah_probe::record(self,start,end,half,result,counts);
         (result,counts.tested as u32,counts.clipped as u32)
     }
+    /// `trace` reduced to start-in-solid or fraction below 1, stopping at the first hull that changes it.
+    fn blocked(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds) -> bool {
+        let mut counts = sah::Counts::default();
+        if let Some(sah) = &self.sah {
+            if let Some(blocked) = sah.blocked(self,start,end,half,query,&mut counts) { return blocked; }
+        }
+        let t = self.legacy_trace(start,end,half,query,&mut counts);
+        t.start_solid || t.fraction < 1.
+    }
     fn trace_inner(&self, start: Vec3, end: Vec3, half: Vec3, query: &SweepBounds, counts: &mut sah::Counts) -> Trace {
         if let Some(sah) = &self.sah {
             if let Some(result) = sah.trace(self,start,end,half,query,counts) {return result;}
@@ -1210,6 +1219,55 @@ impl World {
         }
         if self.sweep_memo.borrow().active { return self.sweep_memoized(start, end, half); }
         self.sweep_except(start, end, half, None)
+    }
+    /// True exactly when `sweep(start, end, half)` would start in solid or stop short (fraction below 1).
+    /// With `sim_sweep_blocked` it stops at the first hull that blocks, where `sweep` keeps clipping to
+    /// find the nearest one. It visits the same geometry in the same order with the same broad phase, and
+    /// every change `clip_hull` makes to a trace is a block, so the first change answers. A trace's
+    /// fraction is never NaN (`clip_hull` stores only finite values), so `fraction < 1` and
+    /// `!(fraction >= 1)` are the same test.
+    pub(crate) fn sweep_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
+        let full = |t: Trace| t.start_solid || t.fraction < 1.;
+        if !crate::sim_maps::sweep_blocked() { return full(self.sweep(start, end, half)); }
+        let _census = crate::phase_census::query_sweep(self,start,end,half,1,None);
+        if self.sweep_memo.borrow().active {
+            let key = Self::query_key(start, end, half);
+            let memo = self.sweep_memo.borrow();
+            if let Some(entry) = memo.slots.get(sweep_memo_slot(&key)) {
+                if entry.generation == memo.generation && entry.key == key { return full(entry.trace); }
+            }
+        }
+        let blocked = self.blocked_geometry(start, end, half);
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var_os("LOOKING_GLASS_SWEEP_BLOCKED_VERIFY").is_some() {
+            assert_eq!(blocked, full(self.sweep_except(start, end, half, None)), "sweep_blocked differs: {start} {end} {half}");
+            crate::sim_maps::count("sweep_blocked_verified", 1);
+        }
+        blocked
+    }
+    /// `sweep_except(.., None)` reduced to its yes/no answer, in the same order: static hulls,
+    /// settled supports, dynamic colliders, weapon obstacles.
+    fn blocked_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
+        self.npc_profile.sweep();
+        crate::sim_maps::count("world_sweeps_blocked", 1);
+        let full = |t: Trace| t.start_solid || t.fraction < 1.;
+        let query = SweepBounds::new(start, end, half);
+        if self.static_geometry.blocked(start, end, half, &query) { return true; }
+        let clips = |h: &Hull| { let mut t = Trace::default(); clip_hull(h, start, end, half, &mut t); full(t) };
+        for c in &self.settled_supports {
+            if crate::sim_maps::npc_queries() && c.bounds.is_none_or(|b| !query.overlaps(b)) { continue; }
+            for hull in c.hulls().iter() {
+                if crate::sim_maps::npc_queries() && !query.overlaps(hull.bounds) { continue; }
+                if clips(hull) { return true; }
+            }
+        }
+        if !self.dynamic.is_empty() && self.dynamic_bounds.is_some_and(|b| b.overlaps(query.bounds)) {
+            for collider in &self.dynamic {
+                if collider.bounds.is_none_or(|b| !b.overlaps(query.bounds)) { continue; }
+                if full(collider.trace_query(start, end, half, &query)) { return true; }
+            }
+        }
+        self.weapon_obstacles.iter().any(|(_, c)| c.hulls().iter().any(clips))
     }
     /// Damage traces may contact a destructible obstacle itself, but must still
     /// respect every other obstacle. Movement never supplies an exception.
@@ -1768,6 +1826,38 @@ fn triangle_hull(a: Vec3, b: Vec3, c: Vec3) -> Option<Hull> {
 mod dynamic_tests;
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sweep_blocked_answers_as_the_full_sweep_on_every_kind_of_geometry() {
+        use super::*;
+        for sah in [false, true] {
+            set_sah_enabled_for_test(Some(sah));
+            let mut boxes = vec![(vec3(-400., -400., -40.), vec3(400., 400., 0.))];
+            for i in 0..24 {
+                let x = (i % 6) as f32 * 120. - 300.;
+                let y = (i / 6) as f32 * 150. - 260.;
+                boxes.push((vec3(x, y, 0.), vec3(x + 30. + (i % 5) as f32 * 9., y + 25., 40. + (i % 7) as f32 * 30.)));
+            }
+            let mut world = World::fixture(&boxes);
+            world.set_settled_supports(vec![Collider::box_bounds(vec3(-50., 300., 0.), vec3(50., 340., 90.))]);
+            world.set_dynamic(vec![Collider::box_bounds(vec3(200., -50., 0.), vec3(230., 50., 150.))]);
+            world.set_weapon_obstacles(vec![crate::combat::Target { id: 9, center: vec3(-200., 100., 60.), half: Vec3::splat(20.) }]);
+            let mut seed = 0x2545_F491u32;
+            let mut next = || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; (seed % 10_000) as f32 / 10_000. };
+            let (mut checked, mut blocked) = (0, 0);
+            for _ in 0..4000 {
+                let a = vec3(next() * 900. - 450., next() * 900. - 450., next() * 240. - 20.);
+                let b = a + vec3(next() * 400. - 200., next() * 400. - 200., next() * 160. - 80.);
+                let half = [Vec3::ZERO, Vec3::splat(0.5), Vec3::splat(8.), Vec3::splat(32.), vec3(24., 24., 40.)][(next() * 5.) as usize % 5];
+                let t = world.sweep(a, b, half);
+                let full = t.start_solid || t.fraction < 1.;
+                assert_eq!(crate::sim_maps::with_sweep_blocked(true, || world.sweep_blocked(a, b, half)), full, "{a} {b} {half} sah={sah}");
+                assert_eq!(world.sweep_blocked(a, b, half), full);
+                checked += 1; blocked += usize::from(full);
+            }
+            assert!(blocked > 500 && checked - blocked > 500, "both answers are exercised: {blocked} of {checked}");
+        }
+        set_sah_enabled_for_test(None);
+    }
     #[test]
     fn trigger_probe_is_inside_a_brush_in_a_disconnected_volume() {
         let world = super::World::fixture(&[

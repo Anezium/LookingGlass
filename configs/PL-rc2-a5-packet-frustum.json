@@ -177,5 +177,9 @@
   "tls_fast": "on",
   "sim_sweep_memo": true,
   "worker_spin_us": 0,
-  "skin_stream": false
+  "skin_stream": false,
+  "spike_log_ms": 0.0,
+  "audio_combat_preload": false,
+  "sim_sweep_blocked": false,
+  "actor_near_cull": 0.0
 }

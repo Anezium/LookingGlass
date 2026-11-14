@@ -1816,6 +1816,13 @@ impl Actor {
     fn target(&self) -> Vec3 {
         self.position() + Vec3::Z * (32. * self.spawn.scale).clamp(12., 100.)
     }
+    /// Distance from `camera` to the actor's body centre (`target`), for `actor_near_cull`.
+    fn near_distance(&self, camera: Vec3) -> f32 { self.target().distance(camera) }
+    /// `actor_near_cull`: a dead Ant whose body centre is closer to the camera than `limit` is not
+    /// drawn. Drawing only: the simulation and its state are unchanged. 0 is off.
+    fn near_culled(&self, camera: Vec3, limit: f32) -> bool {
+        near_cull(limit, self.ant.as_ref().is_some_and(|a| a.health <= 0.), || self.near_distance(camera))
+    }
     fn visible(&self, world: &World, eye: Vec3) -> bool {
         let trace = world.sweep(eye, self.target(), Vec3::splat(0.5));
         !trace.start_solid && trace.fraction >= 1.
@@ -1956,6 +1963,18 @@ pub fn talk_reachable(world: &World, eye: Vec3, aim: Vec3, target: Vec3) -> bool
         }
 }
 
+/// `actor_near_cull`: off at 0; otherwise only a dead body closer than `limit` is skipped.
+fn near_cull(limit: f32, dead: bool, distance: impl FnOnce() -> f32) -> bool {
+    limit > 0. && dead && distance() < limit
+}
+#[cfg(test)]
+#[test]
+fn near_cull_skips_only_close_dead_bodies_and_is_off_at_zero() {
+    assert!(!near_cull(0., true, || 1.));
+    assert!(near_cull(80., true, || 79.9));
+    assert!(!near_cull(80., true, || 80.));
+    assert!(!near_cull(80., false, || 1.));
+}
 pub struct Npcs {
     // GPU-only state, discarded on restore/level change and never serialized.
     visual_lod: BTreeMap<usize, visual_lod::Cache>,
@@ -3304,9 +3323,16 @@ impl Npcs {
             let _identity = actor.skin_identity.scope();
             let _skin_guard = crate::character::skinning::CullGuard::preserve(actor.electric > 0.);
             if actor.ant.as_ref().is_some_and(|a| !a.enabled) { continue; }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if std::env::var_os("LOOKING_GLASS_NEAR_TRACE").is_some() && !crate::character::skinning::overlap::gather_only() {
+                println!("[lg/near-trace] frame={} actor={id} model={} dead={} distance={:.1}", crate::sim_maps::probe::frame(),
+                    actor.spawn.model, actor.ant.as_ref().is_some_and(|a| a.health <= 0.), actor.near_distance(camera));
+            }
             if actor.guide.as_ref().is_some_and(|g| !g.visible()) {
                 continue;
             }
+            #[cfg(feature="vita_renderer")]
+            if actor.near_culled(camera, crate::render::vita_renderer::config().actor_near_cull) { continue; }
             if self.scene_hidden.contains(&actor.spawn.name) {
                 continue;
             }

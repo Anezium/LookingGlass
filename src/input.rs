@@ -251,7 +251,7 @@ fn stick(x: i16, y: i16, deadzone: f32) -> Vec2 {
 
 // Read the analog magnitude without changing the pinned miniquad backend.
 // Backend W/A/S/D still serves menus/host emulation, but not Vita gameplay movement.
-#[cfg(target_os = "vita")]
+// A host runs it only in a cross replay (`replay::input::cross`).
 fn vita_sticks(deadzone: f32) -> (Vec2, Vec2) {
     // The SceCtrl read lives in replay::input so a tape can record or supply it.
     let Some([lx, ly, rx, ry]) = crate::replay::input::vita_pad() else { return (Vec2::ZERO, Vec2::ZERO); };
@@ -260,7 +260,6 @@ fn vita_sticks(deadzone: f32) -> (Vec2, Vec2) {
      stick(axis(rx), -axis(ry), deadzone))
 }
 
-#[cfg(any(target_os = "vita", test))]
 fn resumed_axis(movement: Vec2, needs_neutral: &mut bool) -> Vec2 {
     if movement == Vec2::ZERO { *needs_neutral = false; }
     if *needs_neutral { Vec2::ZERO } else { movement }
@@ -357,11 +356,8 @@ pub struct Input {
     pub using_pad: bool,
     pub disconnected: bool,
     focused: bool,
-    #[cfg(target_os = "vita")]
     vita_neutral: bool,
-    #[cfg(target_os = "vita")]
     vita_look_neutral: bool,
-    #[cfg(target_os = "vita")]
     vita_look_log: std::cell::RefCell<crate::look::stick::RateLog>,
 }
 impl Input {
@@ -381,8 +377,7 @@ impl Input {
         self.disconnected = self.pad.connected && raw.is_none() && self.using_pad;
         self.pad
             .update(raw, focused, prefs.pad_deadzone, get_frame_time().min(0.1));
-        #[cfg(target_os = "vita")]
-        {
+        if cfg!(target_os = "vita") || crate::replay::input::cross() {
             if !self.focused {
                 self.vita_neutral = true;
                 self.vita_look_neutral = true;
@@ -417,7 +412,6 @@ impl Input {
     }
     /// On menus/load/focus boundaries, held inputs must be released before reuse.
     pub fn suppress(&mut self) {
-        #[cfg(target_os = "vita")]
         {
             self.vita_neutral = true;
             self.vita_look_neutral = true;
@@ -496,7 +490,7 @@ impl Input {
             return false;
         }
         // The backend quantizes the Vita stick to W/A/S/D; use its analog read instead.
-        if cfg!(target_os = "vita") && matches!(name, "W" | "S" | "A" | "D") { return false; }
+        if (cfg!(target_os = "vita") || crate::replay::input::cross()) && matches!(name, "W" | "S" | "A" | "D") { return false; }
         (!self.blocked.contains(name) && physical(name, edge))
             || row.is_some_and(|i| {
                 let mask = pad_mask(&prefs.pad_bindings[i]);
@@ -550,7 +544,6 @@ impl Input {
             * vec2(1., if prefs.invert_pad { -1. } else { 1. })
             * prefs.pad_sensitivity
     }
-    #[cfg(target_os = "vita")]
     pub fn vita_look(&self, prefs: &Preferences, elapsed: f32, yaw: &mut f32, pitch: &mut f32) {
         let axis = self.pad.look_axis;
         let before = *yaw;

@@ -193,7 +193,7 @@ impl Session {
             let path = root().join(&settings.play);
             let mut reader = tape::Reader::open(&path).with_context(|| format!("replay {}", path.display()))?;
             let h = reader.tape.header.clone();
-            ensure!(h.platform == tape::platform(), "tape recorded on {} cannot replay on {}", h.platform, tape::platform());
+            ensure!(h.platform == tape::platform() || input::cross(), "tape recorded on {} cannot replay on {}", h.platform, tape::platform());
             // The recorded control settings decide how sticks turn into motion. In memory only.
             *preferences = serde_json::from_value(h.preferences.clone()).context("tape preferences")?;
             if let Some(bytes) = reader.take_game() {
@@ -390,6 +390,8 @@ impl Session {
         self.ended = true;
         input::deactivate();
         let seconds = self.started.elapsed().as_secs_f64();
+        // Spike lines buffered during the run come out before its result line.
+        crate::spike_log::flush("replay-end");
         // Steps begun minus the one in progress.
         let steps = self.step.saturating_sub(1);
         match &mut self.mode {

@@ -2,7 +2,6 @@
 use macroquad::prelude::*;
 use crate::replay::input::{mouse_position};
 
-#[cfg(any(target_os = "vita", test))]
 pub mod stick;
 
 const SENSITIVITY: f32 = 0.0025;

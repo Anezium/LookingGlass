@@ -123,6 +123,41 @@ const WORLD_EFFECTS: &[&str] = &[
     "sound/weapon/knife/knife_hit_flesh1.wav",
     "sound/world/door/door wood open 02.wav",
 ];
+/// `audio_combat_preload`: the cues any fight can request on its first hit or death, whatever the enemy.
+/// Alice's pain cries (`Audio::sanity`) and the weapon flesh hits (`weapons.rs`).
+const COMBAT_EFFECTS: &[&str] = &[
+    "sound/character/alice/pain1.wav",
+    "sound/character/alice/pain_strong1.wav",
+    "sound/character/alice/pain_water1.wav",
+    "sound/weapon/knife/knife_hit_flesh1.wav",
+    "sound/weapon/knife/knife_phit_flesh1.wav",
+    "sound/weapon/mallet/mallet_hit_flesh1.wav",
+    "sound/weapon/mallet/mallet_ball_flesh1.wav",
+    "sound/weapon/cards/cards_hit_flesh1.wav",
+];
+/// The combat sounds to preload for a map: the code-defined cries and attacks of the enemy kinds placed in
+/// it (Ants, Ant corporals, Ladybugs), then [`COMBAT_EFFECTS`] when any enemy is placed. Empty without one.
+fn combat_preload(map: &Bsp) -> Vec<&'static str> {
+    let (mut ant, mut corporal, mut ladybug, mut enemy) = (false, false, false, false);
+    for e in &map.entities {
+        let class = e.get("classname").map(|c| c.to_lowercase()).unwrap_or_default();
+        if !(class.starts_with("characters_") || class.starts_with("enemies_")) { continue; }
+        enemy |= class.starts_with("enemies_");
+        let model = e.get("model").map(|m| m.to_lowercase()).unwrap_or_default();
+        match model.trim_start_matches("models/").trim_end_matches(".tik") {
+            "c_armyant" => ant = true,
+            "c_armyantcorp" => corporal = true,
+            "c_ladybug" => ladybug = true,
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if ant { out.extend(crate::ant::sounds(false)); }
+    if corporal { out.extend(crate::ant::sounds(true)); }
+    if ladybug { out.extend(crate::ladybug::SOUNDS); }
+    if enemy || ant || corporal || ladybug { out.extend(COMBAT_EFFECTS); }
+    out
+}
 const EXTRA_EFFECTS: &[&str] = &[
     "sound/character/cardguard/club/death_3a.wav",
     "sound/character/cardguard/club/death_3b.wav",
@@ -1009,6 +1044,7 @@ impl Audio {
         let mut cache_samples = 0;
         let mut alice_sounds = events::Model::load(assets, "models/alice.tik")?;
         alice_sounds.retain(&crate::character::CLIPS.map(crate::character::sound_alias));
+        let combat = if block::settings().combat_preload { combat_preload(map) } else { Vec::new() };
         // Preload authored emitters and core player cues. Global enemy/weapon
         // libraries belong to unrelated levels too; prepare() resolves those on
         // actual requests, retaining them only while the same 24 MiB budget fits.
@@ -1021,6 +1057,7 @@ impl Audio {
                     .iter()
                     .filter_map(|e| e.get("sound_move").map(String::as_str)),
             )
+            .chain(combat.iter().copied())
         {
             if cache.contains_key(path) {
                 continue;
@@ -1342,7 +1379,13 @@ impl Audio {
             if !self.world_clips.contains_key(&request.path)
                 && !self.missing.contains(&request.path)
             {
-                match assets.read(&request.path).and_then(decode_clip) {
+                let late = crate::spike_log::on().then(std::time::Instant::now);
+                let decoded = assets.read(&request.path).and_then(decode_clip);
+                if let Some(start) = late {
+                    crate::spike_log::late(crate::spike_log::AUDIO_CLIP, start.elapsed().as_secs_f64() * 1000.,
+                        Some(&request.path), decoded.as_ref().ok().map(|c| c.samples.len() * 4));
+                }
+                match decoded {
                     Ok(clip) => {
                         if self.cache_samples + clip.samples.len() > CACHE_SAMPLES {
                             self.resolved += u64::from(self.play_clip(clip, &request));
@@ -2322,6 +2365,34 @@ mod tests {
         println!("AUDIO_PRELOAD_SUMMARY maps={} limit_rejects={overflow}", maps.len());
         ensure!(overflow == 0, "level preload exceeded the audio cache");
         Ok(())
+    }
+    #[test]
+    fn combat_preload_lists_the_sounds_of_the_placed_enemy_kinds() {
+        let map = |models: &[(&str, &str)]| {
+            let mut map = crate::levels::synthetic::map();
+            map.entities = models.iter().map(|(class, model)| BTreeMap::from([
+                ("classname".to_string(), class.to_string()), ("model".to_string(), model.to_string())])).collect();
+            map
+        };
+        assert!(combat_preload(&map(&[])).is_empty());
+        assert!(combat_preload(&map(&[("Characters_BillTheLizard", "c_bill.tik")])).is_empty());
+        let mushrooms = combat_preload(&map(&[("Enemies_EvilMushroom", "c_evilmushroom.tik")]));
+        assert_eq!(mushrooms, COMBAT_EFFECTS);
+        // The potears2 cast: Ants, corporals, Ladybugs, roses, mushrooms and Bill.
+        let potears2 = combat_preload(&map(&[("Enemies_Army-Ant", "c_armyant.tik"), ("Enemies_Army-Ant-Corporal", "models/c_armyantcorp.tik"),
+            ("Enemies_Ladybug", "C_Ladybug.tik"), ("Enemies_BloodRose", "c_bloodrose.tik"), ("Characters_BillTheLizard", "c_bill.tik")]));
+        assert_eq!(potears2.len(), 7 + 7 + crate::ladybug::SOUNDS.len() + COMBAT_EFFECTS.len());
+        // Every sound the console loaded during the a2-04 fight is in the list.
+        for path in ["sound/character/army_ant/gunshot2.wav", "sound/character/army_ant/pain2.wav", "sound/weapon/knife/knife_hit_flesh1.wav",
+            "sound/character/army_ant/pain3.wav", "sound/character/army_ant/death1.wav", "sound/character/alice/pain1.wav",
+            "sound/character/army_ant/pain1.wav", "sound/character/alice/pain_strong1.wav", "sound/character/army_ant/death2.wav",
+            "sound/character/army_ant/death3.wav", "sound/character/ladybug/attack_bomb.wav", "sound/character/ladybug/acorn_explode.wav"] {
+            assert!(potears2.contains(&path), "{path}");
+        }
+        // The Ant tables are the ones the Ant plays: pain then death by variant, then its attack.
+        assert_eq!(crate::ant::sounds(false)[5], "sound/character/army_ant/death3.wav");
+        assert_eq!(crate::ant::sounds(true)[6], "sound/character/army_ant_corp/grenade.wav");
+        assert!(!block::settings().combat_preload, "off by default");
     }
     #[test]
     fn speaker_speech_is_never_ranked_as_ambience() {

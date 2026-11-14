@@ -17,6 +17,7 @@ pub struct Settings {
     pub log_thread: bool,
     pub music_thread: bool,
     pub music_priority: i32,
+    pub combat_preload: bool,
 }
 pub fn settings() -> Settings {
     #[cfg(feature = "vita_renderer")]
@@ -51,6 +52,7 @@ pub fn settings() -> Settings {
             log_thread: c.audio_log_thread,
             music_thread: c.audio_music_thread,
             music_priority: c.audio_music_priority.max(c.audio_producer_priority.clamp(160, 191) + 1).min(191),
+            combat_preload: c.audio_combat_preload,
         }
     }
     #[cfg(not(feature = "vita_renderer"))]
@@ -69,6 +71,7 @@ pub fn settings() -> Settings {
             log_thread: false,
             music_thread: false,
             music_priority: 170,
+            combat_preload: false,
         }
     }
 }

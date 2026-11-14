@@ -13,9 +13,7 @@ pub struct Navigator {
     retry: f32,
 }
 fn clear(world: &World, a: Vec3, b: Vec3, half: Vec3) -> bool {
-    let trace = world.sweep(a, b, half);
-    !trace.start_solid
-        && trace.fraction >= 1.
+    !world.sweep_blocked(a, b, half)
         && (0..=4).all(|i| world.liquid_at(a.lerp(b, i as f32 / 4.) - Vec3::Z * half.z) == 0)
 }
 impl Navigator {
@@ -78,6 +76,24 @@ impl Navigator {
     }
 }
 fn route(world: &World, start: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
+    let timer = crate::spike_log::on().then(std::time::Instant::now);
+    let mut tests = 0u32;
+    let mut clear = |a: Vec3, b: Vec3| { tests += 1; clear(world, a, b, half) };
+    let (path, expanded) = search(start, goal, &mut clear);
+    if let Some(t) = timer {
+        crate::spike_log::planner(crate::spike_log::FLIGHT_ROUTE, t.elapsed().as_secs_f64() * 1000., expanded, tests);
+    }
+    // Host diagnostics: every search with its inputs, to see which ones repeat.
+    #[cfg(not(target_os = "vita"))]
+    if std::env::var_os("LOOKING_GLASS_ROUTE_TRACE").is_some() {
+        println!("[lg/route-trace] flight start={:?} goal={:?} half={:?} expanded={expanded} tests={tests} path={}",
+            start.to_array().map(f32::to_bits), goal.to_array().map(f32::to_bits), half.to_array(), path.len());
+    }
+    path
+}
+/// The route search, with `clear` answering every clearance test. Returns the route and the
+/// number of nodes expanded.
+fn search(start: Vec3, goal: Vec3, clear: &mut impl FnMut(Vec3, Vec3) -> bool) -> (Vec<Vec3>, u32) {
     const CELL: f32 = 80.;
     type Key = [i16; 3];
     let point = |k: Key| start + vec3(k[0] as f32, k[1] as f32, k[2] as f32) * CELL;
@@ -88,7 +104,7 @@ fn route(world: &World, start: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
     let mut best = root;
     let mut reached = false;
     let mut sequence = 0;
-    let mut expanded = 0;
+    let mut expanded = 0u32;
     while let Some(Reverse((_, _, key))) = queue.pop() {
         expanded += 1;
         if expanded > 1536 {
@@ -98,7 +114,7 @@ fn route(world: &World, start: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
         if estimate(key) < estimate(best) {
             best = key;
         }
-        if clear(world, at, goal, half) {
+        if clear(at, goal) {
             best = key;
             reached = true;
             break;
@@ -113,7 +129,7 @@ fn route(world: &World, start: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
                 }
                 let new_cost = cost + 800;
                 if nodes.get(&next).is_some_and(|v| v.0 <= new_cost)
-                    || !clear(world, at, point(next), half)
+                    || !clear(at, point(next))
                 {
                     continue;
                 }
@@ -133,7 +149,7 @@ fn route(world: &World, start: Vec3, goal: Vec3, half: Vec3) -> Vec<Vec3> {
         at = nodes[&at].1;
     }
     result.reverse();
-    result
+    (result, expanded)
 }
 #[cfg(test)]
 mod tests {
