@@ -967,6 +967,14 @@ struct Pending {
     /// (batch, chunk of that batch's layer) per append, recorded only for `water_stage_merge`.
     origin: Vec<(u32, u32)>,
 }
+fn bsp_polygon_source(geometry:&Geometry,surfaces:&[crate::bsp::Surface])->bool {
+    geometry.all_bsp_faces && !geometry.faces.is_empty()
+        && geometry.faces.iter().all(|&face|surfaces.get(face).is_some_and(|surface|surface.kind==1))
+}
+fn bsp_kind_mask(geometry:&Geometry,surfaces:&[crate::bsp::Surface])->u8 {
+    geometry.faces.iter().fold(0,|mask,&face|mask|surfaces.get(face).map_or(0,|surface|
+        u32::try_from(surface.kind).ok().and_then(|kind|1_u8.checked_shl(kind)).unwrap_or(0)))
+}
 struct Group {
     base_element: i32,
     material_order: usize,
@@ -978,7 +986,8 @@ struct Group {
     center: Vec3,
     recipe: Recipe,
     faces: Vec<usize>,
-    all_bsp_faces: bool,
+    bsp_polygons_only: bool,
+    bsp_kinds: u8,
 }
 #[derive(Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Lists {
@@ -1556,7 +1565,7 @@ impl Renderer {
             source_ranges.extend(packed.iter().map(|(_,v,i)| (v.len(), i.as_slice())));
             alpha_ranges::Gather::new(&source_ranges, &allocations,
                 pending.iter().map(|p| alpha_ranges::eligible(&p.recipe)
-                    && ((p.geometry.all_bsp_faces && !p.geometry.faces.is_empty()) || world_list::negative("alpha-range-model-source"))))
+                    && (bsp_polygon_source(&p.geometry,&scene.map.surfaces) || world_list::negative("alpha-range-model-source"))))
         } else { None };
         drop(source_ranges);
         let buffers = packed.into_iter().map(|(_,v,i)| {
@@ -1586,7 +1595,8 @@ impl Renderer {
                 max: p.geometry.max + extent,
                 center: (p.geometry.min + p.geometry.max) * 0.5,
                 recipe: p.recipe,
-                all_bsp_faces: p.geometry.all_bsp_faces && !p.geometry.faces.is_empty(),
+                bsp_polygons_only: bsp_polygon_source(&p.geometry,&scene.map.surfaces),
+                bsp_kinds: bsp_kind_mask(&p.geometry,&scene.map.surfaces),
                 faces: p.geometry.faces,
             });
         }
@@ -3924,9 +3934,16 @@ mod tests {
         let mut geometry=Geometry::default();
         geometry.append(0,&batch,&[0,1,2],Some(17));
         assert!(geometry.all_bsp_faces);
+        let surface=|kind|crate::bsp::Surface {shader:0,kind,first_vertex:0,vertex_count:3,first_index:0,index_count:3,lightmap:-1,patch_width:0,patch_height:0};
+        let mut surfaces=(0..20).map(|_|surface(1)).collect::<Vec<_>>();
+        assert!(bsp_polygon_source(&geometry,&surfaces));
+        surfaces[17]=surface(3);assert!(!bsp_polygon_source(&geometry,&surfaces)); // baked triangle soup
+        surfaces[17]=surface(2);assert!(!bsp_polygon_source(&geometry,&surfaces)); // curved patch
+        surfaces[17]=surface(1);
         geometry.append(1,&batch,&[0,1,2],None); // frozen source with the same material/cell
         geometry.append(2,&batch,&[0,1,2],Some(19));
         assert!(!geometry.all_bsp_faces);
+        assert!(!bsp_polygon_source(&geometry,&surfaces));
         assert_eq!(geometry.faces,[17,19]);
         assert_eq!(geometry.indices,[0,1,2,3,4,5,6,7,8]); // no original draw geometry removed
     }

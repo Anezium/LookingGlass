@@ -1,6 +1,7 @@
 //! Exact index gathering for consecutive same-state alpha commands in the final joint list.
 //! No vertex rebasing or material/depth sorting occurs here. Actors and puffs are fences.
-//! Only BSP-face-backed world surfaces participate. Frozen model meshes preserve their
+//! Only polygon-only BSP world surfaces participate. Patches, triangle soup and
+//! mixed/ambient source batches retain their original draw barriers. Frozen model meshes preserve their
 //! original draw barriers: strict host pixels found those meshes sensitive to joining,
 //! even with equal state/indices and disjoint projected bounds.
 use super::*;
@@ -427,8 +428,8 @@ impl Gather {
             let g = &groups[p.group];
             let original = self.originals[p.group].as_ref().unwrap();
             assert!(
-                g.all_bsp_faces,
-                "gathered alpha source lacks BSP face provenance"
+                g.bsp_polygons_only,
+                "gathered alpha source lacks polygon-only BSP provenance"
             );
             let u = p
                 .uniforms
@@ -477,7 +478,7 @@ impl Gather {
                     .append(true)
                     .open(path)
                     .unwrap();
-                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"bsp_only":members.iter().map(|&m|groups[prepared[m].group].all_bsp_faces).collect::<Vec<_>>(),"wave_normal":groups[prepared[id].group].recipe.wave_normal.is_some(),"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
+                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"bsp_kinds":members.iter().map(|&m|groups[prepared[m].group].bsp_kinds).collect::<Vec<_>>(),"bsp_only":members.iter().map(|&m|groups[prepared[m].group].bsp_polygons_only).collect::<Vec<_>>(),"wave_normal":groups[prepared[id].group].recipe.wave_normal.is_some(),"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
             }
         }
     }
@@ -596,6 +597,8 @@ pub(super) struct PixelProbe {
     mvp: [u32; 16],
     finish_projection: Option<[u32; 16]>,
     bounds: [[f32; 3]; 2],
+    bsp_kinds: u8,
+    bsp_polygons_only: bool,
 }
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
 impl PixelProbe {
@@ -636,6 +639,8 @@ impl PixelProbe {
             finish_projection: crate::render_fx::projection()
                 .map(|m| m.to_cols_array().map(f32::to_bits)),
             bounds: [groups[group].min.to_array(), groups[group].max.to_array()],
+            bsp_kinds: groups[group].bsp_kinds,
+            bsp_polygons_only: groups[group].bsp_polygons_only,
         };
         probe.record("before");
         Some(probe)
@@ -667,7 +672,7 @@ impl PixelProbe {
             .append(true)
             .open(std::env::var_os("LOOKING_GLASS_ALPHA_PIXELS").unwrap())
             .unwrap();
-        writeln!(file,"{}",serde_json::json!({"frame":crate::sim_maps::probe::frame(),"phase":phase,"id":self.id,"group":self.group,"image":self.image,"alpha_test":self.alpha_test,"mvp":self.mvp,"finish_projection":self.finish_projection,"bounds":self.bounds,"viewport":viewport,"sha256":format!("{:x}",Sha256::digest(&pixels))})).unwrap();
+        writeln!(file,"{}",serde_json::json!({"frame":crate::sim_maps::probe::frame(),"phase":phase,"id":self.id,"group":self.group,"image":self.image,"alpha_test":self.alpha_test,"mvp":self.mvp,"finish_projection":self.finish_projection,"bounds":self.bounds,"bsp_kinds":self.bsp_kinds,"bsp_polygons_only":self.bsp_polygons_only,"viewport":viewport,"sha256":format!("{:x}",Sha256::digest(&pixels))})).unwrap();
     }
 }
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
