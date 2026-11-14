@@ -142,6 +142,8 @@ pub(super) struct Gather {
     limit: usize,
     banks: Vec<(BufferId, BufferId)>,
     seen: Vec<bool>,
+    #[cfg(target_os = "vita")]
+    native_report_bits: u8,
 }
 impl Gather {
     pub fn new(
@@ -203,6 +205,8 @@ impl Gather {
             limit,
             banks: Vec::new(),
             seen,
+            #[cfg(target_os = "vita")]
+            native_report_bits: 0,
         })
     }
     pub fn bind_sources(&mut self, banks: &[(BufferId, BufferId)]) -> bool {
@@ -233,6 +237,14 @@ impl Gather {
     }
     pub fn members(&self, first: usize, end: usize) -> &[usize] {
         &self.members[first..end]
+    }
+    /// One native row after an actual joined draw, rather than an upload-only claim.
+    #[cfg(target_os = "vita")]
+    pub fn report_native_draw(&mut self, indices: i32, members: usize) {
+        if self.native_report_bits & 1 == 0 {
+            self.native_report_bits |= 1;
+            eprintln!("[lg/alpha-ranges] native_first_joined_draw indices={indices} members={members}");
+        }
     }
     pub fn prepare(
         &mut self,
@@ -330,6 +342,11 @@ impl Gather {
             self.scratch.clear();
             self.members.clear();
             count("vita_world_alpha_range_same_frame_fallback", 1);
+            #[cfg(target_os = "vita")]
+            if self.native_report_bits & 2 == 0 {
+                self.native_report_bits |= 2;
+                eprintln!("[lg/alpha-ranges] native_same_swap_fallback");
+            }
             return;
         }
         if world_list::negative("alpha-range-index-order") && self.scratch.len() >= 6 {
@@ -344,7 +361,8 @@ impl Gather {
         // byte count, not SubData into live storage. The linked VitaGL implementation
         // marks referenced old stores dirty (four-frame purge queue), allocates a fresh
         // mapped store, and records IBO last_frame on indexed draws. One orphan per
-        // finish bounds the additional purge entries. Renderer drop waits for the GPU.
+        // finish bounds additional purge entries. Drop requests the existing conditional
+        // GL finish; referenced stores independently retain the deferred deletion policy.
         let buffer = *self.buffer.get_or_insert_with(|| {
             ctx.new_buffer(
                 BufferType::IndexBuffer,
@@ -359,13 +377,19 @@ impl Gather {
         );
         // RenderingBackend returns no Result for allocation/update. GL exposes OOM;
         // any reported error conservatively restores every original draw this finish.
-        if unsafe { macroquad::miniquad::gl::glGetError() } != macroquad::miniquad::gl::GL_NO_ERROR
+        let upload_error = unsafe { macroquad::miniquad::gl::glGetError() };
+        if upload_error != macroquad::miniquad::gl::GL_NO_ERROR
             || world_list::negative("alpha-range-upload-fail")
         {
             self.emissions.fill(Emission::Single);
             self.scratch.clear();
             self.members.clear();
             count("vita_world_alpha_range_upload_fallback", 1);
+            #[cfg(target_os = "vita")]
+            if self.native_report_bits & 4 == 0 {
+                self.native_report_bits |= 4;
+                eprintln!("[lg/alpha-ranges] native_upload_fallback gl_error={upload_error}");
+            }
         }
     }
     /// Physical certificate at the actual draw boundary, separate from expanded semantic

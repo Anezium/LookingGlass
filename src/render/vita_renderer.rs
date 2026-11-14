@@ -2678,6 +2678,11 @@ impl Renderer {
                             { crate::frame_profile::record_batch(true, false);
                               crate::frame_profile::record_world_submission();
                               crate::frame_profile::record_geometry(indices as usize/3,0,true); }
+                            #[cfg(target_os="vita")]
+                            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) {
+                                let member_count = members.len();
+                                ranges.report_native_draw(indices, member_count);
+                            }
                             // The gathered IBO differs from the immutable bank used by singles.
                             adjacent_state = state_cache::Cache::new();
                             return;
