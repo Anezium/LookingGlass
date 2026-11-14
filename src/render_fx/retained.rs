@@ -715,7 +715,7 @@ fn valid_mesh(mesh: &Mesh) -> bool {
             .all(|&i| (i as usize) < mesh.vertices.len())
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
+pub(crate) enum Source {
     World(usize),
     Actor(usize),
     Puff(usize),
@@ -1182,7 +1182,7 @@ pub(crate) fn finish(
     flush: bool,
     mut draw_world: impl FnMut(usize),
 ) -> (usize, usize) {
-    finish_world(gpu, world, flush, |id, _| draw_world(id), None)
+    finish_world(gpu, world, flush, |event| if let WorldEvent::Draw(id, _) = event { draw_world(id) }, None)
 }
 /// Host probe: what reaches the joint list, and how many quads cannot touch the view.
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1205,8 +1205,13 @@ fn funnel_before_bank(groups: &[super::Group], puffs: &[world_puffs::Puff]) {
     crate::sim_maps::count("fx_funnel_joint_raw_quads", puffs.len() as u64);
     crate::sim_maps::count("fx_funnel_joint_raw_outside_view", puffs.iter().filter(|p| outside(&p.vertices)).count() as u64);
 }
+/// One event of the joint alpha list. `Plan` hands over the final ordered list once, before any
+/// draw, so a world submitter can plan runs of list entries; `Draw` is one world draw and says
+/// whether no actor or puff sits between it and the previous world draw.
+pub(crate) enum WorldEvent<'a> { Plan(&'a [(f32, Source)]), Draw(usize, bool) }
 pub(crate) fn finish_world(
-    gpu: &mut Gpu, world: &[(f32, usize)], flush: bool, mut draw_world: impl FnMut(usize, bool),
+    gpu: &mut Gpu, world: &[(f32, usize)], flush: bool,
+    mut world_event: impl for<'a> FnMut(WorldEvent<'a>),
     world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
@@ -1414,6 +1419,8 @@ pub(crate) fn finish_world(
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent, groups[id].ant_dead);
         }
     };
+    // The merged list is final here: let a world submitter plan its runs before any draw.
+    world_event(WorldEvent::Plan(&list));
     let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     unsafe {
         crate::render::vita_renderer::begin_3d_pass(PassAction::Nothing);
@@ -1457,7 +1464,7 @@ pub(crate) fn finish_world(
                     let world_started = MetricInstant::now();
                     // Only immediately adjacent world callbacks share state. An actor, even one
                     // ultimately skipped by its own submitter, remains an interruption fence.
-                    draw_world(id, continuation);
+                    world_event(WorldEvent::Draw(id, continuation));
                     world_ns += world_started.elapsed().as_nanos() as u64;
                     world_ms += crate::frame_profile::Totals::<3>::elapsed(start);
                 },

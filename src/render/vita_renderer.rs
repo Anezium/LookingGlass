@@ -14,6 +14,8 @@ mod gxm;
 mod draw_cuts;
 mod alpha_fill;
 mod sky_surfaces;
+mod water_join;
+mod water_probe;
 #[cfg(not(target_os = "vita"))]
 pub(crate) mod interop_check;
 use super::Scene;
@@ -352,6 +354,12 @@ pub struct Config {
     /// without the alpha-test chain, the lightmap branch and the clamp; same arithmetic, so no
     /// pixel should change. Default off.
     pub world_alpha_lite: bool,
+    /// Consecutive liquid world alpha draws that share pipeline, vertex buffer, atlas, texture and
+    /// uniform parameter, with no actor or puff between them, submit as one indexed draw whose
+    /// dynamic index buffer holds their indices in the exact submitted order. The alpha pass
+    /// writes no depth, so only blending order matters and it is preserved; fragments, depth
+    /// tests and uniforms are unchanged. Needs `world_shared_buffers`. Default off.
+    pub water_draw_join: bool,
     /// Effect packets that are unlit, unclamped, uncut, with no dissolve, ghost, power tint or
     /// filter fade use a fragment program without those paths, the dynamic lights (all zero when
     /// unlit) and the sky fade (never set here); same arithmetic. Default off.
@@ -588,7 +596,7 @@ impl Default for Config {
             skin_frustum_cull: true,
             fast_frustum: true,
             packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
-            water_stage_merge: "off".into(), world_alpha_lite: false, fx_lite: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
+            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, fx_lite: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
             flat_actor_light: false, max_texture_dimension: None,
             draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             gpu_state_probe: false,
@@ -703,6 +711,8 @@ impl Config {
             "actor_max_layers must be 1 or 2"
         );
         ensure!(matches!(self.water_stage_merge.as_str(),"off"|"merge"|"drop_filter"),"water_stage_merge must be off, merge or drop_filter");
+        ensure!(!self.water_draw_join || self.world_shared_buffers, "water_draw_join needs world_shared_buffers");
+        ensure!(!self.water_draw_join || self.water_stage_merge == "off", "water_draw_join and water_stage_merge are exclusive");
         ensure!(self.fx_add_max_area.is_finite() && (0. ..=1.).contains(&self.fx_add_max_area), "fx_add_max_area must be 0 to 1");
         ensure!(matches!(self.texture_cache.as_str(),"on"|"off"),"texture_cache must be on or off");
         ensure!(matches!(self.shader_cache.as_str(),"on"|"off"),"shader_cache must be on or off");
@@ -1070,6 +1080,8 @@ struct Pending {
     recipe: Recipe,
     /// (batch, chunk of that batch's layer) per append, recorded only for `water_stage_merge`.
     origin: Vec<(u32, u32)>,
+    /// The part's shader carries a liquid contents bit, as `diag_skip_water` tests it.
+    liquid: bool,
 }
 struct Group {
     base_element: i32,
@@ -1082,6 +1094,7 @@ struct Group {
     center: Vec3,
     recipe: Recipe,
     faces: Vec<usize>,
+    liquid: bool,
 }
 #[derive(Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Lists {
@@ -1239,6 +1252,7 @@ pub struct Renderer {
     parameter_generation: u64,
     field_uniforms: [super::uniform_fields::Cache; 2],
     pvs: Pvs,
+    water_join: Option<water_join::State>,
     pipelines: Vec<Pipeline>,
     shader: ShaderId,
     low_shader:Option<ShaderId>,
@@ -1378,6 +1392,9 @@ impl Renderer {
                 .filter(|d| matches!(d, Deform::Sprite(_) | Deform::WaveNormal(..)))
                 .count()
                 + b.deforms.len().saturating_sub(1);
+            let batch_liquid = b.parts.iter().any(|part| {
+                scene.map.shaders[scene.map.surfaces[part.face].shader].contents & crate::collision::LIQUID_MASK != 0
+            });
             let mut rank = 0;
             for layer in &b.layers {
                 if layer.spec.blend == Blend::Invisible || (layer.spec.detail && !c.detail_layers) {
@@ -1472,6 +1489,9 @@ impl Renderer {
                     let cell = (center / c.cell_size).floor();
                     let key = format!("{signature}|{}|{cell:?}", recipe.rank);
                     let source = &b.full_indices[range];
+                    let liquid = face.map_or(batch_liquid, |face| {
+                        scene.map.shaders[scene.map.surfaces[face].shader].contents & crate::collision::LIQUID_MASK != 0
+                    });
                     // Split unusually large parts on triangle boundaries as well as between faces.
                     for source in source.chunks(59997) {
                         source_chunks+=1;
@@ -1487,6 +1507,7 @@ impl Renderer {
                                     geometry: Geometry::default(),
                                     recipe: recipe.clone(),
                                     origin: Vec::new(),
+                                    liquid,
                                 });
                                 candidates.push(id);
                                 id
@@ -1685,6 +1706,27 @@ impl Renderer {
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::world_ranges(allocations.iter().map(|&(_,base,count)|(base,count)).collect());
+        let water_indices: Vec<Option<Vec<u16>>> = if c.water_draw_join {
+            pending.iter().zip(&allocations).map(|(p, &(slot, base, count))| {
+                (p.liquid && !p.recipe.opaque).then(|| {
+                    let (_, _, indices) = &packed[slot];
+                    indices[base as usize..(base + count) as usize].to_vec()
+                })
+            }).collect()
+        } else { Vec::new() };
+        let water_join = if c.water_draw_join {
+            let total: usize = water_indices.iter().flatten().map(Vec::len).sum();
+            if total * 2 > 4 * 1024 * 1024 {
+                println!("[lg/vita-renderer] water_draw_join key off: {total} indices exceed the 4 MiB stream budget");
+                None
+            } else {
+                let state = water_join::State::new(ctx, water_indices);
+                resources.buffers.push(state.buffer);
+                println!("[lg/vita-renderer] water_draw_join groups={} indices={} stream_bytes={}",
+                    state.indices.iter().filter(|i| i.is_some()).count(), total, total * 2);
+                Some(state)
+            }
+        } else { None };
         let packing_capacity_bytes: usize = packed.iter().map(|(_,v,i)|v.capacity()*52+i.capacity()*2).sum();
         let buffers = packed.into_iter().map(|(_,v,i)| {
             let vertex = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Immutable, BufferSource::slice(&v));
@@ -1713,6 +1755,7 @@ impl Renderer {
                 center: (p.geometry.min + p.geometry.max) * 0.5,
                 recipe: p.recipe,
                 faces: p.geometry.faces,
+                liquid: p.liquid,
             });
         }
         crate::frame_profile::shader_creation();
@@ -1855,6 +1898,7 @@ impl Renderer {
             alpha_fill,
             groups,
             pvs,
+            water_join,
             pipelines,
             shader,low_shader,low_pipelines,
             sky_pipeline,
@@ -1862,6 +1906,120 @@ impl Renderer {
             sky_bindings,
             sky_surfaces,
         })
+    }
+    /// `water_draw_join`: plan this frame's runs from the joint alpha list, then upload their
+    /// concatenated indices once. A run holds the list entries between two non-members in list
+    /// order, so drawing it at its first member's place submits exactly those primitives in order.
+    fn plan_water_runs(&mut self, list: &[(f32, crate::render_fx::retained::Source)]) {
+        use crate::render_fx::retained::Source;
+        let Some(state) = self.water_join.as_mut() else { return; };
+        state.begin_frame(self.prepared.len());
+        let mut open: Option<usize> = None;
+        for (_, source) in list {
+            let Source::World(id) = *source else { open = None; continue; };
+            let group = self.prepared[id].group;
+            let g = &self.groups[group];
+            let key = (g.liquid && state.indices[group].is_some()
+                && !(self.alpha_fill.lite.is_some() && alpha_fill::lite_recipe(&g.recipe)))
+                .then(|| (self.pipelines[g.recipe.blend * 3 + g.recipe.cull], g.bindings.vertex_buffers[0],
+                    g.bindings.images[1], self.prepared[id].texture, g.parameter));
+            let Some((pipeline, vertex, atlas, texture, parameter)) = key else { open = None; continue; };
+            let water_join::State { scratch, indices, runs, members, member, capacity, .. } = state;
+            let items = indices[group].as_ref().expect("a join key has an index copy");
+            let continue_run = open.is_some_and(|run| {
+                let run = &runs[run];
+                run.pipeline == pipeline && run.vertex == vertex && run.atlas == atlas
+                    && run.texture == texture && run.parameter == parameter
+            });
+            let offset = scratch.len();
+            if !continue_run || offset + items.len() > *capacity {
+                if offset + items.len() > *capacity { open = None; continue; }
+                runs.push(water_join::Run { pipeline, vertex, atlas, texture, parameter,
+                    offset, count: 0, first: id, groups: 0 });
+                members.push(Vec::new());
+                open = Some(runs.len() - 1);
+            }
+            let run = open.expect("an open run");
+            member[id] = run as u32;
+            runs[run].count += items.len();
+            runs[run].groups += 1;
+            members[run].push(id);
+            scratch.extend_from_slice(items);
+        }
+        if state.scratch.is_empty() { return; }
+        let ctx = unsafe { get_internal_gl() }.quad_context;
+        let upload = water_probe::tick();
+        ctx.buffer_update(state.buffer, BufferSource::slice(&state.scratch[..]));
+        water_probe::add(|f| &mut f.water_upload_time, upload);
+        water_probe::add_n(|f| &mut f.water_upload_bytes, (state.scratch.len() * 2) as u64);
+        count("vita_world_alpha_join_runs", state.runs.len() as u64);
+        count("vita_world_alpha_join_upload_bytes", (state.scratch.len() * 2) as u64);
+        state.upload_bytes += (state.scratch.len() * 2) as u64;
+    }
+    /// Submit one planned `water_draw_join` run as a single indexed draw. The host probe still
+    /// sees one canonical packet per original draw, in the same order, so the oracle compares
+    /// logical submissions and the joined physical command separately.
+    fn draw_water_run(&mut self, index: usize) {
+        let Some(run) = self.water_join.as_ref().map(|state| state.runs[index]) else { return; };
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        {
+            let members = self.water_join.as_ref().expect("join state").members[index].clone();
+            for member in &members {
+                let group = self.prepared[*member].group;
+                let g = &self.groups[group];
+                crate::sim_maps::probe::world_order(group, true);
+                crate::sim_maps::probe::draw_query::mark("world_alpha", "world_joined",
+                    g.recipe.blend, Some(group), g.recipe.stage.alpha_test,
+                    g.recipe.stage.images.first().map(String::as_str));
+                crate::sim_maps::probe::world_packet(group, g.base_element, g.indices,
+                    &self.prepared[*member].texture,
+                    self.parameters[g.parameter].uniforms.bits_ref(), false,
+                    world_list::pipeline_class(g.recipe.blend, g.recipe.cull));
+            }
+        }
+        let ctx = unsafe { get_internal_gl() }.quad_context;
+        let uniforms = &self.parameters[run.parameter].uniforms;
+        let buffer = self.water_join.as_ref().expect("join state").buffer;
+        let probe_submit = if water_probe::in_window() { water_probe::tick() } else { None };
+        let probe_pipeline = water_probe::tick();
+        ctx.apply_pipeline(&run.pipeline);
+        unsafe { macroquad::miniquad::gl::glDepthMask(0); }
+        scale::log_depth(false);
+        water_probe::add(|f| &mut f.water_pipeline_time, probe_pipeline);
+        let probe_bindings = water_probe::tick();
+        ctx.apply_bindings(&Bindings { vertex_buffers: vec![run.vertex], index_buffer: buffer,
+            images: vec![run.texture, run.atlas] });
+        water_probe::add(|f| &mut f.water_binding_time, probe_bindings);
+        let probe_uniform = water_probe::tick();
+        let traffic = self.field_uniforms[0].apply(ctx, uniforms.values(), config().uniform_field_cache);
+        water_probe::add(|f| &mut f.water_uniform_time, probe_uniform);
+        let probe_draw = water_probe::tick();
+        if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) {
+            ctx.draw(run.offset as i32, run.count as i32, 1);
+        }
+        water_probe::add(|f| &mut f.water_draw_time, probe_draw);
+        water_probe::add(|f| &mut f.water_submit_time, probe_submit);
+        water_probe::add_n(|f| &mut f.water_draw_calls, 1);
+        water_probe::add_n(|f| &mut f.water_pipeline_applications, 1);
+        water_probe::add_n(|f| &mut f.water_binding_applications, 1);
+        water_probe::add_n(|f| &mut f.water_uniform_applications, 1);
+        water_probe::add_n(|f| &mut f.water_uniform_calls, traffic.calls);
+        water_probe::add_n(|f| &mut f.water_uniform_bytes, traffic.bytes);
+        count("vita_world_gpu_draws", 1);
+        count("vita_world_alpha_triangles", run.count as u64 / 3);
+        count("vita_world_alpha_state_applications", 1);
+        count("vita_world_alpha_joined_draws", 1);
+        count("vita_world_alpha_joined_groups", run.groups as u64);
+        count("vita_world_alpha_joined_indices", run.count as u64);
+        crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
+            crate::light_profile::RenderMetrics { draws: 1, pipelines: 1, depth_states: 1, bindings: 1,
+                texture_bind_slots: 2, uniform_uploads: 1, uniform_bytes: traffic.bytes,
+                uniform_gl_calls: traffic.calls, ..Default::default() });
+        #[cfg(target_os = "vita")]
+        {
+            crate::frame_profile::record_world_submission();
+            crate::frame_profile::record_geometry(run.count / 3, 0, true);
+        }
     }
     pub(super) fn draw(
         &mut self,
@@ -1884,6 +2042,8 @@ impl Renderer {
         count("vita_world_rebuilt_indices", 0);
         count("vita_world_sorted_triangles", 0);
         let _census_world = crate::phase_census::span(if alpha {crate::phase_census::Region::AlphaPrepare} else {crate::phase_census::Region::WorldOpaque});
+        water_probe::begin(alpha);
+        let probe_draw = water_probe::tick();
         let census_visibility = crate::phase_census::span(crate::phase_census::Region::WorldVisibility);
         let visibility_started = MetricInstant::now();
         let visibility_span = crate::frame_profile::span("vita_cluster_frustum");
@@ -1919,7 +2079,13 @@ impl Renderer {
                 // Valid models were written by the test that set this generation.
                 if entry.static_group && entry.generation == generation {
                     hits += 1;
-                    if entry.visible { self.alpha_order.push((entry.depth, id)); }
+                    if entry.visible {
+                        self.alpha_order.push((entry.depth, id));
+                        if !alpha && self.groups[id].liquid {
+                            water_probe::add_n(|f| &mut f.opaque_water, 1);
+                            water_probe::add_n(|f| &mut f.opaque_water_triangles, self.groups[id].indices as u64 / 3);
+                        }
+                    }
                     continue;
                 }
                 let g = &self.groups[id];
@@ -1939,12 +2105,19 @@ impl Renderer {
                     entry.depth = result.map_or(0., |r| r.0);
                 }
                 self.models[id] = result.map(|(_, model)| model);
-                if let Some((depth, _)) = result { self.alpha_order.push((depth, id)); }
+                if let Some((depth, _)) = result {
+                    self.alpha_order.push((depth, id));
+                    if !alpha && self.groups[id].liquid {
+                        water_probe::add_n(|f| &mut f.opaque_water, 1);
+                        water_probe::add_n(|f| &mut f.opaque_water_triangles, self.groups[id].indices as u64 / 3);
+                    }
+                }
             }
         } else {
         for &id in ids {
             let g = &self.groups[id];
             let static_group = g.recipe.model.is_none() && g.recipe.motion.is_none();
+            let visibility = water_probe::tick();
             let result = if reuse && static_group && self.visibility[id].0 == self.visibility_generation {
                 hits += 1;
                 self.visibility[id].1
@@ -1962,8 +2135,16 @@ impl Renderer {
                 if reuse && static_group { self.visibility[id] = (self.visibility_generation, result); }
                 result
             };
+            water_probe::add(|f| &mut f.vis_time, visibility);
+            if g.liquid { water_probe::add(|f| &mut f.water_vis_time, visibility); }
             self.models[id] = result.map(|(_, model)| model);
-            if let Some((depth, _)) = result { self.alpha_order.push((depth, id)); }
+            if let Some((depth, _)) = result {
+                self.alpha_order.push((depth, id));
+                if !alpha && g.liquid {
+                    water_probe::add_n(|f| &mut f.opaque_water, 1);
+                    water_probe::add_n(|f| &mut f.opaque_water_triangles, g.indices as u64 / 3);
+                }
+            }
         }
         }
         crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: tests,
@@ -1971,6 +2152,8 @@ impl Renderer {
         count("vita_world_visibility_cache_hits", hits);
         drop(visibility_span);
         drop(census_visibility);
+        if !alpha { water_probe::add_n(|f| &mut f.opaque_groups, self.alpha_order.len() as u64); }
+        let sort_started = water_probe::tick();
         if alpha && !config().world_alpha {self.alpha_order.clear();}
         if !alpha && config().world_texture_sort {
             self.texture_sort.apply(&mut self.alpha_order, &self.groups);
@@ -1986,6 +2169,8 @@ impl Renderer {
         if !alpha && config().world_material_sort {
             self.schedule.apply(&mut self.alpha_order, &self.groups, projection, self.visibility_generation);
         }
+        water_probe::add(|f| &mut f.sort_time, sort_started);
+        let probe_parameters = water_probe::tick();
         self.prepared.clear();
         {
             let _census = crate::phase_census::span(crate::phase_census::Region::WorldParameters);
@@ -2048,10 +2233,15 @@ impl Renderer {
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 if world_list::negative("world-list-swap-order") && list.items.len() > 12 { list.items.swap(5, 11); }
             } else {
+            let mut water_parameters: Vec<usize> = Vec::new();
             for &(depth, id) in &self.alpha_order {
                 let g = &self.groups[id];
+                let liquid = g.liquid;
+                if liquid && !water_parameters.contains(&g.parameter) { water_parameters.push(g.parameter); }
                 let model = if reuse { self.models[id].unwrap() }
                     else { model_matrix(&g.recipe, time, transforms).unwrap() };
+                let build_started = if liquid { water_probe::tick() } else { None };
+                let mut built = false;
                 let u = if parameter_reuse {
                     let p = &mut self.parameters[g.parameter];
                     let model_bits = model.to_cols_array().map(f32::to_bits);
@@ -2063,6 +2253,7 @@ impl Renderer {
                         p.model = model_bits;
                         p.time = time.to_bits();
                         builds += 1;
+                        built = true;
                     } else if split && p.time != time.to_bits() {
                         p.update_time(time);
                         time_updates += 1;
@@ -2072,11 +2263,26 @@ impl Renderer {
                     let mut u = uniforms(&g.recipe, time, eye, model, projection, fullbright, scene.atlas_grid);
                     u.atmosphere(&scene.atmosphere, eye);
                     builds += 1;
+                    built = true;
                     Some(u)
                 };
+                if liquid {
+                    water_probe::add(|f| &mut f.water_parameter_time, build_started);
+                    if built { water_probe::add_n(|f| &mut f.water_parameter_builds, 1); }
+                    if g.recipe.deform.is_some() { water_probe::add_n(|f| &mut f.water_deform_groups, 1); }
+                    if g.recipe.stage.mods.iter().any(|m| matches!(m, TcMod::Turb(_))) {
+                        water_probe::add_n(|f| &mut f.water_turb_groups, 1);
+                    }
+                    if g.recipe.stage.environment { water_probe::add_n(|f| &mut f.water_environment_groups, 1); }
+                    if g.recipe.stage.dot_alpha.is_some() { water_probe::add_n(|f| &mut f.water_dot_alpha_groups, 1); }
+                    if g.recipe.wave_normal.is_some() { water_probe::add_n(|f| &mut f.water_wave_normal_groups, 1); }
+                    water_probe::add_n(|f| &mut f.water_groups, 1);
+                    water_probe::add_n(|f| &mut f.water_triangles, g.indices as u64 / 3);
+                }
                 let texture = g.recipe.textures[g.recipe.stage.frame(time)].raw_miniquad_id();
                 self.prepared.push(Prepared { depth, group: id, texture, uniforms: u, indices: g.indices });
             }
+            water_probe::add_n(|f| &mut f.water_parameters, water_parameters.len() as u64);
             }
             crate::light_profile::render_add(phase, RenderMetrics {
                 parameter_cpu_ns: parameters_started.elapsed().as_nanos() as u64, ..Default::default() });
@@ -2084,6 +2290,7 @@ impl Renderer {
             count("vita_world_parameter_time_updates", time_updates);
             count("vita_world_parameter_reuses", self.alpha_order.len() as u64 - builds);
         }
+        water_probe::add(|f| &mut f.parameter_time, probe_parameters);
         // Uniform values are program storage. These two programs are private to
         // this Renderer; sky, FX and HUD use other programs. Alpha uses this same
         // cache, including interleaved callbacks, so every write stays observed.
@@ -2111,6 +2318,8 @@ impl Renderer {
                 ..Default::default()
             };
             count("vita_world_culled_groups", stats.culled as u64);
+            water_probe::add_n(|f| &mut f.alpha_groups, self.prepared.len() as u64);
+            water_probe::add(|f| &mut f.alpha_draw_time, probe_draw);
             return stats;
         }
         // Direct actor packets never queue Macroquad geometry.
@@ -2230,7 +2439,9 @@ impl Renderer {
         let _pass_submit = (!alpha).then(|| crate::pass_clock::scope(crate::pass_clock::WORLD_SUBMIT));
         if list_submit {
             let mut counts = world_list::Counts::default();
+            let submit_started = water_probe::tick();
             self.submit_list(time, gxm::Pass::Frame, &mut totals, &mut counts, &mut previous_end, &mut between_ns, &mut between_calls);
+            water_probe::add(|f| &mut f.opaque_submit_time, submit_started);
             low_draws = counts.low_draws; pipeline_changes = counts.pipeline_changes; texture_changes = counts.texture_changes;
             applications = counts.applications; uniform_traffic = counts.uniform_traffic;
             stats.batches += counts.batches; stats.triangles += counts.triangles;
@@ -2579,6 +2790,7 @@ impl Renderer {
         self.prepared.clear();
     }
     pub(super) fn finish_fx(&mut self, interop_flush: bool) -> (usize, usize) {
+        let probe_finish = water_probe::tick();
         let _pass_clock = crate::pass_clock::scope(crate::pass_clock::FX_FINISH);
         let mut gpu = self.fx_gpu.take().unwrap_or_else(|| {
             crate::render_fx::retained::Gpu::new().expect("retained actor shader")
@@ -2600,10 +2812,30 @@ impl Renderer {
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::profile_only());
         let mut adjacent_state = state_cache::Cache::new();
         let adjacent = config().world_adjacent_batch;
-        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |id, continuation| {
+        let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |event| {
+            use crate::render_fx::retained::WorldEvent;
+            let WorldEvent::Draw(id, continuation) = event else {
+                if let WorldEvent::Plan(list) = event { self.plan_water_runs(list); }
+                return;
+            };
+            // water_draw_join: the run is drawn at its first member's place, in primitive order.
+            if self.water_join.is_some() {
+                let run = self.water_join.as_ref()
+                    .and_then(|state| state.member.get(id).copied().filter(|&m| m != u32::MAX));
+                if let Some(run) = run {
+                    // The joined command changes pipeline, bindings and uniforms outside the
+                    // adjacent state cache; the next draw must observe a fresh one.
+                    adjacent_state = state_cache::Cache::new();
+                    if self.water_join.as_ref().unwrap().runs[run as usize].first == id {
+                        self.draw_water_run(run as usize);
+                    }
+                    return;
+                }
+            }
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
+            let probe_world = water_probe::tick();
             if !adjacent || !continuation { adjacent_state = state_cache::Cache::new(); }
             let mut totals = totals.borrow_mut();
             let merged = if drop_filter { None } else {
@@ -2649,8 +2881,10 @@ impl Renderer {
             let p = &self.prepared[id];
             let g = &mut self.groups[p.group];
             g.bindings.images[0] = p.texture;
+            let liquid = g.liquid;
             let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
             let ctx = unsafe { get_internal_gl() }.quad_context;
+            let probe_draw = if liquid { water_probe::tick() } else { None };
             let start = totals.start();
             // world_alpha_lite: the same draw through the lean program when its stage allows.
             let lite = self.alpha_fill.lite.as_mut().filter(|_| alpha_fill::lite_recipe(&g.recipe));
@@ -2667,10 +2901,19 @@ impl Renderer {
             // Conservatively treat every pipeline transition as a program transition, including
             // future blend-specific variants. A matching pipeline always names the same program.
             plan.uniforms |= plan.pipeline;
+            let probe_pipeline = if liquid { water_probe::tick() } else { None };
             if plan.pipeline { ctx.apply_pipeline(pipeline); }
             if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(0);} }
             if plan.pipeline || plan.depth { scale::log_depth(false); }
+            water_probe::add(|f| &mut f.water_pipeline_time, probe_pipeline);
+            let probe_bindings = if liquid { water_probe::tick() } else { None };
             if plan.bindings { ctx.apply_bindings(&g.bindings); }
+            water_probe::add(|f| &mut f.water_binding_time, probe_bindings);
+            if liquid {
+                water_probe::add_n(|f| &mut f.water_pipeline_applications, u64::from(plan.pipeline));
+                water_probe::add_n(|f| &mut f.water_binding_applications, u64::from(plan.bindings));
+                water_probe::add_n(|f| &mut f.water_uniform_applications, u64::from(plan.uniforms));
+            }
             if adjacent { count("vita_world_alpha_adjacent_state_skips", u64::from(!plan.pipeline) + u64::from(!plan.depth)
                 + u64::from(!plan.bindings) + u64::from(!plan.uniforms)); }
             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
@@ -2680,8 +2923,14 @@ impl Renderer {
                     ..Default::default() });
             totals.add(0, start);
             let start = totals.start();
+            let probe_uniform = if liquid { water_probe::tick() } else { None };
             let traffic = if plan.uniforms { fields.apply(ctx, u.values(), config().uniform_field_cache) }
                 else { super::uniform_fields::Traffic::default() };
+            water_probe::add(|f| &mut f.water_uniform_time, probe_uniform);
+            if liquid {
+                water_probe::add_n(|f| &mut f.water_uniform_calls, traffic.calls);
+                water_probe::add_n(|f| &mut f.water_uniform_bytes, traffic.bytes);
+            }
             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
                 crate::light_profile::RenderMetrics { uniform_bytes: traffic.bytes,
                     uniform_gl_calls: traffic.calls, ..Default::default() });
@@ -2695,7 +2944,13 @@ impl Renderer {
                 g.recipe.stage.images.first().map(String::as_str));
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::world_packet(p.group, g.base_element, g.indices, &p.texture, u.bits_ref(), false, world_list::pipeline_class(g.recipe.blend, g.recipe.cull));
+            let probe_gpu_draw = if liquid { water_probe::tick() } else { None };
             if !crate::gpu_timing::masked(crate::gpu_timing::MASK_WORLD_ALPHA) { ctx.draw(g.base_element, g.indices, 1); }
+            water_probe::add(|f| &mut f.water_draw_time, probe_gpu_draw);
+            if liquid {
+                water_probe::add_n(|f| &mut f.water_draw_calls, 1);
+                water_probe::add(|f| &mut f.water_submit_time, probe_draw);
+            }
             totals.add(2, start);
             count("vita_world_gpu_draws", 1);
             count("vita_world_alpha_triangles", g.indices as u64 / 3);
@@ -2718,9 +2973,11 @@ impl Renderer {
                     g.recipe.model.is_none(),
                 );
             }
+            water_probe::add(|f| &mut f.world_submit_time, probe_world);
         }, Some(&totals));
         self.prepared.clear();
         self.fx_gpu = Some(gpu);
+        water_probe::finish(probe_finish);
         result
     }
 }
@@ -2734,6 +2991,7 @@ impl Drop for Renderer {
         for &(vertex,index) in &self.world_buffers {
             ctx.delete_buffer(vertex); ctx.delete_buffer(index);
         }
+        if let Some(join) = self.water_join.take() { ctx.delete_buffer(join.buffer); }
         for p in &self.pipelines {
             ctx.delete_pipeline(*p);
         }
@@ -3186,7 +3444,9 @@ mod tests {
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
-        let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any" && !round5_key(k)).cloned().collect::<Vec<_>>();
+        assert!(v.get("water_draw_join").is_none_or(|on| on == false));
+        let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
+            && *k != "water_draw_join" && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -3635,7 +3895,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -3747,7 +4007,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) { written[key] = value.clone(); }
+            if round5_key(key) || key == "water_draw_join" { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
@@ -3820,7 +4080,8 @@ mod tests {
             const A5_FIGHT: [&str; 4] = ["spike_log_ms", "audio_combat_preload", "sim_sweep_blocked", "actor_near_cull"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
-                    && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any" && !round5_key(k)).cloned().collect();
+                    && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
+                    && *k != "water_draw_join" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -4154,6 +4415,21 @@ mod tests {
         for key in ["water_stage_merge", "world_alpha_lite", "fx_lite", "fx_add_zero_alpha_cut", "fx_add_max_area"] {
             assert!(printed.contains(&format!("\"{key}\"")), "{key} is printed");
         }
+    }
+    #[test]
+    fn a5_water_draw_join_defaults_off_and_requires_shared_buffers() {
+        let c = Config::default();
+        assert!(!c.water_draw_join);
+        assert!(serde_json::from_value::<Config>(serde_json::json!({"water_draw_join": 1})).is_err());
+        let c: Config = serde_json::from_value(serde_json::json!({"water_draw_join": true, "world_shared_buffers": false})).unwrap();
+        assert!(c.validate().is_err(), "the join copies indices of shared buffers");
+        let c: Config = serde_json::from_value(serde_json::json!({"water_draw_join": true, "world_shared_buffers": true,
+            "water_stage_merge": "merge"})).unwrap();
+        assert!(c.validate().is_err(), "the stage merge owns the pair's order");
+        let c: Config = serde_json::from_value(serde_json::json!({"water_draw_join": true, "world_shared_buffers": true})).unwrap();
+        c.validate().unwrap();
+        let printed = config_log_lines(&Config::default())[0].clone();
+        assert!(printed.contains("\"water_draw_join\""), "the key is printed");
     }
     #[test]
     fn a5_alpha_fill_configs_differ_from_a5_exact_only_in_their_keys() {
