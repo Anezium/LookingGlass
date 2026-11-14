@@ -1,6 +1,8 @@
 //! Dense opaque submission behind `world_list_submit`. Default off.
 //!
-//! Same GL calls, in the same order, as the state-cached loop in `Renderer::draw`. What goes away
+//! With `world_adjacent_batch` off: same GL calls, in the same order, as the state-cached loop in
+//! `Renderer::draw`. The opt-in coalesces only certified already-adjacent disjoint ranges.
+//! What goes away
 //! is the work around them: a macroquad context lookup per draw, the 143-word uniform copy and
 //! compare per draw, a 596-byte `Prepared`, a texture id lookup through the context, a per-draw
 //! model matrix compare, and a re-sort of an unchanged list. Records are built once at load, so
