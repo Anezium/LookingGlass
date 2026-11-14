@@ -81,6 +81,23 @@ impl<K: Copy + PartialEq> Plan<K> {
         self.member.resize(prepared, u32::MAX);
         self.open = None;
     }
+    /// Publish membership only after the backend confirms this frame's upload.
+    /// A failed replacement invalidates even previously successful membership.
+    /// Return false once, allowing the caller to log the map-level disable.
+    pub fn upload(&mut self, enabled: &mut bool, upload: impl FnOnce(&[u16]) -> bool) -> bool {
+        if !*enabled { return true; }
+        if self.scratch.is_empty() { return true; }
+        if !upload(&self.scratch) {
+            let prepared = self.member.len();
+            self.begin(prepared);
+            *enabled = false;
+            return false;
+        }
+        for (run, members) in self.members.iter().enumerate() {
+            for &id in members { self.member[id] = run as u32; }
+        }
+        true
+    }
     /// Take one list entry. A fence ends the open run; a joinable group continues it only when
     /// its key matches and its indices fit, otherwise it opens a run at its own place. A group
     /// that cannot fit keeps its original draw and ends the current run.
@@ -102,7 +119,6 @@ impl<K: Copy + PartialEq> Plan<K> {
         }
         let run = self.open.expect("a run was opened or continued");
         debug_assert!(first < self.member.len(), "a prepared template id");
-        self.member[first] = run as u32;
         self.runs[run].count += items.len();
         self.runs[run].groups += 1;
         self.members[run].push(first);
@@ -119,6 +135,7 @@ pub(super) struct State {
     /// The packed indices of each group that can join, in the shared buffer's numbering.
     pub indices: Vec<Option<Vec<u16>>>,
     pub upload_bytes: u64,
+    pub enabled: bool,
 }
 impl State {
     pub fn new(ctx: &mut dyn RenderingBackend, indices: Vec<Option<Vec<u16>>>) -> Self {
@@ -126,7 +143,7 @@ impl State {
         let capacity = total.max(1);
         let buffer = ctx.new_buffer(BufferType::IndexBuffer, BufferUsage::Stream,
             BufferSource::empty::<u16>(capacity));
-        Self { buffer, capacity, plan: Plan::default(), indices, upload_bytes: 0 }
+        Self { buffer, capacity, plan: Plan::default(), indices, upload_bytes: 0, enabled: true }
     }
     pub fn begin_frame(&mut self, prepared: usize) {
         self.plan.begin(prepared);
@@ -146,10 +163,50 @@ mod tests {
         let mut plan = Plan::default();
         plan.begin(prepared);
         for &entry in entries { plan.entry(entry, capacity); }
+        assert!(plan.upload(&mut true, |_| true));
         plan
     }
     fn join(key: TestKey, first: usize, items: &[u16]) -> Entry<'_, TestKey> {
         Entry::Join { key, first, items }
+    }
+
+    #[test]
+    fn first_upload_failure_keeps_original_draws_and_disables_map() {
+        let mut plan = Plan::default();
+        let mut enabled = true;
+        plan.begin(3);
+        plan.entry(join(BASE, 0, &[1, 2, 3]), 12);
+        plan.entry(join(BASE, 1, &[4, 5, 6]), 12);
+        assert_eq!(plan.member, [u32::MAX; 3], "unpublished before upload");
+        assert!(!plan.upload(&mut enabled, |indices| {
+            assert_eq!(indices, [1, 2, 3, 4, 5, 6]);
+            false
+        }));
+        assert!(!enabled);
+        assert_eq!(plan.member, [u32::MAX; 3]);
+        assert!(plan.runs.is_empty() && plan.members.is_empty() && plan.scratch.is_empty());
+        assert!(plan.upload(&mut enabled, |_| panic!("disabled map must not retry")), "log only once");
+    }
+
+    #[test]
+    fn failed_later_frame_replacement_clears_previous_membership() {
+        let mut plan = Plan::default();
+        let mut enabled = true;
+        plan.begin(3);
+        plan.entry(join(BASE, 0, &[1, 2, 3]), 12);
+        assert!(plan.upload(&mut enabled, |_| true));
+        assert_eq!(plan.member, [0, u32::MAX, u32::MAX]);
+        plan.begin(3);
+        plan.entry(join(BASE, 1, &[4, 5, 6]), 12);
+        plan.entry(join(BASE, 2, &[7, 8, 9]), 12);
+        assert_eq!(plan.member, [u32::MAX; 3]);
+        assert!(!plan.upload(&mut enabled, |_| false));
+        assert!(!enabled);
+        assert_eq!(plan.member, [u32::MAX; 3], "all original IBO draws must run");
+        assert!(plan.runs.is_empty() && plan.members.is_empty() && plan.scratch.is_empty());
+        plan.begin(3);
+        assert!(plan.upload(&mut enabled, |_| panic!("no upload after failure")));
+        assert_eq!(plan.member, [u32::MAX; 3]);
     }
 
     #[test]

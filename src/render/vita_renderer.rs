@@ -1928,6 +1928,7 @@ impl Renderer {
         use crate::render_fx::retained::Source;
         let Some(state) = self.water_join.as_mut() else { return; };
         state.begin_frame(self.prepared.len());
+        if !state.enabled { return; }
         for (_, source) in list {
             let entry = match *source {
                 Source::Actor(_) => water_join::Entry::Fence(water_join::Fence::Actor),
@@ -1956,11 +1957,16 @@ impl Renderer {
             };
             state.plan.entry(entry, state.capacity);
         }
-        let scratch = &state.plan.scratch;
-        if scratch.is_empty() { return; }
+        if state.plan.scratch.is_empty() { return; }
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let upload = water_probe::tick();
-        ctx.buffer_update(state.buffer, BufferSource::slice(&scratch[..]));
+        if !state.plan.upload(&mut state.enabled, |scratch| {
+            ctx.buffer_update_checked(state.buffer, BufferSource::slice(scratch))
+        }) {
+            println!("[lg/vita-renderer] water_draw_join disabled for this map: index upload failed; using original draws");
+            return;
+        }
+        let scratch = &state.plan.scratch;
         water_probe::add(|f| &mut f.water_upload_time, upload);
         water_probe::add_n(|f| &mut f.water_upload_bytes, (scratch.len() * 2) as u64);
         count("vita_world_alpha_join_runs", state.plan.runs.len() as u64);
