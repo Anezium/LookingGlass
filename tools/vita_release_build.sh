@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Release build of the PS Vita SELF and VPK.
 #
-# Usage: tools/vita_release_build.sh --out DIR [--lib-dir DIR]
+# Usage: tools/vita_release_build.sh --out DIR --lib-dir DIR
+#        tools/vita_release_build.sh --check-libraries --lib-dir DIR
+#        tools/vita_release_build.sh --private-test --out DIR [--lib-dir DIR]
 #
 #   --out DIR      new or empty directory for the artifacts and BUILD.txt
-#   --lib-dir DIR  directory searched before the SDK for the C archives the link pulls in,
-#                  for example a libSceShaccCgExt.a rebuilt at its LGPL-2.1 revision
+#   --lib-dir DIR  explicitly selected directory containing the pinned LGPL archive.
+#                  Release mode validates its bytes before and after the native link.
+#   --private-test builds a non-release test package, permitting the SDK archives.
+#                  Does not generate or claim qualified release notices.
+#   --check-libraries performs only the read-only release-library preflight.
 #
 # Needs VITASDK, the pinned Rust toolchain with rust-src, and cargo-vita. Refuses a tree with
 # uncommitted or untracked files. Honours CARGO_TARGET_DIR, CARGO_BUILD_JOBS and
@@ -22,18 +27,31 @@ SDK_LIBRARIES="vitaGL:libvitaGL.a vitaShaRK:libvitashark.a SceShaccCgExt:libSceS
 
 out=""
 lib_dir=""
+private_test=false
+check_libraries=false
 while [ $# -gt 0 ]; do
     case "$1" in
-        --out) out="$2"; shift 2 ;;
-        --lib-dir) lib_dir="$2"; shift 2 ;;
+        --out|--lib-dir)
+            [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }
+            if [ "$1" = --out ]; then out="$2"; else lib_dir="$2"; fi
+            shift 2 ;;
+        --private-test) private_test=true; shift ;;
+        --check-libraries) check_libraries=true; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[ -n "$out" ] || { echo "usage: $0 --out DIR [--lib-dir DIR]" >&2; exit 2; }
+[ -n "$out" ] || "$check_libraries" || { echo "usage: $0 --out DIR --lib-dir DIR" >&2; exit 2; }
 : "${VITASDK:?VITASDK must point to the Vita SDK}"
 
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$repo"
+if "$private_test"; then
+    "$check_libraries" && { echo "--check-libraries is a release check, not a private-test bypass" >&2; exit 2; }
+    echo "PRIVATE TEST: not a release build; library compatibility/notices are not qualified"
+else
+    python3 -I "$repo/tools/vita_release_libraries.py" --lib-dir "$lib_dir"
+    if "$check_libraries"; then exit 0; fi
+fi
 if [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then
     echo "refusing to build: the tree has uncommitted or untracked files" >&2
     exit 1
@@ -82,6 +100,13 @@ start=$(date +%s)
 cargo vita build vpk --release --locked --features "$FEATURES" 2>&1 | tee "$out/build.log"
 seconds=$(( $(date +%s) - start ))
 
+# Check the archive actually loaded, including every contributing member, before
+# copying a candidate package out. An -L flag alone is not selection evidence.
+if ! "$private_test"; then
+    python3 -I "$repo/tools/vita_release_libraries.py" --lib-dir "$lib_dir" \
+        --link-map "$out/link.map" | tee "$out/libraries.txt"
+fi
+
 [ "$(git rev-parse HEAD)" = "$head" ] || { echo "HEAD moved during the build" >&2; exit 1; }
 [ -z "$(git status --porcelain=v1 --untracked-files=all)" ] || { echo "the tree changed during the build" >&2; exit 1; }
 
@@ -90,17 +115,22 @@ cp "$release/looking-glass.self" "$out/eboot.bin"
 cp "$release/looking-glass.sfo" "$out/param.sfo"
 cp "$release/looking-glass.vpk" "$out/looking-glass.vpk"
 
+set +e
 python3 -I "$repo/tools/vita_release_check.py" \
     --elf "$out/looking-glass.elf" --self "$out/eboot.bin" --sfo "$out/param.sfo" --vpk "$out/looking-glass.vpk" \
     --heap "$HEAP_BYTES" --forbid "$HOME" --sfo-field "APP_VER=$APP_VER" --sfo-field TITLE_ID=ALICELG01 \
     --sfo-field "TITLE=American McGee's Alice" --sfo-field "STITLE=American McGee's Alice" \
-    | tee "$out/check.txt" || true
-check_status=${PIPESTATUS[0]}
+    | tee "$out/check.txt"
+check_pipeline=("${PIPESTATUS[@]}")
+check_status=${check_pipeline[0]}
+if [ "${check_pipeline[1]}" -ne 0 ]; then check_status=1; fi
+set -e
 
 redact() { sed "s|$HOME|~|g"; }
 pacman_db="$VITASDK/var/lib/pacman/local"
 {
     echo "head $head"
+    if "$private_test"; then echo "mode private-test"; else echo "mode release"; fi
     echo "seconds $seconds"
     echo "toolchain $(rustup run "$TOOLCHAIN" rustc --version)"
     echo "cargo-vita $CARGO_VITA_VERSION"
@@ -137,8 +167,15 @@ pacman_db="$VITASDK/var/lib/pacman/local"
 # The link map lists absolute archive paths; keep the record, drop the home directory.
 sed -i.bak "s|$HOME|~|g" "$out/link.map" && rm -f "$out/link.map.bak"
 
-# Notices for this exact link. The committed file must match, or the release ships stale notices.
+# Record the final redacted link-map identity and exact contributing object hashes.
+# Notices for a release must match the committed text; a private test makes no such claim.
 notices_status=0
+if "$private_test"; then
+    echo "PRIVATE TEST ONLY: not a release artifact; release library/notices checks bypassed explicitly." \
+        | tee "$out/PRIVATE-TEST.txt"
+else
+python3 -I "$repo/tools/vita_release_libraries.py" --lib-dir "$lib_dir" --link-map "$out/link.map" \
+    --output "$out/library-selection.json" | tee -a "$out/libraries.txt"
 python3 -I "$repo/tools/vita_notices.py" --link-map "$out/link.map" --output "$out/THIRD_PARTY_NOTICES-vita.txt" \
     || notices_status=$?
 if [ "$notices_status" -ne 0 ]; then
@@ -148,13 +185,10 @@ elif cmp -s "$out/THIRD_PARTY_NOTICES-vita.txt" "$repo/THIRD_PARTY_NOTICES-vita.
 else
     echo "FAIL THIRD_PARTY_NOTICES-vita.txt differs from the notices generated for this link" | tee -a "$out/check.txt"
 fi
-if grep -q "linked libSceShaccCgExt.a .*package=SceShaccCgExt-1.0.1-1 same-as-package" "$out/BUILD.txt"; then
-    echo "WARN libSceShaccCgExt.a is the SDK's v1.0.1 package (GPL-3.0); release builds pass --lib-dir with a d3c83ef or later build" \
-        | tee -a "$out/check.txt"
 fi
 
 if [ "$check_status" -ne 0 ] || grep -q '^FAIL' "$out/check.txt"; then
     echo "release checks failed" >&2
     exit 1
 fi
-echo "release build done: $out"
+if "$private_test"; then echo "private test build done: $out"; else echo "release build checks passed: $out"; fi
