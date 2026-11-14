@@ -279,8 +279,10 @@ impl Gather {
                     let original = self.originals[p.group].as_ref()?;
                     let rect = submit::projected(&groups[p.group], projection)?;
                     coverage = Some(match coverage {
-                        Some(previous) => submit::join_disjoint(previous, rect)?,
-                        None => rect,
+                        Some(previous) if !world_list::negative("alpha-range-overlap") => {
+                            submit::join_disjoint(previous, rect)?
+                        }
+                        _ => rect,
                     });
                     (p.indices == groups[p.group].indices).then(|| {
                         (
@@ -460,7 +462,7 @@ impl Gather {
                     .append(true)
                     .open(path)
                     .unwrap();
-                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
+                writeln!(file,"{}",serde_json::json!({"frame":frame,"leader":id,"members":members,"vertex":format!("{:?}",vertex),"ibo":format!("{:?}",buffer),"base":base,"count":count,"bytes":count as usize*2,"source_bank":first_original.bank,"alpha_test":groups[prepared[id].group].recipe.stage.alpha_test,"images":groups[prepared[id].group].recipe.stage.images,"wave_normal":groups[prepared[id].group].recipe.wave_normal.is_some(),"split_control":world_list::negative("alpha-range-split-draws"),"original_ranges":members.iter().map(|&m| { let g=&groups[prepared[m].group]; (prepared[m].group,g.base_element,g.indices) }).collect::<Vec<_>>(),"verified":true})).unwrap();
             }
         }
     }
