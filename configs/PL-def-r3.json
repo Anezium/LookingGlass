@@ -139,6 +139,7 @@
   "sim_npc_target_stack": true,
   "world_material_sort": false,
   "world_static_merge": false,
+  "world_adjacent_batch": false,
   "world_uniform_persist": false,
   "world_binding_cache": false,
   "world_gl_state_cache": false,

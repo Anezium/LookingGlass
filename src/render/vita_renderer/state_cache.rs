@@ -1,6 +1,7 @@
-//! Only the uninterrupted owned opaque pass may retain backend state.
+//! Only an uninterrupted owned world span may retain backend state.
 //! A new instance after begin_pass/sky discards ALL prior state. Dropping it
-//! before end_pass also invalidates at targets, actors, alpha and Macroquad.
+//! before end_pass also invalidates at targets, actors, alpha and Macroquad. World alpha uses
+//! a separate instance whose continuity is supplied by the final joint world/actor list.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Applications {
     pub pipeline: bool,

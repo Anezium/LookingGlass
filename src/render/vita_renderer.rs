@@ -2218,7 +2218,7 @@ impl Renderer {
             let (end, indices) = if batch { list.adjacent_run(first, groups, projection) }
                 else { (first + 1, draw.indices) };
             position = end;
-            count("vita_world_adjacent_draws_saved", (end - first - 1) as u64);
+            if end > first + 1 { count("vita_world_adjacent_draws_saved", (end - first - 1) as u64); }
             let low = draw.low;
             let binding = (draw.vertex, draw.index, item.texture, draw.atlas);
             let mut plan = planner.observe(draw.pipeline, low, binding, item.uniforms);
@@ -2472,8 +2472,8 @@ impl Renderer {
             if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(0);} }
             if plan.pipeline || plan.depth { scale::log_depth(false); }
             if plan.bindings { ctx.apply_bindings(&g.bindings); }
-            count("vita_world_alpha_adjacent_state_skips", u64::from(!plan.pipeline) + u64::from(!plan.depth)
-                + u64::from(!plan.bindings) + u64::from(!plan.uniforms));
+            if adjacent { count("vita_world_alpha_adjacent_state_skips", u64::from(!plan.pipeline) + u64::from(!plan.depth)
+                + u64::from(!plan.bindings) + u64::from(!plan.uniforms)); }
             crate::light_profile::render_add(crate::light_profile::RenderPhase::WorldAlpha,
                 crate::light_profile::RenderMetrics { draws: 1, pipelines: u64::from(plan.pipeline),
                     depth_states: u64::from(plan.depth), bindings: u64::from(plan.bindings),
@@ -2867,6 +2867,14 @@ pub(crate) async fn visualizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Historical console configs must stay usable by their original SELF. Their omitted
+    // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
+    fn historical_keys(v: &serde_json::Value) -> Vec<String> {
+        assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
+        let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch").cloned().collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
     #[test]
     fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {
         let fields = ["lights_static_cache", "sim_npc_sight_candidates",
@@ -3294,7 +3302,7 @@ mod tests {
         a3.validate().unwrap();
         let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         let all = serde_json::to_value(Config::default()).unwrap();
-        let keys = |v: &serde_json::Value| { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+        let keys = historical_keys;
         assert_eq!(keys(&written), keys(&all), "the A3 config writes every runtime key");
         assert!(!rc1.loading_screen && !rc1.collision_geometry_share, "RC1 keeps both off");
         assert!(a3.loading_screen && a3.collision_geometry_share);
@@ -3370,10 +3378,10 @@ mod tests {
             "fx_attached_persist", "mover_advance_reuse"];
         const BUBBLE: [&str; 2] = ["fx_attached_sphere", "fx_bubble_true_size"];
         let parse = |bytes: &[u8]| {
-            // Every runtime key is written, so no value comes from a code default.
+            // Earlier runtime keys are written; the later adjacent opt-in remains off.
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
             // The replay keys, the A5 draw and fill keys and water_normals came after RC1; its play files keep them
             // at their off defaults.
             const A5: [&str; 10] = ["packet_frustum_cull", "prop_frustum_cull", "packet_min_pixels", "world_min_pixels", "world_texture_sort",
@@ -3381,7 +3389,7 @@ mod tests {
             const A5_FIGHT: [&str; 4] = ["spike_log_ms", "audio_combat_preload", "sim_sweep_blocked", "actor_near_cull"];
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals"
-                    && !A5_FIGHT.contains(&k.as_str())).cloned().collect();
+                    && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch").cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3437,11 +3445,11 @@ mod tests {
     fn rc2_play_configs_are_rc1_plus_the_rc2_keys() {
         // Default file: PL-rc2.json. Each variant differs from it only in the keys listed below.
         let parse = |bytes: &[u8]| {
-            // Every runtime key is written, so no value comes from a code default.
+            // Earlier runtime keys are written; the later adjacent opt-in remains off.
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC2 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3493,8 +3501,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC3 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3570,8 +3578,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an A5 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3637,8 +3645,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an A5 fight config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3708,8 +3716,8 @@ mod tests {
         let parse = |bytes: &[u8]| {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             let defaults = serde_json::to_value(Config::default()).unwrap();
-            let mut written: Vec<_> = raw.as_object().unwrap().keys().cloned().collect();
-            let mut all: Vec<_> = defaults.as_object().unwrap().keys().cloned().collect();
+            let mut written = historical_keys(&raw);
+            let mut all = historical_keys(&defaults);
             written.sort(); all.sort();
             assert_eq!(written, all, "an A5 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
@@ -3755,7 +3763,7 @@ mod tests {
         assert!(rejected.is_none());
         water.validate().unwrap();
         let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        let keys = |v: &serde_json::Value| { let mut k: Vec<_> = v.as_object().unwrap().keys().cloned().collect(); k.sort(); k };
+        let keys = historical_keys;
         assert_eq!(keys(&written), keys(&serde_json::to_value(Config::default()).unwrap()), "the A3 water config writes every runtime key");
         let (rc2, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc2.json")).unwrap();
         assert!(rejected.is_none());
