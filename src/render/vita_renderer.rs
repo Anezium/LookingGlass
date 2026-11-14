@@ -890,6 +890,7 @@ struct Geometry {
     indices: Vec<u16>,
     remap: BTreeMap<(usize, u16), u16>,
     faces: Vec<usize>,
+    all_bsp_faces: bool,
     min: Vec3,
     max: Vec3,
 }
@@ -900,6 +901,7 @@ impl Default for Geometry {
             indices: Vec::new(),
             remap: BTreeMap::new(),
             faces: Vec::new(),
+            all_bsp_faces: true,
             min: Vec3::splat(f32::INFINITY),
             max: Vec3::splat(f32::NEG_INFINITY),
         }
@@ -917,6 +919,9 @@ impl Geometry {
         source: &[u16],
         face: Option<usize>,
     ) {
+        // Identical material/cell keys can mix BSP and frozen-model source batches.
+        // Provenance must cover every append, not merely the presence of one face ID.
+        self.all_bsp_faces &= face.is_some();
         if let Some(face) = face {
             self.faces.push(face);
         }
@@ -973,6 +978,7 @@ struct Group {
     center: Vec3,
     recipe: Recipe,
     faces: Vec<usize>,
+    all_bsp_faces: bool,
 }
 #[derive(Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Lists {
@@ -1550,7 +1556,7 @@ impl Renderer {
             source_ranges.extend(packed.iter().map(|(_,v,i)| (v.len(), i.as_slice())));
             alpha_ranges::Gather::new(&source_ranges, &allocations,
                 pending.iter().map(|p| alpha_ranges::eligible(&p.recipe)
-                    && (!p.geometry.faces.is_empty() || world_list::negative("alpha-range-model-source"))))
+                    && ((p.geometry.all_bsp_faces && !p.geometry.faces.is_empty()) || world_list::negative("alpha-range-model-source"))))
         } else { None };
         drop(source_ranges);
         let buffers = packed.into_iter().map(|(_,v,i)| {
@@ -1581,6 +1587,7 @@ impl Renderer {
                 center: (p.geometry.min + p.geometry.max) * 0.5,
                 recipe: p.recipe,
                 faces: p.geometry.faces,
+                all_bsp_faces: p.geometry.all_bsp_faces,
             });
         }
         crate::frame_profile::shader_creation();
@@ -3899,6 +3906,29 @@ mod tests {
         assert_ne!(on, shader::VERTEX);
         assert!(on.contains("}else if(Deform.x>2.5&&Deform.x<3.5){") && on.contains("if(Deform.x>3.5){"));
         assert!(on.contains("vec3 n=(Model*vec4(rippled,0.0)).xyz;"), "the environment and dot terms read the rippled normal");
+    }
+    #[test]
+    fn alpha_geometry_keeps_mixed_model_provenance_after_later_bsp_appends() {
+        let base=vec![
+            Vertex {position:Vec3::ZERO,uv:Vec2::ZERO,color:[255;4],normal:Vec4::ZERO},
+            Vertex {position:Vec3::X,uv:Vec2::X,color:[255;4],normal:Vec4::ZERO},
+            Vertex {position:Vec3::Y,uv:Vec2::Y,color:[255;4],normal:Vec4::ZERO},
+        ];
+        let batch=super::super::Batch {
+            #[cfg(target_os="vita")] static_offset:None,
+            face_side:FaceSide::Both,motion:None,full_indices:vec![0,1,2],parts:Vec::new(),
+            visibility_work:Default::default(),bounds:(Vec3::ZERO,Vec3::ONE),detail:Vec::new(),animation:None,
+            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:None},base,normals:vec![Vec3::Z;3],
+            deforms:Vec::new(),sky:false,portal:false,layers:Vec::new(),center:Vec3::ZERO,model:None,
+        };
+        let mut geometry=Geometry::default();
+        geometry.append(0,&batch,&[0,1,2],Some(17));
+        assert!(geometry.all_bsp_faces);
+        geometry.append(1,&batch,&[0,1,2],None); // frozen source with the same material/cell
+        geometry.append(2,&batch,&[0,1,2],Some(19));
+        assert!(!geometry.all_bsp_faces);
+        assert_eq!(geometry.faces,[17,19]);
+        assert_eq!(geometry.indices,[0,1,2,3,4,5,6,7,8]); // no original draw geometry removed
     }
     #[test]
     fn wave_normal_rides_the_deform_uniforms_and_never_displaces_vertices() {

@@ -427,7 +427,7 @@ impl Gather {
             let g = &groups[p.group];
             let original = self.originals[p.group].as_ref().unwrap();
             assert!(
-                !g.faces.is_empty(),
+                g.all_bsp_faces && !g.faces.is_empty(),
                 "gathered alpha source lacks BSP face provenance"
             );
             let u = p
