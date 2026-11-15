@@ -392,7 +392,7 @@ This bundle satisfies the source and relink part of LGPL-2.1 section 6 for the
 statically linked SceShaccCgExt library used by the PlayStation Vita release of
 the Looking Glass port of American McGee's Alice.
 
-- Release head: `@@HEAD@@`
+- Release build head: `@@HEAD@@`
 - Release ELF `looking-glass.elf` SHA-256: `@@ELF@@`
 - SceShaccCgExt revision: `@@REVISION@@`
 - Pinned `libSceShaccCgExt.a` SHA-256: `@@LIBRARY@@`
@@ -433,13 +433,15 @@ the Looking Glass port of American McGee's Alice.
 ## What is not in this bundle
 
 - No game data, no pack, texture, sound or movie.
-- No binary under another licence. The other C archives in the link are not
-  redistributed here: `libvitaGL.a` (a local LGPL-3.0 build of
+- No C library binary under another licence. The other C archives in the link
+  are not redistributed here: `libvitaGL.a` (a local LGPL-3.0 build of
   Rinnegatamante/vitaGL at `dca4b9d`), `libvitashark.a` (LGPL-3.0, vdpm package
   vitaShaRK 1.7-1), `libmathneon.a` (MIT), newlib, pthread-embedded, taiHEN and
   the Sce stub archives. `link/BUILD.txt` records the exact SDK components and
   archive SHA-256 values the release used. A byte-identical relink needs the
   same archives; a functional relink works with compatible ones.
+- The Rust object code in `objects/` includes third-party crates; their licence
+  texts are in `licenses/THIRD_PARTY_NOTICES-vita.txt`.
 
 ## Relink against the unmodified library (proof of the kit)
 
@@ -492,7 +494,7 @@ RELINK_TEMPLATE = """#!/bin/sh
 # Usage: VITASDK=/path/to/vitasdk ./link/relink.sh [OUTPUT_ELF]
 #
 # The archive under lib/libSceShaccCgExt.a is linked instead of the SDK one.
-# With the pinned archive the output is the release ELF byte for byte.
+# With the pinned member objects the output is the release ELF byte for byte.
 set -eu
 if [ "$#" -gt 1 ]; then
     echo "usage: $0 [OUTPUT_ELF]" >&2
