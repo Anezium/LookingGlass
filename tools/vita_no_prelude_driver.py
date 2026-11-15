@@ -20,7 +20,7 @@ def run(package, backend):
     assert ready['title']=='ALICELG01'
     for name,digest in ready['files'].items():
         assert sha((package/name).read_bytes())==digest, name
-    backend.preflight()
+    backend.preflight(ready)
     available=[]
     for tape in ready['tapes']:
         data=backend.get_tape(tape['name'],tape['required'])
@@ -61,6 +61,7 @@ def run(package, backend):
 class Console:
     def __init__(self,kit,session):
         spec=importlib.util.spec_from_file_location('kit',kit); self.k=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.k)
+        assert self.k.TITLE == "ALICELG01" and self.k.SELF == "ux0:/app/ALICELG01/eboot.bin"
         self.s=self.k.Sess(session);self.kit=kit;self.session=session
         # Hard gate even if a kit is later edited to use deletes or MKD.
         original=self.k.vita_ftp.Session.execute
@@ -72,7 +73,8 @@ class Console:
     def command(self,*args):
         # Run in-process so the FTP allowlist also covers install/restore.
         assert self.k.main(['--session',str(self.session),*map(str,args)]) in (None,0)
-    def preflight(self):
+    def preflight(self,ready):
+        assert sha(self.kit.read_bytes()) == ready["kit_sha256"], "rc1kit changed since packaging"
         assert shutil.disk_usage(self.session).free>=40*2**30
         s=self.s.state(); assert not s.get('installed') and not s.get('console_written'); assert s['game']=='closed' and s['backup'] and not s['pending'] and s['log']['pid']
         self.log=Path(s['log']['path']); assert self.log.is_file()
