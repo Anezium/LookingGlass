@@ -83,7 +83,7 @@ pub struct Config {
     /// Draw order, geometry and fragment arithmetic stay unchanged. Default off.
     pub actor_opaque_shader: bool,
     /// Cull script-owned bodies when single preparation has no mutable consumer.
-    pub puppet_body_frustum_cull: bool,
+    pub actor_consumer_frustum_cull: bool,
     pub diag_skip_fx: bool,
     pub diag_skip_decals: bool,
     pub diag_skip_alpha_world: bool,
@@ -495,7 +495,7 @@ impl Default for Config {
             ant_corpse_opaque_shader: false,
             diag_skip_live_actors: false,
             actor_opaque_shader: false,
-            puppet_body_frustum_cull: false,
+            actor_consumer_frustum_cull: false,
             diag_skip_fx: false,
             diag_skip_decals: false,
             diag_skip_alpha_world: false,

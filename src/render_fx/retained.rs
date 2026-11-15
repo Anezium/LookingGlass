@@ -2165,7 +2165,7 @@ mod tests {
 }
 
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-fn census_groups(stage:&str,groups:&[Group]) {
+fn census_groups(stage:&str,groups:&[super::Group]) {
     if !crate::character::skinning::census::active() {return;}
     for (id,g) in groups.iter().enumerate() {
         println!("[lg/group-census] frame={} stage={stage} group={id} owner={:?} layers={} triangles={} effect={} textures={:?}",crate::sim_maps::probe::frame(),crate::character::skinning::census::owner(id),g.passes.len(),g.passes.iter().map(|p|p.geometry().indices.len()/3).sum::<usize>(),g.passes.iter().all(|p|p.effect),g.passes.iter().map(|p|crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id))).collect::<Vec<_>>());

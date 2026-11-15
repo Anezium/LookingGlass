@@ -1237,7 +1237,7 @@ impl Model {
         }
         // Visibility/lighting remains identical even when owned worker publications
         // replace the blanket mutable Puppet skin. Actual consumers guard callers.
-        let _visibility = crate::character::skinning::CullGuard::visual_preserve(self.frozen.is_some() || (self.late_skin_overlays && !crate::character::skinning::puppet_body_culling(self.afterimage_normals)));
+        let _visibility = crate::character::skinning::CullGuard::visual_preserve((self.frozen.is_some() || self.late_skin_overlays) && !crate::character::skinning::consumer_body_culling(self.afterimage_normals));
         let _skin_guard = crate::character::skinning::CullGuard::reason(
             self.late_skin_overlays && !crate::character::skinning::actual_consumers(),crate::phase_census::PUPPET);
         let _afterimage = crate::character::skinning::CullGuard::publication_reason(

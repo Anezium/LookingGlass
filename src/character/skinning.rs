@@ -913,10 +913,10 @@ mod actual_consumer_tests {
 /// Single preparation declares actual late mesh consumers before body preparation.
 /// Frozen shells, electric expansion and afterimage normal inheritance retain the
 /// old path. A culled body still samples tags and submits its independent props.
-pub(crate) fn puppet_body_culling(afterimages: bool) -> bool {
+pub(crate) fn consumer_body_culling(afterimages: bool) -> bool {
     #[cfg(feature="vita_renderer")]
     { let c=crate::render::vita_renderer::config();
-      c.puppet_body_frustum_cull && c.skin_actual_consumers && !c.flat_actor_light && overlap::single_preparing()
+      c.actor_consumer_frustum_cull && c.skin_actual_consumers && !c.flat_actor_light && overlap::single_preparing()
           && !afterimages && mutable_reasons()==0 }
     #[cfg(not(feature="vita_renderer"))]
     { let _=afterimages;false }
