@@ -342,6 +342,13 @@ def main():
         (bundle / "link/release-elf.sha256").write_text(elf_hash + "\n", encoding="utf-8")
         (bundle / "link/pinned-library.sha256").write_text(pin["archive_sha256"] + "\n",
                                                            encoding="utf-8")
+        members = []
+        for entry in selection["members"]:
+            if not entry.get("member") or not entry.get("sha256"):
+                fail("release library selection has an incomplete member entry")
+            members.append("%s  %s" % (entry["sha256"], entry["member"]))
+        (bundle / "link/library-members.txt").write_text("\n".join(members) + "\n",
+                                                         encoding="utf-8")
         (bundle / "link/link-map.sha256").write_text(
             sha256(bundle / "link/link.map") + "  link.map\n", encoding="utf-8")
         inputs = []
@@ -409,8 +416,11 @@ the Looking Glass port of American McGee's Alice.
   release build facts: toolchain, flags, SDK components, and the archive and
   members the linker actually loaded.
 - `link/release-elf.sha256`, `link/link-map.sha256`,
-  `link/pinned-library.sha256`, `link/inputs.txt` - the identities used by
-  `relink.sh`.
+  `link/pinned-library.sha256`, `link/library-members.txt`,
+  `link/inputs.txt` - the identities used by `relink.sh`. The member list is
+  the deciding identity: a rebuild of the same source can change the archive
+  file hash because `ar` records member timestamps, but its object bytes stay
+  the same and the relink stays byte-identical.
 - `SHA256SUMS` - SHA-256 of every file in this bundle except itself.
 - `lib/` - empty on purpose. Put the SceShaccCgExt archive to relink against
   here as `lib/libSceShaccCgExt.a`.
@@ -438,13 +448,16 @@ the Looking Glass port of American McGee's Alice.
    make
    ```
 
-   The resulting `libSceShaccCgExt.a` must have SHA-256
-   `@@LIBRARY@@` with the release toolchain.
+   The resulting `libSceShaccCgExt.a` can have a different file SHA-256 from
+   the pinned `@@LIBRARY@@` because `ar` stores member timestamps. What matters
+   is the member object bytes: `link/library-members.txt` holds their SHA-256,
+   and `relink.sh` compares those. With this source and toolchain the members
+   equal the pinned ones and the relink is byte-identical.
 3. `mkdir -p lib && cp libSceShaccCgExt.a lib/`
 4. `VITASDK=/path/to/vitasdk ./link/relink.sh output/looking-glass.elf`
-5. The script prints the ELF SHA-256. With the pinned library it must be
+5. The script prints the ELF SHA-256. With the pinned member objects it must be
    `@@ELF@@`, byte for byte the release ELF. The script fails if the SDK
-   archive is loaded instead.
+   archive is loaded instead or if the expected bytes do not follow.
 
 ## Relink against a modified library
 
@@ -484,6 +497,8 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 sdk=$VITASDK
 linker=$sdk/bin/arm-vita-eabi-gcc
 [ -x "$linker" ] || { echo "missing $linker" >&2; exit 1; }
+archiver=$sdk/bin/arm-vita-eabi-ar
+[ -x "$archiver" ] || { echo "missing $archiver" >&2; exit 1; }
 library=$here/lib/libSceShaccCgExt.a
 [ -f "$library" ] || {
     echo "missing $library; put the SceShaccCgExt archive to relink against there" >&2
@@ -531,7 +546,31 @@ fi
 actual=$(hash_file "$output")
 echo "relinked ELF $output"
 echo "sha256 $actual"
-if [ "$(hash_file "$library")" = "$(cat "$here/link/pinned-library.sha256")" ]; then
+
+# Decide whether the supplied archive carries the pinned member objects. The
+# archive file hash is not decisive: ar stores member timestamps, so a rebuild
+# of the same source can hash differently while its objects are identical.
+pinned_members=true
+if [ -s "$here/link/library-members.txt" ]; then
+    member_file=$here/output/.member
+    while read -r expected member; do
+        [ -n "$member" ] || continue
+        if ! "$archiver" p "$library" "$member" > "$member_file" 2>/dev/null; then
+            pinned_members=false
+            break
+        fi
+        if [ "$(hash_file "$member_file")" != "$expected" ]; then
+            pinned_members=false
+            break
+        fi
+    done < "$here/link/library-members.txt"
+    rm -f "$member_file"
+else
+    pinned_members=false
+fi
+
+echo "archive file sha256 $(hash_file "$library")"
+if $pinned_members; then
     expected=$(cat "$here/link/release-elf.sha256")
     if [ "$actual" != "$expected" ]; then
         echo "FAIL the relink does not reproduce the release ELF ($expected)" >&2
@@ -539,7 +578,7 @@ if [ "$(hash_file "$library")" = "$(cat "$here/link/pinned-library.sha256")" ]; 
     fi
     echo "PASS the relink reproduces the release ELF"
 else
-    echo "library differs from the pinned archive; this is a modified relink, not the release ELF"
+    echo "the contributing member objects differ from the pinned ones; this is a modified relink, not the release ELF"
 fi
 """
 

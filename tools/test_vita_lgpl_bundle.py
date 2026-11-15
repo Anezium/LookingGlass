@@ -158,6 +158,13 @@ class RelinkControls(unittest.TestCase):
             "printf 'LOAD %s\\n' \"$rec/libSceShaccCgExt.a\" > \"$MAP\"\n"
             "printf 'release elf' > \"$out\"\n")
         self.linker.chmod(0o755)
+        self.archiver = self.sdk / "bin/arm-vita-eabi-ar"
+        self.archiver.write_text(
+            "#!/bin/sh\n"
+            "[ \"$1\" = p ] || exit 2\n"
+            "[ \"$3\" = shacccg_ext.c.obj ] || exit 1\n"
+            "printf 'member bytes'\n")
+        self.archiver.chmod(0o755)
         self.map = self.bundle / "output/relink.map"
         self.map.parent.mkdir()
         (self.bundle / "link/args.txt").write_text(
@@ -165,6 +172,8 @@ class RelinkControls(unittest.TestCase):
             "-o\n@OUT@\n-Wl,-Map=@BUNDLE@/output/relink.map\n")
         (self.bundle / "link/release-elf.sha256").write_text(digest(b"release elf") + "\n")
         (self.bundle / "link/pinned-library.sha256").write_text(digest(b"library") + "\n")
+        (self.bundle / "link/library-members.txt").write_text(
+            digest(b"member bytes") + "  shacccg_ext.c.obj\n")
         (self.bundle / "link/relink.sh").write_text(BUNDLE.RELINK_TEMPLATE)
         (self.bundle / "link/relink.sh").chmod(0o755)
 
@@ -182,10 +191,18 @@ class RelinkControls(unittest.TestCase):
         self.assertTrue((self.bundle / "output/looking-glass.elf").is_file())
 
     def test_modified_library_reports_a_modified_relink(self):
-        (self.bundle / "link/pinned-library.sha256").write_text("0" * 64 + "\n")
+        (self.bundle / "link/library-members.txt").write_text("0" * 64 + "  shacccg_ext.c.obj\n")
         result = self.run_relink()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("modified relink", result.stdout)
+
+    def test_archive_file_hash_is_not_the_identity(self):
+        # A rebuild of the same source can change the archive file bytes (ar
+        # stores timestamps) while its member objects stay identical.
+        self.library.write_bytes(b"rebuilt archive with different metadata")
+        result = self.run_relink()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS the relink reproduces the release ELF", result.stdout)
 
     def test_missing_library_is_refused(self):
         self.library.unlink()
