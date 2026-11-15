@@ -259,7 +259,7 @@ def main():
     parser.add_argument("--capture", required=True, type=Path,
                         help="linker wrapper capture directory with argv-1.txt and objects/")
     parser.add_argument("--target-root", required=True, type=Path,
-                        help="Cargo target directory used by the release build")
+                        help="Cargo target directory prefix used by the release build (may be deleted)")
     parser.add_argument("--lib-dir", required=True, type=Path,
                         help="directory that held the pinned SceShaccCgExt archive")
     parser.add_argument("--shacccg-source", required=True, type=Path,
@@ -277,9 +277,14 @@ def main():
         lib_dir = absolute(args.lib_dir)
         source = absolute(args.shacccg_source)
         bundle = absolute(args.out)
-        for path in (release, capture, target_root, lib_dir, source):
+        for path in (release, capture, lib_dir, source):
             if not path.is_dir():
                 fail("not a directory: " + str(path))
+        # The Cargo target may already be deleted after the build; only its path
+        # prefix is needed to read the recorded command. The captured copies
+        # under --capture are the actual inputs.
+        if not target_root.is_absolute():
+            fail("--target-root must be an absolute path")
         if bundle.exists() and any(bundle.iterdir()):
             fail("output directory is not empty: " + str(bundle))
 
