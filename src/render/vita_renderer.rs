@@ -817,7 +817,26 @@ pub(crate) fn fx_cpu_options() -> (bool, bool) {
     let c = config();(c.fx_merge_ranges,c.fx_cpu_inline)
 }
 #[cfg(test)]
+thread_local! {
+    /// Scoped test override, per thread: parallel tests must not see each other's keys.
+    static TEST_CONFIG: std::cell::RefCell<Option<&'static Config>> = const { std::cell::RefCell::new(None) };
+}
+/// Tests cannot edit the process-wide OnceLock. Run one body with a modified copy of the
+/// shipped defaults instead; the copy is leaked (tests only) so `config()` can keep
+/// returning a stable reference, and the previous override is restored on unwind.
+#[cfg(test)]
+pub(crate) fn with_config<T>(change: impl FnOnce(&mut Config), run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<&'static Config>);
+    impl Drop for Reset { fn drop(&mut self) { TEST_CONFIG.with(|c| *c.borrow_mut() = self.0); } }
+    let mut config = Config::default();
+    change(&mut config);
+    let config: &'static Config = Box::leak(Box::new(config));
+    let _reset = Reset(TEST_CONFIG.with(|c| c.borrow_mut().replace(config)));
+    run()
+}
+#[cfg(test)]
 pub fn config() -> &'static Config {
+    if let Some(config) = TEST_CONFIG.with(|c| *c.borrow()) { return config; }
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(Config::default)
 }

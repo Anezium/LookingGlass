@@ -976,6 +976,8 @@ mod skin_preservation_tests {
 /// The registered layers consume rebuilt normals after the base skin is prepared.
 pub(crate) fn skin_requires_preservation(mesh: &Mesh) -> bool {
     let Some(texture) = &mesh.texture else { return false };
+    #[cfg(test)]
+    if let Some(surface) = test_support::surface(texture) { return surface.preserve_skin; }
     let id = texture.raw_miniquad_id();
     #[cfg(feature = "vita_renderer")]
     let surface = SURFACE_LOOKUP.with(|s| s.borrow().get(&id).and_then(Weak::upgrade));
