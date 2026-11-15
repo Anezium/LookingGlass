@@ -71,8 +71,11 @@ tools/vita_lgpl_bundle.sh --release-build /path/to/new-output \
 The source checkout must be clean at the pinned revision. The bundle holds the
 exact object code and link command, the source, the licence text, the release
 link map and a relink script; it holds no game data and no binary under another
-licence. The relink script reproduces the release ELF byte for byte with the
-pinned library and links a different ELF when the library is modified.
+licence. The relink script has two modes. By default it is a functional relink:
+a successful link exits 0 and the script states whether the ELF equals the
+release hash. `--strict` (or `LG_RELINK_STRICT=1`) is release reproduction and
+exits 1 unless the ELF is byte-identical. The generated README carries the
+public rebuild recipe for the vdpm packages and the custom vitaGL archive.
 
 These checks close this library-selection gate. Installation, device behavior,
 the other library/source obligations and the remaining release gates are

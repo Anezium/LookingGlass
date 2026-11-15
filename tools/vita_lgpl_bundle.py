@@ -25,6 +25,11 @@ import tarfile
 ARCHIVE = "libSceShaccCgExt.a"
 HEAD_RE = re.compile(r"^head ([0-9a-f]{40})$", re.M)
 ELF_HASH_RE = re.compile(r"^([0-9a-f]{64})  looking-glass\.elf$", re.M)
+VITAGL_LINE_RE = re.compile(
+    r"^linked libvitaGL\.a sha256=([0-9a-f]{64}) package=(\S+)", re.M)
+VITAGL_RECIPE_RE = re.compile(r"^vitagl-recipe make (.+?) \(documented", re.M)
+VITAGL_REVISION = "dca4b9d143290d78ec043131a19be36c78cdc7b5"
+VDPM_PACKAGES = "taihen vitaShaRK libmathneon"
 FORBIDDEN_SUFFIXES = (".pk3", ".vpk", ".self", ".velf", ".suprx", ".sfo",
                       ".tga", ".wav", ".ogg", ".vag", ".at3")
 
@@ -208,6 +213,24 @@ def write_readme(bundle, facts):
     (bundle / "README.md").write_text(text, encoding="utf-8")
 
 
+def read_vitagl_record(build_text):
+    """Return the vitaGL archive hash, package and make flags the release used."""
+    archive = VITAGL_LINE_RE.search(build_text)
+    recipe = VITAGL_RECIPE_RE.search(build_text)
+    if not archive or not recipe:
+        fail("release BUILD.txt does not record the vitaGL archive and recipe")
+    return {"archive": archive.group(1), "package": archive.group(2),
+            "flags": recipe.group(1).strip()}
+
+
+def append_build_recipe(path, facts):
+    text = BUILD_RECIPE_TEMPLATE
+    for key, value in facts.items():
+        text = text.replace("@@%s@@" % key.upper(), str(value))
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write(text)
+
+
 def write_relink(bundle):
     path = bundle / "link/relink.sh"
     path.write_text(RELINK_TEMPLATE, encoding="utf-8")
@@ -299,6 +322,7 @@ def main():
         elf_hash = elf_hashes[0]
         if sha256(release / "looking-glass.elf") != elf_hash:
             fail("release looking-glass.elf does not match BUILD.txt")
+        vitagl = read_vitagl_record(build_text)
         selection = json.loads((release / "library-selection.json").read_text(encoding="utf-8"))
         if selection["revision"] != pin["revision"] or selection["license"] != pin["license"]:
             fail("release library selection does not match the source pin")
@@ -363,6 +387,13 @@ def main():
                                             relative.as_posix()))
         (bundle / "link/inputs.txt").write_text("\n".join(inputs) + "\n", encoding="utf-8")
         write_relink(bundle)
+        append_build_recipe(bundle / "link/BUILD.txt", {
+            "revision": pin["revision"],
+            "vitagl_revision": VITAGL_REVISION,
+            "vitagl_flags": vitagl["flags"],
+            "vitagl_archive": vitagl["archive"],
+            "vdpm_packages": VDPM_PACKAGES,
+        })
         write_readme(bundle, {
             "head": head,
             "elf": elf_hash,
@@ -370,6 +401,11 @@ def main():
             "revision": pin["revision"],
             "objects": len(copies),
             "bytes": copied_bytes,
+            "vitagl_revision": VITAGL_REVISION,
+            "vitagl_flags": vitagl["flags"],
+            "vitagl_archive": vitagl["archive"],
+            "vitagl_package": vitagl["package"],
+            "vdpm_packages": VDPM_PACKAGES,
         })
         check_bundle(bundle, mapped, ("eboot.bin", "looking-glass.vpk", "looking-glass.self"))
         sums = write_sums(bundle)
@@ -414,7 +450,9 @@ the Looking Glass port of American McGee's Alice.
 - `link/args.txt` - the exact linker command, one argument per line, with three
   placeholders: `@BUNDLE@` is this directory, `@SDK@` is `$VITASDK`, and
   `@OUT@` is the output ELF.
-- `link/relink.sh` - runs that command against `lib/libSceShaccCgExt.a`.
+- `link/relink.sh` - runs that command against `lib/libSceShaccCgExt.a`. The
+  default mode is a functional relink; `--strict` requires byte identity with
+  the release ELF. See "Relink modes and exit codes".
 - `link/link.map` - the release linker map, with the build machine's home
   directory shortened to `~`.
 - `link/BUILD.txt`, `link/library-selection.json`, `link/libraries.txt` -
@@ -434,46 +472,148 @@ the Looking Glass port of American McGee's Alice.
 
 - No game data, no pack, texture, sound or movie.
 - No C library binary under another licence. The other C archives in the link
-  are not redistributed here: `libvitaGL.a` (a local LGPL-3.0 build of
-  Rinnegatamante/vitaGL at `dca4b9d`), `libvitashark.a` (LGPL-3.0, vdpm package
-  vitaShaRK 1.7-1), `libmathneon.a` (MIT), newlib, pthread-embedded, taiHEN and
-  the Sce stub archives. `link/BUILD.txt` records the exact SDK components and
-  archive SHA-256 values the release used. A byte-identical relink needs the
-  same archives; a functional relink works with compatible ones.
+  are not redistributed here: `libvitaGL.a` (LGPL-3.0, a local build of
+  Rinnegatamante/vitaGL at `@@VITAGL_REVISION@@`), `libvitashark.a` (LGPL-3.0,
+  vdpm package vitaShaRK 1.7-1), `libmathneon.a` (MIT), newlib,
+  pthread-embedded, taiHEN and the Sce stub archives. All of them are
+  rebuildable from public sources; the recipe is below. `link/BUILD.txt`
+  records the exact SDK components and archive SHA-256 values the release
+  used. A byte-identical relink needs the same archives; a functional relink
+  works with compatible ones.
 - The Rust object code in `objects/` includes third-party crates; their licence
   texts are in `licenses/THIRD_PARTY_NOTICES-vita.txt`.
 
-## Relink against the unmodified library (proof of the kit)
+## Build the third-party dependencies from public sources
 
-1. Install the VitaSDK components listed in `link/BUILD.txt`, or use the SDK
-   used for the release. Export its root as `VITASDK`.
-2. Build the supplied source at `@@REVISION@@`:
+The link reads four C libraries that are not in this bundle: `libvitaGL.a`,
+`libvitashark.a`, `libmathneon.a` and `libSceShaccCgExt.a`, plus the SDK
+archives. `libvitashark.a` and `libmathneon.a` come from vdpm packages;
+`libvitaGL.a` is built from its public repository because the release used a
+local build, not the vdpm package file; `libSceShaccCgExt.a` is built from the
+source in this bundle. Every one of them is rebuildable from public sources,
+and none needs a proprietary SDK file.
 
-   ```
-   cmake SceShaccCgExt-source -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \\
-     -DCMAKE_C_FLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types" \\
-     -DCMAKE_CXX_FLAGS="-std=gnu++11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
-   make
-   ```
+Prerequisites (host):
 
-   The resulting `libSceShaccCgExt.a` can have a different file SHA-256 from
-   the pinned `@@LIBRARY@@` because `ar` stores member timestamps. What matters
-   is the member object bytes: `link/library-members.txt` holds their SHA-256,
-   and `relink.sh` compares those. With this source and toolchain the members
-   equal the pinned ones and the relink is byte-identical.
-3. `mkdir -p lib && cp libSceShaccCgExt.a lib/`
-4. `VITASDK=/path/to/vitasdk ./link/relink.sh output/looking-glass.elf`
-5. The script prints the ELF SHA-256. With the pinned member objects it must be
-   `@@ELF@@`, byte for byte the release ELF. The script fails if the SDK
-   archive is loaded instead or if the expected bytes do not follow.
+- macOS 13 or later (arm64 or x86_64) or 64-bit Linux. vdpm publishes clients
+  for `arm64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-linux-gnu`,
+  `aarch64-linux-gnu`, `x86_64-linux-musl`, `aarch64-linux-musl`, FreeBSD and
+  Windows x86_64.
+- `git`, `curl`, `tar`, `make`, a POSIX shell and Python 3. On Debian or
+  Ubuntu: `sudo apt install build-essential git curl python3 cmake`. On
+  macOS, `xcode-select --install` provides git, make and tar; `curl` and
+  `python3` are part of the system.
+- CMake 3.5 or newer. CMake 4 needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for
+  the SceShaccCgExt build below. The release used CMake 4.4.4.
+- Network access to github.com and vitasdk.org, and about 2 GB free.
+
+### Step 1: install a clean VitaSDK with vdpm
+
+```sh
+git clone https://github.com/vitasdk/vdpm
+cd vdpm
+VITASDK_CHANNEL=2026.08 ./bootstrap-vitasdk.sh --install-dir "$HOME/vitasdk-clean"
+export VITASDK=$HOME/vitasdk-clean
+export PATH=$VITASDK/bin:$PATH
+```
+
+The bootstrap installs the newest supported SDK series as vdpm packages. The
+release used series `2026.08`; `link/BUILD.txt` records its exact `sdk-build`
+and `sdk-component` revisions. Drop `VITASDK_CHANNEL` to take the series that
+is supported today. A newer series still links, but its archives differ and
+the ELF will not be byte-identical.
+
+### Step 2: install the vdpm packages the link needs
+
+```sh
+"$VITASDK/bin/vdpm" install @@VDPM_PACKAGES@@
+```
+
+`taihen` supplies `libtaihen_stub.a`, `vitaShaRK` supplies `libvitashark.a`,
+and `libmathneon` supplies `libmathneon.a`. The `vitaGL` package is not
+installed on purpose: step 3 replaces it with the release revision. If you
+prefer the packaged archive, install `vitaGL` and skip step 3; the link still
+works but the bytes differ.
+
+### Step 3: build vitaGL at the release revision
+
+```sh
+git clone https://github.com/Rinnegatamante/vitaGL
+cd vitaGL
+git checkout --detach @@VITAGL_REVISION@@
+git rev-parse HEAD   # must print @@VITAGL_REVISION@@
+make @@VITAGL_FLAGS@@
+make install         # libvitaGL.a and source/vitaGL.h into $VITASDK
+```
+
+The release linked `libvitaGL.a` SHA-256 `@@VITAGL_ARCHIVE@@`; the installed
+vdpm package was `@@VITAGL_PACKAGE@@`, but the release used a local build of
+the revision above. The archive does not record its compile flags, so the
+flags above are the documented ones from `link/BUILD.txt`. `make install`
+needs `VITASDK` exported.
+
+The Makefile compiles with `-g`, and `ar` stores member timestamps, so the
+archive file hash depends on the checkout directory and on when it was built.
+A rebuild therefore has a different file SHA-256 although the compiled code is
+the same. Measured on the release host: a fresh clone of the revision above
+built with the same GCC in a different directory produced 30 of 30 members
+identical after `objcopy --strip-debug`. Compare stripped members, not the
+archive file.
+
+### Step 4: build SceShaccCgExt from the source in this bundle
+
+```sh
+cmake SceShaccCgExt-source -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \\
+  -DCMAKE_C_FLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types" \\
+  -DCMAKE_CXX_FLAGS="-std=gnu++11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
+make
+mkdir -p lib
+cp libSceShaccCgExt.a lib/
+```
+
+The archive file hash can differ from the pinned `@@LIBRARY@@` because `ar`
+stores member timestamps. The member object bytes decide identity:
+`link/library-members.txt` holds their SHA-256 and `relink.sh` compares those.
+
+With the release SDK archives and GCC 15.2.0 this recipe links to the release
+ELF byte for byte, as the proof below shows. Across SDK series it produces a
+working ELF with a different hash. This bundle does not claim byte identity
+on a different SDK.
+
+## Relink modes and exit codes
+
+`link/relink.sh` has two modes:
+
+- Default: functional relink. A successful link exits 0. The script prints the
+  ELF SHA-256 and states whether it is byte-identical to the release ELF or
+  differs. A difference is a warning, not a failure, because other SDK
+  archives are allowed to differ.
+- Strict: release reproduction. `--strict` or `LG_RELINK_STRICT=1` exits 1
+  unless the output is byte-identical to the release ELF.
+
+A failed link, a missing archive, or a link that loads the SDK SceShaccCgExt
+archive exits non-zero in both modes. The script does not claim byte identity
+when it did not check it.
+
+## Relink against the unmodified library
+
+1. Complete steps 1 to 4 above, or use the SDK and archives that produced the
+   release (`link/BUILD.txt`).
+2. `VITASDK=/path/to/vitasdk ./link/relink.sh output/looking-glass.elf`
+3. With the pinned member objects and the release SDK the output is
+   `@@ELF@@`, byte for byte the release ELF. The script prints `PASS` and
+   exits 0.
+4. `VITASDK=/path/to/vitasdk ./link/relink.sh --strict output/strict.elf`
+   additionally fails on any difference.
 
 ## Relink against a modified library
 
-1. Modify `SceShaccCgExt-source/` as you wish and build it as above.
+1. Modify `SceShaccCgExt-source/` as you wish and build it as in step 4.
 2. Put the new archive at `lib/libSceShaccCgExt.a`.
 3. Run `./link/relink.sh output/modified.elf`. The output is a new ELF that
-   contains your modified library. Its hash will differ from the release; that
-   is expected and is the point of the bundle.
+   contains your modified library. Its hash differs from the release; the
+   script says so and exits 0 because the link succeeded. `--strict` exits 1,
+   which is the point of the mode split.
 4. Package the ELF into a SELF/VPK with the usual Vita tools if you want to run
    it. This bundle covers the link, not the signing or packaging steps.
 
@@ -491,15 +631,41 @@ release hash above.
 RELINK_TEMPLATE = """#!/bin/sh
 # Relink the Looking Glass Vita ELF from the object code in this bundle.
 #
-# Usage: VITASDK=/path/to/vitasdk ./link/relink.sh [OUTPUT_ELF]
+# Usage: VITASDK=/path/to/vitasdk ./link/relink.sh [--strict] [OUTPUT_ELF]
+#
+# Default mode is a functional relink: the link must succeed and the script
+# states whether the ELF equals the release ELF, but a difference is not an
+# error. --strict (or LG_RELINK_STRICT=1) is release reproduction: the script
+# exits 1 unless the output is byte-identical to the release ELF.
 #
 # The archive under lib/libSceShaccCgExt.a is linked instead of the SDK one.
-# With the pinned member objects the output is the release ELF byte for byte.
 set -eu
-if [ "$#" -gt 1 ]; then
-    echo "usage: $0 [OUTPUT_ELF]" >&2
-    exit 2
-fi
+strict=0
+output=
+for argument in "$@"; do
+    case $argument in
+        --strict) strict=1 ;;
+        -h|--help)
+            echo "usage: VITASDK=/path/to/vitasdk $0 [--strict] [OUTPUT_ELF]"
+            exit 0
+            ;;
+        -*)
+            echo "unknown option: $argument" >&2
+            exit 2
+            ;;
+        *)
+            if [ -n "$output" ]; then
+                echo "usage: $0 [--strict] [OUTPUT_ELF]" >&2
+                exit 2
+            fi
+            output=$argument
+            ;;
+    esac
+done
+case ${LG_RELINK_STRICT:-} in
+    ''|0|no|false) ;;
+    *) strict=1 ;;
+esac
 here=$(cd "$(dirname "$0")/.." && pwd)
 : "${VITASDK:?set VITASDK to the Vita SDK root}"
 sdk=$VITASDK
@@ -512,7 +678,7 @@ library=$here/lib/libSceShaccCgExt.a
     echo "missing $library; put the SceShaccCgExt archive to relink against there" >&2
     exit 1
 }
-output=${1:-$here/output/looking-glass.elf}
+output=${output:-$here/output/looking-glass.elf}
 case $output in
     /*) ;;
     *) output=$(pwd)/$output ;;
@@ -552,8 +718,10 @@ if grep -F "$sdk/arm-vita-eabi/lib/libSceShaccCgExt.a" "$map" >/dev/null 2>&1; t
 fi
 
 actual=$(hash_file "$output")
+expected=$(cat "$here/link/release-elf.sha256")
 echo "relinked ELF $output"
 echo "sha256 $actual"
+echo "release sha256 $expected"
 
 # Decide whether the supplied archive carries the pinned member objects. The
 # archive file hash is not decisive: ar stores member timestamps, so a rebuild
@@ -561,13 +729,13 @@ echo "sha256 $actual"
 pinned_members=true
 if [ -s "$here/link/library-members.txt" ]; then
     member_file=$here/output/.member
-    while read -r expected member; do
+    while read -r member_hash member; do
         [ -n "$member" ] || continue
         if ! "$archiver" p "$library" "$member" > "$member_file" 2>/dev/null; then
             pinned_members=false
             break
         fi
-        if [ "$(hash_file "$member_file")" != "$expected" ]; then
+        if [ "$(hash_file "$member_file")" != "$member_hash" ]; then
             pinned_members=false
             break
         fi
@@ -576,18 +744,67 @@ if [ -s "$here/link/library-members.txt" ]; then
 else
     pinned_members=false
 fi
-
 echo "archive file sha256 $(hash_file "$library")"
-if $pinned_members; then
-    expected=$(cat "$here/link/release-elf.sha256")
-    if [ "$actual" != "$expected" ]; then
-        echo "FAIL the relink does not reproduce the release ELF ($expected)" >&2
-        exit 1
-    fi
-    echo "PASS the relink reproduces the release ELF"
+if [ "$pinned_members" = true ]; then
+    echo "members match the pinned SceShaccCgExt objects"
 else
-    echo "the contributing member objects differ from the pinned ones; this is a modified relink, not the release ELF"
+    echo "members differ from the pinned SceShaccCgExt objects"
 fi
+
+if [ "$actual" = "$expected" ]; then
+    echo "result byte-identical to the release ELF"
+    echo "PASS the relink reproduces the release ELF"
+    exit 0
+fi
+echo "result different from the release ELF"
+if [ "$strict" = 1 ]; then
+    if [ "$pinned_members" = true ]; then
+        echo "FAIL strict mode: the pinned members are present but the ELF differs;" >&2
+        echo "     the other SDK archives in the link are not the release ones" >&2
+    else
+        echo "FAIL strict mode: the archive members differ from the pinned ones" >&2
+    fi
+    exit 1
+fi
+if [ "$pinned_members" = true ]; then
+    echo "WARNING the link succeeded but the ELF differs from the release hash;"
+    echo "        the other SDK archives in the link are not the release ones."
+    echo "        This is a functional relink, not the release ELF."
+else
+    echo "NOTE the contributing member objects differ from the pinned ones;"
+    echo "     this is a modified relink, not the release ELF."
+fi
+echo "use --strict to require byte identity with the release ELF"
+exit 0
+"""
+
+
+BUILD_RECIPE_TEMPLATE = """
+
+## Public rebuild recipe
+
+The lines above are the release record. This section is the executable recipe
+that rebuilds the third-party inputs from public sources. The full version,
+with prerequisites and each command, is in README.md under "Build the
+third-party dependencies from public sources".
+
+- Host: macOS 13+ (arm64 or x86_64) or 64-bit Linux with git, curl, tar, make,
+  a POSIX shell, Python 3 and CMake 3.5 or newer; about 2 GB free; network
+  access to github.com and vitasdk.org.
+- Clean SDK: `git clone https://github.com/vitasdk/vdpm`, then
+  `VITASDK_CHANNEL=2026.08 ./bootstrap-vitasdk.sh --install-dir <directory>`,
+  then `export VITASDK=<directory>` and `export PATH=$VITASDK/bin:$PATH`.
+- Packages: `"$VITASDK/bin/vdpm" install @@VDPM_PACKAGES@@`.
+- vitaGL: `git clone https://github.com/Rinnegatamante/vitaGL`, then
+  `git checkout --detach @@VITAGL_REVISION@@`, then
+  `make @@VITAGL_FLAGS@@`, then `make install`. That is a local build at the
+  recorded revision, not the vdpm package file.
+- SceShaccCgExt: source in this bundle at `@@REVISION@@`; CMake recipe in
+  README.md step 4, output `lib/libSceShaccCgExt.a`.
+- Expected `libvitaGL.a` SHA-256: `@@VITAGL_ARCHIVE@@`. The archive file does
+  not record its compile flags; the flags above are the documented ones.
+- No input here needs a proprietary SDK binary. The Sce stub archives and the
+  C library come from the public vdpm SDK packages.
 """
 
 

@@ -156,7 +156,8 @@ class RelinkControls(unittest.TestCase):
             "  prev=$a\n"
             "done\n"
             "printf 'LOAD %s\\n' \"$rec/libSceShaccCgExt.a\" > \"$MAP\"\n"
-            "printf 'release elf' > \"$out\"\n")
+            "[ -n \"${FAKE_LINK_FAIL:-}\" ] && exit 1\n"
+            "printf '%s' \"${FAKE_ELF:-release elf}\" > \"$out\"\n")
         self.linker.chmod(0o755)
         self.archiver = self.sdk / "bin/arm-vita-eabi-ar"
         self.archiver.write_text(
@@ -184,17 +185,55 @@ class RelinkControls(unittest.TestCase):
                               env={**{"PATH": "/usr/bin:/bin", "MAP": str(self.map),
                                       "VITASDK": str(self.sdk)}, **(env or {})})
 
-    def test_placeholders_resolve_and_release_elf_is_checked(self):
+    def test_default_mode_passes_for_the_release_elf(self):
         result = self.run_relink()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("result byte-identical to the release ELF", result.stdout)
         self.assertIn("PASS the relink reproduces the release ELF", result.stdout)
         self.assertTrue((self.bundle / "output/looking-glass.elf").is_file())
 
+    def test_strict_mode_passes_for_the_release_elf(self):
+        result = self.run_relink("--strict")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS the relink reproduces the release ELF", result.stdout)
+
+    def test_default_mode_warns_when_members_match_but_elf_differs(self):
+        # Compatible SDK archives can link a usable ELF that is not the release
+        # bytes. The default mode must accept that link and say so.
+        result = self.run_relink(env={"FAKE_ELF": "different elf"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("members match the pinned SceShaccCgExt objects", result.stdout)
+        self.assertIn("result different from the release ELF", result.stdout)
+        self.assertIn("WARNING the link succeeded", result.stdout)
+
+    def test_strict_mode_fails_when_members_match_but_elf_differs(self):
+        result = self.run_relink("--strict", env={"FAKE_ELF": "different elf"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL strict mode", result.stderr)
+
+    def test_strict_environment_variable_is_honoured(self):
+        result = self.run_relink(env={"FAKE_ELF": "different elf",
+                                      "LG_RELINK_STRICT": "1"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL strict mode", result.stderr)
+
+    def test_link_failure_fails_in_both_modes(self):
+        for arguments in ((), ("--strict",)):
+            result = self.run_relink(*arguments, env={"FAKE_LINK_FAIL": "1"})
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertNotIn("relinked ELF", result.stdout)
+
     def test_modified_library_reports_a_modified_relink(self):
         (self.bundle / "link/library-members.txt").write_text("0" * 64 + "  shacccg_ext.c.obj\n")
-        result = self.run_relink()
+        result = self.run_relink(env={"FAKE_ELF": "modified elf"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("modified relink", result.stdout)
+
+    def test_modified_library_fails_strict_mode(self):
+        (self.bundle / "link/library-members.txt").write_text("0" * 64 + "  shacccg_ext.c.obj\n")
+        result = self.run_relink("--strict", env={"FAKE_ELF": "modified elf"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL strict mode", result.stderr)
 
     def test_archive_file_hash_is_not_the_identity(self):
         # A rebuild of the same source can change the archive file bytes (ar
@@ -209,6 +248,72 @@ class RelinkControls(unittest.TestCase):
         result = self.run_relink()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing", result.stderr)
+
+    def test_two_outputs_are_refused(self):
+        result = self.run_relink("one.elf", "two.elf")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage", result.stderr)
+
+
+class DocumentationControls(unittest.TestCase):
+    def test_relink_and_readme_document_both_modes(self):
+        for text in (BUNDLE.RELINK_TEMPLATE, BUNDLE.README_TEMPLATE):
+            self.assertIn("--strict", text)
+            self.assertIn("LG_RELINK_STRICT", text)
+        self.assertIn("functional relink", BUNDLE.README_TEMPLATE)
+        self.assertIn("byte-identical", BUNDLE.RELINK_TEMPLATE)
+
+    def test_public_recipe_names_the_full_revision_and_commands(self):
+        self.assertRegex(BUNDLE.VITAGL_REVISION, r"^[0-9a-f]{40}$")
+        facts = {
+            "vitagl_revision": BUNDLE.VITAGL_REVISION,
+            "vitagl_flags": "NO_TEX_COMBINER=1",
+            "vitagl_archive": "c" * 64,
+            "vitagl_package": "vitaGL-1-1",
+            "vdpm_packages": BUNDLE.VDPM_PACKAGES,
+            "revision": "b" * 40,
+        }
+        for template in (BUNDLE.README_TEMPLATE, BUNDLE.BUILD_RECIPE_TEMPLATE):
+            text = template
+            for key, value in facts.items():
+                text = text.replace("@@%s@@" % key.upper(), value)
+            self.assertIn(BUNDLE.VITAGL_REVISION, text)
+            self.assertIn("NO_TEX_COMBINER=1", text)
+            self.assertIn("make install", text)
+            self.assertIn(BUNDLE.VDPM_PACKAGES, text)
+            self.assertIn("bootstrap-vitasdk.sh", text)
+            self.assertIn("CMake 3.5", text)
+
+    def test_vitagl_record_is_read_from_the_release_build(self):
+        text = ("linked libvitaGL.a sha256=" + "a" * 64
+                + " package=vitaGL-1-1 not-the-package-file path=~/vitasdk/lib/libvitaGL.a\n"
+                + "vitagl-recipe make A=1 B=2 (documented; the archive does not record its flags)\n")
+        record = BUNDLE.read_vitagl_record(text)
+        self.assertEqual(record["archive"], "a" * 64)
+        self.assertEqual(record["package"], "vitaGL-1-1")
+        self.assertEqual(record["flags"], "A=1 B=2")
+
+    def test_missing_vitagl_record_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "does not record the vitaGL"):
+            BUNDLE.read_vitagl_record("head " + "0" * 40 + "\n")
+
+    def test_build_recipe_is_appended(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "BUILD.txt"
+            path.write_text("release record\n")
+            BUNDLE.append_build_recipe(path, {
+                "revision": "b" * 40,
+                "vitagl_revision": BUNDLE.VITAGL_REVISION,
+                "vitagl_flags": "A=1 B=2",
+                "vitagl_archive": "c" * 64,
+                "vdpm_packages": BUNDLE.VDPM_PACKAGES,
+            })
+            text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("release record\n"))
+        self.assertIn("## Public rebuild recipe", text)
+        self.assertIn(BUNDLE.VITAGL_REVISION, text)
+        self.assertIn("A=1 B=2", text)
+        self.assertIn("c" * 64, text)
 
 
 if __name__ == "__main__":
