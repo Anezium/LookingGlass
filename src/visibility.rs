@@ -207,6 +207,61 @@ impl Visibility {
         }
         !found
     }
+    /// Whether a box can be seen from `cluster`, through the same leaf/PVS data `bounds` reads,
+    /// without scanning every leaf: a standard BSP descent visits only the nodes the box can
+    /// reach. `Some(false)` means every non-solid leaf the box overlaps has a cluster the PVS
+    /// row of `cluster` leaves unset, so no point of the box is visible. `None` is unknown
+    /// (`cluster` unknown, no data, a box outside the compiled world, a box over solid space
+    /// only, or a tree deeper than the stack) and every caller must treat it as visible.
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) fn bounds_visible(&self, cluster: Option<usize>, planes: &[Plane], min: Vec3, max: Vec3) -> Option<bool> {
+        let c = cluster.filter(|&c| c < self.clusters)?;
+        if self.nodes.is_empty() || self.leaves.is_empty() || planes.is_empty()
+            || !min.is_finite() || !max.is_finite() || min.cmpgt(max).any() {
+            return None;
+        }
+        // Depth-first over both children at a straddling plane stays within one entry a level.
+        let mut stack = [0_i32; 96];
+        let mut length = 1;
+        let mut overlapped = false;
+        while length > 0 {
+            length -= 1;
+            let index = stack[length];
+            if index < 0 {
+                let leaf = &self.leaves[usize::try_from(-1_i64 - index as i64).ok()?];
+                if leaf.cluster >= 0 && min.cmple(leaf.max).all() && max.cmpge(leaf.min).all() {
+                    overlapped = true;
+                    if self.sees(c, leaf.cluster as usize) {
+                        return Some(true);
+                    }
+                }
+                continue;
+            }
+            let node = self.nodes.get(index as usize)?;
+            let plane = planes.get(node.plane)?;
+            let normal = plane.normal;
+            // Support corners of the box along and against the plane normal.
+            let high = normal.dot(vec3(
+                if normal.x >= 0. { max.x } else { min.x },
+                if normal.y >= 0. { max.y } else { min.y },
+                if normal.z >= 0. { max.z } else { min.z }));
+            let low = normal.dot(vec3(
+                if normal.x >= 0. { min.x } else { max.x },
+                if normal.y >= 0. { min.y } else { max.y },
+                if normal.z >= 0. { min.z } else { max.z }));
+            // Child 0 is the `dot >= distance` side, child 1 the other, as `cluster` walks it.
+            let front = high >= plane.distance;
+            let back = low <= plane.distance;
+            let push = |value: i32, stack: &mut [i32; 96], length: &mut usize| -> Option<()> {
+                *stack.get_mut(*length)? = value;
+                *length += 1;
+                Some(())
+            };
+            if front { push(node.children[0], &mut stack, &mut length)?; }
+            if back { push(node.children[1], &mut stack, &mut length)?; }
+        }
+        if overlapped { Some(false) } else { None }
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +333,33 @@ pub(crate) mod tests {
         let v = Visibility::default();
         assert!(v.faces(None).is_none());
         assert!(v.bounds(None, Vec3::ZERO, Vec3::ONE));
+    }
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn box_visibility_matches_the_leaf_bounds_pvs_test() {
+        let v = two_rooms();
+        let planes = [Plane { normal: Vec3::X, distance: 0. }];
+        // Each room's own box is visible only from its own cluster.
+        assert_eq!(v.bounds_visible(Some(0), &planes, vec3(2., -1., -1.), vec3(3., 1., 1.)), Some(true));
+        assert_eq!(v.bounds_visible(Some(1), &planes, vec3(2., -1., -1.), vec3(3., 1., 1.)), Some(false));
+        // A box crossing the split overlaps both rooms.
+        assert_eq!(v.bounds_visible(Some(1), &planes, vec3(-2., -1., -1.), vec3(2., 1., 1.)), Some(true));
+        // Unknown cluster, no data and a box outside the world fail open.
+        assert_eq!(v.bounds_visible(None, &planes, Vec3::ZERO, Vec3::ONE), None);
+        assert_eq!(Visibility::default().bounds_visible(Some(0), &planes, Vec3::ZERO, Vec3::ONE), None);
+        assert_eq!(v.bounds_visible(Some(0), &planes, vec3(50., 50., 50.), vec3(51., 51., 51.)), None);
+        let inverted = vec3(1., 1., 1.);
+        assert_eq!(v.bounds_visible(Some(0), &planes, inverted, Vec3::ZERO), None);
+        // Same answers as the leaf scan wherever the scan has data.
+        for cluster in 0..2 {
+            for (min, max) in [(vec3(2., -1., -1.), vec3(3., 1., 1.)),
+                               (vec3(-9., -1., -1.), vec3(-2., 1., 1.)),
+                               (vec3(-2., -1., -1.), vec3(2., 1., 1.)),
+                               (vec3(-2., -1., -1.), vec3(-2., 1., 1.)),
+                               (vec3(50., 50., 50.), vec3(51., 51., 51.))] {
+                assert_eq!(v.bounds_visible(Some(cluster), &planes, min, max).unwrap_or(true),
+                           v.bounds(Some(cluster), min, max), "{cluster} {min} {max}");
+            }
+        }
     }
 }
