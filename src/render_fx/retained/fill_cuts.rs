@@ -18,11 +18,7 @@ thread_local! {
     /// Textures whose alpha is 0 in every texel. The handles keep their ids from being reused.
     static ZERO_ALPHA: RefCell<(Vec<Texture2D>, HashSet<TextureId>)> = RefCell::default();
 }
-/// Register `texture` when every texel of `rgba` has alpha 0.
-pub(super) fn note_texture(texture: &Texture2D, rgba: &[u8]) {
-    note_zero_alpha(texture, !rgba.is_empty() && rgba.chunks_exact(4).all(|p| p[3] == 0));
-}
-/// The same note when the upload path already computed the verdict.
+/// Register `texture` when every texel has alpha 0.
 pub(super) fn note_zero_alpha(texture: &Texture2D, zero: bool) {
     if !zero { return; }
     ZERO_ALPHA.with(|z| {
