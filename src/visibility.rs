@@ -221,12 +221,13 @@ impl Visibility {
     }
     /// Whether a box can be seen from `cluster`, through the same leaf/PVS data `bounds` reads,
     /// without scanning every leaf: a standard BSP descent visits only the nodes the box can
-    /// reach. `Some(false)` means the box is wholly inside the compiled leaf bounds, every leaf
-    /// the descent reached overlaps it, and every non-solid leaf it overlaps has a cluster the
-    /// PVS row of `cluster` leaves unset, so no point of the box is visible. `None` is unknown
-    /// (`cluster` unknown, no data, a box not wholly inside the compiled world, a box over solid
-    /// space only, a reached leaf whose recorded bounds miss the box, or a traversal that exceeds
-    /// its visit budget) and every caller must treat it as visible.
+    /// reach. `Some(false)` means the box is wholly inside the compiled leaf bounds and every
+    /// non-solid leaf it overlaps has a cluster the PVS row of `cluster` leaves unset, so no
+    /// point of the box is visible. `None` is unknown (`cluster` unknown, no data, a box not
+    /// wholly inside the compiled world, a box over solid space only, or a traversal that
+    /// exceeds its visit budget) and every caller must treat it as visible. A leaf that the
+    /// AABB-support descent visits but whose own bounds miss the box has an empty intersection
+    /// with it (the cell lies inside its bounds), so ignoring it loses no coverage.
     #[cfg(feature = "vita_renderer")]
     pub(crate) fn bounds_visible(&self, cluster: Option<usize>, planes: &[Plane], min: Vec3, max: Vec3) -> Option<bool> {
         let c = cluster.filter(|&c| c < self.clusters)?;
@@ -245,24 +246,17 @@ impl Visibility {
         let mut length = 1;
         let mut budget = self.nodes.len().saturating_mul(2).saturating_add(2);
         let mut overlapped = false;
-        let mut unclassified = false;
         while length > 0 {
             budget = budget.checked_sub(1)?;
             length -= 1;
             let index = stack[length];
             if index < 0 {
                 let leaf = self.leaves.get(usize::try_from(-1_i64 - index as i64).ok()?)?;
-                if min.cmple(leaf.max).all() && max.cmpge(leaf.min).all() {
-                    if leaf.cluster >= 0 {
-                        overlapped = true;
-                        if self.sees(c, leaf.cluster as usize) {
-                            return Some(true);
-                        }
+                if leaf.cluster >= 0 && min.cmple(leaf.max).all() && max.cmpge(leaf.min).all() {
+                    overlapped = true;
+                    if self.sees(c, leaf.cluster as usize) {
+                        return Some(true);
                     }
-                } else {
-                    // The descent reached this leaf but its recorded bounds do not cover the
-                    // box volume that reached it, so the leaf data cannot classify the box.
-                    unclassified = true;
                 }
                 continue;
             }
@@ -294,7 +288,7 @@ impl Visibility {
             if front { push(node.children[0], &mut stack, &mut length)?; }
             if back { push(node.children[1], &mut stack, &mut length)?; }
         }
-        (overlapped && !unclassified).then_some(false)
+        (overlapped).then_some(false)
     }
 }
 
