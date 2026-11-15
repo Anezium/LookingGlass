@@ -62,6 +62,7 @@ class Console:
     def __init__(self,kit,session):
         spec=importlib.util.spec_from_file_location('kit',kit); self.k=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.k)
         assert self.k.TITLE == "ALICELG01" and self.k.SELF == "ux0:/app/ALICELG01/eboot.bin"
+        self.exit_failed=False
         self.s=self.k.Sess(session);self.kit=kit;self.session=session
         # Hard gate even if a kit is later edited to use deletes or MKD.
         original=self.k.vita_ftp.Session.execute
@@ -74,6 +75,7 @@ class Console:
         # Run in-process so the FTP allowlist also covers install/restore.
         code=self.k.main(['--session',str(self.session),*map(str,args)])
         if code not in (None,0):
+            if args[0] == 'wait-exit': self.exit_failed=True
             reason='INCONCLUSIVE; stop, no verdict, no retry' if args[:2]==('log','check-config') and code==4 else 'stop for root recovery'
             raise RuntimeError(f'{args}: exit {code}; {reason}')
     def preflight(self,ready):
@@ -97,7 +99,8 @@ class Console:
             if 'shaders' not in f.ls(self.k.PRIV+'cache/'): return
             assert name not in f.ls(self.k.PRIV+'cache/shaders/'), 'namespace already exists'
     def install(self,self_path,config):
-        if self.s.state().get('launch_id'): self.command('wait-exit','--timeout','30')
+        if self.exit_failed: raise RuntimeError('exit failure latched; root recovery required')
+        self.command('wait-exit','--timeout','30')
         self.command('install',self_path,config)
     def launch_wait(self):
         self.command('launch')
@@ -120,8 +123,8 @@ class Console:
     def result(self,result):(self.session/'no-prelude-result.json').write_text(json.dumps(result,indent=2)+'\n')
     def restore(self):
         # --keep-saves avoids every kit delete path. New game-created caches remain.
-        if self.s.state().get('launch_id'):
-            self.command('wait-exit','--timeout','30')
+        if self.exit_failed: raise RuntimeError('exit failure latched; no restoration; root recovery required')
+        self.command('wait-exit','--timeout','30')
         self.command('restore','--keep-saves')
 
 if __name__=='__main__':
