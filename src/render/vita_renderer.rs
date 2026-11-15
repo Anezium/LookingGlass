@@ -14,6 +14,7 @@ mod gxm;
 mod draw_cuts;
 mod alpha_fill;
 mod sky_surfaces;
+mod open_sky;
 mod water_join;
 mod water_probe;
 #[cfg(not(target_os = "vita"))]
@@ -362,8 +363,9 @@ pub struct Config {
     pub water_draw_join: bool,
     /// A model's world alpha groups (an entity brush or a script object with no vertex deform
     /// and no sky-sequence motion) use the map's PVS over their transformed bounds instead of
-    /// being drawn in every cluster. The bounds test is conservative and fails open, so no
-    /// visible fragment is dropped. Default off.
+    /// being drawn in every cluster. Groups that could show through an omitted sky seal
+    /// are retained: BSP visibility assumes sky depth that the gradient path omits.
+    /// Unknown bounds also fail open. Default off.
     pub alpha_model_pvs: bool,
     /// Effect packets that are unlit, unclamped, uncut, with no dissolve, ghost, power tint or
     /// filter fade use a fragment program without those paths, the dynamic lights (all zero when
@@ -1290,6 +1292,7 @@ pub struct Renderer {
     models: Vec<Option<Mat4>>,
     /// `alpha_model_pvs`: the last PVS answer per group, keyed by camera cluster and model matrix.
     model_pvs: Vec<ModelPvs>,
+    open_sky: open_sky::OpenSky,
     schedule: submit::Schedule,
     texture_sort: draw_cuts::TextureSort,
     alpha_fill: alpha_fill::State,
@@ -1389,6 +1392,7 @@ impl Renderer {
         crate::render_tail::install();
         let started=std::time::Instant::now();
         let c = config();
+        let open_sky = open_sky::OpenSky::new(scene, c.alpha_model_pvs);
         let mut pending: Vec<Pending> = Vec::new();
         let mut parameter_keys = BTreeMap::new();
         let mut parameter_recipes = Vec::new();
@@ -1914,6 +1918,7 @@ impl Renderer {
             visibility: vec![(0, None); groups.len()],
             models: vec![None; groups.len()],
             model_pvs: model_pvs_cache(),
+            open_sky,
             world_buffers: buffers,
             schedule: submit::Schedule::default(),
             texture_sort: draw_cuts::TextureSort::default(),
@@ -2166,7 +2171,8 @@ impl Renderer {
                 let hidden = model_pvs.is_some() && g.recipe.model.is_some() && g.recipe.motion.is_none()
                     && g.recipe.deform.is_none() && model.is_some_and(|model| model_bounds_hidden(
                         model_pvs.as_mut().unwrap(), &scene.map.visibility, &scene.map.planes,
-                        cluster, id, model, g.min, g.max));
+                        cluster, id, model, g.min, g.max)
+                        && !self.open_sky.may_show(eye, model, g.min, g.max));
                 if hidden { count("vita_world_model_pvs_culled", 1); }
                 let result = if hidden { None } else { model.and_then(|model| {
                     tests += 1;
