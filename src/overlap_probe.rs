@@ -55,3 +55,20 @@ impl Drop for Probe {
         if let Some((tx,_,handle))=self.worker.take() { let _=tx.send(false); handle.join().expect("overlap burn shutdown"); }
     }
 }
+
+#[cfg(all(test,feature="vita_renderer"))]
+mod tests {
+    use super::*;
+    #[test]
+    fn off_allocates_no_worker_and_busy_drop_joins() {
+        crate::render::vita_renderer::with_config(|c| c.diag_overlap_burn_ms=0, || {
+            let p=Probe::configured(); assert!(p.worker.is_none());
+        });
+        crate::render::vita_renderer::with_config(|c| c.diag_overlap_burn_ms=1, || {
+            let mut p=Probe::configured();
+            for _ in 0..3 { p.begin(); p.finish(); }
+            p.begin(); // Drop must drain completion before requesting shutdown.
+            drop(p);
+        });
+    }
+}
