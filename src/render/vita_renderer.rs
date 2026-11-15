@@ -38,6 +38,12 @@ pub enum Clocks {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(remote = "Self", default, deny_unknown_fields)]
 pub struct Config {
+    /// Buffered main-thread submission clocks; requires spike logging. Default off.
+    pub diag_submit_timing: bool,
+    /// Retain private actor-program uniform shadows across world/pass/frame boundaries.
+    pub submit_uniform_retain: bool,
+    /// Update only changed field shadows rather than rewriting the full block per draw.
+    pub submit_uniform_sparse: bool,
     /// Miniquad timing report cadence in frames; omitted keeps the historical 10, null or 0
     /// disables it. Measurement runs set 0: the report adds 3-5 ms to p95 (r15b).
     pub log_frame_time_every: Option<u32>,
@@ -498,6 +504,7 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 }
 impl Default for Config {
     fn default() -> Self {
+            diag_submit_timing: false, submit_uniform_retain: false, submit_uniform_sparse: false,
         Self {
             log_frame_time_every: Some(10),
             sim_trigger_facts_reuse: true,
@@ -2021,6 +2028,7 @@ impl Renderer {
     /// sees one canonical packet per original draw, in the same order, so the oracle compares
     /// logical submissions and the joined physical command separately.
     fn draw_water_run(&mut self, index: usize) {
+        let _submit_water = crate::submit_clock::scope("water");
         let Some(run) = self.water_join.as_ref().map(|state| state.plan.runs[index]) else { return; };
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         {
@@ -2429,6 +2437,7 @@ impl Renderer {
         };
         #[cfg(target_os = "vita")]
         if list_submit && self.gxm.proof_due() { self.proof_frame(scene, time); }
+        let submit_sky = crate::submit_clock::scope("sky");
         if !alpha && config().sky && !scene.authored_sky && !config().diag_skip_sky {
             #[cfg(not(target_os = "vita"))]
             let probe = super::sky_stats::begin(false);
@@ -2497,6 +2506,7 @@ impl Renderer {
             super::sky_stats::end(probe, mode, &format!("sky_surface_triangles={}",
                 self.sky_surfaces.as_ref().map_or(0, |s| s.triangles)));
         }
+        drop(submit_sky);
         if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
         } }
@@ -2734,6 +2744,7 @@ impl Renderer {
                 && state.direct_draw(&mut real, item.group as usize, indices as u32, item.uniforms, low, bits, pass, drawn - 1);
             #[cfg(not(target_os = "vita"))]
             let direct = false;
+            let submit_state = crate::submit_clock::scope("world_state");
             if !direct {
                 // vitaGL holds what it last wrote, not what a direct draw left. Take every step through it.
                 #[cfg(target_os = "vita")]
@@ -2755,7 +2766,9 @@ impl Renderer {
                 }
             }
             if low { c.low_draws += 1; }
+            drop(submit_state);
             totals.lap(0, &mut start);
+            let submit_uniform = crate::submit_clock::scope("world_uniform_apply");
             if !direct && plan.uniforms {
                 let values = parameters[draw.parameter as usize].uniforms.values();
                 let traffic = field_uniforms[usize::from(low)].apply(ctx, values, true);
@@ -2764,6 +2777,7 @@ impl Renderer {
                 c.uniform_traffic[1] += traffic.bytes;
                 c.uniform_traffic[2] += traffic.calls;
             }
+            drop(submit_uniform);
             totals.lap(1, &mut start);
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             {
@@ -2787,6 +2801,7 @@ impl Renderer {
                     part.base_element + (base_element - draw.base_element), part.indices, &member.texture,
                     parameters[part.parameter as usize].uniforms.bits_ref(), part.low, part.pipeline_class);
             }
+            let submit_draw = crate::submit_clock::scope("world_draw");
             if !direct {
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 let dropped = world_list::negative("world-list-drop-draw") && drawn % 13 == 6;
@@ -2814,6 +2829,7 @@ impl Renderer {
                     if ran { state.after_vitagl(&capture, item.group as usize, draw.animated, draw.pipeline_class, low, indices as u32, item.uniforms, bits, way); }
                 }
             }
+            drop(submit_draw);
             totals.lap(2, &mut start);
             *previous_end = start;
             if previous_pipeline != Some(draw.pipeline_class) {
@@ -2915,6 +2931,7 @@ impl Renderer {
                     return;
                 }
             }
+            let _submit_alpha = crate::submit_clock::scope("world_alpha");
             let _census = crate::phase_census::span(crate::phase_census::Region::AlphaSubmit);
             let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::WorldAlpha);
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::WorldAlpha);
@@ -3621,7 +3638,7 @@ mod tests {
     fn round5_keys_are_strict_and_off_in_historical_configs() {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
-            if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
+            if key.starts_with("diag_skip_") || key.starts_with("submit_uniform_") || key == "diag_submit_timing" || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
                 || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
@@ -3641,7 +3658,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "diag_submit_timing" | "submit_uniform_retain" | "submit_uniform_sparse" | "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

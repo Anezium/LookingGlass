@@ -147,6 +147,7 @@ impl Frame {
         let ms = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64() * 1000.;
         let _ = write!(out, "[lg/spike] frame={} ms={:.2} sim={:.2} render={:.2} hud={:.2} present={:.2}",
             self.number, ms(begin, now), ms(begin, render), ms(render, hud), ms(hud, cpu_end), ms(cpu_end, now));
+        crate::submit_clock::write(out);
         if self.log_ms > 0. { let _ = write!(out, " log={:.2}", self.log_ms); }
         let gxm = self.gxm_start.zip(self.gxm_mark);
         if let Some((start, end)) = gxm {
@@ -215,6 +216,7 @@ pub(crate) fn begin_frame() {
                 log_ms = now.elapsed().as_secs_f64() * 1000.;
             }
         }
+        crate::submit_clock::reset();
         let number = f.number + 1;
         let mark = f.gxm_mark;
         *f = Frame { number, begin: Some(now), block: Some((Sim::Input as usize, now)), gxm_start: mark,

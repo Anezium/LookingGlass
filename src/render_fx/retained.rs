@@ -515,6 +515,7 @@ impl Gpu {
         Ok(gpu)
     }
     fn upload(&mut self, slot: usize, p: &Pass, leaves: &mut crate::phase_census::FinishLeaves) -> Result<usize> {
+        let _submit = crate::submit_clock::scope(if p.effect {"fx_upload"} else {"actor_upload"});
         crate::game_thread::assert_current();
         let mesh=p.geometry();
         ensure!(
@@ -691,12 +692,18 @@ impl Gpu {
             self.submit_cache.observe(submit_key(key, program, depth_write),
                 (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
         } else { [true; 3] };
+        let submit_family = if p.effect {"fx_state"} else {"actor_state"};
+        let submit_state = crate::submit_clock::scope(submit_family);
         if apply[0] {
             ctx.apply_pipeline(pipeline);
             unsafe { macroquad::miniquad::gl::glDepthMask(u8::from(depth_write)); }
             self.stats.pipeline_sets += 1;
         }
+        drop(submit_state);
+        let submit_binding = crate::submit_clock::scope(if p.effect {"fx_bindings"} else {"actor_bindings"});
         if apply[1] { ctx.apply_bindings(b); self.stats.binding_sets += 1; }
+        drop(submit_binding);
+        let submit_uniform = crate::submit_clock::scope(if p.effect {"fx_uniform_apply"} else {"actor_uniform_apply"});
         // The old uniform-only probe remains independently selectable with the
         // new cache disabled. Both observe the complete bit-exact payload.
         let same = (c.gpu_state_probe || c.gpu_uniform_dedupe) && {
@@ -716,6 +723,7 @@ impl Gpu {
             traffic = fields.apply(ctx, u, c.uniform_field_cache);
             self.stats.uniform_bytes += traffic.bytes;
         }
+        drop(submit_uniform);
         if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         {
@@ -735,7 +743,9 @@ impl Gpu {
                     p.fog.to_bits(),p.model as u32,p.filter_fade.to_bits()],p.mesh.texture.as_ref());
         }
         let class = if p.effect { crate::gpu_timing::fx_class(p.blend_index) } else { crate::gpu_timing::MASK_ACTORS };
+        let submit_draw = crate::submit_clock::scope(if p.effect {"fx_draw"} else {"actor_draw"});
         if !crate::gpu_timing::masked(class) { ctx.draw(0, p.geometry().indices.len() as i32, 1); }
+        drop(submit_draw);
         #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
         if let Some(start) = census_started {
             let (_, texture) = crate::sim_maps::probe::draw_query::actor_label(
@@ -1341,6 +1351,7 @@ pub(crate) fn finish_world(
     world_totals: Option<&std::cell::RefCell<crate::frame_profile::Totals<3>>>,
 ) -> (usize, usize) {
     crate::game_thread::assert_current();
+    let _submit_finish = crate::submit_clock::scope("joint_finish");
     let _census = crate::phase_census::span(crate::phase_census::Region::JointFinish);
     let _owner = crate::render_tail::owner(crate::light_profile::RenderPhase::Fx);
     let finish_started = MetricInstant::now();
@@ -1355,9 +1366,9 @@ pub(crate) fn finish_world(
     gpu.stats = Stats::default();
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
-    gpu.field_uniforms.interrupt();
-    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
-    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
+    if !crate::render::vita_renderer::config().submit_uniform_retain { gpu.field_uniforms.interrupt(); }
+    if let Some(l) = &mut gpu.lite { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
+    if let Some(l) = &mut gpu.corpse_opaque { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
     let (mut groups, mut puffs, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -1407,6 +1418,7 @@ pub(crate) fn finish_world(
     funnel_before_bank(&groups, &puffs);
     let mut list = {
         let _span = crate::frame_profile::span("vita_joint_alpha_sort");
+        let _submit_sort = crate::submit_clock::scope("joint_sort");
         let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishSort);
         let list_time = crate::sim_maps::timer("r26_joint_list_ns");
         let mut list = std::mem::take(&mut gpu.alpha_storage); list.clear();
@@ -1429,6 +1441,7 @@ pub(crate) fn finish_world(
         let _sort_time = crate::sim_maps::timer("r26_joint_sort_ns");
         order(list, crate::render::vita_renderer::config().sort_alpha)
     };
+    let submit_merge=crate::submit_clock::scope("joint_prepare_merge");
     let merge_leaf=crate::phase_census::span(crate::phase_census::Region::FinishMergePack);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     if crate::sim_maps::fx_attached_persist() && crate::sim_maps::probe::negative_control() == Some("persist-quad-order") {
@@ -1485,6 +1498,7 @@ pub(crate) fn finish_world(
         opaque.clear(); gpu.opaque_storage = opaque;
     }
     drop(merge_leaf);
+    drop(submit_merge);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     census_groups("merged",&groups);
     let mut packets = std::mem::take(&mut gpu.packet_storage); packets.clear();
@@ -1511,9 +1525,11 @@ pub(crate) fn finish_world(
                     Ok(b) => {
                         if let Some(id)=shared {shared_uploads.insert(id,b);}
                         let uniform_leaf=leaves.start();
+                        let submit_uniform = crate::submit_clock::scope(if p.effect {"fx_uniform_build"} else {"actor_uniform_build"});
                         let u = if c.fx_prepare_cache { prepared_uniforms(p, &mut uniform_templates) }
                             else { FRAME.with(|f| uniforms(p, &f.borrow())) };
                         leaves.add(1,uniform_leaf);
+                        drop(submit_uniform);
                         packets.push((group_id, pass_id, b, u));
                     }
                     Err(e) => {
@@ -1574,9 +1590,9 @@ pub(crate) fn finish_world(
     }
     let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     count("vita_joint_alpha_groups", list.len() as u64);
-    gpu.field_uniforms.interrupt();
-    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
-    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
+    if !crate::render::vita_renderer::config().submit_uniform_retain { gpu.field_uniforms.interrupt(); }
+    if let Some(l) = &mut gpu.lite { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
+    if let Some(l) = &mut gpu.corpse_opaque { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
     gpu.submit_cache.interrupt(); // External depth-mask change at the alpha boundary.
     unsafe {
         macroquad::miniquad::gl::glDepthMask(0);
@@ -1595,9 +1611,9 @@ pub(crate) fn finish_world(
                 Source::World(id) => {
                     gpu.uniform_cache.interrupt();
                     gpu.submit_cache.interrupt();
-                    gpu.field_uniforms.interrupt();
-                    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
-                    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
+                    if !crate::render::vita_renderer::config().submit_uniform_retain { gpu.field_uniforms.interrupt(); }
+                    if let Some(l) = &mut gpu.lite { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
+                    if let Some(l) = &mut gpu.corpse_opaque { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
                     let start = world_totals.and_then(|t| t.borrow().start());
                     let world_started = MetricInstant::now();
                     // Only immediately adjacent world callbacks share state. An actor, even one

@@ -4113,6 +4113,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         interactions.place_level_particles(&mut steam);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         crate::spike_log::render_begin();
+        let submit_setup = crate::submit_clock::scope("render_setup");
         #[cfg(target_os = "vita")]
         let _lights_profile = crate::frame_profile::span("lights_build");
         let mut lights = steam.lights();
@@ -4150,6 +4151,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let host_gather=std::time::Instant::now();
         #[cfg(feature="vita_renderer")]
         {drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Other);}
+        drop(submit_setup);
         #[cfg(feature="vita_renderer")]
         let census_gather = crate::phase_census::span(crate::phase_census::Region::ActorGather);
         #[cfg(feature="vita_renderer")]
@@ -4160,6 +4162,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 viewer_block = crate::frame_profile::span("skin_gather");
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
             }
+            let _submit_gather = crate::submit_clock::scope("actor_gather");
             let gather_clock = crate::pass_clock::scope(crate::pass_clock::ACTOR_GATHER);
             let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherStoryPose);
             level_art.story_pose(&story);
@@ -4200,7 +4203,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         drop(census_gather);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::span("actor_gather",host_gather.elapsed().as_secs_f64()*1000.);
-        scene.draw(camera, environment_clock, fullbright, false, &transforms);
+        { let _submit_world = crate::submit_clock::scope("world");
+        scene.draw(camera, environment_clock, fullbright, false, &transforms); }
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &mut load_probe {
             p.world(scene.stats.batches, scene.stats.triangles, scene.retained_active());
@@ -4212,6 +4216,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::audio::game_stage(2);
             let _census = crate::phase_census::span(crate::phase_census::Region::ActorCollect);
             let _clock = crate::pass_clock::scope(crate::pass_clock::ACTOR_COLLECT);
+            let _submit_collect = crate::submit_clock::scope("actor_collect");
             frame.collect();
             crate::audio::game_stage(0);
         }
@@ -4228,6 +4233,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let host_characters_profile = crate::frame_profile::span("frame_characters");
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.stage("skin-collect-returned-actors-begin"); }
+        let submit_publication = crate::submit_clock::scope("actor_publication");
         let actors_timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Actors);
         if !world_only && !crate::character::skinning::overlap::single_frame() {
         {
@@ -4266,6 +4272,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
         drop(actors_timer);
+        drop(submit_publication);
         drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_objects"); }
@@ -4296,6 +4303,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
+        let submit_fx = crate::submit_clock::scope("fx_gather");
         {
             scene.draw_with_particles(
                 camera,
@@ -4362,8 +4370,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if draw_world && !world_only {
             crate::lighting::flares(camera, (target - camera).normalize_or_zero());
         }
+        drop(submit_fx);
         let direct_fx = crate::render_fx::retained_active();
         if !world_only || !scene.retained_active() { scene.finish_fx(true); }
+        let submit_first_person = crate::submit_clock::scope("first_person");
         drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::FirstPerson);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_first_person"); }
@@ -4401,8 +4411,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
+        drop(submit_first_person);
         #[cfg(feature="vita_renderer")]
-        crate::render::vita_renderer::present_3d();
+        {
+        let _submit_present = crate::submit_clock::scope("present_prep");
+        crate::render::vita_renderer::present_3d(); }
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.gl("present-queued"); }
         if saves_writable {
