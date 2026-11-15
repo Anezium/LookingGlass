@@ -3624,7 +3624,7 @@ mod tests {
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
             if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
                 || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull"
-                || matches!(key.as_str(), "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") {
+                || matches!(key.as_str(), "gpu_skin_ants" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
