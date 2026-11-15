@@ -103,12 +103,12 @@ impl Gpu {
         ctx.apply_pipeline(pipeline);unsafe{gl::glDepthMask(u8::from(depth_write));}
         ctx.apply_bindings(&Bindings {vertex_buffers:vec![b.vertex],index_buffer:b.index,images:vec![texture,white,white]});
         let mut words=[0.;UNIFORM_FLOATS+EXTRA];words[..UNIFORM_FLOATS].copy_from_slice(u);words[UNIFORM_FLOATS..].copy_from_slice(&skin.palette);
-        ctx.apply_uniforms(UniformsSource::table(&words));
+        {let _upload=Clock::new(2);ctx.apply_uniforms(UniformsSource::table(&words));}
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::gpu_skin_packet(skin.input.vertices.len(),skin.input.source.indices.len(),u,
             &[p.effect as u32,p.blend_index as u32,p.depth_equal as u32,(!depth_write) as u32,p.lit as u32,p.clamp as u32,p.cutout.to_bits(),p.cutout_reference.to_bits(),p.fog.to_bits(),p.model as u32,p.filter_fade.to_bits()],p.mesh.texture.as_ref());
         ctx.draw(0,skin.input.source.indices.len() as i32,1);
-        count("gpu_skin_draws",1);count("gpu_skin_palette_bytes",(skin.input.bones.len()*48) as u64);
+        count("gpu_skin_draws",1);count("gpu_skin_logical_palette_bytes",(skin.input.bones.len()*48) as u64);count("gpu_skin_uniform_upload_bytes",((UNIFORM_FLOATS+EXTRA)*4) as u64);
     }
 }
 impl Drop for Gpu {fn drop(&mut self) {
@@ -117,15 +117,15 @@ impl Drop for Gpu {fn drop(&mut self) {
     for (_,p) in std::mem::take(&mut self.pipelines) {ctx.delete_pipeline(p);}ctx.delete_shader(self.shader);
 }}
 
-thread_local! {static CENSUS:Cell<[u64;3]>=const {Cell::new([0;3])};}
+thread_local! {static CENSUS:Cell<[u64;4]>=const {Cell::new([0;4])};}
 struct Clock(Option<std::time::Instant>,usize);
 impl Clock {fn new(i:usize)->Self {Self(crate::spike_log::on().then(std::time::Instant::now),i)}}
-impl Drop for Clock {fn drop(&mut self) {if let Some(t)=self.0 {CENSUS.with(|c| {let mut row=c.get();row[self.1]+=t.elapsed().as_nanos() as u64;if self.1==1 {row[2]+=1;}c.set(row);});}}}
-pub(crate) fn census_begin() {CENSUS.with(|v|v.set([0;3]));}
+impl Drop for Clock {fn drop(&mut self) {if let Some(t)=self.0 {CENSUS.with(|c| {let mut row=c.get();row[self.1]+=t.elapsed().as_nanos() as u64;if self.1==1 {row[3]+=1;}c.set(row);});}}}
+pub(crate) fn census_begin() {CENSUS.with(|v|v.set([0;4]));}
 pub(crate) fn census_append(out:&mut String) {
     if !crate::render::vita_renderer::config().gpu_skin_ants {return;}
-    use std::fmt::Write;let [palette,submit,draws]=CENSUS.with(Cell::get);
-    let _=write!(out," gpu_skin={draws}/{:.6}/{:.6}",palette as f64/1e6,submit as f64/1e6);
+    use std::fmt::Write;let [palette,submit,upload,draws]=CENSUS.with(Cell::get);
+    let _=write!(out," gpu_skin={draws}/{:.6}/{:.6}/{:.6}",palette as f64/1e6,upload as f64/1e6,submit as f64/1e6);
 }
 #[cfg(test)]
 mod tests {

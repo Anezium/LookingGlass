@@ -391,7 +391,8 @@ impl Data {
         let skeleton = Skeleton::parse(&assets.read(&format!("{}/{}", def.path, def.model))?)?;
         #[cfg(feature="vita_renderer")]
         let skeleton = { let mut skeleton=skeleton;
-            if def.path.eq_ignore_ascii_case("models/characters/army_ant") && def.model.eq_ignore_ascii_case("armyant_baseframe.skb") {
+            if (def.path.eq_ignore_ascii_case("models/characters/army_ant") && def.model.eq_ignore_ascii_case("armyant_baseframe.skb"))
+                || (def.path.eq_ignore_ascii_case("models/characters/army_ant_corp") && def.model.eq_ignore_ascii_case("armyantcorp_baseframe.skb")) {
                 for surface in &mut skeleton.surfaces { surface.mark_gpu_ant(); }
             }
             skeleton

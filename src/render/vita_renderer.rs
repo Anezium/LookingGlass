@@ -336,6 +336,8 @@ pub struct Config {
     pub bone_palette: bool,
     /// Experimental immutable army-ant streams; unsupported draws keep CPU skinning.
     pub gpu_skin_ants: bool,
+    /// Diagnostic PNGs at three replay frames; never enabled by the skin key alone.
+    pub gpu_skin_capture: bool,
     /// Conservative skin bounds; late overlays and normal-driven layers opt out.
     pub skin_frustum_cull: bool,
     /// Conservative center/extent clip-plane test and identity bounds shortcut.
@@ -623,6 +625,7 @@ impl Default for Config {
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:true,
             bone_palette: false,
             gpu_skin_ants: false,
+            gpu_skin_capture: false,
             skin_frustum_cull: true,
             fast_frustum: true,
             packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
@@ -3640,12 +3643,22 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { matches!(k, "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") || k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { matches!(k, "gpu_skin_ants" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") || k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    #[test]
+    fn gpu_skin_keys_are_explicitly_default_off_and_strict_booleans() {
+        let c=Config::default();assert!(!c.gpu_skin_ants && !c.gpu_skin_capture);
+        let on:Config=serde_json::from_str(r#"{"gpu_skin_ants":true}"#).unwrap();
+        assert!(on.gpu_skin_ants && !on.gpu_skin_capture);
+        assert!(serde_json::from_str::<Config>(r#"{"gpu_skin_ants":5}"#).is_err());
+        let raw=serde_json::to_value(c).unwrap();assert_eq!(raw["gpu_skin_ants"],false);assert_eq!(raw["gpu_skin_capture"],false);
+    }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
+        assert!(v.get("gpu_skin_ants").is_none_or(|on|on==false));
+        assert!(v.get("gpu_skin_capture").is_none_or(|on|on==false));
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-            && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+            && *k != "gpu_skin_ants" && *k != "gpu_skin_capture" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -4301,7 +4314,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && *k != "gpu_skin_ants" && *k != "gpu_skin_capture" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -4597,7 +4610,7 @@ mod tests {
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
                     && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-                    && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
+                    && *k != "gpu_skin_ants" && *k != "gpu_skin_capture" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();

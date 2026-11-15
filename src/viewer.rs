@@ -4941,6 +4941,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             println!("TRANSITION_STATE {}", serde_json::json!({"frame":frame,"map":maps[current],
                 "state_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&value)?))}));
         }
+        #[cfg(feature="vita_renderer")]
+        if crate::render::vita_renderer::config().gpu_skin_capture && matches!(frame,1050|1200|1470) {
+            save_capture(&std::path::PathBuf::from(format!("private/gpu-skin/frame-{frame:04}.png")))?;
+        }
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(
