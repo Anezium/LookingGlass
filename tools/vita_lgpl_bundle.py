@@ -52,6 +52,7 @@ PACKAGE_LICENCES = [
     ("LookingGlass-LICENSE-MIT.txt", "LookingGlass-LICENSE-MIT.txt"),
     ("newlib-COPYING.NEWLIB.txt", "newlib-COPYING.NEWLIB"),
     ("newlib-COPYING.LIBGLOSS.txt", "newlib-COPYING.LIBGLOSS"),
+    ("newlib-vita-glue-NOTICE.txt", "newlib-vita-glue-NOTICE.txt"),
     ("vita-headers-LICENSE.md", "vita-headers-LICENSE.md"),
     ("math-neon-LICENSE.txt", "math-neon-LICENSE"),
     ("taiHEN-LICENSE.txt", "taiHEN-LICENSE"),
@@ -367,8 +368,7 @@ def library_member_records(pin, archive_path, objcopy, selection_members=None):
         records.append({"member": name, "bytes": len(data),
                         "sha256": hashlib.sha256(data).hexdigest(),
                         "sha256_stripped": stripped,
-                        "identity": "path-dependent" if name in pin.get("path_dependent", [])
-                        else ident})
+                        "identity": ident})
     pin["members_total"] = len(members)
     return records
 
@@ -678,6 +678,7 @@ def main():
             "objects": len(copies),
             "bytes": copied_bytes,
             "vitagl_revision": VITAGL_REVISION,
+            "vitagl_short": VITAGL_REVISION[:7],
             "vitagl_flags": vitagl["flags"],
             "vitagl_archive": vitagl["archive"],
             "vitagl_package": vitagl["package"],
@@ -735,8 +736,9 @@ American McGee's Alice links statically:
   upstream licence files.
 - `licenses/` - the full licence texts shipped in the package: GPL-3.0,
   LGPL-3.0, LGPL-2.1, the GCC Runtime Library Exception 3.1, MPL-2.0, MIT,
-  Apache-2.0, the newlib BSD texts, the per-library texts of vitaShaRK and
-  pthread-embedded, and `THIRD_PARTY_NOTICES-vita.txt` for the whole link.
+  Apache-2.0, the newlib BSD texts, the newlib Vita glue notice, the
+  per-library texts of vitaShaRK and pthread-embedded, and
+  `THIRD_PARTY_NOTICES-vita.txt` for the whole link.
 - `objects/` - every object file and static archive that the release link read
   from the Cargo target directory. These are the port's own compiled code,
   including the Rust standard library and third-party Rust crates that form the
@@ -848,30 +850,44 @@ revision.
 ### Step 3: build vitaGL at the release revision
 
 ```sh
-(cd "$BUNDLE/deps" && git clone https://github.com/Rinnegatamante/vitaGL && cd vitaGL &&
-  git checkout --detach @@VITAGL_REVISION@@ &&
-  test "$(git rev-parse HEAD)" = @@VITAGL_REVISION@@ &&
-  make @@VITAGL_FLAGS@@ &&
+(cd "$BUNDLE/deps" && cp -R "$BUNDLE/sources/vitaGL" vitaGL && cd vitaGL &&
+  make clean &&
+  make CFLAGS="-g -Wl,-q -O3 -ffast-math -mtune=cortex-a9 -mfpu=neon \\
+    -Wno-incompatible-pointer-types -Wno-stringop-overflow -mfp16-format=ieee \\
+    -DVGL_GIT_HASH='\\"@@VITAGL_SHORT@@\\"' -Isource \\
+    -DDISABLE_TEXTURE_COMBINER -DHAVE_UNFLIPPED_FBOS \\
+    -DHAVE_SINGLE_THREADED_GC -DHAVE_CUSTOM_HEAP" &&
   make install)      # libvitaGL.a and source/vitaGL.h into $VITASDK
 ```
 
 The release linked `libvitaGL.a` SHA-256 `@@VITAGL_ARCHIVE@@`; the installed
 vdpm package was `@@VITAGL_PACKAGE@@`, but the release used a local build of
 the revision above. The archive does not record its compile flags, so the
-flags above are the documented ones from `link/BUILD.txt`. `make install`
-needs `VITASDK` exported.
+flags above are the documented ones from `link/BUILD.txt`. The release's make
+flags were `@@VITAGL_FLAGS@@`; the `CFLAGS` above carries their four
+equivalent `-D` macros. `make install` needs `VITASDK` exported.
+
+The revision has to be passed explicitly. `Makefile:16` fills
+`VGL_GIT_HASH` from `git rev-parse --short HEAD`, and
+`source/splashscreen.c:6266` renders `"#" VGL_GIT_HASH` into the splash
+string. The exported tree has no `.git`, and this Makefile has no
+`VGL_GIT_HASH` make variable (`make VGL_GIT_HASH=...` has no effect), so
+`CFLAGS` names the revision as `-DVGL_GIT_HASH='"@@VITAGL_SHORT@@"'`. The
+command-line `CFLAGS` also overrides the Makefile's feature `+=` lines, so the
+four feature macros are spelled out in the same value. Without this, the only
+difference is that `.rodata.str1.4` starts with `#` instead of
+`#@@VITAGL_SHORT@@`.
 
 The Makefile compiles with `-g`, and `ar` stores member timestamps, so the
-archive file hash depends on the checkout directory and on when it was built.
-A rebuild therefore has a different file SHA-256 although the compiled code is
-the same. The release link passes `-Wl,--strip-debug`, and `relink.sh` compares
-member bytes after `objcopy --strip-debug`. Measured on the release host, a
-fresh build in a different directory produced 29 of 30 members identical after
-stripping. The exception is `splashscreen.o`, which embeds the VitaSDK include
-path in `.rodata.str1.4` through `__FILE__`; its bytes depend on where the SDK
-is installed. `relink.sh` requires that member to be present and says that it
-does not compare its bytes. `link/library-members.txt` records it as
-`path-dependent`.
+archive file hash depends on the directory and on when it was built. A rebuild
+therefore has a different file SHA-256 although the compiled code is the same.
+The release link passes `-Wl,--strip-debug`, and `relink.sh` compares member
+bytes after `objcopy --strip-debug`. Measured on the release host with the
+command above, all 30 members of the exported-source build, including
+`splashscreen.o`, are identical after stripping. Relinking those members with
+the three other release archives reproduces the release ELF, `@@ELF@@`, byte
+for byte. A build from a different SDK series still produces different bytes
+for the other SDK archives and is not claimed to be identical.
 
 ### Step 4: build vitaShaRK at the release revision
 
@@ -929,11 +945,12 @@ stores member timestamps. The member object bytes decide identity:
 
 With the pinned release archives and GCC 15.2.0 the relink reproduces the
 release ELF byte for byte, as the proof below shows. The full source recipe in
-steps 3 to 6 rebuilds each library but does not promise that: a vitaGL built
-under a different SDK path has a different `splashscreen.o` string and the ELF
-hash changes. `link/BUILD.txt` names the archives that produced the release.
-Across SDK series the link still works but the bytes differ. This bundle does
-not claim byte identity from a source rebuild or a different SDK.
+steps 3 to 6 rebuilds each library from public source. The vitaGL step passes
+`VGL_GIT_HASH` explicitly, so the exported-source build reproduces all 30
+vitaGL members, including `splashscreen.o`. `link/BUILD.txt` names the
+archives that produced the release. Across SDK series the other archives still
+link but their bytes differ, so this bundle does not claim byte identity from
+a rebuild under a different SDK series.
 
 ## Relink modes and exit codes
 
@@ -1131,7 +1148,6 @@ done < "$here/link/args.txt"
 
 map=$here/output/relink.map
 all_match=true
-path_dependent=0
 for archive in $supplied; do
     library=$here/lib/$archive
     grep -F "$library" "$map" >/dev/null 2>&1 || {
@@ -1182,13 +1198,6 @@ for archive in $supplied; do
                     continue
                 }
                 ;;
-            path-dependent)
-                # splashscreen.o embeds the SDK include path; require presence only.
-                echo "NOTE member $member of $archive embeds the SDK path; presence checked, bytes not compared"
-                path_dependent=$((path_dependent + 1))
-                rm -f "$member_file"
-                continue
-                ;;
             *)
                 cp "$member_file" "$member_file.stripped"
                 ;;
@@ -1233,11 +1242,7 @@ echo "result different from the release ELF"
 if [ "$strict" = 1 ]; then
     if [ "$all_match" = true ]; then
         echo "FAIL strict mode: the pinned members are present but the ELF differs;" >&2
-        if [ "$path_dependent" -gt 0 ]; then
-            echo "     the other SDK archives or the path-dependent members are not the release ones" >&2
-        else
-            echo "     the other SDK archives in the link are not the release ones" >&2
-        fi
+        echo "     the other SDK archives in the link are not the release ones" >&2
     else
         echo "FAIL strict mode: one or more archive members differ from the pinned ones" >&2
     fi
@@ -1245,11 +1250,7 @@ if [ "$strict" = 1 ]; then
 fi
 if [ "$all_match" = true ]; then
     echo "WARNING the link succeeded but the ELF differs from the release hash;"
-    if [ "$path_dependent" -gt 0 ]; then
-        echo "        the other SDK archives or the path-dependent members are not the release ones."
-    else
-        echo "        the other SDK archives in the link are not the release ones."
-    fi
+    echo "        the other SDK archives in the link are not the release ones."
     echo "        This is a functional relink, not the release ELF."
 else
     echo "NOTE the contributing member objects differ from the pinned ones;"
@@ -1398,9 +1399,14 @@ third-party dependencies from public sources".
   `VITASDK_CHANNEL=2026.08 ./bootstrap-vitasdk.sh --install-dir <directory>`,
   then `export VITASDK=<directory>` and `export PATH=$VITASDK/bin:$PATH`.
 - Packages: `"$VITASDK/bin/vdpm" install @@VDPM_PACKAGES@@`.
-- vitaGL: `git clone https://github.com/Rinnegatamante/vitaGL`, then
-  `git checkout --detach @@VITAGL_REVISION@@`, then
-  `make @@VITAGL_FLAGS@@`, then `make install`. That is a local build at the
+- vitaGL: build `sources/vitaGL` (the exported tree at
+  @@VITAGL_REVISION@@) with the `make CFLAGS=...` command in README.md step 3,
+  then `make install`. The release's make flags were `@@VITAGL_FLAGS@@`.
+  The CFLAGS pass `-DVGL_GIT_HASH='"@@VITAGL_SHORT@@"'`
+  because the Makefile otherwise reads the hash from Git, which an exported
+  tree does not have, and because a command-line CFLAGS also overrides the
+  feature flags (`-DDISABLE_TEXTURE_COMBINER -DHAVE_UNFLIPPED_FBOS
+  -DHAVE_SINGLE_THREADED_GC -DHAVE_CUSTOM_HEAP`). That is a local build at the
   recorded revision, not the vdpm package file.
 - vitaShaRK: `git clone https://github.com/Rinnegatamante/vitaShaRK`, then
   `git checkout --detach @@VITASHARK_REVISION@@`, then `make`, then
@@ -1417,7 +1423,8 @@ third-party dependencies from public sources".
 - Rebuilds have different archive file hashes because `ar` stores member
   timestamps. `link/relink.sh` compares member bytes, stripped with
   `objcopy --strip-debug` (and additionally `-R .comment -R .note` for
-  pthread-embedded).
+  pthread-embedded). With the CFLAGS above, the exported-source vitaGL build
+  matches all 30 pinned members, including `splashscreen.o`.
 - No input here needs a proprietary SDK binary. The Sce stub archives and the
   C library come from the public vdpm SDK packages.
 """

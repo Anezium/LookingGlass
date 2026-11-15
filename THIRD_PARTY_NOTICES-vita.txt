@@ -28,6 +28,8 @@ The PS Vita port changed the files below (A added, M modified, D deleted). Each 
   M src/host/mod.rs
   A src/host/vita/mod.rs
   M src/platform/mod.rs
+The fork also declares four SceAudio import records in src/host/vita/mod.rs: sceAudioOutOpenPort, sceAudioOutOutput, sceAudioOutReleasePort, sceAudioOutSetVolume.
+rustc bundles the VitaSDK SceAudio_stub archive into the cpal rlib; the release link map shows these four import objects inside libcpal-*.rlib, not as a separate archive. The declarations follow VitaSDK's psp2/audioout.h, whose repository text is covered by vita-headers-LICENSE.md.
 
 macroquad 0.4.14: fork https://github.com/Anezium/macroquad?rev=90f0fe456c40f0b9751c30307feca066ae177db7 at 90f0fe4
 Based on not-fl3/macroquad 0.4.14 (commit 2c60f75). Declared license: MIT OR Apache-2.0.
@@ -1664,9 +1666,25 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 newlib (VitaSDK fork)
-License: several permissive licences, listed per source file in COPYING.NEWLIB and COPYING.LIBGLOSS
-Source: https://github.com/vitasdk/newlib at 64aa7aa (VitaSDK build of 2026-08-25). The PS Vita glue in newlib/libc/sys/vita (crt0, sbrk, threading, file system) carries no licence header and is not listed in COPYING.NEWLIB
+License: the newlib core files carry the per-file licences listed in COPYING.NEWLIB and COPYING.LIBGLOSS; the Vita glue is partly MIT-noticed and partly unnotified, as stated in newlib-vita-glue-NOTICE.txt
+Source: https://github.com/vitasdk/newlib at 64aa7aa (VitaSDK build of 2026-08-25). The PS Vita glue in newlib/libc/sys/vita is a fork addition, not upstream newlib. Of the files whose objects this link loads, dirent.c, clock.c, error.c, fs.c, getentropy.c, lcltime_r.c and sysconf.c carry an MIT-style notice (copyright David "Davee" Morgan, Sunguk Lee, Martin Larralde and vitasdk); io.c, mlock.c, sbrk.c, syscalls.c and threading.c carry no copyright or licence line; crt0.c attributes code to PSPSDK (Copyright (c) 2005 Marcus R. Brown) without a licence text. None of these files is named in COPYING.NEWLIB. Its preamble applies the notices it lists to files in the newlib subdirectory unless a file states otherwise; whether that covers the unnotified files is not established here
 Archives in the link: crt0.o, libc.a, libm.a
+Objects compiled from newlib/libc/sys/vita in this link:
+  crt0.o
+  libc.a(closedir.o)
+  libc.a(opendir.o)
+  libc.a(readdir.o)
+  libc.a(lib_a-clock.o)
+  libc.a(lib_a-error.o)
+  libc.a(lib_a-fs.o)
+  libc.a(lib_a-getentropy.o)
+  libc.a(lib_a-io.o)
+  libc.a(lib_a-lcltime_r.o)
+  libc.a(lib_a-mlock.o)
+  libc.a(lib_a-sbrk.o)
+  libc.a(lib_a-syscalls.o)
+  libc.a(lib_a-sysconf.o)
+  libc.a(lib_a-threading.o)
 
 --- licenses/newlib-COPYING.NEWLIB ---
 The newlib subdirectory is a collection of software from several sources.
@@ -3472,6 +3490,85 @@ http://www.opensource.org/licenses.
 
 Copyright (C) 2020 Embecosm Limited
 SPDX-License-Identifier: BSD-2-Clause
+
+--- licenses/newlib-vita-glue-NOTICE.txt ---
+PS Vita glue in newlib/libc/sys/vita
+====================================
+
+Measured in the source tree of https://github.com/vitasdk/newlib at
+64aa7aa33d4f380451a1f100d19589226cdad334, the revision of the VitaSDK build of
+2026-08-25 that this release links. The newlib core files are covered by
+COPYING.NEWLIB and COPYING.LIBGLOSS, shipped beside this notice. The Vita glue
+is a fork addition: it is not in upstream newlib.
+
+Files with an MIT-style notice in the source
+--------------------------------------------
+
+The release link loads objects compiled from twelve libc/sys/vita source files.
+Seven of them carry this notice, with these copyright lines:
+
+  dirent.c       Copyright (C) 2016, David "Davee" Morgan
+  clock.c        Copyright (C) 2019, Martin Larralde
+  error.c        Copyright (C) 2017, David "Davee" Morgan
+                 Copyright (C) 2018, Sunguk Lee
+  fs.c           Copyright (C) 2021, vitasdk
+  getentropy.c   Copyright (C) 2021, vitasdk
+  lcltime_r.c    Copyright (C) 2019, Martin Larralde
+  sysconf.c      Copyright (C) 2022, vitasdk
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+Files with no licence notice in the source
+------------------------------------------
+
+Five further linked files carry no copyright or licence statement at that
+revision:
+
+  io.c, mlock.c, sbrk.c, syscalls.c, threading.c
+
+They were added to the fork in 2015-2016: syscalls.c in Ilya Zhuravlev's first
+Vita commit, sbrk.c, mlock.c and threading.c in his next commits, and io.c by
+Yifan Lu. They were later changed by Ilya Zhuravlev, Ivan Epifanov, Francisco
+José García García, Davee, Glenn Anderson, Sergi Granell, Yifan Lu and others.
+They are not named in COPYING.NEWLIB. Its preamble says that, unless a file
+states otherwise, the notices it lists apply to the contents of the newlib
+subdirectory; whether that applies to these files is a legal question that this
+notice does not resolve. No separate written permission from these authors is
+recorded in this repository.
+
+Newlib's maintainer stated on the public mailing list that files in the newlib
+directory without a notice default to the Red Hat 3-clause BSD text (Jeff
+Johnston, 25 June 2014,
+https://sourceware.org/pipermail/newlib/2014/011490.html). That statement
+concerns upstream newlib; the Vita glue was added to the vitasdk fork, and no
+VitaSDK statement applying it to these five files was found.
+
+crt0.c
+------
+
+crt0.c carries this attribution and no licence text:
+
+  Code below is based on the PSPSDK implementation
+  Copyright (c) 2005 Marcus R. Brown <mrbrown@ocgnet.org>
+
+The release does not claim a licence for the five unnotified files or for the
+PSPSDK-derived part of crt0.c.
 
 
 pthread-embedded (VitaSDK fork)
@@ -13111,7 +13208,7 @@ DEALINGS IN THE SOFTWARE.
 quad-rand-0.2.3
 Declared license: MIT
 Source: https://github.com/not-fl3/quad-rand
-The package ships no licence file and its repository has none. The standard text of its declared licence is in the licence files of other packages listed here.
+quad-rand 0.2.3 ships no licence file and no copyright line. Its repository (https://github.com/not-fl3/quad-rand) has no licence file and no copyright line either; Cargo.toml declares MIT. The standard MIT text is in the licence files of other packages listed here.
 
 
 quote-1.0.47

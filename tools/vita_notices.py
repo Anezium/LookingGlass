@@ -35,6 +35,35 @@ FORKS = {
     "cpal": ("RustAudio/cpal", "7b21251", "0.15.3"),
 }
 
+# Import records compiled into a fork rather than read from a separate archive.
+# cpal's Vita host declares #[link(name = "SceAudio_stub")]; rustc bundles that
+# static archive into libcpal-*.rlib, so the release link map shows these four
+# members inside the rlib and no libSceAudio_stub.a archive of its own.
+IMPORT_RECORDS = {
+    "cpal": ("SceAudio", "src/host/vita/mod.rs",
+             ["sceAudioOutOpenPort", "sceAudioOutOutput",
+              "sceAudioOutReleasePort", "sceAudioOutSetVolume"]),
+}
+
+# Packages that ship no licence file: say exactly what is missing.
+NO_LICENCE_NOTES = {
+    "quad-rand": "quad-rand 0.2.3 ships no licence file and no copyright line. Its "
+                 "repository (https://github.com/not-fl3/quad-rand) has no licence "
+                 "file and no copyright line either; Cargo.toml declares MIT. The "
+                 "standard MIT text is in the licence files of other packages "
+                 "listed here.",
+}
+
+# libc.a members compiled from newlib/libc/sys/vita that the release link map
+# loads. crt0.o is a separate object. Kept explicit so the notice names the
+# measured objects; the map is checked when it is supplied.
+VITA_GLUE_MEMBERS = [
+    "closedir.o", "opendir.o", "readdir.o",
+    "lib_a-clock.o", "lib_a-error.o", "lib_a-fs.o", "lib_a-getentropy.o",
+    "lib_a-io.o", "lib_a-lcltime_r.o", "lib_a-mlock.o", "lib_a-sbrk.o",
+    "lib_a-syscalls.o", "lib_a-sysconf.o", "lib_a-threading.o",
+]
+
 # Licence texts for packages that ship none, taken from their repositories (see vita_licenses/SOURCES.txt).
 EXTRA_TEXTS = {
     "symphonia": ["symphonia-LICENSE"],
@@ -93,11 +122,19 @@ C_LIBRARIES = [
     {
         "name": "newlib (VitaSDK fork)",
         "archives": ["libc.a", "libm.a", "libg.a", "crt0.o"],
-        "licence": "several permissive licences, listed per source file in COPYING.NEWLIB and COPYING.LIBGLOSS",
+        "licence": "the newlib core files carry the per-file licences listed in COPYING.NEWLIB and COPYING.LIBGLOSS; the Vita glue is partly MIT-noticed and partly unnotified, as stated in newlib-vita-glue-NOTICE.txt",
         "source": "https://github.com/vitasdk/newlib at 64aa7aa (VitaSDK build of 2026-08-25). "
-                  "The PS Vita glue in newlib/libc/sys/vita (crt0, sbrk, threading, file system) carries no "
-                  "licence header and is not listed in COPYING.NEWLIB",
-        "files": ["newlib-COPYING.NEWLIB", "newlib-COPYING.LIBGLOSS"],
+                  "The PS Vita glue in newlib/libc/sys/vita is a fork addition, not upstream newlib. "
+                  "Of the files whose objects this link loads, dirent.c, clock.c, error.c, fs.c, "
+                  "getentropy.c, lcltime_r.c and sysconf.c carry an MIT-style notice (copyright "
+                  "David \"Davee\" Morgan, Sunguk Lee, Martin Larralde and vitasdk); io.c, mlock.c, "
+                  "sbrk.c, syscalls.c and threading.c carry no copyright or licence line; crt0.c "
+                  "attributes code to PSPSDK (Copyright (c) 2005 Marcus R. Brown) without a licence "
+                  "text. None of these files is named in COPYING.NEWLIB. Its preamble applies the "
+                  "notices it lists to files in the newlib subdirectory unless a file states "
+                  "otherwise; whether that covers the unnotified files is not established here",
+        "files": ["newlib-COPYING.NEWLIB", "newlib-COPYING.LIBGLOSS",
+                  "newlib-vita-glue-NOTICE.txt"],
     },
     {
         "name": "pthread-embedded (VitaSDK fork)",
@@ -202,7 +239,9 @@ def package_block(package, linked, out, texts):
         out.append("Used at build time only (build script or procedural macro); not linked into the program.")
     directory, names = licence_files(package)
     extra = EXTRA_TEXTS.get(package["name"], []) if not names else []
-    if extra:
+    if package["name"] in NO_LICENCE_NOTES:
+        out.append(NO_LICENCE_NOTES[package["name"]])
+    elif extra:
         out.append("The package ships no licence file; the text below comes from its source repository.")
     elif not names:
         out.append("The package ships no licence file and its repository has none. The standard text of its "
@@ -229,6 +268,14 @@ def fork_block(package, out):
     out.append("The PS Vita port changed the files below (A added, M modified, D deleted). Each changed "
                "file is in the fork at the revision above; its history records every change.")
     out.extend("  " + line.replace("\t", " ") for line in changes)
+    if package["name"] in IMPORT_RECORDS:
+        module, where, symbols = IMPORT_RECORDS[package["name"]]
+        out.append("The fork also declares four %s import records in %s: %s."
+                   % (module, where, ", ".join(symbols)))
+        out.append("rustc bundles the VitaSDK %s_stub archive into the cpal rlib; the release link "
+                   "map shows these four import objects inside libcpal-*.rlib, not as a separate "
+                   "archive. The declarations follow VitaSDK's psp2/audioout.h, whose repository text "
+                   "is covered by vita-headers-LICENSE.md." % module)
     out.append("")
 
 
@@ -236,6 +283,16 @@ def archives_in_map(path):
     text = Path(path).read_text(encoding="utf-8", errors="replace")
     found = set(re.findall(r"([A-Za-z0-9_+.\-]+\.a)\(", text))
     found |= set(re.findall(r"/(crt[a-z0-9]+\.o)\b", text))
+    return found
+
+
+def vita_glue_objects(path):
+    """The newlib/libc/sys/vita objects the link map actually loads."""
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    found = ["crt0.o"] if re.search(r"/crt0\.o\b", text) else []
+    for member in VITA_GLUE_MEMBERS:
+        if "libc.a(%s)" % member in text:
+            found.append("libc.a(%s)" % member)
     return found
 
 
@@ -258,8 +315,10 @@ def main():
     os.chdir(repo)
 
     linked_archives = set()
+    vita_objects = []
     if args.link_map:
         linked_archives = archives_in_map(args.link_map)
+        vita_objects = vita_glue_objects(args.link_map)
         missing = sorted(a for a in linked_archives if not covered(a))
         if missing:
             print("archives in the link map without a notice entry: " + ", ".join(missing), file=sys.stderr)
@@ -318,6 +377,9 @@ def main():
             out.append(f"Archives in the link: {', '.join(used) or 'none'}")
         else:
             out.append(f"Archives: {', '.join(entry['archives'])}")
+        if entry["name"].startswith("newlib") and vita_objects:
+            out.append("Objects compiled from newlib/libc/sys/vita in this link:")
+            out.extend("  " + name for name in vita_objects)
         out.append("")
         for name in entry["files"]:
             out.append(f"--- licenses/{name} ---")

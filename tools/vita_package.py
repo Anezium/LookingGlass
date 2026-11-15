@@ -17,6 +17,7 @@ release used, adding:
   licenses/LookingGlass-LICENSE-MIT.txt
   licenses/newlib-COPYING.NEWLIB.txt
   licenses/newlib-COPYING.LIBGLOSS.txt
+  licenses/newlib-vita-glue-NOTICE.txt
   ... and the per-library licence files used by the notices
 
 It changes packaging only. The ELF is an input; the tool hashes it before and
@@ -50,6 +51,7 @@ LICENCES = [
     ("LookingGlass-LICENSE-MIT.txt", "LookingGlass-LICENSE-MIT.txt"),
     ("newlib-COPYING.NEWLIB.txt", "newlib-COPYING.NEWLIB"),
     ("newlib-COPYING.LIBGLOSS.txt", "newlib-COPYING.LIBGLOSS"),
+    ("newlib-vita-glue-NOTICE.txt", "newlib-vita-glue-NOTICE.txt"),
     ("vita-headers-LICENSE.md", "vita-headers-LICENSE.md"),
     ("math-neon-LICENSE.txt", "math-neon-LICENSE"),
     ("taiHEN-LICENSE.txt", "taiHEN-LICENSE"),

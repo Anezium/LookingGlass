@@ -1,4 +1,6 @@
-Origin of each licence text in this folder, copied verbatim. Used by tools/vita_notices.py.
+Origin of the licence texts in this folder. The texts are copied verbatim from
+the sources below, except newlib-vita-glue-NOTICE.txt, which is compiled from
+the notices measured in the linked newlib source files. Used by tools/vita_notices.py.
 
 vitaGL-COPYING, vitaGL-COPYING.LESSER    Rinnegatamante/vitaGL at dca4b9d, COPYING and COPYING.LESSER
 vitaShaRK-LICENSE                        Rinnegatamante/vitaShaRK at df24065 (tag v.1.7), LICENSE
@@ -7,6 +9,8 @@ math-neon-LICENSE                        Rinnegatamante/math-neon at 0faab81, he
 taiHEN-LICENSE                           yifanlu/taiHEN at 309b380, LICENSE
 vita-headers-LICENSE.md                  vitasdk/vita-headers at ebc8f4f, LICENSE.md
 newlib-COPYING.NEWLIB, -COPYING.LIBGLOSS vitasdk/newlib at 64aa7aa, COPYING.NEWLIB and COPYING.LIBGLOSS
+newlib-vita-glue-NOTICE.txt              vitasdk/newlib at 64aa7aa, copyright/licence headers (or their absence)
+                                         in the libc/sys/vita files whose objects the link loads
 pthread-embedded-COPYING, -COPYING.LIB, -COPYING.vita
                                          vitasdk/pthread-embedded at 11d2e57, COPYING, COPYING.LIB, COPYING.vita
 gcc-COPYING.RUNTIME                      gcc-mirror/gcc at f595792, COPYING.RUNTIME

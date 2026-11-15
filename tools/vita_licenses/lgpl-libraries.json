@@ -212,10 +212,8 @@
       ],
       "archive_sha256": "6842d410b2571fe4a31d4fe933dd76c5679330a28e80a5c27b1539a534d91b3b",
       "members_total": 30,
-      "path_dependent": [
-        "splashscreen.o"
-      ],
-      "path_dependent_reason": "splashscreen.o embeds the VitaSDK include path in .rodata.str1.4 through __FILE__; the bytes depend on where the SDK is installed. The member is required to be present; its bytes are not compared."
+      "revision_macro": "VGL_GIT_HASH",
+      "revision_macro_note": "source/splashscreen.c renders '#' followed by VGL_GIT_HASH in its .rodata string. Makefile:16 fills VGL_GIT_HASH from `git rev-parse --short HEAD` (dca4b9d here). An exported source tree has no .git, and this Makefile has no VGL_GIT_HASH make variable, so an exported-source build must pass the value in CFLAGS; see the bundle README step 3. All 30 members, including splashscreen.o, are compared after objcopy --strip-debug."
     },
     {
       "name": "vitaShaRK",

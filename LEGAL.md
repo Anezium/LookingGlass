@@ -96,10 +96,11 @@ The SceShaccCgExt source at the revision above includes
 `include/sce_intrinsics.h`. It is a C string literal that begins with the
 markers "SCE CONFIDENTIAL", "Copyright (C) 2012 Sony Computer Entertainment
 Inc." and "All Rights Reserved". The library passes that string to the
-console's shader compiler at run time. The same text is present in Sony's SDK
-archive of the library, so it is inherent to SceShaccCgExt rather than
-introduced by the rebuild. No licence text in this repository, in the release
-package or in the source bundle grants permission to redistribute that text.
+console's shader compiler at run time. The same text is present in the
+previously installed VitaSDK archive of the library, so it is inherent to
+SceShaccCgExt rather than introduced by the rebuild. No licence text in this
+repository, in the release package or in the source bundle grants permission to
+redistribute that text.
 
 **Status: open owner decision.** The options are to obtain permission from the
 rights holder, to record an explicit accepted risk, or to drop the

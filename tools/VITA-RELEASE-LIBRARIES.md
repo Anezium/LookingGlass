@@ -59,10 +59,15 @@ member the link loaded:
 vitaGL, vitaShaRK and pthread-embedded are compiled with `-g` and the release
 link passes `-Wl,--strip-debug`. A rebuild in another directory therefore has a
 different archive file hash and different raw member bytes, but its stripped
-member code is identical, with one documented exception: vitaGL's
-`splashscreen.o` embeds the VitaSDK include path in `.rodata.str1.4` through
-`__FILE__`. Its pin is marked `path-dependent`; `relink.sh` requires the member
-to be present but does not compare its bytes. VitaSDK also strips every target
+member code is identical when the build passes the revision macro. vitaGL's
+`Makefile:16` fills `VGL_GIT_HASH` from `git rev-parse --short HEAD`, and
+`source/splashscreen.c:6266` renders `"#" VGL_GIT_HASH`. An exported tree has no
+`.git`, and this Makefile has no `VGL_GIT_HASH` make variable, so the
+exported-source build passes `-DVGL_GIT_HASH='"dca4b9d"'` in `CFLAGS` and spells
+out the four feature macros that a command-line `CFLAGS` would otherwise
+suppress; the full command is in the bundle README step 3. With that, all 30
+vitaGL members, including `splashscreen.o`, are compared after `--strip-debug`
+and match the release archive. VitaSDK also strips every target
 object with `--strip-debug -R .comment -R .note`; pthread-embedded's release
 archive has already had that pass, and `relink.sh` applies it for that library.
 The bundle compares stripped bytes for the other members and raw bytes for
@@ -84,7 +89,7 @@ export LG_TARGET_ROOT=/path/to/cargo-target
 export LG_VITASDK=$VITASDK
 export LG_LIB_DIR=/path/to/isolated-libraries
 tools/vita_release_build.sh --out /path/to/new-output --lib-dir "$LG_LIB_DIR" \
-  --source-bundle alice-lgpl-<head7>-r4.tar.gz
+  --source-bundle alice-lgpl-<head7>-rN.tar.gz
 ```
 
 Then assemble the source and relink bundle from the release output, the capture,
@@ -130,7 +135,8 @@ VPK with the same commands and flags as the release and requires:
 - `SOURCE-OFFER.txt` naming the source bundle and the written offer;
 - `licenses/GPL-3.0.txt`, `LGPL-3.0.txt`, `LGPL-2.1.txt`,
   `GCC-RUNTIME-EXCEPTION-3.1.txt`, `MPL-2.0.txt`, `MIT.txt`, `Apache-2.0.txt`,
-  the newlib BSD texts, and the per-library licence files.
+  the newlib BSD texts, the newlib Vita glue notice, and the per-library
+  licence files.
 
 The tool hashes the ELF before and after, checks the VPK's `eboot.bin` and
 `param.sfo` byte-for-byte against the release artifacts, and fails closed on a
@@ -143,3 +149,18 @@ and the Cargo.lock SHA-256 values are printed.
 
 These checks close the library-selection, source/relink and package-notice
 gates. Installation and device behavior remain separate release gates.
+
+## Release execution checklist
+
+The written offer in `SOURCE-OFFER.txt` names a specific tarball. Publishing the
+VPK alone does not fulfil it.
+
+- [ ] Upload the exact tarball named in the VPK's `SOURCE-OFFER.txt`
+  (`alice-lgpl-<head7>-rN.tar.gz`, with the SHA-256 recorded in the offer) as a
+  release asset beside the VPK.
+- [ ] Link that asset on the release page and repeat its SHA-256 in the release
+  notes.
+- [ ] Confirm the uploaded asset's SHA-256 and its `SHA256SUMS` match the local
+  bundle; do not re-tar or rename it after the offer is written.
+- [ ] Retain the asset, unchanged, for at least three years from the release
+  date so the written offer remains fulfilable.

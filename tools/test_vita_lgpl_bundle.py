@@ -180,7 +180,7 @@ class RelinkControls(unittest.TestCase):
             "libvitaGL.a  buffers.o  %s  stripped" % digest(b"vitaGL buffersstripped"),
             "libvitashark.a  vitashark.o  %s  stripped" % digest(b"vitaShaRKstripped"),
             "libpthread.a  pthread_mutex_lock.o  %s  stripped-comment" % digest(b"pthread lockstripped"),
-            "libvitaGL.a  splashscreen.o  %s  path-dependent" % ("0" * 64),
+            "libvitaGL.a  splashscreen.o  %s  stripped" % digest(b"vitaGL splash path bytesstripped"),
         ]
         self.write_member_manifest(self.pin_lines)
         self.sdk = self.root / "sdk"
@@ -281,13 +281,19 @@ class RelinkControls(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("members of libpthread.a match the pinned objects", result.stdout)
 
-    def test_path_dependent_member_is_presence_only(self):
-        # vitaGL's splashscreen.o embeds the SDK path; its bytes are not compared.
+    def test_splashscreen_member_bytes_are_compared(self):
+        # The exported-source build passes VGL_GIT_HASH, so splashscreen.o is
+        # an ordinary stripped member of the pin, not a presence-only exception.
         self.supply("libvitaGL.a")
         result = self.run_relink()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("presence checked, bytes not compared", result.stdout)
         self.assertIn("members of libvitaGL.a match the pinned objects", result.stdout)
+        self.assertNotIn("presence checked", result.stdout)
+        (self.fake_ar / "libvitaGL.a/splashscreen.o").write_bytes(b"different splash bytes")
+        result = self.run_relink("--strict", env={"FAKE_ELF": "different elf"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("splashscreen.o of libvitaGL.a differs from the pinned object", result.stdout)
+        self.assertIn("archive members differ", result.stderr)
 
     def test_default_mode_warns_when_members_match_but_elf_differs(self):
         self.supply("libSceShaccCgExt.a")
@@ -385,6 +391,13 @@ class LibraryPinControls(unittest.TestCase):
         self.assertEqual(pins["libvitashark.a"]["tag"], "v.1.7")
         self.assertEqual(pins["libpthread.a"]["identity"], "stripped-comment")
         self.assertEqual(pins["libvitaGL.a"]["identity"], "stripped")
+        self.assertNotIn("path_dependent", pins["libvitaGL.a"])
+        splash = next(member for member in pins["libvitaGL.a"]["members"]
+                      if member["member"] == "splashscreen.o")
+        self.assertEqual(splash["sha256_stripped"],
+                         "8d1f0fdd907cd0c88a8dad7024a4d8adb219a99de1f74a16ebedade2062184f9")
+        self.assertEqual(pins["libvitaGL.a"]["revision_macro"], "VGL_GIT_HASH")
+        self.assertIn("VGL_GIT_HASH", pins["libvitaGL.a"]["revision_macro_note"])
 
     def test_every_pinned_member_has_both_hashes(self):
         data = json.loads((TOOLS / "vita_licenses/lgpl-libraries.json").read_text(encoding="utf-8"))
@@ -417,12 +430,14 @@ class DocumentationControls(unittest.TestCase):
     def test_relink_template_checks_members_per_library(self):
         for token in ("libvitaGL.a", "libvitashark.a", "libSceShaccCgExt.a",
                       "libpthread.a", "library-members.txt", "normalise_member",
-                      "also loaded the SDK", "path-dependent"):
+                      "also loaded the SDK", "stripped-comment"):
             self.assertIn(token, BUNDLE.RELINK_TEMPLATE)
+        self.assertNotIn("presence checked", BUNDLE.RELINK_TEMPLATE)
 
     def test_public_recipe_names_the_full_revisions_and_commands(self):
         facts = {
             "vitagl_revision": BUNDLE.VITAGL_REVISION,
+            "vitagl_short": BUNDLE.VITAGL_REVISION[:7],
             "vitashark_revision": "d" * 40,
             "pthread_revision": "e" * 40,
             "vitagl_flags": "NO_TEX_COMBINER=1",
@@ -453,6 +468,33 @@ class DocumentationControls(unittest.TestCase):
         self.assertIn(BUNDLE.VDPM_PACKAGES, recipe)
         self.assertIn("CMake", recipe)
 
+    def test_readme_builds_exported_vitagl_with_the_revision_macro(self):
+        text = BUNDLE.README_TEMPLATE
+        self.assertIn("sources/vitaGL", text)
+        self.assertIn("-DVGL_GIT_HASH='\\\"@@VITAGL_SHORT@@\\\"'", text)
+        for macro in ("-DDISABLE_TEXTURE_COMBINER", "-DHAVE_UNFLIPPED_FBOS",
+                      "-DHAVE_SINGLE_THREADED_GC", "-DHAVE_CUSTOM_HEAP"):
+            self.assertIn(macro, text)
+        self.assertIn("make VGL_GIT_HASH=...` has no effect", text)
+        self.assertNotIn("__FILE__", text)
+
+    def test_notices_name_sceaudio_records_and_quad_rand_copyright_gap(self):
+        text = (REPO / "THIRD_PARTY_NOTICES-vita.txt").read_text(encoding="utf-8")
+        for symbol in ("sceAudioOutOpenPort", "sceAudioOutOutput",
+                       "sceAudioOutReleasePort", "sceAudioOutSetVolume"):
+            self.assertIn(symbol, text)
+        self.assertIn("The fork also declares four SceAudio import records in "
+                      "src/host/vita/mod.rs", text)
+        self.assertIn("quad-rand 0.2.3 ships no licence file and no copyright line", text)
+
+    def test_notices_ship_the_newlib_vita_glue_notice(self):
+        text = (REPO / "THIRD_PARTY_NOTICES-vita.txt").read_text(encoding="utf-8")
+        self.assertIn("--- licenses/newlib-vita-glue-NOTICE.txt ---", text)
+        self.assertIn("Objects compiled from newlib/libc/sys/vita in this link:", text)
+        self.assertIn("io.c, mlock.c, sbrk.c, syscalls.c and threading.c carry no "
+                      "copyright or licence line", text)
+        self.assertIn("crt0.o", text)
+
     def test_vitagl_record_is_read_from_the_release_build(self):
         text = ("linked libvitaGL.a sha256=" + "a" * 64
                 + " package=vitaGL-1-1 not-the-package-file path=~/vitasdk/lib/libvitaGL.a\n"
@@ -473,6 +515,7 @@ class DocumentationControls(unittest.TestCase):
             BUNDLE.append_build_recipe(path, {
                 "revision": "b" * 40,
                 "vitagl_revision": BUNDLE.VITAGL_REVISION,
+                "vitagl_short": BUNDLE.VITAGL_REVISION[:7],
                 "vitashark_revision": "d" * 40,
                 "pthread_revision": "e" * 40,
                 "vitagl_flags": "A=1 B=2",
@@ -561,7 +604,8 @@ with zipfile.ZipFile(out, 'w') as archive:
                      "licenses/LGPL-2.1.txt",
                      "licenses/GCC-RUNTIME-EXCEPTION-3.1.txt",
                      "licenses/MPL-2.0.txt", "licenses/MIT.txt",
-                     "licenses/Apache-2.0.txt"):
+                     "licenses/Apache-2.0.txt",
+                     "licenses/newlib-vita-glue-NOTICE.txt"):
             self.assertIn(name, names)
         with zipfile.ZipFile(vpk) as archive:
             self.assertEqual(archive.read("eboot.bin"), b"self bytes")
