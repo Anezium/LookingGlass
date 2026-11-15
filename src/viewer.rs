@@ -111,28 +111,37 @@ async fn rebuild_outgoing(
 ) -> Option<Box<RebuiltScene>> {
     let mut attempts = 0;
     loop {
+        // Nothing from a failed load outlives its window into this retirement.
+        crate::texture::release_shared();
         crate::render_fx::release_scene();
         crate::transition_memory::released().await;
-        // Partial resources drop together on error, before the next retirement.
-        let attempt = (|| -> Result<_> {
-            crate::transition_memory::recovery_fault()?;
-            let level = checkpoint.level()?;
-            let mut world = Scene::load(assets, &level.map)?;
-            world.map.difficulty = difficulty;
-            interactions.sync(&mut world.world);
-            let mut cast = crate::npc::Npcs::load(assets, &world.map, &level.map,
-                level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
-            cast.restore(&level.npcs)?;
-            let particles = crate::particles::Steam::load(assets, &world.map)?;
-            let mut art = LevelArt::default();
-            art.prepare(assets, &world, interactions, true)?;
-            let character = if reload_alice {
-                let mut character = Character::load(assets)?;
-                character.restore(&checkpoint.character)?;
-                Some(character)
-            } else { None };
-            Ok(Box::new((art, cast, particles, world, character)))
-        })();
+        // Partial resources drop together on error, before the next retirement; the
+        // load guard drops this attempt's cache with them, on success and error alike.
+        let attempt = {
+            let _share = crate::texture::load_scope();
+            (|| -> Result<_> {
+                crate::transition_memory::recovery_fault()?;
+                let level = checkpoint.level()?;
+                let mut world = Scene::load(assets, &level.map)?;
+                world.map.difficulty = difficulty;
+                interactions.sync(&mut world.world);
+                let mut cast = crate::npc::Npcs::load(assets, &world.map, &level.map,
+                    level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
+                cast.restore(&level.npcs)?;
+                let particles = crate::particles::Steam::load(assets, &world.map)?;
+                let mut art = LevelArt::default();
+                art.prepare(assets, &world, interactions, true)?;
+                let character = if reload_alice {
+                    let mut character = Character::load(assets)?;
+                    character.restore(&checkpoint.character)?;
+                    Some(character)
+                } else { None };
+                Ok(Box::new((art, cast, particles, world, character)))
+            })()
+        };
+        // A successful rebuild is a live map now; a failed one is freed before the
+        // next attempt. Either way this attempt leaves no cache owners behind.
+        crate::texture::release_shared();
         match attempt {
             Ok(resources) => return Some(resources),
             Err(error) => {
@@ -390,6 +399,10 @@ async fn finish_entered(
         story,
         hints,
     } = loaded;
+    // One window for the whole destination build. The guard clears on success and
+    // on every `?` below, so a failure cannot retain destination textures across
+    // the load boundary.
+    let _share = crate::texture::load_scope();
     let mut timing = crate::startup::Phase::new("entered_resources");
     let scene = Scene::from_parts(assets, name, map, world)?;
     timing.mark("scene");
@@ -453,12 +466,14 @@ pub(crate) fn draw_transition_loading(name: &str) {
 }
 async fn present_transition_loading(name: &str) {
     crate::frame_profile::exclude_transition_frame();
+    let start = std::time::Instant::now();
     crate::loading_screen::draw_or(|| draw_transition_loading(name));
     #[cfg(not(target_os="vita"))]
     if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_CAPTURE") {
         save_capture(std::path::Path::new(&path)).expect("loading indicator capture");
     }
     next_frame().await;
+    crate::loading_screen::note_present(start.elapsed().as_secs_f64() * 1000.);
     eprintln!("[lg/transition] loading_indicator=presented destination={name}");
 }
 
@@ -489,7 +504,8 @@ pub(crate) async fn check_transition_loading(assets: &mut Assets, options: &Opti
 }
 
 /// The chapter and the restore loads, as the viewer runs them, with whatever `loading_screen`
-/// the renderer config sets: on, each load presents one frame per stage boundary (five) and the
+/// the renderer config sets: on, each load presents one frame per stage boundary (five stage frames, six presents counting the
+/// retirement swap) and the
 /// release frames show step zero; off, none. Prints host wall times for both loads.
 #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
 pub(crate) async fn check_loading_screen(assets: &mut Assets, options: &Options) -> Result<()> {
@@ -500,7 +516,7 @@ pub(crate) async fn check_loading_screen(assets: &mut Assets, options: &Options)
     let expect = |kind: &str, map: &str| -> Result<()> {
         let counts = crate::loading_screen::counts();
         if on {
-            anyhow::ensure!(counts == Some((5, 5)), "{kind} {map}: expected five presented stage frames, got {counts:?}");
+            anyhow::ensure!(counts == Some((5, 6)), "{kind} {map}: expected five stage frames and six presents (one retirement swap), got {counts:?}");
         } else {
             anyhow::ensure!(counts.is_none(), "{kind} {map}: loading_screen off must not start a load");
         }
@@ -1056,6 +1072,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             save_frame.clear();
             #[cfg(feature = "native_timing")]
             timing_ready!(timing_install_reason!($install));
+            crate::texture::release_shared();
         }};
     }
     #[cfg(target_os = "vita")]
@@ -1067,7 +1084,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     // paused fresh-scene/error behavior, without retrying an expensive restore.
     let mut resume_error = None;
     let prepared = if prepared.is_some() { prepared } else if let Some(loaded) = &resume {
-        match save::Restored::build(&mut assets, loaded.game.clone()) {
+        let restored = {
+            // The restore build is its own load window; a failed one keeps nothing.
+            let _share = crate::texture::load_scope();
+            save::Restored::build(&mut assets, loaded.game.clone())
+        };
+        match restored {
             Ok(restored) => Some(restored),
             Err(error) => { resume_error = Some(format!("Could not restore save: {error:#}")); None }
         }
@@ -1075,6 +1097,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut resume_applied = false;
     let validated = prepared.is_some();
     if save::bench_scene(validated) == save::BenchScene::ReuseValidated {
+        // The restored scene's build and its install are one load window.
+        let _share = crate::texture::load_scope();
         let mut timing = crate::startup::Phase::new("restore_resources");
         power_art = crate::powerups::Art::load(&mut assets)?;
         timing.mark("power_art");
@@ -1105,7 +1129,19 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     } else {
         #[cfg(feature = "native_timing")]
         timing.with(|r| r.before_install());
+        // The boot route builds the whole level on the main thread before the viewer
+        // loop exists, so the menu stays frozen unless a load is opened here. With
+        // `loading_screen` off, none of this presents a frame.
+        //
+        // A fresh boot has no outgoing resources, so there is no retirement
+        // sequence: one step-zero frame replaces the menu, then one frame per stage.
+        // The load guard makes this build a single cache window and clears it on
+        // every return path.
+        let _share = crate::texture::load_scope();
+        let boot_loading = crate::loading_screen::begin("chapter-or-console", &maps[current]);
+        crate::loading_screen::show().await;
         scene = load_scene(&mut assets, &maps[current], options.difficulty)?;
+        crate::loading_screen::between("scene").await;
         level_art = LevelArt::default();
         skip_scene = crate::cinematic::Skip::default();
         power_art = crate::powerups::Art::load(&mut assets)?;
@@ -1135,6 +1171,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if options.larva_preview && maps[current] == "centipede1" {
             npcs = crate::npc::Npcs::larva_preview(&mut assets)?;
         }
+        crate::loading_screen::between("npcs").await;
         catalog = Catalog::load(&mut assets)?;
         stats = starting_stats(&options, &maps[current], entry_spawn.as_deref());
         println!(
@@ -1158,6 +1195,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         environment_clock = 0.;
         audio.load(&mut assets, &maps[current], &scene.map);
         story = crate::story::Story::load(&mut assets, &maps[current]);
+        crate::loading_screen::between("sound").await;
         let mut entry_timing = crate::startup::Phase::new("entry_after_story");
         eprintln!("[lg/startup] entry owner=engine map={} opening_roq_requested={opening_requested}", maps[current]);
         if options.shelf_preview {
@@ -1221,11 +1259,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         entry_timing.mark("spawn_and_story_entry");
         alice = Character::load(&mut assets).context("Loading Alice's character")?;
         entry_timing.mark("alice_character");
+        crate::loading_screen::between("alice").await;
         aim_pointer = crate::targeting::Pointer::load(&mut assets)?;
         alice.reset(&player, yaw);
         entry_timing.mark("aim_pointer_and_character_reset");
         level_art.prepare(&mut assets, &scene, &interactions, true)?;
         entry_timing.mark("level_art");
+        crate::loading_screen::between("level_art").await;
+        drop(boot_loading);
         campaign = Campaign::default();
         #[cfg(feature = "native_timing")]
         timing_ready!(crate::native_timing::Reason::Fresh);
@@ -1391,6 +1432,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let audio_checkpoint = audio.transition_checkpoint();
                 let mut memory = crate::transition_memory::Transition::begin($kind, &maps[current], &destination);
                 let _loading = crate::loading_screen::begin($kind, &destination);
+                // The destination build, its install and any rollback share one
+                // cache window; the guard clears it on success and every error.
+                let _share = crate::texture::load_scope();
                 let mut outgoing = unload_scene!();
                 let outgoing_alice = if crate::transition_memory::legacy_overlap() { Some(alice) } else { drop(alice); None };
                 crate::loading_screen::released().await;

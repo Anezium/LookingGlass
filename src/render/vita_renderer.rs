@@ -416,6 +416,8 @@ pub struct Config {
     pub shader_cache: String,
     /// Optional cache of exact device-compressed immutable pixels.
     pub texture_cache: String,
+    /// One upload per resolved asset path for the duration of a load.
+    pub load_texture_share: bool,
     pub route_heading_lock:bool,
     /// Input-only diagnostic: recover recorded world wishes without camera waits.
     pub route_world_wish: bool,
@@ -629,6 +631,7 @@ impl Default for Config {
             audio_music_priority: 170,
             shader_cache:"on".into(),
             texture_cache:"off".into(),
+            load_texture_share: false,
             route_heading_lock:true,
             route_world_wish: false,
             replay_record: String::new(),
@@ -3418,7 +3421,7 @@ mod tests {
     fn release_fallback_renderer_is_explicit_played_baseline_without_recording() {
         use sha2::{Digest, Sha256};
         let played_bytes = include_bytes!("../../configs/PL-played-rc3.json");
-        assert_eq!(format!("{:x}", Sha256::digest(played_bytes)), "61f48046a65b578d345a7eeab5704e0f5cd3a7c05dfd361ee4c3576b947a429f");
+        assert_eq!(format!("{:x}", Sha256::digest(played_bytes)), "def605c0bd92a38281cb86fd9c20e36a794946999569e3a1f4131e1d0bba7c33");
         let bytes = include_bytes!("../../configs/PL-release.json");
         let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         let defaults = serde_json::to_value(Config::default()).unwrap();
@@ -3988,6 +3991,40 @@ mod tests {
         assert!(serde_json::from_str::<Config>(r#"{"audio_offmain":"on"}"#).is_err());
     }
     #[test]
+    fn a6_load_pair_differs_only_in_the_four_load_keys() {
+        let (release, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-release.json")).unwrap();
+        assert!(rejected.is_none());
+        assert!(!release.load_texture_share, "sharing is off in the release input");
+        let off_bytes = include_bytes!("../../configs/PL-a6-load-off.json");
+        let on_bytes = include_bytes!("../../configs/PL-a6-load-on.json");
+        let (off, rejected) = parse_runtime_config(off_bytes).unwrap();
+        assert!(rejected.is_none());
+        off.validate().unwrap();
+        let (on, rejected) = parse_runtime_config(on_bytes).unwrap();
+        assert!(rejected.is_none());
+        on.validate().unwrap();
+        for bytes in [&off_bytes[..], &on_bytes[..]] {
+            let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let all = serde_json::to_value(Config::default()).unwrap();
+            assert_eq!(historical_keys(&written), historical_keys(&all), "the A6 config writes every runtime key");
+        }
+        assert!(!off.loading_screen && !off.load_texture_share && off.texture_cache == "off" && !off.pvs_cache);
+        assert!(on.loading_screen && on.load_texture_share && on.texture_cache == "on" && on.pvs_cache);
+        let (mut off, mut on) = (serde_json::to_value(&off).unwrap(), serde_json::to_value(&on).unwrap());
+        for key in ["loading_screen", "load_texture_share", "texture_cache", "pvs_cache"] {
+            off.as_object_mut().unwrap().remove(key);
+            on.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(on, off, "the A6 pair differs only in the four load keys");
+    }
+    #[test]
+    fn load_texture_share_is_off_by_default_and_a_strict_boolean() {
+        assert!(!Config::default().load_texture_share);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().load_texture_share);
+        assert!(serde_json::from_str::<Config>(r#"{"load_texture_share":true}"#).unwrap().load_texture_share);
+        assert!(serde_json::from_str::<Config>(r#"{"load_texture_share":"on"}"#).is_err());
+    }
+    #[test]
     fn a3_loading_config_is_rc1_with_the_two_load_keys_on() {
         let (rc1, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc1.json")).unwrap();
         assert!(rejected.is_none());
@@ -4061,10 +4098,10 @@ mod tests {
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
         assert_eq!(format!("{:x}", Sha256::digest(rc9_bytes)), "9dbf482cf40ff440dd74ecc5c6be45aaf5c3cb0b06da3bfc0fe47a4b76466cac");
-        assert_eq!(format!("{:x}", Sha256::digest(rc8_bytes)), "4e430433245a7eae3efe20138c805b1d74a351fd4c6a93931f38b534d1ca89e9");
-        assert_eq!(format!("{:x}", Sha256::digest(rc7_bytes)), "e30b3000f223ff146585a813aeac331d1cbb76349c592e8b8e25b9a77ae2804b");
+        assert_eq!(format!("{:x}", Sha256::digest(rc8_bytes)), "a5d21beec0d15648cc94f209bbe0adf1fa387430c0df18a1a5e10ad2756f6f2b");
+        assert_eq!(format!("{:x}", Sha256::digest(rc7_bytes)), "593778fbe24338cbb2c8d00a8504286d5c26018dbc2bc663500221095bfd2b80");
         assert_eq!(format!("{:x}", Sha256::digest(sim_bytes)), "fa64b0c5b79c52d8e028f7fc9d0d3dd2eec57b7641dfc8f76b34212bdcb3334b");
         let (release, rejected) = parse_runtime_config(release_bytes).unwrap();
         assert!(rejected.is_none());

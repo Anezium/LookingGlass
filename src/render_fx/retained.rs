@@ -424,9 +424,9 @@ pub(crate) struct Lite {
     pipelines: BTreeMap<(usize, bool), Pipeline>,
     fields: crate::render::uniform_fields::Cache,
 }
-/// `fx_add_zero_alpha_cut`: particle loading reports each texture with its pixels.
-pub(crate) fn note_particle_texture(texture: &Texture2D, rgba: &[u8]) {
-    if crate::render::vita_renderer::config().fx_add_zero_alpha_cut { fill_cuts::note_texture(texture, rgba); }
+/// `fx_add_zero_alpha_cut`: particle loading reports each texture's verdict.
+pub(crate) fn note_particle_texture_zero_alpha(texture: &Texture2D, zero: bool) {
+    if crate::render::vita_renderer::config().fx_add_zero_alpha_cut { fill_cuts::note_zero_alpha(texture, zero); }
 }
 /// A pass whose full-program arithmetic `FX_LITE_FRAGMENT` reproduces (see there).
 pub(crate) fn lite_pass(p: &Pass) -> bool {

@@ -140,8 +140,11 @@ pub(crate) async fn released_with(mut draw: impl FnMut()) {
     #[cfg(not(target_os="vita"))]
     let frames = 1;
     for _ in 0..frames {
+        let start = std::time::Instant::now();
         draw();
         macroquad::prelude::next_frame().await;
+        // A retirement swap inside an open load is part of that load's cost.
+        crate::loading_screen::note_present(start.elapsed().as_secs_f64() * 1000.);
     }
     observe();
 }

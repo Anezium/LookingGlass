@@ -9,6 +9,12 @@ use crate::{
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// The core ribbon scrolls its UVs, so its base skin is uploaded repeat-keyed.
+/// `fx/eyebeam5` resolves to `textures/special/purple`, which other models sample
+/// clamped; the key separation keeps the two samplings apart.
+const CORE_SKIN_SAMPLER: texture::Sampler = texture::Sampler::Repeat;
+
 struct BeamRig {
     skeleton: crate::skeletal::Skeleton,
     pose: Vec<Transform>,
@@ -36,19 +42,10 @@ impl BeamRig {
         let tip = bone("Bone03")?;
         let pose = skeleton.global_pose(&animation.sample(0., false));
         def.skins.insert("all".into(), "fx/eyebeam5".into());
-        let core = Prop::build(a, def, model, specs)?;
-        // The core ribbon uses the base texture directly, with scrolling UVs.
-        for mesh in &core.meshes {
-            if let Some(texture) = &mesh.texture {
-                unsafe {
-                    get_internal_gl().quad_context.texture_set_wrap(
-                        texture.raw_miniquad_id(),
-                        macroquad::miniquad::TextureWrap::Repeat,
-                        macroquad::miniquad::TextureWrap::Repeat,
-                    );
-                }
-            }
-        }
+        let core = Prop::build_sampled(a, def, model, specs, CORE_SKIN_SAMPLER)?;
+        // The core ribbon scrolls its UVs, so its base skin was uploaded
+        // repeat-keyed. Nothing is rewrapped after upload: the shared cache hands
+        // the same texture to other consumers.
         Ok(Self {
             skeleton,
             pose,
@@ -169,6 +166,23 @@ pub(super) struct Art {
     templates: Vec<Attached>,
     emitters: BTreeMap<(usize, u32), Attached>,
     pub atmosphere: std::cell::RefCell<Atmosphere>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Wrap state is GPU state, not texels, so the shared-upload readback cannot
+    /// see it. The beam core must be uploaded repeat-keyed and must never change
+    /// a (possibly shared) sampler after upload.
+    #[test]
+    fn the_beam_core_is_uploaded_repeat_keyed_and_never_rewrapped() {
+        assert_eq!(CORE_SKIN_SAMPLER, texture::Sampler::Repeat);
+        let source = include_str!("heavy_art.rs");
+        assert!(
+            !source.contains(concat!("texture_set", "_wrap")),
+            "no post-upload sampler mutation in the beam: ask for the repeat key instead"
+        );
+    }
 }
 impl Art {
     pub fn clear(&mut self) {

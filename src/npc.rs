@@ -1559,9 +1559,7 @@ impl Model {
             let tex = if let Some(t) = textures.get(&path) {
                 t.clone()
             } else {
-                let image = texture::decode(assets, &path)?;
-                let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
-                t.set_filter(FilterMode::Linear);
+                let t = texture::decode_upload_shared(assets, &path)?;
                 textures.insert(path, t.clone());
                 t
             };

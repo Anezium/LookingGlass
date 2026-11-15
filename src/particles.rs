@@ -858,14 +858,12 @@ impl Steam {
                     let Some(path) = texture::resolve(assets, frame, &specs) else {
                         continue;
                     };
-                    let image = texture::decode(assets, &path)?;
-                    let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
-                    t.set_filter(FilterMode::Linear);
+                    let shared = texture::decode_upload_shared_full(assets, &path)?;
                     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-                    crate::sim_maps::probe::draw_query::label_texture(t.raw_miniquad_id(), &path);
+                    crate::sim_maps::probe::draw_query::label_texture(shared.texture.raw_miniquad_id(), &path);
                     #[cfg(feature = "vita_renderer")]
-                    crate::render_fx::retained::note_particle_texture(&t, &image.pixels);
-                    textures.push(t);
+                    crate::render_fx::retained::note_particle_texture_zero_alpha(&shared.texture, shared.zero_alpha);
+                    textures.push(shared.texture);
                 }
                 if spec.light.is_none()
                     && (textures.len() != stage.images.len() || textures.is_empty())
@@ -1744,14 +1742,12 @@ impl Attached {
                 let Some(path) = texture::resolve(assets, frame, materials) else {
                     continue;
                 };
-                let image = texture::decode(assets, &path)?;
-                let t = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
-                t.set_filter(FilterMode::Linear);
+                let shared = texture::decode_upload_shared_full(assets, &path)?;
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-                crate::sim_maps::probe::draw_query::label_texture(t.raw_miniquad_id(), &path);
+                crate::sim_maps::probe::draw_query::label_texture(shared.texture.raw_miniquad_id(), &path);
                 #[cfg(feature = "vita_renderer")]
-                crate::render_fx::retained::note_particle_texture(&t, &image.pixels);
-                textures.push(t);
+                crate::render_fx::retained::note_particle_texture_zero_alpha(&shared.texture, shared.zero_alpha);
+                textures.push(shared.texture);
             }
             if textures.is_empty() || textures.len() != stage.images.len() {
                 continue;

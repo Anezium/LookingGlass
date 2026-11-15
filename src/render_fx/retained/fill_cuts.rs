@@ -18,9 +18,9 @@ thread_local! {
     /// Textures whose alpha is 0 in every texel. The handles keep their ids from being reused.
     static ZERO_ALPHA: RefCell<(Vec<Texture2D>, HashSet<TextureId>)> = RefCell::default();
 }
-/// Register `texture` when every texel of `rgba` has alpha 0.
-pub(super) fn note_texture(texture: &Texture2D, rgba: &[u8]) {
-    if rgba.is_empty() || rgba.chunks_exact(4).any(|p| p[3] != 0) { return; }
+/// Register `texture` when every texel has alpha 0.
+pub(super) fn note_zero_alpha(texture: &Texture2D, zero: bool) {
+    if !zero { return; }
     ZERO_ALPHA.with(|z| {
         let mut z = z.borrow_mut();
         if z.1.insert(texture.raw_miniquad_id()) { z.0.push(texture.clone()); }

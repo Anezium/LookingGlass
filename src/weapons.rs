@@ -1002,6 +1002,18 @@ impl Prop {
         model: tan::Model,
         specs: &std::collections::BTreeMap<String, texture::MaterialSpec>,
     ) -> Result<Self> {
+        Self::build_sampled(assets, def, model, specs, texture::Sampler::Clamp)
+    }
+    /// Build with the base skins uploaded for `sampler`. A caller that samples its
+    /// base texture with repeat wrap must ask for [`texture::Sampler::Repeat`]: a
+    /// shared upload's wrap is set at upload and never changed afterwards.
+    pub(crate) fn build_sampled(
+        assets: &mut Assets,
+        def: Definition,
+        model: tan::Model,
+        specs: &std::collections::BTreeMap<String, texture::MaterialSpec>,
+        sampler: texture::Sampler,
+    ) -> Result<Self> {
         let mut meshes = Vec::new();
         let mut material_layers = Vec::new();
         for s in &model.surfaces {
@@ -1013,9 +1025,7 @@ impl Prop {
             let path = texture::resolve(assets, &format!("{}/{skin}", def.path), specs)
                 .or_else(|| texture::resolve(assets, skin, specs))
                 .with_context(|| format!("Weapon texture {skin}"))?;
-            let image = texture::decode(assets, &path)?;
-            let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
-            tex.set_filter(FilterMode::Linear);
+            let tex = texture::decode_upload_shared_sampled(assets, &path, sampler)?;
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             let _census = crate::sim_maps::probe::draw_query::prop_scope();
             material_layers.push(crate::render_fx::register(

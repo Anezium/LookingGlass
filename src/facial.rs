@@ -205,9 +205,8 @@ impl Face {
             let path = texture::resolve(assets, &format!("{}/{skin}", def.path), specs)
                 .or_else(|| texture::resolve(assets, &skin, specs))
                 .context("Missing blink texture")?;
-            let image = texture::decode(assets, &path)?;
-            let closed = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
-            closed.set_filter(FilterMode::Linear);
+            let closed = texture::decode_upload_shared(assets, &path)
+                .context("Blink texture upload")?;
             Some(Blink {
                 surface: index,
                 period,

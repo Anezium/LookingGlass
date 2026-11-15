@@ -43,6 +43,13 @@ thread_local! { static TEST_ENABLED: Cell<Option<bool>> = const { Cell::new(None
 #[cfg(test)]
 pub(crate) fn set_enabled_for_test(on: Option<bool>) { TEST_ENABLED.with(|v| v.set(on)); }
 
+// Test seam: present() returns before drawing or swapping, so a unit test can
+// drive a staged load without a window and still see the accounting.
+#[cfg(test)]
+thread_local! { static TEST_NO_SWAP: Cell<bool> = const { Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn set_no_swap_for_test(on: bool) { TEST_NO_SWAP.with(|v| v.set(on)); }
+
 /// Ends the active load on drop, on success and on every error path alike.
 pub(crate) struct Load(());
 impl Drop for Load {
@@ -73,6 +80,12 @@ pub(crate) fn counts() -> Option<(u32, u32)> {
     ACTIVE.with(|a| a.borrow().as_ref().map(|a| (a.done, a.presents)))
 }
 
+/// The same for tests, without requiring the renderer feature.
+#[cfg(test)]
+fn test_counts() -> Option<(u32, u32)> {
+    ACTIVE.with(|a| a.borrow().as_ref().map(|a| (a.done, a.presents)))
+}
+
 fn current() -> Option<(String, u32)> {
     ACTIVE.with(|a| a.borrow().as_ref().map(|a| (a.destination.clone(), a.done)))
 }
@@ -87,11 +100,36 @@ pub(crate) async fn between(stage: &'static str) {
     let start = Instant::now();
     present(&destination, done, stage).await;
     let ms = start.elapsed().as_secs_f64() * 1000.;
-    ACTIVE.with(|a| if let Some(a) = a.borrow_mut().as_mut() { a.presents += 1; a.present_ms += ms; });
+    note_present(ms);
     eprintln!("[lg/loading] step={stage} done={done}/{STEPS} present_ms={ms:.3}");
 }
 
+/// The load's current screen, once, outside a stage boundary. The boot entry has
+/// no outgoing resources to retire, so it replaces the menu with this one frame
+/// instead of running a retirement sequence.
+pub(crate) async fn show() {
+    if SUPPRESS.with(|s| s.get()) > 0 { return; }
+    let Some((destination, done)) = current() else { return };
+    let start = Instant::now();
+    present(&destination, done, "begin").await;
+    let ms = start.elapsed().as_secs_f64() * 1000.;
+    note_present(ms);
+    eprintln!("[lg/loading] present=begin done={done}/{STEPS} present_ms={ms:.3}");
+}
+
+/// Count one frame this load presented, wherever it drew: a stage boundary, the
+/// boot's step-zero screen, or a retirement sequence inside the load. The end line
+/// reports every swap, not only the `between` calls.
+pub(crate) fn note_present(ms: f64) {
+    ACTIVE.with(|a| if let Some(a) = a.borrow_mut().as_mut() {
+        a.presents += 1;
+        a.present_ms += ms;
+    });
+}
+
 async fn present(destination: &str, done: u32, stage: &str) {
+    #[cfg(test)]
+    if TEST_NO_SWAP.with(|v| v.get()) { return; }
     crate::frame_profile::exclude_transition_frame();
     draw(destination, done);
     #[cfg(not(target_os = "vita"))]
@@ -164,7 +202,20 @@ pub(crate) fn run_ready<F: Future>(future: F) -> F::Output {
 mod tests {
     use super::*;
     struct Reset;
-    impl Drop for Reset { fn drop(&mut self) { set_enabled_for_test(None); } }
+    impl Drop for Reset {
+        fn drop(&mut self) { set_enabled_for_test(None); set_no_swap_for_test(false); }
+    }
+
+    /// Poll a genuinely ready load future without a window. `run_ready` suppresses
+    /// frames, so the accounting tests drive `between`/`show` directly instead.
+    fn drain<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("a test frame awaited a real swap"),
+        }
+    }
 
     async fn staged(log: &mut Vec<u32>) -> u32 {
         for stage in ["a", "b", "c"] {
@@ -208,6 +259,55 @@ mod tests {
         let caught = std::panic::catch_unwind(|| run_ready(async { panic!("load failed") }));
         assert!(caught.is_err());
         assert_eq!(SUPPRESS.with(|s| s.get()), 0);
+    }
+
+    #[test]
+    fn a_boot_load_counts_its_step_zero_screen_and_every_stage() {
+        let _reset = Reset;
+        set_enabled_for_test(Some(true));
+        set_no_swap_for_test(true);
+        let load = begin("chapter-or-console", "gvillage").expect("key on starts a load");
+        drain(show());
+        assert_eq!(test_counts(), Some((0, 1)), "the boot's step-zero screen");
+        for stage in ["scene", "npcs", "sound", "alice", "level_art"] {
+            drain(between(stage));
+        }
+        assert_eq!(
+            test_counts(),
+            Some((5, 6)),
+            "one boot screen plus the five stage frames: the count the end line reports"
+        );
+        drop(load);
+        assert_eq!(test_counts(), None);
+    }
+
+    #[test]
+    fn frames_presented_outside_a_stage_are_part_of_the_load() {
+        let _reset = Reset;
+        set_enabled_for_test(Some(true));
+        set_no_swap_for_test(true);
+        let load = begin("death-retry", "hatter1").unwrap();
+        // A retirement sequence inside the load presents its own frames.
+        note_present(3.);
+        note_present(5.);
+        assert_eq!(test_counts(), Some((0, 2)));
+        drain(between("scene"));
+        assert_eq!(test_counts(), Some((1, 3)));
+        drop(load);
+        note_present(7.);
+        assert_eq!(test_counts(), None, "no load is open, so nothing is counted");
+    }
+
+    #[test]
+    fn a_boot_screen_only_presents_when_a_load_is_open() {
+        let _reset = Reset;
+        set_enabled_for_test(Some(true));
+        set_no_swap_for_test(true);
+        drain(show());
+        assert_eq!(test_counts(), None, "no `begin`, no frame");
+        let _load = begin("chapter-or-console", "gvillage").unwrap();
+        run_ready(show());
+        assert_eq!(test_counts(), Some((0, 0)), "sync callers never present");
     }
 
     #[test]

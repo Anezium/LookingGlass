@@ -257,6 +257,9 @@ pub struct Menu {
 }
 impl Menu {
     pub fn load(assets: &mut Assets) -> Result<Self> {
+        // The menu build is a load boundary of its own: one cache window, cleared
+        // when the menu is built, so no menu texture outlives it into the boot build.
+        let _share = crate::texture::load_scope();
         let mut timing = crate::startup::Phase::new("menu_load");
         let specs = texture::read_materials(assets)?;
         timing.mark("materials");
