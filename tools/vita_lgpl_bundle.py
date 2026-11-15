@@ -428,10 +428,11 @@ the Looking Glass port of American McGee's Alice.
 ## What is not in this bundle
 
 - No game data, no pack, texture, sound or movie.
-- No binary under another licence. The C archives other than SceShaccCgExt are
-  part of the VitaSDK and are not redistributed here: `libvitaGL.a`,
-  `libvitashark.a`, `libmathneon.a`, newlib, pthread-embedded, taiHEN and the
-  Sce stub archives. `link/BUILD.txt` records the exact SDK components and
+- No binary under another licence. The other C archives in the link are not
+  redistributed here: `libvitaGL.a` (a local LGPL-3.0 build of
+  Rinnegatamante/vitaGL at `dca4b9d`), `libvitashark.a` (LGPL-3.0, vdpm package
+  vitaShaRK 1.7-1), `libmathneon.a` (MIT), newlib, pthread-embedded, taiHEN and
+  the Sce stub archives. `link/BUILD.txt` records the exact SDK components and
   archive SHA-256 values the release used. A byte-identical relink needs the
   same archives; a functional relink works with compatible ones.
 
