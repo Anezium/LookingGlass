@@ -1900,7 +1900,8 @@ pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[cr
         || !retained::gpu_skin::available() || alpha!=1. || !skin_fully_opaque()
         || crate::character::skinning::mutable_required() || crate::character::skinning::overlap::ready()
         || crate::character::skinning::overlap::gather_only() {return false;}
-    if source.vertices.len()!=mesh.vertices.len() || source.indices!=mesh.indices {return false;}
+    if source.vertices.len()!=mesh.vertices.len() || source.indices!=mesh.indices
+        || source.vertices.iter().zip(&mesh.vertices).any(|(a,b)|a.uv.to_array().map(f32::to_bits)!=b.uv.to_array().map(f32::to_bits)) {return false;}
     let Some(surface)=&mesh.surface else {return false;};
     if surface.transparent || surface.preserve_skin || surface.layers.iter().any(|l|!actor_cache::simple(&l.stage)) {return false;}
     let Some(payload)=retained::gpu_skin::occurrence(source.cpu(),pose,scales,transform,scale,fullbright,alpha) else {return false;};
