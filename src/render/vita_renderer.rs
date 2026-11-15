@@ -504,8 +504,8 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 }
 impl Default for Config {
     fn default() -> Self {
-            diag_submit_timing: false, submit_uniform_retain: false, submit_uniform_sparse: false,
         Self {
+            diag_submit_timing: false, submit_uniform_retain: false, submit_uniform_sparse: false,
             log_frame_time_every: Some(10),
             sim_trigger_facts_reuse: true,
             sim_hatter_door_candidates: true,
