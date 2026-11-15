@@ -521,7 +521,7 @@ fn selected_mesh(mesh: &Mesh, compact: bool) -> Mesh {
             *next
         })
         .collect();
-    Mesh { surface: None,
+    Mesh { surface: mesh.surface.clone(),
         vertices,
         indices,
         texture: mesh.texture.clone(),
