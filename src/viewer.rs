@@ -504,7 +504,8 @@ pub(crate) async fn check_transition_loading(assets: &mut Assets, options: &Opti
 }
 
 /// The chapter and the restore loads, as the viewer runs them, with whatever `loading_screen`
-/// the renderer config sets: on, each load presents one frame per stage boundary (five) and the
+/// the renderer config sets: on, each load presents one frame per stage boundary (five stage frames, six presents counting the
+/// retirement swap) and the
 /// release frames show step zero; off, none. Prints host wall times for both loads.
 #[cfg(all(feature="vita_renderer", not(target_os="vita")))]
 pub(crate) async fn check_loading_screen(assets: &mut Assets, options: &Options) -> Result<()> {
@@ -515,7 +516,7 @@ pub(crate) async fn check_loading_screen(assets: &mut Assets, options: &Options)
     let expect = |kind: &str, map: &str| -> Result<()> {
         let counts = crate::loading_screen::counts();
         if on {
-            anyhow::ensure!(counts == Some((5, 5)), "{kind} {map}: expected five presented stage frames, got {counts:?}");
+            anyhow::ensure!(counts == Some((5, 6)), "{kind} {map}: expected five stage frames and six presents (one retirement swap), got {counts:?}");
         } else {
             anyhow::ensure!(counts.is_none(), "{kind} {map}: loading_screen off must not start a load");
         }
