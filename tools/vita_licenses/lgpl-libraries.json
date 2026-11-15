@@ -1,0 +1,616 @@
+{
+  "comment": "Pins for the LGPL C libraries linked into the Alice Vita release. Sources in the bundle are exported at these revisions; members are the archive members the release link loaded (all for vitaGL/vitaShaRK, the contributing subset for pthread-embedded). identity=stripped means the member hash is taken after objcopy --strip-debug, because ar stores member timestamps and DWARF paths; the linked ELF uses -Wl,--strip-debug.",
+  "libraries": [
+    {
+      "name": "vitaGL",
+      "archive": "libvitaGL.a",
+      "source": "https://github.com/Rinnegatamante/vitaGL",
+      "revision": "dca4b9d143290d78ec043131a19be36c78cdc7b5",
+      "license": "LGPL-3.0-or-later",
+      "license_files": [
+        {
+          "path": "COPYING",
+          "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+        },
+        {
+          "path": "COPYING.LESSER",
+          "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118"
+        }
+      ],
+      "bundle_licenses": [
+        {
+          "source": "COPYING.LESSER",
+          "name": "LGPL-3.0.txt"
+        },
+        {
+          "source": "COPYING",
+          "name": "GPL-3.0.txt"
+        }
+      ],
+      "identity": "stripped",
+      "members": [
+        {
+          "member": "atitc_utils.o",
+          "bytes": 18848,
+          "sha256": "f808d68a58bf28bf51d45113e26793e80e184598f65039e291832956fff32712",
+          "sha256_stripped": "48b1f24f5578cd259eabb6a25b99df1609ffd4b772da82be7016b8313d8bb5f2"
+        },
+        {
+          "member": "blending.o",
+          "bytes": 25224,
+          "sha256": "c5a79362db89b7f17663b3c142925498419cc0f6a47db0339dada140ba8d6c80",
+          "sha256_stripped": "a37d25519271caa48a91257ebdbf4c7d032789424afdad81f5c1b997b1b14fb9"
+        },
+        {
+          "member": "buffers.o",
+          "bytes": 66296,
+          "sha256": "fa93b1dc5546757c15e5ed184e64ebee5972c12278d4148ef344f72c5d550b7c",
+          "sha256_stripped": "1192fefdd29a76ba98020f80788feec7159934ce59b01f54e3c6a4098ef6ab42"
+        },
+        {
+          "member": "custom_shaders.o",
+          "bytes": 267104,
+          "sha256": "3fee3ed8b92424f7519d50c90503d4be25eeb84631cc5e12e2eebffaf7a98261",
+          "sha256_stripped": "a19fc81be83705119f99ec5d3d56091c8e9d12543bdf5a6338d1fb99c4fc4f21"
+        },
+        {
+          "member": "debug.o",
+          "bytes": 3844,
+          "sha256": "5d071540d4346c965b656d1fe09332b634eb38207502f0d03d0141d534e181a3",
+          "sha256_stripped": "3c75e864683d5805a6f920e16e84e4e9f9223f129e471af547f0d9ce72052f8a"
+        },
+        {
+          "member": "display_lists.o",
+          "bytes": 32216,
+          "sha256": "7c73a13107552ac8c84c60172112c0c940e9fa720d04fdf1d2ef383af59470d8",
+          "sha256_stripped": "4e7b86a663f44110538305fe8af4d22bfe51fa6b8277db28528c4639c225eb04"
+        },
+        {
+          "member": "draw.o",
+          "bytes": 83376,
+          "sha256": "253507afa9c2e117e5ae220868edb56a6b139d96959f5b94075d190ef3b1d917",
+          "sha256_stripped": "206e79a334f8b8756a8c250208753651ddca91436ce2e677e5a16d9e89582e71"
+        },
+        {
+          "member": "eac_utils.o",
+          "bytes": 55052,
+          "sha256": "5a94e2c5be2571992a5d87209b0e89f8b558f2dedc51822560b78d7f85dd2124",
+          "sha256_stripped": "00ca0abcd768031ec604699150244194688f45f0c6cc11a6e5653adbf99995b4"
+        },
+        {
+          "member": "egl.o",
+          "bytes": 27712,
+          "sha256": "215257e7cf72a59bf5eb06286cc82c81082eacd101ea7a2cc5233b932dcf59f0",
+          "sha256_stripped": "0919c63efcc2c74cd8dba8789189004b7daab5a4007299fc234c3380613e1d88"
+        },
+        {
+          "member": "etc1_utils.o",
+          "bytes": 29948,
+          "sha256": "977648b599cdc7f845739a1cad81860d513bb80ceb8e384aae716b93144c4c17",
+          "sha256_stripped": "fb1478e12c3fc9fc90c976e80ccb083612e762a73907939a368878583ca56b5e"
+        },
+        {
+          "member": "etc_utils.o",
+          "bytes": 114868,
+          "sha256": "fa6ef72888af7ba241a67ccff451073f24a72159effe656afec97b54593ebf08",
+          "sha256_stripped": "4f45bcc2554d5a6c7429b60fe9da88fea7070983f8528e0cc684d04b48b2bce6"
+        },
+        {
+          "member": "expression.o",
+          "bytes": 411572,
+          "sha256": "4cba9775de1e4ee70459f3fe04e2ededa55b51fd08a5aa789a5ed13e635ea345",
+          "sha256_stripped": "13089abf4ee7b0ee4291de65abda62ad08c2a4546bb0b526a7c1345c16bc5099"
+        },
+        {
+          "member": "ffp.o",
+          "bytes": 266116,
+          "sha256": "9b1a1531ad20877218b2f95ac6ff643ea5af7adb3b39d4fb208dd774ffaafdde",
+          "sha256_stripped": "3667590b2a677af7cc809399316f77d61f7ec2e2d5d4a008f80c425727988d90"
+        },
+        {
+          "member": "framebuffers.o",
+          "bytes": 112284,
+          "sha256": "f15063655e08e015abd043da988891bde3f7bfbdec1fa73032193364eda46e18",
+          "sha256_stripped": "41ec34a293bd7163bd7fd12966dd2df94c33f312a86ab4ff036525c6c6627806"
+        },
+        {
+          "member": "get_info.o",
+          "bytes": 77672,
+          "sha256": "40ecb70e9cd8c3c651f766f6f34bdaecef452b8157dfa6ae3114d9ba3fa2b969",
+          "sha256_stripped": "876c37d283b44037ecb0f9a4e518756c4e9deea8294821c89fa47bd0bfbe768a"
+        },
+        {
+          "member": "glsl_utils.o",
+          "bytes": 107044,
+          "sha256": "36bc8798bc57a6cb9e2f677ff217bf7b84d38ad8baa6d1a6a72b4482860d095e",
+          "sha256_stripped": "dac3479f276eaf2f1b35a5f6b63ad9daf8f333a1520270afbe9a759d75311108"
+        },
+        {
+          "member": "gpu_utils.o",
+          "bytes": 279648,
+          "sha256": "394adb01515a46c2982240ff39d202c3b023150233331d92e801936068cff2f6",
+          "sha256_stripped": "ca8d0f317f9933505ae1b7f7bfd3eb7cbf60462fcf4fdc8e2dae3f0f8116a502"
+        },
+        {
+          "member": "gxm.o",
+          "bytes": 88976,
+          "sha256": "8d3011e35c68115ec9ba18b553e5834daf4d6ea73f8865da94cf2f2645173e51",
+          "sha256_stripped": "376955b954a157165b195d9f90be27e096f0f3b0fd0a1df3acc3d9c1a9d5fcc6"
+        },
+        {
+          "member": "gxm_utils.o",
+          "bytes": 115684,
+          "sha256": "34728b981e078263a6e34de655c94dcd7ae947d1951f3eb8fe3c8be4b096b163",
+          "sha256_stripped": "b631dc334b36ae46cd8e26dd2809855c687cd0104e0567a38e7675d6356eaa70"
+        },
+        {
+          "member": "lookup.o",
+          "bytes": 66480,
+          "sha256": "1c4d2418a0e2c1e8e032c8c016a0eee745cb282bd6d358fe83b4eee66160f8b6",
+          "sha256_stripped": "65cb62d8c5bf7347a2b7cd8d98e59d3d82003ea051c6d1410024865838744421"
+        },
+        {
+          "member": "matrices.o",
+          "bytes": 122376,
+          "sha256": "e5a07fc434957a09a5ec04f7bf5353ddf2fada6ab5028a05c60e2294c8005e86",
+          "sha256_stripped": "9d100ad70d9d9bf382b1a294571ff4fbd6095e0a5da7c23eb7f32c8a09d4f6ef"
+        },
+        {
+          "member": "mem_utils.o",
+          "bytes": 48724,
+          "sha256": "7877164c7692fee7b03b61ecfc94dd51e504bcff5bfa5d5c954531063dd4e20c",
+          "sha256_stripped": "f1003e0c83ba8ba163df3af34e2a6f08fc21b54f6e480edb3dcaf8b8e97878ea"
+        },
+        {
+          "member": "misc.o",
+          "bytes": 95792,
+          "sha256": "11f549ff51b8dbe5acf02d6bc8b6f0bada415f19ceec76f59a2db0926d3540c6",
+          "sha256_stripped": "e670b536c6e8d65310c06d0e47a1f1bc58f94793fc139fe31480cf488d2b1363"
+        },
+        {
+          "member": "preprocessor.o",
+          "bytes": 2702684,
+          "sha256": "730b6bbfbdc6a5a2073fd9776218f3bb6605b4ee2357314cb02f2246ef31312f",
+          "sha256_stripped": "e0f34360809478948e7c12d2dcb22ea33ecc3f5243c76c81a5b869d540c9ae1b"
+        },
+        {
+          "member": "splashscreen.o",
+          "bytes": 182412,
+          "sha256": "d03bdcf16155533dd140c4ce95835c1ebfd26629a82d79d79257d1925fad284a",
+          "sha256_stripped": "8d1f0fdd907cd0c88a8dad7024a4d8adb219a99de1f74a16ebedade2062184f9"
+        },
+        {
+          "member": "tests.o",
+          "bytes": 83056,
+          "sha256": "ed1a7740f9a47660dbcfb3c5f8fbb096f19b807c50d1bae08c4ee9222afadfca",
+          "sha256_stripped": "65421496100da8a3e9307680a1482f2715f55408245ce29aa46301c4319a2375"
+        },
+        {
+          "member": "texture_callbacks.o",
+          "bytes": 13008,
+          "sha256": "d76a507b7ef13f745f9ed65b560a563b143fcec7c7d879631bd8522d45773366",
+          "sha256_stripped": "3ae702254c66aca50779e406f1444a80b4a85ea5dc725c702c1f7db538d2bba4"
+        },
+        {
+          "member": "texture_swizzler.o",
+          "bytes": 56784,
+          "sha256": "30c8454e61583a731c70f5093163623e94eea5d2b357f140bfda0a5d920969d8",
+          "sha256_stripped": "85086cb584bad8f489e9bb81d66a1d46de091ebef0bc9ec0754617d4d675ea8f"
+        },
+        {
+          "member": "textures.o",
+          "bytes": 254488,
+          "sha256": "f86d49dd9990164803ff34c9c659cf7902b447146f727161ca38c7365ae45d6d",
+          "sha256_stripped": "fd31e6c115fbcb855df73adc814eb6b9eb53713e2f43d4c9cff82efc79c87f7c"
+        },
+        {
+          "member": "vgl.o",
+          "bytes": 93144,
+          "sha256": "1972b234df5dbfb6e5cd531268fc6aa08f980fe10651f1bbf1394a4ad958502b",
+          "sha256_stripped": "4a7809c39d028d49775d3d4dc903c9ccbabbd2f72c88491674ac7fcd1d38f907"
+        }
+      ],
+      "archive_sha256": "6842d410b2571fe4a31d4fe933dd76c5679330a28e80a5c27b1539a534d91b3b",
+      "members_total": 30,
+      "path_dependent": [
+        "splashscreen.o"
+      ],
+      "path_dependent_reason": "splashscreen.o embeds the VitaSDK include path in .rodata.str1.4 through __FILE__; the bytes depend on where the SDK is installed. The member is required to be present; its bytes are not compared."
+    },
+    {
+      "name": "vitaShaRK",
+      "archive": "libvitashark.a",
+      "source": "https://github.com/Rinnegatamante/vitaShaRK",
+      "revision": "df24065e65098b2d1ac533760109ad4367573f28",
+      "tag": "v.1.7",
+      "license": "LGPL-3.0-or-later",
+      "license_files": [
+        {
+          "path": "LICENSE",
+          "sha256": "6557adc4bc1d59232e27567a185dd70cf2ecca3154018b0be61ea29cf9e814e2"
+        }
+      ],
+      "bundle_licenses": [
+        {
+          "source": "LICENSE",
+          "name": "vitaShaRK-LICENSE.txt"
+        }
+      ],
+      "identity": "stripped",
+      "members": [
+        {
+          "member": "vitashark.o",
+          "bytes": 38800,
+          "sha256": "606aeab71274b08e7fc284ed4f44f8fe31ada96002210026953e584d83cd1453",
+          "sha256_stripped": "606aeab71274b08e7fc284ed4f44f8fe31ada96002210026953e584d83cd1453"
+        }
+      ],
+      "archive_sha256": "ad5ba9176cb81074cf0f8b373fc75abf79c05cf1ad1553a209f42ccfb94169b4",
+      "members_total": 1
+    },
+    {
+      "name": "pthread-embedded",
+      "archive": "libpthread.a",
+      "source": "https://github.com/vitasdk/pthread-embedded",
+      "revision": "11d2e5722d98c86f33c908fc47b2cf6e55205db5",
+      "license": "LGPL-2.1; the PS Vita platform layer is MIT",
+      "license_files": [
+        {
+          "path": "COPYING",
+          "sha256": "933dea73f8be52981372244bea77f4499418f577104b7fc522c1f3f130345352"
+        },
+        {
+          "path": "COPYING.LIB",
+          "sha256": "a190dc9c8043755d90f8b0a75fa66b9e42d4af4c980bf5ddc633f0124db3cee7"
+        },
+        {
+          "path": "COPYING.vita",
+          "sha256": "7292d7c97452f761315efe55ba273eb38e0100ebade9ae8fc07fc6f7f05512de"
+        }
+      ],
+      "bundle_licenses": [
+        {
+          "source": "COPYING.LIB",
+          "name": "pthread-embedded-COPYING.LIB.txt"
+        },
+        {
+          "source": "COPYING",
+          "name": "pthread-embedded-COPYING.txt"
+        },
+        {
+          "source": "COPYING.vita",
+          "name": "pthread-embedded-COPYING.vita.txt"
+        }
+      ],
+      "identity": "stripped-comment",
+      "members": [
+        {
+          "member": "cleanup.o",
+          "bytes": 896,
+          "sha256": "4a9317a6bfbe0487d59e2ca5a5a22dce0747c651867216839e70a17e614b9b63",
+          "sha256_stripped": "4a9317a6bfbe0487d59e2ca5a5a22dce0747c651867216839e70a17e614b9b63"
+        },
+        {
+          "member": "create.o",
+          "bytes": 1416,
+          "sha256": "11ebcad5770e84314cbc9ff43ef50112291b5ba3059b2f43b2ee2f2f9cdcbbb0",
+          "sha256_stripped": "11ebcad5770e84314cbc9ff43ef50112291b5ba3059b2f43b2ee2f2f9cdcbbb0"
+        },
+        {
+          "member": "global.o",
+          "bytes": 1132,
+          "sha256": "6e3febb05d7f70b63aab581f4ae86526320033637a1ff3e87799380f80888e43",
+          "sha256_stripped": "6e3febb05d7f70b63aab581f4ae86526320033637a1ff3e87799380f80888e43"
+        },
+        {
+          "member": "pte_callUserDestroyRoutines.o",
+          "bytes": 1220,
+          "sha256": "af34cca31ea01add6f1a72abfc87be2ce1d831f0774fdc973dbf3afc4daf6bbb",
+          "sha256_stripped": "af34cca31ea01add6f1a72abfc87be2ce1d831f0774fdc973dbf3afc4daf6bbb"
+        },
+        {
+          "member": "pte_cancellable_wait.o",
+          "bytes": 996,
+          "sha256": "16bca5432b8e9773ba5304c3af92978d5e9847f1666fce1c60504b1bc9cff5d7",
+          "sha256_stripped": "16bca5432b8e9773ba5304c3af92978d5e9847f1666fce1c60504b1bc9cff5d7"
+        },
+        {
+          "member": "pte_cond_check_need_init.o",
+          "bytes": 864,
+          "sha256": "2de51dc5690a19506fa1a8e29bb46968e94df0371121a1809c925d55bdf2e81f",
+          "sha256_stripped": "2de51dc5690a19506fa1a8e29bb46968e94df0371121a1809c925d55bdf2e81f"
+        },
+        {
+          "member": "pte_detach.o",
+          "bytes": 1332,
+          "sha256": "634e3637e996fde383d728e6e08548b83b59323593cfb76fca041ba71e647b41",
+          "sha256_stripped": "634e3637e996fde383d728e6e08548b83b59323593cfb76fca041ba71e647b41"
+        },
+        {
+          "member": "pte_is_attr.o",
+          "bytes": 580,
+          "sha256": "40ee7512d80da1c562bb37eb5a615ba24f995bd0dc478455e6114c43a377d577",
+          "sha256_stripped": "40ee7512d80da1c562bb37eb5a615ba24f995bd0dc478455e6114c43a377d577"
+        },
+        {
+          "member": "pte_mutex_check_need_init.o",
+          "bytes": 1304,
+          "sha256": "8030c8ec2011b42ff451acff68f67319108f8b7be7eaca97cfd5a82c6e1bdccd",
+          "sha256_stripped": "8030c8ec2011b42ff451acff68f67319108f8b7be7eaca97cfd5a82c6e1bdccd"
+        },
+        {
+          "member": "pte_new.o",
+          "bytes": 808,
+          "sha256": "320efd25c394d4d2b58a1bcb1e0246e8f143d9f62ef8548be1cdd2e7a34679eb",
+          "sha256_stripped": "320efd25c394d4d2b58a1bcb1e0246e8f143d9f62ef8548be1cdd2e7a34679eb"
+        },
+        {
+          "member": "pte_relmillisecs.o",
+          "bytes": 780,
+          "sha256": "b98c5de6d06e58f7f8648f501ed82520103ea6066cf74f8b3166b5513d696166",
+          "sha256_stripped": "b98c5de6d06e58f7f8648f501ed82520103ea6066cf74f8b3166b5513d696166"
+        },
+        {
+          "member": "pte_reuse.o",
+          "bytes": 1124,
+          "sha256": "30548eb5a2398d25ed4ce8c9c0e14821eadc1ce0d60d12bffb91d91a8e233c89",
+          "sha256_stripped": "30548eb5a2398d25ed4ce8c9c0e14821eadc1ce0d60d12bffb91d91a8e233c89"
+        },
+        {
+          "member": "pte_threadDestroy.o",
+          "bytes": 1004,
+          "sha256": "35ee8551fcc58b20fc5ba76edb00cef58c08b96f8e3614c17ab9157caa6b28f8",
+          "sha256_stripped": "35ee8551fcc58b20fc5ba76edb00cef58c08b96f8e3614c17ab9157caa6b28f8"
+        },
+        {
+          "member": "pte_threadStart.o",
+          "bytes": 908,
+          "sha256": "9a6035f0678d50c8d418e3bcc97eb2da0ae835f44e7050670bce3422baf5846c",
+          "sha256_stripped": "9a6035f0678d50c8d418e3bcc97eb2da0ae835f44e7050670bce3422baf5846c"
+        },
+        {
+          "member": "pte_throw.o",
+          "bytes": 1024,
+          "sha256": "7ea4c90a26df8aec1ac72d02f1a16d030f2e83c735f8ad0b5d6266a8980ed465",
+          "sha256_stripped": "7ea4c90a26df8aec1ac72d02f1a16d030f2e83c735f8ad0b5d6266a8980ed465"
+        },
+        {
+          "member": "pte_tkAssocCreate.o",
+          "bytes": 700,
+          "sha256": "688ad55fefae2cf5bc946bf5305ada9586a38e54a74855b5d5b73eb4083eb4c5",
+          "sha256_stripped": "688ad55fefae2cf5bc946bf5305ada9586a38e54a74855b5d5b73eb4083eb4c5"
+        },
+        {
+          "member": "pte_tkAssocDestroy.o",
+          "bytes": 704,
+          "sha256": "a4836ae5cabcef1c2cba8b315d1ab4327cc11427c6d394f34255d0519391cd79",
+          "sha256_stripped": "a4836ae5cabcef1c2cba8b315d1ab4327cc11427c6d394f34255d0519391cd79"
+        },
+        {
+          "member": "pthread_attr_destroy.o",
+          "bytes": 708,
+          "sha256": "b046d321405f25e03afe88eca6a80a91dd733c5e486485696d3961ee8527d86a",
+          "sha256_stripped": "b046d321405f25e03afe88eca6a80a91dd733c5e486485696d3961ee8527d86a"
+        },
+        {
+          "member": "pthread_attr_init.o",
+          "bytes": 764,
+          "sha256": "51be5e11cdba8f14e75970714e5636392bcb94309825dcbb43c6e315f8cf9873",
+          "sha256_stripped": "51be5e11cdba8f14e75970714e5636392bcb94309825dcbb43c6e315f8cf9873"
+        },
+        {
+          "member": "pthread_attr_setstacksize.o",
+          "bytes": 680,
+          "sha256": "8e1bc4e54d2ee807c9696dad5487d486b5a0341c0f1b9e0775cb86b6c5d1ce96",
+          "sha256_stripped": "8e1bc4e54d2ee807c9696dad5487d486b5a0341c0f1b9e0775cb86b6c5d1ce96"
+        },
+        {
+          "member": "pthread_cond_destroy.o",
+          "bytes": 1612,
+          "sha256": "e19c5803a64805f5753b941c77a483d390e1e0d101bf51e54258c25d3dcfd9fc",
+          "sha256_stripped": "e19c5803a64805f5753b941c77a483d390e1e0d101bf51e54258c25d3dcfd9fc"
+        },
+        {
+          "member": "pthread_cond_init.o",
+          "bytes": 1368,
+          "sha256": "dfca76f59e4a45a9fd881afa42851db86a18b35078c70932fd1dfe4799f9d220",
+          "sha256_stripped": "dfca76f59e4a45a9fd881afa42851db86a18b35078c70932fd1dfe4799f9d220"
+        },
+        {
+          "member": "pthread_cond_signal.o",
+          "bytes": 1276,
+          "sha256": "2ac38e2754eed43b4394ee6f2959a463e5f3f868785078b7fc8542af71183375",
+          "sha256_stripped": "2ac38e2754eed43b4394ee6f2959a463e5f3f868785078b7fc8542af71183375"
+        },
+        {
+          "member": "pthread_cond_wait.o",
+          "bytes": 1720,
+          "sha256": "41a8cfc420d36b6edbcdafffdd3a64e4dba72c59c336606adb45aa63dea59873",
+          "sha256_stripped": "41a8cfc420d36b6edbcdafffdd3a64e4dba72c59c336606adb45aa63dea59873"
+        },
+        {
+          "member": "pthread_condattr_destroy.o",
+          "bytes": 676,
+          "sha256": "7ea0dfe0fdc4f798950786f92d109412a9534839944c2790a242ed5242f8eb35",
+          "sha256_stripped": "7ea0dfe0fdc4f798950786f92d109412a9534839944c2790a242ed5242f8eb35"
+        },
+        {
+          "member": "pthread_condattr_init.o",
+          "bytes": 664,
+          "sha256": "2fbf609aaf3a9749e88922daa84a7683961c4b9196da37d49fc03ce4a8a8b64e",
+          "sha256_stripped": "2fbf609aaf3a9749e88922daa84a7683961c4b9196da37d49fc03ce4a8a8b64e"
+        },
+        {
+          "member": "pthread_condattr_setclock.o",
+          "bytes": 592,
+          "sha256": "feab19fc2a62616ff8efc7565d0aafd0baec07be49e627e29c4c2c1ba1e3cf90",
+          "sha256_stripped": "feab19fc2a62616ff8efc7565d0aafd0baec07be49e627e29c4c2c1ba1e3cf90"
+        },
+        {
+          "member": "pthread_detach.o",
+          "bytes": 1116,
+          "sha256": "7924c9b895238fd673473070898749ad1585dc9cd30e51cff5be9dcf64b5681c",
+          "sha256_stripped": "7924c9b895238fd673473070898749ad1585dc9cd30e51cff5be9dcf64b5681c"
+        },
+        {
+          "member": "pthread_equal.o",
+          "bytes": 576,
+          "sha256": "601e1e367a6f8310aa8ec9682e606f0ea5e870e62a9ebe7a33cd4257b3b0fa85",
+          "sha256_stripped": "601e1e367a6f8310aa8ec9682e606f0ea5e870e62a9ebe7a33cd4257b3b0fa85"
+        },
+        {
+          "member": "pthread_getspecific.o",
+          "bytes": 660,
+          "sha256": "e319de6f256ecca72d8ecf7f817329dc90ba88d76e2186c2128982f0205f7f2f",
+          "sha256_stripped": "e319de6f256ecca72d8ecf7f817329dc90ba88d76e2186c2128982f0205f7f2f"
+        },
+        {
+          "member": "pthread_init.o",
+          "bytes": 1444,
+          "sha256": "f456e917872a3cc87098624c3f83baf20d087f89d52586694c1eaf7e7b8148ac",
+          "sha256_stripped": "f456e917872a3cc87098624c3f83baf20d087f89d52586694c1eaf7e7b8148ac"
+        },
+        {
+          "member": "pthread_join.o",
+          "bytes": 1028,
+          "sha256": "fe0d57720f2eab787d2af79fd51761414c3d6f685cfa0ee2b685d4824ae2797b",
+          "sha256_stripped": "fe0d57720f2eab787d2af79fd51761414c3d6f685cfa0ee2b685d4824ae2797b"
+        },
+        {
+          "member": "pthread_key_create.o",
+          "bytes": 764,
+          "sha256": "8eff57c6efc40c105d7766a5357f100e77ef05db638894babe943ac6291e2ffc",
+          "sha256_stripped": "8eff57c6efc40c105d7766a5357f100e77ef05db638894babe943ac6291e2ffc"
+        },
+        {
+          "member": "pthread_key_delete.o",
+          "bytes": 1032,
+          "sha256": "48b79aba21059b077bfbb9e046fa4a0ad99c40be4476c98505b0fe4a2e78dc6f",
+          "sha256_stripped": "48b79aba21059b077bfbb9e046fa4a0ad99c40be4476c98505b0fe4a2e78dc6f"
+        },
+        {
+          "member": "pthread_mutex_destroy.o",
+          "bytes": 1052,
+          "sha256": "4c55bc81795dcbfd2a262abb159267af3aac9ed74ebf837eda546bd60f8c5d3d",
+          "sha256_stripped": "4c55bc81795dcbfd2a262abb159267af3aac9ed74ebf837eda546bd60f8c5d3d"
+        },
+        {
+          "member": "pthread_mutex_init.o",
+          "bytes": 744,
+          "sha256": "e858cce5fe8d2698639483fc2ed3cbb67f0fa14c4558abb7dfd24aa2765c1f4a",
+          "sha256_stripped": "e858cce5fe8d2698639483fc2ed3cbb67f0fa14c4558abb7dfd24aa2765c1f4a"
+        },
+        {
+          "member": "pthread_mutex_lock.o",
+          "bytes": 1056,
+          "sha256": "c26af55de06bb5e3be7639ecd9314a2f41d49c45c3549f47cf19ed70e3463054",
+          "sha256_stripped": "c26af55de06bb5e3be7639ecd9314a2f41d49c45c3549f47cf19ed70e3463054"
+        },
+        {
+          "member": "pthread_mutex_trylock.o",
+          "bytes": 888,
+          "sha256": "8ce15e55709bdc6f8710c10b58386eecdd0497cb73fd435270e43a260f9aa08b",
+          "sha256_stripped": "8ce15e55709bdc6f8710c10b58386eecdd0497cb73fd435270e43a260f9aa08b"
+        },
+        {
+          "member": "pthread_mutex_unlock.o",
+          "bytes": 900,
+          "sha256": "1edaffefcfbb06a327078775bf9286d05453f3e1d2ea9ffb625a431c84a4716e",
+          "sha256_stripped": "1edaffefcfbb06a327078775bf9286d05453f3e1d2ea9ffb625a431c84a4716e"
+        },
+        {
+          "member": "pthread_mutexattr_destroy.o",
+          "bytes": 668,
+          "sha256": "059e1e07329862f73d718625f53b444211c7f2b4d5bdfe0670ddfe15f038a751",
+          "sha256_stripped": "059e1e07329862f73d718625f53b444211c7f2b4d5bdfe0670ddfe15f038a751"
+        },
+        {
+          "member": "pthread_mutexattr_init.o",
+          "bytes": 664,
+          "sha256": "c787dea3ae00b8d5595e9b3640455d0be4e2ba1033029be6158294cebc50b098",
+          "sha256_stripped": "c787dea3ae00b8d5595e9b3640455d0be4e2ba1033029be6158294cebc50b098"
+        },
+        {
+          "member": "pthread_mutexattr_settype.o",
+          "bytes": 600,
+          "sha256": "1210f2a079d71bbd7b16f57cbde945dac7c6e906fdac8819eb750cc487210c91",
+          "sha256_stripped": "1210f2a079d71bbd7b16f57cbde945dac7c6e906fdac8819eb750cc487210c91"
+        },
+        {
+          "member": "pthread_self.o",
+          "bytes": 904,
+          "sha256": "d3c27bf6e40b909271819ce3129c774df389cbb6d4fddce2f38578c3188d35bf",
+          "sha256_stripped": "d3c27bf6e40b909271819ce3129c774df389cbb6d4fddce2f38578c3188d35bf"
+        },
+        {
+          "member": "pthread_setspecific.o",
+          "bytes": 1164,
+          "sha256": "94e0b9f298973144a698b1105f67ddcf21d264ffcee90d361fd8749a91a2f518",
+          "sha256_stripped": "94e0b9f298973144a698b1105f67ddcf21d264ffcee90d361fd8749a91a2f518"
+        },
+        {
+          "member": "pthread_terminate.o",
+          "bytes": 1132,
+          "sha256": "3154852da3891dd7e2e33da0a80d5efe53d16d986efbfa0c508a8905e31146d4",
+          "sha256_stripped": "3154852da3891dd7e2e33da0a80d5efe53d16d986efbfa0c508a8905e31146d4"
+        },
+        {
+          "member": "pthread_testcancel.o",
+          "bytes": 876,
+          "sha256": "1963a3c92e60019c4c7c458c341967f122c5baca23436efa20c2ee6bae9ddc7d",
+          "sha256_stripped": "1963a3c92e60019c4c7c458c341967f122c5baca23436efa20c2ee6bae9ddc7d"
+        },
+        {
+          "member": "sched_yield.o",
+          "bytes": 652,
+          "sha256": "4a34464b3e23129ac3ae90a6efa769d199abf24ca9cbb1f9412bc7099c1ba26d",
+          "sha256_stripped": "4a34464b3e23129ac3ae90a6efa769d199abf24ca9cbb1f9412bc7099c1ba26d"
+        },
+        {
+          "member": "sem_destroy.o",
+          "bytes": 1000,
+          "sha256": "2d990cf38fcb9e74111892e1e1a86ab49f3abb4931901b9afe7b071ce5d62e5c",
+          "sha256_stripped": "2d990cf38fcb9e74111892e1e1a86ab49f3abb4931901b9afe7b071ce5d62e5c"
+        },
+        {
+          "member": "sem_init.o",
+          "bytes": 928,
+          "sha256": "8a63c4b93a7129d71732b89cf3494926d52743c7281b778078ec891922f35fd3",
+          "sha256_stripped": "8a63c4b93a7129d71732b89cf3494926d52743c7281b778078ec891922f35fd3"
+        },
+        {
+          "member": "sem_post.o",
+          "bytes": 924,
+          "sha256": "4d8dc7c729cd4aa39b496fd35e2257144a5ec58b315123859c01b303f4f7523a",
+          "sha256_stripped": "4d8dc7c729cd4aa39b496fd35e2257144a5ec58b315123859c01b303f4f7523a"
+        },
+        {
+          "member": "sem_post_multiple.o",
+          "bytes": 908,
+          "sha256": "0f1f82be0c5976a6c0fced1b2f9021deda0ba19e8eea7100a8649ee367803f90",
+          "sha256_stripped": "0f1f82be0c5976a6c0fced1b2f9021deda0ba19e8eea7100a8649ee367803f90"
+        },
+        {
+          "member": "sem_timedwait.o",
+          "bytes": 1260,
+          "sha256": "6137bc5408efff7ef2434fb8e352c0a09fd9c4537a909eb7bc46fd22aafbeb56",
+          "sha256_stripped": "6137bc5408efff7ef2434fb8e352c0a09fd9c4537a909eb7bc46fd22aafbeb56"
+        },
+        {
+          "member": "sem_wait.o",
+          "bytes": 1364,
+          "sha256": "a29cac643a6f52be215a355c1cc3608b9cc64958761d66645fcaa08469c9d610",
+          "sha256_stripped": "a29cac643a6f52be215a355c1cc3608b9cc64958761d66645fcaa08469c9d610"
+        },
+        {
+          "member": "vita_osal.o",
+          "bytes": 6328,
+          "sha256": "95ab95779c5470f4100789e151946fabf09c18b2229b23ffb7265b5dd4ee4e21",
+          "sha256_stripped": "95ab95779c5470f4100789e151946fabf09c18b2229b23ffb7265b5dd4ee4e21"
+        }
+      ],
+      "archive_sha256": "207c1848aaa3b0a47443299ed6aecc0196d3402de6c496013c5880bfe679325b",
+      "members_total": 134
+    }
+  ]
+}

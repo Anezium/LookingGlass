@@ -66,15 +66,41 @@ the Windows package. Nothing here replaces those terms.
 The PlayStation Vita port in the `vita-*` branches of the Anezium/LookingGlass
 fork is an unofficial community port. It is not reviewed or endorsed by the
 Looking Glass maintainers, and it is not affiliated with EA or Sony Interactive
-Entertainment. Its packages contain no game data, no Internet Archive download
-option or bundled shader compiler. SceShaccCgExt is modified to omit its optional
-intrinsic prelude and the load of that prelude. Players copy their own game files to
-`ux0:data/alice/base/`, and the shader compiler `libshacccg.suprx` is loaded
-from their own console. The Vita build links third-party libraries statically,
-some of them under the GNU LGPL; their licences, and the files the port changed
-in forked dependencies, are listed in
-[THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt). Concerns about the
-port go to the maintainer of that fork through its
+Entertainment. Its packages contain no game data and no Internet Archive
+download option. They do not distribute Sony firmware or Sony libraries:
+players copy their own game files to `ux0:data/alice/base/`, and the shader
+compiler `libshacccg.suprx` is loaded from their own console.
+
+The Vita build links these third-party libraries statically:
+
+- **vitaGL** at `dca4b9d143290d78ec043131a19be36c78cdc7b5`, LGPL-3.0-or-later;
+- **vitaShaRK** at `df24065e65098b2d1ac533760109ad4367573f28` (tag `v.1.7`),
+  LGPL-3.0-or-later;
+- **pthread-embedded** (VitaSDK fork) at
+  `11d2e5722d98c86f33c908fc47b2cf6e55205db5`, LGPL-2.1 for the core with an
+  MIT-licensed PS Vita platform layer;
+- **SceShaccCgExt** at `d3c83efceedeca3be863d0c1f19bb145daf1685f`, LGPL-2.1.
+
+Their notices and licence texts are in
+[THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt). A release VPK also
+carries `THIRD_PARTY_NOTICES-vita.txt`, the full licence texts under
+`licenses/`, and `SOURCE-OFFER.txt`, which names the published source bundle,
+the written offer, and the source route for the MPL-2.0 components. The source
+bundle carries each library's corresponding source at the linked revision, the
+port's object code for this link, the exact linker command, and relink and
+packaging scripts.
+
+### SceShaccCgExt modification
+
+The upstream revision includes an optional intrinsic prelude in
+`include/sce_intrinsics.h`. The release removes that file, its build entry,
+and its load by the shader compiler. It retains the standard-library load,
+optional caller source, extension flag and other patches. The source bundle
+ships the patched source and `SceShaccCgExt-no-prelude.patch`, with dated
+modification notices. This removal does not resolve the other independent
+licence questions identified in the release audit.
+
+Concerns about the port go to the maintainer of that fork through its
 [issue tracker](https://github.com/Anezium/LookingGlass/issues), not to the
 upstream project.
 

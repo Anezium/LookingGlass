@@ -122,8 +122,9 @@ def check(vpk=None):
     if vpk:
         with zipfile.ZipFile(vpk) as archive:
             names = archive.namelist()
-            if set(names) != expected | {'eboot.bin', 'sce_sys/param.sfo'} or len(names) != len(set(names)):
-                raise ValueError('VPK has missing, extra or duplicate members')
+            required = expected | {'eboot.bin', 'sce_sys/param.sfo'}
+            if not required <= set(names) or len(names) != len(set(names)):
+                raise ValueError('VPK has missing or duplicate required members')
             for relative in expected:
                 if archive.read(relative) != (ASSETS / relative).read_bytes():
                     raise ValueError(f'VPK asset differs: {relative}')

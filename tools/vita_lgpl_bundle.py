@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Assemble the LGPL source and relink bundle for the Alice Vita release.
 
-The bundle carries the exact SceShaccCgExt source at the pinned revision, the
-LGPL-2.1 text, copies of every object file and archive the release link used
-(except the SDK and the release library itself), the exact linker command, the
-release link map, a README and SHA-256 sums. It contains no game data and no
-binary under another licence.
+The bundle carries, for every LGPL library the release links statically:
 
-The object copies come from a linker wrapper run during the release build:
-rustc deletes its temporary codegen objects after a successful link.
+- the exact source tree at the linked revision, exported from a public clone;
+- the licence files of that revision;
+- the exact object code and archives the release link read (except the library
+  archives themselves and the SDK archives), the exact linker command, the
+  release link map, a relink script and a packaging script.
+
+It contains no game data and no binary under another licence. The object copies
+come from a linker wrapper run during the release build: rustc deletes its
+temporary codegen objects after a successful link.
 """
 import argparse
 import hashlib
@@ -21,10 +24,13 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 ARCHIVE = "libSceShaccCgExt.a"
+LIBRARY_ORDER = ["libvitaGL.a", "libvitashark.a", "libSceShaccCgExt.a", "libpthread.a"]
 HEAD_RE = re.compile(r"^head ([0-9a-f]{40})$", re.M)
 ELF_HASH_RE = re.compile(r"^([0-9a-f]{64})  looking-glass\.elf$", re.M)
+SELF_HASH_RE = re.compile(r"^([0-9a-f]{64})  eboot\.bin$", re.M)
 VITAGL_LINE_RE = re.compile(
     r"^linked libvitaGL\.a sha256=([0-9a-f]{64}) package=(\S+)", re.M)
 VITAGL_RECIPE_RE = re.compile(r"^vitagl-recipe make (.+?) \(documented", re.M)
@@ -32,6 +38,24 @@ VITAGL_REVISION = "dca4b9d143290d78ec043131a19be36c78cdc7b5"
 VDPM_PACKAGES = "taihen vitaShaRK libmathneon"
 FORBIDDEN_SUFFIXES = (".pk3", ".vpk", ".self", ".velf", ".suprx", ".sfo",
                       ".tga", ".wav", ".ogg", ".vag", ".at3")
+ASSET_FILES = ("sce_sys/icon0.png",
+               "sce_sys/livearea/contents/bg.png",
+               "sce_sys/livearea/contents/startup.png",
+               "sce_sys/livearea/contents/template.xml")
+# Licence texts the VPK carries, mirroring tools/vita_package.py. The LGPL and
+# GPL texts come from the source trees below; these fill the remaining entries.
+PACKAGE_LICENCES = [
+    ("GCC-RUNTIME-EXCEPTION-3.1.txt", "GCC-RUNTIME-EXCEPTION-3.1.txt"),
+    ("MPL-2.0.txt", "symphonia-LICENSE"),
+    ("MIT.txt", "MIT.txt"),
+    ("Apache-2.0.txt", "Apache-2.0.txt"),
+    ("LookingGlass-LICENSE-MIT.txt", "LookingGlass-LICENSE-MIT.txt"),
+    ("newlib-COPYING.NEWLIB.txt", "newlib-COPYING.NEWLIB"),
+    ("newlib-COPYING.LIBGLOSS.txt", "newlib-COPYING.LIBGLOSS"),
+    ("vita-headers-LICENSE.md", "vita-headers-LICENSE.md"),
+    ("math-neon-LICENSE.txt", "math-neon-LICENSE"),
+    ("taiHEN-LICENSE.txt", "taiHEN-LICENSE"),
+]
 
 
 def sha256(path):
@@ -58,16 +82,106 @@ def absolute(path):
     return Path(os.path.abspath(os.path.expanduser(str(path))))
 
 
-def load_pin(repo):
+def normalise_member(name):
+    """Compare a rebuilt CMake object name with the release archive name."""
+    for suffix in (".c.obj", ".cc.obj", ".cpp.obj", ".cxx.obj"):
+        if name.endswith(suffix):
+            return name[:-len(suffix)] + ".o"
+    if name.endswith(".obj"):
+        return name[:-4] + ".o"
+    return name
+
+
+def read_archive_members(path):
+    """Read a GNU/BSD ar archive into {member name: bytes}."""
+    data = Path(path).read_bytes()
+    if data[:8] == b"!<thin>\n":
+        fail("thin archives are not supported: " + str(path))
+    if data[:8] != b"!<arch>\n":
+        fail("not an ar archive: " + str(path))
+    members = {}
+    long_names = b""
+    index = 8
+    while index + 60 <= len(data):
+        header = data[index:index + 60]
+        name = header[:16].decode("latin-1").rstrip()
+        try:
+            size = int(header[48:58].decode("latin-1").strip())
+        except ValueError:
+            fail("malformed ar header in " + str(path))
+        body = data[index + 60:index + 60 + size]
+        if len(body) != size:
+            fail("truncated ar member in " + str(path))
+        if name == "//":
+            long_names = body
+        elif name.startswith("#1/"):
+            length = int(name[3:])
+            name = body[:length].decode("utf-8", "replace").rstrip("\0")
+            members[name] = body[length:]
+        elif name not in ("/", "/SYM64/"):
+            if name.startswith("/") and name[1:].isdigit():
+                offset = int(name[1:])
+                end = long_names.find(b"/\n", offset)
+                if end < 0:
+                    fail("bad long-name reference in " + str(path))
+                name = long_names[offset:end].decode("utf-8", "replace")
+            else:
+                name = name.rstrip("/")
+            if not name:
+                fail("empty ar member name in " + str(path))
+            members[name] = body
+        index += 60 + size + (size & 1)
+    if not members:
+        fail("empty ar archive: " + str(path))
+    return members
+
+
+def strip_debug(data, objcopy, remove_comment=False):
+    with tempfile.TemporaryDirectory() as temp:
+        source = Path(temp) / "member.o"
+        target = Path(temp) / "member.stripped.o"
+        source.write_bytes(data)
+        command = [str(objcopy), "--strip-debug"]
+        if remove_comment:
+            command += ["-R", ".comment", "-R", ".note"]
+        command += [str(source), str(target)]
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return target.read_bytes()
+
+
+def load_pins(repo):
+    """Load the four library pins; SceShaccCgExt keeps its release-tooling pin."""
     folder = repo / "tools/vita_licenses"
     pin = json.loads((folder / "SceShaccCgExt-release.json").read_text(encoding="utf-8"))
     if pin["archive"] != ARCHIVE or pin["license"] != "LGPL-2.1":
         fail("unexpected SceShaccCgExt release pin")
     if sha256(folder / pin["license_file"]) != pin["license_sha256"]:
         fail("the pinned SceShaccCgExt licence text does not match")
-    if "patch" in pin and sha256(Path(repo) / "tools" / pin["patch"]) != pin["patch_sha256"]:
-        raise ValueError("the SceShaccCgExt patch does not match its pin")
-    return pin
+    if sha256(Path(repo) / "tools" / pin["patch"]) != pin["patch_sha256"]:
+        fail("the SceShaccCgExt patch does not match its pin")
+    data = json.loads((folder / "lgpl-libraries.json").read_text(encoding="utf-8"))
+    libraries = {}
+    for entry in data["libraries"]:
+        if entry["archive"] in libraries or entry["archive"] == ARCHIVE:
+            fail("duplicate LGPL library pin: " + entry["archive"])
+        libraries[entry["archive"]] = entry
+    libraries[ARCHIVE] = {
+        "name": "SceShaccCgExt",
+        "archive": ARCHIVE,
+        "source": pin["source"],
+        "revision": pin["revision"],
+        "license": pin["license"],
+        "license_files": [{"path": "LICENSE", "sha256": pin["license_sha256"]}],
+        "bundle_licenses": [{"source": "LICENSE", "name": "LGPL-2.1.txt"}],
+        "archive_sha256": pin["archive_sha256"],
+        "identity": "raw",
+        "members_total": 0,
+        "members": [],
+    }
+    for archive in LIBRARY_ORDER:
+        if archive not in libraries:
+            fail("missing pin for " + archive)
+    return libraries, pin
 
 
 def read_capture(capture):
@@ -89,12 +203,13 @@ def read_capture(capture):
     return argv
 
 
-def classify(argv, target_root, lib_dir, sdk, release_build, capture):
+def classify(argv, target_root, lib_dir, sdk, release_build, capture, library_flags):
     """Map the recorded argv to bundle placeholders and list required copies."""
     mapped = []
     copies = []
     empty_dirs = []
-    count = {"lib": 0, "sdk": 0, "output": 0, "map": 0, "library_flag": 0}
+    count = {"lib": 0, "sdk": 0, "output": 0, "map": 0}
+    flags = {flag: 0 for flag in library_flags}
     lib_index = None
     sdk_index = None
     i = 0
@@ -137,8 +252,8 @@ def classify(argv, target_root, lib_dir, sdk, release_build, capture):
         elif arg.startswith("-"):
             if arg.startswith("@"):
                 fail("the recorded link uses a response file")
-            if arg == "-lSceShaccCgExt":
-                count["library_flag"] += 1
+            if arg in flags:
+                flags[arg] += 1
             mapped.append(arg)
         else:
             value = absolute(arg)
@@ -161,8 +276,9 @@ def classify(argv, target_root, lib_dir, sdk, release_build, capture):
         fail("the release link must search the release library directory exactly once")
     if count["sdk"] != 1:
         fail("the release link must search the SDK library directory exactly once")
-    if count["library_flag"] != 1:
-        fail("the release link must link SceShaccCgExt exactly once")
+    for flag, seen in flags.items():
+        if seen != 1:
+            fail("the release link must name %s exactly once" % flag)
     if count["output"] != 1 or count["map"] != 1:
         fail("the release link must name one output and one link map")
     if lib_index > sdk_index:
@@ -185,33 +301,99 @@ def copy_objects(capture, copies, bundle):
     return total
 
 
-def extract_source(source_repo, revision, destination):
+def check_source(source_repo, revision, name):
     head = subprocess.run(["git", "-C", str(source_repo), "rev-parse", "HEAD"],
                           check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
     if head != revision:
-        fail("SceShaccCgExt source is at " + head + ", not " + revision)
+        fail(name + " source is at " + head + ", not " + revision)
     status = subprocess.run(["git", "-C", str(source_repo), "status", "--porcelain=v1",
                              "--untracked-files=all"],
                             check=True, stdout=subprocess.PIPE, text=True).stdout
     if status.strip():
-        fail("SceShaccCgExt source checkout is not clean")
+        fail(name + " source checkout is not clean")
+
+
+def extract_source(source_repo, revision, destination, name):
+    check_source(source_repo, revision, name)
     data = subprocess.run(["git", "-C", str(source_repo), "archive", "--format=tar", revision],
                           check=True, stdout=subprocess.PIPE).stdout
     destination.mkdir(parents=True)
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         for member in archive.getmembers():
-            name = member.name
-            if name.startswith("/") or ".." in Path(name).parts:
-                fail("unsafe path in the SceShaccCgExt archive: " + name)
+            member_name = member.name
+            if member_name.startswith("/") or ".." in Path(member_name).parts:
+                fail("unsafe path in the " + name + " archive: " + member_name)
             if member.issym() or member.islnk():
-                fail("link in the SceShaccCgExt archive: " + name)
-            if name == "include/sce_intrinsics.h":
+                fail("link in the " + name + " archive: " + member_name)
+            if name == "SceShaccCgExt" and member_name == "include/sce_intrinsics.h":
                 continue
             archive.extract(member, destination)
-    subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "vita_shacccg_no_prelude.py"),
-                    "--apply", str(destination)], check=True)
-    if (destination / "include/sce_intrinsics.h").exists():
-        fail("excluded intrinsic header survived source export")
+
+    if name == "SceShaccCgExt":
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "vita_shacccg_no_prelude.py"),
+                        "--apply", str(destination)], check=True)
+        if (destination / "include/sce_intrinsics.h").exists():
+            fail("excluded intrinsic header survived source export")
+
+
+def library_member_records(pin, archive_path, objcopy, selection_members=None):
+    """Return the member identity records for one library pin."""
+    members = read_archive_members(archive_path)
+    records = []
+    if pin["archive"] == ARCHIVE:
+        if not selection_members:
+            fail("the release selection has no SceShaccCgExt members")
+        for entry in selection_members:
+            name = entry["member"]
+            if name not in members:
+                fail("pinned SceShaccCgExt member is absent from the release archive: " + name)
+            data = members[name]
+            if entry.get("bytes") not in (None, len(data)):
+                fail("pinned SceShaccCgExt member size does not match: " + name)
+            if entry["sha256"] != hashlib.sha256(data).hexdigest():
+                fail("pinned SceShaccCgExt member bytes do not match: " + name)
+            records.append({"member": name, "bytes": len(data), "sha256": entry["sha256"],
+                            "sha256_stripped": hashlib.sha256(
+                                strip_debug(data, objcopy)).hexdigest()})
+        pin["members_total"] = len(members)
+        return records
+    remove_comment = pin.get("identity") == "stripped-comment"
+    ident = pin.get("identity", "raw")
+    available = {normalise_member(name): name for name in members}
+    for entry in pin["members"]:
+        name = entry["member"]
+        actual = available.get(normalise_member(name))
+        if actual is None:
+            fail("pinned %s member is absent from the release archive: %s"
+                 % (pin["name"], name))
+        data = members[actual]
+        if entry.get("bytes") not in (None, len(data)):
+            fail("pinned %s member size does not match: %s" % (pin["name"], name))
+        if entry.get("sha256") and entry["sha256"] != hashlib.sha256(data).hexdigest():
+            fail("pinned %s member bytes do not match: %s" % (pin["name"], name))
+        stripped = hashlib.sha256(strip_debug(data, objcopy, remove_comment)).hexdigest()
+        if entry.get("sha256_stripped") and entry["sha256_stripped"] != stripped:
+            fail("pinned %s stripped member bytes do not match: %s" % (pin["name"], name))
+        records.append({"member": name, "bytes": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        "sha256_stripped": stripped,
+                        "identity": "path-dependent" if name in pin.get("path_dependent", [])
+                        else ident})
+    pin["members_total"] = len(members)
+    return records
+
+
+def copy_assets(repo, bundle):
+    lines = []
+    for relative in ASSET_FILES:
+        source = repo / "vita" / relative
+        if not source.is_file():
+            fail("missing LiveArea asset: " + relative)
+        destination = bundle / "assets" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        lines.append("%s  %s" % (sha256(destination), relative))
+    (bundle / "link/assets.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_readme(bundle, facts):
@@ -239,10 +421,11 @@ def append_build_recipe(path, facts):
         stream.write(text)
 
 
-def write_relink(bundle):
-    path = bundle / "link/relink.sh"
-    path.write_text(RELINK_TEMPLATE, encoding="utf-8")
-    path.chmod(0o755)
+def write_scripts(bundle):
+    for name, text in (("relink.sh", RELINK_TEMPLATE), ("package.sh", PACKAGE_TEMPLATE)):
+        path = bundle / "link" / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
 
 
 def write_sums(bundle):
@@ -284,6 +467,13 @@ def make_tarball(bundle):
     return tarball
 
 
+def write_source_offer(bundle, facts):
+    text = SOURCE_OFFER_TEMPLATE
+    for key, value in facts.items():
+        text = text.replace("@@%s@@" % key.upper(), str(value))
+    (bundle / "SOURCE-OFFER.txt").write_text(text, encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-build", required=True, type=Path,
@@ -296,25 +486,38 @@ def main():
                         help="directory that held the pinned SceShaccCgExt archive")
     parser.add_argument("--shacccg-source", required=True, type=Path,
                         help="clean SceShaccCgExt checkout at the pinned revision")
+    parser.add_argument("--vitagl-source", required=True, type=Path,
+                        help="clean vitaGL checkout at the pinned revision")
+    parser.add_argument("--vitashark-source", required=True, type=Path,
+                        help="clean vitaShaRK checkout at the pinned revision")
+    parser.add_argument("--pthread-source", required=True, type=Path,
+                        help="clean pthread-embedded checkout at the pinned revision")
+    parser.add_argument("--sdk", type=Path,
+                        help="Vita SDK with the release archives (default: $VITASDK)")
     parser.add_argument("--out", required=True, type=Path,
                         help="bundle directory to create")
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parent.parent
     try:
-        pin = load_pin(repo)
+        libraries, pin = load_pins(repo)
         release = absolute(args.release_build)
         capture = absolute(args.capture)
         target_root = absolute(args.target_root)
         lib_dir = absolute(args.lib_dir)
-        source = absolute(args.shacccg_source)
+        sources = {
+            "SceShaccCgExt": absolute(args.shacccg_source),
+            "vitaGL": absolute(args.vitagl_source),
+            "vitaShaRK": absolute(args.vitashark_source),
+            "pthread-embedded": absolute(args.pthread_source),
+        }
+        sdk = absolute(args.sdk or os.environ.get("VITASDK", ""))
         bundle = absolute(args.out)
-        for path in (release, capture, lib_dir, source):
+        for path in (release, capture, lib_dir, *sources.values()):
             if not path.is_dir():
                 fail("not a directory: " + str(path))
-        # The Cargo target may already be deleted after the build; only its path
-        # prefix is needed to read the recorded command. The captured copies
-        # under --capture are the actual inputs.
+        if not sdk.is_dir():
+            fail("--sdk or VITASDK must name the Vita SDK")
         if not target_root.is_absolute():
             fail("--target-root must be an absolute path")
         if bundle.exists() and any(bundle.iterdir()):
@@ -331,42 +534,107 @@ def main():
         elf_hash = elf_hashes[0]
         if sha256(release / "looking-glass.elf") != elf_hash:
             fail("release looking-glass.elf does not match BUILD.txt")
+        self_hashes = SELF_HASH_RE.findall(build_text)
+        if len(set(self_hashes)) != 1:
+            fail("release BUILD.txt does not name one eboot.bin hash")
+        self_hash = self_hashes[0]
         vitagl = read_vitagl_record(build_text)
         selection = json.loads((release / "library-selection.json").read_text(encoding="utf-8"))
-        if selection["revision"] != pin["revision"] or selection["license"] != pin["license"]:
+        shacccg_pin = libraries[ARCHIVE]
+        if selection["revision"] != shacccg_pin["revision"] or selection["license"] != shacccg_pin["license"]:
             fail("release library selection does not match the source pin")
-        if selection["archive_sha256"] != pin["archive_sha256"]:
+        if selection["archive_sha256"] != shacccg_pin["archive_sha256"]:
             fail("release library archive does not match the pinned bytes")
         if not selection.get("members"):
             fail("release library selection has no contributing members")
         recorded = absolute(selection["archive"].replace("~", str(Path.home()), 1))
         if recorded.parent != lib_dir:
             fail("--lib-dir does not match the directory recorded in library-selection.json")
-        if (lib_dir / ARCHIVE).is_file() and sha256(lib_dir / ARCHIVE) != pin["archive_sha256"]:
+        if (lib_dir / ARCHIVE).is_file() and sha256(lib_dir / ARCHIVE) != shacccg_pin["archive_sha256"]:
             fail("the release library archive no longer matches its pin")
 
+        sdk_archives = {}
+        for archive in ("libvitaGL.a", "libvitashark.a", "libpthread.a"):
+            path = sdk / "arm-vita-eabi/lib" / archive
+            if not path.is_file():
+                fail("the SDK is missing " + str(path))
+            sdk_archives[archive] = path
+        sdk_archives[ARCHIVE] = lib_dir / ARCHIVE
+        if not sdk_archives[ARCHIVE].is_file():
+            fail("missing pinned SceShaccCgExt archive: " + str(sdk_archives[ARCHIVE]))
+
+        objcopy = sdk / "bin/arm-vita-eabi-objcopy"
+        if not objcopy.is_file():
+            fail("the SDK is missing " + str(objcopy))
+        member_records = {}
+        for archive in LIBRARY_ORDER:
+            member_records[archive] = library_member_records(
+                libraries[archive], sdk_archives[archive], objcopy, selection["members"]
+                if archive == ARCHIVE else None)
+
         argv = read_capture(capture)
-        mapped, copies, empty_dirs = classify(argv, target_root, lib_dir,
-                                             absolute(os.environ.get("VITASDK", "")),
-                                             release, capture)
+        library_flags = ["-lvitaGL", "-lvitashark", "-lSceShaccCgExt", "-lpthread"]
+        mapped, copies, empty_dirs = classify(argv, target_root, lib_dir, sdk, release,
+                                              capture, library_flags)
 
         bundle.mkdir(parents=True, exist_ok=True)
         (bundle / "link").mkdir()
         (bundle / "licenses").mkdir()
         (bundle / "lib").mkdir()
         (bundle / "output").mkdir()
+        (bundle / "sources").mkdir()
         copied_bytes = copy_objects(capture, copies, bundle)
         for relative in empty_dirs:
             (bundle / "objects" / relative).mkdir(parents=True, exist_ok=True)
         if not (bundle / "objects").is_dir():
             fail("no object code was copied")
 
-        extract_source(source, pin["revision"], bundle / "SceShaccCgExt-source")
-        shutil.copy2(Path(__file__).resolve().parent / "patches/SceShaccCgExt-no-prelude.patch", bundle / "SceShaccCgExt-no-prelude.patch")
-        licence_source = bundle / "SceShaccCgExt-source/LICENSE"
-        if sha256(licence_source) != pin["license_sha256"]:
-            fail("the SceShaccCgExt source licence text does not match the pin")
-        shutil.copy2(licence_source, bundle / "licenses/LGPL-2.1.txt")
+        shutil.copy2(repo / "tools" / pin["patch"], bundle / "SceShaccCgExt-no-prelude.patch")
+        licence_texts = {}
+        source_lines = []
+        for archive in LIBRARY_ORDER:
+            library = libraries[archive]
+            destination = bundle / "sources" / library["name"]
+            extract_source(sources[library["name"]], library["revision"], destination,
+                           library["name"])
+            tree = subprocess.run(["git", "-C", str(sources[library["name"]]), "rev-parse",
+                                   library["revision"] + "^{tree}"],
+                                  check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+            files = sum(1 for path in destination.rglob("*") if path.is_file())
+            source_lines.append("%s  %s  tree=%s  files=%d"
+                                % (library["name"], library["revision"], tree, files))
+            for entry in library["license_files"]:
+                path = destination / entry["path"]
+                if not path.is_file():
+                    fail("%s source has no %s" % (library["name"], entry["path"]))
+                if sha256(path) != entry["sha256"]:
+                    fail("%s %s does not match its pin" % (library["name"], entry["path"]))
+            for mapping in library["bundle_licenses"]:
+                path = destination / mapping["source"]
+                if not path.is_file():
+                    fail("%s source has no %s" % (library["name"], mapping["source"]))
+                target = bundle / "licenses" / mapping["name"]
+                data = path.read_bytes()
+                if target.exists() and target.read_bytes() != data:
+                    fail("two licence files disagree on " + mapping["name"])
+                target.write_bytes(data)
+                licence_texts[mapping["name"]] = hashlib.sha256(data).hexdigest()
+        if not (bundle / "licenses/LGPL-2.1.txt").is_file():
+            fail("the bundle has no LGPL-2.1 text")
+        if not (bundle / "licenses/LGPL-3.0.txt").is_file():
+            fail("the bundle has no LGPL-3.0 text")
+        for name, source_name in PACKAGE_LICENCES:
+            source = repo / "tools/vita_licenses" / source_name
+            if not source.is_file():
+                fail("missing licence text: " + str(source))
+            target = bundle / "licenses" / name
+            if target.exists() and target.read_bytes() != source.read_bytes():
+                fail("two licence files disagree on " + name)
+            if not target.exists():
+                shutil.copy2(source, target)
+        (bundle / "link/sources.txt").write_text("\n".join(source_lines) + "\n",
+                                                 encoding="utf-8")
+        copy_assets(repo, bundle)
 
         for name, destination in (("link.map", "link/link.map"),
                                   ("BUILD.txt", "link/BUILD.txt"),
@@ -374,20 +642,35 @@ def main():
                                   ("libraries.txt", "link/libraries.txt")):
             if (release / name).is_file():
                 shutil.copy2(release / name, bundle / destination)
-        notices = release / "THIRD_PARTY_NOTICES-vita.txt"
+        notices = repo / "THIRD_PARTY_NOTICES-vita.txt"
+        if not notices.is_file():
+            notices = release / "THIRD_PARTY_NOTICES-vita.txt"
         if notices.is_file():
             shutil.copy2(notices, bundle / "licenses/THIRD_PARTY_NOTICES-vita.txt")
         (bundle / "link/args.txt").write_text("\n".join(mapped) + "\n", encoding="utf-8")
         (bundle / "link/release-elf.sha256").write_text(elf_hash + "\n", encoding="utf-8")
-        (bundle / "link/pinned-library.sha256").write_text(pin["archive_sha256"] + "\n",
+        (bundle / "link/release-self.sha256").write_text(self_hash + "\n", encoding="utf-8")
+        (bundle / "link/pinned-library.sha256").write_text(shacccg_pin["archive_sha256"] + "\n",
                                                            encoding="utf-8")
         members = []
-        for entry in selection["members"]:
-            if not entry.get("member") or not entry.get("sha256"):
-                fail("release library selection has an incomplete member entry")
-            members.append("%s  %s" % (entry["sha256"], entry["member"]))
+        for archive in LIBRARY_ORDER:
+            default_identity = "raw" if archive == ARCHIVE else libraries[archive]["identity"]
+            for record in member_records[archive]:
+                identity = record.get("identity", default_identity)
+                member_hash = record["sha256"] if identity == "raw" else record["sha256_stripped"]
+                members.append("%s  %s  %s  %s" % (archive, record["member"], member_hash,
+                                                   identity))
         (bundle / "link/library-members.txt").write_text("\n".join(members) + "\n",
                                                          encoding="utf-8")
+        library_lines = []
+        for archive in LIBRARY_ORDER:
+            library = libraries[archive]
+            library_lines.append("%s  %s  %s  %s  members=%d/%d  archive_sha256=%s"
+                                 % (archive, library["name"], library["revision"],
+                                    library["license"], len(member_records[archive]),
+                                    library["members_total"], sha256(sdk_archives[archive])))
+        (bundle / "link/libraries-linked.txt").write_text("\n".join(library_lines) + "\n",
+                                                          encoding="utf-8")
         (bundle / "link/link-map.sha256").write_text(
             sha256(bundle / "link/link.map") + "  link.map\n", encoding="utf-8")
         inputs = []
@@ -396,27 +679,27 @@ def main():
             inputs.append("%s  %10d  %s" % (sha256(path), path.stat().st_size,
                                             relative.as_posix()))
         (bundle / "link/inputs.txt").write_text("\n".join(inputs) + "\n", encoding="utf-8")
-        write_relink(bundle)
-        append_build_recipe(bundle / "link/BUILD.txt", {
-            "revision": pin["revision"],
-            "vitagl_revision": VITAGL_REVISION,
-            "vitagl_flags": vitagl["flags"],
-            "vitagl_archive": vitagl["archive"],
-            "vdpm_packages": VDPM_PACKAGES,
-        })
-        write_readme(bundle, {
+        facts = {
             "head": head,
             "elf": elf_hash,
-            "library": pin["archive_sha256"],
-            "revision": pin["revision"],
+            "self": self_hash,
+            "bundle_name": bundle.name + ".tar.gz",
+            "library": shacccg_pin["archive_sha256"],
+            "revision": shacccg_pin["revision"],
             "objects": len(copies),
             "bytes": copied_bytes,
             "vitagl_revision": VITAGL_REVISION,
             "vitagl_flags": vitagl["flags"],
             "vitagl_archive": vitagl["archive"],
             "vitagl_package": vitagl["package"],
+            "vitashark_revision": libraries["libvitashark.a"]["revision"],
+            "pthread_revision": libraries["libpthread.a"]["revision"],
             "vdpm_packages": VDPM_PACKAGES,
-        })
+        }
+        write_source_offer(bundle, facts)
+        write_scripts(bundle)
+        append_build_recipe(bundle / "link/BUILD.txt", facts)
+        write_readme(bundle, facts)
         check_bundle(bundle, mapped, ("eboot.bin", "looking-glass.vpk", "looking-glass.self"))
         sums = write_sums(bundle)
         tarball = make_tarball(bundle)
@@ -425,83 +708,102 @@ def main():
         print("PASS tarball %s %s %d bytes" % (tarball, sha256(tarball), tarball.stat().st_size))
         print("release head %s" % head)
         print("release elf sha256 %s" % elf_hash)
-        print("library sha256 %s" % pin["archive_sha256"])
+        print("release eboot.bin sha256 %s" % self_hash)
+        for archive in LIBRARY_ORDER:
+            print("library %s members %d/%d sha256 %s"
+                  % (archive, len(member_records[archive]), libraries[archive]["members_total"],
+                     sha256(sdk_archives[archive])))
         return 0
-    except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
+    except (ValueError, OSError, KeyError, subprocess.CalledProcessError, tarfile.TarError) as error:
         print("FAIL LGPL bundle: " + str(error), file=sys.stderr)
         return 1
 
 
 README_TEMPLATE = """# Alice (Looking Glass Vita port) source and relink bundle
 
-This bundle satisfies the source and relink part of LGPL-2.1 section 6 for the
-statically linked SceShaccCgExt library used by the PlayStation Vita release of
-the Looking Glass port of American McGee's Alice.
+This bundle carries the source, licence and relink material for the four GNU
+LGPL libraries that the PlayStation Vita release of the Looking Glass port of
+American McGee's Alice links statically:
+
+| Library | Revision | Licence |
+| --- | --- | --- |
+| vitaGL | `@@VITAGL_REVISION@@` | LGPL-3.0-or-later |
+| vitaShaRK | `@@VITASHARK_REVISION@@` (tag v.1.7) | LGPL-3.0-or-later |
+| pthread-embedded (VitaSDK fork) | `@@PTHREAD_REVISION@@` | LGPL-2.1; the Vita platform layer is MIT |
+| SceShaccCgExt | `@@REVISION@@` | LGPL-2.1 |
 
 - Release build head: `@@HEAD@@`
 - Release ELF `looking-glass.elf` SHA-256: `@@ELF@@`
-- SceShaccCgExt revision: `@@REVISION@@`
-- Pinned `libSceShaccCgExt.a` SHA-256: `@@LIBRARY@@`
+- Release `eboot.bin` SHA-256: `@@SELF@@`
 - Link inputs shipped: @@OBJECTS@@ files, @@BYTES@@ bytes
+- Bundle tarball: `@@BUNDLE_NAME@@`
 
 ## Contents
 
-- `SceShaccCgExt-source/` - the source tree at `@@REVISION@@` with the optional intrinsic prelude removed (2026-11-15); see `SceShaccCgExt-no-prelude.patch`, exported
-  from Git. Its `LICENSE` is the LGPL-2.1 text.
-- `licenses/LGPL-2.1.txt` - the same LGPL-2.1 text, hash-pinned by the release
-  tooling.
-- `licenses/THIRD_PARTY_NOTICES-vita.txt` - the notices generated for this
-  link, including every other linked library and Rust package.
+- `sources/vitaGL/`, `sources/vitaShaRK/`, `sources/pthread-embedded/`,
+  `sources/SceShaccCgExt/` - the complete source tree of each library at the
+  revision the release linked, exported from Git. Each tree carries its
+  upstream licence files. SceShaccCgExt omits the optional intrinsic prelude and
+  its load (modified 2026-11-15); see `SceShaccCgExt-no-prelude.patch`.
+- `licenses/` - the full licence texts shipped in the package: GPL-3.0,
+  LGPL-3.0, LGPL-2.1, the GCC Runtime Library Exception 3.1, MPL-2.0, MIT,
+  Apache-2.0, the newlib BSD texts, the per-library texts of vitaShaRK and
+  pthread-embedded, and `THIRD_PARTY_NOTICES-vita.txt` for the whole link.
 - `objects/` - every object file and static archive that the release link read
   from the Cargo target directory. These are the port's own compiled code,
   including the Rust standard library and third-party Rust crates that form the
-  work that uses the library. They are the exact bytes of the release link;
+  work that uses the libraries. They are the exact bytes of the release link;
   `link/inputs.txt` lists each file with its size and SHA-256.
 - `link/args.txt` - the exact linker command, one argument per line, with three
   placeholders: `@BUNDLE@` is this directory, `@SDK@` is `$VITASDK`, and
   `@OUT@` is the output ELF.
-- `link/relink.sh` - runs that command against `lib/libSceShaccCgExt.a`. The
-  default mode is a functional relink; `--strict` requires byte identity with
-  the release ELF. See "Relink modes and exit codes".
+- `link/relink.sh` - runs that command against any archives placed in `lib/`.
+  The default mode is a functional relink; `--strict` requires byte identity
+  with the release ELF. See "Relink modes and exit codes".
+- `link/package.sh` - turns a relinked ELF into `eboot.bin`, `param.sfo` and a
+  VPK that carries the notices and licence texts. See "Package and install".
 - `link/link.map` - the release linker map, with the build machine's home
   directory shortened to `~`.
-- `link/BUILD.txt`, `link/library-selection.json`, `link/libraries.txt` -
-  release build facts: toolchain, flags, SDK components, and the archive and
-  members the linker actually loaded.
-- `link/release-elf.sha256`, `link/link-map.sha256`,
-  `link/pinned-library.sha256`, `link/library-members.txt`,
-  `link/inputs.txt` - the identities used by `relink.sh`. The member list is
-  the deciding identity: a rebuild of the same source can change the archive
-  file hash because `ar` records member timestamps, but its object bytes stay
-  the same and the relink stays byte-identical.
+- `link/BUILD.txt`, `link/library-selection.json`, `link/libraries.txt`,
+  `link/libraries-linked.txt`, `link/sources.txt` - release build facts:
+  toolchain, flags, SDK components, the archives and members the linker
+  actually loaded, and the Git tree identity of each source export.
+- `link/release-elf.sha256`, `link/release-self.sha256`,
+  `link/link-map.sha256`, `link/pinned-library.sha256`,
+  `link/library-members.txt`, `link/inputs.txt`, `link/assets.txt` - the
+  identities used by `relink.sh` and `package.sh`. The member list is the
+  deciding identity: a rebuild of the same source can change the archive file
+  hash because `ar` records member timestamps, but its object bytes stay the
+  same. For vitaGL, vitaShaRK and pthread-embedded the check uses the member
+  bytes after `objcopy --strip-debug`, because their build records debug paths
+  and the release link passes `-Wl,--strip-debug`; for SceShaccCgExt it uses the
+  raw member bytes, as the release tooling pins them.
+- `assets/sce_sys/` - the original LiveArea artwork of this port, needed by
+  `link/package.sh`. It is project artwork, not game data.
+- `SOURCE-OFFER.txt` - the written offer and pointers for the source and relink
+  material.
 - `SHA256SUMS` - SHA-256 of every file in this bundle except itself.
-- `lib/` - empty on purpose. Put the SceShaccCgExt archive to relink against
-  here as `lib/libSceShaccCgExt.a`.
+- `lib/` - empty on purpose. Put any rebuilt archive to relink against here:
+  `libvitaGL.a`, `libvitashark.a`, `libSceShaccCgExt.a` or `libpthread.a`.
+  One, several or all four may be present.
 
 ## What is not in this bundle
 
 - No game data, no pack, texture, sound or movie.
-- No C library binary under another licence. The other C archives in the link
-  are not redistributed here: `libvitaGL.a` (LGPL-3.0, a local build of
-  Rinnegatamante/vitaGL at `@@VITAGL_REVISION@@`), `libvitashark.a` (LGPL-3.0,
-  vdpm package vitaShaRK 1.7-1), `libmathneon.a` (MIT), newlib,
-  pthread-embedded, taiHEN and the Sce stub archives. All of them are
-  rebuildable from public sources; the recipe is below. `link/BUILD.txt`
-  records the exact SDK components and archive SHA-256 values the release
-  used. A byte-identical relink needs the same archives; a functional relink
-  works with compatible ones.
+- No C library binary under another licence. The other archives in the link are
+  the VitaSDK ones (newlib, libstdc++, libgcc, the Sce stub archives, taiHEN
+  and math-neon), rebuildable from public sources. The recipe below builds the
+  four LGPL libraries from the source trees in this bundle and the rest from
+  public vdpm packages. `link/BUILD.txt` records the exact SDK components and
+  archive SHA-256 values the release used.
 - The Rust object code in `objects/` includes third-party crates; their licence
   texts are in `licenses/THIRD_PARTY_NOTICES-vita.txt`.
 
 ## Build the third-party dependencies from public sources
 
-The link reads four C libraries that are not in this bundle: `libvitaGL.a`,
-`libvitashark.a`, `libmathneon.a` and `libSceShaccCgExt.a`, plus the SDK
-archives. `libvitashark.a` and `libmathneon.a` come from vdpm packages;
-`libvitaGL.a` is built from its public repository because the release used a
-local build, not the vdpm package file; `libSceShaccCgExt.a` is built from the
-source in this bundle. Every one of them is rebuildable from public sources,
-and none needs a proprietary SDK file.
+The link reads four LGPL libraries plus the SDK archives. All four LGPL
+libraries are in `sources/`, so a relink needs only a public Vita SDK and a C
+toolchain. The SDK archives come from public vdpm packages.
 
 Prerequisites (host):
 
@@ -513,14 +815,14 @@ Prerequisites (host):
   Ubuntu: `sudo apt install build-essential git curl python3 cmake`. On
   macOS, `xcode-select --install` provides git, make and tar; `curl` and
   `python3` are part of the system.
-- CMake 3.10 or newer (`SceShaccCgExt-source/CMakeLists.txt` requires 3.10).
+- CMake 3.10 or newer (`sources/SceShaccCgExt/CMakeLists.txt` requires 3.10).
   CMake 4 also needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for the
   SceShaccCgExt build below. The release used CMake 4.4.4.
 - Network access to github.com and vitasdk.org, and about 2 GB free.
 
-Run the commands of steps 1 to 4 in order, in one shell, starting in the
-extracted bundle directory. Steps 1 and 3 work in subshells and clone into
-`$BUNDLE/deps`, so the shell stays in the bundle directory for step 4.
+Run the commands of steps 1 to 6 in order, in one shell, starting in the
+extracted bundle directory. Steps 1 and 3 to 5 work in subshells and clone into
+`$BUNDLE/deps`, so the shell stays in the bundle directory for step 6.
 
 ### Step 1: install a clean VitaSDK with vdpm
 
@@ -549,10 +851,11 @@ the ELF will not be byte-identical.
 non-interactive script, feed it with `< <(yes Y)` (bash).
 
 `taihen` supplies `libtaihen_stub.a`, `vitaShaRK` supplies `libvitashark.a`,
-and `libmathneon` supplies `libmathneon.a`. The `vitaGL` package is not
-installed on purpose: step 3 replaces it with the release revision. If you
-prefer the packaged archive, install `vitaGL` and skip step 3; the link still
-works but the bytes differ.
+and `libmathneon` supplies `libmathneon.a`. Steps 4 and 5 rebuild vitaShaRK and
+pthread-embedded from the source trees in this bundle and install them over the
+packaged archives; that is the source path the licence asks for. The `vitaGL`
+package is not installed on purpose: step 3 replaces it with the release
+revision.
 
 ### Step 3: build vitaGL at the release revision
 
@@ -573,16 +876,58 @@ needs `VITASDK` exported.
 The Makefile compiles with `-g`, and `ar` stores member timestamps, so the
 archive file hash depends on the checkout directory and on when it was built.
 A rebuild therefore has a different file SHA-256 although the compiled code is
-the same. Measured on the release host: a fresh clone of the revision above
-built with the same GCC in a different directory produced 30 of 30 members
-identical after `objcopy --strip-debug`. Compare stripped members, not the
-archive file.
+the same. The release link passes `-Wl,--strip-debug`, and `relink.sh` compares
+member bytes after `objcopy --strip-debug`. Measured on the release host, a
+fresh build in a different directory produced 29 of 30 members identical after
+stripping. The exception is `splashscreen.o`, which embeds the VitaSDK include
+path in `.rodata.str1.4` through `__FILE__`; its bytes depend on where the SDK
+is installed. `relink.sh` requires that member to be present and says that it
+does not compare its bytes. `link/library-members.txt` records it as
+`path-dependent`.
 
-### Step 4: build SceShaccCgExt from the source in this bundle
+### Step 4: build vitaShaRK at the release revision
+
+```sh
+(cd "$BUNDLE/deps" && git clone https://github.com/Rinnegatamante/vitaShaRK && cd vitaShaRK &&
+  git checkout --detach @@VITASHARK_REVISION@@ &&
+  test "$(git rev-parse HEAD)" = @@VITASHARK_REVISION@@ &&
+  make &&
+  make install)      # libvitashark.a and source/vitashark.h into $VITASDK
+```
+
+The release linked `libvitashark.a` from vdpm package `vitaShaRK-1.7-1`, built
+from tag `v.1.7` at the revision above. A source build has a different archive
+file hash because `ar` records timestamps; the single member `vitashark.o` is
+identical after `objcopy --strip-debug` (measured on the release host).
+
+### Step 5: build pthread-embedded at the release revision
+
+```sh
+(cd "$BUNDLE/deps" && git clone https://github.com/vitasdk/pthread-embedded && cd pthread-embedded &&
+  git checkout --detach @@PTHREAD_REVISION@@ &&
+  test "$(git rev-parse HEAD)" = @@PTHREAD_REVISION@@ &&
+  make -C platform/vita CC=arm-vita-eabi-gcc CXX=arm-vita-eabi-g++ \\
+    AR=arm-vita-eabi-ar GLOBAL_CFLAGS=-Wno-error=int-conversion &&
+  "$VITASDK/bin/arm-vita-eabi-objcopy" --strip-debug -R .comment -R .note \\
+    platform/vita/libpthread.a &&
+  cp platform/vita/libpthread.a "$VITASDK/arm-vita-eabi/lib/")
+```
+
+This is the VitaSDK build recipe: the `platform/vita/Makefile` names the 134
+archive members, and `GLOBAL_CFLAGS=-Wno-error=int-conversion` is the flag the
+VitaSDK buildscripts pass. The `objcopy --strip-debug -R .comment -R .note`
+step is what VitaSDK applies to every target object and archive; without it the
+archive carries `.comment` and debug sections that the release archive does not.
+After it, the 54 members this link loads are byte-identical to the release
+archive (measured on the release host). `relink.sh` applies the same stripping
+when it compares members, so a rebuild that skips the last `objcopy` still
+matches.
+
+### Step 6: build SceShaccCgExt from the source in this bundle
 
 ```sh
 cd "$BUNDLE"
-cmake SceShaccCgExt-source -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \\
+cmake sources/SceShaccCgExt -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \\
   -DCMAKE_C_FLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types" \\
   -DCMAKE_CXX_FLAGS="-std=gnu++11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
 make
@@ -594,10 +939,13 @@ The archive file hash can differ from the pinned `@@LIBRARY@@` because `ar`
 stores member timestamps. The member object bytes decide identity:
 `link/library-members.txt` holds their SHA-256 and `relink.sh` compares those.
 
-With the release SDK archives and GCC 15.2.0 this recipe links to the release
-ELF byte for byte, as the proof below shows. Across SDK series it produces a
-working ELF with a different hash. This bundle does not claim byte identity
-on a different SDK.
+With the pinned release archives and GCC 15.2.0 the relink reproduces the
+release ELF byte for byte, as the proof below shows. The full source recipe in
+steps 3 to 6 rebuilds each library but does not promise that: a vitaGL built
+under a different SDK path has a different `splashscreen.o` string and the ELF
+hash changes. `link/BUILD.txt` names the archives that produced the release.
+Across SDK series the link still works but the bytes differ. This bundle does
+not claim byte identity from a source rebuild or a different SDK.
 
 ## Relink modes and exit codes
 
@@ -610,13 +958,17 @@ on a different SDK.
 - Strict: release reproduction. `--strict` or `LG_RELINK_STRICT=1` exits 1
   unless the output is byte-identical to the release ELF.
 
-A failed link, a missing archive, or a link that loads the SDK SceShaccCgExt
-archive exits non-zero in both modes. The script does not claim byte identity
-when it did not check it.
+Place a rebuilt archive at `lib/libvitaGL.a`, `lib/libvitashark.a`,
+`lib/libSceShaccCgExt.a` or `lib/libpthread.a`. Any combination works: each
+present archive replaces the SDK one for its library, and each is checked
+against its own pinned member list. A link that does not load a supplied
+archive, or that also loads the SDK archive of the same name, exits non-zero in
+both modes. A failed link or a missing archive exits non-zero in both modes.
+The script does not claim byte identity when it did not check it.
 
-## Relink against the unmodified library
+## Relink against the unmodified libraries
 
-1. Complete steps 1 to 4 above, or use the SDK and archives that produced the
+1. Complete steps 1 to 6 above, or use the SDK and archives that produced the
    release (`link/BUILD.txt`).
 2. `VITASDK=/path/to/vitasdk ./link/relink.sh output/looking-glass.elf`
 3. With the pinned member objects and the release SDK the output is
@@ -627,14 +979,47 @@ when it did not check it.
 
 ## Relink against a modified library
 
-1. Modify `SceShaccCgExt-source/` as you wish and build it as in step 4.
-2. Put the new archive at `lib/libSceShaccCgExt.a`.
+1. Modify a source tree in `sources/` as you wish, or use your own copy.
+2. Build it as in steps 3 to 6 and put the new archive in `lib/` under its
+   release name.
 3. Run `./link/relink.sh output/modified.elf`. The output is a new ELF that
    contains your modified library. Its hash differs from the release; the
    script says so and exits 0 because the link succeeded. `--strict` exits 1,
    which is the point of the mode split.
-4. Package the ELF into a SELF/VPK with the usual Vita tools if you want to run
-   it. This bundle covers the link, not the signing or packaging steps.
+4. Package and install it as below.
+
+## Package and install (LGPL-3.0 section 4(e) installation information)
+
+`link/package.sh` turns an ELF into the installable package with the same
+VitaSDK tools and flags the release used:
+
+```sh
+VITASDK=/path/to/vitasdk ./link/package.sh output/looking-glass.elf
+```
+
+It runs, in this order:
+
+1. `vita-elf-create output/looking-glass.elf output/looking-glass.velf`
+2. `vita-make-fself -s output/looking-glass.velf output/eboot.bin`
+3. `vita-mksfoex -d ATTRIBUTE2=12 -s APP_VER=01.00 -s TITLE_ID=ALICELG01
+   "American McGee's Alice" output/param.sfo`
+4. `vita-pack-vpk -s output/param.sfo -b output/eboot.bin` with the four
+   LiveArea assets from `assets/`, plus `THIRD_PARTY_NOTICES-vita.txt`,
+   `SOURCE-OFFER.txt` and every file in `licenses/` at the VPK root and under
+   `licenses/`, producing `output/looking-glass.vpk`.
+
+These are the exact commands and flags from the release build log and
+`link/BUILD.txt`. The script prints the ELF, `eboot.bin` and VPK SHA-256
+values. With the release ELF it prints the release `eboot.bin` hash
+`@@SELF@@`; a modified library produces a different one, which is expected.
+
+To install: copy `output/looking-glass.vpk` to the Vita (VitaShell over USB or
+FTP is the usual route) and open it in VitaShell to install it as
+`ALICELG01`. The game data is not part of the package; players copy their own
+files to `ux0:data/alice/base/`. The shader compiler `libshacccg.suprx` is
+loaded from the console and is not distributed. Installing a relinked package
+replaces the installed application; uninstall the old one first if VitaShell
+asks. This bundle does not test the installation on a console.
 
 ## How the object code was preserved
 
@@ -657,7 +1042,10 @@ RELINK_TEMPLATE = """#!/bin/sh
 # error. --strict (or LG_RELINK_STRICT=1) is release reproduction: the script
 # exits 1 unless the output is byte-identical to the release ELF.
 #
-# The archive under lib/libSceShaccCgExt.a is linked instead of the SDK one.
+# Put any rebuilt LGPL archive in lib/: libvitaGL.a, libvitashark.a,
+# libSceShaccCgExt.a or libpthread.a. One, several or all four may be present;
+# each present archive replaces the SDK one and is checked against its own
+# pinned member list.
 set -eu
 strict=0
 output=
@@ -692,16 +1080,23 @@ linker=$sdk/bin/arm-vita-eabi-gcc
 [ -x "$linker" ] || { echo "missing $linker" >&2; exit 1; }
 archiver=$sdk/bin/arm-vita-eabi-ar
 [ -x "$archiver" ] || { echo "missing $archiver" >&2; exit 1; }
-library=$here/lib/libSceShaccCgExt.a
-[ -f "$library" ] || {
-    echo "missing $library; put the SceShaccCgExt archive to relink against there" >&2
-    exit 1
-}
+objcopy=$sdk/bin/arm-vita-eabi-objcopy
 output=${output:-$here/output/looking-glass.elf}
 case $output in
     /*) ;;
     *) output=$(pwd)/$output ;;
 esac
+
+libraries="libvitaGL.a libvitashark.a libSceShaccCgExt.a libpthread.a"
+supplied=
+for archive in $libraries; do
+    [ -f "$here/lib/$archive" ] && supplied="$supplied $archive"
+done
+[ -n "$supplied" ] || {
+    echo "missing a library archive in $here/lib/;" >&2
+    echo "put a rebuilt libvitaGL.a, libvitashark.a, libSceShaccCgExt.a or libpthread.a there" >&2
+    exit 1
+}
 mkdir -p "$(dirname "$output")" "$here/output"
 
 hash_file() {
@@ -710,6 +1105,26 @@ hash_file() {
     else
         shasum -a 256 "$1" | cut -d' ' -f1
     fi
+}
+
+normalise_member() {
+    case $1 in
+        *.c.obj) printf '%s.o\\n' "${1%.c.obj}" ;;
+        *.cc.obj) printf '%s.o\\n' "${1%.cc.obj}" ;;
+        *.cpp.obj) printf '%s.o\\n' "${1%.cpp.obj}" ;;
+        *.cxx.obj) printf '%s.o\\n' "${1%.cxx.obj}" ;;
+        *.obj) printf '%s.o\\n' "${1%.obj}" ;;
+        *) printf '%s\\n' "$1" ;;
+    esac
+}
+
+member_name() {
+    archive=$1
+    wanted=$2
+    wanted=$(normalise_member "$wanted")
+    "$archiver" t "$archive" | while IFS= read -r name; do
+        [ "$(normalise_member "$name")" = "$wanted" ] && { printf '%s\\n' "$name"; break; }
+    done
 }
 
 set --
@@ -727,48 +1142,99 @@ done < "$here/link/args.txt"
 "$linker" "$@"
 
 map=$here/output/relink.map
-grep -F "$library" "$map" >/dev/null 2>&1 || {
-    echo "the link did not load $library" >&2
-    exit 1
-}
-if grep -F "$sdk/arm-vita-eabi/lib/libSceShaccCgExt.a" "$map" >/dev/null 2>&1; then
-    echo "the link also loaded the SDK SceShaccCgExt archive" >&2
-    exit 1
-fi
+all_match=true
+path_dependent=0
+for archive in $supplied; do
+    library=$here/lib/$archive
+    grep -F "$library" "$map" >/dev/null 2>&1 || {
+        echo "the link did not load $library" >&2
+        exit 1
+    }
+    if grep -F "$sdk/arm-vita-eabi/lib/$archive" "$map" >/dev/null 2>&1; then
+        echo "the link also loaded the SDK $archive" >&2
+        exit 1
+    fi
+done
+
+member_file=$here/output/.member
+for archive in $supplied; do
+    library=$here/lib/$archive
+    match=true
+    pinned=0
+    while read -r pin_archive member member_hash identity; do
+        [ "$pin_archive" = "$archive" ] || continue
+        pinned=$((pinned + 1))
+        actual=$(member_name "$library" "$member")
+        if [ -z "$actual" ]; then
+            match=false
+            echo "missing member $member in $archive"
+            continue
+        fi
+        if ! "$archiver" p "$library" "$actual" > "$member_file" 2>/dev/null; then
+            match=false
+            echo "cannot extract member $member from $archive"
+            continue
+        fi
+        case $identity in
+            stripped)
+                [ -x "$objcopy" ] || { echo "missing $objcopy" >&2; exit 1; }
+                "$objcopy" --strip-debug "$member_file" "$member_file.stripped" 2>/dev/null || {
+                    match=false
+                    echo "cannot strip member $member from $archive"
+                    continue
+                }
+                ;;
+            stripped-comment)
+                # VitaSDK strips target objects with --strip-debug -R .comment -R .note.
+                [ -x "$objcopy" ] || { echo "missing $objcopy" >&2; exit 1; }
+                "$objcopy" --strip-debug -R .comment -R .note "$member_file" \\
+                    "$member_file.stripped" 2>/dev/null || {
+                    match=false
+                    echo "cannot strip member $member from $archive"
+                    continue
+                }
+                ;;
+            path-dependent)
+                # splashscreen.o embeds the SDK include path; require presence only.
+                echo "NOTE member $member of $archive embeds the SDK path; presence checked, bytes not compared"
+                path_dependent=$((path_dependent + 1))
+                rm -f "$member_file"
+                continue
+                ;;
+            *)
+                cp "$member_file" "$member_file.stripped"
+                ;;
+        esac
+        if [ -f "$member_file.stripped" ]; then
+            actual_hash=$(hash_file "$member_file.stripped")
+            rm -f "$member_file.stripped"
+        else
+            actual_hash=$(hash_file "$member_file")
+        fi
+        if [ "$actual_hash" != "$member_hash" ]; then
+            match=false
+            echo "member $member of $archive differs from the pinned object"
+        fi
+    done < "$here/link/library-members.txt"
+    rm -f "$member_file"
+    if [ "$pinned" -eq 0 ]; then
+        match=false
+        echo "no pinned members for $archive in link/library-members.txt"
+    fi
+    echo "archive file sha256 $(hash_file "$library")"
+    if [ "$match" = true ]; then
+        echo "members of $archive match the pinned objects"
+    else
+        echo "members of $archive differ from the pinned objects"
+        all_match=false
+    fi
+done
 
 actual=$(hash_file "$output")
 expected=$(cat "$here/link/release-elf.sha256")
 echo "relinked ELF $output"
 echo "sha256 $actual"
 echo "release sha256 $expected"
-
-# Decide whether the supplied archive carries the pinned member objects. The
-# archive file hash is not decisive: ar stores member timestamps, so a rebuild
-# of the same source can hash differently while its objects are identical.
-pinned_members=true
-if [ -s "$here/link/library-members.txt" ]; then
-    member_file=$here/output/.member
-    while read -r member_hash member; do
-        [ -n "$member" ] || continue
-        if ! "$archiver" p "$library" "$member" > "$member_file" 2>/dev/null; then
-            pinned_members=false
-            break
-        fi
-        if [ "$(hash_file "$member_file")" != "$member_hash" ]; then
-            pinned_members=false
-            break
-        fi
-    done < "$here/link/library-members.txt"
-    rm -f "$member_file"
-else
-    pinned_members=false
-fi
-echo "archive file sha256 $(hash_file "$library")"
-if [ "$pinned_members" = true ]; then
-    echo "members match the pinned SceShaccCgExt objects"
-else
-    echo "members differ from the pinned SceShaccCgExt objects"
-fi
 
 if [ "$actual" = "$expected" ]; then
     echo "result byte-identical to the release ELF"
@@ -777,17 +1243,25 @@ if [ "$actual" = "$expected" ]; then
 fi
 echo "result different from the release ELF"
 if [ "$strict" = 1 ]; then
-    if [ "$pinned_members" = true ]; then
+    if [ "$all_match" = true ]; then
         echo "FAIL strict mode: the pinned members are present but the ELF differs;" >&2
-        echo "     the other SDK archives in the link are not the release ones" >&2
+        if [ "$path_dependent" -gt 0 ]; then
+            echo "     the other SDK archives or the path-dependent members are not the release ones" >&2
+        else
+            echo "     the other SDK archives in the link are not the release ones" >&2
+        fi
     else
-        echo "FAIL strict mode: the archive members differ from the pinned ones" >&2
+        echo "FAIL strict mode: one or more archive members differ from the pinned ones" >&2
     fi
     exit 1
 fi
-if [ "$pinned_members" = true ]; then
+if [ "$all_match" = true ]; then
     echo "WARNING the link succeeded but the ELF differs from the release hash;"
-    echo "        the other SDK archives in the link are not the release ones."
+    if [ "$path_dependent" -gt 0 ]; then
+        echo "        the other SDK archives or the path-dependent members are not the release ones."
+    else
+        echo "        the other SDK archives in the link are not the release ones."
+    fi
     echo "        This is a functional relink, not the release ELF."
 else
     echo "NOTE the contributing member objects differ from the pinned ones;"
@@ -795,6 +1269,128 @@ else
 fi
 echo "use --strict to require byte identity with the release ELF"
 exit 0
+"""
+
+
+PACKAGE_TEMPLATE = """#!/bin/sh
+# Turn a relinked ELF into eboot.bin, param.sfo and a VPK that carries the
+# third-party notices and licence texts.
+#
+# Usage: VITASDK=/path/to/vitasdk ./link/package.sh [ELF]
+#
+# Default input: output/looking-glass.elf. Outputs, in the same directory as
+# the ELF: looking-glass.velf, eboot.bin, param.sfo and looking-glass.vpk.
+# These are the exact VitaSDK commands and flags of the release build.
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+: "${VITASDK:?set VITASDK to the Vita SDK root}"
+sdk=$VITASDK
+for tool in vita-elf-create vita-make-fself vita-mksfoex vita-pack-vpk; do
+    [ -x "$sdk/bin/$tool" ] || { echo "missing $sdk/bin/$tool" >&2; exit 1; }
+done
+elf=${1:-$here/output/looking-glass.elf}
+case $elf in
+    /*) ;;
+    *) elf=$(pwd)/$elf ;;
+esac
+[ -f "$elf" ] || { echo "missing ELF $elf" >&2; exit 1; }
+out=$(dirname "$elf")
+velf=$out/looking-glass.velf
+eboot=$out/eboot.bin
+sfo=$out/param.sfo
+vpk=$out/looking-glass.vpk
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+"$sdk/bin/vita-elf-create" "$elf" "$velf"
+"$sdk/bin/vita-make-fself" -s "$velf" "$eboot"
+"$sdk/bin/vita-mksfoex" -d ATTRIBUTE2=12 -s APP_VER=01.00 -s TITLE_ID=ALICELG01 \\
+    "American McGee's Alice" "$sfo"
+set -- -s "$sfo" -b "$eboot"
+for asset in sce_sys/icon0.png sce_sys/livearea/contents/startup.png \\
+             sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/bg.png; do
+    set -- "$@" --add "$here/assets/$asset=$asset"
+done
+set -- "$@" --add "$here/licenses/THIRD_PARTY_NOTICES-vita.txt=THIRD_PARTY_NOTICES-vita.txt"
+set -- "$@" --add "$here/SOURCE-OFFER.txt=SOURCE-OFFER.txt"
+for licence in "$here"/licenses/*; do
+    [ -f "$licence" ] || continue
+    name=$(basename "$licence")
+    [ "$name" = "THIRD_PARTY_NOTICES-vita.txt" ] && continue
+    set -- "$@" --add "$licence=licenses/$name"
+done
+"$sdk/bin/vita-pack-vpk" "$@" "$vpk"
+
+echo "ELF $elf"
+echo "sha256 $elf $(hash_file "$elf")"
+echo "eboot.bin $eboot"
+echo "sha256 $eboot $(hash_file "$eboot")"
+if [ -f "$here/link/release-self.sha256" ]; then
+    release=$(cat "$here/link/release-self.sha256")
+    echo "release eboot.bin sha256 $release"
+    if [ "$(hash_file "$eboot")" = "$release" ]; then
+        echo "result byte-identical to the release eboot.bin"
+    else
+        echo "result different from the release eboot.bin"
+    fi
+fi
+echo "vpk $vpk"
+echo "sha256 $vpk $(hash_file "$vpk")"
+echo "install: copy the VPK to the Vita and open it in VitaShell (title ALICELG01)"
+"""
+
+
+SOURCE_OFFER_TEMPLATE = """Source and relink offer for the Looking Glass PS Vita package
+
+This package contains the third-party notices in THIRD_PARTY_NOTICES-vita.txt
+and the full licence texts under licenses/. The release build head is
+@@HEAD@@ and the ELF it linked hashes @@ELF@@.
+
+The corresponding source for the four GNU LGPL libraries linked into
+eboot.bin, and the material needed to relink this build against modified
+versions of them, are in the source bundle published with this release:
+
+  @@BUNDLE_NAME@@
+
+It carries, from public repositories at the linked revisions:
+
+  vitaGL            @@VITAGL_REVISION@@  (LGPL-3.0-or-later)
+  vitaShaRK         @@VITASHARK_REVISION@@  (LGPL-3.0-or-later, tag v.1.7)
+  pthread-embedded  @@PTHREAD_REVISION@@  (LGPL-2.1, MIT Vita layer)
+  SceShaccCgExt     @@REVISION@@  (LGPL-2.1)
+
+The bundle also carries the complete object code and rlibs of this build, the
+exact linker command (link/args.txt), the release link map, relink.sh,
+package.sh and the LiveArea packaging assets. The bundle is published with the
+release and is also available on written request.
+
+Written offer: for at least three years from the date this package is
+distributed, the maintainer will provide the same source and relink material
+to any third party on request through
+
+  https://github.com/Anezium/LookingGlass/issues
+
+at no charge beyond the cost of the physical medium and delivery. Identify the
+release by its build head @@HEAD@@ or by the ELF SHA-256 above.
+
+MPL-2.0 source: the four symphonia 0.5.5 crates (symphonia,
+symphonia-bundle-mp3, symphonia-core and symphonia-metadata) are linked
+unmodified. Their Source Code Form is the crates.io release archive, available
+at https://crates.io/api/v1/crates/<crate>/0.5.5/download. Cargo.lock pins these
+SHA-256 values:
+
+  symphonia           5773a4c030a19d9bfaa090f49746ff35c75dfddfa700df7a5939d5e076a57039
+  symphonia-bundle-mp3 4872dd6bb56bf5eac799e3e957aa1981086c3e613b27e0ac23b176054f7c57ed
+  symphonia-core      ea00cc4f79b7f6bb7ff87eddc065a1066f3a43fe1875979056672c9ef948c2af
+  symphonia-metadata  36306ff42b9ffe6e5afc99d49e121e0bd62fe79b9db7b9681d48e29fa19e6b16
+
+Original game data and Sony firmware are not included and are not offered.
 """
 
 
@@ -818,10 +1414,22 @@ third-party dependencies from public sources".
   `git checkout --detach @@VITAGL_REVISION@@`, then
   `make @@VITAGL_FLAGS@@`, then `make install`. That is a local build at the
   recorded revision, not the vdpm package file.
+- vitaShaRK: `git clone https://github.com/Rinnegatamante/vitaShaRK`, then
+  `git checkout --detach @@VITASHARK_REVISION@@`, then `make`, then
+  `make install`.
+- pthread-embedded: `git clone https://github.com/vitasdk/pthread-embedded`, then
+  `git checkout --detach @@PTHREAD_REVISION@@`, then
+  `make -C platform/vita ... GLOBAL_CFLAGS=-Wno-error=int-conversion`, then
+  `objcopy --strip-debug -R .comment -R .note platform/vita/libpthread.a`, then
+  copy it into `$VITASDK/arm-vita-eabi/lib/`.
 - SceShaccCgExt: source in this bundle at `@@REVISION@@`; CMake recipe in
-  README.md step 4, output `lib/libSceShaccCgExt.a`.
+  README.md step 6, output `lib/libSceShaccCgExt.a`.
 - Expected `libvitaGL.a` SHA-256: `@@VITAGL_ARCHIVE@@`. The archive file does
   not record its compile flags; the flags above are the documented ones.
+- Rebuilds have different archive file hashes because `ar` stores member
+  timestamps. `link/relink.sh` compares member bytes, stripped with
+  `objcopy --strip-debug` (and additionally `-R .comment -R .note` for
+  pthread-embedded).
 - No input here needs a proprietary SDK binary. The Sce stub archives and the
   C library come from the public vdpm SDK packages.
 """

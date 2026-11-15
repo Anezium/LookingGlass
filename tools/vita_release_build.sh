@@ -11,6 +11,13 @@
 #   --private-test builds a non-release test package, permitting the SDK archives.
 #                  Does not generate or claim qualified release notices.
 #   --check-libraries performs only the read-only release-library preflight.
+#   --source-bundle NAME  source bundle named in the VPK source offer
+#                  (default: alice-lgpl-<head7>.tar.gz)
+#   --source-bundle-sha256 HEX  SHA-256 of that bundle, written into the offer
+#
+# Release mode repacks the VPK with tools/vita_package.py so the package carries
+# THIRD_PARTY_NOTICES-vita.txt, the licence texts and SOURCE-OFFER.txt. The ELF
+# and every runtime input are unchanged; only packaging differs.
 #
 # Needs VITASDK, the pinned Rust toolchain with rust-src, and cargo-vita. Refuses a tree with
 # uncommitted or untracked files. Honours CARGO_TARGET_DIR, CARGO_BUILD_JOBS and
@@ -30,11 +37,18 @@ out=""
 lib_dir=""
 private_test=false
 check_libraries=false
+source_bundle=""
+source_bundle_sha256=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --out|--lib-dir)
+        --out|--lib-dir|--source-bundle|--source-bundle-sha256)
             [ $# -ge 2 ] || { echo "missing value for $1" >&2; exit 2; }
-            if [ "$1" = --out ]; then out="$2"; else lib_dir="$2"; fi
+            case "$1" in
+                --out) out="$2" ;;
+                --lib-dir) lib_dir="$2" ;;
+                --source-bundle) source_bundle="$2" ;;
+                --source-bundle-sha256) source_bundle_sha256="$2" ;;
+            esac
             shift 2 ;;
         --private-test) private_test=true; shift ;;
         --check-libraries) check_libraries=true; shift ;;
@@ -116,6 +130,57 @@ cp "$release/looking-glass.elf" "$out/looking-glass.elf"
 cp "$release/looking-glass.self" "$out/eboot.bin"
 cp "$release/looking-glass.sfo" "$out/param.sfo"
 cp "$release/looking-glass.vpk" "$out/looking-glass.vpk"
+
+# Record the final redacted link-map identity and exact contributing object hashes.
+# Notices for a release must match the committed text; a private test makes no such claim.
+# This runs before packaging because the release VPK carries the notices and licences.
+notices_status=0
+notices_problem=0
+check_status=0
+if "$private_test"; then
+    echo "PRIVATE TEST ONLY: not a release artifact; release library/notices checks bypassed explicitly." \
+        | tee "$out/PRIVATE-TEST.txt"
+else
+python3 -I "$repo/tools/vita_release_libraries.py" --lib-dir "$lib_dir" --link-map "$out/link.map" \
+    --output "$out/library-selection.json" | tee -a "$out/libraries.txt"
+python3 -I "$repo/tools/vita_notices.py" --link-map "$out/link.map" --output "$out/THIRD_PARTY_NOTICES-vita.txt" \
+    || notices_status=$?
+if [ "$notices_status" -ne 0 ]; then
+    echo "FAIL notices generation" | tee -a "$out/check.txt"
+elif cmp -s "$out/THIRD_PARTY_NOTICES-vita.txt" "$repo/THIRD_PARTY_NOTICES-vita.txt"; then
+    echo "PASS THIRD_PARTY_NOTICES-vita.txt matches this link" | tee -a "$out/check.txt"
+else
+    echo "FAIL THIRD_PARTY_NOTICES-vita.txt differs from the notices generated for this link" | tee -a "$out/check.txt"
+    notices_problem=1
+fi
+check_status=$notices_status
+fi
+if [ "$notices_status" -ne 0 ] || [ "$notices_problem" -ne 0 ]; then
+    echo "release checks failed: notices are missing or uncommitted, refusing to package" >&2
+    exit 1
+fi
+
+# Repack the VPK with the notices, licence texts and source offer. This uses the
+# same VitaSDK commands and flags as the release packaging; the ELF is only read.
+if ! "$private_test"; then
+    if [ -z "$source_bundle" ]; then
+        source_bundle="alice-lgpl-${head:0:7}.tar.gz"
+    fi
+    package_args=(--vitasdk "$VITASDK" --sfo "$out/param.sfo" --eboot "$out/eboot.bin"
+        --elf "$out/looking-glass.elf" --head "$head" --notices "$out/THIRD_PARTY_NOTICES-vita.txt"
+        --source-bundle "$source_bundle" --out "$out/looking-glass.vpk")
+    if [ -n "$source_bundle_sha256" ]; then
+        package_args+=(--source-bundle-sha256 "$source_bundle_sha256")
+    fi
+    set +e
+    python3 -I "$repo/tools/vita_package.py" "${package_args[@]}" | tee -a "$out/check.txt"
+    package_pipeline=("${PIPESTATUS[@]}")
+    set -e
+    if [ "${package_pipeline[0]}" -ne 0 ] || [ "${package_pipeline[1]}" -ne 0 ]; then
+        check_status=1
+    fi
+fi
+
 python3 "$repo/tools/vita_livearea.py" --vpk "$out/looking-glass.vpk" | tee "$out/livearea.txt"
 
 set +e
@@ -123,9 +188,9 @@ python3 -I "$repo/tools/vita_release_check.py" \
     --elf "$out/looking-glass.elf" --self "$out/eboot.bin" --sfo "$out/param.sfo" --vpk "$out/looking-glass.vpk" \
     --heap "$HEAP_BYTES" --forbid "$HOME" --sfo-field "APP_VER=$APP_VER" --sfo-field TITLE_ID=ALICELG01 \
     --sfo-field "TITLE=American McGee's Alice" --sfo-field "STITLE=American McGee's Alice" \
-    | tee "$out/check.txt"
+    | tee -a "$out/check.txt"
 check_pipeline=("${PIPESTATUS[@]}")
-check_status=${check_pipeline[0]}
+if [ "${check_pipeline[0]}" -ne 0 ]; then check_status=1; fi
 if [ "${check_pipeline[1]}" -ne 0 ]; then check_status=1; fi
 set -e
 
@@ -169,26 +234,6 @@ pacman_db="$VITASDK/var/lib/pacman/local"
 } | tee "$out/BUILD.txt"
 # The link map lists absolute archive paths; keep the record, drop the home directory.
 sed -i.bak "s|$HOME|~|g" "$out/link.map" && rm -f "$out/link.map.bak"
-
-# Record the final redacted link-map identity and exact contributing object hashes.
-# Notices for a release must match the committed text; a private test makes no such claim.
-notices_status=0
-if "$private_test"; then
-    echo "PRIVATE TEST ONLY: not a release artifact; release library/notices checks bypassed explicitly." \
-        | tee "$out/PRIVATE-TEST.txt"
-else
-python3 -I "$repo/tools/vita_release_libraries.py" --lib-dir "$lib_dir" --link-map "$out/link.map" \
-    --output "$out/library-selection.json" | tee -a "$out/libraries.txt"
-python3 -I "$repo/tools/vita_notices.py" --link-map "$out/link.map" --output "$out/THIRD_PARTY_NOTICES-vita.txt" \
-    || notices_status=$?
-if [ "$notices_status" -ne 0 ]; then
-    echo "FAIL notices generation" | tee -a "$out/check.txt"
-elif cmp -s "$out/THIRD_PARTY_NOTICES-vita.txt" "$repo/THIRD_PARTY_NOTICES-vita.txt"; then
-    echo "PASS THIRD_PARTY_NOTICES-vita.txt matches this link" | tee -a "$out/check.txt"
-else
-    echo "FAIL THIRD_PARTY_NOTICES-vita.txt differs from the notices generated for this link" | tee -a "$out/check.txt"
-fi
-fi
 
 if [ "$check_status" -ne 0 ] || grep -q '^FAIL' "$out/check.txt"; then
     echo "release checks failed" >&2
