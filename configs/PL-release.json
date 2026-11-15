@@ -185,5 +185,6 @@
   "actor_near_cull": 0.0,
   "sim_flight_memo": true,
   "ant_corpse_triangle_cull": true,
-  "ant_corpse_opaque_shader": true
+  "ant_corpse_opaque_shader": true,
+  "water_draw_join": true
 }

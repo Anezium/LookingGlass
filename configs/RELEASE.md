@@ -21,13 +21,20 @@ RC8 additionally enables three keys measured on the Vita on 2026-11-14:
 `PL-rc7-release.json` keeps the RC7 release bytes for comparison; the RC8
 release differs from it only in those three keys.
 
+RC9 additionally enables `water_draw_join`, measured on the Vita on 2026-11-15
+(walk2 43.2 to 38.7 ms, fight2 median 37.4 to 33.6 ms; `docs/validation`,
+a2-29 session, on 7c089be). The join requires `world_shared_buffers` and
+`world_parameter_reuse`, both already on, and stays exclusive with
+`water_stage_merge`, which remains off. `PL-rc8-release.json` keeps the RC8
+release bytes for comparison; the RC9 release differs from it only in that key.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
 `detail_layers`, `sky_depth`, `sky_cube_capture_only`, `audio_combat_preload` and
 `sky_cube` are false; `sky_cube_size=256`, `actor_near_cull=0.0`,
-`spike_log_ms=0.0` and `sky_cube_refresh=0`. Water normals remain off. The three
-RC8 keys are true.
+`spike_log_ms=0.0` and `sky_cube_refresh=0`. Water normals remain off. The four
+RC8 and RC9 keys are true, and `water_draw_join` is the only one added by RC9.
 
 `PL-played-rc3.json` is a test fixture, copied byte-for-byte from the played input
 `rc3/configs/PL-rc3.json` (SHA-256
