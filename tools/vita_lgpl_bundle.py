@@ -536,6 +536,9 @@ the ELF will not be byte-identical.
 "$VITASDK/bin/vdpm" install @@VDPM_PACKAGES@@
 ```
 
+`vdpm install` asks `Proceed with installation? [Y/n]` and needs a `Y`. In a
+non-interactive script, feed it with `< <(yes Y)` (bash).
+
 `taihen` supplies `libtaihen_stub.a`, `vitaShaRK` supplies `libvitashark.a`,
 and `libmathneon` supplies `libmathneon.a`. The `vitaGL` package is not
 installed on purpose: step 3 replaces it with the release revision. If you
