@@ -4942,8 +4942,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 "state_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&value)?))}));
         }
         #[cfg(feature="vita_renderer")]
-        if crate::render::vita_renderer::config().gpu_skin_capture && matches!(frame,1050|1200|1470) {
-            save_capture(&std::path::PathBuf::from(format!("private/gpu-skin/frame-{frame:04}.png")))?;
+        if crate::render::vita_renderer::config().gpu_skin_capture
+            && matches!(frame,1050|1200|1350|1470|1935|1942)
+        {
+            // Keep the CPU reference set separate so a CPU arm and a GPU arm can both run and
+            // the owner can pair the same frames without one set overwriting the other.
+            let dir=if crate::render::vita_renderer::config().gpu_skin_ants {"private/gpu-skin"}
+                else {"private/gpu-skin/cpu"};
+            save_capture(&std::path::PathBuf::from(format!("{dir}/frame-{frame:04}.png")))?;
         }
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
