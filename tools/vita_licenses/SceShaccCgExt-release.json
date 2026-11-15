@@ -5,6 +5,8 @@
   "license": "LGPL-2.1",
   "license_file": "SceShaccCgExt-LICENSE",
   "license_sha256": "20c17d8b8c48a600800dfd14f95d5cb9ff47066a9641ddeab48dc54aec96e331",
-  "archive_sha256": "a5f9a3d0e5134bbfe144bdca52e4897aeae3c33edd6966da51e1ffc20cb8eb05",
-  "known_sdk_gpl_sha256": "42448da6ebfdc679458702492da467481b3dbcacfd2c254b28f08dba539d2a4a"
+  "archive_sha256": "0e340441f6909c1169b6f33bcd6e0223ffa91c9d7ce5155f3b27eb1bdd0b38a5",
+  "known_sdk_gpl_sha256": "42448da6ebfdc679458702492da467481b3dbcacfd2c254b28f08dba539d2a4a",
+  "patch": "patches/SceShaccCgExt-no-prelude.patch",
+  "patch_sha256": "e142a7517f459f3160adf74fc684a3973f14bed6745cf5669060daada44d8905"
 }

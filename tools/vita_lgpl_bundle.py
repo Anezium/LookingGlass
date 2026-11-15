@@ -203,7 +203,11 @@ def extract_source(source_repo, revision, destination):
                 fail("unsafe path in the SceShaccCgExt archive: " + name)
             if member.issym() or member.islnk():
                 fail("link in the SceShaccCgExt archive: " + name)
+            if name == "include/sce_intrinsics.h":
+                continue
             archive.extract(member, destination)
+    subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "vita_shacccg_no_prelude.py"),
+                    "--apply", str(destination)], check=True)
 
 
 def write_readme(bundle, facts):
@@ -354,6 +358,7 @@ def main():
             fail("no object code was copied")
 
         extract_source(source, pin["revision"], bundle / "SceShaccCgExt-source")
+        shutil.copy2(Path(__file__).resolve().parent / "patches/SceShaccCgExt-no-prelude.patch", bundle / "SceShaccCgExt-no-prelude.patch")
         licence_source = bundle / "SceShaccCgExt-source/LICENSE"
         if sha256(licence_source) != pin["license_sha256"]:
             fail("the SceShaccCgExt source licence text does not match the pin")
@@ -437,7 +442,7 @@ the Looking Glass port of American McGee's Alice.
 
 ## Contents
 
-- `SceShaccCgExt-source/` - the complete source tree at `@@REVISION@@`, exported
+- `SceShaccCgExt-source/` - the source tree at `@@REVISION@@` with the optional intrinsic prelude removed (2026-11-15); see `SceShaccCgExt-no-prelude.patch`, exported
   from Git. Its `LICENSE` is the LGPL-2.1 text.
 - `licenses/LGPL-2.1.txt` - the same LGPL-2.1 text, hash-pinned by the release
   tooling.

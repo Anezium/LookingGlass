@@ -419,6 +419,8 @@ pub struct Config {
     pub audio_music_priority: i32,
     /// Persistent binary pairs; process deduplication remains active when off.
     pub shader_cache: String,
+    /// Empty preserves the release cache path; diagnostics use a fresh child directory.
+    pub shader_cache_namespace: String,
     /// Optional cache of exact device-compressed immutable pixels.
     pub texture_cache: String,
     /// One upload per resolved asset path for the duration of a load.
@@ -635,6 +637,7 @@ impl Default for Config {
             audio_music_thread: false,
             audio_music_priority: 170,
             shader_cache:"on".into(),
+            shader_cache_namespace:String::new(),
             texture_cache:"off".into(),
             load_texture_share: false,
             route_heading_lock:true,
@@ -735,6 +738,7 @@ impl Config {
         ensure!(!self.water_draw_join || self.water_stage_merge == "off", "water_draw_join and water_stage_merge are exclusive");
         ensure!(self.fx_add_max_area.is_finite() && (0. ..=1.).contains(&self.fx_add_max_area), "fx_add_max_area must be 0 to 1");
         ensure!(matches!(self.texture_cache.as_str(),"on"|"off"),"texture_cache must be on or off");
+        ensure!(self.shader_cache_namespace.len() <= 64 && self.shader_cache_namespace.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "invalid shader_cache_namespace");
         ensure!(matches!(self.shader_cache.as_str(),"on"|"off"),"shader_cache must be on or off");
         ensure!(matches!(self.fx_batching.as_str(),"none"|"adjacent"|"material"),"invalid fx_batching");
         ensure!(matches!(self.fx_streaming.as_str(),"orphan"|"ring"),"invalid fx_streaming");

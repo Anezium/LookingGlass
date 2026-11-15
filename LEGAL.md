@@ -67,7 +67,8 @@ The PlayStation Vita port in the `vita-*` branches of the Anezium/LookingGlass
 fork is an unofficial community port. It is not reviewed or endorsed by the
 Looking Glass maintainers, and it is not affiliated with EA or Sony Interactive
 Entertainment. Its packages contain no game data, no Internet Archive download
-option and no Sony software: players copy their own game files to
+option or bundled shader compiler. SceShaccCgExt is modified to omit its optional
+intrinsic prelude and the load of that prelude. Players copy their own game files to
 `ux0:data/alice/base/`, and the shader compiler `libshacccg.suprx` is loaded
 from their own console. The Vita build links third-party libraries statically,
 some of them under the GNU LGPL; their licences, and the files the port changed
