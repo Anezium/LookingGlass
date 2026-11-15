@@ -335,6 +335,8 @@ impl Task {
 }
 /// The exact kernel for one draw, on whichever thread claimed it.
 unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[(Mat3, Vec3)], surfaces: *const Surface, task_output: usize, task_layers: usize, task_dirty: usize) {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let census_time=std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").map(|_|std::time::Instant::now());
             for surface_id in draw.surfaces.clone() {
                 let surface = &*surfaces.add(surface_id);
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
@@ -404,6 +406,8 @@ unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[
                     *(task_dirty as *mut [bool; 2]).add(surface_id) = dirty;
                 }
             }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if let Some(t)=census_time {println!("[lg/worker-census] actor={:?} instance={} bones={} surfaces={} vertices={} cpu_ns={}",draw.actor,draw.instance,pose.len(),draw.surfaces.len(),draw.surfaces.clone().map(|id|(*surfaces.add(id)).vertices.len()).sum::<usize>(),t.elapsed().as_nanos());}
 }
 struct Store {
     // Workers drain before storage is released, also on TLS shutdown.

@@ -664,6 +664,12 @@ impl Gpu {
         metrics.uniform_uploads += u64::from(traffic.calls > 0);
         metrics.uniform_bytes += traffic.bytes;
         metrics.uniform_gl_calls += traffic.calls;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::character::skinning::census::active() && !p.effect {
+            println!("[lg/submit-census] frame={} texture={:?} triangles={} vertices={} blend={} equal={} depth_write={depth_write} pipeline={} bindings={} uniform_calls={} uniform_bytes={} cpu_ns={}",
+                crate::sim_maps::probe::frame(),crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)),p.geometry().indices.len()/3,p.geometry().vertices.len(),p.blend_index,p.depth_equal,
+                apply[0],apply[1],traffic.calls,traffic.bytes,started.map_or(0,|t|t.elapsed().as_nanos()));
+        }
         if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
     }
 }
@@ -1245,6 +1251,8 @@ pub(crate) fn finish_world(
     if flush {
         boundary("flush_vita_3d_packets");
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("raw",&groups);
     super::corpse_triangles::process(&mut groups);
     let cuts = packet_cull::Cuts::new(crate::render::vita_renderer::config());
     if cuts.active() {
@@ -1254,6 +1262,8 @@ pub(crate) fn finish_world(
             packet_cull::cull(&mut gpu.bounds, &mut groups, &mut puffs, matrix, cuts, c.actor_layer_reuse || c.actor_single_prepare);
         }
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("culled",&groups);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     super::corpse_triangles::report(&groups);
     {
@@ -1355,6 +1365,8 @@ pub(crate) fn finish_world(
         opaque.clear(); gpu.opaque_storage = opaque;
     }
     drop(merge_leaf);
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("merged",&groups);
     let mut packets = std::mem::take(&mut gpu.packet_storage); packets.clear();
     let mut ranges = std::mem::take(&mut gpu.range_storage); ranges.clear();
     let mut invalid = 0;
@@ -1414,9 +1426,15 @@ pub(crate) fn finish_world(
     count("vita_fx_compacted_vertices", 0);
     let draw_group = |gpu: &mut Gpu, id: usize| {
         let _census = crate::phase_census::span(if groups[id].passes.iter().all(|p| p.effect) {crate::phase_census::Region::FxSubmit} else {crate::phase_census::Region::ActorSubmit});
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let census_start=crate::character::skinning::census::active().then(std::time::Instant::now);
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent, groups[id].ant_dead);
+        }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::character::skinning::census::active() && groups[id].passes.iter().any(|p|!p.effect) {
+            println!("[lg/group-submit] frame={} group={id} owner={:?} draws={} cpu_ns={}",crate::sim_maps::probe::frame(),crate::character::skinning::census::owner(id),ranges[id].len(),census_start.map_or(0,|t|t.elapsed().as_nanos()));
         }
     };
     let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
@@ -1534,6 +1552,8 @@ pub(crate) fn finish_world(
         groups.clear(); f.groups = groups;
         puffs.clear(); f.world_puffs = puffs;
     });
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    crate::character::skinning::census::clear();
     (list_len, dropped + invalid)
 }
 
@@ -2141,5 +2161,13 @@ mod tests {
         });
         assert!(!FRAME.with(|f| f.borrow().depth_read_only));
         FRAME.with(|f| *f.borrow_mut() = Frame::default());
+    }
+}
+
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+fn census_groups(stage:&str,groups:&[Group]) {
+    if !crate::character::skinning::census::active() {return;}
+    for (id,g) in groups.iter().enumerate() {
+        println!("[lg/group-census] frame={} stage={stage} group={id} owner={:?} layers={} triangles={} effect={} textures={:?}",crate::sim_maps::probe::frame(),crate::character::skinning::census::owner(id),g.passes.len(),g.passes.iter().map(|p|p.geometry().indices.len()/3).sum::<usize>(),g.passes.iter().all(|p|p.effect),g.passes.iter().map(|p|crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id))).collect::<Vec<_>>());
     }
 }

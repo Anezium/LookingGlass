@@ -393,6 +393,8 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
             }
             f.vertices += count;
             let transparent = transparent || f.depth_read_only;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {
                 ant_dead: corpse_triangles::active(),
                 passes,

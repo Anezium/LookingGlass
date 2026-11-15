@@ -707,6 +707,8 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
             let mut f=f.borrow_mut();
             f.vertices+=n;let id=f.groups.len();
             let transparent=surface.transparent||f.depth_read_only;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {ant_dead: super::corpse_triangles::active(),passes:passes.take().unwrap(),transparent});Some(id)
         })?;
         if capped>0 {
@@ -755,6 +757,8 @@ fn prepare_deferred(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,
             debug_assert_eq!(f.vertices,used);
             f.vertices+=n;let group=f.groups.len();
             let transparent=surface.transparent||f.depth_read_only;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {ant_dead: super::corpse_triangles::active(),passes:Vec::new(),transparent});group
         });
         s.deferred.push(Deferred {group,bank,slot,surface,camera,time,appearance,limit,vertices:n,dropped_layers:dropped_layers as u64});
