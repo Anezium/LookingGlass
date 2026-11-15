@@ -72,7 +72,10 @@ class Console:
         self.k.Ftp.delete=lambda *a: (_ for _ in ()).throw(AssertionError('no deletes'))
     def command(self,*args):
         # Run in-process so the FTP allowlist also covers install/restore.
-        assert self.k.main(['--session',str(self.session),*map(str,args)]) in (None,0)
+        code=self.k.main(['--session',str(self.session),*map(str,args)])
+        if code not in (None,0):
+            reason='INCONCLUSIVE; stop, no verdict, no retry' if args[:2]==('log','check-config') and code==4 else 'stop for root recovery'
+            raise RuntimeError(f'{args}: exit {code}; {reason}')
     def preflight(self,ready):
         assert sha(self.kit.read_bytes()) == ready["kit_sha256"], "rc1kit changed since packaging"
         assert shutil.disk_usage(self.session).free>=40*2**30
@@ -93,16 +96,16 @@ class Console:
             if 'cache' not in f.ls(self.k.PRIV): return
             if 'shaders' not in f.ls(self.k.PRIV+'cache/'): return
             assert name not in f.ls(self.k.PRIV+'cache/shaders/'), 'namespace already exists'
-    def install(self,self_path,config): self.command('install',self_path,config)
+    def install(self,self_path,config):
+        if self.s.state().get('launch_id'): self.command('wait-exit','--timeout','30')
+        self.command('install',self_path,config)
     def launch_wait(self):
-        offset=self.log.stat().st_size;self.command('launch');deadline=time.monotonic()+360
-        while time.monotonic()<deadline:
-            with self.log.open('rb') as f:f.seek(offset);text=f.read().decode(errors='replace')
-            if '[lg/replay] done ' in text and 'connection closed' in text.split('[lg/replay] done ',1)[1]:
-                self.command('closed');self.command('log','check-config');return text
-            if any(x in text.lower() for x in ('panicked at','render gpu crash','invalid config')):raise RuntimeError(text[-3000:])
-            time.sleep(1)
-        raise TimeoutError('replay did not close within 360 seconds; root must close ALICELG01 before restore')
+        self.command('launch')
+        # No replay retry and no verdict until exit and a complete attributed config.
+        self.command('wait-exit','--timeout','360')
+        self.command('log','check-config')  # code 4 is INCONCLUSIVE: stop, no verdict
+        rows=self.k.launch_lines(list(self.k.parse_log(self.log,connections=True)))
+        return '\n'.join(text for n,t,src,text,cid in rows if src=='vita')
     def cache(self,name):
         out={}
         with self.k.FtpSession(self.s) as f:
@@ -117,16 +120,8 @@ class Console:
     def result(self,result):(self.session/'no-prelude-result.json').write_text(json.dumps(result,indent=2)+'\n')
     def restore(self):
         # --keep-saves avoids every kit delete path. New game-created caches remain.
-        if self.s.state()['game']!='closed':
-            offset=self.log.stat().st_size
-            self.command('quit')
-            deadline=time.monotonic()+30
-            while time.monotonic()<deadline:
-                with self.log.open('rb') as f:f.seek(offset);text=f.read().decode(errors='replace')
-                if 'connection closed' in text:
-                    self.command('closed');break
-                time.sleep(1)
-            else: raise RuntimeError('cannot verify app closed; root recovery required before restore')
+        if self.s.state().get('launch_id'):
+            self.command('wait-exit','--timeout','30')
         self.command('restore','--keep-saves')
 
 if __name__=='__main__':
