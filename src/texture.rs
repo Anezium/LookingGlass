@@ -98,8 +98,8 @@ fn zero_alpha(pixels: &[u8]) -> bool {
     !pixels.is_empty() && pixels.chunks_exact(4).all(|p| p[3] == 0)
 }
 
-/// `load_texture_share` is off in every shipped config and never reaches a device
-/// unless a person sets it. Without `vita_renderer` the key has no reader, so off.
+/// `load_texture_share` is on in the RC12 release input and off in every earlier one;
+/// without `vita_renderer` the key has no reader, so off.
 fn share_enabled() -> bool {
     #[cfg(test)]
     if let Some(on) = TEST_SHARE.with(|v| v.get()) { return on; }

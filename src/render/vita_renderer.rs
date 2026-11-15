@@ -3431,18 +3431,23 @@ mod tests {
         assert!(rejected.is_none());
         let played_raw: serde_json::Value = serde_json::from_slice(played_bytes).unwrap();
         for (key, value) in played_raw.as_object().unwrap() {
-            let expected = if key == "log_frame_time_every" { serde_json::json!(0) } else { value.clone() };
+            let expected = match key.as_str() {
+                "log_frame_time_every" => serde_json::json!(0),
+                "load_texture_share" => serde_json::json!(true),
+                _ => value.clone(),
+            };
             assert_eq!(raw[key], expected, "{key}");
         }
         let mut played = serde_json::to_value(parse_runtime_config(played_bytes).unwrap().0).unwrap();
         assert_eq!(played["log_frame_time_every"], 10);
         played["log_frame_time_every"] = 0.into();
-        // RC8, RC9 and RC10 deliberately enable the defaults measured on 2026-11-14 and 2026-11-15.
+        // RC8, RC9 and RC10 deliberately enable the defaults measured on 2026-11-14 and 2026-11-15;
+        // RC12 enables the shared upload as well.
         for key in ["sim_flight_memo", "ant_corpse_triangle_cull", "ant_corpse_opaque_shader", "water_draw_join",
-                    "actor_consumer_frustum_cull", "fx_unlit_exact"] { played[key] = true.into(); }
+                    "actor_consumer_frustum_cull", "fx_unlit_exact", "load_texture_share"] { played[key] = true.into(); }
         // Compare typed values on both sides: to_value widens f32 (e.g. the
         // played audio gain 0.001), unlike its original JSON decimal spelling.
-        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown and the six measured defaults may change parsed played values");
+        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown and the seven measured defaults may change parsed played values");
         let added = raw.as_object().unwrap().iter().filter(|(key, _)| played_raw.get(*key).is_none()).map(|(key, value)| (key.clone(), value.clone())).collect::<serde_json::Map<_, _>>();
         assert_eq!(serde_json::Value::Object(added), serde_json::json!({
             "world_adjacent_batch":false,"exact_blends":false,"sky_cube_finish":false,
@@ -3994,7 +3999,7 @@ mod tests {
     fn a6_load_pair_differs_only_in_the_four_load_keys() {
         let (release, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-release.json")).unwrap();
         assert!(rejected.is_none());
-        assert!(!release.load_texture_share, "sharing stays off in the RC11 release input");
+        assert!(release.load_texture_share, "RC12 enables the shared upload in the release input");
         let off_bytes = include_bytes!("../../configs/PL-a6-load-off.json");
         let on_bytes = include_bytes!("../../configs/PL-a6-load-on.json");
         let (off, rejected) = parse_runtime_config(off_bytes).unwrap();
@@ -4091,15 +4096,17 @@ mod tests {
         }
     }
     #[test]
-    fn rc11_release_inputs_are_rc10_with_sharing_off_and_package_configs_add_only_their_keys() {
+    fn rc12_release_inputs_are_rc11_with_sharing_on_and_package_configs_add_only_their_keys() {
         use sha2::{Digest, Sha256};
         let release_bytes = include_bytes!("../../configs/PL-release.json");
+        let rc11_bytes = include_bytes!("../../configs/PL-rc11-release.json");
         let rc10_bytes = include_bytes!("../../configs/PL-rc10-release.json");
         let rc9_bytes = include_bytes!("../../configs/PL-rc9-release.json");
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "4b1a1503b00b7826258a54fff0e69e5bdbd3a609f440bc13aaa2926aae9cb9f5");
+        assert_eq!(format!("{:x}", Sha256::digest(rc11_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
         assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
         assert_eq!(format!("{:x}", Sha256::digest(rc9_bytes)), "9dbf482cf40ff440dd74ecc5c6be45aaf5c3cb0b06da3bfc0fe47a4b76466cac");
         assert_eq!(format!("{:x}", Sha256::digest(rc8_bytes)), "a5d21beec0d15648cc94f209bbe0adf1fa387430c0df18a1a5e10ad2756f6f2b");
@@ -4109,6 +4116,9 @@ mod tests {
         assert!(rejected.is_none());
         release.validate().unwrap();
         let baseline = serde_json::to_value(release).unwrap();
+        let (rc11, rejected) = parse_runtime_config(rc11_bytes).unwrap();
+        assert!(rejected.is_none());
+        let rc11 = serde_json::to_value(rc11).unwrap();
         let (rc10, rejected) = parse_runtime_config(rc10_bytes).unwrap();
         assert!(rejected.is_none());
         let rc10 = serde_json::to_value(rc10).unwrap();
@@ -4121,7 +4131,8 @@ mod tests {
         assert_eq!(baseline["water_draw_join"], true, "the join remains a measured release default");
         assert_eq!(baseline["actor_consumer_frustum_cull"], true, "the consumer cull is a measured RC10 release default");
         assert_eq!(baseline["fx_unlit_exact"], true, "the unlit exact path is a measured RC10 release default");
-        assert_eq!(baseline["load_texture_share"], false, "RC11 keeps sharing off in the release input");
+        assert_eq!(baseline["load_texture_share"], true, "RC12 enables the shared upload in the release input");
+        assert_eq!(rc11["load_texture_share"], false, "RC11 kept sharing off in the release input");
         assert_eq!(baseline["loading_screen"], true, "the boot loading screen stays on");
         assert_eq!(baseline["texture_cache"], "off", "the disk texture cache stays off");
         assert_eq!(baseline["pvs_cache"], false, "the disk PVS cache stays off");
@@ -4129,8 +4140,9 @@ mod tests {
         assert_eq!(baseline["world_parameter_reuse"], true);
         assert_eq!(baseline["water_stage_merge"], "off");
         let mut variant = baseline.clone();
-        variant["load_texture_share"] = rc10["load_texture_share"].clone();
-        assert_eq!(variant, rc10, "RC11 release keeps every RC10 value, with sharing off");
+        variant["load_texture_share"] = rc11["load_texture_share"].clone();
+        assert_eq!(variant, rc11, "RC12 release keeps every RC11 value, with sharing on");
+        assert_eq!(rc11, rc10, "RC11 release keeps every RC10 value, with the shared upload off by default");
         let mut variant = rc10.clone();
         for key in ["actor_consumer_frustum_cull", "fx_unlit_exact"] { variant[key] = rc9[key].clone(); }
         assert_eq!(variant, rc9, "RC10 release changes only the two declared keys relative to RC9");
@@ -4172,10 +4184,15 @@ mod tests {
             }
             assert_eq!(&variant, against, "{name} changes only its declared keys against its release");
         };
-        // The RC11 packages add only their replay keys to the RC11 release.
-        check_package("PL-rc11-release-play04.json", include_bytes!("../../configs/PL-rc11-release-play04.json"), None, &defaults, &baseline);
-        check_package("PL-rc11-load-gvillage.json", include_bytes!("../../configs/PL-rc11-load-gvillage.json"), Some("gvillage"), &defaults, &baseline);
-        check_package("PL-rc11-load-funhouse.json", include_bytes!("../../configs/PL-rc11-load-funhouse.json"), Some("funhouse"), &defaults, &baseline);
+        // The RC12 packages add only their replay keys to the RC12 release.
+        check_package("PL-rc12-release-play04.json", include_bytes!("../../configs/PL-rc12-release-play04.json"), None, &defaults, &baseline);
+        check_package("PL-rc12-load-gvillage.json", include_bytes!("../../configs/PL-rc12-load-gvillage.json"), Some("gvillage"), &defaults, &baseline);
+        check_package("PL-rc12-load-funhouse.json", include_bytes!("../../configs/PL-rc12-load-funhouse.json"), Some("funhouse"), &defaults, &baseline);
+        // The RC11 packages keep their frozen bytes and add only their replay keys
+        // to the frozen RC11 release.
+        check_package("PL-rc11-release-play04.json", include_bytes!("../../configs/PL-rc11-release-play04.json"), None, &defaults, &rc11);
+        check_package("PL-rc11-load-gvillage.json", include_bytes!("../../configs/PL-rc11-load-gvillage.json"), Some("gvillage"), &defaults, &rc11);
+        check_package("PL-rc11-load-funhouse.json", include_bytes!("../../configs/PL-rc11-load-funhouse.json"), Some("funhouse"), &defaults, &rc11);
         // The RC10 packages keep their frozen bytes, so they predate the shared key
         // and add only their replay keys to the frozen RC10 release.
         let frozen_keys: Vec<String> = defaults.iter().filter(|key| *key != "load_texture_share").cloned().collect();

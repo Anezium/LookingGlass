@@ -47,6 +47,17 @@ the key off this head is draw-for-draw and pixel-equal to RC10 on all nine maps.
 stays `false`, so both disk caches remain off. `PL-rc10-release.json` keeps the
 RC10 release bytes for comparison; the RC11 release keeps every RC10 value.
 
+RC12 turns `load_texture_share` on. The merge brings the material identity fix
+(each project mesh owns its material recipe separately from its GPU texture, and
+an image-only load-scoped stage cache preserves the old local-base image alias)
+and the review-2 upload identities, which keep merge eligibility independent of
+the shared handle. On the A6 branch at 6fd8ada that pair is 9/9 pixel-equal with
+zero packet count and order differences, both against RC11 and between the key
+off and on. `loading_screen` stays on, `texture_cache` stays `off` and
+`pvs_cache` stays `false`, so both disk caches remain off; no other value moves.
+`PL-rc11-release.json` keeps the RC11 release bytes for comparison; the RC12
+release differs from it only in that one key.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
@@ -55,7 +66,8 @@ values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `spike_log_ms=0.0` and `sky_cube_refresh=0`. Water normals remain off. The four
 RC8 and RC9 keys are true; `water_draw_join` is the only one added by RC9,
 RC10 adds only `actor_consumer_frustum_cull` and `fx_unlit_exact`, both true and
-both measured, and RC11 changes no measured value.
+both measured, RC11 changes no measured value and RC12 enables only the shared
+upload.
 
 `PL-played-rc3.json` is a test fixture, copied byte-for-byte from the played input
 `rc3/configs/PL-rc3.json` (SHA-256
