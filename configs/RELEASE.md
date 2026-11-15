@@ -37,15 +37,25 @@ requires `skin_actual_consumers`, already on, and does not need
 release bytes for comparison; the RC10 release differs from it only in those
 two keys.
 
+RC11 keeps `load_texture_share` off. The merge brings the sampler-keyed shared
+upload and the boot loading screen, but enabling the key fails the nine-map
+oracle against RC10: `render_fx::register` keeps its material Surface table keyed
+by the base skin texture handle, and sharing makes that handle no longer unique
+per material, so materials that resolve to one image exchange their stages. With
+the key off this head is draw-for-draw and pixel-equal to RC10 on all nine maps.
+`loading_screen` was already on; `texture_cache` stays `off` and `pvs_cache`
+stays `false`, so both disk caches remain off. `PL-rc10-release.json` keeps the
+RC10 release bytes for comparison; the RC11 release keeps every RC10 value.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
 `detail_layers`, `sky_depth`, `sky_cube_capture_only`, `audio_combat_preload` and
 `sky_cube` are false; `sky_cube_size=256`, `actor_near_cull=0.0`,
 `spike_log_ms=0.0` and `sky_cube_refresh=0`. Water normals remain off. The four
-RC8 and RC9 keys are true; `water_draw_join` is the only one added by RC9, and
+RC8 and RC9 keys are true; `water_draw_join` is the only one added by RC9,
 RC10 adds only `actor_consumer_frustum_cull` and `fx_unlit_exact`, both true and
-both measured.
+both measured, and RC11 changes no measured value.
 
 `PL-played-rc3.json` is a test fixture, copied byte-for-byte from the played input
 `rc3/configs/PL-rc3.json` (SHA-256
