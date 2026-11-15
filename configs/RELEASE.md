@@ -28,13 +28,24 @@ a2-29 session, on 7c089be). The join requires `world_shared_buffers` and
 `water_stage_merge`, which remains off. `PL-rc8-release.json` keeps the RC8
 release bytes for comparison; the RC9 release differs from it only in that key.
 
+RC10 additionally enables `actor_consumer_frustum_cull` (the skool1 actor cull:
+actor median 53.7 to 38.7 ms, worst 55.4 to 40.1, draw 52.1 to 37.1 on the Vita
+on 2026-11-15) and `fx_unlit_exact` (the hatter2 unlit FX path: median 49.7 to
+43.2 ms, worst 54.2 to 45.2). Both were reviewed with fixes applied; the cull
+requires `skin_actual_consumers`, already on, and does not need
+`actor_opaque_shader`, which stays off. `PL-rc9-release.json` keeps the RC9
+release bytes for comparison; the RC10 release differs from it only in those
+two keys.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
 `detail_layers`, `sky_depth`, `sky_cube_capture_only`, `audio_combat_preload` and
 `sky_cube` are false; `sky_cube_size=256`, `actor_near_cull=0.0`,
 `spike_log_ms=0.0` and `sky_cube_refresh=0`. Water normals remain off. The four
-RC8 and RC9 keys are true, and `water_draw_join` is the only one added by RC9.
+RC8 and RC9 keys are true; `water_draw_join` is the only one added by RC9, and
+RC10 adds only `actor_consumer_frustum_cull` and `fx_unlit_exact`, both true and
+both measured.
 
 `PL-played-rc3.json` is a test fixture, copied byte-for-byte from the played input
 `rc3/configs/PL-rc3.json` (SHA-256
