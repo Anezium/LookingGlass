@@ -1186,6 +1186,7 @@ impl Model {
         piece: Option<(&str, &str, bool)>,
     ) {
         let _identity = self.skin_identity.scope_unless_set();
+        let _skin_kind = crate::character::skinning::timing::kind(&self.data.def.model);
         self.visible.fill(false);
         self.electric_attachments.clear();
         self.electric_props.clear();

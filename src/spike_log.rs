@@ -180,6 +180,7 @@ impl Frame {
                 n.ms.iter().sum::<f64>(), n.ms[0], n.ms[1], n.ms[2], n.ms[3]);
             any = true;
         }
+        crate::character::skinning::timing::append(out);
         if self.flight_work[0] > 0 {
             let [calls,tests,traversals,witnesses,short,free]=self.flight_work;
             let _=write!(out," flight_work={calls}/{tests}/{traversals}/{witnesses}/{short}/{free}");
@@ -220,6 +221,7 @@ pub(crate) fn begin_frame() {
         *f = Frame { number, begin: Some(now), block: Some((Sim::Input as usize, now)), gxm_start: mark,
             gxm_mark: mark, log_ms, ..Frame::default() };
     });
+    crate::character::skinning::timing::begin();
 }
 /// Writes the buffered lines, one record each, then one `[lg/spike] flushed` line with the count,
 /// the drops and the time the writes took. `at` names the flush point. Called outside play.

@@ -81,6 +81,12 @@ pub struct Config {
     /// Use the same fragment arithmetic without discard for certified opaque dead Ants.
     pub ant_corpse_opaque_shader: bool,
     pub diag_skip_live_actors: bool,
+    /// Buffered CPU actor attribution, requires spike logging.
+    pub diag_actor_timing: bool,
+    /// Exact numeric experiments. All default off.
+    pub skin_vector: bool,
+    pub skin_pose_reuse: bool,
+    pub skin_duplicate_reuse: bool,
     /// Use the discard-free program for every certified opaque actor/prop packet.
     /// Draw order, geometry and fragment arithmetic stay unchanged. Default off.
     pub actor_opaque_shader: bool,
@@ -512,6 +518,10 @@ impl Default for Config {
             ant_corpse_triangle_cull: false,
             ant_corpse_opaque_shader: false,
             diag_skip_live_actors: false,
+            diag_actor_timing: false,
+            skin_vector: false,
+            skin_pose_reuse: false,
+            skin_duplicate_reuse: false,
             actor_opaque_shader: false,
             actor_consumer_frustum_cull: false,
             diag_skip_fx: false,

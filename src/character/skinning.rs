@@ -173,8 +173,10 @@ pub(super) fn positions(job: &mut Job<'_>, p: Params<'_>) {
     }
 }
 pub(super) fn kernel(job: &mut Job<'_>, p: Params<'_>) {
+    let timing=timing::start();
     positions(job, p);
     shade_arrays(job.vertices, job.indices, p.flat, p.fullbright, p.alpha);
+    timing::skin(timing,timing::current(),p.pose.len(),job.vertices.len(),false);
 }
 pub(super) fn shade(mesh: &mut Mesh, flat: bool, fullbright: bool, alpha: f32) {
     if flat { shade_arrays(&mut mesh.vertices, &mesh.indices, flat, fullbright, alpha); return; }
@@ -943,3 +945,6 @@ pub(crate) fn consumer_body_culling(afterimages: bool) -> bool {
 pub(crate) mod census;
 #[cfg(all(test,feature="vita_renderer"))]
 mod cull_tests;
+
+pub(crate) mod timing;
+pub(super) mod experiment;

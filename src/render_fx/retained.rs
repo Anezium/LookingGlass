@@ -516,6 +516,7 @@ impl Gpu {
     }
     fn upload(&mut self, slot: usize, p: &Pass, leaves: &mut crate::phase_census::FinishLeaves) -> Result<usize> {
         crate::game_thread::assert_current();
+        let _skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("upload"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("upload",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         let mesh=p.geometry();
@@ -693,6 +694,7 @@ impl Gpu {
             self.submit_cache.observe(submit_key(key, program, depth_write),
                 (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
         } else { [true; 3] };
+        let skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("state"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("state",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         if apply[0] {
@@ -702,11 +704,15 @@ impl Gpu {
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         drop(actor_leaf);
+        drop(skin_clock);
+        let skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("bindings"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("bindings",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         if apply[1] { ctx.apply_bindings(b); self.stats.binding_sets += 1; }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         drop(actor_leaf);
+        drop(skin_clock);
+        let skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("uniform_apply"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("uniform_apply",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         // The old uniform-only probe remains independently selectable with the
@@ -730,6 +736,7 @@ impl Gpu {
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         drop(actor_leaf);
+        drop(skin_clock);
         if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         {
@@ -749,11 +756,13 @@ impl Gpu {
                     p.fog.to_bits(),p.model as u32,p.filter_fade.to_bits()],p.mesh.texture.as_ref());
         }
         let class = if p.effect { crate::gpu_timing::fx_class(p.blend_index) } else { crate::gpu_timing::MASK_ACTORS };
+        let skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("draw"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("draw",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         if !crate::gpu_timing::masked(class) { ctx.draw(0, p.geometry().indices.len() as i32, 1); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         drop(actor_leaf);
+        drop(skin_clock);
         #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
         if let Some(start) = census_started {
             let (_, texture) = crate::sim_maps::probe::draw_query::actor_label(
@@ -1529,12 +1538,14 @@ pub(crate) fn finish_world(
                     Ok(b) => {
                         if let Some(id)=shared {shared_uploads.insert(id,b);}
                         let uniform_leaf=leaves.start();
+                        let skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("uniform_build"));
                         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                         let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("uniform_build",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
                         let u = if c.fx_prepare_cache { prepared_uniforms(p, &mut uniform_templates) }
                             else { FRAME.with(|f| uniforms(p, &f.borrow())) };
                         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                         drop(actor_leaf);
+        drop(skin_clock);
                         leaves.add(1,uniform_leaf);
                         packets.push((group_id, pass_id, b, u));
                     }
