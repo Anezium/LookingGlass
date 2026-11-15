@@ -125,5 +125,14 @@ class WrapperControls(unittest.TestCase):
         self.run_wrapper(0)
 
 
+class ReleaseScriptControls(unittest.TestCase):
+    def test_release_build_checks_credits_against_the_generator(self):
+        text = (TOOLS / "vita_release_build.sh").read_text(encoding="utf-8")
+        self.assertIn("--credits-output", text)
+        self.assertIn('cmp -s "$out/CREDITS.txt" "$repo/CREDITS.txt"', text)
+        self.assertIn("PASS CREDITS.txt", text)
+        self.assertIn("FAIL CREDITS.txt", text)
+
+
 if __name__ == "__main__":
     unittest.main()

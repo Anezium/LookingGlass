@@ -144,11 +144,18 @@ else
 python3 -I "$repo/tools/vita_release_libraries.py" --lib-dir "$lib_dir" --link-map "$out/link.map" \
     --output "$out/library-selection.json" | tee -a "$out/libraries.txt"
 python3 -I "$repo/tools/vita_notices.py" --link-map "$out/link.map" --output "$out/THIRD_PARTY_NOTICES-vita.txt" \
+    --credits-output "$out/CREDITS.txt" \
     || notices_status=$?
 if [ "$notices_status" -ne 0 ]; then
     echo "FAIL notices generation" | tee -a "$out/check.txt"
 elif cmp -s "$out/THIRD_PARTY_NOTICES-vita.txt" "$repo/THIRD_PARTY_NOTICES-vita.txt"; then
     echo "PASS THIRD_PARTY_NOTICES-vita.txt matches this link" | tee -a "$out/check.txt"
+    if cmp -s "$out/CREDITS.txt" "$repo/CREDITS.txt"; then
+        echo "PASS CREDITS.txt matches the notices generator" | tee -a "$out/check.txt"
+    else
+        echo "FAIL CREDITS.txt differs from the notices generator" | tee -a "$out/check.txt"
+        notices_problem=1
+    fi
 else
     echo "FAIL THIRD_PARTY_NOTICES-vita.txt differs from the notices generated for this link" | tee -a "$out/check.txt"
     notices_problem=1
