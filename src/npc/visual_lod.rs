@@ -1,4 +1,5 @@
 //! Render-only cache for attachment-free ambient actors. No Actor state lives here.
+use crate::mesh::Mesh;
 use super::*;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -52,7 +53,7 @@ impl Cache {
         self.meshes.clear();
         self.meshes.extend(model.meshes.iter().zip(&model.visible)
             .filter_map(|(mesh, visible)| visible.then_some(mesh.as_ref()).flatten())
-            .map(|mesh| Mesh { vertices: mesh.vertices.clone(), indices: mesh.indices.clone(),
+            .map(|mesh| Mesh { surface: mesh.surface.clone(), vertices: mesh.vertices.clone(), indices: mesh.indices.clone(),
                 texture: mesh.texture.clone() }));
     }
 }

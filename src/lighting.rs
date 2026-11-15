@@ -1,4 +1,5 @@
 //! Bounded original-declaration lights, occluded flares and projected contact shadows.
+use crate::mesh::Mesh;
 use crate::{assets::Assets, collision::World, texture};
 use anyhow::Result;
 use macroquad::prelude::*;
@@ -247,7 +248,7 @@ pub fn shadow(world: &World, feet: Vec3, radius: f32) {
         indices.extend([0, i, i + 1]);
     }
     crate::render_fx::effect(
-        &Mesh {
+        &Mesh { surface: None,
             vertices,
             indices,
             texture: Some(texture),
@@ -282,7 +283,7 @@ pub fn flares(eye: Vec3, direction: Vec3) {
                 })
                 .collect();
             crate::render_fx::effect(
-                &Mesh {
+                &Mesh { surface: None,
                     vertices,
                     indices: vec![0, 1, 2, 0, 2, 3],
                     texture: Some(texture.clone()),

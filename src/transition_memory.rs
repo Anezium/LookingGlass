@@ -133,7 +133,6 @@ pub(crate) async fn released() {
     released_with(|| macroquad::prelude::clear_background(macroquad::prelude::BLACK)).await;
 }
 pub(crate) async fn released_with(mut draw: impl FnMut()) {
-    crate::render_fx::prune_surfaces();
     if legacy_overlap() { return; }
     #[cfg(target_os="vita")]
     let frames = 6;

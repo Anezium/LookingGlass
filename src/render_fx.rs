@@ -1,5 +1,6 @@
 //! One transparent queue for world, skin, pickup and effect geometry.
 //! Packets own their uniforms: shared pipeline state never leaks across actors.
+use crate::mesh::{Mesh, draw_mesh};
 #[cfg(feature="vita_renderer")]
 pub(crate) mod corpse_triangles;
 #[cfg(feature="vita_renderer")]
@@ -24,7 +25,7 @@ use macroquad::prelude::*;
 use std::{
     cell::RefCell,
     collections::BTreeMap,
-    rc::{Rc, Weak},
+    rc::Rc,
 };
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -65,8 +66,10 @@ impl Pass {
     fn own_geometry(&mut self) {
         if let Some(geometry)=self.geometry.take() {
             let texture=self.mesh.texture.take();
+            let surface=self.mesh.surface.take();
             self.mesh=Rc::try_unwrap(geometry).map(|g|g.mesh).unwrap_or_else(|m|copy_mesh(&m));
             self.mesh.texture=texture;
+            self.mesh.surface=surface;
         }
     }
 }
@@ -103,14 +106,11 @@ struct Frame {
 thread_local! {
     static FRAME: RefCell<Frame> = RefCell::default();
     static SKIN_OPACITY: std::cell::Cell<f32> = const { std::cell::Cell::new(1.) };
-    static SURFACES: RefCell<Vec<(macroquad::miniquad::TextureId, Weak<Surface>)>> = RefCell::default();
-    #[cfg(feature="vita_renderer")]
-    static SURFACE_LOOKUP:RefCell<std::collections::HashMap<macroquad::miniquad::TextureId,Weak<Surface>>>=RefCell::default();
-    /// Unit tests have no GL context, so they cannot mint a Texture2D for SURFACE_LOOKUP.
+    /// Tests can supply a recipe without creating a GL context.
     #[cfg(all(test, feature="vita_renderer"))]
     static TEST_SURFACE:RefCell<Option<Rc<Surface>>>=const { RefCell::new(None) };
 }
-/// Stands in for the fast SURFACE_LOOKUP hit only. Everything after the lookup,
+/// Supplies a test recipe. Everything after recipe selection,
 /// in actor_publication::prepare and in the serial skin consumer, is the real body.
 #[cfg(all(test, feature="vita_renderer"))]
 fn test_surface() -> Option<Rc<Surface>> { TEST_SURFACE.with(|s| s.borrow().clone()) }
@@ -122,15 +122,7 @@ pub(crate) fn release_scene() {
         actor_cache::release_storage();
     }
     FRAME.with(|f| *f.borrow_mut() = Frame::default());
-    prune_surfaces();
 
-}
-/// Weak entries never own textures. Keep recipes for surviving common objects
-/// and prune dead scene headers after destruction, before the next build.
-pub(crate) fn prune_surfaces() {
-    SURFACES.with(|s| s.borrow_mut().retain(|(_, surface)| surface.strong_count() > 0));
-    #[cfg(feature="vita_renderer")]
-    SURFACE_LOOKUP.with(|s| s.borrow_mut().retain(|_, surface| surface.strong_count() > 0));
 }
 const MAX_VERTICES: usize = 1_000_000;
 /// Actor layer cap. Tests can scope another value; builds always read the config.
@@ -141,7 +133,7 @@ fn actor_max_layers(c: &crate::render::vita_renderer::Config) -> usize {
     c.actor_max_layers
 }
 pub fn copy_mesh(m: &Mesh) -> Mesh {
-    Mesh {
+    Mesh { surface: m.surface.clone(),
         vertices: m.vertices.clone(),
         indices: m.indices.clone(),
         texture: m.texture.clone(),
@@ -275,7 +267,8 @@ pub fn begin_view(camera: &Camera3D, time: f32, atmosphere: &Atmosphere, fullbri
     set_projection(camera.matrix());
 }
 fn same_style(a: &Pass, b: &Pass) -> bool {
-    a.material.as_ref().zip(b.material.as_ref()).is_some_and(|(a,b)| Rc::ptr_eq(a,b))
+    a.mesh.surface.as_ref().map(Rc::as_ptr) == b.mesh.surface.as_ref().map(Rc::as_ptr)
+        && a.material.as_ref().zip(b.material.as_ref()).is_some_and(|(a,b)| Rc::ptr_eq(a,b))
         && a.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
             == b.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
         && a.lit == b.lit
@@ -557,7 +550,7 @@ pub fn finish() -> (usize, usize) {
                         #[cfg(target_os = "vita")]
                         world_geometry_counted: true,
                         cutout_reference: p.cutout_reference,
-                        mesh: Mesh {
+                        mesh: Mesh { surface: p.mesh.surface.clone(),
                             vertices,
                             indices,
                             texture: p.mesh.texture.clone(),
@@ -730,7 +723,7 @@ pub(crate) fn effect_geometry(geometry: Rc<prepared::Geometry>, texture: Option<
     if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     debug_assert!(retained_active());
     let blend = if blend == Blend::Add { Blend::AlphaAdd } else { blend };
-    if let Ok(mut p) = pass(Mesh { vertices: Vec::new(), indices: Vec::new(), texture },
+    if let Ok(mut p) = pass(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture },
         &Stage { blend, ..Default::default() }, true, false, Appearance::default()) {
         p.effect = true; p.geometry = Some(geometry);
         let mut passes = FRAME.with(|f| f.borrow_mut().group_pool.pop().unwrap_or_default());
@@ -823,7 +816,7 @@ pub fn line(a: Vec3, b: Vec3, color: Color) {
         })
         .collect();
     effect(
-        &Mesh {
+        &Mesh { surface: None,
             vertices,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture: None,
@@ -859,7 +852,7 @@ pub fn sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Col
         }
     }
     effect(
-        &Mesh {
+        &Mesh { surface: None,
             vertices,
             indices,
             texture: texture.cloned(),
@@ -875,6 +868,8 @@ pub struct Surface {
     layers: Vec<Layer>,
     transparent: bool,
     preserve_skin: bool,
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    label: (bool, Option<String>),
     #[cfg(feature="vita_renderer")]
     actors:RefCell<std::collections::HashMap<usize,actor_cache::State>>,
 }
@@ -932,25 +927,15 @@ pub fn register(
             textures: vec![base.clone()],
         });
     }
-    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-    if let Some(name) = names.first() {
-        crate::sim_maps::probe::draw_query::label_texture(base.raw_miniquad_id(), name);
-        for t in layers.iter().flat_map(|l| &l.textures) { crate::sim_maps::probe::draw_query::label_texture(t.raw_miniquad_id(), name); }
-    }
     let surface = Rc::new(Surface {
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        label: (crate::sim_maps::probe::draw_query::is_prop(), names.first().cloned()),
         preserve_skin: layers.iter().any(|l| skin_stage_needs_normals(&l.stage)),
         layers,
         transparent,
         #[cfg(feature="vita_renderer")]
         actors:RefCell::default(),
     });
-    SURFACES.with(|s| {
-        let mut s = s.borrow_mut();
-        s.retain(|(_, v)| v.strong_count() > 0);
-        s.push((base.raw_miniquad_id(), Rc::downgrade(&surface)));
-    });
-    #[cfg(feature="vita_renderer")]
-    SURFACE_LOOKUP.with(|s|{let mut s=s.borrow_mut();s.retain(|_,v|v.strong_count()>0);s.insert(base.raw_miniquad_id(),Rc::downgrade(&surface));});
     Ok(surface)
 }
 fn skin_stage_needs_normals(stage: &Stage) -> bool {
@@ -978,14 +963,7 @@ mod skin_preservation_tests {
 }
 /// The registered layers consume rebuilt normals after the base skin is prepared.
 pub(crate) fn skin_requires_preservation(mesh: &Mesh) -> bool {
-    let Some(texture) = &mesh.texture else { return false };
-    let id = texture.raw_miniquad_id();
-    #[cfg(feature = "vita_renderer")]
-    let surface = SURFACE_LOOKUP.with(|s| s.borrow().get(&id).and_then(Weak::upgrade));
-    #[cfg(not(feature = "vita_renderer"))]
-    let surface = SURFACES.with(|s| s.borrow().iter().rev()
-        .find(|(key, _)| *key == id).and_then(|(_, v)| v.upgrade()));
-    surface.is_some_and(|s| s.preserve_skin)
+    mesh.surface.as_ref().is_some_and(|s| s.preserve_skin)
 }
 pub(crate) fn skin_produced(mesh: &Mesh, publication: actor_vertices::Publication<'_>) {
     crate::game_thread::assert_current();
@@ -1052,14 +1030,9 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
     let fast=retained_active()&&crate::render::vita_renderer::config().actor_fast_path;
     #[cfg(not(feature="vita_renderer"))]
     let fast=false;
-    let surface=mesh.texture.as_ref().and_then(|t|{
-        #[cfg(test)]
-        if let Some(surface)=test_support::surface(t) {return Some(surface);}
-        let id=t.raw_miniquad_id();
-        #[cfg(feature="vita_renderer")]
-        if fast {return SURFACE_LOOKUP.with(|s|s.borrow().get(&id).and_then(Weak::upgrade));}
-        SURFACES.with(|s|s.borrow().iter().rev().find(|(key,_)|*key==id).and_then(|(_,v)|v.upgrade()))
-    });
+    let surface = mesh.surface.clone();
+    #[cfg(test)]
+    let surface = surface.or_else(|| mesh.texture.as_ref().and_then(test_support::surface));
     #[cfg(all(test, feature="vita_renderer"))]
     let surface = surface.or_else(|| if fast { test_surface() } else { None });
     let (camera, time, appearance) = FRAME.with(|f| {
@@ -1133,11 +1106,11 @@ fn skin_timed_produced(mesh: &Mesh, clock: Option<f32>, alpha: f32,
 /// FRAME mutably and never touches actor publication state; deferred actor layers call it
 /// after collect with the worker's raw bytes and the values captured at their draw.
 #[allow(clippy::too_many_arguments)]
-fn layer_passes(vertices: &[Vertex], indices: &[u16], surface: &Surface, camera: Vec3, time: f32,
+fn layer_passes(vertices: &[Vertex], indices: &[u16], surface: &Rc<Surface>, camera: Vec3, time: f32,
     alpha: f32, appearance: Appearance, fast: bool, clock: Option<f32>, limit: usize) -> Vec<Pass> {
     let mut passes = Vec::new();
     for layer in surface.layers.iter().take(limit) {
-        let mut copy = Mesh { vertices: vertices.to_vec(), indices: indices.to_vec(), texture: None };
+        let mut copy = Mesh { surface: Some(surface.clone()), vertices: vertices.to_vec(), indices: indices.to_vec(), texture: None };
         copy.texture = Some(
             layer.textures[if layer.stage.images.is_empty() {
                 0
@@ -1203,6 +1176,7 @@ fn layer_copy_bytes(vertices: usize, indices: usize, layers: usize) -> u64 {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use std::rc::Weak;
     thread_local! {
         pub(super) static ACTOR_MAX_LAYERS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
         static SURFACES: RefCell<Vec<(Texture2D, Weak<Surface>)>> = RefCell::default();
@@ -1223,6 +1197,8 @@ pub(crate) mod test_support {
     pub(crate) fn register(base: &Texture2D, layers: Vec<(Stage, Vec<Texture2D>)>, transparent: bool) -> Rc<Surface> {
         let layers: Vec<_> = layers.into_iter().map(|(stage, textures)| Layer { stage, textures }).collect();
         let surface = Rc::new(Surface {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            label: (false, None),
             preserve_skin: layers.iter().any(|l| skin_stage_needs_normals(&l.stage)),
             layers, transparent,
             #[cfg(feature="vita_renderer")]
@@ -1303,7 +1279,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     std::fs::create_dir_all("private/render-fx")?;
     let mut scene = crate::render::Scene::load(assets, "skool1")?;
     let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
-    let quad = |z: f32, color: Color| Mesh {
+    let quad = |z: f32, color: Color| Mesh { surface: None,
         vertices: [
             vec3(-1., -1., z),
             vec3(1., -1., z),
@@ -1733,10 +1709,12 @@ mod tests {
             crate::skeletal::SkinVertex { uv: Vec2::ONE, weights: vec![crate::skeletal::Weight { bone: 0, amount: 1., offset }] }).collect(), vec![0, 1, 2]);
         let cpu = source.cpu();
         // Raw alpha 128: the serial cache and the worker both publish it normalized.
-        let mesh = Mesh { vertices: (0..3).map(|i| Vertex::new(i as f32, 2. * i as f32, 1., 0.25 * i as f32, 0.5, Color::from_rgba(10, 20, 30, 128))).collect(),
+        let mesh = Mesh { surface: None, vertices: (0..3).map(|i| Vertex::new(i as f32, 2. * i as f32, 1., 0.25 * i as f32, 0.5, Color::from_rgba(10, 20, 30, 128))).collect(),
             indices: cpu.indices.clone(), texture: None };
         // Three layers over actor_max_layers=2: one capped layer per kept draw.
         let surface = Rc::new(Surface {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            label: (false, None),
             layers: (0..3).map(|_| Layer { stage: Stage::default(), textures: Vec::new() }).collect(),
             transparent: false, preserve_skin: false, actors: RefCell::default(),
         });
@@ -1845,3 +1823,57 @@ mod tests {
 #[cfg(test)]
 #[path = "render_fx_routing_controls.rs"]
 mod routing_controls;
+
+#[cfg(all(test, feature="vita_renderer"))]
+mod material_identity_tests {
+    use super::*;
+    use super::test_support as ts;
+
+    #[test]
+    fn shared_image_keeps_distinct_blend_stages_and_normal_requirements() {
+        crate::game_thread::assert_current();
+        ts::clear();
+        let base = ts::texture(902);
+        let opaque = ts::register(&base, vec![(Stage::default(), vec![base.clone()])], false);
+        let alpha = ts::register(&base, vec![(Stage { blend: Blend::Alpha, environment: true,
+            ..Default::default() }, vec![base.clone()])], true);
+        let mesh = |surface| Mesh { surface: Some(surface), texture: Some(base.clone()),
+            vertices: vec![Vertex::new(0., 0., 0., 0., 0., WHITE); 3], indices: vec![0, 1, 2] };
+        let a = mesh(opaque.clone());
+        let b = mesh(alpha.clone());
+        assert!(!skin_requires_preservation(&a));
+        assert!(skin_requires_preservation(&b));
+        assert!(Rc::ptr_eq(copy_mesh(&b).surface.as_ref().unwrap(), &alpha));
+        ts::begin_direct(Vec3::ZERO, Vec3::Z, 0., Appearance::default());
+        // Resolve through the real skin entry point, with the deliberately ambiguous
+        // legacy test registry still containing both materials for this same image.
+        skin(&a);
+        skin(&b);
+        let submitted = ts::snapshot();
+        assert_eq!(submitted.groups.len(), 2);
+        assert!(!submitted.groups[0].0);
+        assert!(submitted.groups[1].0);
+        assert_eq!(submitted.groups[0].1[0].blend_index, crate::render::blend_index(Blend::Opaque));
+        assert_eq!(submitted.groups[1].1[0].blend_index, crate::render::blend_index(Blend::Alpha));
+        ts::begin_direct(Vec3::ZERO, Vec3::Z, 0., Appearance::default());
+        let a_pass = layer_passes(&a.vertices, &a.indices, a.surface.as_ref().unwrap(), Vec3::Z,
+            0., 1., Appearance::default(), true, None, 8);
+        let b_pass = layer_passes(&b.vertices, &b.indices, b.surface.as_ref().unwrap(), Vec3::Z,
+            0., 1., Appearance::default(), true, None, 8);
+        assert_eq!(a_pass[0].blend_index, crate::render::blend_index(Blend::Opaque));
+        assert_eq!(b_pass[0].blend_index, crate::render::blend_index(Blend::Alpha));
+        assert!(Rc::ptr_eq(a_pass[0].mesh.surface.as_ref().unwrap(), &opaque));
+        assert!(Rc::ptr_eq(b_pass[0].mesh.surface.as_ref().unwrap(), &alpha));
+        // The fast actor recipe reads the same material identity as the serial layers.
+        let direct = actor_cache::recipe(a.surface.as_ref().unwrap(), 0., Appearance::default()).unwrap();
+        assert_eq!(direct.0[0].blend_index, crate::render::blend_index(Blend::Opaque));
+        assert!(actor_cache::recipe(b.surface.as_ref().unwrap(), 0., Appearance::default()).is_none());
+        // Geometry caches must not create Surface -> cache -> Surface ownership cycles.
+        let weak = Rc::downgrade(&alpha);
+        let geometry = prepared::Geometry::new(copy_mesh(&b));
+        assert!(geometry.mesh.surface.is_none());
+        drop((b_pass, b, alpha));
+        assert!(weak.upgrade().is_none());
+        ts::end_frame(); ts::clear();
+    }
+}

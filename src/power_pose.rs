@@ -1,4 +1,5 @@
 //! Original Alice power-up performances and skins, independent of gameplay timers.
+use crate::mesh::Mesh;
 pub(crate) mod effects;
 use crate::{
     assets::Assets,
@@ -251,9 +252,9 @@ impl Performance {
 
 struct Skin {
     index: usize,
-    normal: Texture2D,
-    rage: Texture2D,
-    tea: Texture2D,
+    normal: (Texture2D, Option<std::rc::Rc<crate::render_fx::Surface>>),
+    rage: (Texture2D, Option<std::rc::Rc<crate::render_fx::Surface>>),
+    tea: (Texture2D, Option<std::rc::Rc<crate::render_fx::Surface>>),
 }
 fn skin_pixels(name: &str, image: &mut texture::RgbaImage) {
     // This opaque alternate arm skin has no authored alpha-test/blend shader.
@@ -298,7 +299,7 @@ impl Art {
             let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
             tex.set_filter(FilterMode::Linear);
             layers.push(crate::render_fx::register(assets, &tex, &[skin], specs)?);
-            textures.insert(name, tex);
+            textures.insert(name, (tex, layers.last().cloned()));
         }
         let mut skins = Vec::new();
         for (index, surface) in skeleton.surfaces.iter().enumerate() {
@@ -314,7 +315,7 @@ impl Art {
                     index,
                     normal: meshes[index]
                         .as_ref()
-                        .and_then(|m| m.texture.clone())
+                        .and_then(|m| m.texture.clone().map(|t| (t, m.surface.clone())))
                         .context("Power-up surface missing")?,
                     rage: textures[rage].clone(),
                     tea: textures[tea].clone(),
@@ -404,15 +405,14 @@ impl Art {
     pub fn skin(&self, meshes: &mut [Option<Mesh>], state: &State) {
         for skin in &self.skins {
             if let Some(mesh) = &mut meshes[skin.index] {
-                mesh.texture = Some(
-                    match state.skin() {
+                let (texture, surface) = match state.skin() {
                         Some(Form::Rage) if state.age < 2.85 => &skin.normal,
                         Some(Form::Rage) => &skin.rage,
                         Some(Form::Tea) => &skin.tea,
                         None => &skin.normal,
-                    }
-                    .clone(),
-                );
+                    }.clone();
+                mesh.texture = Some(texture);
+                mesh.surface = surface;
             }
         }
     }
@@ -428,7 +428,7 @@ impl Art {
         }
         for skin in &self.skins {
             if let Some(mesh) = &meshes[skin.index] {
-                effects::blend_skin(mesh, &skin.rage, effects::ease((state.age - 2.5) / 0.35));
+                effects::blend_skin(mesh, &skin.rage.0, effects::ease((state.age - 2.5) / 0.35));
             }
         }
         for mesh in meshes.iter().flatten() {

@@ -1,6 +1,7 @@
 //! Dead Ants can straddle the eye while each triangle misses the actual view.
 //! A mesh AABB cannot prove that case. Reject only triangles wholly outside one
 //! homogeneous clip half-space; never move vertices or change surviving indices.
+use crate::mesh::Mesh;
 use super::*;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -54,7 +55,7 @@ pub(super) fn process(groups: &mut [Group]) {
             cut += removed as u64;
             let version = p.geometry.as_ref().map(|m| (m.version.identity,m.version.vertices,m.version.topology));
             if let Some(new) = version.and_then(|v| changed.get(&v)) { p.geometry = Some(new.clone()); continue; }
-            let mut copy = Mesh { vertices: mesh.vertices.clone(), indices: Vec::with_capacity(mesh.indices.len()-removed*3), texture: mesh.texture.clone() };
+            let mut copy = Mesh { surface: mesh.surface.clone(), vertices: mesh.vertices.clone(), indices: Vec::with_capacity(mesh.indices.len()-removed*3), texture: mesh.texture.clone() };
             for t in mesh.indices.chunks_exact(3).filter(|t| keep(t, &codes)) { copy.indices.extend_from_slice(t); }
             if copy.indices.is_empty() {
                 // An empty group must not reach upload's nonempty validation.

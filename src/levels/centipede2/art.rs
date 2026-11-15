@@ -1,3 +1,4 @@
+use crate::mesh::Mesh;
 use super::*;
 use crate::{npc::Puppet, particles::Attached, weapons::Prop};
 use std::collections::BTreeMap;
@@ -251,7 +252,7 @@ impl LevelArt for Art {
                     let y = s.normal.cross(x);
                     let center = s.at - s.normal * (if s.fragment { 8. } else { 16. } - 0.25);
                     let alpha = (1. - (s.age - end)).clamp(0., 1.);
-                    let mesh = Mesh {
+                    let mesh = Mesh { surface: None,
                         vertices: [
                             (center - x - y, vec2(0., 0.)),
                             (center + x - y, vec2(1., 0.)),

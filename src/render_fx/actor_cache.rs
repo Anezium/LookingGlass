@@ -1,4 +1,5 @@
 //! Actor-owned layer recipes. Appearance and skinned vertices remain live inputs.
+use crate::mesh::Mesh;
 use super::*;
 
 // Empty containers only: resource-owning Pass values are destroyed on the game
@@ -44,7 +45,7 @@ fn state(s:&Stage,t:f32)->LayerState {
         gain:gain(s,t),fog:fog(s.blend),frame:s.frame(t),vertex_alpha:s.vertex_alpha,
         dynamic:s.rgb.is_some()||s.alpha.is_some()||s.images.len()>1}
 }
-pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance,producer:Option<&actor_vertices::Publication<'_>>,unchanged:bool)->Option<Vec<Pass>> {
+pub(super) fn prepare(surface:&Rc<Surface>,mesh:&Mesh,time:f32,appearance:Appearance,producer:Option<&actor_vertices::Publication<'_>>,unchanged:bool)->Option<Vec<Pass>> {
     let c=crate::render::vita_renderer::config();
     let limit=super::actor_max_layers(c).min(surface.layers.len());
     if !surface.layers.iter().take(limit).all(|l|simple(&l.stage)){return None;}
@@ -102,7 +103,7 @@ pub(super) fn prepare(surface:&Surface,mesh:&Mesh,time:f32,appearance:Appearance
             world_static:None,
             #[cfg(target_os="vita")]
             world_geometry_counted:false,
-            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
+            mesh:Mesh { surface: Some(surface.clone()),vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
             material:None,lit:p.lit,clamp:p.clamp,cutout:p.cutout,cutout_reference:p.reference,
             gain:p.gain,fog:p.fog,model:true,appearance,filter_fade:0.});
     }
@@ -139,7 +140,7 @@ mod tests {
 
 /// Capture game-thread material/texture handles before dispatch. No geometry is read
 /// until collection replaces the empty recipe with its owned immutable publication.
-pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(Vec<Pass>,bool)> {
+pub(super) fn recipe(surface:&Rc<Surface>,time:f32,appearance:Appearance)->Option<(Vec<Pass>,bool)> {
     let limit=super::actor_max_layers(crate::render::vita_renderer::config()).min(surface.layers.len());
     let layers=&surface.layers[..limit];
     let alpha=layers.first().or_else(||{crate::phase_census::rejection(3);None})?.stage.vertex_alpha;
@@ -156,7 +157,7 @@ pub(super) fn recipe(surface:&Surface,time:f32,appearance:Appearance)->Option<(V
             blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
-            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
+            mesh:Mesh { surface: Some(surface.clone()),vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
             material:None,lit:p.lit,clamp:p.clamp,cutout:p.cutout,cutout_reference:p.reference,
             gain:p.gain,fog:p.fog,model:true,appearance,filter_fade:0.});
     }

@@ -1,4 +1,5 @@
 //! GPU regressions using the actual retained world and actor shaders, outside measured runs.
+use crate::mesh::Mesh;
 use super::*;
 use crate::render_fx::{self, Appearance};
 use macroquad::camera::Camera;
@@ -131,7 +132,7 @@ impl Drop for Plane {
     }
 }
 fn quad(z: f32, color: Color) -> Mesh {
-    Mesh {
+    Mesh { surface: None,
         vertices: [
             vec3(-1., -1., z),
             vec3(1., -1., z),

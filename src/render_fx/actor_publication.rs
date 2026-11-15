@@ -1,6 +1,7 @@
 //! Two owned banks per logical surface. Only numeric array addresses reach workers.
 //! Pending packets contain handles, never borrowed/reused worker output. Collection
 //! is the sole publication boundary; retained GPU storage keeps its five-slot ring.
+use crate::mesh::Mesh;
 use super::*;
 use crate::skeletal::SkinSurface;
 use std::{cell::Cell, collections::HashMap, rc::Weak, sync::Arc};
@@ -227,7 +228,7 @@ impl State {
             || s.index_capacity-old_capacity.1+old_capacity.1.max(cpu.indices.len())>INDICES {return None;}
         let bank=&mut s.banks[id];
         let same_cpu=bank.cpu[slot].as_ref().is_some_and(|c|Arc::ptr_eq(c,&cpu));
-        let geometry=bank.slots[slot].get_or_insert_with(||Rc::new(prepared::Geometry::new(Mesh {
+        let geometry=bank.slots[slot].get_or_insert_with(||Rc::new(prepared::Geometry::new(Mesh { surface: None,
             vertices:Vec::new(),indices:Vec::new(),texture:None })));
         let g=Rc::get_mut(geometry).unwrap();
         let resized=g.vertices.len()!=mesh.vertices.len();
@@ -678,11 +679,9 @@ pub(crate) fn end() {
 pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,key:Key)->Option<(usize,PublicationMode)> {
     let texture=mesh.texture.as_ref();
     if texture.is_none() {crate::phase_census::rejection(0);}
+    let surface=mesh.surface.clone();
     #[cfg(test)]
-    let surface=texture.and_then(super::test_support::surface);
-    #[cfg(not(test))]
-    let surface=None;
-    let surface=surface.or_else(||texture.and_then(|t|SURFACE_LOOKUP.with(|s|s.borrow().get(&t.raw_miniquad_id()).and_then(Weak::upgrade))));
+    let surface=surface.or_else(||texture.and_then(super::test_support::surface));
     #[cfg(test)]
     let surface=surface.or_else(super::test_surface);
     let surface=surface.or_else(||{if texture.is_some() {crate::phase_census::rejection(1);}None})?;
@@ -968,7 +967,7 @@ mod tests {
         let surface=crate::skeletal::Surface::new("body".into(),
             [Vec3::ZERO,Vec3::X,Vec3::Y].into_iter().map(|offset|crate::skeletal::SkinVertex {
                 uv:Vec2::ONE,weights:vec![crate::skeletal::Weight {bone:0,amount:1.,offset}]}).collect(),vec![0,1,2]);
-        (Mesh {vertices:vec![Vertex::new(0.,0.,0.,1.,1.,WHITE);3],indices:vec![0,1,2],texture:None},surface.cpu())
+        (Mesh { surface: None,vertices:vec![Vertex::new(0.,0.,0.,1.,1.,WHITE);3],indices:vec![0,1,2],texture:None},surface.cpu())
     }
     fn key(actor:ActorId,cpu:&Arc<SkinSurface>)->Key { Key {actor,surface:Arc::as_ptr(cpu) as usize,occurrence:0} }
     #[test]
@@ -1045,7 +1044,7 @@ mod tests {
             if let Some(old)=held.take() {let old:Rc<prepared::Geometry>=old;assert_eq!(old.indices,[0,1,2]);}
             let source=crate::skeletal::Surface::new("body".into(),(0..4096).map(|_|crate::skeletal::SkinVertex {
                 uv:Vec2::ONE,weights:vec![crate::skeletal::Weight {bone:0,amount:1.,offset:Vec3::ZERO}]}).collect(),vec![0,1,2]);
-            let cpu=source.cpu();let mesh=Mesh {vertices:cpu.bind_vertices.clone(),indices:cpu.indices.clone(),texture:None};
+            let cpu=source.cpu();let mesh=Mesh { surface: None,vertices:cpu.bind_vertices.clone(),indices:cpu.indices.clone(),texture:None};
             state.next_frame();
             for _ in 0..5 {assert!(state.reserve_key(&mesh,cpu.clone(),false,0,O,key(ActorId::default(),&cpu)).is_some(),"unexpected serial fallback after map/reload");}
             let capacity=(state.vertex_capacity,state.index_capacity,state.lookup.len());
@@ -1153,6 +1152,27 @@ mod tests {
             assert!(failed.is_err());assert_eq!(deferred_layers(),ambient,"override must restore on unwind");
         }
     }
+    #[test]
+    fn shared_image_selects_each_mesh_material_in_direct_publications() {
+        use super::super::test_support as ts;
+        ts::clear();
+        let base = ts::texture(903);
+        let opaque = ts::register(&base, vec![(Stage::default(), vec![base.clone()])], false);
+        let alpha = ts::register(&base, vec![(Stage { blend: Blend::Alpha,
+            ..Default::default() }, vec![base.clone()])], true);
+        for (surface, transparent, blend) in [(opaque, false, Blend::Opaque), (alpha, true, Blend::Alpha)] {
+            reset(); ts::begin_direct(Vec3::ZERO, Vec3::Y, 0., Appearance::default()); begin();
+            let (mesh, cpu) = fixture();
+            let mesh = Mesh { surface: Some(surface), texture: Some(base.clone()), ..mesh };
+            assert!(prepare(&mesh, cpu.clone(), false, 1, key(ActorId::default(), &cpu)).is_some());
+            let frame = ts::snapshot();
+            assert_eq!(frame.groups.len(), 1);
+            assert_eq!(frame.groups[0].0, transparent);
+            assert_eq!(frame.groups[0].1[0].blend_index, crate::render::blend_index(blend));
+            end(); ts::end_frame(); reset();
+        }
+        ts::clear();
+    }
     fn test_surface(stages:Vec<Stage>)->(Texture2D,Rc<Surface>) {
         let base=super::super::test_support::texture(77);
         let layers=stages.into_iter().map(|s|(Stage {images:vec!["a".into()],..s},vec![super::super::test_support::texture(78)])).collect();
@@ -1175,7 +1195,7 @@ mod tests {
         use super::super::test_support as ts;
         let three=vec![Stage {environment:true,..Default::default()},Stage::default(),Stage::default()];
         let (base,surface)=test_surface(three);
-        let (mesh,cpu)=fixture();let mesh=Mesh {texture:Some(base),..mesh};
+        let (mesh,cpu)=fixture();let mesh=Mesh { surface: None,texture:Some(base),..mesh};
         let key=key(ActorId::default(),&cpu);
         with_deferred_layers(true,|| {
             for refusal in 0..3 {
@@ -1204,7 +1224,7 @@ mod tests {
     fn deferred_commit_counts_capped_layers_once_and_reserves_the_fallback_group() {
         use super::super::test_support as ts;
         let (base,surface)=test_surface(vec![Stage {dot_alpha:Some(Vec2::ONE),..Default::default()},Stage::default(),Stage::default()]);
-        let (mesh,cpu)=fixture();let mesh=Mesh {texture:Some(base),..mesh};
+        let (mesh,cpu)=fixture();let mesh=Mesh { surface: None,texture:Some(base),..mesh};
         let [off,on]=[false,true].map(|on| with_deferred_layers(on,|| {
             reset();ts::begin_direct(Vec3::ZERO,Vec3::Y,1.,Appearance::default());retained::host_reset();begin();
             let direct=prepare(&mesh,cpu.clone(),false,1,key(ActorId::default(),&cpu));
@@ -1314,7 +1334,7 @@ mod tests {
         let source=crate::skeletal::Surface::new("body".into(),(0..vertices).map(|_|crate::skeletal::SkinVertex {
             uv:Vec2::ONE,weights:vec![crate::skeletal::Weight {bone:0,amount:1.,offset:Vec3::ZERO}]}).collect(),indices);
         let cpu=source.cpu();
-        (Mesh {vertices:cpu.bind_vertices.clone(),indices:cpu.indices.clone(),texture:None},cpu)
+        (Mesh { surface: None,vertices:cpu.bind_vertices.clone(),indices:cpu.indices.clone(),texture:None},cpu)
     }
     fn on()->State { State {occurrences_on:true,..Default::default()} }
     /// prepare() after its eligibility checks: occurrence, reservation, frame budget.
@@ -1330,7 +1350,7 @@ mod tests {
         Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
-            mesh:Mesh {vertices:Vec::new(),indices:Vec::new(),texture:None},material:None,lit:false,clamp:false,cutout:0.,
+            mesh:Mesh { surface: None,vertices:Vec::new(),indices:Vec::new(),texture:None},material:None,lit:false,clamp:false,cutout:0.,
             cutout_reference:0.,gain:Vec4::ONE,fog:0.,model:true,appearance:Appearance::default(),filter_fade:0.}
     }
     /// The thread-local frame path of prepare() after its texture/recipe checks.

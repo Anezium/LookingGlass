@@ -1,4 +1,5 @@
 //! Bounded declarative emitters from local TIKI definitions. No client script VM.
+use crate::mesh::Mesh;
 use crate::{assets::Assets, bsp::Bsp, collision::World, environment::Atmosphere, texture};
 #[cfg(target_os = "vita")]
 use crate::frame_profile::{add_counter, Counter};
@@ -1371,7 +1372,7 @@ impl Steam {
             normal: Vec4::ZERO,
         })
         .collect();
-        Mesh { vertices, indices: vec![0, 1, 2, 0, 2, 3],
+        Mesh { surface: None, vertices, indices: vec![0, 1, 2, 0, 2, 3],
             texture: e.textures.get(e.stage.frame(p.age)).cloned() }
 
     }
@@ -1473,7 +1474,7 @@ impl PickupBurst {
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
         crate::render_fx::effect(
-            &Mesh {
+            &Mesh { surface: None,
                 vertices,
                 indices,
                 texture: Some(self.texture.clone()),

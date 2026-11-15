@@ -1,5 +1,6 @@
 //! Immutable geometry publications. Identity never derives from a reusable address.
 //! Mutable producers are observed once; downstream merge/upload use generations.
+use crate::mesh::Mesh;
 use super::*;
 use super::retained::state_cache::vertices_equal;
 use std::cell::Cell;
@@ -15,9 +16,10 @@ pub(super) fn valid(mesh: &Mesh) -> bool {
         && mesh.indices.iter().all(|&i| (i as usize) < mesh.vertices.len())
 }
 impl Geometry {
-    pub(super) fn merged(mesh: Mesh, previous: Option<Version>, same_topology: bool) -> Self {
+    pub(super) fn merged(mut mesh: Mesh, previous: Option<Version>, same_topology: bool) -> Self {
         // The merge plan already certified every source index and the u16 limit.
         // Rebuilding animated vertices must not rescan unchanged merged topology.
+        mesh.surface = None;
         debug_assert!(valid(&mesh));
         let mut g=Self {mesh, valid:true, version:Version {
             identity:generation(), vertices:generation(), topology:generation() }};
@@ -37,7 +39,9 @@ impl Geometry {
         self.version.vertices = generation();
         self.valid = true;
     }
-    pub(crate) fn new(mesh: Mesh) -> Self {
+    pub(crate) fn new(mut mesh: Mesh) -> Self {
+        // Recipes own geometry caches; cached geometry must not own its recipe.
+        mesh.surface = None;
         Self { valid: valid(&mesh), mesh, version: Version {
             identity: generation(), vertices: generation(), topology: generation() } }
     }
@@ -68,11 +72,11 @@ impl Cache {
         if !same_vertices { version.vertices = generation(); }
         if !same_topology { version.topology = generation(); }
         let cached_valid = old.filter(|_| same_topology).map(|g| g.valid);
-        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh {
+        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { surface: None,
             vertices: Vec::new(), indices: Vec::new(), texture: None })));
         // Queued packets own old immutable arrays until finish; never mutate them.
         if Rc::get_mut(slot).is_none() {
-            *slot = Rc::new(Geometry::new(Mesh { vertices: Vec::new(), indices: Vec::new(), texture: None }));
+            *slot = Rc::new(Geometry::new(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
         }
         let g = Rc::get_mut(slot).unwrap();
         g.mesh.vertices.clear();
@@ -110,11 +114,11 @@ impl Cache {
         if !same_vertices { version.vertices = generation(); }
         if !same_topology { version.topology = generation(); }
         let cached_valid = old.filter(|_| same_topology).map(|g|g.valid);
-        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh {
+        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { surface: None,
             vertices: Vec::new(), indices: Vec::new(), texture: None })));
         let replaced = Rc::get_mut(slot).is_none();
         if replaced {
-            *slot = Rc::new(Geometry::new(Mesh { vertices: Vec::new(), indices: Vec::new(), texture: None }));
+            *slot = Rc::new(Geometry::new(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
         }
         let g = Rc::get_mut(slot).unwrap();
         if !same_vertices || g.vertices.len() != mesh.vertices.len() {
@@ -152,10 +156,10 @@ impl Cache {
         if !same_vertices { version.vertices = generation(); }
         if !same_topology { version.topology = generation(); }
         let cached_valid = old.filter(|_| same_topology).map(|g|g.valid);
-        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh {
+        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { surface: None,
             vertices: Vec::new(), indices: Vec::new(), texture: None })));
         if Rc::get_mut(slot).is_none() {
-            *slot = Rc::new(Geometry::new(Mesh { vertices: Vec::new(), indices: Vec::new(), texture: None }));
+            *slot = Rc::new(Geometry::new(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
         }
         let g = Rc::get_mut(slot).unwrap();
         if !same_vertices || g.vertices.len() != mesh.vertices.len() {
@@ -172,7 +176,7 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn mesh() -> Mesh { Mesh {vertices:vec![Vertex::new(0.,0.,0.,0.,0.,WHITE);4],indices:vec![0,1,2,0,2,3],texture:None} }
+    fn mesh() -> Mesh { Mesh { surface: None,vertices:vec![Vertex::new(0.,0.,0.,0.,0.,WHITE);4],indices:vec![0,1,2,0,2,3],texture:None} }
     #[test]
     fn producer_publications_match_reference_and_keep_live_uv_and_packet_lifetimes() {
         for alpha in [false,true] {

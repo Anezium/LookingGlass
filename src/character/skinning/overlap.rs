@@ -1,5 +1,6 @@
 //! Same-frame CPU skin snapshots. Render handles never enter this storage.
 //! Buffers are bounded and allocated at startup; overflow uses the serial draw.
+use crate::mesh::Mesh;
 #[cfg(feature="frame_total_only")]
 use crate::light_profile::InactiveInstant as MetricInstant;
 #[cfg(not(feature="frame_total_only"))]
@@ -1104,7 +1105,7 @@ pub(crate) fn check_skeleton(
         .surfaces
         .iter()
         .map(|s| {
-            Some(Mesh {
+            Some(Mesh { surface: None,
                 vertices: s
                     .vertices
                     .iter()
@@ -1222,7 +1223,7 @@ pub(crate) fn check_skeleton(
 pub(crate) fn check_direct(skeleton:&Skeleton,poses:&[Vec<Transform>])->anyhow::Result<usize> {
     let mut count=0;
     for workers in [1,2] {for pose in poses {for vertex_alpha in [false,true] {for fullbright in [false,true] {
-        let mut meshes:Vec<_>=skeleton.surfaces.iter().map(|s|Some(Mesh {
+        let mut meshes:Vec<_>=skeleton.surfaces.iter().map(|s|Some(Mesh { surface: None,
             vertices:s.cpu().bind_vertices.clone(),indices:s.indices.clone(),texture:None})).collect();
         for mesh in meshes.iter_mut().flatten() {if let Some(v)=mesh.vertices.first_mut() {v.uv=Vec2::new(-0.,7.);}}
         let mut expected:Vec<_>=meshes.iter().flatten().map(crate::render_fx::copy_mesh).collect();
@@ -1273,7 +1274,7 @@ mod tests {
                 vec![0, 1, 2])],
             skin_bounds: vec![],
         };
-        let meshes = vec![Some(Mesh {
+        let meshes = vec![Some(Mesh { surface: None,
             vertices: vec![
                 Vertex {
                     position: Vec3::ZERO,
@@ -1588,7 +1589,7 @@ mod tests {
     fn serial_fallback_matches_the_reference_kernel() {
         let (skeleton, mut meshes, pose) = fixture();
         let p = params(&pose);
-        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh {
+        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh { surface: mesh.surface.clone(),
             vertices: mesh.vertices.clone(),
             indices: mesh.indices.clone(),
             texture: None,
@@ -1637,7 +1638,7 @@ mod tests {
     fn release_fallback_skins_the_current_pose_when_no_draw_was_gathered() {
         let (skeleton, mut meshes, pose) = fixture();
         let p = params(&pose);
-        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh {
+        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh { surface: mesh.surface.clone(),
             vertices: mesh.vertices.clone(),
             indices: mesh.indices.clone(),
             texture: None,
@@ -1682,7 +1683,7 @@ mod tests {
         let (skeleton, mut meshes, pose) = fixture();
         let gathered = params(&pose);
         let other = Transform { translation: vec3(4., 5., 6.), rotation: Quat::from_rotation_z(1.2) };
-        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh {
+        let mut reference: Vec<Option<Mesh>> = meshes.iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh { surface: mesh.surface.clone(),
             vertices: mesh.vertices.clone(), indices: mesh.indices.clone(), texture: None,
         })).collect();
         for (surface, mesh) in skeleton.surfaces.iter().zip(reference.iter_mut().flatten()) {
@@ -1767,7 +1768,7 @@ mod tests {
             let cpu = skeleton.surfaces[0].cpu();
             let mut vertices = cpu.bind_vertices.clone();
             for v in &mut vertices { v.position = Vec3::splat(-77.); v.color = [9, 8, 7, 6]; }
-            Fixture { mesh: Mesh { vertices, indices: cpu.indices.clone(), texture: Some(base) }, skeleton }
+            Fixture { mesh: Mesh { surface: None, vertices, indices: cpu.indices.clone(), texture: Some(base) }, skeleton }
         }
         thread_local! { static SURFACES_KEEP: RefCell<Vec<std::rc::Rc<crate::render_fx::Surface>>> = RefCell::default(); }
         #[derive(Clone)]
@@ -1809,7 +1810,7 @@ mod tests {
                                 Step::Hidden(m, a) => { let _s = actors[*a].scope(); assert_eq!(handle(&fixtures[*m].skeleton, &mut meshes[*m][*a], p(1., false, false), false), Some(false)); }
                                 Step::Topology(m, a) => {
                                     let _s = actors[*a].scope();
-                                    let mut changed: Vec<Option<Mesh>> = meshes[*m][*a].iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh {
+                                    let mut changed: Vec<Option<Mesh>> = meshes[*m][*a].iter().map(|mesh| mesh.as_ref().map(|mesh| Mesh { surface: mesh.surface.clone(),
                                         vertices: mesh.vertices.clone(), indices: mesh.indices.clone(), texture: mesh.texture.clone(),
                                     })).collect();
                                     changed[0].as_mut().unwrap().indices.swap(0, 1);
@@ -1835,7 +1836,7 @@ mod tests {
                         frame.dispatch();
                         if world {
                             // A world packet between dispatch and collect: actor groups follow it.
-                            crate::render_fx::effect(&Mesh { vertices: vec![Vertex::new(0., 0., 0., 0.5, 0.5, RED); 3], indices: vec![0, 1, 2], texture: None }, Blend::Alpha);
+                            crate::render_fx::effect(&Mesh { surface: None, vertices: vec![Vertex::new(0., 0., 0., 0.5, 0.5, RED); 3], indices: vec![0, 1, 2], texture: None }, Blend::Alpha);
                         }
                         frame.collect();
                         drop(frame);
@@ -2011,7 +2012,7 @@ mod tests {
                             }
                             if index > 0 {
                                 frame.dispatch();
-                                crate::render_fx::effect(&Mesh { vertices: vec![Vertex::new(4., 5., 6., 0.2, 0.3, RED); 3], indices: vec![0, 1, 2], texture: None }, Blend::Alpha);
+                                crate::render_fx::effect(&Mesh { surface: None, vertices: vec![Vertex::new(4., 5., 6., 0.2, 0.3, RED); 3], indices: vec![0, 1, 2], texture: None }, Blend::Alpha);
                             }
                             if index == 2 { frame.collect(); }
                             drop(frame);
@@ -2150,7 +2151,7 @@ mod tests {
             let cpu = skeleton.surfaces[0].cpu();
             let mut vertices = cpu.bind_vertices.clone();
             for v in &mut vertices { v.position = Vec3::splat(-77.); v.color = [9, 8, 7, 6]; }
-            Fixture { mesh: Mesh { vertices, indices: cpu.indices.clone(), texture: Some(base) }, skeleton }
+            Fixture { mesh: Mesh { surface: None, vertices, indices: cpu.indices.clone(), texture: Some(base) }, skeleton }
         }
         struct Unique { commits: u64, frames: Vec<ts::FrameSnapshot>, capacities: Vec<(usize, usize)> }
         /// Real draws through prepare, capture, workers, drain and complete with a one-layer cap.

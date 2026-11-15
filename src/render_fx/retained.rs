@@ -1,5 +1,6 @@
 //! Whole actor/effect packets share one alpha order with immutable world groups.
 //! Only dynamic LG meshes stream here; world buffers are never read or uploaded.
+use crate::mesh::Mesh;
 #[cfg(feature="frame_total_only")]
 use crate::light_profile::InactiveInstant as MetricInstant;
 #[cfg(not(feature="frame_total_only"))]
@@ -632,7 +633,8 @@ impl Gpu {
         if p.effect { crate::render::vita_renderer::log_world_fx_depth(); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         {
-            let (prop, name) = crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id));
+            let (prop, name) = p.mesh.surface.as_ref().map(|s| s.label.clone()).unwrap_or_else(||
+                crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
             crate::sim_maps::probe::draw_query::mark(
                 if p.effect {"fx"} else {"actors"}, if p.effect {"fx"} else if prop {"prop"} else {"actor"},
                 p.blend_index, None, 0, name.as_deref());
@@ -749,7 +751,8 @@ fn center_vertices(vertices: &[Vertex]) -> Vec3 {
 }
 #[cfg(test)]
 fn same_packet(a: &Pass, b: &Pass) -> bool {
-    a.blend_index == b.blend_index
+    a.mesh.surface.as_ref().map(std::rc::Rc::as_ptr) == b.mesh.surface.as_ref().map(std::rc::Rc::as_ptr)
+        && a.blend_index == b.blend_index
         && a.depth_equal == b.depth_equal
         && a.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
             == b.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
@@ -765,11 +768,13 @@ fn same_packet(a: &Pass, b: &Pass) -> bool {
 }
 #[derive(Clone, PartialEq)]
 struct PacketKey {
+    surface: Option<usize>,
     texture: Option<TextureId>,
     state: [u32; 20],
 }
 fn packet_key(p: &Pass) -> PacketKey {
     PacketKey {
+        surface: p.mesh.surface.as_ref().map(|s| std::rc::Rc::as_ptr(s) as usize),
         texture: p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id),
         state: [
             p.blend_index as u32,
@@ -1026,8 +1031,9 @@ fn merge_cached_options<'a>(
         }
         if !hit && local_hit && same_topology { count("fx_merge_local_topology_hits", 1); }
         if in_place {
-            let mut dest = cached.map(|g|g.mesh).unwrap_or_else(|| Mesh {vertices:Vec::new(),indices:Vec::new(),texture:None});
+            let mut dest = cached.map(|g|g.mesh).unwrap_or_else(|| Mesh { surface: None,vertices:Vec::new(),indices:Vec::new(),texture:None});
             dest.texture = groups[target].passes[0].mesh.texture.clone();
+            dest.surface = groups[target].passes[0].mesh.surface.clone();
             cache.packing.clear();
             let mut vertices = 0; let mut indices = 0;
             for id in std::iter::once(target).chain(sources.iter().copied()) {
@@ -1092,6 +1098,7 @@ fn merge_cached_options<'a>(
         if let Some(mut cached) = cached {
             let old = groups[target].passes[0].geometry();
             cached.mesh.texture = groups[target].passes[0].mesh.texture.clone();
+            cached.mesh.surface = groups[target].passes[0].mesh.surface.clone();
             cached.mesh.vertices.clear();
             cached.mesh.indices.clear();
             cached.mesh.vertices.extend_from_slice(&old.vertices);
@@ -1117,7 +1124,8 @@ fn merge_cached_options<'a>(
             let previous = cache.versions.insert(target, version_storage).unwrap_or_default();
             cache.version_scratch.insert(target, previous);
             let texture = groups[target].passes[0].mesh.texture.clone();
-            let mesh = std::mem::replace(&mut groups[target].passes[0].mesh, Mesh { vertices: Vec::new(), indices: Vec::new(), texture });
+            let surface = groups[target].passes[0].mesh.surface.clone();
+            let mesh = std::mem::replace(&mut groups[target].passes[0].mesh, Mesh { surface, vertices: Vec::new(), indices: Vec::new(), texture });
             let geometry = super::prepared::Geometry::merged(mesh, if certified_hit {old_version} else {None}, same_topology);
             if local_reuse { cache.outputs.insert(target, geometry.version); }
             groups[target].passes[0].geometry = Some(std::rc::Rc::new(geometry));
@@ -1510,7 +1518,7 @@ pub(crate) fn finish_world(
             let geometry = if let Some(g) = p.geometry.take() {
                 std::rc::Rc::try_unwrap(g).unwrap_or_else(|g| super::prepared::Geometry::new(super::copy_mesh(&g)))
             } else { super::prepared::Geometry::new(std::mem::replace(&mut p.mesh,
-                Mesh { vertices: Vec::new(), indices: Vec::new(), texture: None })) };
+                Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None })) };
             gpu.merge_meshes[gpu.ring_phase].insert(id, geometry);
         }
     }
@@ -1559,7 +1567,7 @@ mod tests {
     fn owned_particle_publications_match_legacy_packet_geometry_and_blend_policy() {
         for blend in [crate::materials::Blend::Alpha,crate::materials::Blend::Add,crate::materials::Blend::AlphaAdd] {
             FRAME.with(|f| *f.borrow_mut()=Frame {active:true,direct:true,..Default::default()});
-            let mesh=Mesh {vertices:vec![Vertex::new(1.,2.,3.,0.5,0.4,Color::new(0.7,0.4,0.2,0.3));4],
+            let mesh=Mesh { surface: None,vertices:vec![Vertex::new(1.,2.,3.,0.5,0.4,Color::new(0.7,0.4,0.2,0.3));4],
                 indices:vec![0,1,2,0,2,3],texture:None};
             super::super::effect(&mesh,blend);
             let publication=std::rc::Rc::new(super::super::prepared::Geometry::new(super::super::copy_mesh(&mesh)));
@@ -1935,7 +1943,7 @@ mod tests {
     }
     #[test]
     fn actor_ranges_reject_truncated_and_out_of_bounds_indices() {
-        let mut m = Mesh {
+        let mut m = Mesh { surface: None,
             vertices: vec![Vertex::new(0., 0., 0., 0., 0., WHITE); 3],
             indices: vec![0, 1, 2],
             texture: None,
@@ -1956,7 +1964,7 @@ mod tests {
                 effect: false,
                 blend_index: 1,
                 depth_equal: false,
-                mesh: Mesh {
+                mesh: Mesh { surface: None,
                     vertices: vec![Vertex::new(0., 0., 0., 0., 0., WHITE); 3],
                     indices: vec![0, 1, 2],
                     texture: None,
@@ -2059,7 +2067,7 @@ mod tests {
         let mut pool = BTreeMap::new();
         let merged = std::mem::replace(
             &mut groups[0].passes[0].mesh,
-            Mesh {
+            Mesh { surface: None,
                 vertices: Vec::new(),
                 indices: Vec::new(),
                 texture: None,

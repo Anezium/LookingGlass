@@ -1,4 +1,5 @@
 //! Alice's intact skin, locomotion animation and a collision-aware following camera.
+use crate::mesh::{Mesh, draw_mesh};
 pub use crate::weapons::WeaponInput;
 use crate::{
     assets::Assets,
@@ -637,7 +638,7 @@ impl Character {
                 &[format!("{}/{skin}", def.path), skin.clone()],
                 &specs,
             )?);
-            meshes.push(Some(Mesh {
+            meshes.push(Some(Mesh { surface: material_layers.last().cloned(),
                 vertices: surface
                     .vertices
                     .iter()
@@ -1670,7 +1671,7 @@ pub async fn check_shared_material() -> Result<()> {
     };
     set_camera(&camera);
     let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
-    let quad = |x: f32| Mesh {
+    let quad = |x: f32| Mesh { surface: None,
         vertices: [
             vec3(x - 0.7, -1., 0.),
             vec3(x + 0.7, -1., 0.),

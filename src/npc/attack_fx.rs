@@ -1,4 +1,5 @@
 //! Archive-backed attack ribbons. Simulation owns their endpoints and lifetimes.
+use crate::mesh::Mesh;
 use crate::{
     assets::Assets, environment::Atmosphere, particles::Attached, render_fx, skeletal::Transform,
     texture,
@@ -29,7 +30,7 @@ fn ribbon(from: Vec3, to: Vec3, camera: Vec3, width: f32, repeats: f32) -> Optio
         .try_normalize()
         .unwrap_or_else(|| axis.any_orthonormal_vector())
         * width;
-    Some(Mesh {
+    Some(Mesh { surface: None,
         vertices: [
             (from - side, vec2(0., 0.)),
             (to - side, vec2(repeats, 0.)),
@@ -83,6 +84,7 @@ impl Art {
             return;
         };
         mesh.texture = Some(self.layers[material].0.clone());
+        mesh.surface = Some(self.layers[material].1.clone());
         // Original material stages own colour, blending and scrolling; no debug tint.
         render_fx::skin_effect(&mesh, age, 1.);
     }

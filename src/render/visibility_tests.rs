@@ -1,5 +1,6 @@
 //! Compare production selection with the uncached selector from 6f036e1.
 //! No GPU, PK3, timer, or screen-size dependency in these fixtures.
+use crate::mesh::Mesh;
 use super::*;
 
 #[derive(Clone, Copy, Default)]
@@ -46,7 +47,7 @@ fn batch(faces: &[usize]) -> Batch {
         static_offset: None,
         face_side: crate::materials::FaceSide::Both,
         motion: None,
-        mesh: Mesh {
+        mesh: Mesh { surface: None,
             vertices: Vec::new(),
             indices: full_indices.clone(),
             texture: None,

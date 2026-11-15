@@ -1,4 +1,5 @@
 //! Original archive materials and animation-owned smoke; shared GPU resources.
+use crate::mesh::Mesh;
 use super::{
     heavy::{Kind, State},
     Prop,
@@ -152,7 +153,7 @@ impl BeamRig {
             position, uv, normal: Vec4::ZERO, color: [255; 4],
         })
         .collect();
-        crate::render_fx::effect(&Mesh {
+        crate::render_fx::effect(&Mesh { surface: None,
             vertices,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture: self.core.meshes.first().and_then(|m| m.texture.clone()),

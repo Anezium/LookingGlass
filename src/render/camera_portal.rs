@@ -1,5 +1,6 @@
 //! Linked camera apertures, with an independent PVS and a clipped remote view.
 //! Original brush transforms own visibility; no gameplay or saved cast is added.
+use crate::mesh::{Mesh, draw_mesh};
 use super::*;
 use crate::{
     interaction::vector,
@@ -274,7 +275,7 @@ pub(super) fn load(
                 destination,
                 forward,
                 local: vertices.iter().map(|v| v.position).collect(),
-                mesh: Mesh {
+                mesh: Mesh { surface: None,
                     vertices: vertices
                         .iter()
                         .map(|v| {

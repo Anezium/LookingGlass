@@ -5,7 +5,7 @@ use crate::{
     magma::{Magma, Phase},
 };
 pub(super) struct Skins {
-    textures: Vec<[Option<Texture2D>; 3]>,
+    textures: Vec<[Option<(Texture2D, std::rc::Rc<crate::render_fx::Surface>)>; 3]>,
     _layers: Vec<std::rc::Rc<crate::render_fx::Surface>>,
 }
 impl Skins {
@@ -16,7 +16,7 @@ impl Skins {
     ) -> Result<Self> {
         let mut textures = vec![];
         let mut layers = vec![];
-        let mut cache = BTreeMap::<String, Texture2D>::new();
+        let mut cache = BTreeMap::<String, (Texture2D, std::rc::Rc<crate::render_fx::Surface>)>::new();
         for s in &data.skeleton.surfaces {
             let names = match s.name.as_str() {
                 "top_torso" | "bot_body" | "cap_body" => {
@@ -45,6 +45,7 @@ impl Skins {
                         std::slice::from_ref(&shader),
                         specs,
                     )?);
+                    let t = (t, layers.last().unwrap().clone());
                     cache.insert(shader, t.clone());
                     t
                 };
@@ -88,9 +89,10 @@ impl Model {
                 continue;
             }
             if let Some(mesh) = &mut self.meshes[i] {
-                original.push((i, mesh.texture.clone()));
-                if let Some(tex) = &skins.textures[i][g.form as usize] {
+                original.push((i, mesh.texture.clone(), mesh.surface.clone()));
+                if let Some((tex, surface)) = &skins.textures[i][g.form as usize] {
                     mesh.texture = Some(tex.clone());
+                    mesh.surface = Some(surface.clone());
                 }
                 self.visible[i] = true;
             }
@@ -121,7 +123,8 @@ impl Model {
             },
         );
         if !skin_visible { self.visible.fill(false); }
-        for (i, tex) in original {
+        for (i, tex, surface) in original {
+            self.meshes[i].as_mut().unwrap().surface = surface;
             self.meshes[i].as_mut().unwrap().texture = tex;
         }
         for (i, mesh) in removed {

@@ -1,5 +1,6 @@
 //! Meta Essence uses three authored passes: reflection, coloured filter, swirl.
 //! Treating its first image as an opaque skin loses both colour and transparency.
+use crate::mesh::{draw_mesh};
 use crate::{assets::Assets, environment::Atmosphere, loot::Grade, materials::Blend, texture};
 use anyhow::{ensure, Context, Result};
 use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Equation};

@@ -39,7 +39,7 @@ mod tests {
             blend_index:0,depth_equal:false,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
-            mesh:Mesh {vertices:vec![Vertex::new(0.,0.,0.,0.,0.,WHITE);3],indices:vec![0,1,2],texture:None},
+            mesh:Mesh { surface: None,vertices:vec![Vertex::new(0.,0.,0.,0.,0.,WHITE);3],indices:vec![0,1,2],texture:None},
             material:None,lit:true,clamp:false,cutout:4.,cutout_reference:0.5,gain:Vec4::ONE,
             fog:0.,model:true,appearance:Appearance::default(),filter_fade:0.};
         assert!(eligible(&p));

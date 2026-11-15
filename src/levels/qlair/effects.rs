@@ -1,4 +1,5 @@
 //! Saved impact/debris lifetimes; effects continue after their source actor disappears.
+use crate::mesh::Mesh;
 use super::*;
 use crate::{environment::Atmosphere, weapons::Prop};
 use std::collections::BTreeMap;
@@ -181,7 +182,7 @@ pub(super) struct Art {
     particles: BTreeMap<String, crate::particles::Attached>,
     bursts: BTreeMap<String, crate::particles::Attached>,
     children: BTreeMap<String, Vec<crate::particles::ModelBurst>>,
-    textures: BTreeMap<String, Texture2D>,
+    textures: BTreeMap<String, (Texture2D, std::rc::Rc<crate::render_fx::Surface>)>,
     _materials: Vec<std::rc::Rc<crate::render_fx::Surface>>,
 }
 impl Art {
@@ -276,7 +277,7 @@ impl Art {
                     &[name.to_owned()],
                     &materials,
                 )?);
-                textures.insert(name.into(), texture);
+                textures.insert(name.into(), (texture, layers.last().unwrap().clone()));
             }
             ensure!(
                 textures.contains_key(name),
@@ -382,11 +383,11 @@ impl Art {
         }
     }
     fn ribbon(&self, name: &str, a: Vec3, b: Vec3, c: Vec3, d: Vec3, alpha: f32, decal: bool) {
-        let Some(texture) = self.textures.get(name) else {
+        let Some((texture, surface)) = self.textures.get(name) else {
             return;
         };
         let color = Color::new(1., 1., 1., alpha);
-        let mesh = Mesh {
+        let mesh = Mesh { surface: Some(surface.clone()),
             vertices: [
                 (a, vec2(0., 0.)),
                 (b, vec2(1., 0.)),

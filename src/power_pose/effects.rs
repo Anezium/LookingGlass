@@ -1,4 +1,5 @@
 //! Rage's supplied surface layer and the collected vial's cosmetic performance.
+use crate::mesh::Mesh;
 use super::*;
 use crate::{environment::Atmosphere, materials::Stage, particles::Attached, tan};
 use std::cell::Cell;

@@ -1,4 +1,5 @@
 //! Original LIP envelopes and mouth/eyelid presentation. No game code is executed.
+use crate::mesh::Mesh;
 use crate::{
     assets::Assets,
     bsp::tokens,
@@ -175,6 +176,7 @@ struct Blink {
     surface: usize,
     period: f32,
     open: Texture2D,
+    open_surface: Option<std::rc::Rc<crate::render_fx::Surface>>,
     closed: Texture2D,
 }
 pub struct Face {
@@ -211,6 +213,7 @@ impl Face {
                 surface: index,
                 period,
                 open,
+                open_surface: meshes[index].as_ref().and_then(|m| m.surface.clone()),
                 closed,
             })
         } else {
@@ -231,6 +234,7 @@ impl Face {
     pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
         if let Some(b) = &self.blink {
             if let Some(mesh) = &mut meshes[b.surface] {
+                mesh.surface = if alive && blinking(time, b.period) { None } else { b.open_surface.clone() };
                 mesh.texture = Some(
                     if alive && blinking(time, b.period) {
                         &b.closed

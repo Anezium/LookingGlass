@@ -1,4 +1,5 @@
 //! Archive artwork shared by every Ice/Jacks instance; no per-shot GPU pipeline.
+use crate::mesh::Mesh;
 use super::{ice, jacks, Prop};
 use crate::{
     assets::Assets, environment::Atmosphere, particles::Attached, skeletal::Transform, texture,
@@ -221,7 +222,7 @@ impl Art {
             }
             if !vertices.is_empty() {
                 crate::render_fx::effect(
-                    &Mesh {
+                    &Mesh { surface: None,
                         indices: (0..vertices.len() as u16).collect(),
                         vertices,
                         texture: Some(self.swipe.clone()),

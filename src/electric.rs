@@ -1,4 +1,5 @@
 //! Short, pose-following electrical shell using the original shock material.
+use crate::mesh::Mesh;
 use crate::{assets::Assets, render_fx, texture};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
@@ -52,6 +53,7 @@ impl Art {
         let age = LIFE - remaining;
         let mut copy = render_fx::copy_mesh(mesh);
         copy.texture = Some(self.texture.clone());
+        copy.surface = Some(self._surface.clone());
         for v in &mut copy.vertices {
             // These assets use clockwise triangles. The renderer rebuilds the
             // opposite of their authored outward normal; expanding along it

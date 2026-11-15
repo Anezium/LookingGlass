@@ -1,5 +1,6 @@
 //! Direct quad publications after the exact joint-alpha order is known.
 //! Non-particle packets, invalid meshes and authored multi-pass layers are barriers.
+use crate::mesh::Mesh;
 use super::*;
 use crate::materials::{Blend, Stage};
 use std::rc::Rc;
@@ -13,7 +14,7 @@ pub(crate) struct Puff {
 fn normalized(blend: Blend) -> Blend { if blend == Blend::Add { Blend::AlphaAdd } else { blend } }
 fn puff_key(p: &Puff) -> PacketKey {
     let stage = Stage::default();
-    PacketKey { texture: p.texture.as_ref().map(Texture2D::raw_miniquad_id), state: [
+    PacketKey { surface: None, texture: p.texture.as_ref().map(Texture2D::raw_miniquad_id), state: [
         crate::render::blend_index(normalized(p.blend)) as u32, 0, 0, u32::from(stage.clamp),
         (stage.alpha_test as f32).to_bits(), stage.alpha_reference.to_bits(),
         1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(),
@@ -57,7 +58,7 @@ struct Batch {
 impl Default for Batch {
     fn default() -> Self {
         Self { members: Vec::new(), output: 0, quad_members: 0,
-            geometry: Rc::new(super::super::prepared::Geometry::new(Mesh {
+            geometry: Rc::new(super::super::prepared::Geometry::new(Mesh { surface: None,
                 vertices: Vec::new(), indices: Vec::new(), texture: None })) }
     }
 }
@@ -150,7 +151,7 @@ impl Bank {
         }
         if !same_vertices || !same_indices {
             let old = g.version;
-            let mesh = std::mem::replace(&mut g.mesh, Mesh { vertices: Vec::new(), indices: Vec::new(), texture: None });
+            let mesh = std::mem::replace(&mut g.mesh, Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None });
             *g = super::super::prepared::Geometry::merged(mesh, Some(old), same_indices);
             if same_vertices { g.version.vertices = old.vertices; }
         }
@@ -173,7 +174,7 @@ impl Bank {
                 Source::Actor(id) => groups[id].passes.pop().unwrap(),
                 Source::Puff(id) => {
                     let puff = &puffs[id];
-                    super::super::pass(Mesh { vertices: Vec::new(), indices: Vec::new(), texture: puff.texture.clone() },
+                    super::super::pass(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: puff.texture.clone() },
                         &Stage { blend: normalized(puff.blend), ..Default::default() }, true, false,
                         super::super::Appearance::default()).expect("direct puff pass")
                 }
@@ -218,7 +219,7 @@ mod tests {
             active: true, direct: true, ..Default::default() })))
     }
     fn pass_for(p: &Puff, effect: bool, equal: bool) -> super::super::super::Pass {
-        let mut pass = super::super::super::pass(Mesh { vertices: p.vertices.to_vec(),
+        let mut pass = super::super::super::pass(Mesh { surface: None, vertices: p.vertices.to_vec(),
             indices: vec![0,1,2,0,2,3], texture: None },
             &Stage { blend: normalized(p.blend), depth_equal: equal, ..Default::default() },
             true, false, Default::default()).unwrap();

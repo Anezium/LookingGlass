@@ -1,4 +1,5 @@
 //! Placed, animated characters with bounded local reactions. No original AI/scripts run.
+use crate::mesh::Mesh;
 mod ambient;
 pub(crate) mod profile;
 mod visual_lod;
@@ -1559,7 +1560,7 @@ impl Model {
                 &[format!("{}/{skin}", data.def.path), skin.clone()],
                 specs,
             )?);
-            meshes.push(Some(Mesh {
+            meshes.push(Some(Mesh { surface: material_layers.last().cloned(),
                 vertices: s
                     .vertices
                     .iter()

@@ -226,7 +226,7 @@ pub fn negative_control() -> Option<&'static str> {
     ON.get_or_init(|| std::env::var("LOOKING_GLASS_GATHER_NEGATIVE").ok()).as_deref()
 }
 /// `uv`: one live UV edit nobody announces, in both arms. The lever-on arm must go stale.
-pub fn negative_uv_edit(mesh: &mut macroquad::prelude::Mesh) {
+pub fn negative_uv_edit(mesh: &mut crate::mesh::Mesh) {
     if negative_control() == Some("uv") && frame() >= 90 {
         if let Some(v) = mesh.vertices.first_mut() { v.uv.x = frame() as f32 * 0.125; }
     }
@@ -582,6 +582,7 @@ pub mod draw_query {
     }
     /// Textures registered while this lives belong to a Prop.
     pub struct PropScope(bool);
+    pub fn is_prop() -> bool { PROP_SCOPE.with(Cell::get) }
     pub fn prop_scope() -> PropScope { PropScope(PROP_SCOPE.with(|s| s.replace(true))) }
     impl Drop for PropScope { fn drop(&mut self) { PROP_SCOPE.with(|s| s.set(self.0)); } }
     /// Whether an actor-pass texture is a Prop's, and its name. Looks only on an armed frame.

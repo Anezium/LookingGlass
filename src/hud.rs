@@ -1,4 +1,5 @@
 //! Compact HUD using the user's original meter and weapon artwork.
+use crate::mesh::Mesh;
 use crate::{
     assets::Assets,
     inventory::{Catalog, Pickup, PickupKind, Stats, WEAPONS},
@@ -580,7 +581,7 @@ fn tan_picture(
             })
             .collect();
         crate::sim_maps::count("imm_hud_mesh", 1);
-        draw_mesh(&Mesh {
+        draw_mesh(&Mesh { surface: None,
             vertices,
             indices,
             texture: Some(texture.clone()),

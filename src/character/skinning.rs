@@ -1,4 +1,5 @@
 //! Visual skinning only; animation, tags, sounds and gameplay retain Transform.
+use crate::mesh::Mesh;
 use crate::skeletal::{SkinVertex, Transform};
 use macroquad::prelude::*;
 
@@ -779,7 +780,7 @@ mod tests {
     }
     #[test]
     fn lean_overlay_keeps_reference_normals_and_shell_expansion() {
-        let mesh = || Mesh {
+        let mesh = || Mesh { surface: None,
             vertices: [Vec3::ZERO, Vec3::X, Vec3::Y].map(|position| Vertex {
                 position, uv: Vec2::ZERO, normal: Vec4::ZERO, color: [255; 4],
             }).to_vec(),

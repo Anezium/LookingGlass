@@ -1,4 +1,5 @@
 //! Original iceblock secondary shaders, shared across actors and the water shell.
+use crate::mesh::Mesh;
 use crate::{assets::Assets, render_fx, texture};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
@@ -39,6 +40,7 @@ impl Art {
         for (i, tex) in self.textures.iter().enumerate() {
             let mut m = render_fx::copy_mesh(mesh);
             m.texture = Some(tex.clone());
+            m.surface = Some(self._surfaces[i].clone());
             for v in &mut m.vertices {
                 let n = v.normal.truncate().normalize_or_zero();
                 // iceblock2's static bulge: width 10, height 10, speed 0.

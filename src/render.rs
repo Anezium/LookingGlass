@@ -1,4 +1,5 @@
 //! World batches, animated material layers and inline door models.
+use crate::mesh::{Mesh, draw_mesh};
 #[cfg(feature = "vita_renderer")]
 pub(crate) mod uniform_fields;
 #[cfg(feature = "vita_renderer")]
@@ -520,7 +521,7 @@ fn selected_mesh(mesh: &Mesh, compact: bool) -> Mesh {
             *next
         })
         .collect();
-    Mesh {
+    Mesh { surface: None,
         vertices,
         indices,
         texture: mesh.texture.clone(),
@@ -1843,7 +1844,7 @@ impl Scene {
                         bounds: (Vec3::ZERO, Vec3::ZERO),
                         detail: Vec::new(),
                         animation: None,
-                        mesh: Mesh {
+                        mesh: Mesh { surface: None,
                             vertices: Vec::new(),
                             indices: Vec::new(),
                             texture: None,
@@ -1925,7 +1926,7 @@ impl Scene {
                 bounds: (Vec3::ZERO, Vec3::ZERO),
                 detail: Vec::new(),
                 animation: None,
-                mesh: Mesh {
+                mesh: Mesh { surface: None,
                     vertices,
                     indices: shape.indices(),
                     texture: None,
@@ -2042,7 +2043,7 @@ impl Scene {
                     center: placement.pose.translation,
                     base: vertices.clone(),
                     normals,
-                    mesh: Mesh {
+                    mesh: Mesh { surface: None,
                         vertices,
                         indices: surface.indices.clone(),
                         texture: None,
@@ -2804,7 +2805,7 @@ pub async fn check_layers(scene: &Scene) -> Result<()> {
             portal: sky,
             center: Vec3::ZERO,
             model: None,
-            mesh: Mesh {
+            mesh: Mesh { surface: None,
                 vertices,
                 indices: vec![0, 1, 2, 0, 2, 3],
                 texture: None,
@@ -3112,7 +3113,7 @@ pub async fn check_depth() -> Result<()> {
         z_far: 50.,
         ..Default::default()
     };
-    let quad = |z: f32, color: Color| Mesh {
+    let quad = |z: f32, color: Color| Mesh { surface: None,
         vertices: [
             vec3(-1., -1., z),
             vec3(1., -1., z),
