@@ -911,20 +911,12 @@ pub fn register(
             let tex = if stage.clamp {
                 texture::decode_upload_shared(assets, &path)?
             } else {
-                // Repeat wrap cannot share the GPU texture with clamp sampling.
+                // Model shaders tile too (notably the Queen's tentacle and base).
+                // Repeat wrap cannot share the GPU texture with clamp sampling, so
+                // the tiling upload has its own key and sets its wrap before any
+                // consumer sees it.
                 texture::decode_upload_shared_tiling(assets, &path)?
             };
-            // Model shaders tile too (notably the Queen's tentacle and base).
-            // CPU UV modifiers may leave [0,1]; clamping samples one edge texel.
-            if !stage.clamp {
-                unsafe {
-                    get_internal_gl().quad_context.texture_set_wrap(
-                        tex.raw_miniquad_id(),
-                        macroquad::miniquad::TextureWrap::Repeat,
-                        macroquad::miniquad::TextureWrap::Repeat,
-                    );
-                }
-            }
             textures.push(tex);
         }
         if textures.len() == stage.images.len() {
@@ -972,6 +964,16 @@ mod skin_preservation_tests {
         assert!(!skin_stage_needs_normals(&Stage::default()));
         assert!(skin_stage_needs_normals(&Stage { environment: true, ..Default::default() }));
         assert!(skin_stage_needs_normals(&Stage { dot_alpha: Some(Vec2::ONE), ..Default::default() }));
+    }
+    /// Wrap is GPU state, not texels: the shared readback cannot see it, so a
+    /// tiling stage's sampler is set by its keyed upload and never after it.
+    #[test]
+    fn stage_samplers_are_set_at_upload_not_after() {
+        let source = include_str!("render_fx.rs");
+        assert!(
+            !source.contains(concat!("texture_set", "_wrap")),
+            "a shared upload must not be rewrapped after upload"
+        );
     }
 }
 /// The registered layers consume rebuilt normals after the base skin is prepared.

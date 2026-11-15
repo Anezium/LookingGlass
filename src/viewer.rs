@@ -111,28 +111,37 @@ async fn rebuild_outgoing(
 ) -> Option<Box<RebuiltScene>> {
     let mut attempts = 0;
     loop {
+        // Nothing from a failed load outlives its window into this retirement.
+        crate::texture::release_shared();
         crate::render_fx::release_scene();
         crate::transition_memory::released().await;
-        // Partial resources drop together on error, before the next retirement.
-        let attempt = (|| -> Result<_> {
-            crate::transition_memory::recovery_fault()?;
-            let level = checkpoint.level()?;
-            let mut world = Scene::load(assets, &level.map)?;
-            world.map.difficulty = difficulty;
-            interactions.sync(&mut world.world);
-            let mut cast = crate::npc::Npcs::load(assets, &world.map, &level.map,
-                level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
-            cast.restore(&level.npcs)?;
-            let particles = crate::particles::Steam::load(assets, &world.map)?;
-            let mut art = LevelArt::default();
-            art.prepare(assets, &world, interactions, true)?;
-            let character = if reload_alice {
-                let mut character = Character::load(assets)?;
-                character.restore(&checkpoint.character)?;
-                Some(character)
-            } else { None };
-            Ok(Box::new((art, cast, particles, world, character)))
-        })();
+        // Partial resources drop together on error, before the next retirement; the
+        // load guard drops this attempt's cache with them, on success and error alike.
+        let attempt = {
+            let _share = crate::texture::load_scope();
+            (|| -> Result<_> {
+                crate::transition_memory::recovery_fault()?;
+                let level = checkpoint.level()?;
+                let mut world = Scene::load(assets, &level.map)?;
+                world.map.difficulty = difficulty;
+                interactions.sync(&mut world.world);
+                let mut cast = crate::npc::Npcs::load(assets, &world.map, &level.map,
+                    level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
+                cast.restore(&level.npcs)?;
+                let particles = crate::particles::Steam::load(assets, &world.map)?;
+                let mut art = LevelArt::default();
+                art.prepare(assets, &world, interactions, true)?;
+                let character = if reload_alice {
+                    let mut character = Character::load(assets)?;
+                    character.restore(&checkpoint.character)?;
+                    Some(character)
+                } else { None };
+                Ok(Box::new((art, cast, particles, world, character)))
+            })()
+        };
+        // A successful rebuild is a live map now; a failed one is freed before the
+        // next attempt. Either way this attempt leaves no cache owners behind.
+        crate::texture::release_shared();
         match attempt {
             Ok(resources) => return Some(resources),
             Err(error) => {
@@ -390,6 +399,10 @@ async fn finish_entered(
         story,
         hints,
     } = loaded;
+    // One window for the whole destination build. The guard clears on success and
+    // on every `?` below, so a failure cannot retain destination textures across
+    // the load boundary.
+    let _share = crate::texture::load_scope();
     let mut timing = crate::startup::Phase::new("entered_resources");
     let scene = Scene::from_parts(assets, name, map, world)?;
     timing.mark("scene");
@@ -425,7 +438,6 @@ async fn finish_entered(
     timing.mark("level_art");
     crate::loading_screen::between("level_art").await;
     crate::transition_memory::fault("level_art")?;
-    crate::texture::release_shared();
     Ok(Entered {
         art,
         scene,
@@ -454,12 +466,14 @@ pub(crate) fn draw_transition_loading(name: &str) {
 }
 async fn present_transition_loading(name: &str) {
     crate::frame_profile::exclude_transition_frame();
+    let start = std::time::Instant::now();
     crate::loading_screen::draw_or(|| draw_transition_loading(name));
     #[cfg(not(target_os="vita"))]
     if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_CAPTURE") {
         save_capture(std::path::Path::new(&path)).expect("loading indicator capture");
     }
     next_frame().await;
+    crate::loading_screen::note_present(start.elapsed().as_secs_f64() * 1000.);
     eprintln!("[lg/transition] loading_indicator=presented destination={name}");
 }
 
@@ -1069,7 +1083,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     // paused fresh-scene/error behavior, without retrying an expensive restore.
     let mut resume_error = None;
     let prepared = if prepared.is_some() { prepared } else if let Some(loaded) = &resume {
-        match save::Restored::build(&mut assets, loaded.game.clone()) {
+        let restored = {
+            // The restore build is its own load window; a failed one keeps nothing.
+            let _share = crate::texture::load_scope();
+            save::Restored::build(&mut assets, loaded.game.clone())
+        };
+        match restored {
             Ok(restored) => Some(restored),
             Err(error) => { resume_error = Some(format!("Could not restore save: {error:#}")); None }
         }
@@ -1077,6 +1096,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut resume_applied = false;
     let validated = prepared.is_some();
     if save::bench_scene(validated) == save::BenchScene::ReuseValidated {
+        // The restored scene's build and its install are one load window.
+        let _share = crate::texture::load_scope();
         let mut timing = crate::startup::Phase::new("restore_resources");
         power_art = crate::powerups::Art::load(&mut assets)?;
         timing.mark("power_art");
@@ -1110,9 +1131,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // The boot route builds the whole level on the main thread before the viewer
         // loop exists, so the menu stays frozen unless a load is opened here. With
         // `loading_screen` off, none of this presents a frame.
+        //
+        // A fresh boot has no outgoing resources, so there is no retirement
+        // sequence: one step-zero frame replaces the menu, then one frame per stage.
+        // The load guard makes this build a single cache window and clears it on
+        // every return path.
+        let _share = crate::texture::load_scope();
         let boot_loading = crate::loading_screen::begin("chapter-or-console", &maps[current]);
-        if boot_loading.is_some() { crate::loading_screen::released().await; }
-        crate::texture::release_shared();
+        crate::loading_screen::show().await;
         scene = load_scene(&mut assets, &maps[current], options.difficulty)?;
         crate::loading_screen::between("scene").await;
         level_art = LevelArt::default();
@@ -1240,7 +1266,6 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         entry_timing.mark("level_art");
         crate::loading_screen::between("level_art").await;
         drop(boot_loading);
-        crate::texture::release_shared();
         campaign = Campaign::default();
         #[cfg(feature = "native_timing")]
         timing_ready!(crate::native_timing::Reason::Fresh);
@@ -1406,6 +1431,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let audio_checkpoint = audio.transition_checkpoint();
                 let mut memory = crate::transition_memory::Transition::begin($kind, &maps[current], &destination);
                 let _loading = crate::loading_screen::begin($kind, &destination);
+                // The destination build, its install and any rollback share one
+                // cache window; the guard clears it on success and every error.
+                let _share = crate::texture::load_scope();
                 let mut outgoing = unload_scene!();
                 let outgoing_alice = if crate::transition_memory::legacy_overlap() { Some(alice) } else { drop(alice); None };
                 crate::loading_screen::released().await;

@@ -1,7 +1,7 @@
 use crate::assets::Assets;
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::Texture2D;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 /// Longest side, in pixels, of an RGBA8 texture uploaded on Vita.
@@ -10,14 +10,77 @@ use std::collections::BTreeMap;
 #[cfg_attr(not(any(test, target_os = "vita")), allow(dead_code))]
 pub const VITA_TEXTURE_MAX_DIM: u16 = 512;
 
+/// The sampler state an upload is keyed for. Wrap and filter are GPU state, not
+/// texels, so a readback cannot see them: a shared upload never changes its
+/// sampler after a consumer receives it. Repeat has its own key and is set at
+/// upload, before the texture is handed out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sampler {
+    Clamp,
+    Repeat,
+}
+
+impl Sampler {
+    /// The cache key for one path at one sampler state. Clamp keeps the bare
+    /// path, so the clamp entries read exactly as they did before.
+    fn key(self, path: &str) -> String {
+        match self {
+            Sampler::Clamp => path.to_owned(),
+            Sampler::Repeat => format!("{path}\u{1}repeat"),
+        }
+    }
+}
+
 /// The launch's shared uploads for `load_texture_share`, and how they were served.
 #[derive(Default)]
 struct Shared {
-    uploaded: BTreeMap<String, (Texture2D, bool)>,
+    uploaded: BTreeMap<String, Entry>,
     hits: u32,
     misses: u32,
 }
-thread_local! { static SHARED: RefCell<Shared> = RefCell::new(Shared::default()); }
+
+struct Entry {
+    texture: Texture2D,
+    zero_alpha: bool,
+    sampler: Sampler,
+}
+
+thread_local! {
+    static SHARED: RefCell<Shared> = RefCell::new(Shared::default());
+    /// Loads whose textures may be cached. Outside a window the cache is inert.
+    static SHARE_WINDOW: Cell<u32> = const { Cell::new(0) };
+}
+
+/// One load's window on the shared-upload cache. Outside a window nothing is
+/// retained; dropping the last guard clears every entry. A load holds one from
+/// its first upload to its last, so an early `?` or a failed recovery cannot
+/// keep strong texture owners across a load, map or retirement boundary.
+/// The guard is `#[must_use]`: dropping it at once would cache nothing.
+#[must_use = "the load window closes as soon as the guard drops"]
+pub(crate) struct LoadScope(());
+
+impl Drop for LoadScope {
+    fn drop(&mut self) {
+        let closed = SHARE_WINDOW.with(|depth| {
+            let left = depth.get().saturating_sub(1);
+            depth.set(left);
+            left == 0
+        });
+        if closed {
+            release_shared();
+        }
+    }
+}
+
+/// Open a load window. Nested scopes share one window; the outermost drop clears.
+pub(crate) fn load_scope() -> LoadScope {
+    SHARE_WINDOW.with(|depth| depth.set(depth.get() + 1));
+    LoadScope(())
+}
+
+fn share_window() -> bool {
+    SHARE_WINDOW.with(|depth| depth.get() > 0)
+}
 
 /// One uploaded texture and the facts a caller cannot recompute after a reuse.
 pub(crate) struct SharedTexture {
@@ -33,52 +96,78 @@ fn zero_alpha(pixels: &[u8]) -> bool {
 /// `load_texture_share` is off in every shipped config and never reaches a device
 /// unless a person sets it. Without `vita_renderer` the key has no reader, so off.
 fn share_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_SHARE.with(|v| v.get()) { return on; }
     #[cfg(feature = "vita_renderer")]
     { crate::render::vita_renderer::config().load_texture_share }
     #[cfg(not(feature = "vita_renderer"))]
     { false }
 }
 
+#[cfg(test)]
+thread_local! { static TEST_SHARE: Cell<Option<bool>> = const { Cell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn set_share_for_test(on: Option<bool>) { TEST_SHARE.with(|v| v.set(on)); }
+
+/// Whether this upload may be kept and reused. The key alone never retains a
+/// texture between loads; the load window is required as well.
+fn retains_shared_uploads() -> bool {
+    share_enabled() && share_window()
+}
+
 /// Decode and upload one asset path, or reuse the copy this load already uploaded.
 ///
-/// Two callers that name the same resolved path get the same pixels from the same
-/// archive entry, so the second read, decode and GPU allocation are pure repetition.
-/// The texture is returned as a strong clone, so a shared entry is never freed while
-/// any of its users lives. Keys are cleared at the end of every load (`release_shared`).
+/// Two callers that name the same resolved path and sampler get the same pixels
+/// from the same archive entry, so the second read, decode and GPU allocation are
+/// pure repetition. The texture is returned as a strong clone, so a shared entry
+/// is never freed while any of its users lives. The load guard clears the keys at
+/// the end of its window (`release_shared`), on success and every error alike.
 pub(crate) fn decode_upload_shared(assets: &mut Assets, path: &str) -> Result<Texture2D> {
-    decode_upload_keyed(assets, path, path).map(|s| s.texture)
+    decode_upload_shared_sampled(assets, path, Sampler::Clamp)
 }
 
 /// The same, keeping the zero-alpha verdict for `fill_cuts`.
 pub(crate) fn decode_upload_shared_full(assets: &mut Assets, path: &str) -> Result<SharedTexture> {
-    decode_upload_keyed(assets, path, path)
+    decode_upload_keyed(assets, path, Sampler::Clamp)
 }
 
-/// The same, for a caller that sets repeat wrap on the result. Repeat and clamp
-/// cannot share a GPU texture without changing sampling, so they use distinct keys.
+/// The same, for a caller that samples with repeat wrap. Repeat and clamp cannot
+/// share a GPU texture without changing sampling, so they use distinct keys and
+/// the repeat upload sets its wrap once, before any consumer sees it.
 pub(crate) fn decode_upload_shared_tiling(assets: &mut Assets, path: &str) -> Result<Texture2D> {
-    decode_upload_keyed(assets, path, &tiling_key(path)).map(|s| s.texture)
+    decode_upload_shared_sampled(assets, path, Sampler::Repeat)
 }
 
-fn tiling_key(path: &str) -> String {
-    format!("{path}\u{1}tiling")
+/// The same, for a caller that names the sampler its base texture needs.
+pub(crate) fn decode_upload_shared_sampled(
+    assets: &mut Assets,
+    path: &str,
+    sampler: Sampler,
+) -> Result<Texture2D> {
+    decode_upload_keyed(assets, path, sampler).map(|s| s.texture)
 }
 
-fn decode_upload_keyed(assets: &mut Assets, path: &str, key: &str) -> Result<SharedTexture> {
-    let share = share_enabled();
+fn decode_upload_keyed(assets: &mut Assets, path: &str, sampler: Sampler) -> Result<SharedTexture> {
+    let share = retains_shared_uploads();
+    let key = sampler.key(path);
     if share {
         let hit = SHARED.with(|s| {
             let mut s = s.borrow_mut();
-            match s.uploaded.get(key) {
-                Some((texture, zero_alpha)) => {
-                    let found = (texture.clone(), *zero_alpha);
+            match s.uploaded.get(&key) {
+                Some(entry) => {
+                    let found = (entry.texture.clone(), entry.zero_alpha, entry.sampler);
                     s.hits += 1;
-                    Some(SharedTexture { texture: found.0, zero_alpha: found.1 })
+                    Some(found)
                 }
                 None => { s.misses += 1; None }
             }
         });
-        if let Some(shared) = hit {
+        if let Some((texture, zero_alpha, stored)) = hit {
+            ensure!(
+                stored == sampler,
+                "shared upload {path} was reused with a different sampler"
+            );
+            let shared = SharedTexture { texture, zero_alpha };
             verify_hit(assets, path, &shared)?;
             return Ok(shared);
         }
@@ -86,14 +175,34 @@ fn decode_upload_keyed(assets: &mut Assets, path: &str, key: &str) -> Result<Sha
     let image = decode(assets, path)?;
     let texture = upload_rgba8(image.width, image.height, &image.pixels);
     texture.set_filter(macroquad::texture::FilterMode::Linear);
+    if sampler == Sampler::Repeat {
+        set_wrap_repeat(&texture);
+    }
     let shared = SharedTexture { texture, zero_alpha: zero_alpha(&image.pixels) };
     if share {
         SHARED.with(|s| {
             let mut s = s.borrow_mut();
-            s.uploaded.insert(key.to_owned(), (shared.texture.clone(), shared.zero_alpha));
+            s.uploaded.insert(key, Entry {
+                texture: shared.texture.clone(),
+                zero_alpha: shared.zero_alpha,
+                sampler,
+            });
         });
     }
     Ok(shared)
+}
+
+/// The one place a shared upload's wrap is set: at upload, before it is handed
+/// out. No caller mutates a shared texture's sampler afterwards, because wrap is
+/// not part of the pixel bytes the reuse check compares.
+fn set_wrap_repeat(texture: &Texture2D) {
+    unsafe {
+        macroquad::prelude::get_internal_gl().quad_context.texture_set_wrap(
+            texture.raw_miniquad_id(),
+            macroquad::miniquad::TextureWrap::Repeat,
+            macroquad::miniquad::TextureWrap::Repeat,
+        );
+    }
 }
 
 /// Host check only: a reused upload must read back exactly like a fresh one.
@@ -114,7 +223,8 @@ fn verify_hit(assets: &mut Assets, path: &str, shared: &SharedTexture) -> Result
     Ok(())
 }
 
-/// End one load's sharing window and report what it saved, as one line.
+/// End one load's sharing window and report what it saved, as one line. Also
+/// called directly before a retirement sequence and after a rebuild attempt.
 pub(crate) fn release_shared() {
     SHARED.with(|s| {
         let mut s = s.borrow_mut();
@@ -124,7 +234,6 @@ pub(crate) fn release_shared() {
         *s = Shared::default();
     });
 }
-
 
 /// Upload immutable game pixels in DXT5 on Vita; dynamic textures use the
 /// separate upload helper so ordinary subimage updates remain valid.
@@ -398,12 +507,66 @@ pub fn decode(assets: &mut Assets, name: &str) -> Result<RgbaImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct ShareReset;
+    impl Drop for ShareReset {
+        fn drop(&mut self) { set_share_for_test(None); }
+    }
+    /// Cached uploads, which need a GPU to create in a test.
+    fn cached_entries() -> usize {
+        SHARED.with(|s| s.borrow().uploaded.len())
+    }
     #[test]
     fn tiling_and_clamped_paths_never_share_a_key() {
         let p = "models/fx/cap.ftx";
-        assert_ne!(p.to_owned(), tiling_key(p));
-        assert_eq!(tiling_key(p), tiling_key(p));
-        assert_ne!(tiling_key("a"), tiling_key("b"));
+        assert_ne!(Sampler::Clamp.key(p), Sampler::Repeat.key(p));
+        assert_eq!(Sampler::Clamp.key(p), p);
+        assert_eq!(Sampler::Repeat.key(p), Sampler::Repeat.key(p));
+        assert_ne!(Sampler::Repeat.key("a"), Sampler::Repeat.key("b"));
+        // One key can only ever hold one sampler, which is what a hit re-checks.
+        for path in ["a", "models/fx/cap.ftx", "textures/special/purple.ftx"] {
+            assert_ne!(Sampler::Clamp.key(path), Sampler::Repeat.key(path), "{path}");
+        }
+    }
+    #[test]
+    fn the_share_cache_retains_only_inside_a_load_window() {
+        let _reset = ShareReset;
+        set_share_for_test(Some(true));
+        assert!(!retains_shared_uploads(), "a boundary keeps no texture owners");
+        let load = load_scope();
+        assert!(retains_shared_uploads(), "a load's guard opens the window");
+        let nested = load_scope();
+        drop(nested);
+        assert!(retains_shared_uploads(), "an inner scope keeps the outer load open");
+        drop(load);
+        assert!(!retains_shared_uploads(), "the last guard closes and clears");
+        set_share_for_test(None);
+        assert!(!retains_shared_uploads(), "the compiled default is off");
+    }
+    #[test]
+    fn a_failed_load_closes_its_window_like_a_successful_one() {
+        fn failing() -> Result<()> {
+            let _load = load_scope();
+            anyhow::bail!("destination build failed")
+        }
+        fn working() -> Result<()> {
+            let _load = load_scope();
+            Ok(())
+        }
+        let _reset = ShareReset;
+        set_share_for_test(Some(true));
+        assert!(failing().is_err());
+        assert!(!retains_shared_uploads(), "the error path dropped the guard");
+        assert_eq!(cached_entries(), 0);
+        working().unwrap();
+        assert!(!retains_shared_uploads());
+        // A panic unwinds through the same guard, so a load cannot strand owners.
+        let panicked = std::panic::catch_unwind(|| {
+            let _load = load_scope();
+            panic!("load failed hard");
+        });
+        assert!(panicked.is_err());
+        assert!(!retains_shared_uploads());
+        assert_eq!(cached_entries(), 0);
     }
     #[test]
     fn zero_alpha_reads_every_texel() {
