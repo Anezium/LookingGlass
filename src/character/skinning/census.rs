@@ -42,3 +42,15 @@ impl Drop for Actor {fn drop(&mut self) {if let Some((t,id,ordinal,previous))=se
     CURRENT.with(|c|c.set(previous));
     println!("[lg/pose-cpu] pose={ordinal} frame={} identity={id} cpu_ns={}",crate::sim_maps::probe::frame(),t.elapsed().as_nanos());
 }}}
+
+/// Host-only scoped CPU measurements. Overhead is included; never a Vita clock.
+pub(crate) struct Leaf(Option<(std::time::Instant, &'static str)>);
+pub(crate) fn leaf(name: &'static str) -> Leaf {
+    Leaf(active().then(|| (std::time::Instant::now(),name)))
+}
+impl Drop for Leaf { fn drop(&mut self) {
+    if let Some((start,name))=self.0 {
+        println!("[lg/actor-leaf] frame={} leaf={name} cpu_ns={}",
+            crate::sim_maps::probe::frame(),start.elapsed().as_nanos());
+    }
+}}
