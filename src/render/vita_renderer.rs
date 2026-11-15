@@ -3903,6 +3903,33 @@ mod tests {
         assert!(serde_json::from_str::<Config>(r#"{"audio_offmain":"on"}"#).is_err());
     }
     #[test]
+    fn a6_load_pair_differs_only_in_the_four_load_keys() {
+        let (release, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-release.json")).unwrap();
+        assert!(rejected.is_none());
+        assert!(!release.load_texture_share, "sharing is off in the release input");
+        let off_bytes = include_bytes!("../../configs/PL-a6-load-off.json");
+        let on_bytes = include_bytes!("../../configs/PL-a6-load-on.json");
+        let (off, rejected) = parse_runtime_config(off_bytes).unwrap();
+        assert!(rejected.is_none());
+        off.validate().unwrap();
+        let (on, rejected) = parse_runtime_config(on_bytes).unwrap();
+        assert!(rejected.is_none());
+        on.validate().unwrap();
+        for bytes in [&off_bytes[..], &on_bytes[..]] {
+            let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let all = serde_json::to_value(Config::default()).unwrap();
+            assert_eq!(historical_keys(&written), historical_keys(&all), "the A6 config writes every runtime key");
+        }
+        assert!(!off.loading_screen && !off.load_texture_share && off.texture_cache == "off" && !off.pvs_cache);
+        assert!(on.loading_screen && on.load_texture_share && on.texture_cache == "on" && on.pvs_cache);
+        let (mut off, mut on) = (serde_json::to_value(&off).unwrap(), serde_json::to_value(&on).unwrap());
+        for key in ["loading_screen", "load_texture_share", "texture_cache", "pvs_cache"] {
+            off.as_object_mut().unwrap().remove(key);
+            on.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(on, off, "the A6 pair differs only in the four load keys");
+    }
+    #[test]
     fn load_texture_share_is_off_by_default_and_a_strict_boolean() {
         assert!(!Config::default().load_texture_share);
         assert!(!serde_json::from_str::<Config>("{}").unwrap().load_texture_share);
