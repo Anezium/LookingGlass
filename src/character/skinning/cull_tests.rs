@@ -61,7 +61,7 @@ fn body(model: u32, environment: bool, dot_alpha: bool) -> Body {
 
 fn mesh(body: &Body) -> Option<Mesh> {
     let cpu = body.skeleton.surfaces[0].cpu();
-    Some(Mesh { upload_identity: None, surface: None, vertices: cpu.bind_vertices.clone(), indices: cpu.indices.clone(),
+    Some(Mesh { upload_identity: None, surface: ts::surface(&body.texture), vertices: cpu.bind_vertices.clone(), indices: cpu.indices.clone(),
         texture: Some(body.texture.clone()) })
 }
 
