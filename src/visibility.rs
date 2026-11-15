@@ -19,6 +19,10 @@ struct Leaf {
 pub struct Visibility {
     nodes: Vec<Node>,
     leaves: Vec<Leaf>,
+    /// Union of every compiled leaf bound, solid leaves included. A box outside it has
+    /// unclassified volume and must not be declared hidden.
+    world_min: Vec3,
+    world_max: Vec3,
     rows: Vec<u8>,
     stride: usize,
     clusters: usize,
@@ -113,9 +117,17 @@ impl Visibility {
                 );
             }
         }
+        let mut world_min = Vec3::splat(f32::INFINITY);
+        let mut world_max = Vec3::splat(f32::NEG_INFINITY);
+        for leaf in &leaves {
+            world_min = world_min.min(leaf.min);
+            world_max = world_max.max(leaf.max);
+        }
         Ok(Self {
             nodes,
             leaves,
+            world_min,
+            world_max,
             rows: vis[8..].to_vec(),
             stride,
             clusters,
@@ -209,10 +221,12 @@ impl Visibility {
     }
     /// Whether a box can be seen from `cluster`, through the same leaf/PVS data `bounds` reads,
     /// without scanning every leaf: a standard BSP descent visits only the nodes the box can
-    /// reach. `Some(false)` means every non-solid leaf the box overlaps has a cluster the PVS
-    /// row of `cluster` leaves unset, so no point of the box is visible. `None` is unknown
-    /// (`cluster` unknown, no data, a box outside the compiled world, a box over solid space
-    /// only, or a tree deeper than the stack) and every caller must treat it as visible.
+    /// reach. `Some(false)` means the box is wholly inside the compiled leaf bounds, every leaf
+    /// the descent reached overlaps it, and every non-solid leaf it overlaps has a cluster the
+    /// PVS row of `cluster` leaves unset, so no point of the box is visible. `None` is unknown
+    /// (`cluster` unknown, no data, a box not wholly inside the compiled world, a box over solid
+    /// space only, a reached leaf whose recorded bounds miss the box, or a traversal that exceeds
+    /// its visit budget) and every caller must treat it as visible.
     #[cfg(feature = "vita_renderer")]
     pub(crate) fn bounds_visible(&self, cluster: Option<usize>, planes: &[Plane], min: Vec3, max: Vec3) -> Option<bool> {
         let c = cluster.filter(|&c| c < self.clusters)?;
@@ -220,20 +234,35 @@ impl Visibility {
             || !min.is_finite() || !max.is_finite() || min.cmpgt(max).any() {
             return None;
         }
+        // Part of the box outside every compiled leaf is unclassified space, not hidden space.
+        if min.cmplt(self.world_min).any() || max.cmpgt(self.world_max).any() {
+            return None;
+        }
         // Depth-first over both children at a straddling plane stays within one entry a level.
+        // The budget bounds work, not stack capacity: a malformed cyclic tree would otherwise
+        // revisit the same node forever, and it answers unknown when the budget runs out.
         let mut stack = [0_i32; 96];
         let mut length = 1;
+        let mut budget = self.nodes.len().saturating_mul(2).saturating_add(2);
         let mut overlapped = false;
+        let mut unclassified = false;
         while length > 0 {
+            budget = budget.checked_sub(1)?;
             length -= 1;
             let index = stack[length];
             if index < 0 {
-                let leaf = &self.leaves[usize::try_from(-1_i64 - index as i64).ok()?];
-                if leaf.cluster >= 0 && min.cmple(leaf.max).all() && max.cmpge(leaf.min).all() {
-                    overlapped = true;
-                    if self.sees(c, leaf.cluster as usize) {
-                        return Some(true);
+                let leaf = self.leaves.get(usize::try_from(-1_i64 - index as i64).ok()?)?;
+                if min.cmple(leaf.max).all() && max.cmpge(leaf.min).all() {
+                    if leaf.cluster >= 0 {
+                        overlapped = true;
+                        if self.sees(c, leaf.cluster as usize) {
+                            return Some(true);
+                        }
                     }
+                } else {
+                    // The descent reached this leaf but its recorded bounds do not cover the
+                    // box volume that reached it, so the leaf data cannot classify the box.
+                    unclassified = true;
                 }
                 continue;
             }
@@ -249,9 +278,14 @@ impl Visibility {
                 if normal.x >= 0. { min.x } else { max.x },
                 if normal.y >= 0. { min.y } else { max.y },
                 if normal.z >= 0. { min.z } else { max.z }));
+            // Ordinary f32 dot products carry a few ulps of error at map coordinates. Widen
+            // both sides by 32 ulps of the largest term so rounding can only add a child to
+            // the descent, never drop one: missing a visible leaf would hide geometry.
+            let scale = high.abs().max(low.abs()).max(plane.distance.abs()).max(1.);
+            let tolerance = 32. * f32::EPSILON * scale;
             // Child 0 is the `dot >= distance` side, child 1 the other, as `cluster` walks it.
-            let front = high >= plane.distance;
-            let back = low <= plane.distance;
+            let front = high + tolerance >= plane.distance;
+            let back = low - tolerance <= plane.distance;
             let push = |value: i32, stack: &mut [i32; 96], length: &mut usize| -> Option<()> {
                 *stack.get_mut(*length)? = value;
                 *length += 1;
@@ -260,7 +294,7 @@ impl Visibility {
             if front { push(node.children[0], &mut stack, &mut length)?; }
             if back { push(node.children[1], &mut stack, &mut length)?; }
         }
-        if overlapped { Some(false) } else { None }
+        (overlapped && !unclassified).then_some(false)
     }
 }
 
@@ -287,11 +321,22 @@ pub(crate) mod tests {
                     faces: vec![1],
                 },
             ],
+            world_min: Vec3::splat(-10.),
+            world_max: Vec3::splat(10.),
             rows: vec![1, 2],
             stride: 1,
             clusters: 2,
             face_count: 2,
         }
+    }
+    /// The same geometry with the clusters exchanged: a second map whose identical cache key
+    /// must answer differently.
+    pub(crate) fn two_rooms_swapped() -> Visibility {
+        let mut v = two_rooms();
+        v.leaves[0].cluster = 1;
+        v.leaves[1].cluster = 0;
+        v.rows = vec![2, 1];
+        v
     }
     #[cfg(feature = "vita_renderer")]
     #[test]
@@ -361,5 +406,86 @@ pub(crate) mod tests {
                            v.bounds(Some(cluster), min, max), "{cluster} {min} {max}");
             }
         }
+    }
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn boxes_partly_outside_the_compiled_world_fail_open() {
+        let v = two_rooms();
+        let planes = [Plane { normal: Vec3::X, distance: 0. }];
+        // The hidden leaf ends at x = 10; x > 10 is not compiled, so it cannot be hidden.
+        assert_eq!(v.bounds_visible(Some(1), &planes, vec3(2., -1., -1.), vec3(50., 1., 1.)), None);
+        // The same extension on the other side and on an unrelated axis also fails open.
+        assert_eq!(v.bounds_visible(Some(1), &planes, vec3(-50., -1., -1.), vec3(-2., 1., 1.)), None);
+        assert_eq!(v.bounds_visible(Some(1), &planes, vec3(2., -1., -1.), vec3(3., 50., 50.)), None);
+        // A box that ends exactly at the compiled bound is still classified and cut.
+        assert_eq!(v.bounds_visible(Some(1), &planes, vec3(2., -1., -1.), vec3(10., 1., 1.)), Some(false));
+    }
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn bounds_visible_bounds_visits_and_fails_open_on_cycles() {
+        let planes = [Plane { normal: Vec3::X, distance: 0. }];
+        let (min, max) = (vec3(2., -1., -1.), vec3(3., 1., 1.));
+        // The front child revisits node 0. Stack capacity never grows, so the old loop ran
+        // forever; the visit budget now answers unknown, which callers treat as visible.
+        let mut cycle = two_rooms();
+        cycle.nodes[0].children = [0, -1];
+        assert_eq!(cycle.bounds_visible(Some(1), &planes, min, max), None);
+        // A one-sided chain deeper than the 96-slot sibling stack still reaches its leaf.
+        let depth = 400;
+        let mut deep = two_rooms();
+        deep.nodes = (0..depth)
+            .map(|i| Node { plane: 0, children: [if i + 1 < depth { (i + 1) as i32 } else { -1 }, -2] })
+            .collect();
+        assert_eq!(deep.bounds_visible(Some(0), &planes, min, max), Some(true));
+        assert_eq!(deep.bounds_visible(Some(1), &planes, min, max), Some(false));
+    }
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn near_plane_tolerance_at_corpus_extremes_never_answers_hidden() {
+        // Largest |leaf coordinate| over gvillage, hatter1, skool2, wchess2, utemple,
+        // potears2, wchess1 and keep, rounded up.
+        let extreme = 8192_f32;
+        let normal = vec3(3., 4., 0.).normalize();
+        let model = Mat4::from_rotation_translation(
+            Quat::from_rotation_z(0.7),
+            vec3(extreme * 0.8, extreme * 0.8, 0.));
+        let (min, max) = (vec3(-0.02, -0.02, -0.02), vec3(0.02, 0.02, 0.02));
+        let mut low = Vec3::splat(f32::INFINITY);
+        let mut high = Vec3::splat(f32::NEG_INFINITY);
+        for corner in 0..8 {
+            let p = vec3(if corner & 1 == 0 { min.x } else { max.x },
+                         if corner & 2 == 0 { min.y } else { max.y },
+                         if corner & 4 == 0 { min.z } else { max.z });
+            let q = model.transform_point3(p);
+            low = low.min(q);
+            high = high.max(q);
+        }
+        let support = vec3(if normal.x >= 0. { high.x } else { low.x },
+                           if normal.y >= 0. { high.y } else { low.y },
+                           if normal.z >= 0. { high.z } else { low.z });
+        let high_dot = normal.dot(support);
+        assert!(high_dot > 0.);
+        let extent = 2. * extreme;
+        let world = Visibility {
+            nodes: vec![Node { plane: 0, children: [-1, -2] }],
+            leaves: vec![
+                Leaf { cluster: 0, min: Vec3::splat(-extent), max: Vec3::splat(extent), faces: vec![0] },
+                Leaf { cluster: 1, min: Vec3::splat(-extent), max: Vec3::splat(extent), faces: vec![1] },
+            ],
+            world_min: Vec3::splat(-extent),
+            world_max: Vec3::splat(extent),
+            rows: vec![1, 0],
+            stride: 1,
+            clusters: 2,
+            face_count: 2,
+        };
+        let one_ulp_up = f32::from_bits(high_dot.to_bits() + 1);
+        let at = |distance| [Plane { normal, distance }];
+        // One f32 ulp beyond the support corner: without the outward allowance the front
+        // child is dropped and the hidden back leaf would answer Some(false).
+        assert!(high_dot < one_ulp_up);
+        assert_eq!(world.bounds_visible(Some(0), &at(one_ulp_up), low, high), Some(true));
+        // A whole unit behind the plane is still classified and cut.
+        assert_eq!(world.bounds_visible(Some(0), &at(high_dot + 1.), low, high), Some(false));
     }
 }

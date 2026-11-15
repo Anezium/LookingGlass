@@ -1913,7 +1913,7 @@ impl Renderer {
             visibility_key: None, visibility_generation: 0,
             visibility: vec![(0, None); groups.len()],
             models: vec![None; groups.len()],
-            model_pvs: Vec::new(),
+            model_pvs: model_pvs_cache(),
             world_buffers: buffers,
             schedule: submit::Schedule::default(),
             texture_sort: draw_cuts::TextureSort::default(),
@@ -3152,7 +3152,9 @@ struct ModelPvs {
 }
 /// The box a model matrix places a group's own bounds in. Enlarging an axis-aligned box by
 /// enclosing the eight transformed corners can only add space, so a PVS test over it is
-/// conservative.
+/// conservative. The result is then inflated outward by 32 f32 ulps of its largest
+/// coordinate (0.031 units at the corpus extreme of 8192), which covers the rounding in the
+/// matrix product and in the corner sums without moving a real edge inward.
 fn placed_bounds(model: Mat4, min: Vec3, max: Vec3) -> (Vec3, Vec3) {
     let mut low = Vec3::splat(f32::INFINITY);
     let mut high = Vec3::splat(f32::NEG_INFINITY);
@@ -3166,8 +3168,13 @@ fn placed_bounds(model: Mat4, min: Vec3, max: Vec3) -> (Vec3, Vec3) {
         low = low.min(q);
         high = high.max(q);
     }
-    (low, high)
+    let magnitude = low.abs().max(high.abs()).max(min.abs()).max(max.abs())
+        .max_element().max(1.);
+    let margin = magnitude * 32. * f32::EPSILON;
+    (low - Vec3::splat(margin), high + Vec3::splat(margin))
 }
+/// `alpha_model_pvs`: a fresh cache for a renderer, and therefore for a new map.
+fn model_pvs_cache() -> Vec<ModelPvs> { Vec::new() }
 /// `alpha_model_pvs`: a model group whose placed bounds overlap no cluster the camera's PVS row
 /// shows is not submitted. Unknown data always answers visible, so the cut can only remove
 /// groups that `bounds_visible` proves hidden.
@@ -3630,10 +3637,11 @@ mod tests {
         assert_eq!(a, b, "the wchess1 pair differs only in alpha_model_pvs");
     }
     #[test]
-    fn alpha_model_pvs_bounds_enclose_every_placed_corner() {
+    fn alpha_model_pvs_bounds_enclose_every_placed_corner_with_an_outward_margin() {
         let min = vec3(-1., -2., -3.);
         let max = vec3(4., 5., 6.);
-        assert_eq!(placed_bounds(Mat4::IDENTITY, min, max), (min, max));
+        let (low, high) = placed_bounds(Mat4::IDENTITY, min, max);
+        assert!(low.cmplt(min).all() && high.cmpgt(max).all(), "the margin must point outward");
         let model = Mat4::from_rotation_translation(Quat::from_rotation_z(0.5), vec3(10., -4., 2.));
         let (low, high) = placed_bounds(model, min, max);
         for corner in 0..8 {
@@ -3644,7 +3652,59 @@ mod tests {
             assert!(q.cmpge(low).all() && q.cmple(high).all(), "corner {corner}");
         }
         let inner = Mat4::from_translation(vec3(100., 0., 0.));
-        assert_eq!(placed_bounds(inner, min, max), (min + Vec3::X * 100., max + Vec3::X * 100.));
+        let (low, high) = placed_bounds(inner, min, max);
+        assert!(low.cmplt(min + Vec3::X * 100.).all() && high.cmpgt(max + Vec3::X * 100.).all());
+        // A rotated thin box at the largest corpus coordinate stays strictly inside the
+        // inflated result; the f64 corner is the exact placement of the same f32 inputs.
+        let extent = 8192.;
+        let far = Mat4::from_rotation_translation(
+            Quat::from_axis_angle(vec3(0.3, 0.8, 0.5).normalize(), 0.7),
+            vec3(extent, -extent, extent));
+        let (thin_min, thin_max) = (vec3(-0.02, -0.02, -0.02), vec3(0.02, 0.02, 0.02));
+        let (low, high) = placed_bounds(far, thin_min, thin_max);
+        let m = far.to_cols_array().map(f64::from);
+        for corner in 0..8 {
+            let p = [
+                if corner & 1 == 0 { thin_min.x } else { thin_max.x },
+                if corner & 2 == 0 { thin_min.y } else { thin_max.y },
+                if corner & 4 == 0 { thin_min.z } else { thin_max.z },
+            ].map(f64::from);
+            let exact = [
+                m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+                m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+                m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+            ];
+            assert!(exact[0] > low.x as f64 && exact[0] < high.x as f64
+                && exact[1] > low.y as f64 && exact[1] < high.y as f64
+                && exact[2] > low.z as f64 && exact[2] < high.z as f64, "corner {corner}");
+        }
+    }
+    #[test]
+    fn alpha_model_pvs_cache_handles_cluster_matrix_round_trips_and_a_fresh_map() {
+        let v = crate::visibility::tests::two_rooms();
+        let planes = [crate::bsp::Plane { normal: Vec3::X, distance: 0. }];
+        let (min, max) = (vec3(2., -1., -1.), vec3(3., 1., 1.));
+        let mut cache = model_pvs_cache();
+        assert!(cache.is_empty());
+        // A -> B -> A for the camera cluster, then None -> B: each change recomputes.
+        assert!(!model_bounds_hidden(&mut cache, &v, &planes, Some(0), 7, Mat4::IDENTITY, min, max));
+        assert!(model_bounds_hidden(&mut cache, &v, &planes, Some(1), 7, Mat4::IDENTITY, min, max));
+        assert!(!model_bounds_hidden(&mut cache, &v, &planes, Some(0), 7, Mat4::IDENTITY, min, max));
+        assert!(!model_bounds_hidden(&mut cache, &v, &planes, None, 7, Mat4::IDENTITY, min, max));
+        assert!(model_bounds_hidden(&mut cache, &v, &planes, Some(1), 7, Mat4::IDENTITY, min, max));
+        // A changed matrix moves the group into the other room, then back.
+        let moved = Mat4::from_translation(vec3(-5., 0., 0.));
+        assert!(!model_bounds_hidden(&mut cache, &v, &planes, Some(1), 7, moved, min, max));
+        assert!(model_bounds_hidden(&mut cache, &v, &planes, Some(1), 7, Mat4::IDENTITY, min, max));
+        assert_eq!(cache.len(), 1);
+        assert_eq!((cache[0].group, cache[0].cluster, cache[0].hidden), (7, 1, true));
+        // A new renderer for a new map starts with its own empty cache; the identical
+        // group, cluster and matrix key must not reuse map A's hidden answer.
+        let mut fresh = model_pvs_cache();
+        assert!(fresh.is_empty());
+        let other = crate::visibility::tests::two_rooms_swapped();
+        assert!(!model_bounds_hidden(&mut fresh, &other, &planes, Some(1), 7, Mat4::IDENTITY, min, max));
+        assert_eq!(fresh.len(), 1);
     }
     #[test]
     fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {
