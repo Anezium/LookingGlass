@@ -331,14 +331,14 @@ mod tests {
             let mut q = puff(0, Blend::Alpha); q.upload_identity = Some(7);
             let mut groups = (0..2).map(|_| super::super::super::Group {
                 ant_dead: None, passes: vec![pass_for(&q, true, false)], transparent: true }).collect::<Vec<_>>();
-            let mut recycled = super::super::copy_mesh(&groups[0].passes[0].mesh);
+            let mut recycled = crate::render_fx::copy_mesh(&groups[0].passes[0].mesh);
             recycled.upload_identity = Some(999);
-            let mut pool = BTreeMap::from([(0, super::super::prepared::Geometry::new(recycled))]);
+            let mut pool = BTreeMap::from([(0, crate::render_fx::prepared::Geometry::new(recycled))]);
             let mut list = vec![(2.,Source::Actor(0)),(1.,Source::Actor(1))];
             merge_cached_mode(&mut MergeCache::default(), &mut groups, &mut list, true, false, &mut pool, in_place);
             assert_eq!(list.len(), 1);
             assert_eq!(groups[0].passes[0].mesh.upload_identity, Some(7));
-            let copied = super::super::copy_mesh(&groups[0].passes[0].mesh);
+            let copied = crate::render_fx::copy_mesh(&groups[0].passes[0].mesh);
             assert_eq!(copied.upload_identity, Some(7));
         }
     }
