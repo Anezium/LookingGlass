@@ -109,12 +109,30 @@ C_LIBRARIES = [
     {
         "name": "GCC runtime libraries (libgcc, libstdc++, libsupc++)",
         "archives": ["libgcc.a", "libstdc++.a", "libsupc++.a", "libgcc_eh.a", "crtbegin.o", "crtend.o", "crti.o", "crtn.o"],
-        "licence": "GPL-3.0 with the GCC Runtime Library Exception 3.1",
+        "licence": "GPL-3.0-or-later with the GCC Runtime Library Exception 3.1",
         "source": "arm-vita-eabi-gcc 15.2.0 from vita-toolchain c527abc (VitaSDK build of 2026-08-25). "
                   "The exception allows these libraries in a program under any licence",
-        "files": ["gcc-COPYING.RUNTIME", "vitaGL-COPYING"],
+        "files": ["GCC-RUNTIME-EXCEPTION-3.1.txt", "GPL-3.0.txt"],
     },
 ]
+
+MPL_CRATES = ("symphonia", "symphonia-bundle-mp3", "symphonia-core", "symphonia-metadata")
+
+
+def mpl_checksums(repo):
+    """Return {crate: (version, checksum)} for the MPL-2.0 crates in Cargo.lock."""
+    text = (Path(repo) / "Cargo.lock").read_text(encoding="utf-8")
+    found = {}
+    for block in text.split("[[package]]"):
+        name = re.search(r'^name = "([^"]+)"$', block, re.M)
+        version = re.search(r'^version = "([^"]+)"$', block, re.M)
+        checksum = re.search(r'^checksum = "([0-9a-f]{64})"$', block, re.M)
+        if name and name.group(1) in MPL_CRATES and version and checksum:
+            found[name.group(1)] = (version.group(1), checksum.group(1))
+    missing = [name for name in MPL_CRATES if name not in found]
+    if missing:
+        raise ValueError("Cargo.lock does not pin " + ", ".join(missing))
+    return found
 
 
 def run(*args, cwd=None):
@@ -259,6 +277,7 @@ def main():
     std_packages, std_linked = reachable(std_meta, std_roots)
     std_packages = sorted(std_packages, key=lambda p: (p["name"], p["version"]))
     rustc = run("rustup", "run", TOOLCHAIN, "rustc", "--version").strip()
+    mpl = mpl_checksums(repo)
 
     out = [
         "Third-party notices for the Looking Glass PS Vita build",
@@ -267,9 +286,18 @@ def main():
         "(libshacccg.suprx) is loaded at run time from the user's console and is not distributed.",
         "",
         "Looking Glass itself is under LICENSE-MIT; see LEGAL.md. The C libraries under the GNU LGPL are",
-        "linked statically. The complete source of this build, the revisions of every library below and the",
-        "build script (tools/vita_release_build.sh) are published with each release, so the program can be",
-        "relinked against modified versions of those libraries.",
+        "linked statically. Their corresponding source, the port's object code for this link, the exact",
+        "linker command and a relink and packaging script are in the source bundle published with each",
+        "release; this package carries SOURCE-OFFER.txt, which names the bundle and the written offer.",
+        "That material is what lets a user relink the program against modified versions of the libraries.",
+        "",
+        "MPL-2.0 components: the four symphonia 0.5.5 crates are unmodified. Their Source Code Form is",
+        "the crates.io release archive, available at",
+        "https://crates.io/api/v1/crates/<crate>/0.5.5/download. Cargo.lock pins these SHA-256 values:",
+    ]
+    for name in MPL_CRATES:
+        out.append("  %-20s %s" % (name, mpl[name][1]))
+    out += [
         "",
         "",
         "=== 1. Modified forks (Apache-2.0 section 4(b) change notices) ===",

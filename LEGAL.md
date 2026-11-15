@@ -66,14 +66,47 @@ the Windows package. Nothing here replaces those terms.
 The PlayStation Vita port in the `vita-*` branches of the Anezium/LookingGlass
 fork is an unofficial community port. It is not reviewed or endorsed by the
 Looking Glass maintainers, and it is not affiliated with EA or Sony Interactive
-Entertainment. Its packages contain no game data, no Internet Archive download
-option and no Sony software: players copy their own game files to
-`ux0:data/alice/base/`, and the shader compiler `libshacccg.suprx` is loaded
-from their own console. The Vita build links third-party libraries statically,
-some of them under the GNU LGPL; their licences, and the files the port changed
-in forked dependencies, are listed in
-[THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt). Concerns about the
-port go to the maintainer of that fork through its
+Entertainment. Its packages contain no game data and no Internet Archive
+download option. They do not distribute Sony firmware or Sony libraries:
+players copy their own game files to `ux0:data/alice/base/`, and the shader
+compiler `libshacccg.suprx` is loaded from their own console.
+
+The Vita build links these third-party libraries statically:
+
+- **vitaGL** at `dca4b9d143290d78ec043131a19be36c78cdc7b5`, LGPL-3.0-or-later;
+- **vitaShaRK** at `df24065e65098b2d1ac533760109ad4367573f28` (tag `v.1.7`),
+  LGPL-3.0-or-later;
+- **pthread-embedded** (VitaSDK fork) at
+  `11d2e5722d98c86f33c908fc47b2cf6e55205db5`, LGPL-2.1 for the core with an
+  MIT-licensed PS Vita platform layer;
+- **SceShaccCgExt** at `d3c83efceedeca3be863d0c1f19bb145daf1685f`, LGPL-2.1.
+
+Their notices and licence texts are in
+[THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt). A release VPK also
+carries `THIRD_PARTY_NOTICES-vita.txt`, the full licence texts under
+`licenses/`, and `SOURCE-OFFER.txt`, which names the published source bundle,
+the written offer, and the source route for the MPL-2.0 components. The source
+bundle carries each library's corresponding source at the linked revision, the
+port's object code for this link, the exact linker command, and relink and
+packaging scripts.
+
+### Sony text inside the SceShaccCgExt source (open owner decision)
+
+The SceShaccCgExt source at the revision above includes
+`include/sce_intrinsics.h`. It is a C string literal that begins with the
+markers "SCE CONFIDENTIAL", "Copyright (C) 2012 Sony Computer Entertainment
+Inc." and "All Rights Reserved". The library passes that string to the
+console's shader compiler at run time. The same text is present in Sony's SDK
+archive of the library, so it is inherent to SceShaccCgExt rather than
+introduced by the rebuild. No licence text in this repository, in the release
+package or in the source bundle grants permission to redistribute that text.
+
+**Status: open owner decision.** The options are to obtain permission from the
+rights holder, to record an explicit accepted risk, or to drop the
+shader-language extension feature that needs the string. The notices and the
+source bundle do not resolve this question and do not claim to.
+
+Concerns about the port go to the maintainer of that fork through its
 [issue tracker](https://github.com/Anezium/LookingGlass/issues), not to the
 upstream project.
 
