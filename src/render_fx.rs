@@ -1896,7 +1896,8 @@ mod material_identity_tests {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)->bool {
     let c=crate::render::vita_renderer::config();
-    if !c.gpu_skin_ants || c.flat_actor_light || c.packet_min_pixels>0. || !source.gpu_ant || !retained_active() || !c.actor_fast_path
+    if !c.gpu_skin_ants || c.actor_opaque_shader || corpse_triangles::active()==Some(true)
+        || c.flat_actor_light || c.packet_min_pixels>0. || !source.gpu_ant || !retained_active() || !c.actor_fast_path
         || !retained::gpu_skin::available() || alpha!=1. || !skin_fully_opaque()
         || crate::character::skinning::mutable_required() || crate::character::skinning::overlap::ready()
         || crate::character::skinning::overlap::gather_only() {return false;}

@@ -19,7 +19,9 @@ The backend queries GL limits at runtime; miniquad has 16 attribute slots and th
 declaration uses nine. A limit/compiler failure keeps CPU skinning. Native program
 binary GXP headers log PA/SA, temporaries and instructions for both stages.
 
-Only simple opaque layers are admitted. Changed topology or UVs, extra influences
+Only simple opaque live-ant layers are admitted. Dead ants retain CPU triangle
+culling and the existing corpse fragment specialization; actor_opaque_shader also
+keeps its reference path. Changed topology or UVs, extra influences
 or palette bones, mutable live-mesh consumers, normal-dependent layers, flat
 lighting, small-packet cuts and unsupported overlap modes keep the reference path.
 Single preparation admits the GPU surface before worker publication; it never
