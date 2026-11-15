@@ -717,8 +717,8 @@ impl Config {
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
         ensure!(self.diag_overlap_burn_ms <= 20, "diag_overlap_burn_ms must be 0..20");
         ensure!(self.diag_overlap || self.diag_overlap_burn_ms == 0, "burn requires diag_overlap");
-        ensure!(!self.diag_overlap || (self.skin_workers == 1 && self.skin_overlap && self.audio_producer_affinity == 0x40000),
-            "diag_overlap reserves CPU1: requires one skin worker on CPU2 and audio on CPU2");
+        ensure!(!self.diag_overlap || (self.skin_workers == 1 && self.skin_overlap && self.audio_pcm_worker && self.audio_producer_affinity == 0x40000),
+            "diag_overlap reserves CPU1: requires one skin worker, buffered audio and audio on CPU2");
         ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
         ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
@@ -5692,7 +5692,7 @@ mod overlap_probe_tests {
             assert!(serde_json::from_value::<Config>(value).unwrap().validate().is_err());
         }
         for ms in [0,6,12] {
-            let c:Config=serde_json::from_value(serde_json::json!({"diag_overlap":true,"skin_workers":1,"diag_overlap_burn_ms":ms})).unwrap();
+            let c:Config=serde_json::from_value(serde_json::json!({"diag_overlap":true,"skin_workers":1,"audio_pcm_worker":true,"diag_overlap_burn_ms":ms})).unwrap();
             c.validate().unwrap();
         }
     }

@@ -468,3 +468,18 @@ pub(crate) fn pin_overlap_burn() {
         inventory("overlap-burn", Some(0x20000));
     }
 }
+
+/// CPAL pins its consumer to CPU1 before starting the stream. Move it only from
+/// its own callback, after that startup readback, to reserve the diagnostic core.
+#[cfg(target_os="vita")]
+pub(crate) fn overlap_audio_callback() {
+    if !crate::spike_log::overlap_enabled() { return; }
+    thread_local! { static APPLIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    APPLIED.with(|applied| if !applied.replace(true) {
+        unsafe {
+            let rc=sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(),0x40000);
+            assert!(rc >= 0, "overlap audio callback affinity failed: {rc}");
+            inventory("overlap-audio-callback",Some(0x40000));
+        }
+    });
+}
