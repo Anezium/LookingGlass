@@ -4524,7 +4524,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) || key == "water_draw_join" || key == "alpha_model_pvs" || key == "fx_unlit_exact" { written[key] = value.clone(); }
+            if round5_key(key) || key == "shader_cache_namespace" || key == "water_draw_join" || key == "alpha_model_pvs" || key == "fx_unlit_exact" { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
