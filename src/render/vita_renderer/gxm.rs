@@ -278,11 +278,14 @@ impl Direct {
     }
     /// One draw. `class` names the uniform payload. Set only what differs from the context.
     #[inline] pub(crate) fn draw(&mut self, b: &mut impl Backend, record: &Record, count: u32, class: u32, low: bool, program: &Program, bits: &[u32; 143]) {
+        let bindings_clock = crate::submit_clock::scope("world_state");
         if record.texture != self.texture { b.texture(self.unit, record.texture); self.texture = record.texture; }
         if record.stream != self.stream {
             for i in 0..self.streams { b.stream(i, record.stream); }
             self.stream = record.stream;
         }
+        drop(bindings_clock);
+        let uniforms_clock = crate::submit_clock::scope("world_uniform_apply");
         if self.uniforms != Some((class, low)) {
             let buffer = b.reserve_uniforms(program.vertex.size);
             unsafe { program.vertex.write(buffer, bits); }
@@ -292,6 +295,8 @@ impl Direct {
             b.fragment_uniforms(buffer);
             self.uniforms = Some((class, low));
         }
+        drop(uniforms_clock);
+        let _draw_clock = crate::submit_clock::scope("world_draw");
         b.draw(self.primitive, self.format, record.index, count, count);
     }
 }

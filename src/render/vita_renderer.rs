@@ -2744,7 +2744,7 @@ impl Renderer {
                 && state.direct_draw(&mut real, item.group as usize, indices as u32, item.uniforms, low, bits, pass, drawn - 1);
             #[cfg(not(target_os = "vita"))]
             let direct = false;
-            let submit_state = crate::submit_clock::scope("world_state");
+            let submit_state = (!direct).then(|| crate::submit_clock::scope("world_state"));
             if !direct {
                 // vitaGL holds what it last wrote, not what a direct draw left. Take every step through it.
                 #[cfg(target_os = "vita")]
@@ -2768,7 +2768,7 @@ impl Renderer {
             if low { c.low_draws += 1; }
             drop(submit_state);
             totals.lap(0, &mut start);
-            let submit_uniform = crate::submit_clock::scope("world_uniform_apply");
+            let submit_uniform = (!direct).then(|| crate::submit_clock::scope("world_uniform_apply"));
             if !direct && plan.uniforms {
                 let values = parameters[draw.parameter as usize].uniforms.values();
                 let traffic = field_uniforms[usize::from(low)].apply(ctx, values, true);
@@ -2801,7 +2801,7 @@ impl Renderer {
                     part.base_element + (base_element - draw.base_element), part.indices, &member.texture,
                     parameters[part.parameter as usize].uniforms.bits_ref(), part.low, part.pipeline_class);
             }
-            let submit_draw = crate::submit_clock::scope("world_draw");
+            let submit_draw = (!direct).then(|| crate::submit_clock::scope("world_draw"));
             if !direct {
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 let dropped = world_list::negative("world-list-drop-draw") && drawn % 13 == 6;
