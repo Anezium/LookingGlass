@@ -2,7 +2,19 @@
 use super::*;
 pub(crate) fn active()->bool {
     std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").is_some()
-        && (300..=360).contains(&crate::sim_maps::probe::frame())
+        && window().contains(&crate::sim_maps::probe::frame())
+}
+/// Override the inventory window without changing the production renderer.
+fn window() -> std::ops::RangeInclusive<u64> {
+    static WINDOW: std::sync::OnceLock<(u64,u64)> = std::sync::OnceLock::new();
+    let &(first,last)=WINDOW.get_or_init(|| {
+        std::env::var("LOOKING_GLASS_ACTOR_CENSUS_WINDOW").ok()
+            .map(|v| {let (a,b)=v.split_once(':').expect("census window FIRST:LAST");
+                let a=a.parse().expect("census first frame");let b=b.parse().expect("census last frame");
+                assert!(a<=b,"ordered census window");(a,b)})
+            .unwrap_or((300,360))
+    });
+    first..=last
 }
 use std::cell::{Cell,RefCell};
 use std::collections::HashMap;
