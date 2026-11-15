@@ -115,6 +115,11 @@ class Console:
         self.command('launch')
         # No replay retry and no verdict until exit and a complete attributed config.
         self.command('wait-exit','--timeout','360')
+        # The replay exits by itself; a quit that still had to kill the app is an anomaly.
+        outcome=(self.s.state().get('observation') or {}).get('quit_outcome')
+        if outcome!='not-running':
+            self.exit_failed=True
+            raise RuntimeError(f'quit outcome {outcome!r} after a self-exiting replay; stop for root recovery')
         self.command('log','check-config')  # code 4 is INCONCLUSIVE: stop, no verdict
         rows=self.k.launch_lines(list(self.k.parse_log(self.log,connections=True)))
         return '\n'.join(text for n,t,src,text,cid in rows if src=='vita')
