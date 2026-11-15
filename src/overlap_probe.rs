@@ -1,7 +1,8 @@
 //! Default-off memory contention diagnostic. No simulation or renderer objects cross threads.
 use std::{sync::mpsc, thread, time::{Duration, Instant}};
+enum Event { Started, Done(Instant, Instant, u64) }
 pub(crate) struct Probe {
-    worker: Option<(mpsc::SyncSender<bool>, mpsc::Receiver<(f64, u64)>, thread::JoinHandle<()>)>,
+    worker: Option<(mpsc::SyncSender<bool>, mpsc::Receiver<Event>, thread::JoinHandle<()>)>,
     busy: bool,
 }
 impl Probe {
@@ -19,13 +20,14 @@ impl Probe {
                 let mut memory = vec![1u32; 512*1024];
                 while rx.recv() == Ok(true) {
                     let start=Instant::now(); let mut bytes=0;
+                    if done.send(Event::Started).is_err() { break; }
                     while start.elapsed() < Duration::from_millis(u64::from(ms)) {
                         for i in (0..memory.len()).step_by(16) {
                             unsafe { let p=memory.as_mut_ptr().add(i); p.write_volatile(p.read_volatile().wrapping_add(1)); }
                             bytes += 8;
                         }
                     }
-                    if done.send((start.elapsed().as_secs_f64()*1000., bytes)).is_err() { break; }
+                    if done.send(Event::Done(start, Instant::now(), bytes)).is_err() { break; }
                 }
             }).expect("overlap burn thread");
             Some((tx,result,handle))
@@ -33,14 +35,17 @@ impl Probe {
         Self { worker, busy:false }
     }
     pub(crate) fn begin(&mut self) {
-        if let Some((tx,_,_))=&self.worker { assert!(!self.busy); tx.send(true).unwrap(); self.busy=true; }
+        if let Some((tx,_,_))=&self.worker { assert!(!self.busy); tx.send(true).unwrap(); self.busy=true;
+            assert!(matches!(self.worker.as_ref().unwrap().1.recv().unwrap(), Event::Started)); }
     }
     pub(crate) fn finish(&mut self) {
         if self.busy {
+            let render_end=Instant::now();
             let (_,rx,_)=self.worker.as_ref().unwrap();
-            let (ms,bytes)=rx.recv().expect("overlap burn completion");
+            let Event::Done(start,end,bytes)=rx.recv().expect("overlap burn completion") else { panic!("unexpected burn start"); };
             self.busy=false;
-            crate::spike_log::overlap_burn(ms,bytes);
+            crate::spike_log::overlap_burn(end.duration_since(start).as_secs_f64()*1000.,
+                render_end.min(end).saturating_duration_since(start).as_secs_f64()*1000.,bytes);
         }
     }
 }

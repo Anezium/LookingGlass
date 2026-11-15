@@ -57,6 +57,7 @@ struct Frame {
     hud: Option<Instant>,
     world_last: Option<Instant>,
     burn_ms: f64,
+    burn_render_ms: f64,
     burn_bytes: u64,
     cpu_end: Option<Instant>,
     calls: [u32; 7],
@@ -154,8 +155,8 @@ impl Frame {
             // Clamp to render: a last simulation read in HUD/tail leaves zero
             // render-only work that could overlap without extracting more state.
             let split = self.world_last.unwrap_or(hud).max(render).min(hud);
-            let _ = write!(out, " render_world={:.3} render_free={:.3} burn_ms={:.3} burn_bytes={}",
-                ms(render, split), ms(split, hud), self.burn_ms, self.burn_bytes);
+            let _ = write!(out, " render_world={:.3} render_free={:.3} burn_ms={:.3} burn_render_ms={:.3} burn_bytes={}",
+                ms(render, split), ms(split, hud), self.burn_ms, self.burn_render_ms, self.burn_bytes);
         }
         if self.log_ms > 0. { let _ = write!(out, " log={:.2}", self.log_ms); }
         let gxm = self.gxm_start.zip(self.gxm_mark);
@@ -408,6 +409,6 @@ pub(crate) fn overlap_enabled() -> bool {
 pub(crate) fn world_last_read() {
     if on() && overlap_enabled() { FRAME.with(|f| f.borrow_mut().world_last = Some(Instant::now())); }
 }
-pub(crate) fn overlap_burn(ms: f64, bytes: u64) {
-    if on() { FRAME.with(|f| { let mut f=f.borrow_mut(); f.burn_ms=ms; f.burn_bytes=bytes; }); }
+pub(crate) fn overlap_burn(ms: f64, render_ms: f64, bytes: u64) {
+    if on() { FRAME.with(|f| { let mut f=f.borrow_mut(); f.burn_ms=ms; f.burn_render_ms=render_ms; f.burn_bytes=bytes; }); }
 }
