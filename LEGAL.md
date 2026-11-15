@@ -90,22 +90,23 @@ bundle carries each library's corresponding source at the linked revision, the
 port's object code for this link, the exact linker command, and relink and
 packaging scripts.
 
-### Sony text inside the SceShaccCgExt source (open owner decision)
+### SceShaccCgExt modification
 
-The SceShaccCgExt source at the revision above includes
+The upstream revision includes an optional intrinsic prelude in
 `include/sce_intrinsics.h`. It is a C string literal that begins with the
 markers "SCE CONFIDENTIAL", "Copyright (C) 2012 Sony Computer Entertainment
-Inc." and "All Rights Reserved". The library passes that string to the
-console's shader compiler at run time. The same text is present in the
-previously installed VitaSDK archive of the library, so it is inherent to
-SceShaccCgExt rather than introduced by the rebuild. No licence text in this
-repository, in the release package or in the source bundle grants permission to
-redistribute that text.
+Inc." and "All Rights Reserved". The release removes that file, its build entry
+and its load by the shader compiler, so no text from it is built, linked,
+packaged or offered. It retains the standard-library load, optional caller
+source, extension flag and other patches. The source bundle ships the patched
+source and `SceShaccCgExt-no-prelude.patch`, with dated modification notices.
 
-**Status: open owner decision.** The options are to obtain permission from the
-rights holder, to record an explicit accepted risk, or to drop the
-shader-language extension feature that needs the string. The notices and the
-source bundle do not resolve this question and do not claim to.
+**Status: resolved by the owner on 2026-11-15.** The owner approved shipping
+SceShaccCgExt without the prelude after the console check recorded in
+[ALICE-NO-PRELUDE-SLOT-2026-11-15.md](https://github.com/Anezium/Alice-American-McGees-PSVita-Port/blob/4cc323f5a306220a2c5b76425a452fecac80c573/docs/validation/ALICE-NO-PRELUDE-SLOT-2026-11-15.md):
+45 of 45 shader-cache payloads were byte-identical with and without the
+prelude. This removal does not resolve the other independent licence questions
+identified in the release audit.
 
 Concerns about the port go to the maintainer of that fork through its
 [issue tracker](https://github.com/Anezium/LookingGlass/issues), not to the

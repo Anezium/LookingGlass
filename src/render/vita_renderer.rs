@@ -419,6 +419,8 @@ pub struct Config {
     pub audio_music_priority: i32,
     /// Persistent binary pairs; process deduplication remains active when off.
     pub shader_cache: String,
+    /// Empty preserves the release cache path; diagnostics use a fresh child directory.
+    pub shader_cache_namespace: String,
     /// Optional cache of exact device-compressed immutable pixels.
     pub texture_cache: String,
     /// One upload per resolved asset path for the duration of a load.
@@ -635,6 +637,7 @@ impl Default for Config {
             audio_music_thread: false,
             audio_music_priority: 170,
             shader_cache:"on".into(),
+            shader_cache_namespace:String::new(),
             texture_cache:"off".into(),
             load_texture_share: false,
             route_heading_lock:true,
@@ -735,6 +738,7 @@ impl Config {
         ensure!(!self.water_draw_join || self.water_stage_merge == "off", "water_draw_join and water_stage_merge are exclusive");
         ensure!(self.fx_add_max_area.is_finite() && (0. ..=1.).contains(&self.fx_add_max_area), "fx_add_max_area must be 0 to 1");
         ensure!(matches!(self.texture_cache.as_str(),"on"|"off"),"texture_cache must be on or off");
+        ensure!(self.shader_cache_namespace.len() <= 64 && self.shader_cache_namespace.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'), "invalid shader_cache_namespace");
         ensure!(matches!(self.shader_cache.as_str(),"on"|"off"),"shader_cache must be on or off");
         ensure!(matches!(self.fx_batching.as_str(),"none"|"adjacent"|"material"),"invalid fx_batching");
         ensure!(matches!(self.fx_streaming.as_str(),"orphan"|"ring"),"invalid fx_streaming");
@@ -3496,6 +3500,17 @@ pub(crate) async fn visualizer(
 mod tests {
     use super::*;
     #[test]
+    fn shader_cache_namespace_preserves_defaults_and_rejects_paths() {
+        let parsed = parse_runtime_config(include_bytes!("../../configs/PL-rc13-release-play04.json")).unwrap().0;
+        assert!(parsed.shader_cache_namespace.is_empty());
+        for name in ["np-old-a2-04", "np_new_gvillage"] {
+            assert!(Config { shader_cache_namespace:name.into(), ..Config::default() }.validate().is_ok());
+        }
+        for name in ["../old", "a/b", "ux0:foo", ".", "a b", &"a".repeat(65)] {
+            assert!(Config { shader_cache_namespace:name.into(), ..Config::default() }.validate().is_err());
+        }
+    }
+    #[test]
     fn release_fallback_renderer_missing_only_and_read_only() {
         use crate::config_input::{MissingFile, TestDir};
         let dir = TestDir::new("renderer");
@@ -3631,7 +3646,7 @@ mod tests {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-            && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+            && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -4287,7 +4302,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -4509,7 +4524,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) || key == "water_draw_join" || key == "alpha_model_pvs" || key == "fx_unlit_exact" { written[key] = value.clone(); }
+            if round5_key(key) || key == "shader_cache_namespace" || key == "water_draw_join" || key == "alpha_model_pvs" || key == "fx_unlit_exact" { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
@@ -4583,7 +4598,7 @@ mod tests {
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
                     && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-                    && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
+                    && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();

@@ -6,7 +6,10 @@ The old SDK v1.0.1 archive is rejected. No library is installed into the SDK by
 these tools.
 
 The pin records upstream revision `d3c83efceedeca3be863d0c1f19bb145daf1685f`, its
-LGPL-2.1 text hash, and the reviewed archive hash. Build that revision outside
+LGPL-2.1 text hash, and the reviewed archive hash. Export it with `python3 tools/vita_shacccg_no_prelude.py --source UPSTREAM --out NEW_DIR`.
+The exporter omits `include/sce_intrinsics.h` and applies the hash-pinned
+`patches/SceShaccCgExt-no-prelude.patch` without copying the removed text.
+Build that exported source outside
 this checkout with the matching Vita SDK/toolchain, for example using CMake with
 `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` and the current Vita packaging flags:
 
@@ -106,7 +109,9 @@ tools/vita_lgpl_bundle.sh --release-build /path/to/new-output \
   --sdk "$VITASDK" --out /path/to/alice-lgpl-bundle
 ```
 
-Every source checkout must be clean at its pinned revision. The bundle holds the
+Every input source checkout must be clean at its pinned revision. The bundle
+exporter applies the SceShaccCgExt patch, omits the intrinsic header and ships
+the patch separately. The bundle holds the
 four source trees, their licence texts, the exact object code and link command,
 the release link map, `relink.sh`, `package.sh`, the LiveArea assets and a
 `SOURCE-OFFER.txt`; it holds no game data and no binary under another licence.

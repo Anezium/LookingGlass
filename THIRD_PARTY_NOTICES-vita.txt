@@ -1082,7 +1082,7 @@ Library.
 
 SceShaccCgExt
 License: LGPL-2.1
-Source: https://github.com/bythos14/SceShaccCgExt at d3c83ef, the first revision under LGPL-2.1
+Source: https://github.com/bythos14/SceShaccCgExt at d3c83ef, LGPL-2.1; modified 2026-11-15 to remove the optional intrinsic prelude and its load (tools/patches/SceShaccCgExt-no-prelude.patch)
 Archives in the link: libSceShaccCgExt.a
 
 --- licenses/SceShaccCgExt-LICENSE ---

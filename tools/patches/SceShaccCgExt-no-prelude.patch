@@ -1,0 +1,45 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -8,7 +8,7 @@
+   endif()
+ endif()
+ 
+-project(SceShaccCgExt)
++project(SceShaccCgExt) # Modified 2026-11-15: omit optional intrinsic header.
+ include("${VITASDK}/share/vita.cmake" REQUIRED)
+ 
+ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -ffast-math -mtune=cortex-a9 -mfpu=neon -fno-optimize-sibling-calls -ftree-vectorize -Wall")
+@@ -16,7 +16,6 @@
+ 
+ add_library(${PROJECT_NAME}
+   include/shacccg_ext.h
+-  include/sce_intrinsics.h
+   src/shacccg_ext.c
+   src/shacccg_ext_oop.cpp
+ )
+--- a/src/shacccg_ext.c
++++ b/src/shacccg_ext.c
+@@ -1,4 +1,4 @@
+-#include "shacccg_ext.h"
++#include "shacccg_ext.h" // Modified 2026-11-15: omit optional intrinsic prelude and its load.
+ 
+ #include <stdbool.h>
+ #include <stdlib.h>
+@@ -7,7 +7,6 @@
+ #include <psp2/kernel/modulemgr.h>
+ #include <psp2/kernel/clib.h>
+ 
+-#include "sce_intrinsics.h"
+ 
+ #ifdef NDEBUG
+ #define LOG(level, msg, args...)
+@@ -37,9 +36,6 @@
+ 
+ static bool LoadInternalString_patch(void *param_1, bool nostdlib)
+ {
+-	if (!LoadInternalString(param_1, sce_intrinsics))
+-		return false;
+-
+ 	if (!nostdlib && !LoadInternalString(param_1, cgStdLib))
+ 		return false;
+ 

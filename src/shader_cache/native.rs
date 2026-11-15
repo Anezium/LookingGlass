@@ -60,7 +60,10 @@ fn disk_enabled()->bool {
 fn path(key:&[u8;32])->std::path::PathBuf {
     #[cfg(test)]
     if let Some(root)=TEST_ROOT.with(|r|r.borrow().clone()) {return root.join(format!("{}.bin",hex(key)));}
-    Path::new("ux0:data/alice/private/cache/shaders").join(format!("{}.bin",hex(key)))
+    let root = Path::new("ux0:data/alice/private/cache/shaders");
+    #[cfg(all(target_os="vita",feature="vita_renderer"))]
+    let root = root.join(&crate::render::vita_renderer::config().shader_cache_namespace);
+    root.join(format!("{}.bin",hex(key)))
 }
 /// Copy to word-aligned storage before calling GXM. Validate matrix indices too.
 unsafe fn valid_stage(stage:&[u8], kind:u32)->bool {

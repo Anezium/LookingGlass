@@ -30,6 +30,8 @@ def load_pin(repo):
         raise ValueError("unexpected release library pin")
     if sha256(folder / pin["license_file"]) != pin["license_sha256"]:
         raise ValueError("the pinned SceShaccCgExt licence text does not match")
+    if "patch" in pin and sha256(Path(repo) / "tools" / pin["patch"]) != pin["patch_sha256"]:
+        raise ValueError("the SceShaccCgExt patch does not match its pin")
     return pin
 
 
@@ -101,6 +103,8 @@ def main():
                    "revision": pin["revision"], "license": pin["license"],
                    "license_sha256": pin["license_sha256"], "archive_sha256": sha256(selected),
                    "archive": str(selected).replace(str(Path.home()), "~", 1), "members": []}
+        if "patch" in pin:
+            receipt.update(patch=pin["patch"], patch_sha256=pin["patch_sha256"])
         if args.link_map:
             members = verify_link_map(args.link_map.read_text(encoding="utf-8"), selected, pin)
             if not os.environ.get("VITASDK"):

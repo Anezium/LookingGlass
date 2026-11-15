@@ -158,6 +158,8 @@ def load_pins(repo):
         fail("unexpected SceShaccCgExt release pin")
     if sha256(folder / pin["license_file"]) != pin["license_sha256"]:
         fail("the pinned SceShaccCgExt licence text does not match")
+    if sha256(Path(repo) / "tools" / pin["patch"]) != pin["patch_sha256"]:
+        fail("the SceShaccCgExt patch does not match its pin")
     data = json.loads((folder / "lgpl-libraries.json").read_text(encoding="utf-8"))
     libraries = {}
     for entry in data["libraries"]:
@@ -324,7 +326,15 @@ def extract_source(source_repo, revision, destination, name):
                 fail("unsafe path in the " + name + " archive: " + member_name)
             if member.issym() or member.islnk():
                 fail("link in the " + name + " archive: " + member_name)
+            if name == "SceShaccCgExt" and member_name == "include/sce_intrinsics.h":
+                continue
             archive.extract(member, destination)
+
+    if name == "SceShaccCgExt":
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "vita_shacccg_no_prelude.py"),
+                        "--apply", str(destination)], check=True)
+        if (destination / "include/sce_intrinsics.h").exists():
+            fail("excluded intrinsic header survived source export")
 
 
 def library_member_records(pin, archive_path, objcopy, selection_members=None):
@@ -579,6 +589,7 @@ def main():
         if not (bundle / "objects").is_dir():
             fail("no object code was copied")
 
+        shutil.copy2(repo / "tools" / pin["patch"], bundle / "SceShaccCgExt-no-prelude.patch")
         licence_texts = {}
         source_lines = []
         for archive in LIBRARY_ORDER:
@@ -590,8 +601,10 @@ def main():
                                    library["revision"] + "^{tree}"],
                                   check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
             files = sum(1 for path in destination.rglob("*") if path.is_file())
-            source_lines.append("%s  %s  tree=%s  files=%d"
+            source_lines.append("%s  %s  upstream_tree=%s  files=%d"
                                 % (library["name"], library["revision"], tree, files))
+            if library["name"] == "SceShaccCgExt":
+                source_lines[-1] += "  patch_sha256=" + pin["patch_sha256"]
             for entry in library["license_files"]:
                 path = destination / entry["path"]
                 if not path.is_file():
@@ -733,7 +746,8 @@ American McGee's Alice links statically:
 - `sources/vitaGL/`, `sources/vitaShaRK/`, `sources/pthread-embedded/`,
   `sources/SceShaccCgExt/` - the complete source tree of each library at the
   revision the release linked, exported from Git. Each tree carries its
-  upstream licence files.
+  upstream licence files. SceShaccCgExt omits the optional intrinsic prelude and
+  its load (modified 2026-11-15); see `SceShaccCgExt-no-prelude.patch`.
 - `licenses/` - the full licence texts shipped in the package: GPL-3.0,
   LGPL-3.0, LGPL-2.1, the GCC Runtime Library Exception 3.1, MPL-2.0, MIT,
   Apache-2.0, the newlib BSD texts, the newlib Vita glue notice, the

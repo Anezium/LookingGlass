@@ -94,7 +94,7 @@ C_LIBRARIES = [
         "name": "SceShaccCgExt",
         "archives": ["libSceShaccCgExt.a"],
         "licence": "LGPL-2.1",
-        "source": "https://github.com/bythos14/SceShaccCgExt at d3c83ef, the first revision under LGPL-2.1",
+        "source": "https://github.com/bythos14/SceShaccCgExt at d3c83ef, LGPL-2.1; modified 2026-11-15 to remove the optional intrinsic prelude and its load (tools/patches/SceShaccCgExt-no-prelude.patch)",
         "files": ["SceShaccCgExt-LICENSE"],
     },
     {
