@@ -153,7 +153,7 @@ impl BeamRig {
             position, uv, normal: Vec4::ZERO, color: [255; 4],
         })
         .collect();
-        crate::render_fx::effect(&Mesh { upload_identity: None, surface: None,
+        crate::render_fx::effect(&Mesh { upload_identity: self.core.meshes.first().and_then(|m| m.upload_identity), surface: None,
             vertices,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture: self.core.meshes.first().and_then(|m| m.texture.clone()),

@@ -3,7 +3,7 @@
 //! is the sole publication boundary; retained GPU storage keeps its five-slot ring.
 use crate::mesh::Mesh;
 use super::*;
-use crate::skeletal::SkinSurface;
+use crate::skeletal::{Skeleton, SkinSurface};
 use std::{cell::Cell, collections::HashMap, rc::Weak, sync::Arc};
 use crate::character::skinning::identity::ActorId;
 use super::actor_vertices::PublicationMode;
@@ -669,6 +669,38 @@ pub(crate) fn end() {
         });
     }
 }
+/// A body removed by the consumer cull before preparation still owes the shared frame
+/// vertex budget the reservation its publication would have made in the OFF arm. Charge
+/// one `vertices * layers` group per present surface, in surface order, and one dropped
+/// group where that charge would not fit. Nothing is reserved, skinned or published, and
+/// no layer-drop counter moves, so every later group is admitted exactly as in OFF.
+pub(crate) fn charge_culled(skeleton:&Skeleton,meshes:&[Option<Mesh>]) {
+    if !retained_active() { return; }
+    // capture_single prepares one group per present mesh, in surface order.
+    for mesh in skeleton.surfaces.iter().zip(meshes).filter_map(|(_, mesh)| mesh.as_ref()) {
+        let n=mesh.vertices.len().saturating_mul(culled_layers(mesh));
+        FRAME.with(|f| {let mut f=f.borrow_mut();
+            if f.vertices.saturating_add(n)>MAX_VERTICES {f.dropped+=1;return;}
+            f.vertices+=n;
+        });
+    }
+}
+/// What one surface of a culled body would have submitted: the actor layer cap, or the
+/// single synthesized pass of a mesh whose surface is not registered. The direct recipe,
+/// the deferred placeholder and the serial fallback all submit the same capped count.
+fn culled_layers(mesh:&Mesh)->usize {
+    culled_surface(mesh).map_or(1,|surface|actor_max_layers(crate::render::vita_renderer::config()).min(surface.layers.len()))
+}
+/// The same surface lookup prepare() uses, without its census side effects: a culled body
+/// charges a budget, it does not report eligibility.
+fn culled_surface(mesh:&Mesh)->Option<Rc<Surface>> {
+    let surface = mesh.surface.clone();
+    #[cfg(test)]
+    let surface = surface.or_else(|| mesh.texture.as_ref().and_then(super::test_support::surface));
+    #[cfg(test)]
+    let surface = surface.or_else(super::test_surface);
+    surface
+}
 /// This address is valid only between prepare and the fully drained collect. Banks
 /// cannot be mutated again while any old packet/view still owns their publication.
 ///
@@ -706,6 +738,8 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
             let mut f=f.borrow_mut();
             f.vertices+=n;let id=f.groups.len();
             let transparent=surface.transparent||f.depth_read_only;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {ant_dead: super::corpse_triangles::active(),passes:passes.take().unwrap(),transparent});Some(id)
         })?;
         if capped>0 {
@@ -754,6 +788,8 @@ fn prepare_deferred(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,
             debug_assert_eq!(f.vertices,used);
             f.vertices+=n;let group=f.groups.len();
             let transparent=surface.transparent||f.depth_read_only;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {ant_dead: super::corpse_triangles::active(),passes:Vec::new(),transparent});group
         });
         s.deferred.push(Deferred {group,bank,slot,surface,camera,time,appearance,limit,vertices:n,dropped_layers:dropped_layers as u64});

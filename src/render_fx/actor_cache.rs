@@ -103,7 +103,7 @@ pub(super) fn prepare(surface:&Rc<Surface>,mesh:&Mesh,time:f32,appearance:Appear
             world_static:None,
             #[cfg(target_os="vita")]
             world_geometry_counted:false,
-            mesh:Mesh { upload_identity: None, surface: Some(surface.clone()),vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
+            mesh:Mesh { upload_identity: l.upload_identities.get(p.frame).copied().flatten(), surface: Some(surface.clone()),vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
             material:None,lit:p.lit,clamp:p.clamp,cutout:p.cutout,cutout_reference:p.reference,
             gain:p.gain,fog:p.fog,model:true,appearance,filter_fade:0.});
     }
@@ -157,7 +157,7 @@ pub(super) fn recipe(surface:&Rc<Surface>,time:f32,appearance:Appearance)->Optio
             blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
-            mesh:Mesh { upload_identity: None, surface: Some(surface.clone()),vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
+            mesh:Mesh { upload_identity: l.upload_identities.get(p.frame).copied().flatten(), surface: Some(surface.clone()),vertices:Vec::new(),indices:Vec::new(),texture:layer_texture(l, p.frame)},
             material:None,lit:p.lit,clamp:p.clamp,cutout:p.cutout,cutout_reference:p.reference,
             gain:p.gain,fog:p.fog,model:true,appearance,filter_fade:0.});
     }

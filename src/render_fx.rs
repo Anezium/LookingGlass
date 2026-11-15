@@ -270,7 +270,6 @@ pub fn begin_view(camera: &Camera3D, time: f32, atmosphere: &Atmosphere, fullbri
 }
 fn same_style(a: &Pass, b: &Pass) -> bool {
     a.mesh.upload_identity == b.mesh.upload_identity
-        && a.mesh.surface.as_ref().map(Rc::as_ptr) == b.mesh.surface.as_ref().map(Rc::as_ptr)
         && a.material.as_ref().zip(b.material.as_ref()).is_some_and(|(a,b)| Rc::ptr_eq(a,b))
         && a.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
             == b.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
@@ -389,6 +388,8 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
             }
             f.vertices += count;
             let transparent = transparent || f.depth_read_only;
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {
                 ant_dead: corpse_triangles::active(),
                 passes,
@@ -874,6 +875,7 @@ pub fn sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Col
 struct Layer {
     stage: Stage,
     textures: Vec<Texture2D>,
+    upload_identities: Vec<Option<u64>>,
 }
 pub struct Surface {
     layers: Vec<Layer>,
@@ -889,6 +891,12 @@ pub fn register(
     base: &Texture2D,
     names: &[String],
     specs: &BTreeMap<String, texture::MaterialSpec>,
+) -> Result<Rc<Surface>> {
+    register_identified(assets, base, None, names, specs)
+}
+pub(crate) fn register_identified(
+    assets: &mut Assets, base: &Texture2D, base_identity: Option<u64>,
+    names: &[String], specs: &BTreeMap<String, texture::MaterialSpec>,
 ) -> Result<Rc<Surface>> {
     let spec = names.iter().find_map(|n| {
         let key = n.to_lowercase();
@@ -906,27 +914,23 @@ pub fn register(
         !s.unsupported && !s.images.is_empty() && !s.images.iter().any(|n| n == "$lightmap")
     }) {
         let mut textures = Vec::new();
+        let mut upload_identities = Vec::new();
         for name in &stage.images {
             if name == "$whiteimage" || name == "*white" {
                 textures.push(crate::texture::upload_rgba8(1, 1, &[255; 4]));
+                upload_identities.push(None);
                 continue;
             }
             let Some(path) = texture::resolve(assets, name, &BTreeMap::new()) else {
                 continue;
             };
-            let tex = if stage.clamp {
-                texture::decode_upload_shared(assets, &path)?
-            } else {
-                // Model shaders tile too (notably the Queen's tentacle and base).
-                // Repeat wrap cannot share the GPU texture with clamp sampling, so
-                // the tiling upload has its own key and sets its wrap before any
-                // consumer sees it.
-                texture::decode_upload_shared_tiling(assets, &path)?
-            };
-            textures.push(tex);
+            let uploaded = texture::decode_upload_keyed(assets, &path,
+                if stage.clamp { texture::Sampler::Clamp } else { texture::Sampler::Repeat })?;
+            upload_identities.push(Some(uploaded.upload_identity));
+            textures.push(uploaded.texture);
         }
         if textures.len() == stage.images.len() {
-            layers.push(Layer { stage, textures });
+            layers.push(Layer { stage, textures, upload_identities });
         }
     }
     if layers.is_empty() {
@@ -936,6 +940,7 @@ pub fn register(
                 ..Default::default()
             },
             textures: vec![base.clone()],
+            upload_identities: vec![base_identity],
         });
     }
     let surface = Rc::new(Surface {
@@ -1122,14 +1127,9 @@ fn layer_passes(vertices: &[Vertex], indices: &[u16], surface: &Rc<Surface>, cam
     let mut passes = Vec::new();
     for layer in surface.layers.iter().take(limit) {
         let mut copy = Mesh { upload_identity: None, surface: Some(surface.clone()), vertices: vertices.to_vec(), indices: indices.to_vec(), texture: None };
-        copy.texture = Some(
-            layer.textures[if layer.stage.images.is_empty() {
-                0
-            } else {
-                layer.stage.frame(time)
-            }]
-            .clone(),
-        );
+        let frame = if layer.stage.images.is_empty() { 0 } else { layer.stage.frame(time) };
+        copy.texture = Some(layer.textures[frame].clone());
+        copy.upload_identity = layer.upload_identities.get(frame).copied().flatten();
         for v in &mut copy.vertices {
             if fast && !layer.stage.environment && layer.stage.dot_alpha.is_none() {
                 if !layer.stage.mods.is_empty() || layer.stage.vector_uv.is_some(){
@@ -1206,7 +1206,7 @@ pub(crate) mod test_support {
         Texture2D::from_miniquad_texture(TextureId::from_raw_id(RawId::OpenGl(id)))
     }
     pub(crate) fn register(base: &Texture2D, layers: Vec<(Stage, Vec<Texture2D>)>, transparent: bool) -> Rc<Surface> {
-        let layers: Vec<_> = layers.into_iter().map(|(stage, textures)| Layer { stage, textures }).collect();
+        let layers: Vec<_> = layers.into_iter().map(|(stage, textures)| Layer { stage, upload_identities: vec![None; textures.len()], textures }).collect();
         let surface = Rc::new(Surface {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             label: (false, None),
@@ -1726,7 +1726,7 @@ mod tests {
         let surface = Rc::new(Surface {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             label: (false, None),
-            layers: (0..3).map(|_| Layer { stage: Stage::default(), textures: Vec::new() }).collect(),
+            layers: (0..3).map(|_| Layer { stage: Stage::default(), textures: Vec::new(), upload_identities: Vec::new() }).collect(),
             transparent: false, preserve_skin: false, actors: RefCell::default(),
         });
         assert_eq!(crate::render::vita_renderer::config().actor_max_layers, 2);

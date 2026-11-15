@@ -1,4 +1,4 @@
-//! A discard-free variant of the same shader for proven opaque corpse packets.
+//! A discard-free variant of the same shader for proven opaque actor packets.
 //! Immutable all-255 texture alpha survives filtering, size reduction and DXT5.
 //! Weak managed handles include their slot generation, so reused GPU ids cannot
 //! inherit an old texture's certificate. The table does not keep textures alive.
@@ -7,7 +7,8 @@ use std::collections::HashMap;
 thread_local! { static OPAQUE: RefCell<HashMap<macroquad::miniquad::TextureId,Texture2D>> = RefCell::default(); }
 fn all_opaque(rgba:&[u8]) -> bool { !rgba.is_empty() && rgba.len()%4==0 && rgba.chunks_exact(4).all(|p|p[3]==255) }
 pub(crate) fn note_texture(texture:&Texture2D, rgba:&[u8]) {
-    if !crate::render::vita_renderer::config().ant_corpse_opaque_shader {return;}
+    let c=crate::render::vita_renderer::config();
+    if !c.ant_corpse_opaque_shader && !c.actor_opaque_shader {return;}
     OPAQUE.with(|table| {
         let mut table=table.borrow_mut();
         if table.len()>=4096 {table.clear();}
@@ -58,6 +59,10 @@ mod tests {
         assert!(super::all_opaque(&[0,0,0,255,255,255,255,255]));
         for bytes in [vec![],vec![255;3],vec![255;5],vec![255,255,255,254],vec![255,255,255,0]] {assert!(!super::all_opaque(&bytes));}
         assert!(!crate::render::vita_renderer::Config::default().ant_corpse_opaque_shader);
+        let c:crate::render::vita_renderer::Config=serde_json::from_value(serde_json::json!({"actor_opaque_shader":true})).unwrap();
+        assert!(c.actor_opaque_shader);
+        assert!(!c.ant_corpse_opaque_shader);
+        assert!(!crate::render::vita_renderer::Config::default().actor_opaque_shader);
     }
     #[test]
     fn specialization_removes_only_the_four_discard_statements() {

@@ -1026,16 +1026,16 @@ impl Prop {
             let path = texture::resolve(assets, &format!("{}/{skin}", def.path), specs)
                 .or_else(|| texture::resolve(assets, skin, specs))
                 .with_context(|| format!("Weapon texture {skin}"))?;
-            let tex = texture::decode_upload_shared_sampled(assets, &path, sampler)?;
+            let tex = texture::decode_upload_keyed(assets, &path, sampler)?;
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             let _census = crate::sim_maps::probe::draw_query::prop_scope();
-            material_layers.push(crate::render_fx::register(
+            material_layers.push(crate::render_fx::register_identified(
                 assets,
-                &tex,
+                &tex.texture, Some(tex.upload_identity),
                 &[format!("{}/{skin}", def.path), skin.clone()],
                 specs,
             )?);
-            meshes.push(Mesh { upload_identity: None, surface: material_layers.last().cloned(),
+            meshes.push(Mesh { upload_identity: Some(tex.upload_identity), surface: material_layers.last().cloned(),
                 vertices: s
                     .uv
                     .iter()
@@ -1047,7 +1047,7 @@ impl Prop {
                     })
                     .collect(),
                 indices: s.indices.clone(),
-                texture: Some(tex),
+                texture: Some(tex.texture),
             });
         }
         Ok(Self {

@@ -15,7 +15,7 @@ pub(crate) struct Puff {
 fn normalized(blend: Blend) -> Blend { if blend == Blend::Add { Blend::AlphaAdd } else { blend } }
 fn puff_key(p: &Puff) -> PacketKey {
     let stage = Stage::default();
-    PacketKey { upload_identity: p.upload_identity, surface: None, texture: p.texture.as_ref().map(merge_texture), state: [
+    PacketKey { upload_identity: p.upload_identity, texture: p.texture.as_ref().map(merge_texture), state: [
         crate::render::blend_index(normalized(p.blend)) as u32, 0, 0, u32::from(stage.clamp),
         (stage.alpha_test as f32).to_bits(), stage.alpha_reference.to_bits(),
         1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(),
@@ -322,6 +322,24 @@ mod tests {
                     assert_eq!(snapshot(&groups, &list), expected, "published puff identities must survive FX planner");
                 });
             }
+        }
+    }
+    #[test]
+    fn recycled_merge_geometry_keeps_the_current_upload_identity() {
+        let _frame = frame();
+        for in_place in [false, true] {
+            let mut q = puff(0, Blend::Alpha); q.upload_identity = Some(7);
+            let mut groups = (0..2).map(|_| super::super::super::Group {
+                ant_dead: None, passes: vec![pass_for(&q, true, false)], transparent: true }).collect::<Vec<_>>();
+            let mut recycled = super::super::copy_mesh(&groups[0].passes[0].mesh);
+            recycled.upload_identity = Some(999);
+            let mut pool = BTreeMap::from([(0, super::super::prepared::Geometry::new(recycled))]);
+            let mut list = vec![(2.,Source::Actor(0)),(1.,Source::Actor(1))];
+            merge_cached_mode(&mut MergeCache::default(), &mut groups, &mut list, true, false, &mut pool, in_place);
+            assert_eq!(list.len(), 1);
+            assert_eq!(groups[0].passes[0].mesh.upload_identity, Some(7));
+            let copied = super::super::copy_mesh(&groups[0].passes[0].mesh);
+            assert_eq!(copied.upload_identity, Some(7));
         }
     }
     #[derive(Debug, PartialEq)]

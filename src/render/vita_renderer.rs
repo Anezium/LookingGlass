@@ -81,6 +81,11 @@ pub struct Config {
     /// Use the same fragment arithmetic without discard for certified opaque dead Ants.
     pub ant_corpse_opaque_shader: bool,
     pub diag_skip_live_actors: bool,
+    /// Use the discard-free program for every certified opaque actor/prop packet.
+    /// Draw order, geometry and fragment arithmetic stay unchanged. Default off.
+    pub actor_opaque_shader: bool,
+    /// Cull script-owned bodies when single preparation has no mutable consumer.
+    pub actor_consumer_frustum_cull: bool,
     pub diag_skip_fx: bool,
     pub diag_skip_decals: bool,
     pub diag_skip_alpha_world: bool,
@@ -362,8 +367,11 @@ pub struct Config {
     pub water_draw_join: bool,
     /// Effect packets that are unlit, unclamped, uncut, with no dissolve, ghost, power tint or
     /// filter fade use a fragment program without those paths, the dynamic lights (all zero when
-    /// unlit) and the sky fade (never set here); same arithmetic. Default off.
+    /// unlit) and the sky fade (never set here); host rounding can differ. Default off.
     pub fx_lite: bool,
+    /// Eligible unlit effects keep the full fragment arithmetic and replace only the
+    /// known-zero dynamic light result. Takes precedence over fx_lite. Default off.
+    pub fx_unlit_exact: bool,
     /// Additive effects (drawn with source alpha) whose texture has alpha 0 in every texel add
     /// nothing; their puffs and effect groups are not drawn. No pixel changes. Default off.
     pub fx_add_zero_alpha_cut: bool,
@@ -499,6 +507,8 @@ impl Default for Config {
             ant_corpse_triangle_cull: false,
             ant_corpse_opaque_shader: false,
             diag_skip_live_actors: false,
+            actor_opaque_shader: false,
+            actor_consumer_frustum_cull: false,
             diag_skip_fx: false,
             diag_skip_decals: false,
             diag_skip_alpha_world: false,
@@ -598,7 +608,7 @@ impl Default for Config {
             skin_frustum_cull: true,
             fast_frustum: true,
             packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
-            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, fx_lite: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
+            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, fx_lite: false, fx_unlit_exact: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
             flat_actor_light: false, max_texture_dimension: None,
             draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             gpu_state_probe: false,
@@ -837,7 +847,26 @@ pub(crate) fn fx_cpu_options() -> (bool, bool) {
     let c = config();(c.fx_merge_ranges,c.fx_cpu_inline)
 }
 #[cfg(test)]
+thread_local! {
+    /// Scoped test override, per thread: parallel tests must not see each other's keys.
+    static TEST_CONFIG: std::cell::RefCell<Option<&'static Config>> = const { std::cell::RefCell::new(None) };
+}
+/// Tests cannot edit the process-wide OnceLock. Run one body with a modified copy of the
+/// shipped defaults instead; the copy is leaked (tests only) so `config()` can keep
+/// returning a stable reference, and the previous override is restored on unwind.
+#[cfg(test)]
+pub(crate) fn with_config<T>(change: impl FnOnce(&mut Config), run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<&'static Config>);
+    impl Drop for Reset { fn drop(&mut self) { TEST_CONFIG.with(|c| *c.borrow_mut() = self.0); } }
+    let mut config = Config::default();
+    change(&mut config);
+    let config: &'static Config = Box::leak(Box::new(config));
+    let _reset = Reset(TEST_CONFIG.with(|c| c.borrow_mut().replace(config)));
+    run()
+}
+#[cfg(test)]
 pub fn config() -> &'static Config {
+    if let Some(config) = TEST_CONFIG.with(|c| *c.borrow()) { return config; }
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(Config::default)
 }
@@ -3408,11 +3437,12 @@ mod tests {
         let mut played = serde_json::to_value(parse_runtime_config(played_bytes).unwrap().0).unwrap();
         assert_eq!(played["log_frame_time_every"], 10);
         played["log_frame_time_every"] = 0.into();
-        // RC8 and RC9 deliberately enable the defaults measured on 2026-11-14 and 2026-11-15.
-        for key in ["sim_flight_memo", "ant_corpse_triangle_cull", "ant_corpse_opaque_shader", "water_draw_join"] { played[key] = true.into(); }
+        // RC8, RC9 and RC10 deliberately enable the defaults measured on 2026-11-14 and 2026-11-15.
+        for key in ["sim_flight_memo", "ant_corpse_triangle_cull", "ant_corpse_opaque_shader", "water_draw_join",
+                    "actor_consumer_frustum_cull", "fx_unlit_exact"] { played[key] = true.into(); }
         // Compare typed values on both sides: to_value widens f32 (e.g. the
         // played audio gain 0.001), unlike its original JSON decimal spelling.
-        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown and the four measured defaults may change parsed played values");
+        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown and the six measured defaults may change parsed played values");
         let added = raw.as_object().unwrap().iter().filter(|(key, _)| played_raw.get(*key).is_none()).map(|(key, value)| (key.clone(), value.clone())).collect::<serde_json::Map<_, _>>();
         assert_eq!(serde_json::Value::Object(added), serde_json::json!({
             "world_adjacent_batch":false,"exact_blends":false,"sky_cube_finish":false,
@@ -3421,9 +3451,11 @@ mod tests {
             "spike_log_ms":0.0,"detail_layers":false,"sky_depth":false,
             "sky_cube_capture_only":false,"sky_cube_refresh":0,"audio_combat_preload":false,"sky_cube":false,
             "sim_flight_memo":true,"ant_corpse_triangle_cull":true,"ant_corpse_opaque_shader":true,
-            "water_draw_join":true
+            "water_draw_join":true,"actor_consumer_frustum_cull":true,"fx_unlit_exact":true
         }));
         assert_eq!(raw["water_draw_join"], true, "RC9 enables the measured water draw join");
+        assert_eq!(raw["actor_consumer_frustum_cull"], true, "RC10 enables the measured consumer cull");
+        assert_eq!(raw["fx_unlit_exact"], true, "RC10 enables the measured unlit exact FX path");
         assert_eq!(raw["world_shared_buffers"], true);
         assert_eq!(raw["world_parameter_reuse"], true);
         assert_eq!(raw["water_stage_merge"], "off");
@@ -3448,7 +3480,8 @@ mod tests {
     fn round5_keys_are_strict_and_off_in_historical_configs() {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
-            if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo" {
+            if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
+                || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -3465,25 +3498,80 @@ mod tests {
     }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader") }
+    // The two actor keys arrived after every frozen era file, so those files stay valid
+    // unchanged and their omitted opt-in must read as an explicit off.
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-            && *k != "water_draw_join" && !round5_key(k)).cloned().collect::<Vec<_>>();
+            && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
     // Every config built before RC9 leaves the join off, including the frozen RC8 release.
     #[test]
-    fn water_draw_join_is_off_before_rc9_and_on_only_in_the_rc9_release() {
+    fn water_draw_join_is_off_before_rc9_and_on_only_from_the_rc9_release() {
         for bytes in [&include_bytes!("../../configs/PL-rc1.json")[..], &include_bytes!("../../configs/PL-rc4.json")[..],
                       &include_bytes!("../../configs/PL-rc7-release.json")[..], &include_bytes!("../../configs/PL-rc8-release.json")[..]] {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             assert!(raw.get("water_draw_join").is_none_or(|on| on == false), "a pre-RC9 config never joins water draws");
         }
-        let raw: serde_json::Value = serde_json::from_slice(include_bytes!("../../configs/PL-release.json")).unwrap();
-        assert_eq!(raw["water_draw_join"], true);
+        for bytes in [&include_bytes!("../../configs/PL-rc9-release.json")[..],
+                      &include_bytes!("../../configs/PL-release.json")[..]] {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(raw["water_draw_join"], true);
+        }
+    }
+    // Every config built before RC10 leaves the actor cull off, including the frozen RC9 release.
+    #[test]
+    fn actor_consumer_frustum_cull_is_off_before_rc10_and_on_only_from_the_rc10_release() {
+        for bytes in [&include_bytes!("../../configs/PL-rc1.json")[..],
+                      &include_bytes!("../../configs/PL-rc8-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc9-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc9-release-play04.json")[..]] {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            assert!(!c.actor_consumer_frustum_cull, "a pre-RC10 config culls actors");
+        }
+        let (c, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-release.json")).unwrap();
+        assert!(rejected.is_none());
+        assert!(c.actor_consumer_frustum_cull, "RC10 enables the measured consumer cull");
+    }
+    #[test]
+    fn fx_unlit_exact_is_strict_and_on_only_from_the_rc10_release() {
+        assert!(!Config::default().fx_unlit_exact);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().fx_unlit_exact);
+        assert!(serde_json::from_str::<Config>(r#"{"fx_unlit_exact":true}"#).unwrap().fx_unlit_exact);
+        assert!(serde_json::from_str::<Config>(r#"{"fx_unlit_exact":1}"#).is_err());
+        // Every input built before RC10 leaves the opt-in off. The frozen files are
+        // not rewritten to add the key.
+        for bytes in [&include_bytes!("../../configs/PL-rc9-release-play04.json")[..],
+                      &include_bytes!("../../configs/PL-rc8-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc1.json")[..]] {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            assert!(!c.fx_unlit_exact, "a pre-RC10 input enabled fx_unlit_exact");
+        }
+        let (release, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-release.json")).unwrap();
+        assert!(rejected.is_none());
+        assert!(release.fx_unlit_exact, "RC10 enables the measured unlit exact path");
+        let control_bytes = include_bytes!("../../configs/PL-a5-hatter2-control.json");
+        let exact_bytes = include_bytes!("../../configs/PL-a5-hatter2-unlit-exact.json");
+        let (control, rejected) = parse_runtime_config(control_bytes).unwrap();
+        assert!(rejected.is_none());
+        control.validate().unwrap();
+        let (exact, rejected) = parse_runtime_config(exact_bytes).unwrap();
+        assert!(rejected.is_none());
+        exact.validate().unwrap();
+        assert!(!control.fx_unlit_exact && exact.fx_unlit_exact);
+        let mut off = serde_json::to_value(control).unwrap();
+        let mut on = serde_json::to_value(exact).unwrap();
+        off["fx_unlit_exact"] = on["fx_unlit_exact"].clone();
+        assert_eq!(off, on, "the hatter2 pair changes only fx_unlit_exact");
+        assert_eq!(crate::render_fx::retained::specialized_program(true, true),
+            Some(crate::render_fx::retained::Specialized::UnlitExact),
+            "fx_unlit_exact takes precedence over fx_lite");
     }
     #[test]
     fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {
@@ -3906,7 +3994,7 @@ mod tests {
     fn a6_load_pair_differs_only_in_the_four_load_keys() {
         let (release, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-release.json")).unwrap();
         assert!(rejected.is_none());
-        assert!(!release.load_texture_share, "sharing is off in the release input");
+        assert!(!release.load_texture_share, "sharing stays off in the RC11 release input");
         let off_bytes = include_bytes!("../../configs/PL-a6-load-off.json");
         let on_bytes = include_bytes!("../../configs/PL-a6-load-on.json");
         let (off, rejected) = parse_runtime_config(off_bytes).unwrap();
@@ -3964,7 +4052,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -4003,13 +4091,17 @@ mod tests {
         }
     }
     #[test]
-    fn rc9_release_inputs_are_rc8_plus_the_water_join_and_package_configs_add_only_their_keys() {
+    fn rc11_release_inputs_are_rc10_with_sharing_off_and_package_configs_add_only_their_keys() {
         use sha2::{Digest, Sha256};
         let release_bytes = include_bytes!("../../configs/PL-release.json");
+        let rc10_bytes = include_bytes!("../../configs/PL-rc10-release.json");
+        let rc9_bytes = include_bytes!("../../configs/PL-rc9-release.json");
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "f88283c4535d6e7a80f337f29bc44d796c6eef093748f47b4c293e60e5bf4117");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
+        assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
+        assert_eq!(format!("{:x}", Sha256::digest(rc9_bytes)), "9dbf482cf40ff440dd74ecc5c6be45aaf5c3cb0b06da3bfc0fe47a4b76466cac");
         assert_eq!(format!("{:x}", Sha256::digest(rc8_bytes)), "a5d21beec0d15648cc94f209bbe0adf1fa387430c0df18a1a5e10ad2756f6f2b");
         assert_eq!(format!("{:x}", Sha256::digest(rc7_bytes)), "593778fbe24338cbb2c8d00a8504286d5c26018dbc2bc663500221095bfd2b80");
         assert_eq!(format!("{:x}", Sha256::digest(sim_bytes)), "fa64b0c5b79c52d8e028f7fc9d0d3dd2eec57b7641dfc8f76b34212bdcb3334b");
@@ -4017,16 +4109,34 @@ mod tests {
         assert!(rejected.is_none());
         release.validate().unwrap();
         let baseline = serde_json::to_value(release).unwrap();
+        let (rc10, rejected) = parse_runtime_config(rc10_bytes).unwrap();
+        assert!(rejected.is_none());
+        let rc10 = serde_json::to_value(rc10).unwrap();
+        let (rc9, rejected) = parse_runtime_config(rc9_bytes).unwrap();
+        assert!(rejected.is_none());
+        let rc9 = serde_json::to_value(rc9).unwrap();
         let (rc8, rejected) = parse_runtime_config(rc8_bytes).unwrap();
         assert!(rejected.is_none());
         let rc8 = serde_json::to_value(rc8).unwrap();
-        assert_eq!(baseline["water_draw_join"], true, "the join is the one measured RC9 release default");
+        assert_eq!(baseline["water_draw_join"], true, "the join remains a measured release default");
+        assert_eq!(baseline["actor_consumer_frustum_cull"], true, "the consumer cull is a measured RC10 release default");
+        assert_eq!(baseline["fx_unlit_exact"], true, "the unlit exact path is a measured RC10 release default");
+        assert_eq!(baseline["load_texture_share"], false, "RC11 keeps sharing off in the release input");
+        assert_eq!(baseline["loading_screen"], true, "the boot loading screen stays on");
+        assert_eq!(baseline["texture_cache"], "off", "the disk texture cache stays off");
+        assert_eq!(baseline["pvs_cache"], false, "the disk PVS cache stays off");
         assert_eq!(baseline["world_shared_buffers"], true);
         assert_eq!(baseline["world_parameter_reuse"], true);
         assert_eq!(baseline["water_stage_merge"], "off");
         let mut variant = baseline.clone();
+        variant["load_texture_share"] = rc10["load_texture_share"].clone();
+        assert_eq!(variant, rc10, "RC11 release keeps every RC10 value, with sharing off");
+        let mut variant = rc10.clone();
+        for key in ["actor_consumer_frustum_cull", "fx_unlit_exact"] { variant[key] = rc9[key].clone(); }
+        assert_eq!(variant, rc9, "RC10 release changes only the two declared keys relative to RC9");
+        let mut variant = rc9.clone();
         variant["water_draw_join"] = rc8["water_draw_join"].clone();
-        assert_eq!(variant, rc8, "RC9 release changes only the water draw join relative to RC8");
+        assert_eq!(variant, rc8, "the frozen RC9 release changes only the water draw join relative to RC8");
         // The frozen RC8 release keeps the three measured defaults relative to RC7.
         let (rc7, rejected) = parse_runtime_config(rc7_bytes).unwrap();
         assert!(rejected.is_none());
@@ -4038,7 +4148,41 @@ mod tests {
         }
         assert_eq!(variant, rc7, "the RC8 release changes only its three declared keys relative to RC7");
         let defaults = historical_keys(&serde_json::to_value(Config::default()).unwrap());
-        // The RC9 package is the release plus the two play keys.
+        // A package adds only its replay keys to the release it is built on.
+        let check_package = |name: &str, bytes: &[u8], map: Option<&str>, keys: &[String], against: &serde_json::Value| {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(&historical_keys(&raw), keys, "{name}");
+            let (play, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            play.validate().unwrap();
+            let mut variant = serde_json::to_value(play).unwrap();
+            let mut declared = vec![("log_frame_time_every", serde_json::json!(10))];
+            match map {
+                None => declared.push(("replay_play", serde_json::json!("a2-04.lgtape"))),
+                Some(map) => declared.extend([
+                    ("replay_play", serde_json::json!(format!("a4-{map}-01.lgtape"))),
+                    ("replay_start", serde_json::json!(format!("chapter:{map}"))),
+                    ("replay_stop_after", serde_json::json!(1200)),
+                    ("replay_check_every", serde_json::json!(600)),
+                ]),
+            }
+            for (key, expected) in declared {
+                assert_eq!(variant[key], expected, "{name} {key}");
+                variant[key] = against[key].clone();
+            }
+            assert_eq!(&variant, against, "{name} changes only its declared keys against its release");
+        };
+        // The RC11 packages add only their replay keys to the RC11 release.
+        check_package("PL-rc11-release-play04.json", include_bytes!("../../configs/PL-rc11-release-play04.json"), None, &defaults, &baseline);
+        check_package("PL-rc11-load-gvillage.json", include_bytes!("../../configs/PL-rc11-load-gvillage.json"), Some("gvillage"), &defaults, &baseline);
+        check_package("PL-rc11-load-funhouse.json", include_bytes!("../../configs/PL-rc11-load-funhouse.json"), Some("funhouse"), &defaults, &baseline);
+        // The RC10 packages keep their frozen bytes, so they predate the shared key
+        // and add only their replay keys to the frozen RC10 release.
+        let frozen_keys: Vec<String> = defaults.iter().filter(|key| *key != "load_texture_share").cloned().collect();
+        check_package("PL-rc10-release-play04.json", include_bytes!("../../configs/PL-rc10-release-play04.json"), None, &frozen_keys, &rc10);
+        check_package("PL-rc10-skool1.json", include_bytes!("../../configs/PL-rc10-skool1.json"), Some("skool1"), &frozen_keys, &rc10);
+        check_package("PL-rc10-hatter2.json", include_bytes!("../../configs/PL-rc10-hatter2.json"), Some("hatter2"), &frozen_keys, &rc10);
+        // The RC9 package is the frozen RC9 release plus the two play keys.
         let bytes = include_bytes!("../../configs/PL-rc9-release-play04.json");
         let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert_eq!(historical_keys(&raw), defaults);
@@ -4052,9 +4196,9 @@ mod tests {
         let mut variant = serde_json::to_value(play).unwrap();
         assert_eq!(variant["replay_play"], "a2-04.lgtape");
         assert_eq!(variant["log_frame_time_every"], 10);
-        variant["replay_play"] = baseline["replay_play"].clone();
-        variant["log_frame_time_every"] = baseline["log_frame_time_every"].clone();
-        assert_eq!(variant, baseline, "the RC9 play config changes only its two declared keys");
+        variant["replay_play"] = rc9["replay_play"].clone();
+        variant["log_frame_time_every"] = rc9["log_frame_time_every"].clone();
+        assert_eq!(variant, rc9, "the RC9 play config changes only its two declared keys");
         // The RC8 package keeps its frozen bytes, its measured defaults and no join key.
         let bytes = include_bytes!("../../configs/PL-rc8-release-play04.json");
         let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
@@ -4106,7 +4250,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) || key == "water_draw_join" { written[key] = value.clone(); }
+            if round5_key(key) || key == "water_draw_join" || key == "fx_unlit_exact" { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
@@ -4180,7 +4324,7 @@ mod tests {
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
                     && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-                    && *k != "water_draw_join" && !round5_key(k)).cloned().collect();
+                    && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();

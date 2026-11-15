@@ -30,7 +30,7 @@ pub(super) fn process(groups: &mut [Group]) {
     let enabled = crate::render::vita_renderer::config().ant_corpse_triangle_cull;
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let trace = std::env::var_os("LOOKING_GLASS_CORPSE_PROBE").is_some()
-        && matches!(crate::sim_maps::probe::frame(), 1400 | 1980 | 2030 | 2100..=2120);
+        && matches!(crate::sim_maps::probe::frame(), 300 | 1400 | 1980 | 2030 | 2100..=2120);
     #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
     let trace = false;
     if !enabled && !trace { return; }
@@ -40,14 +40,14 @@ pub(super) fn process(groups: &mut [Group]) {
     let mut changed: HashMap<(u64,u64,u64), Rc<prepared::Geometry>> = HashMap::new();
     let mut cut = 0;
     for g in groups {
-        if g.ant_dead.is_none() || (!trace && g.ant_dead != Some(true)) { continue; }
+        if !trace && g.ant_dead != Some(true) { continue; }
         for p in &mut g.passes {
             let mesh = p.geometry();
             if mesh.indices.len() % 3 != 0 || mesh.indices.iter().any(|&i| i as usize >= mesh.vertices.len()) { continue; }
             let codes: Vec<_> = mesh.vertices.iter().map(|v| outcode(matrix * v.position.extend(1.))).collect();
             if trace {
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                trace_pass(p, g.ant_dead.unwrap(), g.transparent, matrix, &codes);
+                trace_pass(p, g.ant_dead.unwrap_or(false), g.transparent, matrix, &codes);
             }
             if !enabled || g.ant_dead != Some(true) { continue; }
             let removed = mesh.indices.chunks_exact(3).filter(|t| !keep(t, &codes)).count();
@@ -80,7 +80,7 @@ fn trace_pass(p: &Pass, dead: bool, transparent: bool, m: Mat4, codes: &[u8]) {
         outside+=usize::from(!keep(tri,codes));
         area+=clipped_area(&v);
     }
-    println!("[lg/corpse-probe] frame={} dead={dead} transparent={transparent} blend={} depth_equal={} cutout={} appearance={}/{}/{} vertices={} triangles={} behind={behind} crossing={crossing} outside={outside} clipped_screen_area={area}",crate::sim_maps::probe::frame(),p.blend_index,p.depth_equal,p.cutout,p.appearance.dissolve,p.appearance.ghost,p.appearance.power,mesh.vertices.len(),mesh.indices.len()/3);
+    println!("[lg/corpse-probe] texture={:?} frame={} dead={dead} transparent={transparent} blend={} depth_equal={} cutout={} appearance={}/{}/{} vertices={} triangles={} behind={behind} crossing={crossing} outside={outside} clipped_screen_area={area}",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id),crate::sim_maps::probe::frame(),p.blend_index,p.depth_equal,p.cutout,p.appearance.dissolve,p.appearance.ghost,p.appearance.power,mesh.vertices.len(),mesh.indices.len()/3);
 }
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
 fn clipped_area(triangle: &[Vec4]) -> f64 {

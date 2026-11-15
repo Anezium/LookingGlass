@@ -89,6 +89,23 @@ impl CullGuard {
 impl Drop for CullGuard {
     fn drop(&mut self) { if let Some((preserve,mutable))=self.0 { PRESERVE_SKIN.with(|c| c.set(preserve)); MUTABLE_SKIN.with(|c|c.set(mutable)); } }
 }
+thread_local! { static CULL_OWES_BUDGET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// The availability guard kept a script-owned body prepared in OFF. When the consumer key
+/// releases that guard and the body falls outside the view, the body still owes the shared
+/// frame vertex budget exactly what its publication would have reserved, so this scope marks
+/// the draw: `overlap::capture_single` then charges OFF's reservation without skinning,
+/// reserving output or publishing a group. Every later admission decision stays identical.
+pub(crate) struct CullBudget(Option<bool>);
+impl CullBudget {
+    pub(crate) fn released_by_key(required: bool) -> Self {
+        if !required { return Self(None); }
+        Self(Some(CULL_OWES_BUDGET.with(|c| c.replace(true))))
+    }
+}
+impl Drop for CullBudget {
+    fn drop(&mut self) { if let Some(old) = self.0 { CULL_OWES_BUDGET.with(|c| c.set(old)); } }
+}
+pub(crate) fn cull_owes_budget() -> bool { CULL_OWES_BUDGET.with(|c| c.get()) }
 pub(super) fn culling_allowed() -> bool { PRESERVE_SKIN.with(|c| !c.get()) }
 
 pub(super) fn visual_options(cull: bool, flat: bool, meshes: &[Option<Mesh>]) -> (bool, bool) {
@@ -910,3 +927,19 @@ mod actual_consumer_tests {
         assert_eq!(mutable_reasons(),0);assert!(!culling_allowed());
     }
 }
+
+/// Single preparation declares actual late mesh consumers before body preparation.
+/// Frozen shells, electric expansion and afterimage normal inheritance retain the
+/// old path. A culled body still samples tags and submits its independent props.
+pub(crate) fn consumer_body_culling(afterimages: bool) -> bool {
+    #[cfg(feature="vita_renderer")]
+    { let c=crate::render::vita_renderer::config();
+      c.actor_consumer_frustum_cull && c.skin_actual_consumers && !c.flat_actor_light && overlap::single_preparing()
+          && !afterimages && mutable_reasons()==0 }
+    #[cfg(not(feature="vita_renderer"))]
+    { let _=afterimages;false }
+}
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) mod census;
+#[cfg(all(test,feature="vita_renderer"))]
+mod cull_tests;

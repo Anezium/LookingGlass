@@ -329,6 +329,69 @@ fn unchanged_merged(
     }
     vertex == cached.vertices.len() && index == cached.indices.len()
 }
+/// The opt-in lean program. `fx_unlit_exact` takes precedence when both keys are set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Specialized {
+    Lite,
+    UnlitExact,
+}
+impl Specialized {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Lite => "retained-fx-lite",
+            Self::UnlitExact => "retained-fx-unlit-exact",
+        }
+    }
+    fn fragment(self) -> String {
+        match self {
+            Self::Lite => crate::render::FX_LITE_FRAGMENT.to_owned(),
+            Self::UnlitExact => unlit_exact_fragment(),
+        }
+    }
+}
+pub(crate) fn specialized_program(fx_lite: bool, fx_unlit_exact: bool) -> Option<Specialized> {
+    if fx_unlit_exact {
+        Some(Specialized::UnlitExact)
+    } else if fx_lite {
+        Some(Specialized::Lite)
+    } else {
+        None
+    }
+}
+/// `fx_unlit_exact`: an admitted pass packs sixteen zero light vectors, so the
+/// dynamic light result is exactly zero. Replace only that call and keep every
+/// other operation of the full fragment source byte for byte.
+pub(crate) fn unlit_exact_fragment() -> String {
+    crate::render::FRAGMENT.replace("dynamicLight(worldPosition)", "vec3(0.0)")
+}
+/// Program choice for one draw. A pass that fails `lite_pass` always uses the full
+/// program; a missing specialized program is the documented fallback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Route {
+    Full,
+    Lite,
+    CorpseOpaque,
+}
+fn route(p: &Pass, opaque: bool, specialized: bool) -> Route {
+    if opaque {
+        Route::CorpseOpaque
+    } else if specialized && lite_pass(p) {
+        Route::Lite
+    } else {
+        Route::Full
+    }
+}
+/// Submit-cache key. Each program owns its own pipeline bank, so the lean route
+/// offsets its blend slot past every full-program blend. The corpse program is a
+/// third bank, not an alias of either.
+fn submit_key(key: (usize, bool), route: Route, depth_write: bool) -> (usize, bool, bool) {
+    let offset = match route {
+        Route::Full => 0,
+        Route::Lite => crate::render::BLEND_COUNT,
+        Route::CorpseOpaque => 2 * crate::render::BLEND_COUNT,
+    };
+    (key.0 + offset, key.1, depth_write)
+}
 pub(crate) struct Gpu {
     _game_thread: crate::game_thread::GameThread,
     shader: ShaderId,
@@ -371,6 +434,13 @@ pub(crate) fn lite_pass(p: &Pass) -> bool {
     p.effect && !p.lit && !p.clamp && p.cutout < 0.5 && !(p.appearance.dissolve > 0.)
         && !p.appearance.ghost && !(p.appearance.power > 0.5) && p.filter_fade == 0.
 }
+/// The opt-in programs one configuration asks for: the lean fragment program and
+/// whether the corpse-opaque program is requested. One pure decision, so the
+/// combined selection can be pinned without a GL context.
+fn program_choice(c: &crate::render::vita_renderer::Config) -> (Option<Specialized>, bool) {
+    (specialized_program(c.fx_lite, c.fx_unlit_exact),
+     c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+}
 impl Gpu {
     pub(crate) fn new() -> Result<Self> {
         let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
@@ -388,15 +458,17 @@ impl Gpu {
                 meta(),
             )
             .context("retained actor shader")?;
-        // A lean program that does not build turns `fx_lite` off with a warning.
-        let lite = crate::render::vita_renderer::config().fx_lite.then(|| {
+        // A failed specialized program falls back to the full program.
+        let (specialized, corpse_requested) = program_choice(crate::render::vita_renderer::config());
+        let lite = specialized.and_then(|specialized| {
             crate::frame_profile::shader_creation();
-            let _shader_name = crate::shader_cache::Name::new("retained-fx-lite");
+            let _shader_name = crate::shader_cache::Name::new(specialized.name());
+            let source = specialized.fragment();
             ctx.new_shader(ShaderSource::Glsl { vertex: crate::render::VERTEX,
-                fragment: &crate::environment::fragment(crate::render::FX_LITE_FRAGMENT) }, meta())
-                .map_err(|e| eprintln!("[lg/vita-renderer] warning fx_lite program failed, key off: {e:?}")).ok()
-        }).flatten().map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
-        let corpse_opaque = crate::render::vita_renderer::config().ant_corpse_opaque_shader.then(|| {
+                fragment: &crate::environment::fragment(&source) }, meta())
+                .map_err(|e| eprintln!("[lg/vita-renderer] warning {} program failed, key off: {e:?}", specialized.name())).ok()
+        }).map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
+        let corpse_opaque = corpse_requested.then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name=crate::shader_cache::Name::new("retained-ant-corpse-opaque");
             let fragment=crate::lighting::fragment(&crate::environment::fragment(&super::corpse_opaque::fragment()));
@@ -580,9 +652,16 @@ impl Gpu {
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        let census_started = (p.effect && crate::sim_maps::probe::draw_query::armed())
+            .then(std::time::Instant::now);
         let key = (p.blend_index, p.depth_equal);
-        let opaque = ant_dead==Some(true) && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
-        if opaque {count("vita_ant_corpse_opaque_draws",1);}
+        let c=crate::render::vita_renderer::config();
+        let opaque = (ant_dead==Some(true) && c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+            && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
+        if opaque {
+            count(if ant_dead==Some(true) {"vita_ant_corpse_opaque_draws"} else {"vita_actor_opaque_draws"},1);
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if ant_dead.is_some() && std::env::var_os("LOOKING_GLASS_CORPSE_PROBE").is_some()
             && matches!(crate::sim_maps::probe::frame(),1400 | 1980 | 2030 | 2100..=2120) {
@@ -590,9 +669,16 @@ impl Gpu {
                 crate::sim_maps::probe::frame(),ant_dead.unwrap(),opaque,p.geometry().indices.len()/3,p.geometry().vertices.len());
         }
 
-        let lite = !opaque && self.lite.is_some() && lite_pass(p);
-        if lite { count("vita_fx_lite_draws", 1); }
-        let pipeline = if opaque {self.corpse_opaque.as_ref().unwrap().pipelines.get(&key)} else if lite { self.lite.as_ref().unwrap().pipelines.get(&key) } else { self.pipelines.get(&key) }
+        let program = route(p, opaque, self.lite.is_some());
+        let lite = program == Route::Lite;
+        if lite { count(if crate::render::vita_renderer::config().fx_unlit_exact {
+            "vita_fx_unlit_exact_draws"
+        } else { "vita_fx_lite_draws" }, 1); }
+        let pipeline = match program {
+            Route::CorpseOpaque => self.corpse_opaque.as_ref().unwrap().pipelines.get(&key),
+            Route::Lite => self.lite.as_ref().unwrap().pipelines.get(&key),
+            Route::Full => self.pipelines.get(&key),
+        }
             .expect("prewarmed LG actor pipeline");
         // Several actor layers can share one uploaded vertex/index page.
         // Texture bindings still belong to the individual layer packet.
@@ -602,7 +688,7 @@ impl Gpu {
         let b = &self.buffers[slot].bindings;
         let apply = if c.fx_submit_state_cache {
             // The lean program's pipelines are other state: offset its key past every blend.
-            self.submit_cache.observe((key.0 + if opaque {2*crate::render::BLEND_COUNT} else if lite { crate::render::BLEND_COUNT } else { 0 }, key.1, depth_write),
+            self.submit_cache.observe(submit_key(key, program, depth_write),
                 (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
         } else { [true; 3] };
         if apply[0] {
@@ -650,6 +736,14 @@ impl Gpu {
         }
         let class = if p.effect { crate::gpu_timing::fx_class(p.blend_index) } else { crate::gpu_timing::MASK_ACTORS };
         if !crate::gpu_timing::masked(class) { ctx.draw(0, p.geometry().indices.len() as i32, 1); }
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        if let Some(start) = census_started {
+            let (_, texture) = crate::sim_maps::probe::draw_query::actor_label(
+                p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id));
+            println!("FX_SUBMIT {}", serde_json::json!({"frame": crate::sim_maps::probe::frame(),
+                "texture": texture, "triangles": p.geometry().indices.len()/3,
+                "cpu_ns": start.elapsed().as_nanos() as u64, "query_overhead_included": true}));
+        }
         self.stats.draws += 1;
         self.stats.triangles += p.geometry().indices.len() as u64 / 3;
         let metrics = &mut self.stats.render[usize::from(p.effect)];
@@ -661,6 +755,12 @@ impl Gpu {
         metrics.uniform_uploads += u64::from(traffic.calls > 0);
         metrics.uniform_bytes += traffic.bytes;
         metrics.uniform_gl_calls += traffic.calls;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::character::skinning::census::active() && !p.effect {
+            println!("[lg/submit-census] frame={} texture={:?} triangles={} vertices={} blend={} equal={} depth_write={depth_write} pipeline={} bindings={} uniform_calls={} uniform_bytes={} cpu_ns={}",
+                crate::sim_maps::probe::frame(),crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)),p.geometry().indices.len()/3,p.geometry().vertices.len(),p.blend_index,p.depth_equal,
+                apply[0],apply[1],traffic.calls,traffic.bytes,started.map_or(0,|t|t.elapsed().as_nanos()));
+        }
         if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
     }
 }
@@ -752,7 +852,6 @@ fn center_vertices(vertices: &[Vertex]) -> Vec3 {
 #[cfg(test)]
 fn same_packet(a: &Pass, b: &Pass) -> bool {
     a.mesh.upload_identity == b.mesh.upload_identity
-        && a.mesh.surface.as_ref().map(std::rc::Rc::as_ptr) == b.mesh.surface.as_ref().map(std::rc::Rc::as_ptr)
         && a.blend_index == b.blend_index
         && a.depth_equal == b.depth_equal
         && a.mesh.texture.as_ref() == b.mesh.texture.as_ref()
@@ -779,14 +878,12 @@ fn merge_texture(texture: &Texture2D) -> MergeTexture {
 #[derive(Clone, PartialEq)]
 struct PacketKey {
     upload_identity: Option<u64>,
-    surface: Option<usize>,
     texture: Option<MergeTexture>,
     state: [u32; 20],
 }
 fn packet_key(p: &Pass) -> PacketKey {
     PacketKey {
         upload_identity: p.mesh.upload_identity,
-        surface: p.mesh.surface.as_ref().map(|s| std::rc::Rc::as_ptr(s) as usize),
         texture: p.mesh.texture.as_ref().map(merge_texture),
         state: [
             p.blend_index as u32,
@@ -1024,13 +1121,19 @@ fn merge_cached_options<'a>(
         let same_topology = certified_hit && versions.as_ref().zip(cache.versions.get(&target)).is_some_and(|(a,b)|
             a.len()==b.len() && a.iter().zip(b).all(|(a,b)|a.identity==b.identity && a.topology==b.topology));
         let mut cached = pool.remove(&target);
+        if let Some(cached) = cached.as_mut() {
+            cached.mesh.upload_identity = groups[target].passes[0].mesh.upload_identity;
+        }
         if let Some(previous) = cached.as_ref() {
             let version_hit = certified_hit && versions.is_some_and(|v| cache.versions.get(&target) == Some(v));
             if version_hit || hit && versions.is_none() && unchanged_merged(previous, groups, target, sources) {
                 if !hit && local_hit { count("fx_merge_local_vertex_hits", 1); }
-                let cached = cached.take().unwrap();
+                let mut cached = cached.take().unwrap();
                 if versions.is_some() { groups[target].passes[0].geometry=Some(std::rc::Rc::new(cached)); }
-                else { groups[target].passes[0].geometry=None; groups[target].passes[0].mesh=cached.mesh; }
+                else {
+                    cached.mesh.surface = groups[target].passes[0].mesh.surface.clone();
+                    groups[target].passes[0].geometry=None; groups[target].passes[0].mesh=cached.mesh;
+                }
                 for &source in sources {
                     super::actor_cache::recycle(&mut groups[source].passes);
                 groups[source].passes.clear();
@@ -1112,6 +1215,7 @@ fn merge_cached_options<'a>(
             let old = groups[target].passes[0].geometry();
             cached.mesh.texture = groups[target].passes[0].mesh.texture.clone();
             cached.mesh.surface = groups[target].passes[0].mesh.surface.clone();
+            cached.mesh.upload_identity = groups[target].passes[0].mesh.upload_identity;
             cached.mesh.vertices.clear();
             cached.mesh.indices.clear();
             cached.mesh.vertices.extend_from_slice(&old.vertices);
@@ -1267,6 +1371,8 @@ pub(crate) fn finish_world(
     if flush {
         boundary("flush_vita_3d_packets");
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("raw",&groups);
     super::corpse_triangles::process(&mut groups);
     let cuts = packet_cull::Cuts::new(crate::render::vita_renderer::config());
     if cuts.active() {
@@ -1276,6 +1382,8 @@ pub(crate) fn finish_world(
             packet_cull::cull(&mut gpu.bounds, &mut groups, &mut puffs, matrix, cuts, c.actor_layer_reuse || c.actor_single_prepare);
         }
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("culled",&groups);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     super::corpse_triangles::report(&groups);
     {
@@ -1377,6 +1485,8 @@ pub(crate) fn finish_world(
         opaque.clear(); gpu.opaque_storage = opaque;
     }
     drop(merge_leaf);
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("merged",&groups);
     let mut packets = std::mem::take(&mut gpu.packet_storage); packets.clear();
     let mut ranges = std::mem::take(&mut gpu.range_storage); ranges.clear();
     let mut invalid = 0;
@@ -1436,9 +1546,15 @@ pub(crate) fn finish_world(
     count("vita_fx_compacted_vertices", 0);
     let draw_group = |gpu: &mut Gpu, id: usize| {
         let _census = crate::phase_census::span(if groups[id].passes.iter().all(|p| p.effect) {crate::phase_census::Region::FxSubmit} else {crate::phase_census::Region::ActorSubmit});
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let census_start=crate::character::skinning::census::active().then(std::time::Instant::now);
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent, groups[id].ant_dead);
+        }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::character::skinning::census::active() && groups[id].passes.iter().any(|p|!p.effect) {
+            println!("[lg/group-submit] frame={} group={id} owner={:?} draws={} cpu_ns={}",crate::sim_maps::probe::frame(),crate::character::skinning::census::owner(id),ranges[id].len(),census_start.map_or(0,|t|t.elapsed().as_nanos()));
         }
     };
     // The merged list is final here: let a world submitter plan its runs before any draw.
@@ -1558,6 +1674,8 @@ pub(crate) fn finish_world(
         groups.clear(); f.groups = groups;
         puffs.clear(); f.world_puffs = puffs;
     });
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    crate::character::skinning::census::clear();
     (list_len, dropped + invalid)
 }
 
@@ -2149,6 +2267,373 @@ mod tests {
         p.filter_fade = 0.;
         assert_eq!(&uniforms(p, &f)[48..52], &[0.; 4]);
     }
+    fn light_block(u: &[f32; UNIFORM_FLOATS]) -> &[f32] {
+        let end = UNIFORM_FIELDS.iter().find(|(name, _)| *name == "Lights").unwrap().1;
+        &u[end - 64..end]
+    }
+    fn nonzero_lights(u: &[f32; UNIFORM_FLOATS]) -> bool {
+        light_block(u).iter().any(|v| *v != 0.)
+    }
+    fn frame_with_lights(fullbright: bool) {
+        FRAME.with(|f| {
+            *f.borrow_mut() = Frame {
+                projection: Some(Mat4::IDENTITY),
+                camera: vec3(8., 9., 10.),
+                fullbright,
+                ..Default::default()
+            }
+        });
+        crate::lighting::fixture_lights(vec![
+            crate::lighting::Light { position: vec3(1., 2., 3.), color: vec3(0.6, 0.7, 0.8), radius: 9., only_models: false, flare: false },
+            crate::lighting::Light { position: vec3(-4., 5., 6.), color: vec3(0.1, 0.2, 0.3), radius: 7., only_models: true, flare: false },
+        ]);
+    }
+    fn clear_lights() {
+        crate::lighting::fixture_lights(Vec::new());
+        FRAME.with(|f| *f.borrow_mut() = Frame::default());
+    }
+    fn effect_pass(lit: bool, model: bool) -> Pass {
+        let mut p = fixture_group().passes.pop().unwrap();
+        p.effect = true;
+        p.lit = lit;
+        p.model = model;
+        p
+    }
+    #[test]
+    fn unlit_exact_fragment_replaces_only_the_dynamic_light_call() {
+        let full = crate::render::FRAGMENT;
+        assert_eq!(full.matches("dynamicLight(worldPosition)").count(), 1);
+        let (before, after) = full.split_once("dynamicLight(worldPosition)").unwrap();
+        let exact = unlit_exact_fragment();
+        assert_eq!(exact, format!("{before}vec3(0.0){after}"));
+        assert!(!exact.contains("dynamicLight("));
+        // Every operation outside the zero light addition is retained verbatim.
+        for operation in [
+            "texture2D(Texture,coords)",
+            "CutoutReference",
+            "discard",
+            "LightAtlas",
+            "lighting=min(vec3(1.0),texture2D(LightAtlas,sampleUV).rgb*2.0)",
+            "diffuse.rgb*mix(vec3(1.0),lighting,Lit*(1.0-Fullbright))*Gain.rgb",
+            "rgb+=diffuse.rgb*vec3(0.0)*Gain.rgb",
+            "FxAppearance.x", "FxAppearance.y", "FxAppearance.z", "FxAppearance.w",
+            "vec3(0.65,1.15,0.7)", "vec3(1.3,0.55,0.4)",
+            "fogged(", "SkyBackdrop",
+        ] {
+            assert!(exact.contains(operation), "specialized source lost {operation}");
+        }
+        assert_eq!(Specialized::UnlitExact.fragment(), exact);
+        assert_ne!(Specialized::Lite.fragment(), exact);
+    }
+    #[test]
+    fn specialized_program_precedence_and_fallback_are_explicit() {
+        assert_eq!(specialized_program(false, false), None);
+        assert_eq!(specialized_program(true, false), Some(Specialized::Lite));
+        assert_eq!(specialized_program(false, true), Some(Specialized::UnlitExact));
+        assert_eq!(specialized_program(true, true), Some(Specialized::UnlitExact));
+        assert_eq!(Specialized::Lite.name(), "retained-fx-lite");
+        assert_eq!(Specialized::UnlitExact.name(), "retained-fx-unlit-exact");
+        let mut p = effect_pass(false, true);
+        assert!(lite_pass(&p));
+        assert_eq!(route(&p, false, true), Route::Lite);
+        assert_eq!(route(&p, false, false), Route::Full, "missing program falls back");
+        p.lit = true;
+        assert_eq!(route(&p, false, true), Route::Full, "lit pass never uses either lean program");
+        p.lit = false;
+        p.effect = false;
+        assert_eq!(route(&p, false, true), Route::Full, "non-effect pass is not an FX specialization");
+    }
+    // RC10 merges two branches that each selected one opt-in program. Pin the whole
+    // truth table so neither source branch's selection is lost in the union.
+    #[test]
+    fn combined_actor_program_selection_matches_each_source_branch() {
+        let config = |keys: &str| -> crate::render::vita_renderer::Config {
+            serde_json::from_str(keys).unwrap()
+        };
+        // All off: no lean program and no corpse program, as RC9 before either branch.
+        assert_eq!(program_choice(&config("{}")), (None, false));
+        // fx_lite alone: the existing lean program, unchanged by hatter2.
+        assert_eq!(program_choice(&config(r#"{"fx_lite":true}"#)),
+            (Some(Specialized::Lite), false));
+        // fx_unlit_exact alone: hatter2's program only.
+        assert_eq!(program_choice(&config(r#"{"fx_unlit_exact":true}"#)),
+            (Some(Specialized::UnlitExact), false));
+        // actor_opaque_shader alone: skool1's corpse program, still no lean program.
+        assert_eq!(program_choice(&config(r#"{"actor_opaque_shader":true}"#)), (None, true));
+        // The RC8 corpse default keeps asking for the same program.
+        assert_eq!(program_choice(&config(r#"{"ant_corpse_opaque_shader":true}"#)), (None, true));
+        // The merged case: hatter2's program and skool1's corpse program together.
+        assert_eq!(program_choice(&config(r#"{"fx_unlit_exact":true,"actor_opaque_shader":true}"#)),
+            (Some(Specialized::UnlitExact), true));
+        // Combinations neither source branch could see: precedence, and both at once.
+        assert_eq!(program_choice(&config(r#"{"fx_lite":true,"fx_unlit_exact":true}"#)),
+            (Some(Specialized::UnlitExact), false));
+        assert_eq!(program_choice(&config(r#"{"fx_lite":true,"actor_opaque_shader":true}"#)),
+            (Some(Specialized::Lite), true));
+    }
+    #[test]
+    fn specialization_rejects_each_clip_and_appearance_path_and_counts_routes() {
+        let base = || effect_pass(false, true);
+        for (name, adjust) in [
+            ("clamp", (|p: &mut Pass| p.clamp = true) as fn(&mut Pass)),
+            ("cutout gt0", |p: &mut Pass| p.cutout = 1.),
+            ("cutout reference", |p: &mut Pass| p.cutout = 5.),
+            ("cutout threshold half", |p: &mut Pass| p.cutout = 0.5),
+            ("dissolve", |p: &mut Pass| p.appearance.dissolve = 0.0001),
+            ("ghost", |p: &mut Pass| p.appearance.ghost = true),
+            ("power red", |p: &mut Pass| p.appearance.power = 1.),
+            ("power green", |p: &mut Pass| p.appearance.power = 2.),
+            ("filter fade", |p: &mut Pass| p.filter_fade = 0.25),
+            ("negative filter fade", |p: &mut Pass| p.filter_fade = -0.25),
+        ] {
+            let mut p = base();
+            assert_eq!(route(&p, false, true), Route::Lite, "control {name}");
+            adjust(&mut p);
+            assert!(!lite_pass(&p), "{name} was admitted");
+            assert_eq!(route(&p, false, true), Route::Full, "{name} used the lean program");
+        }
+        let mut sequence = Vec::new();
+        for lit in [true, false, true, false] {
+            sequence.push(effect_pass(lit, true));
+        }
+        let mut muted = base();
+        muted.clamp = true;
+        sequence.push(muted);
+        let mut harmless = base();
+        harmless.appearance.power = 0.5;
+        sequence.push(harmless);
+        let counts = sequence.iter().fold([0u64; 3], |mut counts, p| {
+            counts[match route(p, false, true) { Route::Full => 0, Route::Lite => 1, Route::CorpseOpaque => 2 }] += 1;
+            counts
+        });
+        assert_eq!(counts, [3, 3, 0], "both routes must be exercised");
+    }
+    #[test]
+    fn lit_effects_keep_nonzero_dynamic_lights_through_run_time_switches() {
+        frame_with_lights(false);
+        let mut templates = [None; 4];
+        let mut p = effect_pass(true, true);
+        let lit = FRAME.with(|f| uniforms(&p, &f.borrow()));
+        assert_eq!(lit[35], 1.);
+        assert!(nonzero_lights(&lit));
+        assert_eq!(prepared_uniforms(&p, &mut templates).map(f32::to_bits), lit.map(f32::to_bits));
+        assert_eq!(route(&p, false, true), Route::Full);
+        // The same payload switches to unlit: the packed lights become zero and
+        // the draw changes program. Switching back restores the lit payload.
+        p.lit = false;
+        let unlit = FRAME.with(|f| uniforms(&p, &f.borrow()));
+        assert_eq!(unlit[35], 0.);
+        assert!(!nonzero_lights(&unlit));
+        assert_eq!(prepared_uniforms(&p, &mut templates).map(f32::to_bits), unlit.map(f32::to_bits));
+        assert_eq!(route(&p, false, true), Route::Lite);
+        p.lit = true;
+        let lit_again = FRAME.with(|f| uniforms(&p, &f.borrow()));
+        assert!(nonzero_lights(&lit_again));
+        assert_eq!(lit_again.map(f32::to_bits), lit.map(f32::to_bits));
+        assert_eq!(route(&p, false, true), Route::Full);
+        // Fullbright zeroes the packed payload but must never admit a lit pass.
+        FRAME.with(|f| f.borrow_mut().fullbright = true);
+        let fullbright = FRAME.with(|f| uniforms(&p, &f.borrow()));
+        assert_eq!(fullbright[34], 1.);
+        assert!(!nonzero_lights(&fullbright));
+        assert_eq!(route(&p, false, true), Route::Full);
+        p.lit = false;
+        assert_eq!(route(&p, false, true), Route::Lite);
+        // Non-model passes exclude models-only lights; lit non-model passes
+        // still keep the full program and their allowed lights.
+        FRAME.with(|f| f.borrow_mut().fullbright = false);
+        p.lit = true;
+        p.model = false;
+        let non_model = FRAME.with(|f| uniforms(&p, &f.borrow()));
+        assert!(nonzero_lights(&non_model));
+        assert_eq!(&non_model[52..56], &[1., 2., 3., 9.]);
+        assert_eq!(&non_model[64..68], &[0.; 4], "models-only light leaked into a non-model pass");
+        assert_eq!(route(&p, false, true), Route::Full);
+        clear_lights();
+    }
+    #[test]
+    fn lightmap_bearing_geometry_is_classified_by_lit_not_by_its_atlas_coordinates() {
+        let mut p = effect_pass(false, false);
+        for v in &mut p.mesh.vertices {
+            // lm.xy are atlas coordinates and lm.z selects the lightmap tile.
+            v.normal = vec4(0.25, 0.5, 2., 0.);
+        }
+        assert_eq!(route(&p, false, true), Route::Lite, "unlit lightmapped FX must stay specialized");
+        p.lit = true;
+        assert_eq!(route(&p, false, true), Route::Full, "lit lightmapped FX must keep the full program");
+        // The retained lightmap branch is still present in the exact source; it is
+        // multiplied through Lit=0 for an admitted pass instead of being removed.
+        assert!(unlit_exact_fragment().contains("lm.z>0.5&&FxModel<0.5"));
+        assert!(unlit_exact_fragment().contains("Lit*(1.0-Fullbright)"));
+    }
+    #[test]
+    fn lit_and_unlit_draws_never_share_cached_state() {
+        frame_with_lights(false);
+        let mut templates = [None; 4];
+        let mut p = effect_pass(false, true);
+        let unlit = prepared_uniforms(&p, &mut templates);
+        assert!(!nonzero_lights(&unlit));
+        p.lit = true;
+        let lit = prepared_uniforms(&p, &mut templates);
+        assert!(nonzero_lights(&lit), "the unlit template leaked into the lit payload");
+        p.lit = false;
+        let unlit_again = prepared_uniforms(&p, &mut templates);
+        assert_eq!(unlit_again.map(f32::to_bits), unlit.map(f32::to_bits));
+        // model/non-model is a separate template axis as well.
+        p.lit = true;
+        p.model = false;
+        let non_model = prepared_uniforms(&p, &mut templates);
+        assert_eq!(&non_model[52..56], &[1., 2., 3., 9.]);
+        assert_eq!(&non_model[64..68], &[0.; 4]);
+        // Merge and packet identity carry the lit bit.
+        p.model = true;
+        p.lit = false;
+        let unlit_key = packet_key(&p);
+        p.lit = true;
+        let lit_key = packet_key(&p);
+        assert!(unlit_key != lit_key);
+        let mut groups = vec![fixture_group(), fixture_group()];
+        for g in &mut groups {
+            g.passes[0].effect = true;
+            g.passes[0].lit = false;
+        }
+        groups[1].passes[0].lit = true;
+        let mut list = vec![(2., Source::Actor(0)), (1., Source::Actor(1))];
+        merge_adjacent(&mut groups, &mut list);
+        assert_eq!(list.len(), 2, "lit and unlit packets were merged");
+        // Each program owns a distinct submit-cache slot even when the payload
+        // bytes, bindings and blend are identical.
+        let full_key = submit_key((7, false), Route::Full, true);
+        let lite_key = submit_key((7, false), Route::Lite, true);
+        let opaque_key = submit_key((7, false), Route::CorpseOpaque, true);
+        assert_ne!(full_key, lite_key);
+        assert_ne!(full_key, opaque_key);
+        assert_ne!(lite_key, opaque_key);
+        let bindings = (1, [2, 3, 4]);
+        let u = [1., 2., 3., 4.];
+        let mut cache = SubmitCache::<(usize, bool, bool), (usize, [usize; 3]), 4>::default();
+        assert_eq!(cache.observe(full_key, bindings, &u), [true; 3]);
+        assert_eq!(cache.observe(full_key, bindings, &u), [false; 3]);
+        assert_eq!(cache.observe(lite_key, bindings, &u), [true; 3], "program switch kept the full cache");
+        assert_eq!(cache.observe(lite_key, bindings, &u), [false; 3]);
+        assert_eq!(cache.observe(full_key, bindings, &u), [true; 3]);
+        clear_lights();
+    }
+    /// The producer side of an electric/frozen shell, without a GL context:
+    /// `effect` and `lit` come from the real `skin*` path, including the actor
+    /// cache used by opaque frozen geometry.
+    fn produced_classification(stage: crate::materials::Stage, texture: u32, effect: bool,
+        appearance: super::super::Appearance) -> (bool, bool, bool) {
+        use crate::render_fx::test_support;
+        let base = test_support::texture(texture);
+        let _surface = test_support::register(&base, vec![(stage, vec![base.clone()])], true);
+        let mesh = Mesh { upload_identity: None, surface: None,
+            vertices: vec![
+                Vertex { position: vec3(-1., -1., 0.), uv: vec2(0., 0.),
+                    color: [255, 255, 255, 200], normal: vec4(0.25, 0.5, 2., 0.) },
+                Vertex { position: vec3(1., -1., 0.), uv: vec2(1., 0.),
+                    color: [255, 255, 255, 200], normal: vec4(0.25, 0.5, 2., 0.) },
+                Vertex { position: vec3(0., 1., 0.), uv: vec2(0.5, 1.),
+                    color: [255, 255, 255, 200], normal: vec4(0.25, 0.5, 2., 0.) },
+            ],
+            indices: vec![0, 1, 2],
+            texture: Some(base),
+        };
+        test_support::begin_direct(vec3(0., 0., 10.), Vec3::Z, 0.25, appearance);
+        if effect { crate::render_fx::skin_effect(&mesh, 0.2, 1.); } else { crate::render_fx::skin(&mesh); }
+        let row = FRAME.with(|f| {
+            let f = f.borrow();
+            assert_eq!(f.groups.len(), 1, "one shell must submit one group");
+            assert_eq!(f.groups[0].passes.len(), 1, "one stage must submit one pass");
+            let p = &f.groups[0].passes[0];
+            (p.effect, p.lit, lite_pass(p))
+        });
+        test_support::end_frame();
+        test_support::clear();
+        row
+    }
+    fn parsed_stage(source: &str, name: &str) -> crate::materials::Stage {
+        crate::materials::parse(source).unwrap()[name].stages[0].clone()
+    }
+    #[test]
+    fn lit_material_producers_keep_lighting_and_electric_frozen_and_tints_stay_full() {
+        use super::super::Appearance;
+        let shock = parsed_stage("shock\n{\n{\nalphatest greaterequal 0.3\nmap lightning.tga\nblendFunc GL_SRC_ALPHA GL_ONE_MINUS_SRC_ALPHA\nalphaGen wave inversesawtooth -2 3 0 1\n}\n}", "shock");
+        let (effect, lit, admitted) = produced_classification(shock, 0x7f01, true, Appearance::default());
+        assert!(effect && lit);
+        assert!(!admitted, "electric shell entered the unlit program");
+        for (index, generator) in ["lightingdiffuse", "vertex", "entity"].into_iter().enumerate() {
+            let stage = parsed_stage(&format!("lit\n{{\n{{\nmap {generator}.tga\nrgbGen {generator}\n}}\n}}"), "lit");
+            let (effect, lit, admitted) = produced_classification(stage, 0x7f10 + index as u32, true, Appearance::default());
+            assert!(effect, "{generator} effect was dropped");
+            assert!(lit, "rgbGen {generator} lost its lighting classification");
+            assert!(!admitted, "rgbGen {generator} entered the unlit program");
+        }
+        let alpha_lit = parsed_stage("lit\n{\n{\nmap alpha.tga\nalphaGen lightingSpecular\n}\n}", "lit");
+        let (effect, lit, admitted) = produced_classification(alpha_lit, 0x7f20, true, Appearance::default());
+        assert!(effect && lit);
+        assert!(!admitted, "lighting-dependent alpha entered the unlit program");
+        for (index, material) in ["powerups/iceblock1", "powerups/iceblock2"].into_iter().enumerate() {
+            let name = material.rsplit('/').next().unwrap();
+            let stage = parsed_stage(&format!("{material}\n{{\n{{\nmap ice.tga\nblendFunc GL_ONE GL_ONE\nrgbGen entity\n}}\n}}"), material);
+            let (effect, lit, admitted) = produced_classification(stage, 0x7f30 + index as u32, false, Appearance::default());
+            assert!(!effect, "{name} frozen shell was marked as an effect");
+            assert!(lit, "{name} lost its entity lighting");
+            assert!(!admitted, "{name} frozen shell entered the unlit program");
+        }
+        // Anti-vacuity: an unlit, untinted effect does take the specialized route,
+        // and the same material through frozen's skin() does not become an effect.
+        let unlit = parsed_stage("steam\n{\n{\nmap steam.tga\nrgbGen identity\n}\n}", "steam");
+        assert_eq!(produced_classification(unlit.clone(), 0x7f40, true, Appearance::default()), (true, false, true));
+        assert_eq!(produced_classification(unlit.clone(), 0x7f41, false, Appearance::default()), (false, false, false));
+        for (power, label) in [(1., "red"), (2., "green")] {
+            let tinted = Appearance { power, ..Default::default() };
+            assert_eq!(produced_classification(unlit.clone(), 0x7f42 + (power as u32), true, tinted), (true, false, false), "{label} power tint was admitted");
+        }
+    }
+    #[test]
+    fn one_effect_switching_lit_and_unlit_at_run_time_switches_programs_and_payloads() {
+        use crate::render_fx::test_support;
+        use super::super::Appearance;
+        frame_with_lights(false);
+        let lit_stage = parsed_stage("lit\n{\n{\nmap lit.tga\nrgbGen lightingDiffuse\n}\n}", "lit");
+        let unlit_stage = parsed_stage("unlit\n{\n{\nmap unlit.tga\nrgbGen identity\n}\n}", "unlit");
+        let lit_texture = test_support::texture(0x7f50);
+        let unlit_texture = test_support::texture(0x7f51);
+        let _lit = test_support::register(&lit_texture, vec![(lit_stage, vec![lit_texture.clone()])], true);
+        let _unlit = test_support::register(&unlit_texture, vec![(unlit_stage, vec![unlit_texture.clone()])], true);
+        let mut mesh = Mesh { upload_identity: None, surface: None,
+            vertices: vec![Vertex::new(0., 0., 0., 0., 0., WHITE); 3],
+            indices: vec![0, 1, 2],
+            texture: Some(lit_texture.clone()),
+        };
+        let mut routes = Vec::new();
+        for (lit_material, fullbright) in [(true, false), (false, false), (true, false), (false, true), (true, true)] {
+            mesh.texture = Some(if lit_material { lit_texture.clone() } else { unlit_texture.clone() });
+            test_support::begin_direct(vec3(0., 0., 10.), Vec3::Z, 0.25, Appearance::default());
+            FRAME.with(|f| {
+                let mut f = f.borrow_mut();
+                f.projection = Some(Mat4::IDENTITY);
+                f.fullbright = fullbright;
+            });
+            crate::render_fx::skin_effect(&mesh, 0.2, 1.);
+            let (route, has_lights, lit) = FRAME.with(|f| {
+                let f = f.borrow();
+                let p = &f.groups[0].passes[0];
+                (route(p, false, true), nonzero_lights(&uniforms(p, &f)), p.lit)
+            });
+            routes.push(route);
+            if lit && !fullbright {
+                assert!(has_lights, "lit stage lost its dynamic lights");
+            } else {
+                assert!(!has_lights, "zero-light pass kept a nonzero payload");
+            }
+            test_support::end_frame();
+        }
+        test_support::clear();
+        assert_eq!(routes, vec![Route::Full, Route::Lite, Route::Full, Route::Lite, Route::Full]);
+        clear_lights();
+    }
     #[test]
     fn deferred_depth_scope_restores_nested_and_empty_calls() {
         FRAME.with(|f| {
@@ -2165,5 +2650,13 @@ mod tests {
         });
         assert!(!FRAME.with(|f| f.borrow().depth_read_only));
         FRAME.with(|f| *f.borrow_mut() = Frame::default());
+    }
+}
+
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+fn census_groups(stage:&str,groups:&[super::Group]) {
+    if !crate::character::skinning::census::active() {return;}
+    for (id,g) in groups.iter().enumerate() {
+        println!("[lg/group-census] frame={} stage={stage} group={id} owner={:?} layers={} triangles={} effect={} textures={:?}",crate::sim_maps::probe::frame(),crate::character::skinning::census::owner(id),g.passes.len(),g.passes.iter().map(|p|p.geometry().indices.len()/3).sum::<usize>(),g.passes.iter().all(|p|p.effect),g.passes.iter().map(|p|crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id))).collect::<Vec<_>>());
     }
 }

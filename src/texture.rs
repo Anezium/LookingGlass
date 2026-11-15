@@ -83,6 +83,7 @@ fn share_window() -> bool {
 }
 
 /// One uploaded texture and the facts a caller cannot recompute after a reuse.
+#[derive(Clone)]
 pub(crate) struct SharedTexture {
     pub texture: Texture2D,
     /// Every texel is fully transparent, as `fill_cuts` reads it.
@@ -149,7 +150,7 @@ pub(crate) fn decode_upload_shared_sampled(
     decode_upload_keyed(assets, path, sampler).map(|s| s.texture)
 }
 
-fn decode_upload_keyed(assets: &mut Assets, path: &str, sampler: Sampler) -> Result<SharedTexture> {
+pub(crate) fn decode_upload_keyed(assets: &mut Assets, path: &str, sampler: Sampler) -> Result<SharedTexture> {
     thread_local! { static NEXT_UPLOAD: Cell<u64> = const { Cell::new(1) }; }
     let upload_identity = NEXT_UPLOAD.with(|n| { let v = n.get(); n.set(v.checked_add(1).expect("upload identity overflow")); v });
     let share = retains_shared_uploads();

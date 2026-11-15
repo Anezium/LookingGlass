@@ -2002,6 +2002,11 @@ fn draw_skin_deformed(
         crate::light_profile::RenderMetrics { visibility_tests: 1, ..Default::default() }); }
     let visible = !(cull && skinning::outside_skin_bounds(cull, &skeleton.skin_bounds, pose, bone_scales,
         world_rotation.unwrap(), transform.translation, scale));
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").is_some() && crate::sim_maps::probe::frame()==300 {
+        println!("[lg/skin-census] identity={:?} bones={} visible={visible} cull={cull} allowed={} preserved_materials={} palette={use_palette} mutable={} surfaces={} triangles={} gathering={}",
+            skinning::identity::current(),pose.len(),skinning::culling_allowed(),meshes.iter().flatten().filter(|m|crate::render_fx::skin_requires_preservation(m)).count(),skinning::mutable_reasons(),meshes.iter().flatten().count(),meshes.iter().flatten().map(|m|m.indices.len()/3).sum::<usize>(),skinning::overlap::gather_only());
+    }
     skinning::with_palette(use_palette, pose, bone_scales, |palette| {
         drop(character_setup_profile);
         drop(setup_profile);

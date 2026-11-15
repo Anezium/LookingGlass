@@ -56,6 +56,8 @@ impl Buffer {
     }
     fn prepare_mode(&mut self, puffs: &[Puff], emitters: &[Emitter], camera: Vec3, direction: Option<Vec3>, raw: bool) {
         let _span = crate::frame_profile::span("particle_producer");
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        let census_started = crate::sim_maps::probe::draw_query::armed().then(std::time::Instant::now);
         self.live = 0;
         self.raw_live = 0;
         self.recipes.clear();
@@ -81,6 +83,23 @@ impl Buffer {
             crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::PairJobs,1);
             crate::character::skinning::overlap::cpu_pair(||kernel(ra,a),||kernel(rb,b));
         } else { kernel(&self.recipes,&mut self.output); }
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        if let Some(start) = census_started {
+            println!("FX_PREPARE {}", serde_json::json!({"frame": crate::sim_maps::probe::frame(),
+                "particles": puffs.len(), "cpu_ns": start.elapsed().as_nanos() as u64,
+                "worker": worker, "raw": raw}));
+            for (index, e) in emitters.iter().enumerate() {
+                let count = puffs.iter().filter(|p| p.emitter == index).count();
+                let started = std::time::Instant::now();
+                for (p, r) in puffs.iter().zip(&self.recipes).filter(|(p, _)| p.emitter == index) {
+                    std::hint::black_box((p, quad(r)));
+                }
+                println!("FX_EMITTER {}", serde_json::json!({"frame": crate::sim_maps::probe::frame(),
+                    "entity": e.id, "name": e.spec.name, "image": e.spec.image, "particles": count,
+                    "blend": if e.additive {"AlphaAdd"} else {"Alpha"}, "layers": 1,
+                    "kernel_remeasure_ns": started.elapsed().as_nanos() as u64}));
+            }
+        }
         if raw {
             self.raw_live = puffs.len();
             crate::render_fx::retained::count("particle_direct_quads", self.raw_live as u64);
