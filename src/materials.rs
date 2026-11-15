@@ -697,6 +697,20 @@ mod tests {
         assert_eq!(lines("/* ignored { */ good\n{\n}")[0], vec!["good"]);
     }
     #[test]
+    fn lighting_and_entity_generators_are_conservatively_lit_stages() {
+        let source = "lit\n{\n{\nmap a.tga\nrgbGen lightingDiffuse\n}\n{\nmap b.tga\nrgbGen vertex\n}\n{\nmap c.tga\nrgbGen entity\n}\n{\nmap d.tga\nalphaGen lightingSpecular\n}\n{\nmap e.tga\nrgbGen identity\n}\n{\nmap f.tga\nrgbGen identityLighting\n}\n}";
+        let stages = &parse(source).unwrap()["lit"].stages;
+        assert_eq!(stages.len(), 6);
+        assert_eq!(
+            stages.iter().map(|s| s.identity).collect::<Vec<_>>(),
+            vec![false, false, false, false, true, true],
+            "only identity/identityLighting may be unlit"
+        );
+        assert!(!stages[3].vertex_alpha, "lightingSpecular is not a vertex alpha implementation");
+        assert!(!stages[1].vertex_alpha && !stages[2].vertex_alpha,
+            "rgbGen vertex/entity are lighting generators, not alpha generators");
+    }
+    #[test]
     fn explicit_alpha_thresholds_survive_material_parsing() {
         for (comparison, mode) in [
             ("greaterequal", 5),

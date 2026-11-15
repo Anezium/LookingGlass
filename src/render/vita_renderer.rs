@@ -3470,7 +3470,7 @@ mod tests {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-            && *k != "water_draw_join" && !round5_key(k)).cloned().collect::<Vec<_>>();
+            && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -3484,6 +3484,39 @@ mod tests {
         }
         let raw: serde_json::Value = serde_json::from_slice(include_bytes!("../../configs/PL-release.json")).unwrap();
         assert_eq!(raw["water_draw_join"], true);
+    }
+    #[test]
+    fn fx_unlit_exact_is_off_by_default_strict_and_only_the_candidate_pair_uses_it() {
+        assert!(!Config::default().fx_unlit_exact);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().fx_unlit_exact);
+        assert!(serde_json::from_str::<Config>(r#"{"fx_unlit_exact":true}"#).unwrap().fx_unlit_exact);
+        assert!(serde_json::from_str::<Config>(r#"{"fx_unlit_exact":1}"#).is_err());
+        // Every release and historical input omits the opt-in, so its release
+        // default stays off. The pinned files are not rewritten to add a key.
+        for bytes in [&include_bytes!("../../configs/PL-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc9-release-play04.json")[..],
+                      &include_bytes!("../../configs/PL-rc8-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc1.json")[..]] {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            assert!(!c.fx_unlit_exact, "a release input enabled fx_unlit_exact");
+        }
+        let control_bytes = include_bytes!("../../configs/PL-a5-hatter2-control.json");
+        let exact_bytes = include_bytes!("../../configs/PL-a5-hatter2-unlit-exact.json");
+        let (control, rejected) = parse_runtime_config(control_bytes).unwrap();
+        assert!(rejected.is_none());
+        control.validate().unwrap();
+        let (exact, rejected) = parse_runtime_config(exact_bytes).unwrap();
+        assert!(rejected.is_none());
+        exact.validate().unwrap();
+        assert!(!control.fx_unlit_exact && exact.fx_unlit_exact);
+        let mut off = serde_json::to_value(control).unwrap();
+        let mut on = serde_json::to_value(exact).unwrap();
+        off["fx_unlit_exact"] = on["fx_unlit_exact"].clone();
+        assert_eq!(off, on, "the hatter2 pair changes only fx_unlit_exact");
+        assert_eq!(crate::render_fx::retained::specialized_program(true, true),
+            Some(crate::render_fx::retained::Specialized::UnlitExact),
+            "fx_unlit_exact takes precedence over fx_lite");
     }
     #[test]
     fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {
@@ -3930,7 +3963,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -4072,7 +4105,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) || key == "water_draw_join" { written[key] = value.clone(); }
+            if round5_key(key) || key == "water_draw_join" || key == "fx_unlit_exact" { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
@@ -4146,7 +4179,7 @@ mod tests {
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
                     && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-                    && *k != "water_draw_join" && !round5_key(k)).cloned().collect();
+                    && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
