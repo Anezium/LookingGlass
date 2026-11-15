@@ -1,6 +1,7 @@
 use crate::assets::Assets;
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::Texture2D;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 /// Longest side, in pixels, of an RGBA8 texture uploaded on Vita.
@@ -8,6 +9,122 @@ use std::collections::BTreeMap;
 /// Desktop uploads ignore this cap.
 #[cfg_attr(not(any(test, target_os = "vita")), allow(dead_code))]
 pub const VITA_TEXTURE_MAX_DIM: u16 = 512;
+
+/// The launch's shared uploads for `load_texture_share`, and how they were served.
+#[derive(Default)]
+struct Shared {
+    uploaded: BTreeMap<String, (Texture2D, bool)>,
+    hits: u32,
+    misses: u32,
+}
+thread_local! { static SHARED: RefCell<Shared> = RefCell::new(Shared::default()); }
+
+/// One uploaded texture and the facts a caller cannot recompute after a reuse.
+pub(crate) struct SharedTexture {
+    pub texture: Texture2D,
+    /// Every texel is fully transparent, as `fill_cuts` reads it.
+    pub zero_alpha: bool,
+}
+
+fn zero_alpha(pixels: &[u8]) -> bool {
+    !pixels.is_empty() && pixels.chunks_exact(4).all(|p| p[3] == 0)
+}
+
+/// `load_texture_share` is off in every shipped config and never reaches a device
+/// unless a person sets it. Without `vita_renderer` the key has no reader, so off.
+fn share_enabled() -> bool {
+    #[cfg(feature = "vita_renderer")]
+    { crate::render::vita_renderer::config().load_texture_share }
+    #[cfg(not(feature = "vita_renderer"))]
+    { false }
+}
+
+/// Decode and upload one asset path, or reuse the copy this load already uploaded.
+///
+/// Two callers that name the same resolved path get the same pixels from the same
+/// archive entry, so the second read, decode and GPU allocation are pure repetition.
+/// The texture is returned as a strong clone, so a shared entry is never freed while
+/// any of its users lives. Keys are cleared at the end of every load (`release_shared`).
+pub(crate) fn decode_upload_shared(assets: &mut Assets, path: &str) -> Result<Texture2D> {
+    decode_upload_keyed(assets, path, path).map(|s| s.texture)
+}
+
+/// The same, keeping the zero-alpha verdict for `fill_cuts`.
+pub(crate) fn decode_upload_shared_full(assets: &mut Assets, path: &str) -> Result<SharedTexture> {
+    decode_upload_keyed(assets, path, path)
+}
+
+/// The same, for a caller that sets repeat wrap on the result. Repeat and clamp
+/// cannot share a GPU texture without changing sampling, so they use distinct keys.
+pub(crate) fn decode_upload_shared_tiling(assets: &mut Assets, path: &str) -> Result<Texture2D> {
+    decode_upload_keyed(assets, path, &tiling_key(path)).map(|s| s.texture)
+}
+
+fn tiling_key(path: &str) -> String {
+    format!("{path}\u{1}tiling")
+}
+
+fn decode_upload_keyed(assets: &mut Assets, path: &str, key: &str) -> Result<SharedTexture> {
+    let share = share_enabled();
+    if share {
+        let hit = SHARED.with(|s| {
+            let mut s = s.borrow_mut();
+            match s.uploaded.get(key) {
+                Some((texture, zero_alpha)) => {
+                    let found = (texture.clone(), *zero_alpha);
+                    s.hits += 1;
+                    Some(SharedTexture { texture: found.0, zero_alpha: found.1 })
+                }
+                None => { s.misses += 1; None }
+            }
+        });
+        if let Some(shared) = hit {
+            verify_hit(assets, path, &shared)?;
+            return Ok(shared);
+        }
+    }
+    let image = decode(assets, path)?;
+    let texture = upload_rgba8(image.width, image.height, &image.pixels);
+    texture.set_filter(macroquad::texture::FilterMode::Linear);
+    let shared = SharedTexture { texture, zero_alpha: zero_alpha(&image.pixels) };
+    if share {
+        SHARED.with(|s| {
+            let mut s = s.borrow_mut();
+            s.uploaded.insert(key.to_owned(), (shared.texture.clone(), shared.zero_alpha));
+        });
+    }
+    Ok(shared)
+}
+
+/// Host check only: a reused upload must read back exactly like a fresh one.
+/// Off unless `LOOKING_GLASS_TEXTURE_SHARE_VERIFY` is set; the Vita has no readback.
+fn verify_hit(assets: &mut Assets, path: &str, shared: &SharedTexture) -> Result<()> {
+    #[cfg(not(target_os = "vita"))]
+    if std::env::var_os("LOOKING_GLASS_TEXTURE_SHARE_VERIFY").is_some() {
+        let image = decode(assets, path)?;
+        let fresh = upload_rgba8(image.width, image.height, &image.pixels);
+        let (a, b) = (fresh.get_texture_data(), shared.texture.get_texture_data());
+        ensure!(
+            a.width == b.width && a.height == b.height && a.bytes == b.bytes,
+            "shared upload differs from a fresh one: {path}"
+        );
+    }
+    #[cfg(target_os = "vita")]
+    let _ = (assets, path, shared);
+    Ok(())
+}
+
+/// End one load's sharing window and report what it saved, as one line.
+pub(crate) fn release_shared() {
+    SHARED.with(|s| {
+        let mut s = s.borrow_mut();
+        if (s.hits, s.misses) != (0, 0) {
+            eprintln!("[lg/texture-share] hits={} misses={} uploaded={}", s.hits, s.misses, s.uploaded.len());
+        }
+        *s = Shared::default();
+    });
+}
+
 
 /// Upload immutable game pixels in DXT5 on Vita; dynamic textures use the
 /// separate upload helper so ordinary subimage updates remain valid.
@@ -281,6 +398,19 @@ pub fn decode(assets: &mut Assets, name: &str) -> Result<RgbaImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tiling_and_clamped_paths_never_share_a_key() {
+        let p = "models/fx/cap.ftx";
+        assert_ne!(p.to_owned(), tiling_key(p));
+        assert_eq!(tiling_key(p), tiling_key(p));
+        assert_ne!(tiling_key("a"), tiling_key("b"));
+    }
+    #[test]
+    fn zero_alpha_reads_every_texel() {
+        assert!(zero_alpha(&[0, 0, 0, 0, 9, 9, 9, 0]));
+        assert!(!zero_alpha(&[0, 0, 0, 0, 9, 9, 9, 1]));
+        assert!(!zero_alpha(&[]));
+    }
     #[test]
     fn ftx_preserves_rgba_and_rejects_bad_sizes() {
         let mut b = Vec::new();

@@ -425,6 +425,7 @@ async fn finish_entered(
     timing.mark("level_art");
     crate::loading_screen::between("level_art").await;
     crate::transition_memory::fault("level_art")?;
+    crate::texture::release_shared();
     Ok(Entered {
         art,
         scene,
@@ -1056,6 +1057,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             save_frame.clear();
             #[cfg(feature = "native_timing")]
             timing_ready!(timing_install_reason!($install));
+            crate::texture::release_shared();
         }};
     }
     #[cfg(target_os = "vita")]
@@ -1105,7 +1107,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     } else {
         #[cfg(feature = "native_timing")]
         timing.with(|r| r.before_install());
+        // The boot route builds the whole level on the main thread before the viewer
+        // loop exists, so the menu stays frozen unless a load is opened here. With
+        // `loading_screen` off, none of this presents a frame.
+        let boot_loading = crate::loading_screen::begin("chapter-or-console", &maps[current]);
+        if boot_loading.is_some() { crate::loading_screen::released().await; }
+        crate::texture::release_shared();
         scene = load_scene(&mut assets, &maps[current], options.difficulty)?;
+        crate::loading_screen::between("scene").await;
         level_art = LevelArt::default();
         skip_scene = crate::cinematic::Skip::default();
         power_art = crate::powerups::Art::load(&mut assets)?;
@@ -1135,6 +1144,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if options.larva_preview && maps[current] == "centipede1" {
             npcs = crate::npc::Npcs::larva_preview(&mut assets)?;
         }
+        crate::loading_screen::between("npcs").await;
         catalog = Catalog::load(&mut assets)?;
         stats = starting_stats(&options, &maps[current], entry_spawn.as_deref());
         println!(
@@ -1158,6 +1168,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         environment_clock = 0.;
         audio.load(&mut assets, &maps[current], &scene.map);
         story = crate::story::Story::load(&mut assets, &maps[current]);
+        crate::loading_screen::between("sound").await;
         let mut entry_timing = crate::startup::Phase::new("entry_after_story");
         eprintln!("[lg/startup] entry owner=engine map={} opening_roq_requested={opening_requested}", maps[current]);
         if options.shelf_preview {
@@ -1221,11 +1232,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         entry_timing.mark("spawn_and_story_entry");
         alice = Character::load(&mut assets).context("Loading Alice's character")?;
         entry_timing.mark("alice_character");
+        crate::loading_screen::between("alice").await;
         aim_pointer = crate::targeting::Pointer::load(&mut assets)?;
         alice.reset(&player, yaw);
         entry_timing.mark("aim_pointer_and_character_reset");
         level_art.prepare(&mut assets, &scene, &interactions, true)?;
         entry_timing.mark("level_art");
+        crate::loading_screen::between("level_art").await;
+        drop(boot_loading);
+        crate::texture::release_shared();
         campaign = Campaign::default();
         #[cfg(feature = "native_timing")]
         timing_ready!(crate::native_timing::Reason::Fresh);

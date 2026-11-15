@@ -1,4 +1,5 @@
 {
+  "load_texture_share": false,
   "sim_triangle_candidates": true,
   "sim_fan_candidates": true,
   "fx_merge_local_reuse": true,

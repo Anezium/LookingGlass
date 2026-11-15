@@ -365,6 +365,10 @@ pub(crate) struct Lite {
 pub(crate) fn note_particle_texture(texture: &Texture2D, rgba: &[u8]) {
     if crate::render::vita_renderer::config().fx_add_zero_alpha_cut { fill_cuts::note_texture(texture, rgba); }
 }
+/// The same note when the shared uploader already computed the verdict.
+pub(crate) fn note_particle_texture_zero_alpha(texture: &Texture2D, zero: bool) {
+    if crate::render::vita_renderer::config().fx_add_zero_alpha_cut { fill_cuts::note_zero_alpha(texture, zero); }
+}
 /// A pass whose full-program arithmetic `FX_LITE_FRAGMENT` reproduces (see there).
 pub(crate) fn lite_pass(p: &Pass) -> bool {
     p.effect && !p.lit && !p.clamp && p.cutout < 0.5 && !(p.appearance.dissolve > 0.)

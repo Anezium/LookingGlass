@@ -20,7 +20,11 @@ thread_local! {
 }
 /// Register `texture` when every texel of `rgba` has alpha 0.
 pub(super) fn note_texture(texture: &Texture2D, rgba: &[u8]) {
-    if rgba.is_empty() || rgba.chunks_exact(4).any(|p| p[3] != 0) { return; }
+    note_zero_alpha(texture, !rgba.is_empty() && rgba.chunks_exact(4).all(|p| p[3] == 0));
+}
+/// The same note when the upload path already computed the verdict.
+pub(super) fn note_zero_alpha(texture: &Texture2D, zero: bool) {
+    if !zero { return; }
     ZERO_ALPHA.with(|z| {
         let mut z = z.borrow_mut();
         if z.1.insert(texture.raw_miniquad_id()) { z.0.push(texture.clone()); }

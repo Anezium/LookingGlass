@@ -1,4 +1,5 @@
 {
+  "load_texture_share": false,
   "sim_school_mesh": true,
   "sim_tower_templates": true,
   "sim_npc_queries": true,
