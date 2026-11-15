@@ -28,6 +28,22 @@ pub struct Visibility {
     clusters: usize,
     face_count: usize,
 }
+/// Conservative half-width of one f64 box-against-plane support comparison, in world units.
+/// `normal` and `distance` are the plane as stored (f32) and `min`/`max` are the f32 box
+/// corners the test receives. The bound is proportional to the sum of the individual term
+/// magnitudes `|d| + Σ|n_i|·|corner_i|`, never to the dotted result, so cancellation between
+/// terms cannot shrink it. Each stored f32 differs from its intended value by at most half an
+/// ulp (2^-24 relative); a product of two of them therefore moves by at most 2·2^-24 of its
+/// magnitude and the distance term by 2^-24, which 3·2^-24 covers for the sum. The f64
+/// products of f32 inputs are exact and three additions add a few 2^-53, covered by eight
+/// f64 epsilons. `corner_i` is the larger |min| or |max| on that axis, i.e. the worst support
+/// corner magnitude on the axis.
+fn support_margin(normal: Vec3, distance: f32, min: Vec3, max: Vec3) -> f64 {
+    let magnitudes = normal.as_dvec3().abs()
+        .dot(min.as_dvec3().abs().max(max.as_dvec3().abs()))
+        + f64::from(distance).abs();
+    magnitudes * (3. * 2f64.powi(-24) + 8. * f64::EPSILON)
+}
 impl Visibility {
     /// The retained renderer prepares every PVS draw list before entering its frame loop.
     #[cfg(feature = "vita_renderer")]
@@ -221,13 +237,26 @@ impl Visibility {
     }
     /// Whether a box can be seen from `cluster`, through the same leaf/PVS data `bounds` reads,
     /// without scanning every leaf: a standard BSP descent visits only the nodes the box can
-    /// reach. `Some(false)` means the box is wholly inside the compiled leaf bounds and every
-    /// non-solid leaf it overlaps has a cluster the PVS row of `cluster` leaves unset, so no
-    /// point of the box is visible. `None` is unknown (`cluster` unknown, no data, a box not
-    /// wholly inside the compiled world, a box over solid space only, or a traversal that
-    /// exceeds its visit budget) and every caller must treat it as visible. A leaf that the
-    /// AABB-support descent visits but whose own bounds miss the box has an empty intersection
-    /// with it (the cell lies inside its bounds), so ignoring it loses no coverage.
+    /// reach.
+    ///
+    /// The guarantee is the exact BSP descent, not leaf-AABB overlap. `Some(false)` means the
+    /// box is wholly inside the compiled leaf bounds and, at every non-solid leaf the descent
+    /// reaches, either the box misses that leaf's cell or the leaf's cluster is unset in the
+    /// PVS row of `cluster`. If the box intersects a visible leaf's cell, take a point in the
+    /// intersection: it satisfies every ancestor half-space, so each ancestor pushes that
+    /// child, and the leaf bounds enclose the cell, so the leaf is reached and answers visible.
+    /// A leaf's recorded AABB can overlap the box while its diagonal cell does not; such a leaf
+    /// is correctly ignored. A visited leaf whose bounds miss the box cannot hold a box point,
+    /// because its cell lies inside its bounds. `bounds` scans those recorded AABBs, is the
+    /// looser test, and may answer visible where this answers hidden
+    /// (`diagonal_split_overlapping_a_visible_leaf_aabb_is_culled_only_when_the_cell_is_missed`).
+    /// The descent guarantee is conditional on the compiler writing leaf bounds that enclose
+    /// each non-solid cell; `parse` rejects inverted bounds but cannot verify containment. The
+    /// shipped maps were checked against this invariant.
+    ///
+    /// `None` is unknown (`cluster` unknown, no data, a non-finite plane, a box not wholly
+    /// inside the compiled world, a box over solid space only, or a traversal that exceeds its
+    /// visit budget) and every caller must treat it as visible.
     #[cfg(feature = "vita_renderer")]
     pub(crate) fn bounds_visible(&self, cluster: Option<usize>, planes: &[Plane], min: Vec3, max: Vec3) -> Option<bool> {
         let c = cluster.filter(|&c| c < self.clusters)?;
@@ -263,23 +292,31 @@ impl Visibility {
             let node = self.nodes.get(index as usize)?;
             let plane = planes.get(node.plane)?;
             let normal = plane.normal;
-            // Support corners of the box along and against the plane normal.
-            let high = normal.dot(vec3(
-                if normal.x >= 0. { max.x } else { min.x },
-                if normal.y >= 0. { max.y } else { min.y },
-                if normal.z >= 0. { max.z } else { min.z }));
-            let low = normal.dot(vec3(
-                if normal.x >= 0. { min.x } else { max.x },
-                if normal.y >= 0. { min.y } else { max.y },
-                if normal.z >= 0. { min.z } else { max.z }));
-            // Ordinary f32 dot products carry a few ulps of error at map coordinates. Widen
-            // both sides by 32 ulps of the largest term so rounding can only add a child to
-            // the descent, never drop one: missing a visible leaf would hide geometry.
-            let scale = high.abs().max(low.abs()).max(plane.distance.abs()).max(1.);
-            let tolerance = 32. * f32::EPSILON * scale;
+            let distance = plane.distance;
+            if !normal.is_finite() || !distance.is_finite() {
+                return None;
+            }
+            // Support corners of the box along and against the plane normal, in f64. Both
+            // operands are stored f32 values, so each f64 product is exact and the sum has only
+            // f64 rounding; `support_margin` covers that plus the f32 storage of the plane and
+            // the corners.
+            let n = normal.as_dvec3();
+            let high = n.dot(dvec3(
+                f64::from(if normal.x >= 0. { max.x } else { min.x }),
+                f64::from(if normal.y >= 0. { max.y } else { min.y }),
+                f64::from(if normal.z >= 0. { max.z } else { min.z })));
+            let low = n.dot(dvec3(
+                f64::from(if normal.x >= 0. { min.x } else { max.x }),
+                f64::from(if normal.y >= 0. { min.y } else { max.y }),
+                f64::from(if normal.z >= 0. { min.z } else { max.z })));
+            let tolerance = support_margin(normal, distance, min, max);
+            let d = f64::from(distance);
             // Child 0 is the `dot >= distance` side, child 1 the other, as `cluster` walks it.
-            let front = high + tolerance >= plane.distance;
-            let back = low - tolerance <= plane.distance;
+            // The margin is derived from the sum of the individual term magnitudes, so
+            // cancellation between diagonal terms cannot shrink it; rounding can only add a
+            // child to the descent, never drop one.
+            let front = high + tolerance >= d;
+            let back = low - tolerance <= d;
             let push = |value: i32, stack: &mut [i32; 96], length: &mut usize| -> Option<()> {
                 *stack.get_mut(*length)? = value;
                 *length += 1;
@@ -400,6 +437,80 @@ pub(crate) mod tests {
                            v.bounds(Some(cluster), min, max), "{cluster} {min} {max}");
             }
         }
+    }
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn diagonal_split_overlapping_a_visible_leaf_aabb_is_culled_only_when_the_cell_is_missed() {
+        // The re-review's diagonal fixture: plane x + y = 0 divides the world AABB into two
+        // diagonal half-cells, and both leaves record the whole AABB, which validly encloses
+        // either half. The guarantee is cell intersection, so the AABB-overlap answer of
+        // `bounds` is the looser one.
+        let normal = Vec3::new(1., 1., 0.);
+        let planes = [Plane { normal, distance: 0. }];
+        let (low, high) = (Vec3::splat(-10.), Vec3::splat(10.));
+        let v = Visibility {
+            nodes: vec![Node { plane: 0, children: [-1, -2] }],
+            leaves: vec![
+                Leaf { cluster: 0, min: low, max: high, faces: vec![0] },
+                Leaf { cluster: 1, min: low, max: high, faces: vec![1] },
+            ],
+            world_min: low,
+            world_max: high,
+            rows: vec![1, 0],
+            stride: 1,
+            clusters: 2,
+            face_count: 2,
+        };
+        // The review's box is inside both recorded AABBs but x + y <= -6 everywhere, so it
+        // misses the visible front cell and is correctly culled. This is the documented
+        // difference from `bounds`, which sees only the AABB overlap and answers visible.
+        let (min, max) = (vec3(-9., 1., -1.), vec3(-8., 2., 1.));
+        assert!(normal.dot(max) < 0., "the box misses the visible front cell");
+        assert!(v.bounds(Some(0), min, max), "the AABB test overlaps the visible leaf");
+        assert_eq!(v.bounds_visible(Some(0), &planes, min, max), Some(false));
+        // The same AABB extended into the front cell intersects it and must stay visible even
+        // though the descent also reaches the hidden leaf.
+        assert_eq!(v.bounds_visible(Some(0), &planes, vec3(-9., 1., -1.), vec3(-8., 10., 1.)), Some(true));
+        // A box straddling the plane visits both children; equality counts as front.
+        assert_eq!(v.bounds_visible(Some(0), &planes, vec3(-2., -2., -1.), vec3(2., 2., 1.)), Some(true));
+        // The rear cell is visible from the rear cluster itself (the camera is there), so the
+        // same box answers visible from cluster 1.
+        assert_eq!(v.bounds_visible(Some(1), &planes, vec3(-9., 1., -1.), vec3(-8., 2., 1.)), Some(true));
+    }
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn cancellation_at_corpus_scale_still_answers_visible() {
+        // The re-review's f32 counterexample. The two products are both 4714.544921875 and
+        // cancel to zero in f32, while the exact dot product of the stored f32 inputs is
+        // 1.94e-5, just past the stored distance. A margin taken from the dotted result would
+        // be smaller than that distance and would drop the visible front leaf.
+        let normal = vec3(0.6000000238418579, 0.800000011920929, 0.);
+        let distance = 0.000009715367923490703_f32;
+        let point = vec3(7857.57470703125, -5893.18115234375, 0.);
+        // The two f32 products are both 4714.544921875; their sum rounds to zero.
+        assert!(normal.dot(point) < distance, "{}", normal.dot(point));
+        let exact = normal.as_dvec3().dot(point.as_dvec3());
+        assert!(exact > f64::from(distance) && exact < 1e-4, "{exact}");
+        assert!(support_margin(normal, distance, point, point) > exact - f64::from(distance));
+        let extent = 8192.;
+        let world = Visibility {
+            nodes: vec![Node { plane: 0, children: [-1, -2] }],
+            leaves: vec![
+                Leaf { cluster: 0, min: Vec3::splat(-extent), max: Vec3::splat(extent), faces: vec![0] },
+                Leaf { cluster: 1, min: Vec3::splat(-extent), max: Vec3::splat(extent), faces: vec![1] },
+            ],
+            world_min: Vec3::splat(-extent),
+            world_max: Vec3::splat(extent),
+            rows: vec![1, 0],
+            stride: 1,
+            clusters: 2,
+            face_count: 2,
+        };
+        let planes = [Plane { normal, distance }];
+        // A degenerate point box on the front side must still reach the visible front leaf;
+        // only the hidden back leaf would answer Some(false).
+        assert!(world.bounds(Some(0), point, point));
+        assert_eq!(world.bounds_visible(Some(0), &planes, point, point), Some(true));
     }
     #[cfg(feature = "vita_renderer")]
     #[test]

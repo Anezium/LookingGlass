@@ -3152,9 +3152,13 @@ struct ModelPvs {
 }
 /// The box a model matrix places a group's own bounds in. Enlarging an axis-aligned box by
 /// enclosing the eight transformed corners can only add space, so a PVS test over it is
-/// conservative. The result is then inflated outward by 32 f32 ulps of its largest
-/// coordinate (0.031 units at the corpus extreme of 8192), which covers the rounding in the
-/// matrix product and in the corner sums without moving a real edge inward.
+/// conservative. The supported matrices are the rigid rotation+translation this pass builds in
+/// `model_matrix` (an eligible group has no motion and no deform), so every exact vertex lies
+/// inside the exact corner hull. The f32 corner computation is inflated outward by 32·2^-24 of
+/// its largest coordinate (0.031 units at the corpus extreme of 8192), which covers the
+/// rounding in the matrix product and in the corner sums without moving a real edge inward.
+/// This allowance is separate from, and additive to, the plane-support margin inside
+/// `Visibility::bounds_visible`, which covers the plane and box f32 storage in that test.
 fn placed_bounds(model: Mat4, min: Vec3, max: Vec3) -> (Vec3, Vec3) {
     let mut low = Vec3::splat(f32::INFINITY);
     let mut high = Vec3::splat(f32::NEG_INFINITY);
@@ -3175,9 +3179,9 @@ fn placed_bounds(model: Mat4, min: Vec3, max: Vec3) -> (Vec3, Vec3) {
 }
 /// `alpha_model_pvs`: a fresh cache for a renderer, and therefore for a new map.
 fn model_pvs_cache() -> Vec<ModelPvs> { Vec::new() }
-/// `alpha_model_pvs`: a model group whose placed bounds overlap no cluster the camera's PVS row
-/// shows is not submitted. Unknown data always answers visible, so the cut can only remove
-/// groups that `bounds_visible` proves hidden.
+/// `alpha_model_pvs`: a model group whose placed box the BSP descent proves cannot reach any
+/// cluster the camera's PVS row shows is not submitted. Unknown data always answers visible,
+/// so the cut can only remove groups that `bounds_visible` proves hidden.
 fn model_bounds_hidden(cache: &mut Vec<ModelPvs>, visibility: &crate::visibility::Visibility,
     planes: &[crate::bsp::Plane], cluster: Option<usize>, id: usize, model: Mat4, min: Vec3, max: Vec3) -> bool {
     // Host sabotage: hide every eligible model group, so the pixel oracle must report a wrong cut.
