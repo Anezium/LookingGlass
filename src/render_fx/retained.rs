@@ -1353,6 +1353,9 @@ pub(crate) fn finish_world(
         gpu.ring_phase = 1;
     }
     gpu.stats = Stats::default();
+    // Field shadows belong to private shader handles: binding world/HUD programs or
+    // changing depth does not write these programs' uniform values. Retention leaves
+    // pipeline/binding fences intact and still compares every field by exact bits.
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
     gpu.field_uniforms.interrupt();
