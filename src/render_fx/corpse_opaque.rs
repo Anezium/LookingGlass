@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn selector_keeps_alpha_and_appearance_fallbacks() {
         let mut p=Pass {
-            _game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,
+            #[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,
             blend_index:0,depth_equal:false,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,

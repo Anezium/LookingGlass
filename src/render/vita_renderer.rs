@@ -334,6 +334,8 @@ pub struct Config {
     pub actor_frustum_cull:bool,
     /// Matrix skinning changes float rounding: opt in after console comparison.
     pub bone_palette: bool,
+    /// Experimental immutable army-ant streams; unsupported draws keep CPU skinning.
+    pub gpu_skin_ants: bool,
     /// Conservative skin bounds; late overlays and normal-driven layers opt out.
     pub skin_frustum_cull: bool,
     /// Conservative center/extent clip-plane test and identity bounds shortcut.
@@ -620,6 +622,7 @@ impl Default for Config {
             fx_ring_safe: true,
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:true,
             bone_palette: false,
+            gpu_skin_ants: false,
             skin_frustum_cull: true,
             fast_frustum: true,
             packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,

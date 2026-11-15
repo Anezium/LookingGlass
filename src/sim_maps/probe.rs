@@ -430,6 +430,10 @@ pub fn record_exact_frame(case: &str, frame: u64, png: bool) -> anyhow::Result<(
     anyhow::ensure!(viewport[2] > 0 && viewport[3] > 0, "empty GL viewport for {case} frame {frame}: {viewport:?}");
     let image = macroquad::prelude::get_screen_data();
     anyhow::ensure!(image.width > 0 && image.height > 0 && !image.bytes.is_empty(), "empty framebuffer for {case} frame {frame}");
+    if let Some(directory)=std::env::var_os("LOOKING_GLASS_PIXEL_SAVE") {
+        let directory=std::path::PathBuf::from(directory);std::fs::create_dir_all(&directory)?;
+        image::save_buffer(directory.join(format!("{frame:06}.png")),&image.bytes,image.width as u32,image.height as u32,image::ColorType::Rgba8)?;
+    }
     let png = if png {
         let path = std::path::PathBuf::from(format!("exact-frames/{case}-{frame:03}.png"));
         crate::viewer::save_capture(&path)?;
@@ -773,4 +777,22 @@ pub fn gpu_geometry(vertex_count:usize,index_count:usize)->(Vec<macroquad::prelu
         glGetBufferSubData(0x8893,0,(indices.len()*2) as isize,indices.as_mut_ptr().cast());
     }
     (vertices,indices)
+}
+
+/// GPU geometry is explicitly excluded from the CPU-vertex equality oracle.
+/// Its picture is compared independently on every frame; all other packets stay strict.
+pub fn gpu_skin_occurrence(actor:Option<crate::character::skinning::identity::ActorId>,surface:usize) {
+    let slot=reserve_skin(actor,surface);
+    if slot!=usize::MAX {SKINS.with(|s|s.borrow_mut()[slot]["path"]="gpu".into());}
+}
+pub fn gpu_skin_packet(vertices:usize,indices:usize,uniforms:&[f32],policy:&[u32],texture:Option<&macroquad::prelude::Texture2D>) {
+    if !skin_proof() {return;}
+    let mut h=Sha256::new();for f in uniforms {h.update(f.to_bits().to_le_bytes());}
+    let uniform_hash=format!("{:x}",h.finalize());
+    let texture=texture.map(|t|TEXTURES.with(|cache| {let mut cache=cache.borrow_mut();
+        cache.entry(format!("{:?}",t.raw_miniquad_id())).or_insert_with(|| {
+            let image=t.get_texture_data();let mut h=Sha256::new();h.update(image.width.to_le_bytes());h.update(image.height.to_le_bytes());h.update(&image.bytes);format!("{:x}",h.finalize())
+        }).clone()
+    }));
+    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"gpu_skin":true,"vertices":vertices,"indices":indices,"uniforms":uniform_hash,"policy":policy,"texture":texture})));
 }

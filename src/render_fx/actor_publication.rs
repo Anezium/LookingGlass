@@ -1383,7 +1383,7 @@ mod tests {
     fn geometry(state:&State,(id,slot,_):(usize,usize,usize))->Rc<prepared::Geometry> { state.banks[id].slots[slot].clone().unwrap() }
     fn occurrence_of(state:&State,id:usize)->u16 { state.banks[id].key.unwrap().occurrence }
     fn pass()->Pass {
-        Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
+        Pass {#[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
             mesh:Mesh { upload_identity: None, surface: None,vertices:Vec::new(),indices:Vec::new(),texture:None},material:None,lit:false,clamp:false,cutout:0.,

@@ -9,6 +9,7 @@ pub(super) mod state_cache;
 pub(super) mod world_puffs;
 mod packet_cull;
 mod fill_cuts;
+pub(crate) mod gpu_skin;
 use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
 use super::{Frame, Pass, FRAME};
 use crate::environment::Atmosphere;
@@ -395,6 +396,7 @@ fn submit_key(key: (usize, bool), route: Route, depth_write: bool) -> (usize, bo
 pub(crate) struct Gpu {
     _game_thread: crate::game_thread::GameThread,
     shader: ShaderId,
+    skin: Option<gpu_skin::Gpu>,
     pipelines: BTreeMap<(usize, bool), Pipeline>,
     /// `fx_lite`: the lean program, its pipelines (same keys) and its own uniform cache.
     lite: Option<Lite>,
@@ -482,6 +484,7 @@ impl Gpu {
         let mut gpu = Self {
             _game_thread: crate::game_thread::GameThread::new(),
             shader,
+            skin: if crate::render::vita_renderer::config().gpu_skin_ants { gpu_skin::Gpu::new(&fragment).map_err(|e|eprintln!("[lg/gpu-skin] CPU fallback: {e:#}")).ok() } else { None },
             pipelines: BTreeMap::new(),
             lite,
             corpse_opaque,
@@ -516,6 +519,7 @@ impl Gpu {
     }
     fn upload(&mut self, slot: usize, p: &Pass, leaves: &mut crate::phase_census::FinishLeaves) -> Result<usize> {
         crate::game_thread::assert_current();
+        if let Some(skin)=&p.gpu_skin { self.skin.as_mut().context("GPU skin pipeline unavailable")?.upload(skin); return Ok(slot); }
         let _skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("upload"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("upload",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
@@ -652,6 +656,13 @@ impl Gpu {
         }
     }
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool, ant_dead: Option<bool>) {
+        if let Some(skin)=&p.gpu_skin {
+            self.skin.as_mut().expect("accepted skin program").draw(p,skin,u,depth_write,&self.white);
+            self.submit_cache=SubmitCache::default();
+            self.uniform_cache=UniformCache::default();
+            self.field_uniforms=crate::render::uniform_fields::Cache::new(meta());
+            return;
+        }
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
@@ -878,7 +889,7 @@ fn center_vertices(vertices: &[Vertex]) -> Vec3 {
 }
 #[cfg(test)]
 fn same_packet(a: &Pass, b: &Pass) -> bool {
-    a.mesh.upload_identity == b.mesh.upload_identity
+    a.gpu_skin.is_none() && b.gpu_skin.is_none() && a.mesh.upload_identity == b.mesh.upload_identity
         && a.blend_index == b.blend_index
         && a.depth_equal == b.depth_equal
         && a.mesh.texture.as_ref() == b.mesh.texture.as_ref()
@@ -1037,7 +1048,7 @@ fn merge_cached_options<'a>(
             if let Source::Actor(id) = source {
                 let g = &groups[id];
                 let p = g.passes.first();
-                let eligible = g.passes.len() == 1 && p.is_some_and(|p| p.geometry.as_ref().map_or_else(|| valid_mesh(p.geometry()), |g| g.valid) && (p.effect || crate::render::vita_renderer::config().actor_batching));
+                let eligible = g.passes.len() == 1 && p.is_some_and(|p| p.gpu_skin.is_none() && p.geometry.as_ref().map_or_else(|| valid_mesh(p.geometry()), |g| g.valid) && (p.effect || crate::render::vita_renderer::config().actor_batching));
                 Signature {
                     source,
                     key: eligible.then(|| packet_key(p.unwrap())),
@@ -1481,7 +1492,7 @@ pub(crate) fn finish_world(
         let mut index = 0;
         for group in &mut groups { for p in &mut group.passes {
             if storage.len() <= index { storage.push(Default::default()); }
-            if p.geometry.is_none() {
+            if p.geometry.is_none() && p.gpu_skin.is_none() {
                 p.geometry = Some(if observe_move { storage[index].observe_owned(&mut p.mesh) }
                     else { storage[index].observe(&p.mesh, None) });
             }
@@ -1531,7 +1542,7 @@ pub(crate) fn finish_world(
                     continue;
                 }
                 crate::phase_census::count(0,1);
-                let shared=p.geometry.as_ref().map(|m|std::rc::Rc::as_ptr(m) as usize);
+                let shared=p.geometry.as_ref().filter(|_|p.gpu_skin.is_none()).map(|m|std::rc::Rc::as_ptr(m) as usize);
                 let previous=shared.and_then(|id|shared_uploads.get(&id).copied());
                 let upload=if let Some(b)=previous {crate::phase_census::count(1,1);count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p,&mut leaves)};
                 match upload {
@@ -2124,7 +2135,7 @@ mod tests {
             ant_dead: None,
             transparent: true,
             passes: vec![Pass {
-                _game_thread: crate::game_thread::GameThread::default(),
+                #[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread: crate::game_thread::GameThread::default(),
                 geometry:None,
                 effect: false,
                 blend_index: 1,

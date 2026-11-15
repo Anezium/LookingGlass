@@ -35,6 +35,8 @@ pub struct Appearance {
     pub power: f32,
 }
 pub struct Pass {
+    #[cfg(feature="vita_renderer")]
+    gpu_skin: Option<Rc<retained::gpu_skin::Occurrence>>,
     _game_thread: crate::game_thread::GameThread,
     #[cfg(feature="vita_renderer")]
     geometry:Option<Rc<prepared::Geometry>>,
@@ -540,7 +542,7 @@ pub fn finish() -> (usize, usize) {
                 let _submit_profile = crate::frame_profile::span("transparent_submit");
                 draw_pass(
                     &Pass {
-                        _game_thread: crate::game_thread::GameThread::default(),
+                        #[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread: crate::game_thread::GameThread::default(),
                         #[cfg(feature="vita_renderer")]
                         geometry:None,
                         #[cfg(feature="vita_renderer")]
@@ -648,7 +650,7 @@ fn pass_at(
             .map_or(1., |w| w.sample(clock))
             .clamp(0., 2.);
     Ok(Pass {
-        _game_thread: crate::game_thread::GameThread::default(),
+        #[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread: crate::game_thread::GameThread::default(),
         #[cfg(feature="vita_renderer")]
         geometry:None,
         #[cfg(feature="vita_renderer")]
@@ -1887,4 +1889,23 @@ mod material_identity_tests {
         assert!(weak.upgrade().is_none());
         ts::end_frame(); ts::clear();
     }
+}
+
+/// Only simple opaque army-ant layers can leave the CPU mesh unpublished.
+#[cfg(feature="vita_renderer")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)->bool {
+    let c=crate::render::vita_renderer::config();
+    if !c.gpu_skin_ants || c.flat_actor_light || c.packet_min_pixels>0. || !source.gpu_ant || !retained_active() || !c.actor_fast_path
+        || !retained::gpu_skin::available() || alpha!=1. || !skin_fully_opaque()
+        || crate::character::skinning::mutable_required() || crate::character::skinning::overlap::ready()
+        || crate::character::skinning::overlap::gather_only() {return false;}
+    if source.vertices.len()!=mesh.vertices.len() || source.indices!=mesh.indices {return false;}
+    let Some(surface)=&mesh.surface else {return false;};
+    if surface.transparent || surface.preserve_skin || surface.layers.iter().any(|l|!actor_cache::simple(&l.stage)) {return false;}
+    let Some(payload)=retained::gpu_skin::occurrence(source.cpu(),pose,scales,transform,scale,fullbright,alpha) else {return false;};
+    let (camera,time,appearance)=FRAME.with(|f|{let f=f.borrow();(f.camera,f.time,f.appearance)});
+    let mut passes=layer_passes(&source.bind_vertices,&source.indices,surface,camera,time,alpha,appearance,true,None,actor_max_layers(c));
+    for pass in &mut passes {pass.gpu_skin=Some(payload.clone());}
+    submit(passes,false);true
 }

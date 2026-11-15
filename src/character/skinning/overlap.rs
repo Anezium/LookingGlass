@@ -630,6 +630,11 @@ impl Store {
         let start = i.surfaces.len();
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };
+            if crate::render_fx::gpu_skin_ant(surface,mesh,p.pose,p.scales,p.transform,p.scale,p.fullbright,p.alpha) {
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                crate::sim_maps::probe::gpu_skin_occurrence(actor,mesh_id);
+                continue;
+            }
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::negative_uv_edit(mesh);
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]

@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn cache_checks_all_pose_bits_keeps_live_uv_and_invalidates_on_scene_reset() {
         reset();
-        let surface=std::sync::Arc::new(crate::skeletal::SkinSurface {vertices:vec![],indices:vec![],bind_vertices:vec![],
+        let surface=std::sync::Arc::new(crate::skeletal::SkinSurface {gpu_ant:false,stored_normals:vec![],vertices:vec![],indices:vec![],bind_vertices:vec![],
             #[cfg(feature="vita_renderer")] used_bones:vec![]});
         let pose=[Transform {translation:Vec3::ZERO,rotation:Quat::IDENTITY}];
         let p=Params {pose:&pose,scales:&[],palette:&[],transform:pose[0],scale:1.,flat:false,fullbright:false,alpha:1.};

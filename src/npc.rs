@@ -389,6 +389,13 @@ impl Data {
         ensure!(!def.model.is_empty(), "NPC requires a skeleton: {name}");
         let meta = metadata(&String::from_utf8_lossy(&assets.read(&path)?))?;
         let skeleton = Skeleton::parse(&assets.read(&format!("{}/{}", def.path, def.model))?)?;
+        #[cfg(feature="vita_renderer")]
+        let skeleton = { let mut skeleton=skeleton;
+            if def.path.eq_ignore_ascii_case("models/characters/army_ant") && def.model.eq_ignore_ascii_case("armyant_baseframe.skb") {
+                for surface in &mut skeleton.surfaces { surface.mark_gpu_ant(); }
+            }
+            skeleton
+        };
         let idle = [
             "idle",
             "idle1",
