@@ -89,7 +89,7 @@
   "world_texture_sort": false,
   "water_stage_merge": "off",
   "world_alpha_lite": false,
-  "fx_lite": true,
+  "fx_lite": false,
   "fx_add_zero_alpha_cut": true,
   "fx_add_max_area": 0.0,
   "flat_actor_light": false,
@@ -186,5 +186,6 @@
   "sim_flight_memo": true,
   "ant_corpse_triangle_cull": true,
   "ant_corpse_opaque_shader": true,
-  "water_draw_join": true
+  "water_draw_join": true,
+  "fx_unlit_exact": true
 }

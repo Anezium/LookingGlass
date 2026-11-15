@@ -387,13 +387,20 @@ impl Gpu {
                 meta(),
             )
             .context("retained actor shader")?;
-        // A lean program that does not build turns `fx_lite` off with a warning.
-        let lite = crate::render::vita_renderer::config().fx_lite.then(|| {
+        // A failed specialized program falls back to the full program.
+        let config = crate::render::vita_renderer::config();
+        let lite = (config.fx_lite || config.fx_unlit_exact).then(|| {
             crate::frame_profile::shader_creation();
-            let _shader_name = crate::shader_cache::Name::new("retained-fx-lite");
+            let name = if config.fx_unlit_exact {"retained-fx-unlit-exact"} else {"retained-fx-lite"};
+            let _shader_name = crate::shader_cache::Name::new(name);
+            let source = if config.fx_unlit_exact {
+                // An unlit pass packs sixteen zero light vectors. Preserve all other
+                // operations, including the addition of zero, to keep shader rounding.
+                crate::render::FRAGMENT.replace("dynamicLight(worldPosition)", "vec3(0.0)")
+            } else { crate::render::FX_LITE_FRAGMENT.to_owned() };
             ctx.new_shader(ShaderSource::Glsl { vertex: crate::render::VERTEX,
-                fragment: &crate::environment::fragment(crate::render::FX_LITE_FRAGMENT) }, meta())
-                .map_err(|e| eprintln!("[lg/vita-renderer] warning fx_lite program failed, key off: {e:?}")).ok()
+                fragment: &crate::environment::fragment(&source) }, meta())
+                .map_err(|e| eprintln!("[lg/vita-renderer] warning {name} program failed, key off: {e:?}")).ok()
         }).flatten().map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
         let corpse_opaque = crate::render::vita_renderer::config().ant_corpse_opaque_shader.then(|| {
             crate::frame_profile::shader_creation();
@@ -593,7 +600,9 @@ impl Gpu {
         }
 
         let lite = !opaque && self.lite.is_some() && lite_pass(p);
-        if lite { count("vita_fx_lite_draws", 1); }
+        if lite { count(if crate::render::vita_renderer::config().fx_unlit_exact {
+            "vita_fx_unlit_exact_draws"
+        } else { "vita_fx_lite_draws" }, 1); }
         let pipeline = if opaque {self.corpse_opaque.as_ref().unwrap().pipelines.get(&key)} else if lite { self.lite.as_ref().unwrap().pipelines.get(&key) } else { self.pipelines.get(&key) }
             .expect("prewarmed LG actor pipeline");
         // Several actor layers can share one uploaded vertex/index page.

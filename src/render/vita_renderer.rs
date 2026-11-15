@@ -362,8 +362,11 @@ pub struct Config {
     pub water_draw_join: bool,
     /// Effect packets that are unlit, unclamped, uncut, with no dissolve, ghost, power tint or
     /// filter fade use a fragment program without those paths, the dynamic lights (all zero when
-    /// unlit) and the sky fade (never set here); same arithmetic. Default off.
+    /// unlit) and the sky fade (never set here); host rounding can differ. Default off.
     pub fx_lite: bool,
+    /// Eligible unlit effects keep the full fragment arithmetic and replace only the
+    /// known-zero dynamic light result. Takes precedence over fx_lite. Default off.
+    pub fx_unlit_exact: bool,
     /// Additive effects (drawn with source alpha) whose texture has alpha 0 in every texel add
     /// nothing; their puffs and effect groups are not drawn. No pixel changes. Default off.
     pub fx_add_zero_alpha_cut: bool,
@@ -596,7 +599,7 @@ impl Default for Config {
             skin_frustum_cull: true,
             fast_frustum: true,
             packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
-            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, fx_lite: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
+            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, fx_lite: false, fx_unlit_exact: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
             flat_actor_light: false, max_texture_dimension: None,
             draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             gpu_state_probe: false,
