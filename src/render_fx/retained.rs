@@ -579,6 +579,9 @@ impl Gpu {
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        let census_started = (p.effect && crate::sim_maps::probe::draw_query::armed())
+            .then(std::time::Instant::now);
         let key = (p.blend_index, p.depth_equal);
         let opaque = ant_dead==Some(true) && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
         if opaque {count("vita_ant_corpse_opaque_draws",1);}
@@ -648,6 +651,14 @@ impl Gpu {
         }
         let class = if p.effect { crate::gpu_timing::fx_class(p.blend_index) } else { crate::gpu_timing::MASK_ACTORS };
         if !crate::gpu_timing::masked(class) { ctx.draw(0, p.geometry().indices.len() as i32, 1); }
+        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+        if let Some(start) = census_started {
+            let (_, texture) = crate::sim_maps::probe::draw_query::actor_label(
+                p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id));
+            println!("FX_SUBMIT {}", serde_json::json!({"frame": crate::sim_maps::probe::frame(),
+                "texture": texture, "triangles": p.geometry().indices.len()/3,
+                "cpu_ns": start.elapsed().as_nanos() as u64, "query_overhead_included": true}));
+        }
         self.stats.draws += 1;
         self.stats.triangles += p.geometry().indices.len() as u64 / 3;
         let metrics = &mut self.stats.render[usize::from(p.effect)];
