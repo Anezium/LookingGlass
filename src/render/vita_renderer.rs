@@ -5677,3 +5677,23 @@ mod tests {
         assert!(!opaque_stage(&s));
     }
 }
+
+#[cfg(test)]
+mod overlap_probe_tests {
+    use super::Config;
+    #[test]
+    fn overlap_reservation_and_burn_are_explicit() {
+        let default=Config::default();
+        assert!(!default.diag_overlap && default.diag_overlap_burn_ms==0);
+        for value in [serde_json::json!({"diag_overlap_burn_ms":12}),
+            serde_json::json!({"diag_overlap":true}),
+            serde_json::json!({"diag_overlap":true,"skin_workers":1,"diag_overlap_burn_ms":21}),
+            serde_json::json!({"diag_overlap":true,"skin_workers":1,"audio_producer_affinity":0x20000})] {
+            assert!(serde_json::from_value::<Config>(value).unwrap().validate().is_err());
+        }
+        for ms in [0,6,12] {
+            let c:Config=serde_json::from_value(serde_json::json!({"diag_overlap":true,"skin_workers":1,"diag_overlap_burn_ms":ms})).unwrap();
+            c.validate().unwrap();
+        }
+    }
+}
