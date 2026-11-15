@@ -270,8 +270,9 @@ def make_tarball(bundle):
     tarball = bundle.parent / (bundle.name + ".tar.gz")
     if tarball.exists():
         tarball.unlink()
+    env = dict(os.environ, COPYFILE_DISABLE="1")  # no AppleDouble members on macOS
     subprocess.run(["tar", "-czf", str(tarball), "-C", str(bundle.parent), bundle.name],
-                   check=True)
+                   check=True, env=env)
     return tarball
 
 
@@ -503,16 +504,22 @@ Prerequisites (host):
   Ubuntu: `sudo apt install build-essential git curl python3 cmake`. On
   macOS, `xcode-select --install` provides git, make and tar; `curl` and
   `python3` are part of the system.
-- CMake 3.5 or newer. CMake 4 needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for
-  the SceShaccCgExt build below. The release used CMake 4.4.4.
+- CMake 3.10 or newer (`SceShaccCgExt-source/CMakeLists.txt` requires 3.10).
+  CMake 4 also needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` for the
+  SceShaccCgExt build below. The release used CMake 4.4.4.
 - Network access to github.com and vitasdk.org, and about 2 GB free.
+
+Run the commands of steps 1 to 4 in order, in one shell, starting in the
+extracted bundle directory. Steps 1 and 3 work in subshells and clone into
+`$BUNDLE/deps`, so the shell stays in the bundle directory for step 4.
 
 ### Step 1: install a clean VitaSDK with vdpm
 
 ```sh
-git clone https://github.com/vitasdk/vdpm
-cd vdpm
-VITASDK_CHANNEL=2026.08 ./bootstrap-vitasdk.sh --install-dir "$HOME/vitasdk-clean"
+BUNDLE=$(pwd)   # the extracted bundle directory
+mkdir -p "$BUNDLE/deps"
+(cd "$BUNDLE/deps" && git clone https://github.com/vitasdk/vdpm && cd vdpm &&
+  VITASDK_CHANNEL=2026.08 ./bootstrap-vitasdk.sh --install-dir "$HOME/vitasdk-clean")
 export VITASDK=$HOME/vitasdk-clean
 export PATH=$VITASDK/bin:$PATH
 ```
@@ -538,12 +545,11 @@ works but the bytes differ.
 ### Step 3: build vitaGL at the release revision
 
 ```sh
-git clone https://github.com/Rinnegatamante/vitaGL
-cd vitaGL
-git checkout --detach @@VITAGL_REVISION@@
-git rev-parse HEAD   # must print @@VITAGL_REVISION@@
-make @@VITAGL_FLAGS@@
-make install         # libvitaGL.a and source/vitaGL.h into $VITASDK
+(cd "$BUNDLE/deps" && git clone https://github.com/Rinnegatamante/vitaGL && cd vitaGL &&
+  git checkout --detach @@VITAGL_REVISION@@ &&
+  test "$(git rev-parse HEAD)" = @@VITAGL_REVISION@@ &&
+  make @@VITAGL_FLAGS@@ &&
+  make install)      # libvitaGL.a and source/vitaGL.h into $VITASDK
 ```
 
 The release linked `libvitaGL.a` SHA-256 `@@VITAGL_ARCHIVE@@`; the installed
@@ -563,6 +569,7 @@ archive file.
 ### Step 4: build SceShaccCgExt from the source in this bundle
 
 ```sh
+cd "$BUNDLE"
 cmake SceShaccCgExt-source -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \\
   -DCMAKE_C_FLAGS="-std=gnu11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types" \\
   -DCMAKE_CXX_FLAGS="-std=gnu++11 -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
@@ -789,7 +796,7 @@ with prerequisites and each command, is in README.md under "Build the
 third-party dependencies from public sources".
 
 - Host: macOS 13+ (arm64 or x86_64) or 64-bit Linux with git, curl, tar, make,
-  a POSIX shell, Python 3 and CMake 3.5 or newer; about 2 GB free; network
+  a POSIX shell, Python 3 and CMake 3.10 or newer; about 2 GB free; network
   access to github.com and vitasdk.org.
 - Clean SDK: `git clone https://github.com/vitasdk/vdpm`, then
   `VITASDK_CHANNEL=2026.08 ./bootstrap-vitasdk.sh --install-dir <directory>`,

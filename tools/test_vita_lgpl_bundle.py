@@ -282,7 +282,7 @@ class DocumentationControls(unittest.TestCase):
             self.assertIn("make install", text)
             self.assertIn(BUNDLE.VDPM_PACKAGES, text)
             self.assertIn("bootstrap-vitasdk.sh", text)
-            self.assertIn("CMake 3.5", text)
+            self.assertIn("CMake 3.10", text)
 
     def test_vitagl_record_is_read_from_the_release_build(self):
         text = ("linked libvitaGL.a sha256=" + "a" * 64
