@@ -601,8 +601,10 @@ def main():
                                    library["revision"] + "^{tree}"],
                                   check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
             files = sum(1 for path in destination.rglob("*") if path.is_file())
-            source_lines.append("%s  %s  tree=%s  files=%d"
+            source_lines.append("%s  %s  upstream_tree=%s  files=%d"
                                 % (library["name"], library["revision"], tree, files))
+            if library["name"] == "SceShaccCgExt":
+                source_lines[-1] += "  patch_sha256=" + pin["patch_sha256"]
             for entry in library["license_files"]:
                 path = destination / entry["path"]
                 if not path.is_file():
