@@ -363,6 +363,8 @@ unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[
                     if surface.output == 0 { *dst = *bind; }
                     let position: Vec3 = if vector && !palette.is_empty() {
                         super::experiment::vector_position(src,palette)
+                    } else if vector {
+                        super::experiment::vector_pose(src,pose,scales)
                     } else if !palette.is_empty() {
                         weights
                             .iter()

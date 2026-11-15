@@ -66,3 +66,42 @@ pub(super) unsafe fn vector_position(src: &SkinVertex, palette: &[(Mat3,Vec3)]) 
     }
     sum.truncate()
 }
+
+#[cfg_attr(target_arch="arm", target_feature(enable="neon"))]
+#[inline]
+pub(super) unsafe fn vector_pose(src:&SkinVertex,pose:&[Transform],scales:&[f32])->Vec3 {
+    let mut sum=Vec4::ZERO;
+    for w in &src.weights {
+        let t=pose[w.bone];
+        let v=if scales.is_empty(){w.offset}else{w.offset*scales[w.bone]};
+        let b=Vec3::new(t.rotation.x,t.rotation.y,t.rotation.z);
+        // Keep scalar reductions and the reference's exact association.
+        let rotated=(v.extend(0.)*(t.rotation.w*t.rotation.w-b.dot(b))
+            +b.extend(0.)*(v.dot(b)*2.))+b.cross(v).extend(0.)*(t.rotation.w*2.);
+        sum+=(rotated+t.translation.extend(0.))*w.amount;
+    }
+    sum.truncate()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn vector_kernel_keeps_reference_bits_for_non_unit_quaternions_and_scales() {
+        let pose:Vec<_>=(0..19).map(|i|Transform {rotation:Quat::from_xyzw(i as f32*0.03,-0.21,0.6,0.77),
+            translation:vec3(i as f32,-2.3,0.71)}).collect();
+        let scales:Vec<_>=(0..19).map(|i|0.7+i as f32*0.02).collect();
+        let palette=super::super::palette(&pose,&scales);
+        for i in 0..500 {
+            let src=SkinVertex {uv:Vec2::ZERO,weights:(0..4).map(|j|crate::skeletal::Weight {
+                bone:(i+j)%19,amount:0.13+j as f32*0.1,offset:vec3(i as f32*0.07,j as f32-2.,-0.31)}).collect()};
+            let bits=|v:Vec3|v.to_array().map(f32::to_bits);
+            assert_eq!(bits(unsafe{vector_position(&src,&palette)}),bits(position(&src,&palette)));
+            for scales in [&[][..],&scales[..]] {
+                let reference=if scales.is_empty(){src.position(&pose)}else{
+                    src.weights.iter().map(|w|pose[w.bone].point(w.offset*scales[w.bone])*w.amount).sum()};
+                assert_eq!(bits(unsafe{vector_pose(&src,&pose,scales)}),bits(reference));
+            }
+        }
+    }
+}
