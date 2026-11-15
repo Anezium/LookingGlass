@@ -5,6 +5,8 @@ pub(crate) struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u16>,
     pub texture: Option<Texture2D>,
+    /// Identity of the upload that would exist with texture sharing disabled.
+    pub upload_identity: Option<u64>,
     pub surface: Option<Rc<crate::render_fx::Surface>>,
 }
 /// Same submission as macroquad::models::draw_mesh, without copying geometry.

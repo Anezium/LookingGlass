@@ -751,11 +751,11 @@ fn center_vertices(vertices: &[Vertex]) -> Vec3 {
 }
 #[cfg(test)]
 fn same_packet(a: &Pass, b: &Pass) -> bool {
-    a.mesh.surface.as_ref().map(std::rc::Rc::as_ptr) == b.mesh.surface.as_ref().map(std::rc::Rc::as_ptr)
+    a.mesh.upload_identity == b.mesh.upload_identity
+        && a.mesh.surface.as_ref().map(std::rc::Rc::as_ptr) == b.mesh.surface.as_ref().map(std::rc::Rc::as_ptr)
         && a.blend_index == b.blend_index
         && a.depth_equal == b.depth_equal
-        && a.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
-            == b.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
+        && a.mesh.texture.as_ref() == b.mesh.texture.as_ref()
         && a.lit == b.lit
         && a.clamp == b.clamp
         && a.cutout == b.cutout
@@ -766,16 +766,28 @@ fn same_packet(a: &Pass, b: &Pass) -> bool {
         && a.appearance == b.appearance
         && a.filter_fade == b.filter_fade
 }
+// Unmanaged test textures compare handles directly without a Macroquad GPU context.
+// Production keeps the existing raw binding key.
+#[cfg(test)]
+type MergeTexture = Texture2D;
+#[cfg(not(test))]
+type MergeTexture = TextureId;
+fn merge_texture(texture: &Texture2D) -> MergeTexture {
+    #[cfg(test)] { texture.clone() }
+    #[cfg(not(test))] { texture.raw_miniquad_id() }
+}
 #[derive(Clone, PartialEq)]
 struct PacketKey {
+    upload_identity: Option<u64>,
     surface: Option<usize>,
-    texture: Option<TextureId>,
+    texture: Option<MergeTexture>,
     state: [u32; 20],
 }
 fn packet_key(p: &Pass) -> PacketKey {
     PacketKey {
+        upload_identity: p.mesh.upload_identity,
         surface: p.mesh.surface.as_ref().map(|s| std::rc::Rc::as_ptr(s) as usize),
-        texture: p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id),
+        texture: p.mesh.texture.as_ref().map(merge_texture),
         state: [
             p.blend_index as u32,
             u32::from(p.depth_equal),
@@ -1031,9 +1043,10 @@ fn merge_cached_options<'a>(
         }
         if !hit && local_hit && same_topology { count("fx_merge_local_topology_hits", 1); }
         if in_place {
-            let mut dest = cached.map(|g|g.mesh).unwrap_or_else(|| Mesh { surface: None,vertices:Vec::new(),indices:Vec::new(),texture:None});
+            let mut dest = cached.map(|g|g.mesh).unwrap_or_else(|| Mesh { upload_identity: None, surface: None,vertices:Vec::new(),indices:Vec::new(),texture:None});
             dest.texture = groups[target].passes[0].mesh.texture.clone();
             dest.surface = groups[target].passes[0].mesh.surface.clone();
+            dest.upload_identity = groups[target].passes[0].mesh.upload_identity;
             cache.packing.clear();
             let mut vertices = 0; let mut indices = 0;
             for id in std::iter::once(target).chain(sources.iter().copied()) {
@@ -1125,7 +1138,8 @@ fn merge_cached_options<'a>(
             cache.version_scratch.insert(target, previous);
             let texture = groups[target].passes[0].mesh.texture.clone();
             let surface = groups[target].passes[0].mesh.surface.clone();
-            let mesh = std::mem::replace(&mut groups[target].passes[0].mesh, Mesh { surface, vertices: Vec::new(), indices: Vec::new(), texture });
+            let upload_identity = groups[target].passes[0].mesh.upload_identity;
+            let mesh = std::mem::replace(&mut groups[target].passes[0].mesh, Mesh { upload_identity, surface, vertices: Vec::new(), indices: Vec::new(), texture });
             let geometry = super::prepared::Geometry::merged(mesh, if certified_hit {old_version} else {None}, same_topology);
             if local_reuse { cache.outputs.insert(target, geometry.version); }
             groups[target].passes[0].geometry = Some(std::rc::Rc::new(geometry));
@@ -1518,7 +1532,7 @@ pub(crate) fn finish_world(
             let geometry = if let Some(g) = p.geometry.take() {
                 std::rc::Rc::try_unwrap(g).unwrap_or_else(|g| super::prepared::Geometry::new(super::copy_mesh(&g)))
             } else { super::prepared::Geometry::new(std::mem::replace(&mut p.mesh,
-                Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None })) };
+                Mesh { upload_identity: None, surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None })) };
             gpu.merge_meshes[gpu.ring_phase].insert(id, geometry);
         }
     }
@@ -1567,7 +1581,7 @@ mod tests {
     fn owned_particle_publications_match_legacy_packet_geometry_and_blend_policy() {
         for blend in [crate::materials::Blend::Alpha,crate::materials::Blend::Add,crate::materials::Blend::AlphaAdd] {
             FRAME.with(|f| *f.borrow_mut()=Frame {active:true,direct:true,..Default::default()});
-            let mesh=Mesh { surface: None,vertices:vec![Vertex::new(1.,2.,3.,0.5,0.4,Color::new(0.7,0.4,0.2,0.3));4],
+            let mesh=Mesh { upload_identity: None, surface: None,vertices:vec![Vertex::new(1.,2.,3.,0.5,0.4,Color::new(0.7,0.4,0.2,0.3));4],
                 indices:vec![0,1,2,0,2,3],texture:None};
             super::super::effect(&mesh,blend);
             let publication=std::rc::Rc::new(super::super::prepared::Geometry::new(super::super::copy_mesh(&mesh)));
@@ -1943,7 +1957,7 @@ mod tests {
     }
     #[test]
     fn actor_ranges_reject_truncated_and_out_of_bounds_indices() {
-        let mut m = Mesh { surface: None,
+        let mut m = Mesh { upload_identity: None, surface: None,
             vertices: vec![Vertex::new(0., 0., 0., 0., 0., WHITE); 3],
             indices: vec![0, 1, 2],
             texture: None,
@@ -1964,7 +1978,7 @@ mod tests {
                 effect: false,
                 blend_index: 1,
                 depth_equal: false,
-                mesh: Mesh { surface: None,
+                mesh: Mesh { upload_identity: None, surface: None,
                     vertices: vec![Vertex::new(0., 0., 0., 0., 0., WHITE); 3],
                     indices: vec![0, 1, 2],
                     texture: None,
@@ -2067,7 +2081,7 @@ mod tests {
         let mut pool = BTreeMap::new();
         let merged = std::mem::replace(
             &mut groups[0].passes[0].mesh,
-            Mesh { surface: None,
+            Mesh { upload_identity: None, surface: None,
                 vertices: Vec::new(),
                 indices: Vec::new(),
                 texture: None,

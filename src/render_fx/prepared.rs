@@ -72,11 +72,11 @@ impl Cache {
         if !same_vertices { version.vertices = generation(); }
         if !same_topology { version.topology = generation(); }
         let cached_valid = old.filter(|_| same_topology).map(|g| g.valid);
-        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { surface: None,
+        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { upload_identity: None, surface: None,
             vertices: Vec::new(), indices: Vec::new(), texture: None })));
         // Queued packets own old immutable arrays until finish; never mutate them.
         if Rc::get_mut(slot).is_none() {
-            *slot = Rc::new(Geometry::new(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
+            *slot = Rc::new(Geometry::new(Mesh { upload_identity: None, surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
         }
         let g = Rc::get_mut(slot).unwrap();
         g.mesh.vertices.clear();
@@ -114,11 +114,11 @@ impl Cache {
         if !same_vertices { version.vertices = generation(); }
         if !same_topology { version.topology = generation(); }
         let cached_valid = old.filter(|_| same_topology).map(|g|g.valid);
-        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { surface: None,
+        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { upload_identity: None, surface: None,
             vertices: Vec::new(), indices: Vec::new(), texture: None })));
         let replaced = Rc::get_mut(slot).is_none();
         if replaced {
-            *slot = Rc::new(Geometry::new(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
+            *slot = Rc::new(Geometry::new(Mesh { upload_identity: None, surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
         }
         let g = Rc::get_mut(slot).unwrap();
         if !same_vertices || g.vertices.len() != mesh.vertices.len() {
@@ -156,10 +156,10 @@ impl Cache {
         if !same_vertices { version.vertices = generation(); }
         if !same_topology { version.topology = generation(); }
         let cached_valid = old.filter(|_| same_topology).map(|g|g.valid);
-        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { surface: None,
+        let slot = self.current.get_or_insert_with(|| Rc::new(Geometry::new(Mesh { upload_identity: None, surface: None,
             vertices: Vec::new(), indices: Vec::new(), texture: None })));
         if Rc::get_mut(slot).is_none() {
-            *slot = Rc::new(Geometry::new(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
+            *slot = Rc::new(Geometry::new(Mesh { upload_identity: None, surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None }));
         }
         let g = Rc::get_mut(slot).unwrap();
         if !same_vertices || g.vertices.len() != mesh.vertices.len() {
@@ -176,7 +176,7 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn mesh() -> Mesh { Mesh { surface: None,vertices:vec![Vertex::new(0.,0.,0.,0.,0.,WHITE);4],indices:vec![0,1,2,0,2,3],texture:None} }
+    fn mesh() -> Mesh { Mesh { upload_identity: None, surface: None,vertices:vec![Vertex::new(0.,0.,0.,0.,0.,WHITE);4],indices:vec![0,1,2,0,2,3],texture:None} }
     #[test]
     fn producer_publications_match_reference_and_keep_live_uv_and_packet_lifetimes() {
         for alpha in [false,true] {

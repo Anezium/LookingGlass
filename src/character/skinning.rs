@@ -780,7 +780,7 @@ mod tests {
     }
     #[test]
     fn lean_overlay_keeps_reference_normals_and_shell_expansion() {
-        let mesh = || Mesh { surface: None,
+        let mesh = || Mesh { upload_identity: None, surface: None,
             vertices: [Vec3::ZERO, Vec3::X, Vec3::Y].map(|position| Vertex {
                 position, uv: Vec2::ZERO, normal: Vec4::ZERO, color: [255; 4],
             }).to_vec(),

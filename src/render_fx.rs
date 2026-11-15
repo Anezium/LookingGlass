@@ -67,9 +67,11 @@ impl Pass {
         if let Some(geometry)=self.geometry.take() {
             let texture=self.mesh.texture.take();
             let surface=self.mesh.surface.take();
+            let upload_identity=self.mesh.upload_identity;
             self.mesh=Rc::try_unwrap(geometry).map(|g|g.mesh).unwrap_or_else(|m|copy_mesh(&m));
             self.mesh.texture=texture;
             self.mesh.surface=surface;
+            self.mesh.upload_identity=upload_identity;
         }
     }
 }
@@ -133,7 +135,7 @@ fn actor_max_layers(c: &crate::render::vita_renderer::Config) -> usize {
     c.actor_max_layers
 }
 pub fn copy_mesh(m: &Mesh) -> Mesh {
-    Mesh { surface: m.surface.clone(),
+    Mesh { upload_identity: m.upload_identity, surface: m.surface.clone(),
         vertices: m.vertices.clone(),
         indices: m.indices.clone(),
         texture: m.texture.clone(),
@@ -267,7 +269,8 @@ pub fn begin_view(camera: &Camera3D, time: f32, atmosphere: &Atmosphere, fullbri
     set_projection(camera.matrix());
 }
 fn same_style(a: &Pass, b: &Pass) -> bool {
-    a.mesh.surface.as_ref().map(Rc::as_ptr) == b.mesh.surface.as_ref().map(Rc::as_ptr)
+    a.mesh.upload_identity == b.mesh.upload_identity
+        && a.mesh.surface.as_ref().map(Rc::as_ptr) == b.mesh.surface.as_ref().map(Rc::as_ptr)
         && a.material.as_ref().zip(b.material.as_ref()).is_some_and(|(a,b)| Rc::ptr_eq(a,b))
         && a.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
             == b.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)
@@ -550,7 +553,7 @@ pub fn finish() -> (usize, usize) {
                         #[cfg(target_os = "vita")]
                         world_geometry_counted: true,
                         cutout_reference: p.cutout_reference,
-                        mesh: Mesh { surface: p.mesh.surface.clone(),
+                        mesh: Mesh { upload_identity: p.mesh.upload_identity, surface: p.mesh.surface.clone(),
                             vertices,
                             indices,
                             texture: p.mesh.texture.clone(),
@@ -720,10 +723,14 @@ pub fn effect(mesh: &Mesh, blend: Blend) {
 /// A producer publication already owns its persistent CPU arrays.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn effect_geometry(geometry: Rc<prepared::Geometry>, texture: Option<Texture2D>, blend: Blend) {
+    effect_geometry_identified(geometry, texture, None, blend);
+}
+#[cfg(feature="vita_renderer")]
+pub(crate) fn effect_geometry_identified(geometry: Rc<prepared::Geometry>, texture: Option<Texture2D>, upload_identity: Option<u64>, blend: Blend) {
     if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     debug_assert!(retained_active());
     let blend = if blend == Blend::Add { Blend::AlphaAdd } else { blend };
-    if let Ok(mut p) = pass(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture },
+    if let Ok(mut p) = pass(Mesh { upload_identity, surface: None, vertices: Vec::new(), indices: Vec::new(), texture },
         &Stage { blend, ..Default::default() }, true, false, Appearance::default()) {
         p.effect = true; p.geometry = Some(geometry);
         let mut passes = FRAME.with(|f| f.borrow_mut().group_pool.pop().unwrap_or_default());
@@ -740,6 +747,10 @@ pub(crate) fn world_puff_batches_active() -> bool {
 /// Registration position preserves ties with packets submitted later in the view.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>, blend: Blend) {
+    world_puff_quad_identified(vertices, texture, None, blend);
+}
+#[cfg(feature="vita_renderer")]
+pub(crate) fn world_puff_quad_identified(vertices: [Vertex; 4], texture: Option<Texture2D>, upload_identity: Option<u64>, blend: Blend) {
     if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if crate::character::skinning::overlap::gather_only() { return; }
     debug_assert!(world_puff_batches_active());
@@ -748,12 +759,12 @@ pub(crate) fn world_puff_quad(vertices: [Vertex; 4], texture: Option<Texture2D>,
         if f.vertices.saturating_add(4) > MAX_VERTICES { f.dropped += 1; return; }
         f.vertices += 4;
         let before_group = f.groups.len();
-        f.world_puffs.push(retained::world_puffs::Puff { vertices, texture, blend, before_group });
+        f.world_puffs.push(retained::world_puffs::Puff { vertices, texture, upload_identity, blend, before_group });
     });
 }
 /// `world_puff_quad` for a whole set, in order, under one borrow of the frame.
 #[cfg(feature="vita_renderer")]
-pub(crate) fn world_puff_quads<'a>(quads: impl ExactSizeIterator<Item = (&'a [Vertex; 4], Option<Texture2D>, Blend)>) {
+pub(crate) fn world_puff_quads<'a>(quads: impl ExactSizeIterator<Item = (&'a [Vertex; 4], Option<Texture2D>, Option<u64>, Blend)>) {
     if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Fx) { return; }
     if crate::character::skinning::overlap::gather_only() { return; }
     debug_assert!(world_puff_batches_active());
@@ -762,10 +773,10 @@ pub(crate) fn world_puff_quads<'a>(quads: impl ExactSizeIterator<Item = (&'a [Ve
         let f = &mut *f;
         f.world_puffs.reserve(quads.len());
         let before_group = f.groups.len();
-        for (vertices, texture, blend) in quads {
+        for (vertices, texture, upload_identity, blend) in quads {
             if f.vertices.saturating_add(4) > MAX_VERTICES { f.dropped += 1; continue; }
             f.vertices += 4;
-            f.world_puffs.push(retained::world_puffs::Puff { vertices: *vertices, texture, blend, before_group });
+            f.world_puffs.push(retained::world_puffs::Puff { vertices: *vertices, texture, upload_identity, blend, before_group });
         }
     });
 }
@@ -816,7 +827,7 @@ pub fn line(a: Vec3, b: Vec3, color: Color) {
         })
         .collect();
     effect(
-        &Mesh { surface: None,
+        &Mesh { upload_identity: None, surface: None,
             vertices,
             indices: vec![0, 1, 2, 0, 2, 3],
             texture: None,
@@ -852,7 +863,7 @@ pub fn sphere(center: Vec3, radius: f32, texture: Option<&Texture2D>, color: Col
         }
     }
     effect(
-        &Mesh { surface: None,
+        &Mesh { upload_identity: None, surface: None,
             vertices,
             indices,
             texture: texture.cloned(),
@@ -1110,7 +1121,7 @@ fn layer_passes(vertices: &[Vertex], indices: &[u16], surface: &Rc<Surface>, cam
     alpha: f32, appearance: Appearance, fast: bool, clock: Option<f32>, limit: usize) -> Vec<Pass> {
     let mut passes = Vec::new();
     for layer in surface.layers.iter().take(limit) {
-        let mut copy = Mesh { surface: Some(surface.clone()), vertices: vertices.to_vec(), indices: indices.to_vec(), texture: None };
+        let mut copy = Mesh { upload_identity: None, surface: Some(surface.clone()), vertices: vertices.to_vec(), indices: indices.to_vec(), texture: None };
         copy.texture = Some(
             layer.textures[if layer.stage.images.is_empty() {
                 0
@@ -1279,7 +1290,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     std::fs::create_dir_all("private/render-fx")?;
     let mut scene = crate::render::Scene::load(assets, "skool1")?;
     let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
-    let quad = |z: f32, color: Color| Mesh { surface: None,
+    let quad = |z: f32, color: Color| Mesh { upload_identity: None, surface: None,
         vertices: [
             vec3(-1., -1., z),
             vec3(1., -1., z),
@@ -1709,7 +1720,7 @@ mod tests {
             crate::skeletal::SkinVertex { uv: Vec2::ONE, weights: vec![crate::skeletal::Weight { bone: 0, amount: 1., offset }] }).collect(), vec![0, 1, 2]);
         let cpu = source.cpu();
         // Raw alpha 128: the serial cache and the worker both publish it normalized.
-        let mesh = Mesh { surface: None, vertices: (0..3).map(|i| Vertex::new(i as f32, 2. * i as f32, 1., 0.25 * i as f32, 0.5, Color::from_rgba(10, 20, 30, 128))).collect(),
+        let mesh = Mesh { upload_identity: None, surface: None, vertices: (0..3).map(|i| Vertex::new(i as f32, 2. * i as f32, 1., 0.25 * i as f32, 0.5, Color::from_rgba(10, 20, 30, 128))).collect(),
             indices: cpu.indices.clone(), texture: None };
         // Three layers over actor_max_layers=2: one capped layer per kept draw.
         let surface = Rc::new(Surface {
@@ -1837,7 +1848,7 @@ mod material_identity_tests {
         let opaque = ts::register(&base, vec![(Stage::default(), vec![base.clone()])], false);
         let alpha = ts::register(&base, vec![(Stage { blend: Blend::Alpha, environment: true,
             ..Default::default() }, vec![base.clone()])], true);
-        let mesh = |surface| Mesh { surface: Some(surface), texture: Some(base.clone()),
+        let mesh = |surface| Mesh { upload_identity: None, surface: Some(surface), texture: Some(base.clone()),
             vertices: vec![Vertex::new(0., 0., 0., 0., 0., WHITE); 3], indices: vec![0, 1, 2] };
         let a = mesh(opaque.clone());
         let b = mesh(alpha.clone());

@@ -581,7 +581,7 @@ fn tan_picture(
             })
             .collect();
         crate::sim_maps::count("imm_hud_mesh", 1);
-        draw_mesh(&Mesh { surface: None,
+        draw_mesh(&Mesh { upload_identity: None, surface: None,
             vertices,
             indices,
             texture: Some(texture.clone()),

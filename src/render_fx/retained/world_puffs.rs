@@ -8,13 +8,14 @@ use std::rc::Rc;
 pub(crate) struct Puff {
     pub vertices: [Vertex; 4],
     pub texture: Option<Texture2D>,
+    pub upload_identity: Option<u64>,
     pub blend: Blend,
     pub before_group: usize,
 }
 fn normalized(blend: Blend) -> Blend { if blend == Blend::Add { Blend::AlphaAdd } else { blend } }
 fn puff_key(p: &Puff) -> PacketKey {
     let stage = Stage::default();
-    PacketKey { surface: None, texture: p.texture.as_ref().map(Texture2D::raw_miniquad_id), state: [
+    PacketKey { upload_identity: p.upload_identity, surface: None, texture: p.texture.as_ref().map(merge_texture), state: [
         crate::render::blend_index(normalized(p.blend)) as u32, 0, 0, u32::from(stage.clamp),
         (stage.alpha_test as f32).to_bits(), stage.alpha_reference.to_bits(),
         1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(), 1f32.to_bits(),
@@ -58,7 +59,7 @@ struct Batch {
 impl Default for Batch {
     fn default() -> Self {
         Self { members: Vec::new(), output: 0, quad_members: 0,
-            geometry: Rc::new(super::super::prepared::Geometry::new(Mesh { surface: None,
+            geometry: Rc::new(super::super::prepared::Geometry::new(Mesh { upload_identity: None, surface: None,
                 vertices: Vec::new(), indices: Vec::new(), texture: None })) }
     }
 }
@@ -75,18 +76,18 @@ impl Bank {
     fn plan(&mut self, groups: &[super::super::Group], puffs: &[Puff], list: &[(f32, Source)], material: bool) {
         self.live = 0;
         self.candidates.clear(); self.kept.clear();
-        // puff_key depends only on the texture and the blend, and a run shares both.
+        // A cached key must include the original upload identity as well as the binding.
         let reuse_key = crate::sim_maps::fx_attached_persist();
-        let mut last_puff: Option<(Option<macroquad::miniquad::TextureId>, Blend, PacketKey)> = None;
+        let mut last_puff: Option<(Option<MergeTexture>, Blend, Option<u64>, PacketKey)> = None;
         for &(depth, source) in list {
             let puff_meta = match source {
                 Source::Puff(id) if reuse_key => {
                     let p = &puffs[id];
-                    let texture = p.texture.as_ref().map(Texture2D::raw_miniquad_id);
-                    let hit = last_puff.as_ref().filter(|l| l.0 == texture && l.1 == p.blend).map(|l| l.2.clone());
+                    let texture = p.texture.as_ref().map(merge_texture);
+                    let hit = last_puff.as_ref().filter(|l| l.0 == texture && l.1 == p.blend && l.2 == p.upload_identity).map(|l| l.3.clone());
                     let key = hit.unwrap_or_else(|| {
                         let key = puff_key(p);
-                        last_puff = Some((texture, p.blend, key.clone()));
+                        last_puff = Some((texture.clone(), p.blend, p.upload_identity, key.clone()));
                         key
                     });
                     Some((key, 4, 6))
@@ -151,7 +152,7 @@ impl Bank {
         }
         if !same_vertices || !same_indices {
             let old = g.version;
-            let mesh = std::mem::replace(&mut g.mesh, Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None });
+            let mesh = std::mem::replace(&mut g.mesh, Mesh { upload_identity: None, surface: None, vertices: Vec::new(), indices: Vec::new(), texture: None });
             *g = super::super::prepared::Geometry::merged(mesh, Some(old), same_indices);
             if same_vertices { g.version.vertices = old.vertices; }
         }
@@ -174,7 +175,7 @@ impl Bank {
                 Source::Actor(id) => groups[id].passes.pop().unwrap(),
                 Source::Puff(id) => {
                     let puff = &puffs[id];
-                    super::super::pass(Mesh { surface: None, vertices: Vec::new(), indices: Vec::new(), texture: puff.texture.clone() },
+                    super::super::pass(Mesh { upload_identity: puff.upload_identity, surface: None, vertices: Vec::new(), indices: Vec::new(), texture: puff.texture.clone() },
                         &Stage { blend: normalized(puff.blend), ..Default::default() }, true, false,
                         super::super::Appearance::default()).expect("direct puff pass")
                 }
@@ -208,7 +209,7 @@ mod tests {
     use super::*;
     fn puff(tag: usize, blend: Blend) -> Puff {
         Puff { vertices: std::array::from_fn(|i| Vertex::new(tag as f32, i as f32, 0., i as f32, 0., WHITE)),
-            texture: None, blend, before_group: 0 }
+            texture: None, upload_identity: None, blend, before_group: 0 }
     }
     struct Restore(super::super::super::Frame);
     impl Drop for Restore {
@@ -219,7 +220,7 @@ mod tests {
             active: true, direct: true, ..Default::default() })))
     }
     fn pass_for(p: &Puff, effect: bool, equal: bool) -> super::super::super::Pass {
-        let mut pass = super::super::super::pass(Mesh { surface: None, vertices: p.vertices.to_vec(),
+        let mut pass = super::super::super::pass(Mesh { upload_identity: p.upload_identity, surface: None, vertices: p.vertices.to_vec(),
             indices: vec![0,1,2,0,2,3], texture: None },
             &Stage { blend: normalized(p.blend), depth_equal: equal, ..Default::default() },
             true, false, Default::default()).unwrap();
@@ -282,6 +283,46 @@ mod tests {
                 assert!(batch.geometry.indices.iter().all(|&i|(i as usize)<batch.geometry.vertices.len()));
             }
         }}
+    }
+    #[test]
+    fn distinct_uploads_sharing_an_image_preserve_alpha_sequence_in_both_planners() {
+        let _frame = frame();
+        use macroquad::miniquad::{RawId, TextureId};
+        // Identical image pixels, overlapping quads, distinct vertex colours.
+        // A and B are separate particle systems/uploads even when ON binds one image.
+        for shared in [false, true] {
+            let mut puffs = (0..3).map(|i| puff(i, Blend::Alpha)).collect::<Vec<_>>();
+            for (i, p) in puffs.iter_mut().enumerate() {
+                p.upload_identity = Some(i as u64 + 1);
+                p.texture = Some(Texture2D::from_miniquad_texture(TextureId::from_raw_id(
+                    RawId::OpenGl(if shared { 401 } else { 401 + i as u32 }))));
+                for (v, position) in p.vertices.iter_mut().zip([vec3(-1.,-1.,0.), vec3(1.,-1.,0.), vec3(1.,1.,0.), vec3(-1.,1.,0.)]) {
+                    v.position = position; v.color = [0,0,0,128]; v.color[i] = 255;
+                }
+            }
+            let mut groups = puffs.iter().map(|p| {
+                let mut pass = pass_for(p, true, false);
+                pass.mesh.texture = p.texture.clone();
+                super::super::super::Group { ant_dead: None, passes: vec![pass], transparent: true }
+            }).collect::<Vec<_>>();
+            let original = vec![(3., Source::Actor(0)), (2., Source::Actor(1)), (1., Source::Actor(2))];
+            let expected = snapshot(&groups, &original);
+            let mut list = original;
+            merge_cached_mode(&mut MergeCache::default(), &mut groups, &mut list, true, false, &mut BTreeMap::new(), false);
+            assert_eq!(snapshot(&groups, &list), expected, "FX planner shared={shared}");
+            for persist in [false, true] {
+                crate::sim_maps::with_fx_attached_persist(persist, || {
+                    let mut groups = Vec::new();
+                    let mut list = vec![(3., Source::Puff(0)), (2., Source::Puff(1)), (1., Source::Puff(2))];
+                    let mut bank = Bank::default();
+                    bank.build(&mut groups, &puffs, &mut list, true);
+                    assert_eq!(bank.live, 3, "distinct particle uploads must not merge");
+                    assert_eq!(snapshot(&groups, &list), expected, "puff planner shared={shared} persist={persist}");
+                    merge_cached_mode(&mut MergeCache::default(), &mut groups, &mut list, true, false, &mut BTreeMap::new(), false);
+                    assert_eq!(snapshot(&groups, &list), expected, "published puff identities must survive FX planner");
+                });
+            }
+        }
     }
     #[derive(Debug, PartialEq)]
     struct Packed { draws: Vec<Draw>, vertices_new: Vec<bool>, topology_new: Vec<bool> }
@@ -370,7 +411,7 @@ mod tests {
             let _frame = frame();
             super::super::super::test_support::set_frame_vertices(super::super::super::test_support::MAX - 12);
             if whole {
-                super::super::super::world_puff_quads(quads.iter().map(|q| (&q.vertices, None, q.blend)));
+                super::super::super::world_puff_quads(quads.iter().map(|q| (&q.vertices, None, q.upload_identity, q.blend)));
             } else {
                 for q in &quads { super::super::super::world_puff_quad(q.vertices, None, q.blend); }
             }

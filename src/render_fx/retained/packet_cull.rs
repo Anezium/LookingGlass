@@ -160,7 +160,7 @@ mod tests {
         Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
-            mesh:Mesh { surface: None,vertices:points.iter().map(|p| Vertex::new(p.x,p.y,p.z,0.,0.,WHITE)).collect(),indices:Vec::new(),texture:None},
+            mesh:Mesh { upload_identity: None, surface: None,vertices:points.iter().map(|p| Vertex::new(p.x,p.y,p.z,0.,0.,WHITE)).collect(),indices:Vec::new(),texture:None},
             material:None,lit:false,clamp:false,cutout:0.,cutout_reference:0.,gain:Vec4::ONE,fog:0.,model:true,
             appearance:super::super::super::Appearance::default(),filter_fade:0.}
     }
@@ -202,7 +202,7 @@ mod tests {
     }
     #[test]
     fn bounds_follow_the_vertex_generation() {
-        let quad = |x: f32| Mesh { surface: None, vertices: vec![Vertex::new(x, 0., 0., 0., 0., WHITE), Vertex::new(x + 1., 2., 3., 0., 0., WHITE),
+        let quad = |x: f32| Mesh { upload_identity: None, surface: None, vertices: vec![Vertex::new(x, 0., 0., 0., 0., WHITE), Vertex::new(x + 1., 2., 3., 0., 0., WHITE),
             Vertex::new(x, 2., 0., 0., 0., WHITE)], indices: vec![0, 1, 2], texture: None };
         let mut g = super::super::super::prepared::Geometry::new(quad(5.));
         let mut bounds = Bounds::default();
@@ -210,7 +210,7 @@ mod tests {
         let mut pass = Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
-            mesh:Mesh { surface: None,vertices:Vec::new(),indices:Vec::new(),texture:None},material:None,lit:false,clamp:false,cutout:0.,
+            mesh:Mesh { upload_identity: None, surface: None,vertices:Vec::new(),indices:Vec::new(),texture:None},material:None,lit:false,clamp:false,cutout:0.,
             cutout_reference:0.,gain:Vec4::ONE,fog:0.,model:true,appearance:super::super::super::Appearance::default(),filter_fade:0.};
         pass.geometry = Some(std::rc::Rc::new(super::super::super::prepared::Geometry { mesh: quad(5.), version: g.version, valid: true }));
         assert_eq!(bounds.of(&pass, &mut scanned), (vec3(5., 0., 0.), vec3(6., 2., 3.)));

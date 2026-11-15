@@ -387,7 +387,7 @@ impl Art {
             return;
         };
         let color = Color::new(1., 1., 1., alpha);
-        let mesh = Mesh { surface: Some(surface.clone()),
+        let mesh = Mesh { upload_identity: None, surface: Some(surface.clone()),
             vertices: [
                 (a, vec2(0., 0.)),
                 (b, vec2(1., 0.)),

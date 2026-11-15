@@ -89,12 +89,12 @@ impl Buffer {
         for vertices in &self.output {
             let i = self.live;
             if self.publications.len() <= i {
-                self.publications.push(Rc::new(Geometry::new(Mesh { surface: None,vertices:Vec::with_capacity(4),
+                self.publications.push(Rc::new(Geometry::new(Mesh { upload_identity: None, surface: None,vertices:Vec::with_capacity(4),
                     indices:vec![0,1,2,0,2,3], texture:None})));
             }
             // Reflections / queued prior views retain immutable publications.
             if Rc::get_mut(&mut self.publications[i]).is_none() {
-                self.publications[i] = Rc::new(Geometry::new(Mesh { surface: None,vertices:Vec::with_capacity(4),
+                self.publications[i] = Rc::new(Geometry::new(Mesh { upload_identity: None, surface: None,vertices:Vec::with_capacity(4),
                     indices:vec![0,1,2,0,2,3],texture:None}));
             }
             Rc::get_mut(&mut self.publications[i]).unwrap().update_quad(vertices);

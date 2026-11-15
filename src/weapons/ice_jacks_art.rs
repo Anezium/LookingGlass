@@ -222,7 +222,7 @@ impl Art {
             }
             if !vertices.is_empty() {
                 crate::render_fx::effect(
-                    &Mesh { surface: None,
+                    &Mesh { upload_identity: None, surface: None,
                         indices: (0..vertices.len() as u16).collect(),
                         vertices,
                         texture: Some(self.swipe.clone()),

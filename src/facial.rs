@@ -178,6 +178,8 @@ struct Blink {
     open: Texture2D,
     open_surface: Option<std::rc::Rc<crate::render_fx::Surface>>,
     closed: Texture2D,
+    closed_upload_identity: u64,
+    open_upload_identity: Option<u64>,
 }
 pub struct Face {
     rig: Rig,
@@ -207,14 +209,16 @@ impl Face {
             let path = texture::resolve(assets, &format!("{}/{skin}", def.path), specs)
                 .or_else(|| texture::resolve(assets, &skin, specs))
                 .context("Missing blink texture")?;
-            let closed = texture::decode_upload_shared(assets, &path)
+            let closed = texture::decode_upload_shared_full(assets, &path)
                 .context("Blink texture upload")?;
             Some(Blink {
                 surface: index,
                 period,
                 open,
                 open_surface: meshes[index].as_ref().and_then(|m| m.surface.clone()),
-                closed,
+                closed_upload_identity: closed.upload_identity,
+                open_upload_identity: meshes[index].as_ref().and_then(|m| m.upload_identity),
+                closed: closed.texture,
             })
         } else {
             None
@@ -234,6 +238,7 @@ impl Face {
     pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
         if let Some(b) = &self.blink {
             if let Some(mesh) = &mut meshes[b.surface] {
+                mesh.upload_identity = if alive && blinking(time, b.period) { Some(b.closed_upload_identity) } else { b.open_upload_identity };
                 mesh.surface = if alive && blinking(time, b.period) { None } else { b.open_surface.clone() };
                 mesh.texture = Some(
                     if alive && blinking(time, b.period) {

@@ -275,7 +275,7 @@ pub(super) fn load(
                 destination,
                 forward,
                 local: vertices.iter().map(|v| v.position).collect(),
-                mesh: Mesh { surface: None,
+                mesh: Mesh { upload_identity: None, surface: None,
                     vertices: vertices
                         .iter()
                         .map(|v| {

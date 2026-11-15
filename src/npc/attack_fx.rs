@@ -30,7 +30,7 @@ fn ribbon(from: Vec3, to: Vec3, camera: Vec3, width: f32, repeats: f32) -> Optio
         .try_normalize()
         .unwrap_or_else(|| axis.any_orthonormal_vector())
         * width;
-    Some(Mesh { surface: None,
+    Some(Mesh { upload_identity: None, surface: None,
         vertices: [
             (from - side, vec2(0., 0.)),
             (to - side, vec2(repeats, 0.)),

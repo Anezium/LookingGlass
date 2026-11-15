@@ -638,7 +638,7 @@ impl Character {
                 &[format!("{}/{skin}", def.path), skin.clone()],
                 &specs,
             )?);
-            meshes.push(Some(Mesh { surface: material_layers.last().cloned(),
+            meshes.push(Some(Mesh { upload_identity: None, surface: material_layers.last().cloned(),
                 vertices: surface
                     .vertices
                     .iter()
@@ -1671,7 +1671,7 @@ pub async fn check_shared_material() -> Result<()> {
     };
     set_camera(&camera);
     let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
-    let quad = |x: f32| Mesh { surface: None,
+    let quad = |x: f32| Mesh { upload_identity: None, surface: None,
         vertices: [
             vec3(x - 0.7, -1., 0.),
             vec3(x + 0.7, -1., 0.),

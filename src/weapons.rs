@@ -1035,7 +1035,7 @@ impl Prop {
                 &[format!("{}/{skin}", def.path), skin.clone()],
                 specs,
             )?);
-            meshes.push(Mesh { surface: material_layers.last().cloned(),
+            meshes.push(Mesh { upload_identity: None, surface: material_layers.last().cloned(),
                 vertices: s
                     .uv
                     .iter()
@@ -1154,7 +1154,7 @@ impl Prop {
             return false;
         }
         if entry.meshes.is_empty() {
-            entry.meshes = self.meshes.iter().map(|m| Mesh { surface: m.surface.clone(),
+            entry.meshes = self.meshes.iter().map(|m| Mesh { upload_identity: m.upload_identity, surface: m.surface.clone(),
                 vertices: m.vertices.clone(), indices: m.indices.clone(), texture: m.texture.clone() }).collect();
             crate::sim_maps::count("prop_occurrence_copied_vertices", entry.meshes.iter().map(|m| m.vertices.len() as u64).sum());
         }
@@ -2427,7 +2427,7 @@ impl Visuals {
         if !vertices.is_empty() {
             gl_use_material(&self.effect_material);
             crate::sim_maps::count("imm_weapon_mesh", 1);
-            draw_mesh(&Mesh { surface: None,
+            draw_mesh(&Mesh { upload_identity: None, surface: None,
                 indices: (0..vertices.len() as u16).collect(),
                 vertices,
                 texture: Some(self.return_texture.clone()),
@@ -2442,7 +2442,7 @@ impl Visuals {
         if !vertices.is_empty() {
             let age = self.trail.first().map_or(0., |t| 0.2 - t.life);
             crate::render_fx::skin_effect(
-                &Mesh { surface: Some(self._swipe_surface.clone()),
+                &Mesh { upload_identity: None, surface: Some(self._swipe_surface.clone()),
                     indices: (0..vertices.len() as u16).collect(),
                     vertices,
                     texture: Some(self.swipe_texture.clone()),
@@ -2459,7 +2459,7 @@ impl Visuals {
         append_swing(&mut vertices, &self.trail, false);
         if !vertices.is_empty() {
             crate::sim_maps::count("imm_weapon_mesh", 1);
-            draw_mesh(&Mesh { surface: None,
+            draw_mesh(&Mesh { upload_identity: None, surface: None,
                 indices: (0..vertices.len() as u16).collect(),
                 vertices,
                 texture: Some(self.spark_texture.clone()),
@@ -2553,7 +2553,7 @@ impl Visuals {
         }
         if !vertices.is_empty() {
             crate::sim_maps::count("imm_weapon_mesh", 1);
-            draw_mesh(&Mesh { surface: None,
+            draw_mesh(&Mesh { upload_identity: None, surface: None,
                 indices: (0..vertices.len() as u16).collect(),
                 vertices,
                 texture: Some(self.spark_texture.clone()),
@@ -3656,7 +3656,7 @@ mod prop_occurrence_tests {
         // A second registered texture for a caller to swap in.
         let swapped = ts::register(&ts::texture(texture + 300), vec![(stage, vec![ts::texture(texture + 400)])], false);
         let model = tan::Model { surfaces: vec![surface(frames)], tags: Default::default(), tag_rotations: Default::default(), frame_time: 0.1 };
-        let meshes = model.surfaces.iter().map(|s| Mesh { surface: None,
+        let meshes = model.surfaces.iter().map(|s| Mesh { upload_identity: None, surface: None,
             vertices: s.uv.iter().map(|&uv| Vertex { position: Vec3::ZERO, uv, color: [255; 4], normal: Vec4::ZERO }).collect(),
             indices: s.indices.clone(), texture: Some(base.clone()) }).collect();
         (Prop { _material_layers: Vec::new(), bounds: model_bounds(&model), culled: false, model, meshes, scale: 1.25, occurrences: PropOccurrences::default() }, vec![keep, swapped])

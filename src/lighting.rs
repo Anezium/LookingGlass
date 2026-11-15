@@ -248,7 +248,7 @@ pub fn shadow(world: &World, feet: Vec3, radius: f32) {
         indices.extend([0, i, i + 1]);
     }
     crate::render_fx::effect(
-        &Mesh { surface: None,
+        &Mesh { upload_identity: None, surface: None,
             vertices,
             indices,
             texture: Some(texture),
@@ -283,7 +283,7 @@ pub fn flares(eye: Vec3, direction: Vec3) {
                 })
                 .collect();
             crate::render_fx::effect(
-                &Mesh { surface: None,
+                &Mesh { upload_identity: None, surface: None,
                     vertices,
                     indices: vec![0, 1, 2, 0, 2, 3],
                     texture: Some(texture.clone()),

@@ -87,6 +87,8 @@ pub(crate) struct SharedTexture {
     pub texture: Texture2D,
     /// Every texel is fully transparent, as `fill_cuts` reads it.
     pub zero_alpha: bool,
+    /// Unique per request, even on a cache hit: the private upload OFF would create.
+    pub upload_identity: u64,
 }
 
 fn zero_alpha(pixels: &[u8]) -> bool {
@@ -148,6 +150,8 @@ pub(crate) fn decode_upload_shared_sampled(
 }
 
 fn decode_upload_keyed(assets: &mut Assets, path: &str, sampler: Sampler) -> Result<SharedTexture> {
+    thread_local! { static NEXT_UPLOAD: Cell<u64> = const { Cell::new(1) }; }
+    let upload_identity = NEXT_UPLOAD.with(|n| { let v = n.get(); n.set(v.checked_add(1).expect("upload identity overflow")); v });
     let share = retains_shared_uploads();
     let key = sampler.key(path);
     if share {
@@ -167,7 +171,7 @@ fn decode_upload_keyed(assets: &mut Assets, path: &str, sampler: Sampler) -> Res
                 stored == sampler,
                 "shared upload {path} was reused with a different sampler"
             );
-            let shared = SharedTexture { texture, zero_alpha };
+            let shared = SharedTexture { texture, zero_alpha, upload_identity };
             verify_hit(assets, path, &shared)?;
             return Ok(shared);
         }
@@ -178,7 +182,7 @@ fn decode_upload_keyed(assets: &mut Assets, path: &str, sampler: Sampler) -> Res
     if sampler == Sampler::Repeat {
         set_wrap_repeat(&texture);
     }
-    let shared = SharedTexture { texture, zero_alpha: zero_alpha(&image.pixels) };
+    let shared = SharedTexture { texture, zero_alpha: zero_alpha(&image.pixels), upload_identity };
     if share {
         SHARED.with(|s| {
             let mut s = s.borrow_mut();

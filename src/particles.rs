@@ -478,6 +478,7 @@ struct Emitter {
     light_style: Option<light_style::Style>,
     light_color: Option<Vec3>,
     textures: Vec<Texture2D>,
+    upload_identities: Vec<u64>,
     stage: crate::materials::Stage,
     additive: bool,
     carry: f32,
@@ -855,6 +856,7 @@ impl Steam {
                         ..Default::default()
                     });
                 let mut textures = Vec::new();
+                let mut upload_identities = Vec::new();
                 for frame in &stage.images {
                     let Some(path) = texture::resolve(assets, frame, &specs) else {
                         continue;
@@ -864,6 +866,7 @@ impl Steam {
                     crate::sim_maps::probe::draw_query::label_texture(shared.texture.raw_miniquad_id(), &path);
                     #[cfg(feature = "vita_renderer")]
                     crate::render_fx::retained::note_particle_texture_zero_alpha(&shared.texture, shared.zero_alpha);
+                    upload_identities.push(shared.upload_identity);
                     textures.push(shared.texture);
                 }
                 if spec.light.is_none()
@@ -899,6 +902,7 @@ impl Steam {
                     light_style,
                     light_color,
                     textures,
+                    upload_identities,
                     stage,
                     additive,
                     // One ten-second pixie is alive from entry, then replaced.
@@ -1311,7 +1315,7 @@ impl Steam {
             let e = &self.emitters[p.emitter];
             // Stage::frame is 0 for at most one image, whatever the age.
             let frame = if e.stage.images.len() <= 1 { 0 } else { e.stage.frame(p.age) };
-            (quads.raw_ref(i).unwrap(), e.textures.get(frame).cloned(),
+            (quads.raw_ref(i).unwrap(), e.textures.get(frame).cloned(), e.upload_identities.get(frame).copied(),
                 if e.additive || cfg!(all(feature="sim_maps_probe",not(target_os="vita"))) && negative("persist-blend") { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha })
         }));
         true
@@ -1323,14 +1327,14 @@ impl Steam {
             if let Some(vertices) = self.quads.borrow().raw_quad(index) {
                 crate::sim_maps::count("fx_funnel_registered_raw", 1);
                 let e = &self.emitters[self.puffs[index].emitter];
-                crate::render_fx::world_puff_quad(vertices, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
+                crate::render_fx::world_puff_quad_identified(vertices, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(), e.upload_identities.get(e.stage.frame(self.puffs[index].age)).copied(),
                     if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
                 return;
             }
             if let Some(geometry) = self.quads.borrow().geometry(index) {
                 crate::sim_maps::count("fx_funnel_registered_publication", 1);
                 let e = &self.emitters[self.puffs[index].emitter];
-                crate::render_fx::effect_geometry(geometry, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(),
+                crate::render_fx::effect_geometry_identified(geometry, e.textures.get(e.stage.frame(self.puffs[index].age)).cloned(), e.upload_identities.get(e.stage.frame(self.puffs[index].age)).copied(),
                     if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
                 return;
             }
@@ -1372,7 +1376,7 @@ impl Steam {
             normal: Vec4::ZERO,
         })
         .collect();
-        Mesh { surface: None, vertices, indices: vec![0, 1, 2, 0, 2, 3],
+        Mesh { upload_identity: e.upload_identities.get(e.stage.frame(p.age)).copied(), surface: None, vertices, indices: vec![0, 1, 2, 0, 2, 3],
             texture: e.textures.get(e.stage.frame(p.age)).cloned() }
 
     }
@@ -1474,7 +1478,7 @@ impl PickupBurst {
             indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
         }
         crate::render_fx::effect(
-            &Mesh { surface: None,
+            &Mesh { upload_identity: None, surface: None,
                 vertices,
                 indices,
                 texture: Some(self.texture.clone()),
@@ -1739,6 +1743,7 @@ impl Attached {
                     ..Default::default()
                 });
             let mut textures = Vec::new();
+            let mut upload_identities = Vec::new();
             for frame in &stage.images {
                 let Some(path) = texture::resolve(assets, frame, materials) else {
                     continue;
@@ -1748,6 +1753,7 @@ impl Attached {
                 crate::sim_maps::probe::draw_query::label_texture(shared.texture.raw_miniquad_id(), &path);
                 #[cfg(feature = "vita_renderer")]
                 crate::render_fx::retained::note_particle_texture_zero_alpha(&shared.texture, shared.zero_alpha);
+                upload_identities.push(shared.upload_identity);
                 textures.push(shared.texture);
             }
             if textures.is_empty() || textures.len() != stage.images.len() {
@@ -1772,6 +1778,7 @@ impl Attached {
                 light_style: None,
                 light_color: None,
                 textures,
+                upload_identities,
                 stage,
                 additive,
                 carry: 0.,
@@ -2532,7 +2539,7 @@ pub(crate) mod tests {
                         },
                         light_style: None,
                         light_color: None,
-                        textures: vec![],
+                        textures: vec![], upload_identities: vec![],
                         stage: Default::default(),
                         additive: false,
                         carry: 0.,
@@ -2751,7 +2758,7 @@ pub(crate) mod tests {
                 },
                 light_style: None,
                 light_color: None,
-                textures: vec![],
+                textures: vec![], upload_identities: vec![],
                 stage: crate::materials::Stage::default(),
                 additive: false,
                 carry: 0.,

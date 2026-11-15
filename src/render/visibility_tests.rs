@@ -47,7 +47,7 @@ fn batch(faces: &[usize]) -> Batch {
         static_offset: None,
         face_side: crate::materials::FaceSide::Both,
         motion: None,
-        mesh: Mesh { surface: None,
+        mesh: Mesh { upload_identity: None, surface: None,
             vertices: Vec::new(),
             indices: full_indices.clone(),
             texture: None,

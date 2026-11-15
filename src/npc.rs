@@ -1560,7 +1560,7 @@ impl Model {
                 &[format!("{}/{skin}", data.def.path), skin.clone()],
                 specs,
             )?);
-            meshes.push(Some(Mesh { surface: material_layers.last().cloned(),
+            meshes.push(Some(Mesh { upload_identity: None, surface: material_layers.last().cloned(),
                 vertices: s
                     .vertices
                     .iter()

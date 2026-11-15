@@ -53,7 +53,7 @@ impl Cache {
         self.meshes.clear();
         self.meshes.extend(model.meshes.iter().zip(&model.visible)
             .filter_map(|(mesh, visible)| visible.then_some(mesh.as_ref()).flatten())
-            .map(|mesh| Mesh { surface: mesh.surface.clone(), vertices: mesh.vertices.clone(), indices: mesh.indices.clone(),
+            .map(|mesh| Mesh { upload_identity: mesh.upload_identity, surface: mesh.surface.clone(), vertices: mesh.vertices.clone(), indices: mesh.indices.clone(),
                 texture: mesh.texture.clone() }));
     }
 }

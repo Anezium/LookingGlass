@@ -132,7 +132,7 @@ impl Drop for Plane {
     }
 }
 fn quad(z: f32, color: Color) -> Mesh {
-    Mesh { surface: None,
+    Mesh { upload_identity: None, surface: None,
         vertices: [
             vec3(-1., -1., z),
             vec3(1., -1., z),
