@@ -433,6 +433,13 @@ pub(crate) fn lite_pass(p: &Pass) -> bool {
     p.effect && !p.lit && !p.clamp && p.cutout < 0.5 && !(p.appearance.dissolve > 0.)
         && !p.appearance.ghost && !(p.appearance.power > 0.5) && p.filter_fade == 0.
 }
+/// The opt-in programs one configuration asks for: the lean fragment program and
+/// whether the corpse-opaque program is requested. One pure decision, so the
+/// combined selection can be pinned without a GL context.
+fn program_choice(c: &crate::render::vita_renderer::Config) -> (Option<Specialized>, bool) {
+    (specialized_program(c.fx_lite, c.fx_unlit_exact),
+     c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+}
 impl Gpu {
     pub(crate) fn new() -> Result<Self> {
         let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
@@ -451,8 +458,8 @@ impl Gpu {
             )
             .context("retained actor shader")?;
         // A failed specialized program falls back to the full program.
-        let config = crate::render::vita_renderer::config();
-        let lite = specialized_program(config.fx_lite, config.fx_unlit_exact).and_then(|specialized| {
+        let (specialized, corpse_requested) = program_choice(crate::render::vita_renderer::config());
+        let lite = specialized.and_then(|specialized| {
             crate::frame_profile::shader_creation();
             let _shader_name = crate::shader_cache::Name::new(specialized.name());
             let source = specialized.fragment();
@@ -460,7 +467,7 @@ impl Gpu {
                 fragment: &crate::environment::fragment(&source) }, meta())
                 .map_err(|e| eprintln!("[lg/vita-renderer] warning {} program failed, key off: {e:?}", specialized.name())).ok()
         }).map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
-        let corpse_opaque = (config.ant_corpse_opaque_shader || config.actor_opaque_shader).then(|| {
+        let corpse_opaque = corpse_requested.then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name=crate::shader_cache::Name::new("retained-ant-corpse-opaque");
             let fragment=crate::lighting::fragment(&crate::environment::fragment(&super::corpse_opaque::fragment()));
@@ -2309,6 +2316,34 @@ mod tests {
         p.lit = false;
         p.effect = false;
         assert_eq!(route(&p, false, true), Route::Full, "non-effect pass is not an FX specialization");
+    }
+    // RC10 merges two branches that each selected one opt-in program. Pin the whole
+    // truth table so neither source branch's selection is lost in the union.
+    #[test]
+    fn combined_actor_program_selection_matches_each_source_branch() {
+        let config = |keys: &str| -> crate::render::vita_renderer::Config {
+            serde_json::from_str(keys).unwrap()
+        };
+        // All off: no lean program and no corpse program, as RC9 before either branch.
+        assert_eq!(program_choice(&config("{}")), (None, false));
+        // fx_lite alone: the existing lean program, unchanged by hatter2.
+        assert_eq!(program_choice(&config(r#"{"fx_lite":true}"#)),
+            (Some(Specialized::Lite), false));
+        // fx_unlit_exact alone: hatter2's program only.
+        assert_eq!(program_choice(&config(r#"{"fx_unlit_exact":true}"#)),
+            (Some(Specialized::UnlitExact), false));
+        // actor_opaque_shader alone: skool1's corpse program, still no lean program.
+        assert_eq!(program_choice(&config(r#"{"actor_opaque_shader":true}"#)), (None, true));
+        // The RC8 corpse default keeps asking for the same program.
+        assert_eq!(program_choice(&config(r#"{"ant_corpse_opaque_shader":true}"#)), (None, true));
+        // The merged case: hatter2's program and skool1's corpse program together.
+        assert_eq!(program_choice(&config(r#"{"fx_unlit_exact":true,"actor_opaque_shader":true}"#)),
+            (Some(Specialized::UnlitExact), true));
+        // Combinations neither source branch could see: precedence, and both at once.
+        assert_eq!(program_choice(&config(r#"{"fx_lite":true,"fx_unlit_exact":true}"#)),
+            (Some(Specialized::UnlitExact), false));
+        assert_eq!(program_choice(&config(r#"{"fx_lite":true,"actor_opaque_shader":true}"#)),
+            (Some(Specialized::Lite), true));
     }
     #[test]
     fn specialization_rejects_each_clip_and_appearance_path_and_counts_routes() {
