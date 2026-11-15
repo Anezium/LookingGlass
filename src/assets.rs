@@ -3,13 +3,13 @@ use std::{
     collections::BTreeMap,
     fs::{self, File},
     io::{self, Cursor, Read},
-    sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc},
+    sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, mpsc, Arc},
     thread::{self, JoinHandle},
     path::{Path, PathBuf},
 };
 use zip::ZipArchive;
 #[path = "assets/pk3.rs"]
-mod pk3;
+pub(crate) mod pk3;
 
 const MAX_ENTRY: u64 = 128 * 1024 * 1024;
 
@@ -17,7 +17,9 @@ const MAX_ENTRY: u64 = 128 * 1024 * 1024;
 pub struct Assets {
     packs: Vec<ZipArchive<pk3::PackReader>>,
     paths: Vec<PathBuf>,
-    entries: BTreeMap<String, (usize, usize, u64, u32)>,
+    entries: BTreeMap<String, (usize, usize, u64, u32, u64, u64)>,
+    // Per-pack end of the announced entry window, set before each entry is opened.
+    entry_caps: Vec<Arc<std::sync::atomic::AtomicU64>>,
     pub base: PathBuf,
     content_fingerprint: Option<String>,
     // One immutable, override-resolved shader library per mounted corpus.
@@ -33,7 +35,7 @@ impl Assets {
         eprintln!("[lg/startup] corpus_identity begin entries={}",self.entries.len());
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
-        for (name, &(_, _, size, crc)) in &self.entries {
+        for (name, &(_, _, size, crc, _, _)) in &self.entries {
             hash.update((name.len() as u64).to_le_bytes());
             hash.update(name.as_bytes());
             hash.update(size.to_le_bytes());
@@ -44,7 +46,9 @@ impl Assets {
         eprintln!("[lg/startup] corpus_identity done elapsed_ms={:.3}",start.elapsed().as_secs_f64()*1000.);
         Ok(value)
     }
-    pub fn open(base: &Path) -> Result<Self> {
+    pub fn open(base: &Path) -> Result<Self> { Self::open_with_window(base, 0) }
+    /// `window` bytes of read-ahead per open pack; 0 keeps one read per request.
+    pub fn open_with_window(base: &Path, window: usize) -> Result<Self> {
         let mount_start=std::time::Instant::now();
         eprintln!("[lg/startup] pk3_mount begin data={}",base.display());
         let mut paths = fs::read_dir(base)
@@ -64,12 +68,13 @@ impl Assets {
         }
         let mut entries = BTreeMap::new();
         let mut packs = Vec::new();
+        let mut entry_caps = Vec::new();
         for path in &paths {
             let start=std::time::Instant::now();
             eprintln!("[lg/startup] pk3_open begin file={}",path.display());
             let file=File::open(&path)?;
             eprintln!("[lg/startup] pk3_open done elapsed_ms={:.3}; central_directory begin",start.elapsed().as_secs_f64()*1000.);
-            let (pack, metadata) = pk3::open(file)
+            let (pack, metadata, cap) = pk3::open_windowed(file, window)
                 .with_context(|| format!("Invalid PK3: {}", path.display()))?;
             eprintln!("[lg/startup] pk3_central_directory done entries={} elapsed_ms={:.3}; index begin",pack.len(),start.elapsed().as_secs_f64()*1000.);
             let p = packs.len();
@@ -77,7 +82,7 @@ impl Assets {
             let index_start = std::time::Instant::now();
             for (i, entry) in metadata.into_iter().enumerate() {
                 if !entry.name.ends_with(['/', '\\']) {
-                    entries.insert(normalize(&entry.name), (p, i, entry.size, entry.crc));
+                    entries.insert(normalize(&entry.name), (p, i, entry.size, entry.crc, entry.compressed_size, entry.header_start));
                 }
                 if (i+1)%1024==0 || i+1==total {
                     eprintln!("[lg/startup] pk3_index progress={}/{} elapsed_ms={:.3}",i+1,total,start.elapsed().as_secs_f64()*1000.);
@@ -85,12 +90,14 @@ impl Assets {
             }
             eprintln!("[lg/startup] pk3_index done entries={total} elapsed_ms={:.3}", index_start.elapsed().as_secs_f64()*1000.);
             packs.push(pack);
+            entry_caps.push(cap);
         }
         eprintln!("[lg/startup] pk3_mount done packs={} names={} elapsed_ms={:.3}",packs.len(),entries.len(),mount_start.elapsed().as_secs_f64()*1000.);
         Ok(Self {
             packs,
             paths,
             entries,
+            entry_caps,
             base: base.to_path_buf(),
             content_fingerprint: None,
             material_specs: None,
@@ -108,7 +115,7 @@ impl Assets {
     }
     /// Stream an override-resolved entry through a bounded ZIP reader.
     pub fn open_stream(&mut self, name: &str) -> Result<EntryReader> {
-        let &(p, i, _, _) = self
+        let &(p, i, _, _, _, _) = self
             .entries
             .get(&normalize(name))
             .with_context(|| format!("Asset not found: {name}"))?;
@@ -139,10 +146,13 @@ impl Assets {
         result
     }
     fn read_entry(&mut self, name: &str) -> Result<Vec<u8>> {
-        let &(p, i, _, _) = self
+        let &(p, i, _, _, compressed, header) = self
             .entries
             .get(&normalize(name))
             .with_context(|| format!("Asset not found: {name}"))?;
+        // The fill may cover the local header and the payload, never a distant entry.
+        self.entry_caps[p].store(header.saturating_add(compressed).saturating_add(1024),
+            std::sync::atomic::Ordering::Relaxed);
         let entry = self.packs[p].by_index(i)?;
         if entry.size() > MAX_ENTRY {
             bail!("Asset exceeds 128 MiB limit: {name}");
@@ -358,7 +368,7 @@ mod tests {
                 let start = Instant::now();
                 for (i, e) in metadata.iter().enumerate() {
                     if !e.name.ends_with(['/', '\\']) {
-                        new_entries.insert(normalize(&e.name), (p, i, e.size, e.crc));
+                        new_entries.insert(normalize(&e.name), (p, i, e.size, e.crc, e.compressed_size, e.header_start));
                     }
                 }
                 let new_index = start.elapsed().as_secs_f64() * 1000.;
@@ -392,7 +402,7 @@ mod tests {
             phases[4] = start.elapsed().as_secs_f64() * 1000.;
             let expected = format!("{:x}", hash.finalize());
             assert_eq!(old_entries.iter().map(|(n, &(p, i))| (n, p, i)).collect::<Vec<_>>(),
-                new_entries.iter().map(|(n, &(p, i, _, _))| (n, p, i)).collect::<Vec<_>>());
+                new_entries.iter().map(|(n, &(p, i, _, _, _, _))| (n, p, i)).collect::<Vec<_>>());
             let mut assets = Assets::open(&base)?;
             assert_eq!(assets.entries, new_entries);
             let start = Instant::now();
@@ -502,6 +512,40 @@ mod tests {
         for name in ["pak0.pk3", "pak5.pk3"] {
             fs::remove_file(dir.join(name))?;
         }
+        fs::remove_dir(dir)?;
+        Ok(())
+    }
+    // The key changes how the pack is fetched, not what an entry contains.
+    #[test]
+    fn a_windowed_mount_reads_every_entry_like_an_unwindowed_one() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("looking-glass-window-{}", std::process::id()));
+        fs::create_dir_all(&dir)?;
+        let mut z = zip::ZipWriter::new(File::create(dir.join("pak0.pk3"))?);
+        let mut names = Vec::new();
+        for (name, size) in [("textures/a.ftx", 1usize), ("models/b.tik", 700),
+                             ("sound/c.wav", 200_000), ("maps/d.bsp", 1_400_000)] {
+            let data = (0..size).map(|i| (i.wrapping_mul(17) ^ size) as u8).collect::<Vec<_>>();
+            z.start_file(name, zip::write::FileOptions::default())?;
+            z.write_all(&data)?;
+            names.push((name.to_string(), data));
+        }
+        z.start_file("stored/e.tga", zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored))?;
+        z.write_all(&vec![9u8; 90_000])?;
+        z.finish()?;
+        let mut plain = Assets::open_with_window(&dir, 0)?;
+        let mut windowed = Assets::open_with_window(&dir, 256 * 1024)?;
+        let mut tiny = Assets::open_with_window(&dir, 64)?;
+        for (name, expected) in &names {
+            let a = plain.read(name)?;
+            assert_eq!(&a, expected, "{name}");
+            assert_eq!(windowed.read(name)?, a, "{name} through the window");
+            assert_eq!(tiny.read(name)?, a, "{name} through a 64-byte window");
+        }
+        assert_eq!(windowed.read("stored/e.tga")?, vec![9u8; 90_000]);
+        assert_eq!(tiny.read("stored/e.tga")?, vec![9u8; 90_000]);
+        drop((plain, windowed, tiny));
+        fs::remove_file(dir.join("pak0.pk3"))?;
         fs::remove_dir(dir)?;
         Ok(())
     }

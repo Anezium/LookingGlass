@@ -418,6 +418,8 @@ pub struct Config {
     pub texture_cache: String,
     /// One upload per resolved asset path for the duration of a load.
     pub load_texture_share: bool,
+    /// Read-ahead window per open pack, in KiB. 0 keeps one read per request.
+    pub load_read_window_kib: u32,
     pub route_heading_lock:bool,
     /// Input-only diagnostic: recover recorded world wishes without camera waits.
     pub route_world_wish: bool,
@@ -632,6 +634,7 @@ impl Default for Config {
             shader_cache:"on".into(),
             texture_cache:"off".into(),
             load_texture_share: false,
+            load_read_window_kib: 0,
             route_heading_lock:true,
             route_world_wish: false,
             replay_record: String::new(),
@@ -730,6 +733,7 @@ impl Config {
         ensure!(!self.water_draw_join || self.water_stage_merge == "off", "water_draw_join and water_stage_merge are exclusive");
         ensure!(self.fx_add_max_area.is_finite() && (0. ..=1.).contains(&self.fx_add_max_area), "fx_add_max_area must be 0 to 1");
         ensure!(matches!(self.texture_cache.as_str(),"on"|"off"),"texture_cache must be on or off");
+        ensure!(self.load_read_window_kib <= 4096, "load_read_window_kib must be 0..4096");
         ensure!(matches!(self.shader_cache.as_str(),"on"|"off"),"shader_cache must be on or off");
         ensure!(matches!(self.fx_batching.as_str(),"none"|"adjacent"|"material"),"invalid fx_batching");
         ensure!(matches!(self.fx_streaming.as_str(),"orphan"|"ring"),"invalid fx_streaming");
@@ -3509,8 +3513,11 @@ mod tests {
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
+        // The pack read window arrived after every frozen era file; a missing value is
+        // the documented off, and the A6 read pair asserts its value directly.
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-            && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+            && *k != "water_draw_join" && *k != "fx_unlit_exact" && *k != "load_read_window_kib"
+            && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -4023,6 +4030,51 @@ mod tests {
         assert_eq!(on, off, "the A6 pair differs only in the four load keys");
     }
     #[test]
+    fn load_read_window_is_off_by_default_and_a_strict_integer() {
+        assert_eq!(Config::default().load_read_window_kib, 0);
+        assert_eq!(serde_json::from_str::<Config>("{}").unwrap().load_read_window_kib, 0);
+        assert_eq!(serde_json::from_str::<Config>(r#"{"load_read_window_kib":256}"#)
+            .unwrap().load_read_window_kib, 256);
+        assert!(serde_json::from_str::<Config>(r#"{"load_read_window_kib":"on"}"#).is_err());
+        assert!(serde_json::from_str::<Config>(r#"{"load_read_window_kib":-1}"#).is_err());
+        let mut too_big = Config::default();
+        too_big.load_read_window_kib = 4097;
+        assert!(too_big.validate().is_err(), "a 4 MiB window per pack is not a bounded setting");
+        let mut largest = Config::default();
+        largest.load_read_window_kib = 4096;
+        largest.validate().unwrap();
+    }
+    #[test]
+    fn a6_read_pair_differs_only_in_the_window_key() {
+        let (release, _) = parse_runtime_config(include_bytes!("../../configs/PL-release.json")).unwrap();
+        assert!(release.load_texture_share && release.loading_screen,
+            "the A6 read pair runs on the RC12 release base");
+        let off_bytes = include_bytes!("../../configs/PL-a6-read-off.json");
+        let on_bytes = include_bytes!("../../configs/PL-a6-read-on.json");
+        let (off, rejected) = parse_runtime_config(off_bytes).unwrap();
+        assert!(rejected.is_none());
+        off.validate().unwrap();
+        let (on, rejected) = parse_runtime_config(on_bytes).unwrap();
+        assert!(rejected.is_none());
+        on.validate().unwrap();
+        for bytes in [&off_bytes[..], &on_bytes[..]] {
+            let written: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            let all = serde_json::to_value(Config::default()).unwrap();
+            assert_eq!(historical_keys(&written), historical_keys(&all),
+                "the A6 read config writes every runtime key");
+        }
+        assert_eq!((off.load_read_window_kib, off.replay_start.as_str(),
+                    off.replay_stop_after, off.replay_check_every, off.log_frame_time_every),
+                   (0, "chapter:gvillage", 1200, 600, Some(10)));
+        assert_eq!((on.load_read_window_kib, on.replay_start.as_str(),
+                    on.replay_stop_after, on.replay_check_every, on.log_frame_time_every),
+                   (256, "chapter:gvillage", 1200, 600, Some(10)));
+        let (mut off, mut on) = (serde_json::to_value(&off).unwrap(), serde_json::to_value(&on).unwrap());
+        off.as_object_mut().unwrap().remove("load_read_window_kib");
+        on.as_object_mut().unwrap().remove("load_read_window_kib");
+        assert_eq!(on, off, "the A6 read pair differs only in the window key");
+    }
+    #[test]
     fn load_texture_share_is_off_by_default_and_a_strict_boolean() {
         assert!(!Config::default().load_texture_share);
         assert!(!serde_json::from_str::<Config>("{}").unwrap().load_texture_share);
@@ -4057,7 +4109,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && *k != "fx_unlit_exact" && *k != "load_read_window_kib" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -4267,7 +4319,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) || key == "water_draw_join" || key == "fx_unlit_exact" { written[key] = value.clone(); }
+            if round5_key(key) || key == "water_draw_join" || key == "fx_unlit_exact" || key == "load_read_window_kib" { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
@@ -4341,7 +4393,7 @@ mod tests {
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
                     && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-                    && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
+                    && *k != "water_draw_join" && *k != "fx_unlit_exact" && *k != "load_read_window_kib" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();

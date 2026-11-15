@@ -66,6 +66,7 @@ impl Phase {
 impl Drop for Phase {
     fn drop(&mut self) {
         self.mark("end");
-        STATE.with(|s| s.borrow_mut().0 -= 1);
+        let outermost = STATE.with(|s| { let mut s = s.borrow_mut(); s.0 -= 1; s.0 == 0 });
+        if outermost { crate::assets::pk3::read_stats::report(self.scope); }
     }
 }
