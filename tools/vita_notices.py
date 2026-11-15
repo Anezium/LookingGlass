@@ -95,6 +95,13 @@ C_LIBRARIES = [
         "archives": ["libSceShaccCgExt.a"],
         "licence": "LGPL-2.1",
         "source": "https://github.com/bythos14/SceShaccCgExt at d3c83ef, LGPL-2.1; modified 2026-11-15 to remove the optional intrinsic prelude and its load (tools/patches/SceShaccCgExt-no-prelude.patch)",
+        "notes": ["Sony intrinsics prelude: resolved. The owner approved shipping SceShaccCgExt "
+                  "without the optional intrinsic prelude on 2026-11-15. The upstream "
+                  "include/sce_intrinsics.h is not built, linked, packaged or offered, and the "
+                  "library no longer loads it. The console comparison of the two library builds "
+                  "is recorded at "
+                  "https://github.com/Anezium/Alice-American-McGees-PSVita-Port/blob/4cc323f5a306220a2c5b76425a452fecac80c573/docs/validation/ALICE-NO-PRELUDE-SLOT-2026-11-15.md"
+                  ": 45 of 45 shader-cache payloads were byte-identical with and without it."],
         "files": ["SceShaccCgExt-LICENSE"],
     },
     {
@@ -377,6 +384,7 @@ def main():
             out.append(f"Archives in the link: {', '.join(used) or 'none'}")
         else:
             out.append(f"Archives: {', '.join(entry['archives'])}")
+        out.extend(entry.get("notes", []))
         if entry["name"].startswith("newlib") and vita_objects:
             out.append("Objects compiled from newlib/libc/sys/vita in this link:")
             out.extend("  " + name for name in vita_objects)
