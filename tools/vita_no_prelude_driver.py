@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Root-only console comparison. No receiver or terminal is started here.
-Root must supply a fresh rc1kit session, backed up and closed, with its log running.
+Root supplies a backed-up, observed-closed session with its log running.
+Use --step for one arm, acknowledge its PNG, then repeat. --step --restore restores separately.
 """
 import argparse, hashlib, importlib.util, json, re, shutil, subprocess, sys, time
 from pathlib import Path
@@ -15,12 +16,16 @@ def payload(b, key):
 def compare(a,b):
     assert a and a==b, 'shader cache file sets or payload hashes differ (or empty)'
 
-def run(package, backend):
+def run(package, backend, restore=False):
+    """Exactly one replay arm per invocation; root acknowledges between invocations."""
     ready=json.loads((package/'READY.json').read_text())
     assert ready['title']=='ALICELG01'
     for name,digest in ready['files'].items():
         assert sha((package/name).read_bytes())==digest, name
     backend.preflight(ready)
+    progress=backend.session/'no-prelude-progress.json'
+    state=json.loads(progress.read_text()) if progress.exists() else dict(index=0,results=[],manifests={},failed=False)
+    assert not state['failed'], 'prior driver failure; stop for root recovery'
     available=[]
     for tape in ready['tapes']:
         data=backend.get_tape(tape['name'],tape['required'])
@@ -28,35 +33,40 @@ def run(package, backend):
         assert sha(data)==tape['sha256'], 'tape differs: '+tape['name']
         available.append(tape)
     assert any(t['required'] for t in available)
-    # One unique namespace per arm. Refuse reuse even if a directory is empty.
-    for arm in ('old','new'):
-        for tape in available:
-            backend.require_absent(ready['namespaces'][arm]+'-'+tape['label'])
-    manifests={}; results=[]; touched=False
-    try:
-        for arm in ('old','new'):
-            manifests[arm]={}
-            for tape in available:
-                config=package/'configs'/f"{arm}-{tape['label']}.json"
-                touched=True
-                backend.install(package/f'{arm}-eboot.bin',config)
-                text=backend.launch_wait()
-                assert not any(x in text.lower() for x in ('panicked at','invalid config','render gpu crash','[lg/replay] diverge','[lg/replay] mismatch','cache_write_failed','export_unavailable'))
-                done=[l for l in text.splitlines() if '[lg/replay] done ' in l]
-                assert len(done)==1 and all(re.search(r'\b'+x+r'(?:\s|$)',done[0]) for x in ('result=PASS','diff=0','event_mismatches=0')), text[-3000:]
-                shaders=[l for l in text.splitlines() if '[lg/shader] name=' in l]
-                assert shaders and all('linked=1 ' in l and 'cache=disk ' not in l for l in shaders), 'not a cold successful compilation'
-                expected=set(re.findall(r'cache_key=([0-9a-f]{64})', '\n'.join(shaders)))
-                results.append({'arm':arm,'tape':tape['name'],'result':done[0]})
-                files=backend.cache(ready['namespaces'][arm]+'-'+tape['label'])
-                assert set(files)=={key+'.bin' for key in expected}, 'cache does not cover logged shader keys'
-                manifests[arm][tape['label']]={name:payload(data,name[:-4]) for name,data in sorted(files.items())}
-                backend.save(arm+'-'+tape['label'],files)
-        compare(manifests['old'],manifests['new'])
-        outcome={'result':'PASS','replays':results,'payloads':manifests}
-    finally:
-        if touched: backend.restore()
-    backend.result(outcome)
+    plan=[(arm,tape) for arm in ('old','new') for tape in available]
+    identity=sha(json.dumps(ready,sort_keys=True).encode())
+    assert state.get('identity',identity)==identity and state.get('plan',[[a,t['name']] for a,t in plan])==[[a,t['name']] for a,t in plan], 'package/tape set changed'
+    state.update(identity=identity,plan=[(a,t['name']) for a,t in plan])
+    # JSON normalizes tuples to lists.
+    state['plan']=[[a,t['name']] for a,t in plan]
+    def save():
+        backend.k.write_json(progress,state)
+    if restore:
+        assert state['index']==len(plan), 'arms incomplete'
+        compare(state['manifests']['old'],state['manifests']['new'])
+        backend.restore()
+        backend.result(dict(result='PASS',replays=state['results'],payloads=state['manifests']))
+        state['restored']=True;save();return
+    assert state['index']<len(plan), 'all arms complete; observe final PNG then use --restore'
+    arm,tape=plan[state['index']]
+    backend.require_absent(ready['namespaces'][arm]+'-'+tape['label'])
+    state['failed']=True;save()  # crash/failure must not silently retry a launch
+    config=package/'configs'/f"{arm}-{tape['label']}.json"
+    backend.install(package/f'{arm}-eboot.bin',config)
+    text=backend.launch_wait()
+    assert not any(x in text.lower() for x in ('panicked at','invalid config','render gpu crash','[lg/replay] diverge','[lg/replay] mismatch','cache_write_failed','export_unavailable'))
+    done=[l for l in text.splitlines() if '[lg/replay] done ' in l]
+    assert len(done)==1 and all(re.search(r'\b'+x+r'(?:\s|$)',done[0]) for x in ('result=PASS','diff=0','event_mismatches=0')), text[-3000:]
+    shaders=[l for l in text.splitlines() if '[lg/shader] name=' in l]
+    assert shaders and all('linked=1 ' in l and 'cache=disk ' not in l for l in shaders), 'not a cold successful compilation'
+    expected=set(re.findall(r'cache_key=([0-9a-f]{64})', '\n'.join(shaders)))
+    files=backend.cache(ready['namespaces'][arm]+'-'+tape['label'])
+    assert set(files)=={key+'.bin' for key in expected}, 'cache does not cover logged shader keys'
+    state['manifests'].setdefault(arm,{})[tape['label']]={name:payload(data,name[:-4]) for name,data in sorted(files.items())}
+    backend.save(arm+'-'+tape['label'],files)
+    state['results'].append(dict(arm=arm,tape=tape['name'],result=done[0]))
+    state['index']+=1;state['failed']=False;save()
+    print('STEP COMPLETE; inspect latest PNG and run closed --observed before next step or --restore')
 
 class Console:
     def __init__(self,kit,session):
@@ -81,7 +91,7 @@ class Console:
     def preflight(self,ready):
         assert sha(self.kit.read_bytes()) == ready["kit_sha256"], "rc1kit changed since packaging"
         assert shutil.disk_usage(self.session).free>=40*2**30
-        s=self.s.state(); assert not s.get('installed') and not s.get('console_written'); assert s['game']=='closed' and s['backup'] and not s['pending'] and s['log']['pid']
+        s=self.s.state(); self.k.mutation_guard(self.s,'driver step'); assert s['backup'] and not s['pending'] and s['log']['pid']
         self.log=Path(s['log']['path']); assert self.log.is_file()
         b=self.s.backup(); assert self.k.RENDERER not in b['absent']
     def get_tape(self,name,required):
@@ -100,7 +110,6 @@ class Console:
             assert name not in f.ls(self.k.PRIV+'cache/shaders/'), 'namespace already exists'
     def install(self,self_path,config):
         if self.exit_failed: raise RuntimeError('exit failure latched; root recovery required')
-        self.command('wait-exit','--timeout','30')
         self.command('install',self_path,config)
     def launch_wait(self):
         self.command('launch')
@@ -124,9 +133,10 @@ class Console:
     def restore(self):
         # --keep-saves avoids every kit delete path. New game-created caches remain.
         if self.exit_failed: raise RuntimeError('exit failure latched; no restoration; root recovery required')
-        self.command('wait-exit','--timeout','30')
         self.command('restore','--keep-saves')
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--package',type=Path,default=Path(__file__).resolve().parent);p.add_argument('--kit',type=Path,required=True);p.add_argument('--session',type=Path,required=True);a=p.parse_args()
-    run(a.package,Console(a.kit,a.session))
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--step',action='store_true',required=True);p.add_argument('--restore',action='store_true');p.add_argument('--package',type=Path,default=Path(__file__).resolve().parent);p.add_argument('--kit',type=Path,required=True);p.add_argument('--session',type=Path,required=True);a=p.parse_args()
+    backend=Console(a.kit,a.session)
+    with backend.k.session_lock(backend.s,'driver.lock'):
+        run(a.package,backend,restore=a.restore)
