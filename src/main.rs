@@ -136,6 +136,7 @@ mod loading_screen;
 mod frame_profile;
 mod frame_phases;
 mod spike_log;
+mod overlap_probe;
 mod phase_census;
 mod game_thread;
 mod skin_worker;

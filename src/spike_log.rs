@@ -55,6 +55,9 @@ struct Frame {
     begin: Option<Instant>,
     render: Option<Instant>,
     hud: Option<Instant>,
+    world_last: Option<Instant>,
+    burn_ms: f64,
+    burn_bytes: u64,
     cpu_end: Option<Instant>,
     calls: [u32; 7],
     ms: [f64; 7],
@@ -147,6 +150,13 @@ impl Frame {
         let ms = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64() * 1000.;
         let _ = write!(out, "[lg/spike] frame={} ms={:.2} sim={:.2} render={:.2} hud={:.2} present={:.2}",
             self.number, ms(begin, now), ms(begin, render), ms(render, hud), ms(hud, cpu_end), ms(cpu_end, now));
+        if overlap_enabled() {
+            // Clamp to render: a last simulation read in HUD/tail leaves zero
+            // render-only work that could overlap without extracting more state.
+            let split = self.world_last.unwrap_or(hud).max(render).min(hud);
+            let _ = write!(out, " render_world={:.3} render_free={:.3} burn_ms={:.3} burn_bytes={}",
+                ms(render, split), ms(split, hud), self.burn_ms, self.burn_bytes);
+        }
         if self.log_ms > 0. { let _ = write!(out, " log={:.2}", self.log_ms); }
         let gxm = self.gxm_start.zip(self.gxm_mark);
         if let Some((start, end)) = gxm {
@@ -386,4 +396,18 @@ mod tests {
         f.end_calls[PRESENT] = 1;
         assert!(f.line(t(40), [t(0), t(12), t(30), t(31)]).contains(" gxm_begin=0.07 gxm_end=45.00 sim_split=input:2.00,npcs:10.00 gxm_end_in=scene:44.50/1,present:0.50/1 npc="));
     }
+}
+
+#[inline]
+pub(crate) fn overlap_enabled() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { crate::render::vita_renderer::config().diag_overlap }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
+pub(crate) fn world_last_read() {
+    if on() && overlap_enabled() { FRAME.with(|f| f.borrow_mut().world_last = Some(Instant::now())); }
+}
+pub(crate) fn overlap_burn(ms: f64, bytes: u64) {
+    if on() { FRAME.with(|f| { let mut f=f.borrow_mut(); f.burn_ms=ms; f.burn_bytes=bytes; }); }
 }

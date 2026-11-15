@@ -1460,6 +1460,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }};
     }
+    let mut overlap_probe = crate::overlap_probe::Probe::configured();
     loop {
         #[cfg(feature = "native_timing")]
         { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
@@ -4113,6 +4114,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         interactions.place_level_particles(&mut steam);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         crate::spike_log::render_begin();
+        overlap_probe.begin();
         #[cfg(target_os = "vita")]
         let _lights_profile = crate::frame_profile::span("lights_build");
         let mut lights = steam.lights();
@@ -4427,6 +4429,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
         drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Hud);
         crate::spike_log::hud_begin();
+        overlap_probe.finish();
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_hud"); }
         #[cfg(target_os = "vita")]
@@ -4888,6 +4891,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
         crate::spike_log::cpu_end();
+        // HUD/timing above still read story, player, stats and interactions. Thus no
+        // suffix of the existing render region is safe for concurrent simulation.
+        // Later replay/probe/tail reads only move this boundary further right.
+        crate::spike_log::world_last_read();
         #[cfg(target_os = "vita")]
         {
             crate::frame_phases::mark(3);

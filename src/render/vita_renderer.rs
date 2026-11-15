@@ -146,6 +146,10 @@ pub struct Config {
     /// Diagnostic per-draw clocks; normal play keeps only phase/tail timings.
     pub render_draw_timing: bool,
     pub worker_probe: bool,
+    /// Overlap kill-test instrumentation and dedicated CPU1 reservation. Default off.
+    pub diag_overlap: bool,
+    /// Memory-touching CPU1 load per render frame; zero disables the burn thread.
+    pub diag_overlap_burn_ms: u32,
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
     pub skin_overlap: bool,
@@ -558,7 +562,7 @@ impl Default for Config {
             world_parameter_time_split: true,
             uniform_field_cache: true,
             render_draw_timing: false,
-            worker_probe: false, skin_workers: 2, skin_overlap: true,
+            worker_probe: false, diag_overlap: false, diag_overlap_burn_ms: 0, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             actor_publication_occurrences: true,
             actor_deferred_layers: true,
@@ -711,6 +715,10 @@ impl Config {
         ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
             "actor_single_prepare requires renderer=vita, skin_overlap=true, skin_workers>0, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
+        ensure!(self.diag_overlap_burn_ms <= 20, "diag_overlap_burn_ms must be 0..20");
+        ensure!(self.diag_overlap || self.diag_overlap_burn_ms == 0, "burn requires diag_overlap");
+        ensure!(!self.diag_overlap || (self.skin_workers == 1 && self.skin_overlap && self.audio_producer_affinity == 0x40000),
+            "diag_overlap reserves CPU1: requires one skin worker on CPU2 and audio on CPU2");
         ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
         ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
