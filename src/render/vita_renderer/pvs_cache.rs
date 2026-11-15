@@ -4,10 +4,11 @@ use super::{config, Group, Lists, Pvs};
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
-const MAGIC: &[u8; 8] = b"LGPVS005";
+const MAGIC: &[u8; 8] = b"LGPVS006";
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Hard bound for the whole cache; least recently written maps are evicted past it.
-/// All 36 shipping maps together measured 104.3 MiB, so this keeps about twenty of them.
+/// All 36 shipping maps together measured 104.3 MiB at the old 32-bit id width and
+/// about 52 MiB at the narrow width this format picks, so this holds every map.
 const DIR_BUDGET: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "vita")]
 const ROOT: &str = "ux0:data/alice/private/renderer-cache";
@@ -47,6 +48,9 @@ fn key(groups: &[Group], visibility: &crate::visibility::Visibility, corpus: &st
     }
     format!("{:x}", hash.finalize())
 }
+/// Ids are stored at the narrowest width that holds every id and list length, because
+/// the card delivers a few MB/s and this file is read on every launch. The header stays
+/// 32-bit so a count never depends on the width choice.
 fn encode(pvs: &Pvs, groups: usize) -> Result<Vec<u8>> {
     let mut pool = vec![&pvs.unknown];
     let mut ids = BTreeMap::from([(Arc::as_ptr(&pvs.unknown) as usize, 0u32)]);
@@ -59,14 +63,21 @@ fn encode(pvs: &Pvs, groups: usize) -> Result<Vec<u8>> {
         });
         clusters.push(*n);
     }
-    let mut body = Vec::new();
+    let narrow = groups <= u16::MAX as usize && pool.len() <= u16::MAX as usize
+        && pvs.clusters.len() <= u16::MAX as usize;
+    let mut body = Vec::with_capacity(13 + clusters.len() * 2);
+    body.push(u8::from(narrow));
+    body.extend_from_slice(&u32::try_from(groups)?.to_le_bytes());
+    body.extend_from_slice(&u32::try_from(clusters.len())?.to_le_bytes());
+    body.extend_from_slice(&u32::try_from(pool.len())?.to_le_bytes());
     let mut put = |n: usize| -> Result<()> {
-        body.extend(u32::try_from(n)?.to_le_bytes());
+        if narrow {
+            body.extend_from_slice(&u16::try_from(n)?.to_le_bytes());
+        } else {
+            body.extend_from_slice(&u32::try_from(n)?.to_le_bytes());
+        }
         Ok(())
     };
-    put(groups)?;
-    put(clusters.len())?;
-    put(pool.len())?;
     for id in clusters {
         put(id as usize)?;
     }
@@ -85,6 +96,31 @@ fn encode(pvs: &Pvs, groups: usize) -> Result<Vec<u8>> {
     data.extend(body);
     Ok(data)
 }
+struct Reader<'a> { body: &'a [u8], cursor: usize, narrow: bool }
+impl Reader<'_> {
+    fn word(&mut self) -> Result<usize> {
+        let value = u32::from_le_bytes(
+            self.body.get(self.cursor..self.cursor + 4)
+                .context("truncated PVS cache")?
+                .try_into()?,
+        );
+        self.cursor += 4;
+        Ok(value as usize)
+    }
+    fn id(&mut self) -> Result<usize> {
+        if self.narrow {
+            let value = u16::from_le_bytes(
+                self.body.get(self.cursor..self.cursor + 2)
+                    .context("truncated PVS cache")?
+                    .try_into()?,
+            );
+            self.cursor += 2;
+            Ok(value as usize)
+        } else {
+            self.word()
+        }
+    }
+}
 fn decode(bytes: &[u8], groups: usize, clusters: usize) -> Result<Pvs> {
     ensure!(
         bytes.len() >= 40 && bytes.len() <= MAX_BYTES && &bytes[..8] == MAGIC,
@@ -95,28 +131,21 @@ fn decode(bytes: &[u8], groups: usize, clusters: usize) -> Result<Pvs> {
         Sha256::digest(body).as_slice() == &bytes[8..40],
         "PVS cache checksum mismatch"
     );
-    let mut cursor = 0;
-    let mut get = || -> Result<usize> {
-        let value = u32::from_le_bytes(
-            body.get(cursor..cursor + 4)
-                .context("truncated PVS cache")?
-                .try_into()?,
-        );
-        cursor += 4;
-        Ok(value as usize)
-    };
+    let flags = *body.first().context("truncated PVS cache")?;
+    ensure!(flags <= 1, "invalid PVS cache id width");
+    let mut reader = Reader { body, cursor: 1, narrow: flags == 1 };
     ensure!(
-        get()? == groups && get()? == clusters,
+        reader.word()? == groups && reader.word()? == clusters,
         "PVS cache input counts changed"
     );
-    let count = get()?;
+    let count = reader.word()?;
     ensure!(
         count > 0 && count <= clusters + 1,
         "invalid PVS unique count"
     );
     let cluster_ids = (0..clusters)
         .map(|_| {
-            let id = get()?;
+            let id = reader.id()?;
             ensure!(id < count, "invalid PVS list ID");
             Ok(id)
         })
@@ -124,23 +153,23 @@ fn decode(bytes: &[u8], groups: usize, clusters: usize) -> Result<Pvs> {
     let mut pool = Vec::with_capacity(count);
     for _ in 0..count {
         let mut seen = vec![false; groups];
-        let mut list = || -> Result<Vec<usize>> {
-            let len = get()?;
+        let mut list = |reader: &mut Reader| -> Result<Vec<usize>> {
+            let len = reader.id()?;
             ensure!(len <= groups, "invalid PVS group count");
             let mut result = Vec::with_capacity(len);
             for _ in 0..len {
-                let id = get()?;
+                let id = reader.id()?;
                 ensure!(id < groups && !seen[id], "invalid/duplicate PVS group ID");
                 seen[id] = true;
                 result.push(id);
             }
             Ok(result)
         };
-        let opaque = list()?;
-        let alpha = list()?;
+        let opaque = list(&mut reader)?;
+        let alpha = list(&mut reader)?;
         pool.push(Arc::new(Lists { opaque, alpha }));
     }
-    ensure!(cursor == body.len(), "trailing PVS cache data");
+    ensure!(reader.cursor == body.len(), "trailing PVS cache data");
     Ok(Pvs {
         unknown: pool[0].clone(),
         clusters: cluster_ids.into_iter().map(|id| pool[id].clone()).collect(),
@@ -292,6 +321,7 @@ mod tests {
             alpha: vec![2],
         });
         let bytes = encode(&pvs, 3).unwrap();
+        assert_eq!(*bytes.get(40).unwrap(),1,"small group counts store 16-bit ids");
         let decoded = decode(&bytes, 3, 3).unwrap();
         for cluster in [None, Some(0), Some(1), Some(2), Some(999)] {
             assert!(pvs.get(cluster) == decoded.get(cluster));
@@ -299,6 +329,38 @@ mod tests {
         assert!(Arc::ptr_eq(&decoded.clusters[0], &decoded.clusters[2]));
         assert!(decode(&bytes, 4, 3).is_err());
         assert!(decode(&bytes, 3, 4).is_err());
+    }
+    /// A body with a chosen id width, checksum included, for the width and range checks.
+    fn crafted(flags: u8, groups: u32, clusters: u32, pool: u32, cluster_ids: &[u32], lists: &[(u32, &[u32])]) -> Vec<u8> {
+        let wide = flags == 0;
+        let mut body = vec![flags];
+        for n in [groups, clusters, pool] { body.extend_from_slice(&n.to_le_bytes()); }
+        for &id in cluster_ids {
+            if wide { body.extend_from_slice(&id.to_le_bytes()); } else { body.extend_from_slice(&(id as u16).to_le_bytes()); }
+        }
+        for (len, ids) in lists {
+            if wide { body.extend_from_slice(&len.to_le_bytes()); } else { body.extend_from_slice(&(*len as u16).to_le_bytes()); }
+            for &id in *ids {
+                if wide { body.extend_from_slice(&id.to_le_bytes()); } else { body.extend_from_slice(&(id as u16).to_le_bytes()); }
+            }
+        }
+        let mut data = MAGIC.to_vec();
+        data.extend(Sha256::digest(&body));
+        data.extend(body);
+        data
+    }
+    #[test]
+    fn narrow_ids_halve_the_payload_and_wide_ids_still_decode() {
+        let lists: Vec<u32> = (0..64).collect();
+        let narrow = crafted(1, 64, 1, 1, &[0], &[(64, &lists), (0, &[])]);
+        let wide = crafted(0, 64, 1, 1, &[0], &[(64, &lists), (0, &[])]);
+        assert_eq!(wide.len() - narrow.len(), 64 * 2 + 2 * 3, "two bytes per id and per length");
+        for bytes in [&narrow, &wide] {
+            let pvs = decode(bytes, 64, 1).unwrap();
+            assert_eq!(pvs.get(None).opaque.len(), 64);
+            assert_eq!(pvs.get(Some(0)).opaque, lists.iter().map(|&v| v as usize).collect::<Vec<_>>());
+        }
+        assert!(decode(&crafted(2, 1, 1, 1, &[0], &[(0, &[]), (0, &[])]), 1, 1).is_err(), "unknown width rejected");
     }
     #[test]
     fn damaged_truncated_or_invalid_cached_ranges_fail_closed() {
@@ -313,11 +375,14 @@ mod tests {
         let mut corrupt = bytes.clone();
         *corrupt.last_mut().unwrap() ^= 1;
         assert!(decode(&corrupt, 1, 1).is_err());
-        // Last opaque ID is beyond the known renderer group count, with a valid checksum.
-        let mut invalid = bytes.clone();
-        invalid[60..64].copy_from_slice(&1u32.to_le_bytes());
-        let checksum = Sha256::digest(&invalid[40..]);
-        invalid[8..40].copy_from_slice(&checksum);
+        // A group ID beyond the known renderer group count, with a valid checksum.
+        let invalid = crafted(1, 1, 1, 2, &[1], &[(1, &[1]), (0, &[])]);
         assert!(decode(&invalid, 1, 1).is_err());
+        // A duplicate ID inside one list, with a valid checksum.
+        let duplicate = crafted(1, 2, 1, 1, &[0], &[(2, &[0, 0]), (0, &[])]);
+        assert!(decode(&duplicate, 2, 1).is_err());
+        // A list length beyond the group count, with a valid checksum.
+        let long = crafted(1, 1, 1, 1, &[0], &[(2, &[0, 0]), (0, &[])]);
+        assert!(decode(&long, 1, 1).is_err());
     }
 }
