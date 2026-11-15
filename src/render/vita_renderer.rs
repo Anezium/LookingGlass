@@ -365,6 +365,11 @@ pub struct Config {
     /// writes no depth, so only blending order matters and it is preserved; fragments, depth
     /// tests and uniforms are unchanged. Needs `world_shared_buffers`. Default off.
     pub water_draw_join: bool,
+    /// A model's world alpha groups (an entity brush or a script object with no vertex deform
+    /// and no sky-sequence motion) use the map's PVS over their transformed bounds instead of
+    /// being drawn in every cluster. The bounds test is conservative and fails open, so no
+    /// visible fragment is dropped. Default off.
+    pub alpha_model_pvs: bool,
     /// Effect packets that are unlit, unclamped, uncut, with no dissolve, ghost, power tint or
     /// filter fade use a fragment program without those paths, the dynamic lights (all zero when
     /// unlit) and the sky fade (never set here); host rounding can differ. Default off.
@@ -608,7 +613,7 @@ impl Default for Config {
             skin_frustum_cull: true,
             fast_frustum: true,
             packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
-            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, fx_lite: false, fx_unlit_exact: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
+            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, alpha_model_pvs: false, fx_lite: false, fx_unlit_exact: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
             flat_actor_light: false, max_texture_dimension: None,
             draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             gpu_state_probe: false,
@@ -1315,6 +1320,8 @@ pub struct Renderer {
     visibility_generation: u64,
     visibility: Vec<(u64, Option<(f32, Mat4)>)>,
     models: Vec<Option<Mat4>>,
+    /// `alpha_model_pvs`: the last PVS answer per group, keyed by camera cluster and model matrix.
+    model_pvs: Vec<ModelPvs>,
     schedule: submit::Schedule,
     texture_sort: draw_cuts::TextureSort,
     alpha_fill: alpha_fill::State,
@@ -1938,6 +1945,7 @@ impl Renderer {
             visibility_key: None, visibility_generation: 0,
             visibility: vec![(0, None); groups.len()],
             models: vec![None; groups.len()],
+            model_pvs: model_pvs_cache(),
             world_buffers: buffers,
             schedule: submit::Schedule::default(),
             texture_sort: draw_cuts::TextureSort::default(),
@@ -2100,6 +2108,18 @@ impl Renderer {
         let cluster = scene.map.visibility.cluster(eye, &scene.map.planes);
         let lists = self.pvs.get(cluster);
         let ids = if alpha { &lists.alpha } else { &lists.opaque };
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if alpha && crate::sim_maps::probe::draw_query::armed() {
+            println!("WORLD_ALPHA_LIST {}", serde_json::json!({
+                "frame": crate::sim_maps::probe::frame(),
+                "cluster": cluster, "visible_alpha": ids.len(),
+                "map_alpha": self.groups.iter().filter(|g| !g.recipe.opaque).count(),
+                "unknown_alpha": self.pvs.unknown.alpha.len(),
+            }));
+        }
+        // `alpha_model_pvs`: the per-group answers are taken out of the renderer so the loop below
+        // can hold a group borrow and the cache at once.
+        let mut model_pvs = (alpha && config().alpha_model_pvs).then(|| std::mem::take(&mut self.model_pvs));
         self.alpha_order.clear();
         let reuse = config().world_view_reuse;
         let mut key = [0u32; 26];
@@ -2171,7 +2191,16 @@ impl Renderer {
                 hits += 1;
                 self.visibility[id].1
             } else {
-                let result = model_matrix(&g.recipe, time, transforms).and_then(|model| {
+                let model = model_matrix(&g.recipe, time, transforms);
+                // A model group is always in every cluster's list: its geometry is stored in
+                // model space, so the load-time face sources cannot place it. The placed bounds
+                // can, and `bounds_visible` answers from the map's own PVS row.
+                let hidden = model_pvs.is_some() && g.recipe.model.is_some() && g.recipe.motion.is_none()
+                    && g.recipe.deform.is_none() && model.is_some_and(|model| model_bounds_hidden(
+                        model_pvs.as_mut().unwrap(), &scene.map.visibility, &scene.map.planes,
+                        cluster, id, model, g.min, g.max));
+                if hidden { count("vita_world_model_pvs_culled", 1); }
+                let result = if hidden { None } else { model.and_then(|model| {
                     tests += 1;
                     let m = projection * model;
                     (in_frustum(m, g.min, g.max) && !draw_cuts::below_pixels(m, g.min, g.max, world_min)).then(|| {
@@ -2180,7 +2209,7 @@ impl Renderer {
                         } else { (model.transform_point3(g.center) - eye).length_squared() };
                         (depth, model)
                     })
-                });
+                }) };
                 if reuse && static_group { self.visibility[id] = (self.visibility_generation, result); }
                 result
             };
@@ -2198,6 +2227,7 @@ impl Renderer {
         }
         crate::light_profile::render_add(phase, RenderMetrics { visibility_tests: tests,
             visibility_cpu_ns: visibility_started.elapsed().as_nanos() as u64, ..Default::default() });
+        if let Some(cache) = model_pvs { self.model_pvs = cache; }
         count("vita_world_visibility_cache_hits", hits);
         drop(visibility_span);
         drop(census_visibility);
@@ -2934,6 +2964,8 @@ impl Renderer {
             let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms);
             let ctx = unsafe { get_internal_gl() }.quad_context;
             let probe_draw = if liquid { water_probe::tick() } else { None };
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let census_started = crate::sim_maps::probe::draw_query::armed().then(std::time::Instant::now);
             let start = totals.start();
             // world_alpha_lite: the same draw through the lean program when its stage allows.
             let lite = self.alpha_fill.lite.as_mut().filter(|_| alpha_fill::lite_recipe(&g.recipe));
@@ -3009,6 +3041,33 @@ impl Renderer {
             );
             // Every alternation can change state; this counter is conservative.
             count("vita_world_alpha_state_applications", 1);
+            // Host census: one line per alpha world draw on the sampled frame, for the GL
+            // samples table of the same frame. Times the state apply, uniform upload and submit.
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if let Some(started) = census_started {
+                let stage = &g.recipe.stage;
+                println!("WORLD_ALPHA_DRAW {}", serde_json::json!({
+                    "frame": crate::sim_maps::probe::frame(),
+                    "group": p.group, "depth_bits": p.depth.to_bits(),
+                    "parameter": g.parameter,
+                    "min": g.min.to_array(), "max": g.max.to_array(),
+                    "triangles": g.indices / 3, "indices": g.indices,
+                    "blend": format!("{:?}", stage.blend), "blend_class": g.recipe.blend,
+                    "lit": g.recipe.lit, "alpha_test": stage.alpha_test,
+                    "clamp": stage.clamp, "environment": stage.environment,
+                    "vector_uv": stage.vector_uv.is_some(), "dot_alpha": stage.dot_alpha.is_some(),
+                    "depth_equal": stage.depth_equal, "liquid": liquid,
+                    "model": g.recipe.model.is_some(), "model_id": g.recipe.model,
+                    "model_identity": self.models[p.group].map(|m| m == Mat4::IDENTITY),
+                    "model_translation": self.models[p.group].map(|m| m.to_cols_array()[12..15].to_vec()),
+                    "deform": g.recipe.deform.is_some(),
+                    "motion": g.recipe.motion.is_some(), "images": stage.images,
+                    "texture": format!("{:?}", p.texture),
+                    "lite_recipe": alpha_fill::lite_recipe(&g.recipe),
+                    "cpu_ns": started.elapsed().as_nanos() as u64,
+                    "query_overhead_included": true,
+                }));
+            }
             #[cfg(target_os = "vita")]
             {
                 crate::frame_profile::record_batch(
@@ -3112,6 +3171,67 @@ fn model_matrix(recipe: &Recipe, time: f32, transforms: &[(usize, Vec3, Quat)]) 
 }
 fn in_frustum(m: Mat4, min: Vec3, max: Vec3) -> bool {
     !super::outside_matrix(m, min, max)
+}
+/// `alpha_model_pvs`: one group's last answer. The key is the camera cluster and the model matrix
+/// the tested bounds were placed with; a moving model or a new cluster recomputes.
+#[derive(Clone, Copy, Default)]
+struct ModelPvs {
+    group: u32,
+    /// The camera cluster, or `u32::MAX` for an unknown one.
+    cluster: u32,
+    model: [u32; 16],
+    hidden: bool,
+}
+/// The box a model matrix places a group's own bounds in. Enlarging an axis-aligned box by
+/// enclosing the eight transformed corners can only add space, so a PVS test over it is
+/// conservative. The supported matrices are the rigid rotation+translation this pass builds in
+/// `model_matrix` (an eligible group has no motion and no deform), so every exact vertex lies
+/// inside the exact corner hull. The f32 corner computation is inflated outward by 32·2^-24 of
+/// its largest coordinate (0.031 units at the corpus extreme of 8192), which covers the
+/// rounding in the matrix product and in the corner sums without moving a real edge inward.
+/// This allowance is separate from, and additive to, the plane-support margin inside
+/// `Visibility::bounds_visible`, which covers the plane and box f32 storage in that test.
+fn placed_bounds(model: Mat4, min: Vec3, max: Vec3) -> (Vec3, Vec3) {
+    let mut low = Vec3::splat(f32::INFINITY);
+    let mut high = Vec3::splat(f32::NEG_INFINITY);
+    for corner in 0..8 {
+        let p = vec3(
+            if corner & 1 == 0 { min.x } else { max.x },
+            if corner & 2 == 0 { min.y } else { max.y },
+            if corner & 4 == 0 { min.z } else { max.z },
+        );
+        let q = model.transform_point3(p);
+        low = low.min(q);
+        high = high.max(q);
+    }
+    let magnitude = low.abs().max(high.abs()).max(min.abs()).max(max.abs())
+        .max_element().max(1.);
+    let margin = magnitude * 32. * f32::EPSILON;
+    (low - Vec3::splat(margin), high + Vec3::splat(margin))
+}
+/// `alpha_model_pvs`: a fresh cache for a renderer, and therefore for a new map.
+fn model_pvs_cache() -> Vec<ModelPvs> { Vec::new() }
+/// `alpha_model_pvs`: a model group whose placed box the BSP descent proves cannot reach any
+/// cluster the camera's PVS row shows is not submitted. Unknown data always answers visible,
+/// so the cut can only remove groups that `bounds_visible` proves hidden.
+fn model_bounds_hidden(cache: &mut Vec<ModelPvs>, visibility: &crate::visibility::Visibility,
+    planes: &[crate::bsp::Plane], cluster: Option<usize>, id: usize, model: Mat4, min: Vec3, max: Vec3) -> bool {
+    // Host sabotage: hide every eligible model group, so the pixel oracle must report a wrong cut.
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    if crate::sim_maps::probe::negative_control() == Some("alpha-model-pvs") { return true; }
+    let key = cluster.map_or(u32::MAX, |c| c as u32);
+    let bits = model.to_cols_array().map(f32::to_bits);
+    if let Some(entry) = cache.iter().find(|e| e.group == id as u32) {
+        if entry.cluster == key && entry.model == bits { return entry.hidden; }
+    }
+    let (low, high) = placed_bounds(model, min, max);
+    let hidden = visibility.bounds_visible(cluster, planes, low, high) == Some(false);
+    let entry = ModelPvs { group: id as u32, cluster: key, model: bits, hidden };
+    match cache.iter_mut().find(|e| e.group == id as u32) {
+        Some(slot) => *slot = entry,
+        None => cache.push(entry),
+    }
+    hidden
 }
 
 fn uv_matrices(stage: &Stage, time: f32) -> (Mat4, Mat4, [f32; 4]) {
@@ -3510,7 +3630,7 @@ mod tests {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-            && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+            && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -3577,6 +3697,114 @@ mod tests {
         assert_eq!(crate::render_fx::retained::specialized_program(true, true),
             Some(crate::render_fx::retained::Specialized::UnlitExact),
             "fx_unlit_exact takes precedence over fx_lite");
+    }
+    #[test]
+    fn alpha_model_pvs_is_default_off_strict_and_only_the_wchess1_pair_uses_it() {
+        assert!(!Config::default().alpha_model_pvs);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().alpha_model_pvs);
+        assert!(serde_json::from_str::<Config>(r#"{"alpha_model_pvs":true}"#).unwrap().alpha_model_pvs);
+        for invalid in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({"alpha_model_pvs": invalid})).is_err());
+        }
+        Config::default().validate().unwrap();
+        for bytes in [&include_bytes!("../../configs/PL-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc9-release-play04.json")[..]] {
+            let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert!(raw.get("alpha_model_pvs").is_none_or(|on| on == false), "a release input keeps the cut off");
+            assert!(!serde_json::from_slice::<Config>(bytes).unwrap().alpha_model_pvs);
+        }
+        let control = include_bytes!("../../configs/PL-a5-wchess1-control.json");
+        let on = include_bytes!("../../configs/PL-a5-wchess1-alpha-model-pvs.json");
+        let (control_parsed, rejected) = parse_runtime_config(control).unwrap();
+        assert!(rejected.is_none());
+        control_parsed.validate().unwrap();
+        let (on_parsed, rejected) = parse_runtime_config(on).unwrap();
+        assert!(rejected.is_none());
+        on_parsed.validate().unwrap();
+        assert!(!control_parsed.alpha_model_pvs && on_parsed.alpha_model_pvs);
+        assert_eq!(control_parsed.replay_play, "a4-wchess1-01.lgtape");
+        for (config, expected) in [(&control_parsed, false), (&on_parsed, true)] {
+            assert_eq!(config.replay_start, "chapter:wchess1");
+            assert_eq!(config.replay_stop_after, 1200);
+            assert_eq!(config.replay_check_every, 600);
+            assert_eq!(config.log_frame_time_every, Some(10));
+            assert_eq!(config.alpha_model_pvs, expected);
+        }
+        let mut a = serde_json::to_value(control_parsed).unwrap();
+        let mut b = serde_json::to_value(on_parsed).unwrap();
+        a.as_object_mut().unwrap().remove("alpha_model_pvs");
+        b.as_object_mut().unwrap().remove("alpha_model_pvs");
+        assert_eq!(a, b, "the wchess1 pair differs only in alpha_model_pvs");
+    }
+    #[test]
+    fn alpha_model_pvs_bounds_enclose_every_placed_corner_with_an_outward_margin() {
+        let min = vec3(-1., -2., -3.);
+        let max = vec3(4., 5., 6.);
+        let (low, high) = placed_bounds(Mat4::IDENTITY, min, max);
+        assert!(low.cmplt(min).all() && high.cmpgt(max).all(), "the margin must point outward");
+        let model = Mat4::from_rotation_translation(Quat::from_rotation_z(0.5), vec3(10., -4., 2.));
+        let (low, high) = placed_bounds(model, min, max);
+        for corner in 0..8 {
+            let p = vec3(if corner & 1 == 0 { min.x } else { max.x },
+                         if corner & 2 == 0 { min.y } else { max.y },
+                         if corner & 4 == 0 { min.z } else { max.z });
+            let q = model.transform_point3(p);
+            assert!(q.cmpge(low).all() && q.cmple(high).all(), "corner {corner}");
+        }
+        let inner = Mat4::from_translation(vec3(100., 0., 0.));
+        let (low, high) = placed_bounds(inner, min, max);
+        assert!(low.cmplt(min + Vec3::X * 100.).all() && high.cmpgt(max + Vec3::X * 100.).all());
+        // A rotated thin box at the largest corpus coordinate stays strictly inside the
+        // inflated result; the f64 corner is the exact placement of the same f32 inputs.
+        let extent = 8192.;
+        let far = Mat4::from_rotation_translation(
+            Quat::from_axis_angle(vec3(0.3, 0.8, 0.5).normalize(), 0.7),
+            vec3(extent, -extent, extent));
+        let (thin_min, thin_max) = (vec3(-0.02, -0.02, -0.02), vec3(0.02, 0.02, 0.02));
+        let (low, high) = placed_bounds(far, thin_min, thin_max);
+        let m = far.to_cols_array().map(f64::from);
+        for corner in 0..8 {
+            let p = [
+                if corner & 1 == 0 { thin_min.x } else { thin_max.x },
+                if corner & 2 == 0 { thin_min.y } else { thin_max.y },
+                if corner & 4 == 0 { thin_min.z } else { thin_max.z },
+            ].map(f64::from);
+            let exact = [
+                m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+                m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+                m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+            ];
+            assert!(exact[0] > low.x as f64 && exact[0] < high.x as f64
+                && exact[1] > low.y as f64 && exact[1] < high.y as f64
+                && exact[2] > low.z as f64 && exact[2] < high.z as f64, "corner {corner}");
+        }
+    }
+    #[test]
+    fn alpha_model_pvs_cache_handles_cluster_matrix_round_trips_and_a_fresh_map() {
+        let v = crate::visibility::tests::two_rooms();
+        let planes = [crate::bsp::Plane { normal: Vec3::X, distance: 0. }];
+        let (min, max) = (vec3(2., -1., -1.), vec3(3., 1., 1.));
+        let mut cache = model_pvs_cache();
+        assert!(cache.is_empty());
+        // A -> B -> A for the camera cluster, then None -> B: each change recomputes.
+        assert!(!model_bounds_hidden(&mut cache, &v, &planes, Some(0), 7, Mat4::IDENTITY, min, max));
+        assert!(model_bounds_hidden(&mut cache, &v, &planes, Some(1), 7, Mat4::IDENTITY, min, max));
+        assert!(!model_bounds_hidden(&mut cache, &v, &planes, Some(0), 7, Mat4::IDENTITY, min, max));
+        assert!(!model_bounds_hidden(&mut cache, &v, &planes, None, 7, Mat4::IDENTITY, min, max));
+        assert!(model_bounds_hidden(&mut cache, &v, &planes, Some(1), 7, Mat4::IDENTITY, min, max));
+        // A changed matrix moves the group into the other room, then back.
+        let moved = Mat4::from_translation(vec3(-5., 0., 0.));
+        assert!(!model_bounds_hidden(&mut cache, &v, &planes, Some(1), 7, moved, min, max));
+        assert!(model_bounds_hidden(&mut cache, &v, &planes, Some(1), 7, Mat4::IDENTITY, min, max));
+        assert_eq!(cache.len(), 1);
+        assert_eq!((cache[0].group, cache[0].cluster, cache[0].hidden), (7, 1, true));
+        // A new renderer for a new map starts with its own empty cache; the identical
+        // group, cluster and matrix key must not reuse map A's hidden answer.
+        let mut fresh = model_pvs_cache();
+        assert!(fresh.is_empty());
+        let other = crate::visibility::tests::two_rooms_swapped();
+        assert!(!model_bounds_hidden(&mut fresh, &other, &planes, Some(1), 7, Mat4::IDENTITY, min, max));
+        assert_eq!(fresh.len(), 1);
     }
     #[test]
     fn accepted_light_and_npc_defaults_are_independent_strict_booleans() {
@@ -4057,7 +4285,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -4267,7 +4495,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) || key == "water_draw_join" || key == "fx_unlit_exact" { written[key] = value.clone(); }
+            if round5_key(key) || key == "water_draw_join" || key == "alpha_model_pvs" || key == "fx_unlit_exact" { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
@@ -4341,7 +4569,7 @@ mod tests {
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
                     && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-                    && *k != "water_draw_join" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
+                    && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
