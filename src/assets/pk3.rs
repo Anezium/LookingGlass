@@ -67,9 +67,9 @@ pub(super) struct PackReader {
     directory_start: u64,
     directory: Vec<u8>,
     // Bounded read-ahead for one entry payload. `window_size` 0 keeps one read per
-    // request; otherwise each fill is at most `window_size` and never reads far past
-    // the entry announced with `set_read_cap`. `window_fill` is the valid prefix of
-    // `window`, which keeps its allocation.
+    // request; otherwise each fill is at most `window_size` and never crosses the
+    // entry window in `cap_end`. `window_fill` is the valid prefix of `window`,
+    // which keeps its allocation.
     window_size: usize,
     window_start: u64,
     window_fill: usize,
