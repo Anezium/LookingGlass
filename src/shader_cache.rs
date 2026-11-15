@@ -2,7 +2,7 @@
 //! GLSL bytes include all defines. Program pairs retain translator semantics.
 #![cfg_attr(not(any(target_os = "vita", test)), allow(dead_code))]
 use sha2::{Digest, Sha256};
-use std::{cell::RefCell, fs, io::{Read, Write}, path::Path};
+use std::{cell::RefCell, collections::BTreeMap, fs, io::{Read, Write}, path::{Path, PathBuf}};
 #[cfg(any(target_os = "vita", test))]
 #[path="shader_cache/native.rs"]
 mod native;
@@ -40,6 +40,59 @@ fn decode<'a>(bytes: &'a [u8], key: &[u8; 32]) -> Option<&'a [u8]> {
     let data = &bytes[HEADER..];
     (Sha256::digest(data).as_slice() == &bytes[40..72]).then_some(data)
 }
+/// Bytes one stored entry occupies: envelope header plus payload.
+pub(crate) const fn stored_size(payload: usize) -> u64 { (HEADER + payload) as u64 }
+thread_local! {
+    /// Estimated bytes per cache directory this process wrote to, so a sweep runs only
+    /// when the bound is crossed. The loader is single-threaded; the estimate is exact
+    /// until a sweep re-measures it.
+    static DIRECTORIES: RefCell<BTreeMap<PathBuf, u64>> = const { RefCell::new(BTreeMap::new()) };
+}
+fn directory_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    entries.flatten().filter_map(|entry| entry.metadata().ok()).filter(|meta| meta.is_file()).map(|meta| meta.len()).sum()
+}
+/// Delete the least recently written files in `dir` until `target` bytes remain, never
+/// `keep`. Missing or unreadable entries are skipped, never fatal.
+fn trim(dir: &Path, target: u64, keep: &Path) -> (usize, u64) {
+    let Ok(entries) = fs::read_dir(dir) else { return (0, 0) };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let path = entry.path();
+        if !meta.is_file() || path == keep { continue; }
+        // An unreadable timestamp sorts first: an entry we cannot date is the safest to drop.
+        let written = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        files.push((written, meta.len(), path));
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    let mut bytes: u64 = files.iter().map(|(_, len, _)| *len).sum();
+    let (mut removed, mut freed) = (0usize, 0u64);
+    for (_, len, path) in files {
+        if bytes <= target { break; }
+        if fs::remove_file(&path).is_ok() { bytes -= len; removed += 1; freed += len; }
+    }
+    (removed, freed)
+}
+/// Account one finished write of `added` bytes in `dir` and enforce `budget`, keeping
+/// `keep` even when it alone exceeds the bound. Returns `(removed, freed)` when a sweep ran.
+/// Eviction is least-recently-written first, so a data or build change leaves the new
+/// entries and removes the ones the new keys made stale.
+pub(crate) fn note_write(dir: &Path, budget: u64, added: u64, keep: &Path) -> Option<(usize, u64)> {
+    let total = DIRECTORIES.with(|directories| {
+        let mut directories = directories.borrow_mut();
+        let total = directories.entry(dir.to_path_buf()).or_insert_with(|| directory_bytes(dir));
+        *total = total.saturating_add(added);
+        *total
+    });
+    if total <= budget { return None; }
+    // Leave an eighth of the bound free so the next sweep is not needed immediately.
+    let (removed, freed) = trim(dir, budget - budget / 8, keep);
+    DIRECTORIES.with(|directories| { directories.borrow_mut().insert(dir.to_path_buf(), total.saturating_sub(freed)); });
+    (removed > 0).then_some((removed, freed))
+}
+#[cfg(test)]
+pub(crate) fn forget_directory(dir: &Path) { DIRECTORIES.with(|directories| { directories.borrow_mut().remove(dir); }); }
 pub(crate) fn read(path: &Path, key: &[u8; 32]) -> Option<Vec<u8>> {
     let mut f = fs::File::open(path).ok()?;
     if f.metadata().ok()?.len() > (HEADER + MAX_BINARY) as u64 { return None; }
@@ -50,7 +103,16 @@ pub(crate) fn write(path: &Path, key: &[u8; 32], payload: &[u8]) -> std::io::Res
     let data = encode(key, payload).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "cache payload size"))?;
     if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
     let temporary = path.with_extension("tmp");
-    let result = (|| { let mut f = fs::File::create(&temporary)?; f.write_all(&data)?; f.sync_all()?; drop(f); fs::rename(&temporary, path) })();
+    let result = (|| {
+        let mut f = fs::File::create(&temporary)?; f.write_all(&data)?; f.sync_all()?; drop(f);
+        match fs::rename(&temporary, path) {
+            Ok(()) => Ok(()),
+            // Some card filesystems refuse to replace an existing target. A lost cache
+            // entry costs one rebuild, so remove it and retry once.
+            Err(_) if path.exists() => { fs::remove_file(path)?; fs::rename(&temporary, path) }
+            Err(e) => Err(e),
+        }
+    })();
     if result.is_err() { let _ = fs::remove_file(temporary); } result
 }
 pub(crate) fn word(b: &[u8], offset: usize) -> Option<u32> {
@@ -119,5 +181,21 @@ mod tests {
         let k=[7;32]; write(&p,&k,b"one").unwrap(); assert_eq!(read(&p,&k).unwrap(),b"one");
         fs::write(&p,b"broken").unwrap(); assert!(read(&p,&k).is_none());
         write(&p,&k,b"two").unwrap(); assert_eq!(read(&p,&k).unwrap(),b"two"); fs::remove_dir_all(dir).unwrap();
+    }
+    #[test] fn budget_eviction_drops_the_least_recently_written_and_keeps_the_new_entry() {
+        let dir=std::env::temp_dir().join(format!("lg-budget-{}",std::process::id()));
+        let _=fs::remove_dir_all(&dir); fs::create_dir_all(&dir).unwrap();
+        forget_directory(&dir);
+        let mut paths=Vec::new();
+        for i in 0..6 { let p=dir.join(format!("{i}.bin")); fs::write(&p,vec![0u8;1000]).unwrap(); paths.push(p); std::thread::sleep(std::time::Duration::from_millis(10)); }
+        let keep=&paths[5];
+        // 6000 bytes present and 1000 more accounted: over a 4000-byte bound, so trim to 3500.
+        assert_eq!(note_write(&dir,4000,1000,keep),Some((2,2000)));
+        assert!(keep.is_file(),"the entry just written survives its own sweep");
+        assert!(!paths[0].is_file() && !paths[1].is_file());
+        assert!(paths[2].is_file() && paths[3].is_file() && paths[4].is_file());
+        // Under the bound nothing is removed and nothing is scanned away.
+        assert_eq!(note_write(&dir,4000,100,keep),None);
+        forget_directory(&dir); fs::remove_dir_all(dir).unwrap();
     }
 }

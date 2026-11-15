@@ -4501,6 +4501,35 @@ mod tests {
         assert_eq!(variant, rc7, "the RC7 play config changes only its two declared keys");
     }
     #[test]
+    fn a6_disk_cache_pair_differs_only_in_the_two_cache_keys() {
+        let (base, rejected) = parse_runtime_config(include_bytes!("../../configs/PL-rc13-release-play04.json")).unwrap();
+        assert!(rejected.is_none());
+        let base = serde_json::to_value(base).unwrap();
+        let parse = |bytes: &[u8]| {
+            let (config, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            config.validate().unwrap();
+            serde_json::to_value(config).unwrap()
+        };
+        let off = parse(include_bytes!("../../configs/PL-a6-cache-off.json"));
+        let on = parse(include_bytes!("../../configs/PL-a6-cache-on.json"));
+        // Both arms run the A4 gvillage tape so the console check is repeatable.
+        let mut variant = off.clone();
+        for (key, value) in [("replay_play", serde_json::json!("a4-gvillage-01.lgtape")),
+            ("replay_start", serde_json::json!("chapter:gvillage")),
+            ("replay_stop_after", serde_json::json!(1200)), ("replay_check_every", serde_json::json!(600))] {
+            assert_eq!(variant[key], value, "{key}");
+            variant[key] = base[key].clone();
+        }
+        assert_eq!(variant, base, "the off arm adds only its replay keys to the RC13 release");
+        assert_eq!((off["texture_cache"].as_str(), off["pvs_cache"].as_bool()), (Some("off"), Some(false)));
+        assert_eq!((on["texture_cache"].as_str(), on["pvs_cache"].as_bool()), (Some("on"), Some(true)));
+        let mut variant = on.clone();
+        variant["texture_cache"] = off["texture_cache"].clone();
+        variant["pvs_cache"] = off["pvs_cache"].clone();
+        assert_eq!(variant, off, "the pair differs only in the two disk cache keys");
+    }
+    #[test]
     fn packaged_r3_config_contains_exactly_all_runtime_defaults() {
         let bytes = include_bytes!("../../configs/PL-def-r3.json");
         let c: Config = serde_json::from_slice(bytes).unwrap();

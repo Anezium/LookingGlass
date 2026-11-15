@@ -3,17 +3,28 @@
 use super::{config, Group, Lists, Pvs};
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
-const MAGIC: &[u8; 8] = b"LGPVS004";
+use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
+const MAGIC: &[u8; 8] = b"LGPVS005";
 const MAX_BYTES: usize = 16 * 1024 * 1024;
+/// Hard bound for the whole cache; least recently written maps are evicted past it.
+/// All 36 shipping maps together measured 104.3 MiB, so this keeps about twenty of them.
+const DIR_BUDGET: u64 = 64 * 1024 * 1024;
 #[cfg(target_os = "vita")]
 const ROOT: &str = "ux0:data/alice/private/renderer-cache";
 #[cfg(not(target_os = "vita"))]
 const ROOT: &str = "private/renderer-cache";
+thread_local! {static WRITE_WARNING:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
+fn warn_write(error: &anyhow::Error) {
+    if WRITE_WARNING.with(|w| w.replace(true)) { return; }
+    eprintln!("[lg/vita-renderer] PVS cache write failed: {error:#}; later failures stay silent");
+}
 fn key(groups: &[Group], visibility: &crate::visibility::Visibility, corpus: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(MAGIC);
     hash.update((corpus.len() as u64).to_le_bytes()); hash.update(corpus.as_bytes());
+    // `pvs_method` selects a different compiler with a different answer.
+    let method = config().pvs_method.as_bytes();
+    hash.update((method.len() as u64).to_le_bytes()); hash.update(method);
     visibility.retained_cache_key(&mut hash);
     hash.update((groups.len() as u64).to_le_bytes());
     for g in groups {
@@ -143,7 +154,8 @@ pub(super) fn load_or_build(
     if !config().pvs_cache {
         return (Pvs::new(groups, visibility), "disabled");
     }
-    let path = PathBuf::from(ROOT).join(format!("pvs-{}.bin", key(groups, visibility, corpus)));
+    let root = PathBuf::from(ROOT);
+    let path = root.join(format!("pvs-{}.bin", key(groups, visibility, corpus)));
     let mut invalid = false;
     let read = (|| -> Result<Option<Pvs>> {
         let metadata = match std::fs::metadata(&path) {
@@ -180,19 +192,8 @@ pub(super) fn load_or_build(
         }
     }
     let pvs = Pvs::new(groups, visibility);
-    let write = (|| -> Result<()> {
-        let data = encode(&pvs, groups.len())?;
-        std::fs::create_dir_all(ROOT)?;
-        let tmp = path.with_extension("bin.tmp");
-        use std::io::Write;
-        let mut file=std::fs::File::create(&tmp)?;
-        file.write_all(&data)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(tmp, &path)?;
-        Ok(())
-    })();
-    match write {
+    let stored = encode(&pvs, groups.len()).and_then(|data| store(&root, &path, &data));
+    match stored {
         Ok(()) => {
             println!("[lg/vita-renderer] PVS cache stored {}", path.display());
             (
@@ -205,10 +206,44 @@ pub(super) fn load_or_build(
             )
         }
         Err(e) => {
-            eprintln!("[lg/vita-renderer] PVS cache not stored: {e:#}");
+            warn_write(&e);
             (pvs, "miss-not-stored")
         }
     }
+}
+/// Write one entry atomically under `root`, then enforce the directory bound. A failed
+/// write removes its temporary file and leaves no partial entry behind.
+fn store(root: &Path, path: &Path, data: &[u8]) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    let tmp = path.with_extension("bin.tmp");
+    let result = (|| -> Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            // Some card filesystems refuse to replace an existing target. A lost cache
+            // entry costs one rebuild, so remove it and retry once.
+            Err(_) if path.exists() => {
+                std::fs::remove_file(path)?;
+                std::fs::rename(&tmp, path)?;
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return result;
+    }
+    if let Some((files, freed)) =
+        crate::shader_cache::note_write(root, DIR_BUDGET, data.len() as u64, path)
+    {
+        println!("[lg/vita-renderer] PVS cache evicted files={files} bytes={freed} bound_bytes={DIR_BUDGET}");
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -217,6 +252,38 @@ mod tests {
     fn mounted_data_change_invalidates_pvs_cache() {
         let visibility=crate::visibility::Visibility::default();
         assert_ne!(key(&[],&visibility,"old-corpus"),key(&[],&visibility,"new-corpus"));
+    }
+    #[test]
+    fn pvs_method_is_part_of_the_key() {
+        let visibility=crate::visibility::Visibility::default();
+        let sources=super::super::with_config(|c|c.pvs_method="sources".into(),||key(&[],&visibility,"corpus"));
+        let legacy=super::super::with_config(|c|c.pvs_method="legacy".into(),||key(&[],&visibility,"corpus"));
+        assert_ne!(sources,legacy,"a method change must miss, never return the other compiler's lists");
+    }
+    #[test]
+    fn store_replaces_an_invalid_entry_and_leaves_no_temporary() {
+        let root=std::env::temp_dir().join(format!("lg-pvs-store-{}",std::process::id()));
+        let _=std::fs::remove_dir_all(&root);
+        let path=root.join("pvs-entry.bin");
+        assert!(store(&root,&path,b"first").is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(),b"first");
+        std::fs::write(&path,b"truncated").unwrap();
+        assert!(store(&root,&path,b"second").is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(),b"second");
+        let names=std::fs::read_dir(&root).unwrap().map(|e|e.unwrap().file_name()).collect::<Vec<_>>();
+        assert_eq!(names,vec![std::ffi::OsString::from("pvs-entry.bin")],"no temporary survives a write");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    fn unreadable_cache_directory_is_a_miss_not_a_failure() {
+        let root=std::env::temp_dir().join(format!("lg-pvs-save-dir-{}",std::process::id()));
+        let _=std::fs::remove_dir_all(&root);
+        // A file where the cache directory should be: every write fails, nothing panics.
+        std::fs::write(&root,b"not a directory").unwrap();
+        let path=root.join("pvs-entry.bin");
+        assert!(store(&root,&path,b"data").is_err());
+        assert!(!path.is_file());
+        std::fs::remove_file(&root).unwrap();
     }
     #[test]
     fn portable_lists_preserve_unknown_shared_clusters_and_order() {

@@ -58,6 +58,17 @@ fn identity()->&'static str {
     #[cfg(test)] {"mock-vitaGL"}
     #[cfg(target_os="vita")] {env!("LG_VITAGL_ID")}
 }
+/// Hard bound for `cache/textures`; least recently written entries are evicted past it.
+/// The measured union of every eligible texture on all 36 maps is 35.4 MB, so this keeps
+/// nearly all of it while bounding a card whose data or build changed. One entry is at
+/// most 512*512+76 = 262,220 bytes.
+const DIR_BUDGET:u64=32*1024*1024;
+thread_local! {static WRITE_WARNING:std::cell::Cell<bool>=const{std::cell::Cell::new(false)};}
+/// A full card must not print the same failure once per texture.
+fn warn_write(file:&Path,error:&std::io::Error) {
+    if WRITE_WARNING.with(|w|w.replace(true)) {return;}
+    eprintln!("[lg/texture-cache] write_failed file={} error={error}; later failures stay silent",file.display());
+}
 fn eligible(target:u32,level:i32,internal:i32,width:i32,height:i32,border:i32,format:u32,kind:u32,data:*const c_void)->bool {
     target==TEXTURE_2D && level==0 && internal==DXT5 && border==0 && format==RGBA && kind==UNSIGNED_BYTE && !data.is_null()
         && (4..=512).contains(&width) && (4..=512).contains(&height) && (width as u32).is_power_of_two() && (height as u32).is_power_of_two()
@@ -73,7 +84,9 @@ pub unsafe extern "C" fn __wrap_glTexImage2D(target:u32,level:i32,internal:i32,w
     let pixels=std::slice::from_raw_parts(data.cast::<u8>(),size*4);
     let key=shader_cache::key(identity(),b"vitaGL-swizzled-DXT5-level0-v1",&[&width.to_le_bytes(),&height.to_le_bytes(),&[api::fast_texture_compression],pixels]);
     let file=path(&key);
-    if let Some(binary)=shader_cache::read(&file,&key).filter(|b|b.len()==size) {
+    let cached=shader_cache::read(&file,&key).filter(|b|b.len()==size);
+    if cached.is_none() && file.is_file() {eprintln!("[lg/texture-cache] invalid_entry file={} action=ignore-recompress",file.display());}
+    if let Some(binary)=cached {
         // Allocate with the same format and dimensions, but no compression work.
         // The public pointer addresses the initialized driver-owned GPU allocation.
         api::upload(target,level,internal,width,height,border,format,kind,std::ptr::null());
@@ -88,7 +101,16 @@ pub unsafe extern "C" fn __wrap_glTexImage2D(target:u32,level:i32,internal:i32,w
     let compressed=api::vglGetTexDataPointer(target);
     if !compressed.is_null() {
         let bytes=std::slice::from_raw_parts(compressed.cast::<u8>(),size);
-        if let Err(e)=shader_cache::write(&file,&key,bytes){eprintln!("[lg/texture-cache] write_failed key={} error={e}",shader_cache::hex(&key));}
+        match shader_cache::write(&file,&key,bytes) {
+            Ok(()) => {
+                if let Some(parent)=file.parent() {
+                    if let Some((files,freed))=shader_cache::note_write(parent,DIR_BUDGET,shader_cache::stored_size(size),&file) {
+                        eprintln!("[lg/texture-cache] evicted files={files} bytes={freed} bound_bytes={DIR_BUDGET}");
+                    }
+                }
+            }
+            Err(e)=>warn_write(&file,&e),
+        }
     }
     eprintln!("[lg/texture-cache] key={} cache=compress bytes={size} elapsed_ms={:.3}",shader_cache::hex(&key),start.elapsed().as_secs_f64()*1000.);
 }
