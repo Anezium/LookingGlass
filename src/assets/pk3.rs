@@ -289,6 +289,7 @@ fn metadata(reader: &PackReader) -> Option<Vec<Metadata>> {
     }
     Some(entries)
 }
+#[cfg(test)]
 pub(super) fn open(file: File) -> Result<(ZipArchive<PackReader>, Vec<Metadata>)> {
     let (pack, entries, _) = open_windowed(file, 0)?;
     Ok((pack, entries))

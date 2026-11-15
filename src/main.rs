@@ -689,7 +689,9 @@ fn run() -> Result<()> {
     let read_window = render::vita_renderer::config().load_read_window_kib as usize * 1024;
     #[cfg(not(feature = "vita_renderer"))]
     let read_window = 0;
-    let mut assets = Assets::open_with_window(&o.data, read_window)?;
+    // With the key off, mount through the untouched one-read-per-request path.
+    let mut assets = if read_window == 0 { Assets::open(&o.data)? }
+        else { Assets::open_with_window(&o.data, read_window)? };
     #[cfg(feature = "vita_renderer")]
     render::vita_renderer::config().warn_unknown_maps(&assets);
     eprintln!("[lg/startup] assets ready mode={mode}");
