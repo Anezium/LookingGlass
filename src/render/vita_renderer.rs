@@ -2093,6 +2093,7 @@ impl Renderer {
         // `alpha_model_pvs`: the per-group answers are taken out of the renderer so the loop below
         // can hold a group borrow and the cache at once.
         let mut model_pvs = (alpha && config().alpha_model_pvs).then(|| std::mem::take(&mut self.model_pvs));
+        if alpha { self.open_sky.begin_frame(); }
         self.alpha_order.clear();
         let reuse = config().world_view_reuse;
         let mut key = [0u32; 26];
@@ -2172,7 +2173,7 @@ impl Renderer {
                     && g.recipe.deform.is_none() && model.is_some_and(|model| model_bounds_hidden(
                         model_pvs.as_mut().unwrap(), &scene.map.visibility, &scene.map.planes,
                         cluster, id, model, g.min, g.max)
-                        && !self.open_sky.may_show(eye, model, g.min, g.max));
+                        && !self.open_sky.may_show(id, eye, model, g.min, g.max));
                 if hidden { count("vita_world_model_pvs_culled", 1); }
                 let result = if hidden { None } else { model.and_then(|model| {
                     tests += 1;
