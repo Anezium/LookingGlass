@@ -3500,6 +3500,17 @@ pub(crate) async fn visualizer(
 mod tests {
     use super::*;
     #[test]
+    fn shader_cache_namespace_preserves_defaults_and_rejects_paths() {
+        let parsed = parse_runtime_config(include_bytes!("../../configs/PL-rc13-release-play04.json")).unwrap().0;
+        assert!(parsed.shader_cache_namespace.is_empty());
+        for name in ["np-old-a2-04", "np_new_gvillage"] {
+            assert!(Config { shader_cache_namespace:name.into(), ..Config::default() }.validate().is_ok());
+        }
+        for name in ["../old", "a/b", "ux0:foo", ".", "a b", &"a".repeat(65)] {
+            assert!(Config { shader_cache_namespace:name.into(), ..Config::default() }.validate().is_err());
+        }
+    }
+    #[test]
     fn release_fallback_renderer_missing_only_and_read_only() {
         use crate::config_input::{MissingFile, TestDir};
         let dir = TestDir::new("renderer");

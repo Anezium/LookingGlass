@@ -65,6 +65,8 @@ def load_pin(repo):
         fail("unexpected SceShaccCgExt release pin")
     if sha256(folder / pin["license_file"]) != pin["license_sha256"]:
         fail("the pinned SceShaccCgExt licence text does not match")
+    if "patch" in pin and sha256(Path(repo) / "tools" / pin["patch"]) != pin["patch_sha256"]:
+        raise ValueError("the SceShaccCgExt patch does not match its pin")
     return pin
 
 
@@ -208,6 +210,8 @@ def extract_source(source_repo, revision, destination):
             archive.extract(member, destination)
     subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "vita_shacccg_no_prelude.py"),
                     "--apply", str(destination)], check=True)
+    if (destination / "include/sce_intrinsics.h").exists():
+        fail("excluded intrinsic header survived source export")
 
 
 def write_readme(bundle, facts):

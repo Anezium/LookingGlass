@@ -1,5 +1,14 @@
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
+@@ -8,7 +8,7 @@
+   endif()
+ endif()
+ 
+-project(SceShaccCgExt)
++project(SceShaccCgExt) # Modified 2026-11-15: omit optional intrinsic header.
+ include("${VITASDK}/share/vita.cmake" REQUIRED)
+ 
+ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -ffast-math -mtune=cortex-a9 -mfpu=neon -fno-optimize-sibling-calls -ftree-vectorize -Wall")
 @@ -16,7 +16,6 @@
  
  add_library(${PROJECT_NAME}
@@ -10,6 +19,12 @@
  )
 --- a/src/shacccg_ext.c
 +++ b/src/shacccg_ext.c
+@@ -1,4 +1,4 @@
+-#include "shacccg_ext.h"
++#include "shacccg_ext.h" // Modified 2026-11-15: omit optional intrinsic prelude and its load.
+ 
+ #include <stdbool.h>
+ #include <stdlib.h>
 @@ -7,7 +7,6 @@
  #include <psp2/kernel/modulemgr.h>
  #include <psp2/kernel/clib.h>

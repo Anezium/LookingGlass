@@ -8,5 +8,5 @@
   "archive_sha256": "0e340441f6909c1169b6f33bcd6e0223ffa91c9d7ce5155f3b27eb1bdd0b38a5",
   "known_sdk_gpl_sha256": "42448da6ebfdc679458702492da467481b3dbcacfd2c254b28f08dba539d2a4a",
   "patch": "patches/SceShaccCgExt-no-prelude.patch",
-  "patch_sha256": "e142a7517f459f3160adf74fc684a3973f14bed6745cf5669060daada44d8905"
+  "patch_sha256": "6c7b7053bbf559d8680d7c2bb79c3495c7b22feff6411c3ae08143400db79cd6"
 }
