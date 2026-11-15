@@ -11,8 +11,11 @@ thread_local! {
 }
 #[repr(C)]
 struct Vertex { offsets: [[f32;4];5], indices: [f32;4], fifth: f32, normal: [f32;3], uv: [f32;2] }
-pub(crate) struct Input { source: Arc<SkinSurface>, vertices: Vec<Vertex>, bones: Vec<usize> }
+pub(crate) struct Input { source: Arc<SkinSurface>, vertices: Vec<Vertex>, bones: Vec<usize>, placeholder: Rc<crate::render_fx::prepared::Geometry> }
 pub(crate) struct Occurrence { input: Rc<Input>, palette: [f32; EXTRA] }
+impl Occurrence {
+    pub(crate) fn placeholder(&self)->Rc<crate::render_fx::prepared::Geometry> {self.input.placeholder.clone()}
+}
 pub(crate) fn available()->bool { AVAILABLE.with(|v|v.get()>0) }
 fn input(source:Arc<SkinSurface>)->Option<Rc<Input>> {
     let id=Arc::as_ptr(&source) as usize;
@@ -29,7 +32,8 @@ fn input(source:Arc<SkinSurface>)->Option<Rc<Input>> {
         }
         out
     }).collect();
-    let result=Rc::new(Input {source,vertices,bones});
+    let placeholder=Rc::new(crate::render_fx::prepared::Geometry::new(Mesh {upload_identity:None,surface:None,vertices:source.bind_vertices.clone(),indices:source.indices.clone(),texture:None}));
+    let result=Rc::new(Input {source,vertices,bones,placeholder});
     INPUTS.with(|c| {let mut c=c.borrow_mut();if c.len()>512 {c.retain(|_,v|v.strong_count()>0);} c.insert(id,Rc::downgrade(&result));});
     println!("[lg/gpu-skin] immutable vertices={} influences={} bones={}",result.vertices.len(),result.source.vertices.iter().map(|v|v.weights.len()).max().unwrap_or(0),result.bones.len());
     Some(result)
@@ -63,7 +67,7 @@ fn skin_meta()->ShaderMeta {
     let mut m=meta();
     m.uniforms.uniforms.extend([UniformDesc::new("Bones",UniformType::Float4).array(BONES*3),UniformDesc::new("SkinModel",UniformType::Mat4),UniformDesc::new("SkinLight",UniformType::Float4)]);m
 }
-struct Buffers { _input:Rc<Input>, vertex:BufferId,index:BufferId }
+struct Buffers { _input:Rc<Input>, vertex:BufferId,index:BufferId,bindings:Option<Bindings> }
 pub(crate) struct Gpu { shader:ShaderId,pipelines:BTreeMap<(usize,bool),Pipeline>,buffers:BTreeMap<usize,Buffers> }
 impl Gpu {
     pub(super) fn new(fragment:&str)->Result<Self> {
@@ -87,7 +91,7 @@ impl Gpu {
             let ctx=unsafe{get_internal_gl()}.quad_context;
             let vertex=ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable,BufferSource::slice(&skin.input.vertices));
             let index=ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable,BufferSource::slice(&skin.input.source.indices));
-            Buffers {_input:skin.input.clone(),vertex,index}
+            Buffers {_input:skin.input.clone(),vertex,index,bindings:None}
         });
     }
     pub(super) fn draw(&mut self,p:&Pass,skin:&Occurrence,u:&[f32;UNIFORM_FLOATS],depth_write:bool,white:&Texture2D) {
@@ -99,9 +103,11 @@ impl Gpu {
             &[BufferLayout {stride:std::mem::size_of::<Vertex>() as i32,..Default::default()}],
             &[VertexAttribute::new("Offset0",VertexFormat::Float4),VertexAttribute::new("Offset1",VertexFormat::Float4),VertexAttribute::new("Offset2",VertexFormat::Float4),VertexAttribute::new("Offset3",VertexFormat::Float4),VertexAttribute::new("Offset4",VertexFormat::Float4),VertexAttribute::new("Indices",VertexFormat::Float4),VertexAttribute::new("Fifth",VertexFormat::Float1),VertexAttribute::new("BindNormal",VertexFormat::Float3),VertexAttribute::new("texcoord",VertexFormat::Float2)],self.shader,
             PipelineParams {depth_test:if p.depth_equal {Comparison::Equal}else{Comparison::LessOrEqual},..crate::render::depth_pipeline(crate::render::blend(p.blend_index))}));
-        let b=&self.buffers[&(Rc::as_ptr(&skin.input) as usize)];
+        let b=self.buffers.get_mut(&(Rc::as_ptr(&skin.input) as usize)).unwrap();
+        let bindings=b.bindings.get_or_insert_with(||Bindings {vertex_buffers:vec![b.vertex],index_buffer:b.index,images:vec![texture,white,white]});
+        bindings.images[0]=texture;
         ctx.apply_pipeline(pipeline);unsafe{gl::glDepthMask(u8::from(depth_write));}
-        ctx.apply_bindings(&Bindings {vertex_buffers:vec![b.vertex],index_buffer:b.index,images:vec![texture,white,white]});
+        ctx.apply_bindings(bindings);
         let mut words=[0.;UNIFORM_FLOATS+EXTRA];words[..UNIFORM_FLOATS].copy_from_slice(u);words[UNIFORM_FLOATS..].copy_from_slice(&skin.palette);
         {let _upload=Clock::new(2);ctx.apply_uniforms(UniformsSource::table(&words));}
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]

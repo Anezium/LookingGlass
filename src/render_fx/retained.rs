@@ -658,9 +658,9 @@ impl Gpu {
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool, ant_dead: Option<bool>) {
         if let Some(skin)=&p.gpu_skin {
             self.skin.as_mut().expect("accepted skin program").draw(p,skin,u,depth_write,&self.white);
-            self.submit_cache=SubmitCache::default();
-            self.uniform_cache=UniformCache::default();
-            self.field_uniforms=crate::render::uniform_fields::Cache::new(meta());
+            self.submit_cache.interrupt();
+            self.uniform_cache.interrupt();
+            self.field_uniforms.interrupt();
             return;
         }
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });

@@ -1906,7 +1906,13 @@ pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[cr
     if surface.transparent || surface.preserve_skin || surface.layers.iter().any(|l|!actor_cache::simple(&l.stage)) {return false;}
     let Some(payload)=retained::gpu_skin::occurrence(source.cpu(),pose,scales,transform,scale,fullbright,alpha) else {return false;};
     let (camera,time,appearance)=FRAME.with(|f|{let f=f.borrow();(f.camera,f.time,f.appearance)});
-    let mut passes=layer_passes(&source.bind_vertices,&source.indices,surface,camera,time,alpha,appearance,true,None,actor_max_layers(c));
-    for pass in &mut passes {pass.gpu_skin=Some(payload.clone());}
+    let _=camera;
+    let mut passes=Vec::with_capacity(actor_max_layers(c).min(surface.layers.len()));
+    for layer in surface.layers.iter().take(actor_max_layers(c)) {
+        let frame=if layer.stage.images.is_empty() {0} else {layer.stage.frame(time)};
+        let mesh=Mesh {upload_identity:layer.upload_identities.get(frame).copied().flatten(),surface:Some(surface.clone()),vertices:Vec::new(),indices:Vec::new(),texture:Some(layer.textures[frame].clone())};
+        let Ok(mut pass)=pass_at(mesh,&layer.stage,true,!layer.stage.identity,appearance,time) else {return false;};
+        pass.geometry=Some(payload.placeholder());pass.gpu_skin=Some(payload.clone());passes.push(pass);
+    }
     submit(passes,false);true
 }
