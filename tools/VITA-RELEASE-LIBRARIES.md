@@ -113,8 +113,9 @@ Every input source checkout must be clean at its pinned revision. The bundle
 exporter applies the SceShaccCgExt patch, omits the intrinsic header and ships
 the patch separately. The bundle holds the
 four source trees, their licence texts, the exact object code and link command,
-the release link map, `relink.sh`, `package.sh`, the LiveArea assets and a
-`SOURCE-OFFER.txt`; it holds no game data and no binary under another licence.
+the release link map, `relink.sh`, `package.sh`, `CREDITS.txt`, the LiveArea
+assets and a `SOURCE-OFFER.txt`; it holds no game data and no binary under
+another licence.
 
 `relink.sh` accepts a rebuilt archive in `lib/` for any one, several or all four
 libraries (`libvitaGL.a`, `libvitashark.a`, `libSceShaccCgExt.a`,
@@ -127,9 +128,9 @@ or that also loads the SDK archive of the same name, exits non-zero.
 
 `package.sh` is the LGPL-3.0 section 4(e) installation information: it runs
 `vita-elf-create`, `vita-make-fself -s`, `vita-mksfoex` and `vita-pack-vpk` with
-the release flags, adding the notices, licence texts and source offer to the
-VPK, and prints the ELF, `eboot.bin` and VPK hashes. Installation is copying the
-VPK to the Vita and opening it in VitaShell.
+the release flags, adding the notices, credits, licence texts and source offer to
+the VPK, and prints the ELF, `eboot.bin` and VPK hashes. Installation is copying
+the VPK to the Vita and opening it in VitaShell.
 
 ## VPK packaging
 
@@ -137,6 +138,7 @@ Release mode calls `tools/vita_package.py` after the native link. It repacks the
 VPK with the same commands and flags as the release and requires:
 
 - `THIRD_PARTY_NOTICES-vita.txt`;
+- `CREDITS.txt`;
 - `SOURCE-OFFER.txt` naming the source bundle and the written offer;
 - `licenses/GPL-3.0.txt`, `LGPL-3.0.txt`, `LGPL-2.1.txt`,
   `GCC-RUNTIME-EXCEPTION-3.1.txt`, `MPL-2.0.txt`, `MIT.txt`, `Apache-2.0.txt`,
@@ -145,8 +147,8 @@ VPK with the same commands and flags as the release and requires:
 
 The tool hashes the ELF before and after, checks the VPK's `eboot.bin` and
 `param.sfo` byte-for-byte against the release artifacts, and fails closed on a
-missing notice or licence. Packaging is the only change: no runtime source or
-link input changes, so the ELF stays identical.
+missing notice, credit or licence. Packaging is the only change: no runtime
+source or link input changes, so the ELF stays identical.
 
 The MPL-2.0 source route is stated in the notices and the source offer: the four
 symphonia 0.5.5 crates are unmodified, their source is the crates.io archive,

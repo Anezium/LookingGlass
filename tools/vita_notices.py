@@ -12,7 +12,9 @@ Sources, in the order they appear in the file:
 With --link-map, every archive in the linker map must belong to a known C library, so a new
 library cannot reach the binary without a notice. No path of the build machine is written.
 
-Usage: tools/vita_notices.py [--link-map FILE] [--output FILE]
+--credits-output writes the short CREDITS.txt that the VPK carries at its root.
+
+Usage: tools/vita_notices.py [--link-map FILE] [--output FILE] [--credits-output FILE]
 """
 import argparse
 import json
@@ -20,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 TARGET = "armv7-sony-vita-newlibeabihf"
@@ -64,6 +67,44 @@ VITA_GLUE_MEMBERS = [
     "lib_a-syscalls.o", "lib_a-sysconf.o", "lib_a-threading.o",
 ]
 
+# Credits for the linked files that state no licence. Measured in the public
+# history of https://github.com/vitasdk/newlib at 64aa7aa, the revision this
+# release links: the commit that introduced each file and the authors git blame
+# attributes its lines to at that revision. The owner decided on 2026-11-15 that
+# no permission request would be posted for these files and that the release
+# ships with the gap documented and the authors credited (LEGAL.md). These names
+# are attribution only. They are not a licence and they do not claim one.
+NEWLIB_GLUE_CREDITS = [
+    ("crt0.c", "Ilya Zhuravlev (0681b290b, 2015-08-13)",
+     "Francisco José García García, Ilya Zhuravlev, Sergi Granell, Ivan Epifanov, "
+     "Glenn Anderson, Yifan Lu, Rémy F"),
+    ("io.c", "Yifan Lu (95b2dc6df, 2016-06-23)",
+     "Davee, Ivan Epifanov, Yifan Lu, Vladimir Atamanenko, Nikolay Arhipov"),
+    ("mlock.c", "Ilya Zhuravlev (5bf33fd61, 2015-08-14)",
+     "Ivan Epifanov, Francisco José García García, Ilya Zhuravlev, Sergi Granell"),
+    ("sbrk.c", "Ilya Zhuravlev (c7ae9b785, 2015-08-13)",
+     "Ilya Zhuravlev, Ivan Epifanov, Francisco José García García, Glenn Anderson, "
+     "Sergi Granell, Rinnegatamante"),
+    ("syscalls.c", "Ilya Zhuravlev (0681b290b, 2015-08-13)",
+     "Ilya Zhuravlev, Ivan Epifanov, Davee, Jeffrey Pfau, frangarcj, Nikolay Arhipov, "
+     "Vladimir Atamanenko, Yifan Lu, Sunguk Lee, Glenn Anderson, "
+     "Francisco José García García"),
+    ("threading.c", "Ilya Zhuravlev (0875ca1dd, 2015-08-14)",
+     "Davee, Ilya Zhuravlev, Ivan Epifanov, Francisco José García García, "
+     "Sergi Granell, TheOfficialFloW"),
+]
+NEWLIB_GLUE_CREDIT_NOTE = ('Ivan Epifanov also appears in the history as "Epifanov Ivan".')
+NEWLIB_REVISION = "64aa7aa33d4f380451a1f100d19589226cdad334"
+RBTREE_CREDIT = {
+    "library": "SceShaccCgExt",
+    "revision": "d3c83efceedeca3be863d0c1f19bb145daf1685f",
+    "file": "src/shacccg_ext_oop.cpp",
+    "url": "https://github.com/Dynmi/RedBlackTree",
+    "author": "Haris Wang",
+    "handle": "Dynmi",
+    "upstream": "533e5d3ca8368682898f89a5574a96d0df8ec265",
+}
+
 # Licence texts for packages that ship none, taken from their repositories (see vita_licenses/SOURCES.txt).
 EXTRA_TEXTS = {
     "symphonia": ["symphonia-LICENSE"],
@@ -101,7 +142,13 @@ C_LIBRARIES = [
                   "library no longer loads it. The console comparison of the two library builds "
                   "is recorded at "
                   "https://github.com/Anezium/Alice-American-McGees-PSVita-Port/blob/4cc323f5a306220a2c5b76425a452fecac80c573/docs/validation/ALICE-NO-PRELUDE-SLOT-2026-11-15.md"
-                  ": 45 of 45 shader-cache payloads were byte-identical with and without it."],
+                  ": 45 of 45 shader-cache payloads were byte-identical with and without it.",
+                  "Red-black tree: " + RBTREE_CREDIT["file"] + " contains a red-black tree copied "
+                  "from " + RBTREE_CREDIT["url"] + ", whose rbtree.h names its author as "
+                  + RBTREE_CREDIT["author"] + " (GitHub: " + RBTREE_CREDIT["handle"] + "). The "
+                  "upstream repository has no licence file and its files state no licence. The "
+                  "author and repository are credited in the CREDITS section and in CREDITS.txt; "
+                  "no licence is claimed for that code."],
         "files": ["SceShaccCgExt-LICENSE"],
     },
     {
@@ -140,6 +187,9 @@ C_LIBRARIES = [
                   "text. None of these files is named in COPYING.NEWLIB. Its preamble applies the "
                   "notices it lists to files in the newlib subdirectory unless a file states "
                   "otherwise; whether that covers the unnotified files is not established here",
+        "notes": ["Credits: the authors of the linked files that state no licence are named in "
+                  "the CREDITS section and in CREDITS.txt. That credit is an attribution "
+                  "recorded after the owner decision of 2026-11-15; it is not a licence grant."],
         "files": ["newlib-COPYING.NEWLIB", "newlib-COPYING.LIBGLOSS",
                   "newlib-vita-glue-NOTICE.txt"],
     },
@@ -312,10 +362,127 @@ def covered(archive):
     return archive.endswith(".rlib") or archive.startswith("liblooking_glass")
 
 
+def credits_section():
+    """The CREDITS section of the notices: attribution for the two documented gaps."""
+    lines = [
+        "=== CREDITS: authors of linked files that state no licence ===",
+        "",
+    ]
+    lines += textwrap.wrap(
+        "The owner decided on 2026-11-15 that no permission request would be posted for "
+        "the two gaps below. The release ships with each gap documented and the authors "
+        "credited. That decision is an accepted risk, not a licence grant: nothing here "
+        "asserts that permission exists for these files. See LEGAL.md and CREDITS.txt.",
+        width=96)
+    lines += ["", "newlib PS Vita port", ""]
+    lines += textwrap.wrap(
+        "The link loads objects compiled from six files in newlib/libc/sys/vita of "
+        "https://github.com/vitasdk/newlib at " + NEWLIB_REVISION + " that state no "
+        "licence: io.c, mlock.c, sbrk.c, syscalls.c and threading.c carry no copyright "
+        "or licence line, and crt0.c carries only the PSPSDK attribution quoted below. "
+        "Each file's introduction commit and the authors git blame attributes its lines "
+        "to at " + NEWLIB_REVISION[:7] + " are listed here. They are credited as "
+        "contributors, not as grantors of a licence.",
+        width=96)
+    lines.append("")
+    for name, introduced, authors in NEWLIB_GLUE_CREDITS:
+        lines.append("  " + name)
+        lines.extend(textwrap.wrap("Introduced by " + introduced + ".",
+                                   width=96, initial_indent="    ",
+                                   subsequent_indent="      "))
+        lines.extend(textwrap.wrap("Line authors at " + NEWLIB_REVISION[:7] + ": "
+                                   + authors + ".",
+                                   width=96, initial_indent="    ",
+                                   subsequent_indent="      "))
+    lines += [
+        "",
+        NEWLIB_GLUE_CREDIT_NOTE,
+        "",
+        "crt0.c also carries this attribution and no licence text:",
+        "",
+        '  Code below is based on the PSPSDK implementation',
+        '  Copyright (c) 2005 Marcus R. Brown <mrbrown@ocgnet.org>',
+        "",
+        "red-black tree in SceShaccCgExt",
+        "",
+    ]
+    lines += textwrap.wrap(
+        RBTREE_CREDIT["library"] + " 1.0.1 at " + RBTREE_CREDIT["revision"]
+        + " contains a red-black tree in " + RBTREE_CREDIT["file"] + " copied from "
+        + RBTREE_CREDIT["url"] + ", whose rbtree.h names its author as "
+        + RBTREE_CREDIT["author"] + " (GitHub: " + RBTREE_CREDIT["handle"] + "). The "
+        "upstream repository has no licence file and no licence statement in its files "
+        "(measured at " + RBTREE_CREDIT["upstream"] + ", 2021-04-13); the source comment "
+        "links the repository and states the origin. " + RBTREE_CREDIT["author"]
+        + " is credited as the author of that code. No licence is claimed for it.",
+        width=96)
+    lines.append("")
+    return lines
+
+
+def credits_text():
+    """The short CREDITS.txt shipped at the VPK root, from the same facts as the section."""
+    lines = [
+        "Credits for third-party files that state no licence",
+        "",
+        "Looking Glass, PS Vita port. See LEGAL.md and THIRD_PARTY_NOTICES-vita.txt.",
+        "",
+        "newlib PS Vita port",
+        "",
+    ]
+    lines += textwrap.wrap(
+        "The release links objects from newlib/libc/sys/vita of the VitaSDK newlib fork "
+        "at " + NEWLIB_REVISION + ". These linked files carry no copyright or licence "
+        "statement and are not named in COPYING.NEWLIB:",
+        width=96)
+    lines += [
+        "",
+        "  io.c, mlock.c, sbrk.c, syscalls.c, threading.c",
+        "",
+        "crt0.c carries this PSPSDK attribution and no licence text:",
+        "",
+        '  Code below is based on the PSPSDK implementation',
+        '  Copyright (c) 2005 Marcus R. Brown <mrbrown@ocgnet.org>',
+        "",
+    ]
+    lines += textwrap.wrap(
+        "Contributors recorded in the public Git history of "
+        "https://github.com/vitasdk/newlib for these files:",
+        width=96)
+    lines += [
+        "",
+        "  Ilya Zhuravlev, Yifan Lu, Davee, Ivan Epifanov,",
+        "  Francisco José García García, Sergi Granell, Vladimir Atamanenko,",
+        "  Nikolay Arhipov, Glenn Anderson, Rinnegatamante, Jeffrey Pfau, frangarcj,",
+        "  Sunguk Lee, TheOfficialFloW, Rémy F",
+        "",
+        "red-black tree in SceShaccCgExt",
+        "",
+    ]
+    lines += textwrap.wrap(
+        RBTREE_CREDIT["file"] + " of " + RBTREE_CREDIT["library"] + " at "
+        + RBTREE_CREDIT["revision"] + " contains a red-black tree copied from "
+        + RBTREE_CREDIT["url"] + ". The author named in its rbtree.h is "
+        + RBTREE_CREDIT["author"] + " (GitHub: " + RBTREE_CREDIT["handle"] + "). The "
+        "upstream repository has no licence file and states no licence.",
+        width=96)
+    lines += [""]
+    lines += textwrap.wrap(
+        "The owner decided on 2026-11-15 that no permission request would be posted for "
+        "these two items and that the release ships with the gaps documented and the "
+        "authors credited. That is an accepted risk, not a licence grant. No licence is "
+        "claimed for the files named above.",
+        width=96)
+    lines.append("")
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--link-map")
     parser.add_argument("--output", default="THIRD_PARTY_NOTICES-vita.txt")
+    parser.add_argument("--credits-output",
+                        help="also write the short CREDITS.txt shipped at the VPK root")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parent.parent
     texts = repo / "tools" / "vita_licenses"
@@ -363,8 +530,9 @@ def main():
     ]
     for name in MPL_CRATES:
         out.append("  %-20s %s" % (name, mpl[name][1]))
+    out += [""]
+    out += credits_section()
     out += [
-        "",
         "",
         "=== 1. Modified forks (Apache-2.0 section 4(b) change notices) ===",
         "",
@@ -413,13 +581,18 @@ def main():
             (sysroot / "share/doc/rust/licenses/LLVM-exception.txt").read_text(encoding="utf-8").rstrip("\n"), ""]
 
     text = "\n".join(out) + "\n"
+    credits = credits_text() if args.credits_output else ""
     for private in {str(Path.home()), str(repo)}:
-        if private in text:
+        if private in text or private in credits:
             print("refusing to write: a build machine path reached the notices", file=sys.stderr)
             return 1
     Path(args.output).write_text(text, encoding="utf-8")
+    if args.credits_output:
+        Path(args.credits_output).write_text(credits, encoding="utf-8")
     print(f"{args.output}: {len(packages)} Rust packages, {len(std_packages)} standard library packages, "
           f"{len(C_LIBRARIES)} C library entries, {text.count(chr(10))} lines")
+    if args.credits_output:
+        print(f"{args.credits_output}: {credits.count(chr(10))} lines")
     return 0
 
 

@@ -495,6 +495,34 @@ class DocumentationControls(unittest.TestCase):
                       "copyright or licence line", text)
         self.assertIn("crt0.o", text)
 
+    def test_notices_credit_the_files_that_state_no_licence(self):
+        text = (REPO / "THIRD_PARTY_NOTICES-vita.txt").read_text(encoding="utf-8")
+        self.assertIn("=== CREDITS: authors of linked files that state no licence ===", text)
+        for token in ("64aa7aa33d4f380451a1f100d19589226cdad334",
+                      "0681b290b", "95b2dc6df", "0875ca1dd",
+                      "Ilya Zhuravlev", "Yifan Lu", "Davee", "Francisco José García García",
+                      "Sergi Granell", "Glenn Anderson", "Marcus R. Brown",
+                      "https://github.com/Dynmi/RedBlackTree", "Haris Wang", "Dynmi",
+                      "accepted risk, not a licence grant"):
+            self.assertIn(token, text)
+        self.assertNotIn("Permission is hereby granted, free of charge", text.split(
+            "=== CREDITS")[1].split("=== 1. Modified forks")[0])
+
+    def test_credits_file_is_attribution_not_a_licence_grant(self):
+        text = (REPO / "CREDITS.txt").read_text(encoding="utf-8")
+        for token in ("newlib/libc/sys/vita", "64aa7aa33d4f380451a1f100d19589226cdad334",
+                      "io.c, mlock.c, sbrk.c, syscalls.c, threading.c",
+                      "https://github.com/vitasdk/newlib", "Ilya Zhuravlev",
+                      "https://github.com/Dynmi/RedBlackTree", "Haris Wang",
+                      "accepted risk, not a licence grant"):
+            self.assertIn(token, text)
+        self.assertNotIn("Permission is hereby granted", text)
+
+    def test_bundle_ships_the_credits_file_and_packages_it(self):
+        self.assertIn("CREDITS.txt", BUNDLE.README_TEMPLATE)
+        self.assertIn('"$here/CREDITS.txt=CREDITS.txt"', BUNDLE.PACKAGE_TEMPLATE)
+        self.assertIn("CREDITS.txt", BUNDLE.PACKAGE_TEMPLATE)
+
     def test_vitagl_record_is_read_from_the_release_build(self):
         text = ("linked libvitaGL.a sha256=" + "a" * 64
                 + " package=vitaGL-1-1 not-the-package-file path=~/vitasdk/lib/libvitaGL.a\n"
@@ -599,7 +627,7 @@ with zipfile.ZipFile(out, 'w') as archive:
 
     def test_vpk_contains_notices_licences_and_source_offer(self):
         vpk, names = self.build()
-        for name in ("THIRD_PARTY_NOTICES-vita.txt", "SOURCE-OFFER.txt",
+        for name in ("THIRD_PARTY_NOTICES-vita.txt", "CREDITS.txt", "SOURCE-OFFER.txt",
                      "licenses/GPL-3.0.txt", "licenses/LGPL-3.0.txt",
                      "licenses/LGPL-2.1.txt",
                      "licenses/GCC-RUNTIME-EXCEPTION-3.1.txt",
@@ -610,6 +638,8 @@ with zipfile.ZipFile(out, 'w') as archive:
         with zipfile.ZipFile(vpk) as archive:
             self.assertEqual(archive.read("eboot.bin"), b"self bytes")
             self.assertEqual(archive.read("sce_sys/param.sfo"), b"sfo bytes")
+            self.assertEqual(archive.read("CREDITS.txt"),
+                             (REPO / "CREDITS.txt").read_bytes())
             offer = archive.read("SOURCE-OFFER.txt").decode()
         self.assertIn("alice-lgpl-test.tar.gz", offer)
         self.assertIn("crates.io", offer)

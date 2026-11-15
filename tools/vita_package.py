@@ -6,6 +6,7 @@ assets. This tool repacks it with the same VitaSDK commands and flags the
 release used, adding:
 
   THIRD_PARTY_NOTICES-vita.txt
+  CREDITS.txt
   SOURCE-OFFER.txt
   licenses/GPL-3.0.txt
   licenses/LGPL-3.0.txt
@@ -68,7 +69,7 @@ LIVEAREA = [
 ]
 MPL_CRATES = ("symphonia", "symphonia-bundle-mp3", "symphonia-core", "symphonia-metadata")
 REQUIRED_MEMBERS = ["eboot.bin", "sce_sys/param.sfo",
-                    "THIRD_PARTY_NOTICES-vita.txt", "SOURCE-OFFER.txt"]
+                    "THIRD_PARTY_NOTICES-vita.txt", "CREDITS.txt", "SOURCE-OFFER.txt"]
 REQUIRED_MEMBERS += ["licenses/" + name for name, _ in LICENCES]
 REQUIRED_MEMBERS += LIVEAREA
 
@@ -213,6 +214,12 @@ def stage(repo, stage_dir, notices, cargo_checksums, facts):
     notice_target = stage_dir / "THIRD_PARTY_NOTICES-vita.txt"
     shutil.copy2(notices, notice_target)
     extras.append((notice_target, "THIRD_PARTY_NOTICES-vita.txt"))
+    credits = Path(repo) / "CREDITS.txt"
+    if not credits.is_file():
+        fail("missing credits file: " + str(credits))
+    credits_target = stage_dir / "CREDITS.txt"
+    shutil.copy2(credits, credits_target)
+    extras.append((credits_target, "CREDITS.txt"))
     licence_dir = stage_dir / "licenses"
     licence_dir.mkdir(exist_ok=True)
     for name, source_name in LICENCES:

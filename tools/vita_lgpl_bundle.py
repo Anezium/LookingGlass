@@ -636,6 +636,10 @@ def main():
                 shutil.copy2(source, target)
         (bundle / "link/sources.txt").write_text("\n".join(source_lines) + "\n",
                                                  encoding="utf-8")
+        credits = repo / "CREDITS.txt"
+        if not credits.is_file():
+            fail("missing CREDITS.txt")
+        shutil.copy2(credits, bundle / "CREDITS.txt")
         copy_assets(repo, bundle)
 
         for name, destination in (("link.map", "link/link.map"),
@@ -784,6 +788,10 @@ American McGee's Alice links statically:
   raw member bytes, as the release tooling pins them.
 - `assets/sce_sys/` - the original LiveArea artwork of this port, needed by
   `link/package.sh`. It is project artwork, not game data.
+- `CREDITS.txt` - the attribution shipped at the VPK root for the linked files
+  that state no licence (the newlib Vita glue and the red-black tree copied into
+  SceShaccCgExt). It is an accepted risk recorded by the owner on 2026-11-15,
+  not a licence grant; see its text and `licenses/THIRD_PARTY_NOTICES-vita.txt`.
 - `SOURCE-OFFER.txt` - the written offer and pointers for the source and relink
   material.
 - `SHA256SUMS` - SHA-256 of every file in this bundle except itself.
@@ -1024,8 +1032,8 @@ It runs, in this order:
    "American McGee's Alice" output/param.sfo`
 4. `vita-pack-vpk -s output/param.sfo -b output/eboot.bin` with the four
    LiveArea assets from `assets/`, plus `THIRD_PARTY_NOTICES-vita.txt`,
-   `SOURCE-OFFER.txt` and every file in `licenses/` at the VPK root and under
-   `licenses/`, producing `output/looking-glass.vpk`.
+   `CREDITS.txt`, `SOURCE-OFFER.txt` and every file in `licenses/` at the VPK
+   root and under `licenses/`, producing `output/looking-glass.vpk`.
 
 These are the exact commands and flags from the release build log and
 `link/BUILD.txt`. The script prints the ELF, `eboot.bin` and VPK SHA-256
@@ -1321,6 +1329,8 @@ for asset in sce_sys/icon0.png sce_sys/livearea/contents/startup.png \\
     set -- "$@" --add "$here/assets/$asset=$asset"
 done
 set -- "$@" --add "$here/licenses/THIRD_PARTY_NOTICES-vita.txt=THIRD_PARTY_NOTICES-vita.txt"
+[ -f "$here/CREDITS.txt" ] || { echo "missing $here/CREDITS.txt" >&2; exit 1; }
+set -- "$@" --add "$here/CREDITS.txt=CREDITS.txt"
 set -- "$@" --add "$here/SOURCE-OFFER.txt=SOURCE-OFFER.txt"
 for licence in "$here"/licenses/*; do
     [ -f "$licence" ] || continue

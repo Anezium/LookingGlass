@@ -1,0 +1,35 @@
+Credits for third-party files that state no licence
+
+Looking Glass, PS Vita port. See LEGAL.md and THIRD_PARTY_NOTICES-vita.txt.
+
+newlib PS Vita port
+
+The release links objects from newlib/libc/sys/vita of the VitaSDK newlib fork at
+64aa7aa33d4f380451a1f100d19589226cdad334. These linked files carry no copyright or licence
+statement and are not named in COPYING.NEWLIB:
+
+  io.c, mlock.c, sbrk.c, syscalls.c, threading.c
+
+crt0.c carries this PSPSDK attribution and no licence text:
+
+  Code below is based on the PSPSDK implementation
+  Copyright (c) 2005 Marcus R. Brown <mrbrown@ocgnet.org>
+
+Contributors recorded in the public Git history of https://github.com/vitasdk/newlib for these
+files:
+
+  Ilya Zhuravlev, Yifan Lu, Davee, Ivan Epifanov,
+  Francisco José García García, Sergi Granell, Vladimir Atamanenko,
+  Nikolay Arhipov, Glenn Anderson, Rinnegatamante, Jeffrey Pfau, frangarcj,
+  Sunguk Lee, TheOfficialFloW, Rémy F
+
+red-black tree in SceShaccCgExt
+
+src/shacccg_ext_oop.cpp of SceShaccCgExt at d3c83efceedeca3be863d0c1f19bb145daf1685f contains a
+red-black tree copied from https://github.com/Dynmi/RedBlackTree. The author named in its
+rbtree.h is Haris Wang (GitHub: Dynmi). The upstream repository has no licence file and states
+no licence.
+
+The owner decided on 2026-11-15 that no permission request would be posted for these two items
+and that the release ships with the gaps documented and the authors credited. That is an
+accepted risk, not a licence grant. No licence is claimed for the files named above.

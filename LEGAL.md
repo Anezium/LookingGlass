@@ -1,6 +1,6 @@
 # Rights, ownership and distribution notice
 
-Updated 13 November 2026.
+Updated 15 November 2026.
 
 Looking Glass is an independent, unofficial compatibility engine for American
 McGee's Alice. **This project is not endorsed by or affiliated with EA or its
@@ -83,12 +83,12 @@ The Vita build links these third-party libraries statically:
 
 Their notices and licence texts are in
 [THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt). A release VPK also
-carries `THIRD_PARTY_NOTICES-vita.txt`, the full licence texts under
-`licenses/`, and `SOURCE-OFFER.txt`, which names the published source bundle,
-the written offer, and the source route for the MPL-2.0 components. The source
-bundle carries each library's corresponding source at the linked revision, the
-port's object code for this link, the exact linker command, and relink and
-packaging scripts.
+carries `THIRD_PARTY_NOTICES-vita.txt`, `CREDITS.txt`, the full licence texts
+under `licenses/`, and `SOURCE-OFFER.txt`, which names the published source
+bundle, the written offer, and the source route for the MPL-2.0 components. The
+source bundle carries each library's corresponding source at the linked
+revision, the port's object code for this link, the exact linker command, and
+relink and packaging scripts.
 
 ### SceShaccCgExt modification
 
@@ -107,6 +107,40 @@ SceShaccCgExt without the prelude after the console check recorded in
 45 of 45 shader-cache payloads were byte-identical with and without the
 prelude. This removal does not resolve the other independent licence questions
 identified in the release audit.
+
+### Licence evidence gaps accepted by the owner (2026-11-15)
+
+Two further gaps were open at this release. The owner decided on 2026-11-15 that
+no permission request would be posted for either of them, and that the release
+ships with each gap documented and the authors credited. **That decision is an
+accepted risk, not a licence grant.** It does not assert that permission exists,
+it does not change the terms of the files, and it is not a statement that the
+use is licensed.
+
+- **newlib PS Vita port.** The release links objects compiled from
+  `newlib/libc/sys/vita` in the VitaSDK newlib fork at
+  `64aa7aa33d4f380451a1f100d19589226cdad334` (the VitaSDK build of 2026-08-25).
+  `io.c`, `mlock.c`, `sbrk.c`, `syscalls.c` and `threading.c` carry no
+  copyright or licence line at that revision, and `crt0.c` carries an
+  attribution to PSPSDK (Copyright (c) 2005 Marcus R. Brown) with no licence
+  text. None of these files is named in `COPYING.NEWLIB`. The notices keep
+  those measured facts and claim no licence. The contributors recorded in the
+  public Git history of <https://github.com/vitasdk/newlib>, with the
+  introduction commit of each file, are credited in
+  [THIRD_PARTY_NOTICES-vita.txt](THIRD_PARTY_NOTICES-vita.txt) and
+  [CREDITS.txt](CREDITS.txt).
+- **Red-black tree in SceShaccCgExt.** `src/shacccg_ext_oop.cpp` in
+  SceShaccCgExt at `d3c83efceedeca3be863d0c1f19bb145daf1685f` contains a
+  red-black tree copied from <https://github.com/Dynmi/RedBlackTree>, whose
+  `rbtree.h` names its author as Haris Wang (GitHub: Dynmi). The upstream
+  repository has no licence file and its files state no licence. The author and
+  repository are credited in the notices and `CREDITS.txt`; no licence is
+  claimed for that code.
+
+The notices state no licence for either item. A reader who needs a grant for
+these files must obtain it from their authors; this release does not provide
+one. The earlier audit's open items and measurements remain in the release
+record and in `tools/vita_licenses/newlib-vita-glue-NOTICE.txt`.
 
 Concerns about the port go to the maintainer of that fork through its
 [issue tracker](https://github.com/Anezium/LookingGlass/issues), not to the

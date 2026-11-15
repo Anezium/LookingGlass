@@ -17,6 +17,64 @@ https://crates.io/api/v1/crates/<crate>/0.5.5/download. Cargo.lock pins these SH
   symphonia-core       ea00cc4f79b7f6bb7ff87eddc065a1066f3a43fe1875979056672c9ef948c2af
   symphonia-metadata   36306ff42b9ffe6e5afc99d49e121e0bd62fe79b9db7b9681d48e29fa19e6b16
 
+=== CREDITS: authors of linked files that state no licence ===
+
+The owner decided on 2026-11-15 that no permission request would be posted for the two gaps
+below. The release ships with each gap documented and the authors credited. That decision is an
+accepted risk, not a licence grant: nothing here asserts that permission exists for these files.
+See LEGAL.md and CREDITS.txt.
+
+newlib PS Vita port
+
+The link loads objects compiled from six files in newlib/libc/sys/vita of
+https://github.com/vitasdk/newlib at 64aa7aa33d4f380451a1f100d19589226cdad334 that state no
+licence: io.c, mlock.c, sbrk.c, syscalls.c and threading.c carry no copyright or licence line,
+and crt0.c carries only the PSPSDK attribution quoted below. Each file's introduction commit and
+the authors git blame attributes its lines to at 64aa7aa are listed here. They are credited as
+contributors, not as grantors of a licence.
+
+  crt0.c
+    Introduced by Ilya Zhuravlev (0681b290b, 2015-08-13).
+    Line authors at 64aa7aa: Francisco José García García, Ilya Zhuravlev, Sergi Granell, Ivan
+      Epifanov, Glenn Anderson, Yifan Lu, Rémy F.
+  io.c
+    Introduced by Yifan Lu (95b2dc6df, 2016-06-23).
+    Line authors at 64aa7aa: Davee, Ivan Epifanov, Yifan Lu, Vladimir Atamanenko, Nikolay
+      Arhipov.
+  mlock.c
+    Introduced by Ilya Zhuravlev (5bf33fd61, 2015-08-14).
+    Line authors at 64aa7aa: Ivan Epifanov, Francisco José García García, Ilya Zhuravlev, Sergi
+      Granell.
+  sbrk.c
+    Introduced by Ilya Zhuravlev (c7ae9b785, 2015-08-13).
+    Line authors at 64aa7aa: Ilya Zhuravlev, Ivan Epifanov, Francisco José García García, Glenn
+      Anderson, Sergi Granell, Rinnegatamante.
+  syscalls.c
+    Introduced by Ilya Zhuravlev (0681b290b, 2015-08-13).
+    Line authors at 64aa7aa: Ilya Zhuravlev, Ivan Epifanov, Davee, Jeffrey Pfau, frangarcj,
+      Nikolay Arhipov, Vladimir Atamanenko, Yifan Lu, Sunguk Lee, Glenn Anderson, Francisco José
+      García García.
+  threading.c
+    Introduced by Ilya Zhuravlev (0875ca1dd, 2015-08-14).
+    Line authors at 64aa7aa: Davee, Ilya Zhuravlev, Ivan Epifanov, Francisco José García García,
+      Sergi Granell, TheOfficialFloW.
+
+Ivan Epifanov also appears in the history as "Epifanov Ivan".
+
+crt0.c also carries this attribution and no licence text:
+
+  Code below is based on the PSPSDK implementation
+  Copyright (c) 2005 Marcus R. Brown <mrbrown@ocgnet.org>
+
+red-black tree in SceShaccCgExt
+
+SceShaccCgExt 1.0.1 at d3c83efceedeca3be863d0c1f19bb145daf1685f contains a red-black tree in
+src/shacccg_ext_oop.cpp copied from https://github.com/Dynmi/RedBlackTree, whose rbtree.h names
+its author as Haris Wang (GitHub: Dynmi). The upstream repository has no licence file and no
+licence statement in its files (measured at 533e5d3ca8368682898f89a5574a96d0df8ec265,
+2021-04-13); the source comment links the repository and states the origin. Haris Wang is
+credited as the author of that code. No licence is claimed for it.
+
 
 === 1. Modified forks (Apache-2.0 section 4(b) change notices) ===
 
@@ -1085,6 +1143,7 @@ License: LGPL-2.1
 Source: https://github.com/bythos14/SceShaccCgExt at d3c83ef, LGPL-2.1; modified 2026-11-15 to remove the optional intrinsic prelude and its load (tools/patches/SceShaccCgExt-no-prelude.patch)
 Archives in the link: libSceShaccCgExt.a
 Sony intrinsics prelude: resolved. The owner approved shipping SceShaccCgExt without the optional intrinsic prelude on 2026-11-15. The upstream include/sce_intrinsics.h is not built, linked, packaged or offered, and the library no longer loads it. The console comparison of the two library builds is recorded at https://github.com/Anezium/Alice-American-McGees-PSVita-Port/blob/4cc323f5a306220a2c5b76425a452fecac80c573/docs/validation/ALICE-NO-PRELUDE-SLOT-2026-11-15.md: 45 of 45 shader-cache payloads were byte-identical with and without it.
+Red-black tree: src/shacccg_ext_oop.cpp contains a red-black tree copied from https://github.com/Dynmi/RedBlackTree, whose rbtree.h names its author as Haris Wang (GitHub: Dynmi). The upstream repository has no licence file and its files state no licence. The author and repository are credited in the CREDITS section and in CREDITS.txt; no licence is claimed for that code.
 
 --- licenses/SceShaccCgExt-LICENSE ---
                   GNU LESSER GENERAL PUBLIC LICENSE
@@ -1670,6 +1729,7 @@ newlib (VitaSDK fork)
 License: the newlib core files carry the per-file licences listed in COPYING.NEWLIB and COPYING.LIBGLOSS; the Vita glue is partly MIT-noticed and partly unnotified, as stated in newlib-vita-glue-NOTICE.txt
 Source: https://github.com/vitasdk/newlib at 64aa7aa (VitaSDK build of 2026-08-25). The PS Vita glue in newlib/libc/sys/vita is a fork addition, not upstream newlib. Of the files whose objects this link loads, dirent.c, clock.c, error.c, fs.c, getentropy.c, lcltime_r.c and sysconf.c carry an MIT-style notice (copyright David "Davee" Morgan, Sunguk Lee, Martin Larralde and vitasdk); io.c, mlock.c, sbrk.c, syscalls.c and threading.c carry no copyright or licence line; crt0.c attributes code to PSPSDK (Copyright (c) 2005 Marcus R. Brown) without a licence text. None of these files is named in COPYING.NEWLIB. Its preamble applies the notices it lists to files in the newlib subdirectory unless a file states otherwise; whether that covers the unnotified files is not established here
 Archives in the link: crt0.o, libc.a, libm.a
+Credits: the authors of the linked files that state no licence are named in the CREDITS section and in CREDITS.txt. That credit is an attribution recorded after the owner decision of 2026-11-15; it is not a licence grant.
 Objects compiled from newlib/libc/sys/vita in this link:
   crt0.o
   libc.a(closedir.o)
@@ -3569,7 +3629,10 @@ crt0.c carries this attribution and no licence text:
   Copyright (c) 2005 Marcus R. Brown <mrbrown@ocgnet.org>
 
 The release does not claim a licence for the five unnotified files or for the
-PSPSDK-derived part of crt0.c.
+PSPSDK-derived part of crt0.c. The authors recorded in the public Git history of
+https://github.com/vitasdk/newlib are credited in the CREDITS section of
+THIRD_PARTY_NOTICES-vita.txt and in CREDITS.txt; that credit is an attribution,
+not a licence grant.
 
 
 pthread-embedded (VitaSDK fork)

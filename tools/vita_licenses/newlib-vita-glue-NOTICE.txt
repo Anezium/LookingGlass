@@ -74,4 +74,7 @@ crt0.c carries this attribution and no licence text:
   Copyright (c) 2005 Marcus R. Brown <mrbrown@ocgnet.org>
 
 The release does not claim a licence for the five unnotified files or for the
-PSPSDK-derived part of crt0.c.
+PSPSDK-derived part of crt0.c. The authors recorded in the public Git history of
+https://github.com/vitasdk/newlib are credited in the CREDITS section of
+THIRD_PARTY_NOTICES-vita.txt and in CREDITS.txt; that credit is an attribution,
+not a licence grant.
