@@ -762,7 +762,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os="vita")]
     let mut r13_survey = crate::r13_survey::Survey::open(&mut options)?;
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-    let physical_input = !crate::sim_maps::probe::enabled();
+    // A cross replay must consume the installed tape inputs while the strict
+    // probe observes it. Synthetic map probes still suppress physical inputs.
+    let physical_input = !crate::sim_maps::probe::enabled() || crate::replay::input::cross();
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let physical_input = true;
     // A survey keeps the pad off unless its config sets physical_input (human-played census).
