@@ -189,5 +189,6 @@
   "ant_corpse_opaque_shader": true,
   "water_draw_join": true,
   "actor_consumer_frustum_cull": true,
-  "fx_unlit_exact": true
+  "fx_unlit_exact": true,
+  "alpha_model_pvs": false
 }

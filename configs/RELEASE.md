@@ -58,6 +58,20 @@ off and on. `loading_screen` stays on, `texture_cache` stays `off` and
 `PL-rc11-release.json` keeps the RC11 release bytes for comparison; the RC12
 release differs from it only in that one key.
 
+RC13 keeps `alpha_model_pvs` off. The merge brings the model alpha PVS cut: a
+world alpha group whose recipe carries a model and has no motion and no vertex
+deform is tested against the map's own PVS over its placed bounds, and is
+skipped when the descent proves no visible non-solid leaf cell can contain it.
+The descent fails open outside the compiled world box, on cycles and on unusable
+data; the plane support is evaluated in f64 and widened from the term
+magnitudes; the placed box carries a separate outward allowance. The key is
+default off, and the release writes it explicitly false: in the release oracle
+against RC12 it removes visible, alpha-tested `textures/glass/glass_pane1sh.tga`
+panes on hatter2 from scripted frame 155 (eleven of the eighteen culled groups
+have visible samples; 2,736 pixels differ at frame 165), so it is not a release
+default yet. `PL-rc12-release.json` keeps the RC12 release bytes for comparison;
+the RC13 release keeps every RC12 value.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
@@ -66,8 +80,8 @@ values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `spike_log_ms=0.0` and `sky_cube_refresh=0`. Water normals remain off. The four
 RC8 and RC9 keys are true; `water_draw_join` is the only one added by RC9,
 RC10 adds only `actor_consumer_frustum_cull` and `fx_unlit_exact`, both true and
-both measured, RC11 changes no measured value and RC12 enables only the shared
-upload.
+both measured, RC11 changes no measured value, RC12 enables only the shared
+upload and RC13 enables no measured value: the model alpha PVS cull stays off.
 
 `PL-played-rc3.json` is a test fixture, copied byte-for-byte from the played input
 `rc3/configs/PL-rc3.json` (SHA-256

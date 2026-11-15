@@ -3562,7 +3562,7 @@ mod tests {
         assert_eq!(played["log_frame_time_every"], 10);
         played["log_frame_time_every"] = 0.into();
         // RC8, RC9 and RC10 deliberately enable the defaults measured on 2026-11-14 and 2026-11-15;
-        // RC12 enables the shared upload as well.
+        // RC12 enables the shared upload. RC13 keeps the model alpha PVS cull off.
         for key in ["sim_flight_memo", "ant_corpse_triangle_cull", "ant_corpse_opaque_shader", "water_draw_join",
                     "actor_consumer_frustum_cull", "fx_unlit_exact", "load_texture_share"] { played[key] = true.into(); }
         // Compare typed values on both sides: to_value widens f32 (e.g. the
@@ -3576,7 +3576,8 @@ mod tests {
             "spike_log_ms":0.0,"detail_layers":false,"sky_depth":false,
             "sky_cube_capture_only":false,"sky_cube_refresh":0,"audio_combat_preload":false,"sky_cube":false,
             "sim_flight_memo":true,"ant_corpse_triangle_cull":true,"ant_corpse_opaque_shader":true,
-            "water_draw_join":true,"actor_consumer_frustum_cull":true,"fx_unlit_exact":true
+            "water_draw_join":true,"actor_consumer_frustum_cull":true,"fx_unlit_exact":true,
+            "alpha_model_pvs":false
         }));
         assert_eq!(raw["water_draw_join"], true, "RC9 enables the measured water draw join");
         assert_eq!(raw["actor_consumer_frustum_cull"], true, "RC10 enables the measured consumer cull");
@@ -3699,7 +3700,7 @@ mod tests {
             "fx_unlit_exact takes precedence over fx_lite");
     }
     #[test]
-    fn alpha_model_pvs_is_default_off_strict_and_only_the_wchess1_pair_uses_it() {
+    fn alpha_model_pvs_is_default_off_and_stays_off_in_the_release_after_the_hatter2_finding() {
         assert!(!Config::default().alpha_model_pvs);
         assert!(!serde_json::from_str::<Config>("{}").unwrap().alpha_model_pvs);
         assert!(serde_json::from_str::<Config>(r#"{"alpha_model_pvs":true}"#).unwrap().alpha_model_pvs);
@@ -3708,6 +3709,7 @@ mod tests {
         }
         Config::default().validate().unwrap();
         for bytes in [&include_bytes!("../../configs/PL-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc12-release.json")[..],
                       &include_bytes!("../../configs/PL-rc9-release-play04.json")[..]] {
             let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
             assert!(raw.get("alpha_model_pvs").is_none_or(|on| on == false), "a release input keeps the cut off");
@@ -4324,16 +4326,18 @@ mod tests {
         }
     }
     #[test]
-    fn rc12_release_inputs_are_rc11_with_sharing_on_and_package_configs_add_only_their_keys() {
+    fn rc13_release_inputs_are_rc12_with_the_model_alpha_cull_off_and_package_configs_add_only_their_keys() {
         use sha2::{Digest, Sha256};
         let release_bytes = include_bytes!("../../configs/PL-release.json");
+        let rc12_bytes = include_bytes!("../../configs/PL-rc12-release.json");
         let rc11_bytes = include_bytes!("../../configs/PL-rc11-release.json");
         let rc10_bytes = include_bytes!("../../configs/PL-rc10-release.json");
         let rc9_bytes = include_bytes!("../../configs/PL-rc9-release.json");
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "4b1a1503b00b7826258a54fff0e69e5bdbd3a609f440bc13aaa2926aae9cb9f5");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "c71ce47388460bdb5f4145395fa605bed98c64186a8f5328bba091b7c0d58e01");
+        assert_eq!(format!("{:x}", Sha256::digest(rc12_bytes)), "4b1a1503b00b7826258a54fff0e69e5bdbd3a609f440bc13aaa2926aae9cb9f5");
         assert_eq!(format!("{:x}", Sha256::digest(rc11_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
         assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
         assert_eq!(format!("{:x}", Sha256::digest(rc9_bytes)), "9dbf482cf40ff440dd74ecc5c6be45aaf5c3cb0b06da3bfc0fe47a4b76466cac");
@@ -4344,6 +4348,9 @@ mod tests {
         assert!(rejected.is_none());
         release.validate().unwrap();
         let baseline = serde_json::to_value(release).unwrap();
+        let (rc12_release, rejected) = parse_runtime_config(rc12_bytes).unwrap();
+        assert!(rejected.is_none());
+        let rc12 = serde_json::to_value(rc12_release).unwrap();
         let (rc11, rejected) = parse_runtime_config(rc11_bytes).unwrap();
         assert!(rejected.is_none());
         let rc11 = serde_json::to_value(rc11).unwrap();
@@ -4360,14 +4367,17 @@ mod tests {
         assert_eq!(baseline["actor_consumer_frustum_cull"], true, "the consumer cull is a measured RC10 release default");
         assert_eq!(baseline["fx_unlit_exact"], true, "the unlit exact path is a measured RC10 release default");
         assert_eq!(baseline["load_texture_share"], true, "RC12 enables the shared upload in the release input");
+        assert_eq!(baseline["alpha_model_pvs"], false, "RC13 keeps the model alpha cull off after the hatter2 finding");
         assert_eq!(rc11["load_texture_share"], false, "RC11 kept sharing off in the release input");
+        assert_eq!(rc12["alpha_model_pvs"], false, "RC12 kept the model alpha cull off in the release input");
         assert_eq!(baseline["loading_screen"], true, "the boot loading screen stays on");
         assert_eq!(baseline["texture_cache"], "off", "the disk texture cache stays off");
         assert_eq!(baseline["pvs_cache"], false, "the disk PVS cache stays off");
         assert_eq!(baseline["world_shared_buffers"], true);
         assert_eq!(baseline["world_parameter_reuse"], true);
         assert_eq!(baseline["water_stage_merge"], "off");
-        let mut variant = baseline.clone();
+        assert_eq!(baseline, rc12, "RC13 release keeps every RC12 value; the model alpha cull stays off");
+        let mut variant = rc12.clone();
         variant["load_texture_share"] = rc11["load_texture_share"].clone();
         assert_eq!(variant, rc11, "RC12 release keeps every RC11 value, with sharing on");
         assert_eq!(rc11, rc10, "RC11 release keeps every RC10 value, with the shared upload off by default");
@@ -4412,10 +4422,14 @@ mod tests {
             }
             assert_eq!(&variant, against, "{name} changes only its declared keys against its release");
         };
-        // The RC12 packages add only their replay keys to the RC12 release.
-        check_package("PL-rc12-release-play04.json", include_bytes!("../../configs/PL-rc12-release-play04.json"), None, &defaults, &baseline);
-        check_package("PL-rc12-load-gvillage.json", include_bytes!("../../configs/PL-rc12-load-gvillage.json"), Some("gvillage"), &defaults, &baseline);
-        check_package("PL-rc12-load-funhouse.json", include_bytes!("../../configs/PL-rc12-load-funhouse.json"), Some("funhouse"), &defaults, &baseline);
+        // The RC13 packages add only their replay keys to the RC13 release.
+        check_package("PL-rc13-release-play04.json", include_bytes!("../../configs/PL-rc13-release-play04.json"), None, &defaults, &baseline);
+        check_package("PL-rc13-wchess1.json", include_bytes!("../../configs/PL-rc13-wchess1.json"), Some("wchess1"), &defaults, &baseline);
+        // The RC12 packages keep their frozen bytes and add only their replay keys
+        // to the frozen RC12 release.
+        check_package("PL-rc12-release-play04.json", include_bytes!("../../configs/PL-rc12-release-play04.json"), None, &defaults, &rc12);
+        check_package("PL-rc12-load-gvillage.json", include_bytes!("../../configs/PL-rc12-load-gvillage.json"), Some("gvillage"), &defaults, &rc12);
+        check_package("PL-rc12-load-funhouse.json", include_bytes!("../../configs/PL-rc12-load-funhouse.json"), Some("funhouse"), &defaults, &rc12);
         // The RC11 packages keep their frozen bytes and add only their replay keys
         // to the frozen RC11 release.
         check_package("PL-rc11-release-play04.json", include_bytes!("../../configs/PL-rc11-release-play04.json"), None, &defaults, &rc11);
