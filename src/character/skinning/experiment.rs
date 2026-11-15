@@ -19,6 +19,36 @@ struct Entry {
     output: Vec<(Vec3, Vec4, [u8;4])>,
 }
 static CACHE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+#[inline]
+fn blend(a:Vec4,b:Vec4,c:Vec4,t:Vec4,s:[f32;4])->Vec4 {
+    #[cfg(not(target_arch="arm"))]
+    { ((a*s[0]+b*s[1])+c*s[2]+t)*s[3] }
+    #[cfg(target_arch="arm")]
+    { unsafe { neon_blend(a,b,c,t,s) } }
+}
+/// Explicit non-fused arithmetic: LLVM otherwise scalarizes the three live lanes
+/// even inside a +neon function. The unused fourth lane never enters output.
+#[cfg(target_arch="arm")]
+#[target_feature(enable="neon")]
+unsafe fn neon_blend(a:Vec4,b:Vec4,c:Vec4,t:Vec4,s:[f32;4])->Vec4 {
+    let vectors=[a.to_array(),b.to_array(),c.to_array(),t.to_array()];
+    let mut output=[0.;4];
+    core::arch::asm!(
+        "vld1.32 {{q0, q1}}, [{vectors}]!",
+        "vld1.32 {{q2, q3}}, [{vectors}]",
+        "vld1.32 {{q4}}, [{scalars}]",
+        "vdup.32 q5, d8[0]", "vmul.f32 q0, q0, q5",
+        "vdup.32 q5, d8[1]", "vmul.f32 q1, q1, q5",
+        "vadd.f32 q0, q0, q1",
+        "vdup.32 q5, d9[0]", "vmul.f32 q2, q2, q5",
+        "vadd.f32 q0, q0, q2", "vadd.f32 q0, q0, q3",
+        "vdup.32 q5, d9[1]", "vmul.f32 q0, q0, q5",
+        "vst1.32 {{q0}}, [{output}]",
+        vectors=inout(reg) vectors.as_ptr()=>_, scalars=in(reg) s.as_ptr(), output=in(reg) output.as_mut_ptr(),
+        out("q0") _,out("q1") _,out("q2") _,out("q3") _,out("q4") _,out("q5") _,
+        options(nostack,preserves_flags));
+    Vec4::from_array(output)
+}
 fn key(p: Params<'_>) -> Vec<u32> {
     let mut k=Vec::with_capacity(p.pose.len()*7+p.palette.len()*12+p.scales.len()+16);
     k.extend([p.pose.len() as u32,p.scales.len() as u32,p.palette.len() as u32]);
@@ -64,8 +94,8 @@ pub(super) unsafe fn vector_position(src: &SkinVertex, palette: &[(Mat3,Vec3)]) 
     let mut sum=Vec4::ZERO;
     for w in &src.weights {
         let (r,t)=palette[w.bone];
-        let v=((r.x_axis.extend(0.)*w.offset.x+r.y_axis.extend(0.)*w.offset.y)
-            +r.z_axis.extend(0.)*w.offset.z+t.extend(0.))*w.amount;
+        let v=blend(r.x_axis.extend(0.),r.y_axis.extend(0.),r.z_axis.extend(0.),t.extend(0.),
+            [w.offset.x,w.offset.y,w.offset.z,w.amount]);
         sum+=v;
     }
     sum.truncate()
@@ -80,9 +110,8 @@ pub(super) unsafe fn vector_pose(src:&SkinVertex,pose:&[Transform],scales:&[f32]
         let v=if scales.is_empty(){w.offset}else{w.offset*scales[w.bone]};
         let b=Vec3::new(t.rotation.x,t.rotation.y,t.rotation.z);
         // Keep scalar reductions and the reference's exact association.
-        let rotated=(v.extend(0.)*(t.rotation.w*t.rotation.w-b.dot(b))
-            +b.extend(0.)*(v.dot(b)*2.))+b.cross(v).extend(0.)*(t.rotation.w*2.);
-        sum+=(rotated+t.translation.extend(0.))*w.amount;
+        sum+=blend(v.extend(0.),b.extend(0.),b.cross(v).extend(0.),t.translation.extend(0.),
+            [t.rotation.w*t.rotation.w-b.dot(b),v.dot(b)*2.,t.rotation.w*2.,w.amount]);
     }
     sum.truncate()
 }
