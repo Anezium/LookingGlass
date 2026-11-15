@@ -47,6 +47,8 @@ struct Entry {
 
 thread_local! {
     static SHARED: RefCell<Shared> = RefCell::new(Shared::default());
+    // Image-only equivalence within one original base upload. Never stores a Surface.
+    static MATERIAL_IMAGES: RefCell<BTreeMap<String, SharedTexture>> = RefCell::new(BTreeMap::new());
     /// Loads whose textures may be cached. Outside a window the cache is inert.
     static SHARE_WINDOW: Cell<u32> = const { Cell::new(0) };
 }
@@ -150,6 +152,30 @@ pub(crate) fn decode_upload_shared_sampled(
     decode_upload_keyed(assets, path, sampler).map(|s| s.texture)
 }
 
+/// RC11 registered several surfaces against a locally cached base image. Its
+/// last-registration lookup gave those surfaces the same stage images. Preserve
+/// that image equivalence without selecting anyone else's material recipe.
+/// The original base upload, layer slot and animation frame fence independent
+/// uploads/frames, even if load_texture_share gives all of them one GPU binding.
+pub(crate) fn material_image(
+    assets: &mut Assets, base: &Texture2D, base_identity: Option<u64>,
+    layer: usize, frame: usize, path: &str, sampler: Sampler,
+) -> Result<SharedTexture> {
+    let owner = base_identity.map_or_else(
+        || format!("private:{:?}", base.raw_miniquad_id()), |id| format!("upload:{id}"));
+    let key = format!("{owner}:{layer}:{frame}:{}", sampler.key(path));
+    if share_window() {
+        if let Some(image) = MATERIAL_IMAGES.with(|images| images.borrow().get(&key).cloned()) {
+            return Ok(image);
+        }
+    }
+    let image = decode_upload_keyed(assets, path, sampler)?;
+    if share_window() {
+        MATERIAL_IMAGES.with(|images| images.borrow_mut().insert(key, image.clone()));
+    }
+    Ok(image)
+}
+
 pub(crate) fn decode_upload_keyed(assets: &mut Assets, path: &str, sampler: Sampler) -> Result<SharedTexture> {
     thread_local! { static NEXT_UPLOAD: Cell<u64> = const { Cell::new(1) }; }
     let upload_identity = NEXT_UPLOAD.with(|n| { let v = n.get(); n.set(v.checked_add(1).expect("upload identity overflow")); v });
@@ -231,6 +257,7 @@ fn verify_hit(assets: &mut Assets, path: &str, shared: &SharedTexture) -> Result
 /// End one load's sharing window and report what it saved, as one line. Also
 /// called directly before a retirement sequence and after a rebuild attempt.
 pub(crate) fn release_shared() {
+    MATERIAL_IMAGES.with(|images| images.borrow_mut().clear());
     SHARED.with(|s| {
         let mut s = s.borrow_mut();
         if (s.hits, s.misses) != (0, 0) {

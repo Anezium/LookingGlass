@@ -910,12 +910,12 @@ pub(crate) fn register_identified(
             .first()
             .is_some_and(|s| s.blend != Blend::Opaque && s.alpha_test == 0 && !s.depth_write);
     let mut layers = Vec::new();
-    for stage in stages.into_iter().filter(|s| {
+    for (layer_index, stage) in stages.into_iter().filter(|s| {
         !s.unsupported && !s.images.is_empty() && !s.images.iter().any(|n| n == "$lightmap")
-    }) {
+    }).enumerate() {
         let mut textures = Vec::new();
         let mut upload_identities = Vec::new();
-        for name in &stage.images {
+        for (frame_index, name) in stage.images.iter().enumerate() {
             if name == "$whiteimage" || name == "*white" {
                 textures.push(crate::texture::upload_rgba8(1, 1, &[255; 4]));
                 upload_identities.push(None);
@@ -924,7 +924,7 @@ pub(crate) fn register_identified(
             let Some(path) = texture::resolve(assets, name, &BTreeMap::new()) else {
                 continue;
             };
-            let uploaded = texture::decode_upload_keyed(assets, &path,
+            let uploaded = texture::material_image(assets, base, base_identity, layer_index, frame_index, &path,
                 if stage.clamp { texture::Sampler::Clamp } else { texture::Sampler::Repeat })?;
             upload_identities.push(Some(uploaded.upload_identity));
             textures.push(uploaded.texture);
