@@ -33,6 +33,10 @@ fn key(p: Params<'_>) -> Vec<u32> {
 pub(super) fn cached(surface: &std::sync::Arc<crate::skeletal::SkinSurface>, actor: Option<super::identity::ActorId>,
     output: &mut [Vertex], p: Params<'_>, compute: impl FnOnce(&mut [Vertex])) -> bool {
     let (_,reuse,duplicate)=flags();
+    cache_with_flags(surface,actor,output,p,reuse,duplicate,compute)
+}
+fn cache_with_flags(surface:&std::sync::Arc<crate::skeletal::SkinSurface>,actor:Option<super::identity::ActorId>,
+    output:&mut [Vertex],p:Params<'_>,reuse:bool,duplicate:bool,compute:impl FnOnce(&mut [Vertex]))->bool {
     if !reuse && !duplicate { compute(output); return false; }
     let frame=FRAME.load(Ordering::Relaxed); let key=key(p);
     {
@@ -86,6 +90,32 @@ pub(super) unsafe fn vector_pose(src:&SkinVertex,pose:&[Transform],scales:&[f32]
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cache_checks_all_pose_bits_keeps_live_uv_and_invalidates_on_scene_reset() {
+        reset();
+        let surface=std::sync::Arc::new(crate::skeletal::SkinSurface {vertices:vec![],indices:vec![],bind_vertices:vec![],
+            #[cfg(feature="vita_renderer")] used_bones:vec![]});
+        let pose=[Transform {translation:Vec3::ZERO,rotation:Quat::IDENTITY}];
+        let p=Params {pose:&pose,scales:&[],palette:&[],transform:pose[0],scale:1.,flat:false,fullbright:false,alpha:1.};
+        let actor=Some(super::super::identity::ActorId::default());
+        let mut output=[Vertex {position:Vec3::ZERO,normal:Vec4::ZERO,color:[0;4],uv:Vec2::ONE}];
+        let fill=|v:&mut [Vertex]|{v[0].position=Vec3::X;v[0].normal=Vec4::Y;v[0].color=[3;4];};
+        assert!(!cache_with_flags(&surface,actor,&mut output,p,false,true,fill));
+        output[0].position=Vec3::ZERO;output[0].uv=Vec2::splat(7.);
+        assert!(cache_with_flags(&surface,None,&mut output,p,false,true,|_|panic!("duplicate recomputed")));
+        assert_eq!(output[0].position,Vec3::X);assert_eq!(output[0].uv,Vec2::splat(7.));
+        begin();
+        assert!(cache_with_flags(&surface,actor,&mut output,p,true,false,|_|panic!("pose recomputed")));
+        let changed=[Transform {translation:vec3(-0.,0.,0.),..pose[0]}];
+        assert!(!cache_with_flags(&surface,actor,&mut output,Params {pose:&changed,..p},true,false,fill));
+        assert_ne!(key(p),key(Params {alpha:-0.,..p}));
+        assert_ne!(key(p),key(Params {scale:-0.,..p}));
+        assert_ne!(key(p),key(Params {flat:true,..p}));
+        assert_ne!(key(p),key(Params {fullbright:true,..p}));
+        reset();
+        assert!(!cache_with_flags(&surface,actor,&mut output,p,true,true,fill));
+        reset();
+    }
     #[test]
     fn vector_kernel_keeps_reference_bits_for_non_unit_quaternions_and_scales() {
         let pose:Vec<_>=(0..19).map(|i|Transform {rotation:Quat::from_xyzw(i as f32*0.03,-0.21,0.6,0.77),
