@@ -44,13 +44,16 @@ impl Drop for Actor {fn drop(&mut self) {if let Some((t,id,ordinal,previous))=se
 }}}
 
 /// Host-only scoped CPU measurements. Overhead is included; never a Vita clock.
-pub(crate) struct Leaf(Option<(std::time::Instant, &'static str)>);
-pub(crate) fn leaf(name: &'static str) -> Leaf {
-    Leaf(active().then(|| (std::time::Instant::now(),name)))
+pub(crate) struct Leaf(Option<(std::time::Instant, &'static str, String)>);
+pub(crate) fn leaf(name: &'static str, texture: Option<macroquad::miniquad::TextureId>) -> Leaf {
+    Leaf(active().then(|| {
+        let label=crate::sim_maps::probe::draw_query::actor_label(texture).1.unwrap_or_else(|| "unknown".into());
+        (std::time::Instant::now(),name,label)
+    }))
 }
 impl Drop for Leaf { fn drop(&mut self) {
-    if let Some((start,name))=self.0 {
-        println!("[lg/actor-leaf] frame={} leaf={name} cpu_ns={}",
+    if let Some((start,name,label))=&self.0 {
+        println!("[lg/actor-leaf] frame={} leaf={name} texture={label:?} cpu_ns={}",
             crate::sim_maps::probe::frame(),start.elapsed().as_nanos());
     }
 }}

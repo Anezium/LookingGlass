@@ -517,7 +517,7 @@ impl Gpu {
     fn upload(&mut self, slot: usize, p: &Pass, leaves: &mut crate::phase_census::FinishLeaves) -> Result<usize> {
         crate::game_thread::assert_current();
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let _actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("upload"));
+        let _actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("upload",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         let mesh=p.geometry();
         ensure!(
             if crate::render::vita_renderer::config().fx_prepare_cache {
@@ -694,7 +694,7 @@ impl Gpu {
                 (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
         } else { [true; 3] };
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("state"));
+        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("state",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         if apply[0] {
             ctx.apply_pipeline(pipeline);
             unsafe { macroquad::miniquad::gl::glDepthMask(u8::from(depth_write)); }
@@ -703,12 +703,12 @@ impl Gpu {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         drop(actor_leaf);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("bindings"));
+        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("bindings",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         if apply[1] { ctx.apply_bindings(b); self.stats.binding_sets += 1; }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         drop(actor_leaf);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("uniform_apply"));
+        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("uniform_apply",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         // The old uniform-only probe remains independently selectable with the
         // new cache disabled. Both observe the complete bit-exact payload.
         let same = (c.gpu_state_probe || c.gpu_uniform_dedupe) && {
@@ -750,7 +750,7 @@ impl Gpu {
         }
         let class = if p.effect { crate::gpu_timing::fx_class(p.blend_index) } else { crate::gpu_timing::MASK_ACTORS };
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("draw"));
+        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("draw",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
         if !crate::gpu_timing::masked(class) { ctx.draw(0, p.geometry().indices.len() as i32, 1); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         drop(actor_leaf);
@@ -1530,7 +1530,7 @@ pub(crate) fn finish_world(
                         if let Some(id)=shared {shared_uploads.insert(id,b);}
                         let uniform_leaf=leaves.start();
                         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("uniform_build"));
+                        let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("uniform_build",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
                         let u = if c.fx_prepare_cache { prepared_uniforms(p, &mut uniform_templates) }
                             else { FRAME.with(|f| uniforms(p, &f.borrow())) };
                         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
