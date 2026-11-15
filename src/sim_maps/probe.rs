@@ -576,7 +576,7 @@ pub mod draw_query {
     /// Census only: a surface texture by the first name it was registered under, and whether a
     /// Prop (a weapon, an attachment, a level object) registered it.
     pub fn label_texture(id: macroquad::miniquad::TextureId, name: &str) {
-        if !active() { return; }
+        if !active() && std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").is_none() { return; }
         let prop = PROP_SCOPE.with(Cell::get);
         LABELS.with(|labels| { labels.borrow_mut().entry(id).or_insert_with(|| (name.to_string(), prop)); });
     }
@@ -586,7 +586,7 @@ pub mod draw_query {
     impl Drop for PropScope { fn drop(&mut self) { PROP_SCOPE.with(|s| s.set(self.0)); } }
     /// Whether an actor-pass texture is a Prop's, and its name. Looks only on an armed frame.
     pub fn actor_label(texture: Option<macroquad::miniquad::TextureId>) -> (bool, Option<String>) {
-        if !armed() { return (false, None); }
+        if !armed() && std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").is_none() { return (false, None); }
         texture.and_then(|id| LABELS.with(|labels| labels.borrow().get(&id).cloned()))
             .map_or((false, None), |(name, prop)| (prop, Some(name)))
     }

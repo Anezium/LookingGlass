@@ -1191,6 +1191,11 @@ impl Model {
         if scale <= 0. {
             return;
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let _actor_timing=crate::character::skinning::census::actor(
+            self.skin_identity, &self.data.def.path, &self.data.def.model,
+            self.data.skeleton.bones.len(), &self.data.meta.attachments, transform, scale,
+            self.late_skin_overlays, self.afterimage_normals);
         let d = &self.data;
         let prepared = crate::character::skinning::prepared::pose(
             (&d.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
@@ -1232,7 +1237,12 @@ impl Model {
         }
         // Visibility/lighting remains identical even when owned worker publications
         // replace the blanket mutable Puppet skin. Actual consumers guard callers.
-        let _visibility = crate::character::skinning::CullGuard::visual_preserve(self.frozen.is_some() || self.late_skin_overlays);
+        // The consumer key releases the availability guard only when nothing reads the live
+        // mesh; a body it removes still charges the frame vertex budget OFF reserved.
+        let guarded = self.frozen.is_some() || self.late_skin_overlays;
+        let released = crate::character::skinning::consumer_body_culling(self.afterimage_normals);
+        let _visibility = crate::character::skinning::CullGuard::visual_preserve(guarded && !released);
+        let _cull_budget = crate::character::skinning::CullBudget::released_by_key(guarded && released);
         let _skin_guard = crate::character::skinning::CullGuard::reason(
             self.late_skin_overlays && !crate::character::skinning::actual_consumers(),crate::phase_census::PUPPET);
         let _afterimage = crate::character::skinning::CullGuard::publication_reason(
@@ -3326,6 +3336,13 @@ impl Npcs {
                 || actor.chess.as_ref().is_some_and(|p|p.health<=0.) || actor.guard.as_ref().is_some_and(|p|p.health<=0.);
             if (corpse && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::AntCorpses))
                 || (!dead && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors)) { continue; }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").is_some() && crate::sim_maps::probe::frame()==300 {
+                let d=&self.models[actor.model].data;
+                println!("[lg/actor-census] actor={id} identity={} model={} name={} dead={dead} bones={} surfaces={} triangles={} attachments={:?} position={:?} gathering={}",
+                    actor.skin_identity.census_id(),actor.spawn.model,actor.spawn.name,d.skeleton.bones.len(),d.skeleton.surfaces.len(),
+                    d.skeleton.surfaces.iter().map(|s|s.indices.len()/3).sum::<usize>(),d.meta.attachments,actor.position(),crate::character::skinning::overlap::gather_only());
+            }
             let _identity = actor.skin_identity.scope();
             let _skin_guard = crate::character::skinning::CullGuard::preserve(actor.electric > 0.);
             if actor.ant.as_ref().is_some_and(|a| !a.enabled) { continue; }

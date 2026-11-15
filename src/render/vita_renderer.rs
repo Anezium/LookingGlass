@@ -81,6 +81,11 @@ pub struct Config {
     /// Use the same fragment arithmetic without discard for certified opaque dead Ants.
     pub ant_corpse_opaque_shader: bool,
     pub diag_skip_live_actors: bool,
+    /// Use the discard-free program for every certified opaque actor/prop packet.
+    /// Draw order, geometry and fragment arithmetic stay unchanged. Default off.
+    pub actor_opaque_shader: bool,
+    /// Cull script-owned bodies when single preparation has no mutable consumer.
+    pub actor_consumer_frustum_cull: bool,
     pub diag_skip_fx: bool,
     pub diag_skip_decals: bool,
     pub diag_skip_alpha_world: bool,
@@ -497,6 +502,8 @@ impl Default for Config {
             ant_corpse_triangle_cull: false,
             ant_corpse_opaque_shader: false,
             diag_skip_live_actors: false,
+            actor_opaque_shader: false,
+            actor_consumer_frustum_cull: false,
             diag_skip_fx: false,
             diag_skip_decals: false,
             diag_skip_alpha_world: false,
@@ -834,7 +841,26 @@ pub(crate) fn fx_cpu_options() -> (bool, bool) {
     let c = config();(c.fx_merge_ranges,c.fx_cpu_inline)
 }
 #[cfg(test)]
+thread_local! {
+    /// Scoped test override, per thread: parallel tests must not see each other's keys.
+    static TEST_CONFIG: std::cell::RefCell<Option<&'static Config>> = const { std::cell::RefCell::new(None) };
+}
+/// Tests cannot edit the process-wide OnceLock. Run one body with a modified copy of the
+/// shipped defaults instead; the copy is leaked (tests only) so `config()` can keep
+/// returning a stable reference, and the previous override is restored on unwind.
+#[cfg(test)]
+pub(crate) fn with_config<T>(change: impl FnOnce(&mut Config), run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<&'static Config>);
+    impl Drop for Reset { fn drop(&mut self) { TEST_CONFIG.with(|c| *c.borrow_mut() = self.0); } }
+    let mut config = Config::default();
+    change(&mut config);
+    let config: &'static Config = Box::leak(Box::new(config));
+    let _reset = Reset(TEST_CONFIG.with(|c| c.borrow_mut().replace(config)));
+    run()
+}
+#[cfg(test)]
 pub fn config() -> &'static Config {
+    if let Some(config) = TEST_CONFIG.with(|c| *c.borrow()) { return config; }
     static CONFIG: OnceLock<Config> = OnceLock::new();
     CONFIG.get_or_init(Config::default)
 }
@@ -3445,7 +3471,8 @@ mod tests {
     fn round5_keys_are_strict_and_off_in_historical_configs() {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
-            if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo" {
+            if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
+                || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -3462,7 +3489,9 @@ mod tests {
     }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader") }
+    // The two actor keys arrived after every frozen era file, so those files stay valid
+    // unchanged and their omitted opt-in must read as an explicit off.
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

@@ -335,6 +335,8 @@ impl Task {
 }
 /// The exact kernel for one draw, on whichever thread claimed it.
 unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[(Mat3, Vec3)], surfaces: *const Surface, task_output: usize, task_layers: usize, task_dirty: usize) {
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            let census_time=std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").map(|_|std::time::Instant::now());
             for surface_id in draw.surfaces.clone() {
                 let surface = &*surfaces.add(surface_id);
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
@@ -404,6 +406,8 @@ unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[
                     *(task_dirty as *mut [bool; 2]).add(surface_id) = dirty;
                 }
             }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if let Some(t)=census_time {println!("[lg/worker-census] actor={:?} instance={} bones={} surfaces={} vertices={} cpu_ns={}",draw.actor,draw.instance,pose.len(),draw.surfaces.len(),draw.surfaces.clone().map(|id|(*surfaces.add(id)).vertices.len()).sum::<usize>(),t.elapsed().as_nanos());}
 }
 struct Store {
     // Workers drain before storage is released, also on TLS shutdown.
@@ -588,7 +592,14 @@ impl Store {
         crate::frame_profile::skinned_draw(!visible);
 
         let actor=super::identity::current();
-        if !visible { return false; }
+        if !visible {
+            // The consumer key culled a body whose availability guard kept it prepared in
+            // OFF. Charge OFF's reservation here, in the same position, before any later
+            // group: skinning, output reservation and publication still do not happen, but
+            // every later admission decision matches the OFF arm exactly.
+            if super::cull_owes_budget() { crate::render_fx::actor_publication::charge_culled(skeleton, meshes); }
+            return false;
+        }
         let i = unsafe { &mut *self.input.get() };
         let bounded = actor.is_some() && i.draws.len() < DRAWS && i.surfaces.len() + meshes.iter().flatten().count() <= SURFACES
             && self.output_len + meshes.iter().flatten().map(|m|m.vertices.len()).sum::<usize>() <= VERTICES

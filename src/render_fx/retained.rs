@@ -395,7 +395,8 @@ impl Gpu {
                 fragment: &crate::environment::fragment(crate::render::FX_LITE_FRAGMENT) }, meta())
                 .map_err(|e| eprintln!("[lg/vita-renderer] warning fx_lite program failed, key off: {e:?}")).ok()
         }).flatten().map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) });
-        let corpse_opaque = crate::render::vita_renderer::config().ant_corpse_opaque_shader.then(|| {
+        let c=crate::render::vita_renderer::config();
+        let corpse_opaque = (c.ant_corpse_opaque_shader || c.actor_opaque_shader).then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name=crate::shader_cache::Name::new("retained-ant-corpse-opaque");
             let fragment=crate::lighting::fragment(&crate::environment::fragment(&super::corpse_opaque::fragment()));
@@ -580,8 +581,12 @@ impl Gpu {
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
         let key = (p.blend_index, p.depth_equal);
-        let opaque = ant_dead==Some(true) && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
-        if opaque {count("vita_ant_corpse_opaque_draws",1);}
+        let c=crate::render::vita_renderer::config();
+        let opaque = (ant_dead==Some(true) && c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+            && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
+        if opaque {
+            count(if ant_dead==Some(true) {"vita_ant_corpse_opaque_draws"} else {"vita_actor_opaque_draws"},1);
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if ant_dead.is_some() && std::env::var_os("LOOKING_GLASS_CORPSE_PROBE").is_some()
             && matches!(crate::sim_maps::probe::frame(),1400 | 1980 | 2030 | 2100..=2120) {
@@ -659,6 +664,12 @@ impl Gpu {
         metrics.uniform_uploads += u64::from(traffic.calls > 0);
         metrics.uniform_bytes += traffic.bytes;
         metrics.uniform_gl_calls += traffic.calls;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::character::skinning::census::active() && !p.effect {
+            println!("[lg/submit-census] frame={} texture={:?} triangles={} vertices={} blend={} equal={} depth_write={depth_write} pipeline={} bindings={} uniform_calls={} uniform_bytes={} cpu_ns={}",
+                crate::sim_maps::probe::frame(),crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)),p.geometry().indices.len()/3,p.geometry().vertices.len(),p.blend_index,p.depth_equal,
+                apply[0],apply[1],traffic.calls,traffic.bytes,started.map_or(0,|t|t.elapsed().as_nanos()));
+        }
         if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
     }
 }
@@ -1245,6 +1256,8 @@ pub(crate) fn finish_world(
     if flush {
         boundary("flush_vita_3d_packets");
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("raw",&groups);
     super::corpse_triangles::process(&mut groups);
     let cuts = packet_cull::Cuts::new(crate::render::vita_renderer::config());
     if cuts.active() {
@@ -1254,6 +1267,8 @@ pub(crate) fn finish_world(
             packet_cull::cull(&mut gpu.bounds, &mut groups, &mut puffs, matrix, cuts, c.actor_layer_reuse || c.actor_single_prepare);
         }
     }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("culled",&groups);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     super::corpse_triangles::report(&groups);
     {
@@ -1355,6 +1370,8 @@ pub(crate) fn finish_world(
         opaque.clear(); gpu.opaque_storage = opaque;
     }
     drop(merge_leaf);
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    census_groups("merged",&groups);
     let mut packets = std::mem::take(&mut gpu.packet_storage); packets.clear();
     let mut ranges = std::mem::take(&mut gpu.range_storage); ranges.clear();
     let mut invalid = 0;
@@ -1414,9 +1431,15 @@ pub(crate) fn finish_world(
     count("vita_fx_compacted_vertices", 0);
     let draw_group = |gpu: &mut Gpu, id: usize| {
         let _census = crate::phase_census::span(if groups[id].passes.iter().all(|p| p.effect) {crate::phase_census::Region::FxSubmit} else {crate::phase_census::Region::ActorSubmit});
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let census_start=crate::character::skinning::census::active().then(std::time::Instant::now);
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent, groups[id].ant_dead);
+        }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if crate::character::skinning::census::active() && groups[id].passes.iter().any(|p|!p.effect) {
+            println!("[lg/group-submit] frame={} group={id} owner={:?} draws={} cpu_ns={}",crate::sim_maps::probe::frame(),crate::character::skinning::census::owner(id),ranges[id].len(),census_start.map_or(0,|t|t.elapsed().as_nanos()));
         }
     };
     // The merged list is final here: let a world submitter plan its runs before any draw.
@@ -1536,6 +1559,8 @@ pub(crate) fn finish_world(
         groups.clear(); f.groups = groups;
         puffs.clear(); f.world_puffs = puffs;
     });
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    crate::character::skinning::census::clear();
     (list_len, dropped + invalid)
 }
 
@@ -2143,5 +2168,13 @@ mod tests {
         });
         assert!(!FRAME.with(|f| f.borrow().depth_read_only));
         FRAME.with(|f| *f.borrow_mut() = Frame::default());
+    }
+}
+
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+fn census_groups(stage:&str,groups:&[super::Group]) {
+    if !crate::character::skinning::census::active() {return;}
+    for (id,g) in groups.iter().enumerate() {
+        println!("[lg/group-census] frame={} stage={stage} group={id} owner={:?} layers={} triangles={} effect={} textures={:?}",crate::sim_maps::probe::frame(),crate::character::skinning::census::owner(id),g.passes.len(),g.passes.iter().map(|p|p.geometry().indices.len()/3).sum::<usize>(),g.passes.iter().all(|p|p.effect),g.passes.iter().map(|p|crate::sim_maps::probe::draw_query::actor_label(p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id))).collect::<Vec<_>>());
     }
 }
