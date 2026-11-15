@@ -4955,7 +4955,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::phase_census::accept(active, frame > 60);
-        if quit_after_frame { break; }
+        if quit_after_frame { crate::spike_log::world_last_read(); break; }
         if options.frames.is_some_and(|limit| frame >= limit) {
             #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
             println!("[lg/vita-renderer] host frame report {}",crate::render::vita_renderer::report());
@@ -4972,6 +4972,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if context_before != (menu, inventory_menu, console.open, paused) {
             input.suppress();
         }
+        crate::spike_log::world_last_read();
         crate::frame_phases::mark(9);
         drop(census_tail);
         next_frame().await;
@@ -4989,6 +4990,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
         }
+        crate::spike_log::world_last_read();
     }
     crate::spike_log::end_play();
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
