@@ -40,6 +40,40 @@ result in `BUILD.txt` and `PRIVATE-TEST.txt`, and does not generate qualified
 release notices. ELF/package/path-remapping checks still apply. It is not a
 release qualification shortcut.
 
+## Source and relink bundle
+
+LGPL-2.1 section 6 also asks for the library source and the object code of the
+work so that a user can relink against a modified library. Rust deletes its
+temporary codegen objects after a successful link, so the release build has to
+run the linker through `tools/vita_lgpl_link_capture.sh`. Set the wrapper as
+the target linker and give it a capture directory:
+
+```
+export CARGO_TARGET_ARMV7_SONY_VITA_NEWLIBEABIHF_LINKER=$PWD/tools/vita_lgpl_link_capture.sh
+export LG_LINK_CAPTURE=/path/to/empty-capture
+export LG_REAL_LINKER=$VITASDK/bin/arm-vita-eabi-gcc
+export LG_TARGET_ROOT=/path/to/cargo-target
+export LG_VITASDK=$VITASDK
+export LG_LIB_DIR=/path/to/isolated-libraries
+tools/vita_release_build.sh --out /path/to/new-output --lib-dir "$LG_LIB_DIR"
+```
+
+Then assemble the source and relink bundle from the release output and the
+capture:
+
+```
+tools/vita_lgpl_bundle.sh --release-build /path/to/new-output \
+  --capture "$LG_LINK_CAPTURE" --target-root "$LG_TARGET_ROOT" \
+  --lib-dir "$LG_LIB_DIR" --shacccg-source /path/to/SceShaccCgExt \
+  --out /path/to/alice-lgpl-bundle
+```
+
+The source checkout must be clean at the pinned revision. The bundle holds the
+exact object code and link command, the source, the licence text, the release
+link map and a relink script; it holds no game data and no binary under another
+licence. The relink script reproduces the release ELF byte for byte with the
+pinned library and links a different ELF when the library is modified.
+
 These checks close this library-selection gate. Installation, device behavior,
 the other library/source obligations and the remaining release gates are
 separate work.
