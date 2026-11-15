@@ -592,7 +592,14 @@ impl Store {
         crate::frame_profile::skinned_draw(!visible);
 
         let actor=super::identity::current();
-        if !visible { return false; }
+        if !visible {
+            // The consumer key culled a body whose availability guard kept it prepared in
+            // OFF. Charge OFF's reservation here, in the same position, before any later
+            // group: skinning, output reservation and publication still do not happen, but
+            // every later admission decision matches the OFF arm exactly.
+            if super::cull_owes_budget() { crate::render_fx::actor_publication::charge_culled(skeleton, meshes); }
+            return false;
+        }
         let i = unsafe { &mut *self.input.get() };
         let bounded = actor.is_some() && i.draws.len() < DRAWS && i.surfaces.len() + meshes.iter().flatten().count() <= SURFACES
             && self.output_len + meshes.iter().flatten().map(|m|m.vertices.len()).sum::<usize>() <= VERTICES

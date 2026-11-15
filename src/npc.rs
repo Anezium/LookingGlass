@@ -1237,7 +1237,12 @@ impl Model {
         }
         // Visibility/lighting remains identical even when owned worker publications
         // replace the blanket mutable Puppet skin. Actual consumers guard callers.
-        let _visibility = crate::character::skinning::CullGuard::visual_preserve((self.frozen.is_some() || self.late_skin_overlays) && !crate::character::skinning::consumer_body_culling(self.afterimage_normals));
+        // The consumer key releases the availability guard only when nothing reads the live
+        // mesh; a body it removes still charges the frame vertex budget OFF reserved.
+        let guarded = self.frozen.is_some() || self.late_skin_overlays;
+        let released = crate::character::skinning::consumer_body_culling(self.afterimage_normals);
+        let _visibility = crate::character::skinning::CullGuard::visual_preserve(guarded && !released);
+        let _cull_budget = crate::character::skinning::CullBudget::released_by_key(guarded && released);
         let _skin_guard = crate::character::skinning::CullGuard::reason(
             self.late_skin_overlays && !crate::character::skinning::actual_consumers(),crate::phase_census::PUPPET);
         let _afterimage = crate::character::skinning::CullGuard::publication_reason(
