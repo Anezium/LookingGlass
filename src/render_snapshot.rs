@@ -131,3 +131,119 @@ impl DynamicInput {
             + self.pickups.capacity() * std::mem::size_of::<PickupInput>()
     }
 }
+
+/// A renderer visit has no relationship to an address or a saved game identifier.
+/// Rebuilding even the same map creates a fresh namespace for completions.
+pub(crate) struct RenderVisit(u64);
+impl Default for RenderVisit {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(id != 0 && id != u64::MAX, "render visit namespace exhausted");
+        Self(id)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HandoffTag {
+    visit: u64,
+    slot: usize,
+    frame: u64,
+}
+/// Owned renderer output. Local animation transforms are deliberately retained
+/// separately from the facial/global pose submitted to skinning.
+pub(crate) struct HandoffCompletion {
+    tag: HandoffTag,
+    pose: Option<crate::cinematic::ActorPose>,
+}
+impl HandoffCompletion {
+    pub fn rendered(visit: &RenderVisit, slot: usize, frame: u64,
+        pose: Option<&crate::cinematic::ActorPose>) -> Self {
+        Self { tag: HandoffTag { visit: visit.0, slot, frame }, pose: pose.cloned() }
+    }
+}
+/// Serial acknowledgement prototype. A future producer must wait for the exact
+/// expected completion; it cannot substitute the current simulation pose.
+#[derive(Default)]
+pub(crate) struct HandoffReturn {
+    visit: u64,
+    expected: Option<HandoffTag>,
+    pending: Option<HandoffCompletion>,
+    acknowledged: Option<HandoffCompletion>,
+}
+impl HandoffReturn {
+    pub fn retire(&mut self) { *self = Self::default(); }
+    pub fn expect(&mut self, completion: &HandoffCompletion) {
+        if self.visit != completion.tag.visit { self.retire(); }
+        self.visit = completion.tag.visit;
+        self.expected = Some(completion.tag);
+        self.pending = None;
+    }
+    pub fn publish(&mut self, completion: HandoffCompletion) -> bool {
+        if self.expected != Some(completion.tag) { return false; }
+        self.pending = Some(completion);
+        true
+    }
+    /// Called before simulation, including paused and menu iterations. Frames
+    /// without a new draw keep the acknowledged last draw, not a boundary sample.
+    pub fn consume(&mut self, visit: &RenderVisit) -> bool {
+        if self.visit != visit.0 { self.retire(); return true; }
+        if let Some(expected) = self.expected {
+            let Some(completion) = self.pending.take() else { return false; };
+            if completion.tag != expected { return false; }
+            self.acknowledged = Some(completion);
+            self.expected = None;
+        }
+        true
+    }
+    pub fn pose(&self, visit: &RenderVisit) -> Option<&crate::cinematic::ActorPose> {
+        if self.visit != visit.0 || self.expected.is_some() { return None; }
+        self.acknowledged.as_ref().and_then(|c| c.pose.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+    fn pose(x: f32) -> crate::cinematic::ActorPose {
+        let transform = crate::skeletal::Transform { translation: vec3(x, 0., 0.), rotation: Quat::IDENTITY };
+        crate::cinematic::ActorPose { local: vec![transform], transform, scale: 1. }
+    }
+    #[test]
+    fn handoff_exact_completion_and_last_draw_survive_pause_and_skip() {
+        let visit = RenderVisit::default();
+        let mut state = HandoffReturn::default();
+        let mut source = pose(4.);
+        let completion = HandoffCompletion::rendered(&visit, 3, 10, Some(&source));
+        state.expect(&completion);
+        assert!(!state.consume(&visit));
+        assert!(state.pose(&visit).is_none());
+        assert!(!state.publish(HandoffCompletion::rendered(&visit, 4, 10, Some(&source))));
+        assert!(!state.publish(HandoffCompletion::rendered(&visit, 3, 9, Some(&source))));
+        source.local[0].translation.x = 99.;
+        assert!(state.publish(completion));
+        assert!(state.consume(&visit));
+        assert_eq!(state.pose(&visit).unwrap().local[0].translation.x, 4.);
+        // No renderer publication during a menu/pause; an immediate skip/natural
+        // end reads exactly the same acknowledged local pose.
+        for _ in 0..4 { assert!(state.consume(&visit)); }
+        assert_eq!(state.pose(&visit).unwrap().local[0].translation.x, 4.);
+        let next = HandoffCompletion::rendered(&visit, 3, 11, Some(&pose(7.)));
+        state.expect(&next); assert!(state.publish(next)); assert!(state.consume(&visit));
+        assert_eq!(state.pose(&visit).unwrap().local[0].translation.x, 7.);
+    }
+    #[test]
+    fn handoff_restore_failed_extraction_and_no_pose_retire_old_output() {
+        let first = RenderVisit::default(); let restored = RenderVisit::default();
+        let mut state = HandoffReturn::default();
+        let completion = HandoffCompletion::rendered(&first, 0, 1, Some(&pose(1.)));
+        state.expect(&completion); assert!(state.publish(completion)); assert!(state.consume(&first));
+        assert!(state.consume(&restored)); assert!(state.pose(&restored).is_none());
+        assert!(!state.publish(HandoffCompletion::rendered(&first, 0, 1, Some(&pose(2.)))));
+        let empty = HandoffCompletion::rendered(&restored, 0, 2, None);
+        state.expect(&empty); assert!(state.publish(empty)); assert!(state.consume(&restored));
+        assert!(state.pose(&restored).is_none());
+        let failed = HandoffCompletion::rendered(&restored, 0, 3, Some(&pose(3.)));
+        state.expect(&failed); state.retire(); assert!(!state.publish(failed));
+        assert!(state.pose(&restored).is_none());
+    }
+}

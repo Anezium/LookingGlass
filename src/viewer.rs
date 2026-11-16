@@ -79,6 +79,7 @@ struct Entered {
 /// whole group on every kind of level change, including the Tab/console chooser.
 #[derive(Default)]
 struct LevelArt {
+    snapshot_visit: crate::render_snapshot::RenderVisit,
     fortress: Option<crate::fortress::cinema::Art>,
     village: Option<crate::village::cinema::Art>,
     school: Option<crate::school::Art>,
@@ -172,28 +173,23 @@ async fn rebuild_outgoing(
 }
 
 impl LevelArt {
+    fn handoff_source(&self) -> Option<(usize, &crate::cinematic::ActorPose)> {
+        self.village.as_ref().and_then(|a| a.alice.handoff_pose()).map(|p| (0, p))
+            .or_else(|| self.fortress.as_ref().and_then(|a| a.alice.handoff_pose()).map(|p| (1, p)))
+            .or_else(|| self.pandemonium.as_ref().and_then(|a| a.alice.handoff_pose()).map(|p| (2, p)))
+            .or_else(|| self.duchess.as_ref().and_then(|a| a.alice.handoff_pose()).map(|p| (3, p)))
+            .or_else(|| self.pool.as_ref().and_then(|a| a.cinema.alice.handoff_pose()).map(|p| (4, p)))
+            .or_else(|| self.school.as_ref().and_then(|a| a.returning.alice.handoff_pose()).map(|p| (5, p)))
+            .or_else(|| self.levels.iter().enumerate().find_map(|(slot, a)|
+                a.as_ref().and_then(|a| a.handoff_pose()).map(|p| (6 + slot, p))))
+    }
     fn handoff_pose(&self) -> Option<&crate::cinematic::ActorPose> {
-        self.village
-            .as_ref()
-            .and_then(|a| a.alice.handoff_pose())
-            .or_else(|| self.fortress.as_ref().and_then(|a| a.alice.handoff_pose()))
-            .or_else(|| {
-                self.pandemonium
-                    .as_ref()
-                    .and_then(|a| a.alice.handoff_pose())
-            })
-            .or_else(|| self.duchess.as_ref().and_then(|a| a.alice.handoff_pose()))
-            .or_else(|| {
-                self.pool
-                    .as_ref()
-                    .and_then(|a| a.cinema.alice.handoff_pose())
-            })
-            .or_else(|| {
-                self.school
-                    .as_ref()
-                    .and_then(|a| a.returning.alice.handoff_pose())
-            })
-            .or_else(|| self.levels.iter().flatten().find_map(|a| a.handoff_pose()))
+        self.handoff_source().map(|(_, pose)| pose)
+    }
+    fn handoff_completion(&self, frame: u64) -> crate::render_snapshot::HandoffCompletion {
+        let source = self.handoff_source();
+        crate::render_snapshot::HandoffCompletion::rendered(&self.snapshot_visit,
+            source.map_or(usize::MAX, |(slot, _)| slot), frame, source.map(|(_, pose)| pose))
     }
     fn prepare(
         &mut self,
@@ -940,6 +936,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut paused = false;
     let mut pitch = 0.0f32;
     let mut frame = 0;
+    let mut handoff_return = crate::render_snapshot::HandoffReturn::default();
     let mut snapshot_frames = 0u64;
     let mut snapshot_fenced_frames = 0u64;
     let mut dynamic_input = crate::render_snapshot::DynamicInput::default();
@@ -1473,6 +1470,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     let mut overlap_probe = crate::overlap_probe::Probe::configured();
     loop {
+        #[cfg(feature="vita_renderer")]
+        let snapshot_handoff = crate::render::vita_renderer::config().diag_snapshot;
+        #[cfg(not(feature="vita_renderer"))]
+        let snapshot_handoff = false;
+        if snapshot_handoff {
+            // All frames remain serial fences. A missing exact completion is a
+            // protocol error; never advance simulation using a replacement pose.
+            assert!(handoff_return.consume(&level_art.snapshot_visit), "cinematic render completion missing");
+        } else { handoff_return.retire(); }
         #[cfg(feature = "native_timing")]
         { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -3429,7 +3435,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             spawn_landing = true;
             weapon_click = None;
             weapon_buttons.block();
-            alice.resume_scene(&player, yaw, level_art.handoff_pose());
+            alice.resume_scene(&player, yaw, if snapshot_handoff {
+                handoff_return.pose(&level_art.snapshot_visit)
+            } else { level_art.handoff_pose() });
         }
         let direction = vec3(
             yaw.cos() * pitch.cos(),
@@ -4366,6 +4374,7 @@ interactions
             let (bytes, ants, overflow) = npcs.extract_ants(camera, (target-camera).normalize_or_zero());
             let allocations = scope.finish();
             let us = start.elapsed().as_secs_f64()*1_000_000.;
+            if overflow { handoff_return.retire(); }
             snapshot_frames += 1;
             // Alice, level art and later 3D consumers still lack complete schemas.
             // Until all are converted this is a whole-frame serial fence, including
@@ -4540,6 +4549,16 @@ interactions
         } // world-only diagnostic mask includes all character work
         #[cfg(feature="vita_renderer")]
         drop(skin_frame);
+        if snapshot_enabled {
+            let start = std::time::Instant::now();
+            let scope = crate::kernel_alloc::Scope::begin();
+            let completion = level_art.handoff_completion(frame as u64);
+            handoff_return.expect(&completion);
+            assert!(handoff_return.publish(completion));
+            let allocations = scope.finish();
+            println!("[lg/snapshot-handoff] frame={} extraction_us={:.3} allocations={}",
+                frame, start.elapsed().as_secs_f64()*1_000_000., allocations);
+        }
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
         drop(actors_timer);
