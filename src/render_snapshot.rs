@@ -135,6 +135,7 @@ impl DynamicInput {
 /// A renderer visit has no relationship to an address or a saved game identifier.
 /// Rebuilding even the same map creates a fresh namespace for completions.
 pub(crate) struct RenderVisit(u64);
+impl RenderVisit { pub(crate) fn id(&self) -> u64 { self.0 } }
 impl Default for RenderVisit {
     fn default() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -206,7 +207,7 @@ mod handoff_tests {
     use super::*;
     fn pose(x: f32) -> crate::cinematic::ActorPose {
         let transform = crate::skeletal::Transform { translation: vec3(x, 0., 0.), rotation: Quat::IDENTITY };
-        crate::cinematic::ActorPose { local: vec![transform], transform, scale: 1. }
+        crate::cinematic::ActorPose { rendered: None, local: vec![transform], transform, scale: 1. }
     }
     #[test]
     fn handoff_exact_completion_and_last_draw_survive_pause_and_skip() {
@@ -247,3 +248,12 @@ mod handoff_tests {
         assert!(state.pose(&restored).is_none());
     }
 }
+
+thread_local! {
+    static HANDOFF_RENDER_STAMP: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+}
+pub(crate) fn handoff_render_begin(visit: &RenderVisit, frame: u64) {
+    HANDOFF_RENDER_STAMP.with(|stamp| stamp.set(Some((visit.0, frame))));
+}
+pub(crate) fn handoff_render_end() { HANDOFF_RENDER_STAMP.with(|stamp| stamp.set(None)); }
+pub(crate) fn handoff_render_stamp() -> Option<(u64, u64)> { HANDOFF_RENDER_STAMP.with(|stamp| stamp.get()) }

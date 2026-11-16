@@ -38,6 +38,7 @@ pub fn land_player(
 /// Last rendered local pose, retained only by Alice puppets for gameplay blending.
 #[derive(Clone)]
 pub struct ActorPose {
+    pub(crate) rendered: Option<(u64, u64)>,
     pub local: Vec<crate::skeletal::Transform>,
     pub transform: crate::skeletal::Transform,
     pub scale: f32,

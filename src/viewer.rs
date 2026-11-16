@@ -186,10 +186,12 @@ impl LevelArt {
     fn handoff_pose(&self) -> Option<&crate::cinematic::ActorPose> {
         self.handoff_source().map(|(_, pose)| pose)
     }
-    fn handoff_completion(&self, frame: u64) -> crate::render_snapshot::HandoffCompletion {
-        let source = self.handoff_source();
+    fn handoff_completion(&self, frame: u64, minimum_frame: u64) -> crate::render_snapshot::HandoffCompletion {
+        let source = self.handoff_source().filter(|(_, p)|
+            p.rendered.is_some_and(|(visit, drawn)| visit == self.snapshot_visit.id() && drawn >= minimum_frame));
         crate::render_snapshot::HandoffCompletion::rendered(&self.snapshot_visit,
-            source.map_or(usize::MAX, |(slot, _)| slot), frame, source.map(|(_, pose)| pose))
+            source.map_or(usize::MAX, |(slot, _)| slot),
+            source.and_then(|(_, p)| p.rendered.map(|(_, drawn)| drawn)).unwrap_or(frame), source.map(|(_, pose)| pose))
     }
     fn prepare(
         &mut self,
@@ -937,6 +939,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut pitch = 0.0f32;
     let mut frame = 0;
     let mut handoff_return = crate::render_snapshot::HandoffReturn::default();
+    let mut handoff_minimum_frame = 0u64;
     let mut snapshot_frames = 0u64;
     let mut snapshot_fenced_frames = 0u64;
     let mut dynamic_input = crate::render_snapshot::DynamicInput::default();
@@ -4369,12 +4372,26 @@ interactions
             selection
         });
         if snapshot_enabled {
+            // Script state is resolved before cinematic pose extraction; materials
+            // and lazy mesh/effect publication remain on the renderer thread.
+            if let (Some(art), Some(pool)) = (&mut level_art.pool, &interactions.pool) {
+                art.cinema.story_pose(&story);
+                let start = std::time::Instant::now();
+                let scope = crate::kernel_alloc::Scope::begin();
+                let (bytes, overflow) = art.extract(pool);
+                let allocations = scope.finish();
+                println!("[lg/snapshot-pool] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",
+                    frame, bytes, start.elapsed().as_secs_f64()*1_000_000., allocations, u8::from(overflow));
+                if overflow { handoff_return.retire(); handoff_minimum_frame = frame as u64; }
+            }
+        } else if let Some(art) = &mut level_art.pool { art.clear_input(); }
+        if snapshot_enabled {
             let start = std::time::Instant::now();
             let scope = crate::kernel_alloc::Scope::begin();
             let (bytes, ants, overflow) = npcs.extract_ants(camera, (target-camera).normalize_or_zero());
             let allocations = scope.finish();
             let us = start.elapsed().as_secs_f64()*1_000_000.;
-            if overflow { handoff_return.retire(); }
+            if overflow { handoff_return.retire(); handoff_minimum_frame = frame as u64; }
             snapshot_frames += 1;
             // Alice, level art and later 3D consumers still lack complete schemas.
             // Until all are converted this is a whole-frame serial fence, including
@@ -4385,6 +4402,7 @@ interactions
         } else { npcs.clear_actor_inputs(); }
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
+        if snapshot_enabled { crate::render_snapshot::handoff_render_begin(&level_art.snapshot_visit, frame as u64); }
         crate::spike_log::render_begin();
         overlap_probe.begin();
         #[cfg(target_os = "vita")]
@@ -4552,13 +4570,14 @@ interactions
         if snapshot_enabled {
             let start = std::time::Instant::now();
             let scope = crate::kernel_alloc::Scope::begin();
-            let completion = level_art.handoff_completion(frame as u64);
+            let completion = level_art.handoff_completion(frame as u64, handoff_minimum_frame);
             handoff_return.expect(&completion);
             assert!(handoff_return.publish(completion));
             let allocations = scope.finish();
             println!("[lg/snapshot-handoff] frame={} extraction_us={:.3} allocations={}",
                 frame, start.elapsed().as_secs_f64()*1_000_000., allocations);
         }
+        crate::render_snapshot::handoff_render_end();
         #[cfg(not(target_os = "vita"))]
         drop(host_characters_profile);
         drop(actors_timer);

@@ -747,7 +747,58 @@ pub struct Puppet(
     Option<crate::cinematic::ActorPose>,
     crate::facial::Watch,
 );
+/// Complete input for the ordinary cinematic Puppet path. Resource identity is
+/// supplied by the enclosing visit registry, never by a pointer in this record.
+pub(crate) struct PuppetInput {
+    pose: Vec<Transform>,
+    scales: Vec<f32>,
+    handoff: Option<crate::cinematic::ActorPose>,
+    visual: crate::animation_events::VisualState,
+    time: f32,
+    alive: bool,
+    transform: Transform,
+    scale: f32,
+    attachments: bool,
+    frozen: bool,
+}
+impl PuppetInput {
+    pub(crate) fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.pose.len()*std::mem::size_of::<Transform>()
+            + self.scales.len()*std::mem::size_of::<f32>() + self.visual.payload_bytes()
+            + self.handoff.as_ref().map_or(0, |p| p.local.len()*std::mem::size_of::<Transform>())
+    }
+    pub(crate) fn bones(&self) -> usize { self.pose.len() }
+}
 impl Puppet {
+    pub(crate) fn extract_draw(&self, clip: &str, time: f32, looping: bool,
+        transform: Transform, scale: f32) -> PuppetInput {
+        let d = &self.0.data;
+        let animation = d.clips.get(clip).unwrap_or(&d.clips[&d.idle]);
+        let mut local = animation.sample(time, looping);
+        self.5.apply(&d.skeleton, &mut local);
+        let handoff = self.4.as_ref().map(|_| crate::cinematic::ActorPose {
+            rendered: None, local: local.clone(), transform, scale });
+        let mut pose = self.0.face.pose(&d.skeleton, &local, self.2);
+        let scales = if self.0.bone_scales.is_empty() { Vec::new() } else {
+            crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.0.bone_scales)
+        };
+        PuppetInput { pose, scales, handoff,
+            visual: d.events.visual(clip, time, animation.duration(), animation.frame_time, looping),
+            time, alive: !clip.starts_with("death"), transform, scale,
+            attachments: self.1, frozen: clip == "death_frozen" }
+    }
+    pub(crate) fn draw_input(&mut self, input: &PuppetInput, fullbright: bool) {
+        if let (Some(dst), Some(src)) = (&mut self.4, &input.handoff) {
+            dst.clone_from(src); dst.rendered = crate::render_snapshot::handoff_render_stamp();
+        }
+        let _consumer = crate::character::skinning::CullGuard::publication_reason(
+            input.frozen, crate::phase_census::FROZEN);
+        let material = self.3.clone();
+        material.draw_dissolving(0., || self.0.draw_resolved_pose(
+            &input.pose, &input.scales, 0., input.time, input.alive, input.transform,
+            input.scale, fullbright, input.attachments, &input.visual, None));
+        if input.frozen { self.0.draw_frozen(); }
+    }
     /// Afterimages inherit the last normal draw's normals, including across frames.
     /// Declare this at construction, before any normal draw can enter a worker bank.
     pub(crate) fn with_afterimages(mut self) -> Self {
@@ -792,6 +843,7 @@ impl Puppet {
             0.,
             crate::character::skin_material()?,
             (name == "alice").then(|| crate::cinematic::ActorPose {
+                rendered: None,
                 local: Vec::new(),
                 transform: Transform {
                     translation: Vec3::ZERO,
@@ -982,6 +1034,7 @@ impl Puppet {
             pose.local.clone_from(&local);
             pose.transform = transform;
             pose.scale = scale;
+            pose.rendered = crate::render_snapshot::handoff_render_stamp();
         }
         let visual = d.events.visual(
             clip,
@@ -1024,6 +1077,7 @@ impl Puppet {
             pose.local.clone_from(&local);
             pose.transform = transform;
             pose.scale = scale;
+            pose.rendered = crate::render_snapshot::handoff_render_stamp();
         }
         let animation = &d.clips[&clip];
         let visual = d.events.visual(
