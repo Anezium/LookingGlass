@@ -4342,18 +4342,35 @@ interactions
             "character": alice.snapshot(), "environment_clock": environment_clock,
             "pickup_clock": pickup_clock, "transforms": transforms,
         }));
+        // Resolve dynamic lights at the simulation boundary. Resident lighting
+        // textures and the selected-light TLS stay owned by the renderer.
+        let extracted_lights = snapshot_enabled.then(|| {
+            let scope = crate::kernel_alloc::Scope::begin();
+            let start = std::time::Instant::now();
+            let mut lights = steam.lights();
+            lights.extend(alice.lights());
+            lights.extend(npcs.lights());
+            for slot in &interactions.levels { lights.extend(slot.ctl.lights()); }
+            let selection = crate::lighting::resolve(lights, camera, &scene.world);
+            let us = start.elapsed().as_secs_f64() * 1_000_000.;
+            let allocations = scope.finish();
+            println!("[lg/snapshot-lights] frame={} bytes={} capacity_bytes={} extraction_us={:.3} allocations={}",
+                frame, selection.bytes(), selection.capacity_bytes(), us, allocations);
+            selection
+        });
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         crate::spike_log::render_begin();
         overlap_probe.begin();
         #[cfg(target_os = "vita")]
         let _lights_profile = crate::frame_profile::span("lights_build");
-        let mut lights = steam.lights();
-        lights.extend(alice.lights());
-        lights.extend(npcs.lights());
-        for slot in &interactions.levels {
-            lights.extend(slot.ctl.lights());
-        }
+        let live_lights = if snapshot_enabled { None } else {
+            let mut lights = steam.lights();
+            lights.extend(alice.lights());
+            lights.extend(npcs.lights());
+            for slot in &interactions.levels { lights.extend(slot.ctl.lights()); }
+            Some(lights)
+        };
         #[cfg(target_os = "vita")]
         drop(_lights_profile);
         #[cfg(target_os = "vita")]
@@ -4366,7 +4383,11 @@ interactions
         {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("lights_select");
-            crate::lighting::select(lights, camera, &scene.world);
+            if let Some(selection) = extracted_lights {
+                crate::lighting::publish(selection);
+            } else {
+                crate::lighting::select(live_lights.unwrap(), camera, &scene.world);
+            }
         }
         if !world_only || !scene.retained_active() {
             scene.begin_fx_view(&world_camera, environment_clock, fullbright, true);

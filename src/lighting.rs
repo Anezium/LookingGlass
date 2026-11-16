@@ -19,7 +19,28 @@ thread_local! {
     static FLARE: RefCell<Option<Texture2D>> = const {RefCell::new(None)};
     static CROQUET: RefCell<Vec<Light>> = const {RefCell::new(Vec::new())};
 }
+/// Owned collision-resolved input. Publication owns the renderer TLS; extraction
+/// never installs lights or retains World. This serial boundary is not Send proof.
+pub(crate) struct Selection {
+    lights: Vec<Light>,
+    candidates: usize,
+    sweeps: usize,
+    reused: usize,
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    elapsed_ms: f64,
+}
+impl Selection {
+    pub(crate) fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.lights.len() * std::mem::size_of::<Light>()
+    }
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.lights.capacity() * std::mem::size_of::<Light>()
+    }
+}
 pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
+    publish(resolve(lights, eye, world));
+}
+pub(crate) fn resolve(lights: Vec<Light>, eye: Vec3, world: &World) -> Selection {
     let _census = crate::phase_census::span(crate::phase_census::Region::Lights);
     #[cfg(target_os = "vita")]
     let limit = 2;
@@ -45,6 +66,18 @@ pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
         } else { world.sweep(eye, l.position, Vec3::ZERO).fraction >= 0.995 }
     });
     let sweeps = sweeps - reused;
+    Selection { lights, candidates, sweeps, reused,
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
+    }
+}
+/// Called at the original selection site, after portal rendering has restored
+/// its own light state. No collision or simulation access is possible here.
+pub(crate) fn publish(selection: Selection) {
+    let Selection { lights, candidates, sweeps, reused,
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        elapsed_ms,
+    } = selection;
     #[cfg(not(feature="vita_renderer"))]
     crate::sim_maps::count("lights_candidates", candidates as u64);
     #[cfg(not(feature="vita_renderer"))]
@@ -53,7 +86,7 @@ pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
     #[cfg(not(feature="vita_renderer"))]
     crate::sim_maps::count("lights_selected", lights.len() as u64);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-    crate::sim_maps::probe::span("lights_select", started.elapsed().as_secs_f64() * 1000.);
+    crate::sim_maps::probe::span("lights_select", elapsed_ms);
     #[cfg(target_os="vita")]
     crate::frame_profile::counts(&[("lights_candidates", candidates as u64),
         ("lights_sweeps", sweeps as u64), ("lights_selected", lights.len() as u64)]);
@@ -387,6 +420,24 @@ mod tests {
             let l = l.borrow();
             assert_eq!(l.len(), 8);
             assert_eq!(l[0].position, Vec3::ZERO);
+        });
+    }
+    #[test]
+    fn resolved_selection_survives_world_mutation_until_publication() {
+        let mut world = World::fixture(&[]);
+        let light = Light { position: Vec3::X * 10., color: Vec3::ONE,
+            radius: 100., only_models: false, flare: true };
+        let input = resolve(vec![light], Vec3::ZERO, &world);
+        world.set_dynamic(vec![crate::collision::Collider::fixture(
+            vec3(4., -1., -1.), vec3(6., 1., 1.))]);
+        select(vec![light], Vec3::ZERO, &world);
+        assert_eq!(count(), 0);
+        publish(input);
+        LIGHTS.with(|lights| {
+            let lights = lights.borrow();
+            assert_eq!(lights.len(), 1);
+            assert_eq!(lights[0].position, light.position);
+            assert!(lights[0].flare);
         });
     }
     #[test]
