@@ -172,6 +172,11 @@ pub(crate) struct HandoffReturn {
     acknowledged: Option<HandoffCompletion>,
 }
 impl HandoffReturn {
+    pub fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + [&self.pending, &self.acknowledged].into_iter()
+            .filter_map(|c| c.as_ref()).filter_map(|c| c.pose.as_ref())
+            .map(|p| p.local.len()*std::mem::size_of::<crate::skeletal::Transform>()).sum::<usize>()
+    }
     pub fn retire(&mut self) { *self = Self::default(); }
     pub fn expect(&mut self, completion: &HandoffCompletion) {
         if self.visit != completion.tag.visit { self.retire(); }

@@ -844,7 +844,7 @@ impl Input {
         std::mem::size_of::<Self>() + self.commands.len()*std::mem::size_of::<Command>()
             + self.commands.iter().map(|c| match c {
                 Command::Puppet(_, p) => p.bytes()-std::mem::size_of::<crate::npc::PuppetInput>(),
-                Command::Leaf(_, _, Some(p)) => p.bytes(), _ => 0,
+                Command::Leaf(_, _, Some(p)) => p.bytes()-std::mem::size_of::<crate::npc::PuppetInput>(), _ => 0,
             }).sum::<usize>()
     }
 }

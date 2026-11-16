@@ -4574,8 +4574,8 @@ interactions
             handoff_return.expect(&completion);
             assert!(handoff_return.publish(completion));
             let allocations = scope.finish();
-            println!("[lg/snapshot-handoff] frame={} extraction_us={:.3} allocations={}",
-                frame, start.elapsed().as_secs_f64()*1_000_000., allocations);
+            println!("[lg/snapshot-handoff] frame={} bytes={} extraction_us={:.3} allocations={}",
+                frame, handoff_return.bytes(), start.elapsed().as_secs_f64()*1_000_000., allocations);
         }
         crate::render_snapshot::handoff_render_end();
         #[cfg(not(target_os = "vita"))]
