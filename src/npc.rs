@@ -1,6 +1,8 @@
 //! Placed, animated characters with bounded local reactions. No original AI/scripts run.
 use crate::mesh::Mesh;
 mod ambient;
+#[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+pub(crate) mod snapshot_check;
 pub(crate) mod profile;
 mod visual_lod;
 pub(crate) mod attack_fx;
@@ -2081,11 +2083,13 @@ fn near_cull_skips_only_close_dead_bodies_and_is_off_at_zero() {
 struct SnapshotRegistry {
     generation: u64,
     slots: Vec<(crate::character::skinning::identity::ActorId, usize)>,
+    // Required owned commands; omissions may never silently read live actors.
+    owned_slots: Vec<usize>,
 }
 impl SnapshotRegistry {
     fn retire(&mut self) {
         self.generation = crate::character::skinning::identity::next_instance();
-        self.slots.clear();
+        self.slots.clear(); self.owned_slots.clear();
     }
 }
 struct AntBodyInput {
@@ -2108,20 +2112,58 @@ struct AntInput {
     shots: Vec<crate::ant::Bullet>,
     blasts: Vec<crate::ant::Blast>,
 }
+struct AmbientInput {
+    slot: usize,
+    visible: bool,
+    preserve: bool,
+    body: Option<AntBodyInput>,
+    clip: usize,
+    sample_time: f32,
+    looping: bool,
+    lod_safe: bool,
+    distance_squared: f32,
+    radius: f32,
+}
+impl Actor {
+    fn snapshot_ambient(&self) -> bool {
+        self.ant.is_none() && self.resident.is_none() && self.clock.is_none()
+            && self.imp.is_none() && self.chess.is_none() && self.guard.is_none() && self.guide.is_none()
+    }
+}
 #[derive(Default)]
 struct ActorInputs {
     generation: u64,
     ants: Vec<AntInput>,
+    ambient: Vec<AmbientInput>,
     overflow: bool,
 }
 impl ActorInputs {
     fn valid_for(&self, registry: &SnapshotRegistry) -> bool {
         !self.overflow && self.generation != 0 && self.generation == registry.generation
+            && self.ants.len()+self.ambient.len() == registry.owned_slots.len()
+            && registry.owned_slots.iter().all(|slot|
+                self.ants.iter().any(|a| a.slot == *slot) || self.ambient.iter().any(|a| a.slot == *slot))
             && self.ants.iter().all(|a| a.slot < registry.slots.len())
             && self.ants.windows(2).all(|a| a[0].slot < a[1].slot)
+            && self.ambient.iter().all(|a| a.slot < registry.slots.len()
+                && !self.ants.iter().any(|b| b.slot == a.slot))
+            && self.ambient.windows(2).all(|a| a[0].slot < a[1].slot)
+    }
+    fn valid_resources(&self, registry: &SnapshotRegistry, models: &[Model]) -> bool {
+        self.valid_for(registry) && registry.slots.iter().all(|(_, slot)| *slot < models.len())
+            && self.ambient.iter().all(|a| {
+                let d = &models[registry.slots[a.slot].1].data;
+                a.clip < d.clips.len() && a.visible == a.body.is_some()
+                    && a.body.as_ref().is_none_or(|b| b.pose.len() == d.skeleton.bones.len()
+                        && (b.scales.is_empty() || b.scales.len() == b.pose.len()))
+            })
     }
     fn bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + self.ants.len()*std::mem::size_of::<AntInput>()
+        std::mem::size_of::<Self>() + self.ambient.len()*std::mem::size_of::<AmbientInput>()
+            + self.ambient.iter().filter_map(|a| a.body.as_ref()).map(|b|
+                b.pose.len()*std::mem::size_of::<Transform>() + b.scales.len()*std::mem::size_of::<f32>()
+                + b.visual.payload_bytes()).sum::<usize>()
+            + self.ants.len()*std::mem::size_of::<AntInput>()
             + self.ants.iter().map(|a| a.shots.len()*std::mem::size_of::<crate::ant::Bullet>()
                 + a.blasts.len()*std::mem::size_of::<crate::ant::Blast>()
                 + a.body.as_ref().map_or(0, |b| b.pose.len()*std::mem::size_of::<Transform>()
@@ -2186,8 +2228,9 @@ impl Npcs {
     pub(crate) fn snapshot_fence_census(&self) -> std::collections::BTreeMap<String, usize> {
         let mut counts = std::collections::BTreeMap::new();
         for actor in &self.actors {
-            if actor.ant.is_some() { continue; }
-            let family = if let Some(p) = &actor.resident {
+            if (actor.ant.is_some() || actor.snapshot_ambient()) && self.actor_inputs.as_ref()
+                .is_some_and(|i| i.valid_resources(&self.snapshot_registry, &self.models)) { continue; }
+            let family = if actor.ant.is_some() { "ant" } else if let Some(p) = &actor.resident {
                 match &p.body {
                     resident::Body::Boojum(_) => "boojum",
                     resident::Body::Ladybug(_) => "ladybug",
@@ -2215,12 +2258,19 @@ impl Npcs {
         const MAX_ACTORS: usize = 1024;
         const MAX_BONES: usize = 65536;
         const MAX_EFFECTS: usize = 16384;
+        // Reject before walking a malformed/unbounded cast or allocating poses.
+        if self.actors.len() > MAX_ACTORS || self.actors.iter().any(|a| a.model >= self.models.len()) {
+            self.actor_inputs = Some(ActorInputs { overflow: true, ..Default::default() });
+            return (std::mem::size_of::<ActorInputs>(), 0, true);
+        }
         let changed = self.snapshot_registry.slots.len() != self.actors.len()
             || self.snapshot_registry.slots.iter().zip(&self.actors)
                 .any(|((id, model), a)| *id != a.skin_identity || *model != a.model);
         if changed || self.snapshot_registry.generation == 0 {
             self.snapshot_registry.retire();
             self.snapshot_registry.slots.extend(self.actors.iter().map(|a| (a.skin_identity,a.model)));
+            self.snapshot_registry.owned_slots.extend(self.actors.iter().enumerate()
+                .filter(|(_,a)| a.ant.is_some() || a.snapshot_ambient()).map(|(slot,_)|slot));
         }
         let mut inputs = ActorInputs { generation: self.snapshot_registry.generation, ..Default::default() };
         let mut bones = 0;
@@ -2262,6 +2312,46 @@ impl Npcs {
             inputs.ants.push(AntInput { slot, visible, corpse, preserve: actor.electric>0., body,
                 shots: if visible { ant.shots.clone() } else { Vec::new() },
                 blasts: if visible { ant.blasts.clone() } else { Vec::new() } });
+        }
+        for (slot, actor) in self.actors.iter().enumerate().filter(|(_,a)| a.snapshot_ambient()) {
+            if inputs.overflow { break; }
+            let mut visible = !crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors)
+                && !self.scene_hidden.contains(&actor.spawn.name) && !self.registry_owns(actor)
+                && !self.legacy_owns(actor) && (!(actor.spawn.hidden || (self.owns_pandemonium
+                    && matches!(actor.spawn.name.as_str(), "rope_cat"|"cards_cat"))) || actor.story_visible);
+            #[cfg(feature="vita_renderer")]
+            { visible &= !actor.near_culled(camera, crate::render::vita_renderer::config().actor_near_cull); }
+            let offset = actor.target()-camera;
+            visible &= !(offset.length_squared()>3500.*3500.
+                || (offset.length_squared()>200.*200. && offset.normalize().dot(direction)< -0.3));
+            let model = &self.models[actor.model]; let d = &model.data;
+            let mut clip_slot = 0; let mut sample_time = 0.; let mut looping = false;
+            let body = if visible {
+                if d.skeleton.bones.len() > MAX_BONES.saturating_sub(bones) {
+                    inputs.overflow = true; break;
+                }
+                let idle = actor.spawn.animation.as_ref().filter(|n| d.clips.contains_key(*n)).unwrap_or(&d.idle);
+                let idle = if actor.walk.is_some() { "walk" } else { idle };
+                let (mut local, clip, at, loops) = d.performance(idle, actor.greeting>0. || actor.speaking,
+                    actor.ending_talk, actor.time);
+                actor.watch.apply(&d.skeleton, &mut local);
+                let animation = &d.clips[&clip];
+                clip_slot = d.clips.keys().position(|k| *k == clip).expect("resident ambient clip");
+                sample_time = at; looping = loops;
+                bones += d.skeleton.bones.len();
+                if bones>MAX_BONES { inputs.overflow=true; break; }
+                let mut pose = model.face.pose(&d.skeleton, &local, actor.mouth);
+                let scales = if model.bone_scales.is_empty() { Vec::new() } else {
+                    crate::skeletal::scale_pose(&d.skeleton, &mut pose, &model.bone_scales) };
+                Some(AntBodyInput { pose, scales,
+                    visual: d.events.visual(&clip, at, animation.duration(), animation.frame_time, loops),
+                    transform: Transform { translation: actor.position(), rotation: Quat::from_rotation_z(actor.yaw) },
+                    scale: actor.spawn.scale, time: actor.time, alive: true, frozen: false, electric: actor.electric })
+            } else { None };
+            if inputs.ambient.len()+inputs.ants.len()>=MAX_ACTORS { inputs.overflow=true; break; }
+            inputs.ambient.push(AmbientInput { slot, visible, preserve: actor.electric>0., body,
+                clip: clip_slot, sample_time, looping, lod_safe: visual_lod::safe(actor,model),
+                distance_squared: offset.length_squared(), radius: d.visual_radius*d.def.scale*actor.spawn.scale });
         }
         let result = (inputs.bytes(), inputs.ants.len(), inputs.overflow);
         self.actor_inputs = Some(inputs);
@@ -3587,7 +3677,7 @@ impl Npcs {
         let mut lod_counts = [0u64; 5];
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
-        let inputs = self.actor_inputs.as_ref().filter(|i| i.valid_for(&self.snapshot_registry));
+        let inputs = self.actor_inputs.as_ref().filter(|i| i.valid_resources(&self.snapshot_registry, &self.models));
         let draw_count = inputs.map_or_else(|| self.actors.len(), |_| self.snapshot_registry.slots.len());
         for id in 0..draw_count {
             if let Some(input) = inputs.and_then(|i| i.ants.iter().find(|a| a.slot == id)) {
@@ -3614,6 +3704,48 @@ impl Npcs {
                     if body.frozen { model.draw_frozen(); }
                     model.draw_electric(body.electric);
                 }
+                continue;
+            }
+            if let Some(input) = inputs.and_then(|i| i.ambient.iter().find(|a| a.slot == id)) {
+                if !input.visible { continue; }
+                let Some(body) = &input.body else { continue; };
+                let (identity, model_slot) = self.snapshot_registry.slots[input.slot];
+                let _identity = identity.scope();
+                let _preserve = crate::character::skinning::CullGuard::preserve(input.preserve);
+                let decision = if crate::character::skinning::overlap::ready() {
+                    self.visual_lod.get(&id).map_or(visual_lod::Decision::Exact, |lod| lod.prepared)
+                } else if lod_enabled {
+                    let outside = config.anim_cull && input.lod_safe && crate::render::outside_bounds(
+                        body.transform.translation-Vec3::splat(input.radius), body.transform.translation+Vec3::splat(input.radius));
+                    #[cfg(target_os="vita")] { lod_counts[4] += u64::from(!input.lod_safe); }
+                    self.visual_lod.entry(id).or_default().decide(config,input.lod_safe,outside,
+                        input.distance_squared,body.transform,body.scale,fullbright)
+                } else { visual_lod::Decision::Exact };
+                if crate::character::skinning::overlap::gather_only() {
+                    self.visual_lod.entry(id).or_default().prepared=decision;
+                }
+                #[cfg(target_os="vita")] { lod_counts[match decision {
+                    visual_lod::Decision::Exact=>0,visual_lod::Decision::Hidden=>1,
+                    visual_lod::Decision::Refresh=>2,visual_lod::Decision::Reuse=>3 }] += 1; }
+                match decision {
+                    visual_lod::Decision::Hidden => continue,
+                    visual_lod::Decision::Reuse => {
+                        for mesh in &self.visual_lod[&id].meshes { crate::render_fx::skin(mesh); } continue;
+                    }
+                    _ => {}
+                }
+                let model = &mut self.models[model_slot];
+                let _consumer = crate::character::skinning::CullGuard::reason(
+                    crate::character::skinning::overlap::single_preparing() && decision==visual_lod::Decision::Refresh,
+                    crate::phase_census::AMBIENT);
+                model.draw_resolved_pose(&body.pose,&body.scales,0.,body.time,true,body.transform,
+                    body.scale,fullbright,true,&body.visual,None);
+                if decision==visual_lod::Decision::Refresh && !crate::character::skinning::overlap::gather_only() {
+                    self.visual_lod.get_mut(&id).expect("ambient cache").capture(model);
+                }
+                let clip = model.data.clips.keys().nth(input.clip).expect("validated ambient clip").clone();
+                model.draw_effects(&clip,input.sample_time,input.looping,body.transform,body.scale,camera,atmosphere);
+                model.draw_electric(body.electric); self.material.bind();
                 continue;
             }
             let actor = &self.actors[id];
@@ -4632,11 +4764,14 @@ mod tests {
     fn actor_snapshot_rejects_stale_overflow_and_malformed_batches() {
         let mut registry = SnapshotRegistry::default();
         registry.retire();
-        registry.slots.push((Default::default(), 0));
+        registry.slots.push((Default::default(), 0)); registry.owned_slots.push(0);
         let ant = || AntInput { slot: 0, visible: true, preserve: false, corpse: false,
             body: None, shots: Vec::new(), blasts: Vec::new() };
-        let mut input = ActorInputs { generation: registry.generation, ants: vec![ant()], overflow: false };
+        let mut input = ActorInputs { generation: registry.generation, ants: vec![ant()], ambient: Vec::new(), overflow: false };
         assert!(input.valid_for(&registry));
+        let required = registry.owned_slots.pop().unwrap(); assert!(!input.valid_for(&registry));
+        registry.owned_slots.push(required);
+        let missing = input.ants.pop().unwrap(); assert!(!input.valid_for(&registry)); input.ants.push(missing);
         input.overflow = true;
         assert!(!input.valid_for(&registry));
         input.overflow = false;

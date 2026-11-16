@@ -562,6 +562,12 @@ fn run() -> Result<()> {
             "--potears1-render-check" => mode = "potears1-render",
             "--pool-render-check" => mode = "pool-render",
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-npc-ambient-check" => mode = "snapshot-npc-ambient",
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            "--snapshot-npc-ladybug-check" => mode = "snapshot-npc-ladybug",
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            "--snapshot-npc-plant-check" => mode = "snapshot-npc-plant",
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
             "--snapshot-hud-resource-check" => mode = "snapshot-hud-resource",
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             "--snapshot-cheshire-render-check" => mode = "snapshot-cheshire-render",
@@ -1274,6 +1280,13 @@ fn run() -> Result<()> {
             }
         });
         return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    if let Some(family)=mode.strip_prefix("snapshot-npc-") {
+        let family=family.to_owned();
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e)=npc::snapshot_check::check(&mut assets,&family).await {eprintln!("Snapshot NPC failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
     }
     #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
     if mode == "snapshot-hud-resource" {
