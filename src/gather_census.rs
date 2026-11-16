@@ -343,11 +343,12 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(4));
             }
         }
+        STATE.with(|s| s.borrow_mut().frames = 1);
         let text = test_summary();
         assert!(text.contains("npc="), "{text}");
         let npc = field(&text, "npc");
-        let ant = field(&text, "ant");
-        assert!(npc > ant && npc > 5.0, "{text}");
+        let ambush = field(&text, "ambush");
+        assert!(npc > ambush && npc > 5.0, "{text}");
         assert_eq!(test_errors(), 0);
         assert_eq!(test_counters()[Counter::ActorsVisited as usize], 1);
     }
