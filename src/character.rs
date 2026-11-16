@@ -1385,6 +1385,15 @@ impl Character {
         } else { self.visuals.draw_effects(&self.material,camera,fullbright,show_alice); }
     }
     pub fn draw_first_person(&mut self, fullbright: bool) {
+        if let Some(input)=self.body_input.take() {
+            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) && self.visuals.valid_effects_input(&input.effects) {
+                self.material.bind();self.visuals.draw_held_input(&input.held,fullbright);
+                crate::render::depth_read_only(||self.visuals.draw_view_trail_input(&input.effects));gl_use_default_material();
+            } else {self.draw_first_person_live(fullbright);}
+            self.body_input=Some(input);
+        } else {self.draw_first_person_live(fullbright);}
+    }
+    fn draw_first_person_live(&mut self, fullbright: bool) {
         self.material.bind();
         self.visuals
             .draw_held(&self.actions, &self.anchors, fullbright);

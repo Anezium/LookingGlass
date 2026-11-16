@@ -4447,6 +4447,8 @@ interactions
             let allocations=scope.finish();
             println!("[lg/snapshot-aim] frame={} bytes={} extraction_us={:.3} allocations={} overflow=0",frame,std::mem::size_of_val(&input),start.elapsed().as_secs_f64()*1_000_000.,allocations);Some(input)
         } else {None};
+        let first_person_input=snapshot_enabled.then(|| !world_only && !third_person && !pand_cinematic && !flying && stats.alive()
+            && player.script_motion==0 && !interactions.school.as_ref().is_some_and(|s|s.cinematic()));
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         if snapshot_enabled {
@@ -4751,12 +4753,12 @@ interactions
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
-        if !world_only && !third_person
+        if first_person_input.unwrap_or_else(|| !world_only && !third_person
             && !pand_cinematic
             && !flying
             && stats.alive()
             && player.script_motion == 0
-            && !interactions.school.as_ref().is_some_and(|s| s.cinematic())
+            && !interactions.school.as_ref().is_some_and(|s| s.cinematic()))
         {
             if direct_fx {
                 // All 3-D packets have reached miniquad; the view toy needs only a depth clear.

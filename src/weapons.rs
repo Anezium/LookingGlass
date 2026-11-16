@@ -2529,6 +2529,21 @@ impl Visuals {
         }
         gl_use_default_material();
     }
+    pub(crate) fn draw_view_trail_input(&self,input:&EffectsInput) {
+        self.draw_electric_trail_input(&input.trail);
+        gl_use_material(&self.effect_material);
+        let mut vertices = Vec::new();
+        append_swing(&mut vertices, &input.trail, false);
+        if !vertices.is_empty() {
+            crate::sim_maps::count("imm_weapon_mesh", 1);
+            draw_mesh(&Mesh { upload_identity: None, surface: None,
+                indices: (0..vertices.len() as u16).collect(),
+                vertices,
+                texture: Some(self.spark_texture.clone()),
+            });
+        }
+        gl_use_default_material();
+    }
     pub(crate) fn render_effects_overflow(&self)->bool {
         self.heavy.render_records()+self.ice.render_records()+self.jacks.render_records()+self.bombs.render_records()+self.dice.render_records()
             +self.projectiles.len()+self.blasts.len()+self.sparks.len()+self.trail.len()+self.flight_trails.len()>16384
