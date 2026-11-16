@@ -150,11 +150,17 @@ thread_local! { static STATE: RefCell<State> = const { RefCell::new(State::ZERO)
 
 #[inline]
 pub(crate) fn on() -> bool {
+    #[cfg(test)]
+    if FORCE.with(|f| f.get()) { return true; }
     #[cfg(feature = "vita_renderer")]
     { crate::render::vita_renderer::config().gather_census }
     #[cfg(not(feature = "vita_renderer"))]
     { false }
 }
+#[cfg(test)]
+thread_local! { static FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub(crate) fn test_force(value: bool) { FORCE.with(|f| f.set(value)); }
 /// True while a counted window is open.
 pub(crate) fn active() -> bool {
     if !on() { return false; }
@@ -263,28 +269,28 @@ fn write_summary(s: &State, out: &mut String) {
 /// summary line to `push` once the last frame closed.
 pub(crate) fn frame_closed(number: u64, push: impl FnOnce(&str)) {
     if !on() { return; }
-    let (first, last) = {
-        #[cfg(feature = "vita_renderer")]
-        { let c = crate::render::vita_renderer::config();
-          (u64::from(c.spike_log_first_frame), u64::from(c.spike_log_last_frame)) }
-        #[cfg(not(feature = "vita_renderer"))]
-        { (0u64, 0u64) }
-    };
-    if last == 0 { return; }
     let mut line = String::new();
     let mut emit = false;
     STATE.with(|s| {
         let mut s = s.borrow_mut();
         if s.finished { return; }
         if !s.armed {
+            let (first, last) = {
+                #[cfg(feature = "vita_renderer")]
+                { let c = crate::render::vita_renderer::config();
+                  (u64::from(c.spike_log_first_frame), u64::from(c.spike_log_last_frame)) }
+                #[cfg(not(feature = "vita_renderer"))]
+                { (0u64, 0u64) }
+            };
+            if last == 0 { return; }
             if number < first.saturating_sub(1) { return; }
             s.open(first, last);
         }
-        if number < first || number > last { return; }
+        if number < s.window_first || number > s.window_last { return; }
         s.frames += 1;
         if s.root_mask != 0 || s.depth != 0 { s.errors += 1; }
         if s.touched { s.measured += 1; s.touched = false; }
-        if number == last {
+        if number == s.window_last {
             write_summary(&s, &mut line);
             s.finished = true;
             emit = true;
@@ -314,6 +320,7 @@ mod tests {
     }
     #[test]
     fn inactive_gather_keeps_no_time_or_counters() {
+        test_force(false);
         STATE.with(|s| *s.borrow_mut() = State::ZERO);
         assert!(!active());
         { let _s = span(Leaf::StoryPose); }
@@ -325,6 +332,7 @@ mod tests {
     }
     #[test]
     fn children_are_excluded_from_the_enclosing_root() {
+        test_force(true);
         test_open(10, 12);
         {
             let _root = span(Leaf::NpcTraversal);
@@ -344,12 +352,14 @@ mod tests {
     }
     #[test]
     fn kind_outside_the_npc_traversal_is_ignored() {
+        test_force(true);
         test_open(10, 12);
         { let _k = kind(0); }
         STATE.with(|s| { let s = s.borrow(); assert!(s.ns.iter().all(|&n| n == 0)); });
     }
     #[test]
     fn generic_leaves_need_a_traversal_root() {
+        test_force(true);
         test_open(10, 12);
         { let _p = span(Leaf::PoseEval); }
         STATE.with(|s| { let s = s.borrow(); assert_eq!(s.ns[Leaf::PoseEval as usize], 0); });
@@ -361,6 +371,8 @@ mod tests {
     }
     #[test]
     fn the_window_emits_one_line_and_then_stops() {
+        test_force(true);
+        test_open(10, 12);
         let mut lines = Vec::new();
         for number in 8..=12 {
             frame_closed(number, |line| lines.push(line.to_string()));
