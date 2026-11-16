@@ -58,7 +58,7 @@ const ROOT_DISPATCH: u8 = 1 << 5;
 const ANY_TRAVERSAL: u8 = ROOT_ALICE | ROOT_NPC | ROOT_ART;
 /// Bracket depth; the measured tree is a root and at most two child levels.
 const DEPTH: usize = 8;
-const COUNTERS: [&str; 16] = [
+const COUNTERS: [&str; 17] = [
     "actors_visited", "actors_drawn", "actors_culled", "surfaces_skinned",
     "vertices_skinned", "bones_captured", "lane_jobs", "serial_surfaces",
     "pose_evaluations", "pose_hits", "bones_evaluated", "sample_evaluations",
