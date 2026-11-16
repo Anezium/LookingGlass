@@ -1,6 +1,8 @@
 """Seal r9 helpers/artifacts locally. Never imports a transport or console driver."""
 from pathlib import Path
-import argparse,hashlib,json,os,shutil,subprocess,zipfile
+import argparse,hashlib,json,os,shutil,subprocess,sys,zipfile
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from report_files import is_report_file
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('output',type=Path);p.add_argument('--cleanup',action='store_true');p.add_argument('--manifest-only',action='store_true');a=p.parse_args();O=a.output.resolve();R=Path(__file__).resolve().parents[2];T=R/'tools/skin_exact_r9'
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def write(p,v):p.write_text(json.dumps(v,indent=2)+'\n')
@@ -12,7 +14,7 @@ if a.manifest_only:
   assert z.testzip() is None and set(z.namelist())==set(verification['members'])
   for name,record in verification['members'].items():
    raw=z.read(name);assert len(raw)==record['bytes'] and hashlib.sha256(raw).hexdigest()==record['sha256'] and raw==(O/name).read_bytes()
- write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','REPORT.md']})
+ write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name) and f.name != 'ARTIFACT-SHA256.json'})
  print('Verified unchanged ZIP and refreshed complete artifact manifest')
  raise SystemExit(0)
 
@@ -50,5 +52,5 @@ with zipfile.ZipFile(O/'CONSOLE-PACKAGE.zip') as z:
  assert all(members[str(f.relative_to(O))]['sha256']==sha(f) for f in files)
 write(O/'proof/PACKAGE-VERIFICATION.json',dict(status='PASS',zip_sha256=sha(O/'CONSOLE-PACKAGE.zip'),members=members,session_paths_absent=True,console_executed=False))
 # The report is edited after disk cleanup; exclude it to avoid a circular seal.
-write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','REPORT.md']})
+write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name) and f.name != 'ARTIFACT-SHA256.json'})
 print('Sealed',len(members),'console members; session directories absent; no device access')

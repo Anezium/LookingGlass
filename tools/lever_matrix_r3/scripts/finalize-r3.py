@@ -1,6 +1,8 @@
 """Final local provenance, cache cleanup and artifact seal. No device transport."""
 from pathlib import Path
-import ast,hashlib,json,shutil,subprocess
+import ast,hashlib,json,shutil,subprocess,sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+from report_files import is_report_file
 O=Path(__file__).resolve().parents[1]
 R=Path('/Users/anezium/vita-work/lg-lever-matrix-r3')
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -67,7 +69,7 @@ Removed **{sum(x['bytes'] for x in removed):,} bytes** of task caches/test-layou
 ```
 '''
 (O/'REPORT.md').write_text(report)
-seal={str(p.relative_to(O)):sha(p) for p in sorted(O.rglob('*')) if p.is_file() and p.name not in ('ARTIFACT-SHA256.json','FINAL-AUDIT.json','REPORT.md')}
+seal={str(p.relative_to(O)):sha(p) for p in sorted(O.rglob('*')) if p.is_file() and not is_report_file(p.name) and p.name not in ('ARTIFACT-SHA256.json','FINAL-AUDIT.json')}
 write(O/'ARTIFACT-SHA256.json',seal)
 assert all(sha(O/name)==digest for name,digest in seal.items())
 write(O/'FINAL-AUDIT.json',dict(status='PASS',sealed_files=len(seal),seal_sha256=sha(O/'ARTIFACT-SHA256.json'),

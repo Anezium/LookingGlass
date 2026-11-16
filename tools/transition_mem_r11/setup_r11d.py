@@ -1,6 +1,8 @@
 """Copy the read-only r11c package's documents and freeze the r11d run schedule."""
 from pathlib import Path
-import hashlib, json, shutil, sys
+import hashlib, json, sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from report_files import copy_documents
 
 R = Path(__file__).resolve().parents[2]
 T = Path(__file__).resolve().parent
@@ -13,8 +15,7 @@ snapshot = {str(p.relative_to(old)): dict(bytes=p.stat().st_size,
             sha256=hashlib.sha256(p.read_bytes()).hexdigest())
             for p in sorted(old.rglob('*')) if p.is_file()}
 (O / 'proof/R11C-READ-ONLY.json').write_text(json.dumps(snapshot, indent=2) + '\n')
-for p in old.glob('*.md'):
-    shutil.copyfile(p, O / p.name)
+copy_documents(old, O)
 # Historical reports remain historical, with a clearly labelled correction in
 # these new copies only. The originals and their seals are never modified.
 correction = '''> R11d correction to this historical report: LG uses sample_count=1

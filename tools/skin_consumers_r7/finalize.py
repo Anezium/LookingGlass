@@ -1,6 +1,8 @@
 """Seal the local handoff and remove only task-specific build/Python caches."""
 from pathlib import Path
 import argparse,hashlib,json,os,shutil,subprocess,sys,zipfile
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from report_files import is_report_file
 R=Path(__file__).resolve().parents[2];T=R/'tools/skin_consumers_r7';parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--manifest-only',action='store_true');args=parser.parse_args();O=args.package.resolve()
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def write(p,v):p.write_text(json.dumps(v,indent=2)+'\n')
@@ -15,7 +17,7 @@ if args.manifest_only:
   assert set(z.namelist())==set(verification['members'])
   for name,record in verification['members'].items():
    data=z.read(name);assert len(data)==record['bytes'] and hashlib.sha256(data).hexdigest()==record['sha256'] and data==(O/name).read_bytes(),name
- manifest={str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','REPORT.md','LATECB-FIX.md','RESEAL-AMENDMENTS.md']}
+ manifest={str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name) and f.name not in ['ARTIFACT-SHA256.json','LATECB-FIX.md','RESEAL-AMENDMENTS.md']}
  write(O/'ARTIFACT-SHA256.json',manifest)
  print('Verified ZIP and refreshed manifest:',len(manifest),'files')
  sys.exit(0)
@@ -54,7 +56,7 @@ with zipfile.ZipFile(O/'CONSOLE-PACKAGE.zip') as z:
  assert not any(part.startswith('session-') for name in z.namelist() for part in Path(name).parts)
  members={i.filename:dict(bytes=i.file_size,sha256=hashlib.sha256(z.read(i)).hexdigest()) for i in z.infolist()}
 write(O/'proof/PACKAGE-VERIFICATION.json',dict(status='PASS',amendments=amendment_hashes,report_exclusions=['LATECB-FIX.md','RESEAL-AMENDMENTS.md'],blocked_attempts_excluded_from_zip=True,session_directory_absent=True,zip_has_no_session_directory=True,common_self=len({sha(O/'packages'/a/'eboot.bin') for a in ['baseline','baseline-census','skin','skin-census']})==1,members=members))
-manifest={str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','REPORT.md','LATECB-FIX.md','RESEAL-AMENDMENTS.md']}
+manifest={str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name) and f.name not in ['ARTIFACT-SHA256.json','LATECB-FIX.md','RESEAL-AMENDMENTS.md']}
 write(O/'ARTIFACT-SHA256.json',manifest)
 print('Sealed',len(manifest),'files; removed',sum(v['bytes'] for v in removed),'bytes')
 print(subprocess.check_output(['df','-h',str(O)],text=True))
