@@ -1038,6 +1038,35 @@ mod tests {
         assert_eq!(state.lookup.len(),3);
     }
     #[test]
+    fn output_reuse_requires_completed_consecutive_identical_slot() {
+        let (mesh,cpu)=fixture(); let mut state=State::default();
+        let key=key(ActorId::default(),&cpu);
+        state.next_frame();
+        let (id,slot,output)=state.reserve_key(&mesh,cpu.clone(),false,7,O,key).unwrap();
+        assert_eq!(state.reusable_output,0);
+        // A reserved but unfinished output must never be treated as skinned.
+        state.next_frame();
+        state.reserve_key(&mesh,cpu.clone(),true,7,O,key).unwrap();
+        assert_eq!(state.reusable_output,0);
+        state.banks[id].completed[slot]=true;
+        state.next_frame();
+        state.reserve_key(&mesh,cpu.clone(),true,7,O,key).unwrap();
+        assert_eq!(state.reusable_output,output);
+        assert!(!state.banks[id].completed[slot]);
+        state.banks[id].completed[slot]=true;
+        state.next_frame();
+        state.reserve_key(&mesh,cpu.clone(),false,7,O,key).unwrap();
+        assert_eq!(state.reusable_output,0,"changed numeric inputs");
+        state.banks[id].completed[slot]=true;
+        state.next_frame(); state.next_frame();
+        state.reserve_key(&mesh,cpu.clone(),true,7,O,key).unwrap();
+        assert_eq!(state.reusable_output,0,"nonconsecutive output");
+        state.banks[id].completed[slot]=true;
+        state.next_frame();
+        state.reserve_key(&mesh,cpu.clone(),true,8,O,key).unwrap();
+        assert_eq!(state.reusable_output,0,"different occurrence instance");
+    }
+    #[test]
     fn unchanged_shared_instance_moving_to_another_slot_advances_gpu_revision() {
         let (mesh,cpu)=fixture();let mut state=State::default();state.next_frame();
         let key=key(ActorId::default(),&cpu);
