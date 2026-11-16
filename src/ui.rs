@@ -182,6 +182,7 @@ pub fn load_texture(assets: &mut Assets, path: &str) -> Result<Texture2D> {
 }
 
 pub struct Ui {
+    resource: crate::render_snapshot::RenderVisit,
     pub font: BitmapFont,
     pub body: BitmapFont,
     pub courier: BitmapFont,
@@ -201,6 +202,7 @@ impl Ui {
             return Ok(ui);
         }
         let ui = Rc::new(Self {
+            resource: Default::default(),
             font: BitmapFont::load(assets, "asrafel")?,
             body: BitmapFont::load(assets, "verdana-12")?,
             courier: BitmapFont::load(assets, "courier-14")?,
@@ -218,6 +220,11 @@ impl Ui {
         });
         SHARED.with(|s| *s.borrow_mut() = Rc::downgrade(&ui));
         Ok(ui)
+    }
+    pub(crate) fn resource_id(&self) -> u64 { self.resource.id() }
+    /// The weak registry and all texture owners stay on the graphics thread.
+    pub(crate) fn resolve_resource(id: u64) -> Option<Rc<Self>> {
+        SHARED.with(|s| s.borrow().upgrade()).filter(|ui| ui.resource_id() == id)
     }
     pub fn panel(&self, r: Rect) {
         nine(&self.left, Rect::new(r.x, r.y, r.w * 0.5, r.h), 16.);

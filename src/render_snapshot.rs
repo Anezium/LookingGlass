@@ -15,6 +15,7 @@ impl Subtitle {
 }
 
 pub(crate) struct HudInput {
+    pub visit: u64,
     pub prompt: Option<String>,
     pub objective: Option<String>,
     pub help: bool,
@@ -30,6 +31,12 @@ pub(crate) struct HudInput {
     pub level: Vec<HudCommand>,
 }
 impl HudInput {
+    /// Reject the complete batch before drawing; fall back serially, never partly.
+    pub fn valid(&self) -> bool {
+        self.level.len() <= 16384 && self.bytes() <= 4 * 1024 * 1024
+            && self.level.iter().all(HudCommand::valid)
+    }
+
     /// Resident payload capacity, excluding allocator headers. HUD stats contain
     /// no collected/loot trees. Saves are deliberately outside this byte count.
     pub fn bytes(&self) -> usize {
@@ -48,18 +55,21 @@ pub(crate) enum Primitive {
     Rectangle(f32, f32, f32, f32, Color),
     Boss(String, f32),
 }
-/// Rc is a resident renderer resource handle. No controller is retained.
+/// Numeric resource identity only. Ui and all texture/font handles remain in
+/// the graphics owner registry; this command can cross the simulation boundary.
 pub(crate) struct HudCommand {
-    ui: std::rc::Rc<crate::ui::Ui>,
+    ui: u64,
     primitive: Primitive,
 }
 impl HudCommand {
+    pub fn valid(&self) -> bool { crate::ui::Ui::resolve_resource(self.ui).is_some() }
     pub fn draw(&self) {
+        let ui = crate::ui::Ui::resolve_resource(self.ui).expect("validated resident HUD resource");
         match &self.primitive {
-            Primitive::Dialog(r) => self.ui.dialog(*r),
-            Primitive::Label(t, x, y, size, color) => self.ui.label(t, *x, *y, *size, *color),
+            Primitive::Dialog(r) => ui.dialog(*r),
+            Primitive::Label(t, x, y, size, color) => ui.label(t, *x, *y, *size, *color),
             Primitive::Rectangle(x, y, w, h, c) => draw_rectangle(*x, *y, *w, *h, *c),
-            Primitive::Boss(t, remaining) => crate::hud::boss_meter(&self.ui, t, *remaining),
+            Primitive::Boss(t, remaining) => crate::hud::boss_meter(&ui, t, *remaining),
         }
     }
     fn text_capacity(&self) -> usize {
@@ -75,7 +85,7 @@ pub(crate) struct Painter<'a> {
 }
 impl<'a> Painter<'a> {
     pub fn new(ui: &'a std::rc::Rc<crate::ui::Ui>, out: &'a mut Vec<HudCommand>) -> Self { Self { ui, out } }
-    fn push(&mut self, primitive: Primitive) { self.out.push(HudCommand { ui: self.ui.clone(), primitive }); }
+    fn push(&mut self, primitive: Primitive) { self.out.push(HudCommand { ui: self.ui.resource_id(), primitive }); }
     pub fn dialog(&mut self, r: Rect) { self.push(Primitive::Dialog(r)); }
     pub fn label(&mut self, t: &str, x: f32, y: f32, size: f32, c: Color) { self.push(Primitive::Label(t.into(), x, y, size, c)); }
     pub fn rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, c: Color) { self.push(Primitive::Rectangle(x, y, w, h, c)); }
@@ -274,5 +284,16 @@ impl WaveInput {
                     crate::render_fx::legacy_line(position,position+vec3(a.cos(),a.sin(),((i%5) as f32-2.)*0.4)*r*0.5,color);}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hud_ownership_tests {
+    use super::*;
+    #[test]
+    fn hud_payload_is_send_and_stale_resources_are_rejected() {
+        fn assert_send<T: Send>() {} assert_send::<HudInput>(); assert_send::<HudCommand>();
+        assert!(!HudCommand { ui: 0, primitive: Primitive::Boss("test".into(), 0.5) }.valid());
+        assert!(!HudCommand { ui: u64::MAX, primitive: Primitive::Dialog(Rect::default()) }.valid());
     }
 }

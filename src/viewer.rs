@@ -4352,6 +4352,7 @@ interactions
         let extraction_start = snapshot_enabled.then(std::time::Instant::now);
         let snapshot_scope = snapshot_enabled.then(crate::kernel_alloc::Scope::begin);
         let hud_snapshot = snapshot_enabled.then(|| crate::render_snapshot::HudInput {
+            visit: level_art.snapshot_visit.id(),
             prompt: if !world_only && active { resolve_prompt!() } else { None },
             objective: if !world_only { resolve_objective!(get_time() < help_until) } else { None },
             help: get_time() < help_until,
@@ -4361,6 +4362,10 @@ interactions
             fades: resolve_fades!(), subtitle: story.subtitle_input(), skip: resolve_skip!(),
             level: { let mut commands = Vec::new(); level_art.hud_input(&interactions, &mut commands); commands },
         });
+        // Validate the entire HUD batch before drawing any command. A rejection
+        // retains the serial live fallback and fences this frame.
+        let hud_snapshot = hud_snapshot.filter(|s| s.visit == level_art.snapshot_visit.id()
+            && s.valid());
         let tail_snapshot = snapshot_enabled.then(|| crate::render_snapshot::TailInput {
             alive: stats.alive(), feet: player.feet,
             cinema: skip_id.is_some() || pand_cinematic || scripted_camera.is_some() || story.busy()
@@ -4425,6 +4430,34 @@ interactions
                 frame, selection.bytes(), selection.capacity_bytes(), us, allocations);
             selection
         });
+        let preview_capture = if saves_writable {
+            #[cfg(feature = "vita_renderer")]
+            let throttled = crate::render::vita_renderer::config().save_preview == "throttled";
+            #[cfg(not(feature = "vita_renderer"))]
+            let throttled = false;
+            #[cfg(target_os = "vita")]
+            let preview_mode = crate::frame_profile::mode();
+            #[cfg(not(target_os = "vita"))]
+            let preview_mode = crate::frame_profile::Mode::Full;
+            let required = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
+                || pending_menu_save.is_some() || pending_menu_newgame.is_some() || opening_escape_menu
+                || (!context_before.3 && paused) || (!context_before.0 && menu)
+                || (!context_before.1 && inventory_menu) || quit_after_frame;
+            preview_throttle.capture_requested(preview_mode, throttled, required)
+        } else { false };
+        let tail_save_fence = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
+            || pending_menu_save.is_some() || pending_menu_newgame.is_some();
+        #[cfg(target_os="vita")]
+        let tail_survey_fence = r13_survey.is_some();
+        #[cfg(not(target_os="vita"))]
+        let tail_survey_fence = false;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let tail_diagnostic_fence = crate::transition_memory::host_probe();
+        #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
+        let tail_diagnostic_fence = false;
+        let tail_terminal_fence = quit_after_frame || options.frames.is_some_and(|n| frame+1>=n);
+        let snapshot_tail_fenced = !snapshot_enabled || hud_snapshot.is_none() || tail_save_fence
+            || tail_survey_fence || tail_diagnostic_fence || tail_terminal_fence;
         let level_dispatch = snapshot_enabled.then(|| {
             let scope = crate::kernel_alloc::Scope::begin(); let start = std::time::Instant::now();
             let input = level_art.extract_dispatch(&interactions, &hints, &story);
@@ -4575,7 +4608,10 @@ interactions
         // qualify a schema; absent instances still leave dispatcher reads live.
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if snapshot_enabled && std::env::var_os("LOOKING_GLASS_SNAPSHOT_FENCE_CENSUS").is_some() {
-            let mut blockers = vec!["hud.resource_handles".to_owned(), "tail.unconditional".to_owned()];
+            let mut blockers = Vec::new();
+            if hud_snapshot.is_none() { blockers.push("hud.rejected".to_owned()); }
+            if tail_survey_fence { blockers.push("tail.survey".to_owned()); }
+            if tail_diagnostic_fence { blockers.push("tail.diagnostic".to_owned()); }
             if !level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)) {
                 blockers.push("level.dispatch.rejected".into());
             }
@@ -4604,7 +4640,7 @@ interactions
             let save = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
                 || pending_menu_save.is_some() || pending_menu_newgame.is_some();
             if save { blockers.push("tail.save_checkpoint".into()); }
-            if saves_writable { blockers.push("tail.preview_policy".into()); }
+
             if quit_after_frame || options.frames.is_some_and(|n|frame+1>=n) { blockers.push("tail.terminal".into()); }
             // Transition loading happens before extraction and is not a rendered tape frame.
             println!("SNAPSHOT_FENCE_CENSUS {}", serde_json::json!({
@@ -4904,29 +4940,13 @@ interactions
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         crate::spike_log::world_last_read();
-        // Every opt-in frame is fenced while any 3D art schema remains incomplete.
-        let snapshot_tail_fenced = true;
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.gl("present-queued"); }
-        if saves_writable {
-            #[cfg(feature = "vita_renderer")]
-            let throttled = crate::render::vita_renderer::config().save_preview == "throttled";
-            #[cfg(not(feature = "vita_renderer"))]
-            let throttled = false;
-            #[cfg(target_os = "vita")]
-            let preview_mode = crate::frame_profile::mode();
-            #[cfg(not(target_os = "vita"))]
-            let preview_mode = crate::frame_profile::Mode::Full;
-            let required = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
-                || pending_menu_save.is_some() || pending_menu_newgame.is_some() || opening_escape_menu
-                || (!context_before.3 && paused) || (!context_before.0 && menu)
-                || (!context_before.1 && inventory_menu) || quit_after_frame;
-            if preview_throttle.capture_requested(preview_mode, throttled, required) {
-                let _profile = crate::frame_profile::span("save_preview");
-                save_frame.update();
-            }
+        if preview_capture {
+            let _profile = crate::frame_profile::span("save_preview");
+            save_frame.update();
         }
         if freeze_capture { paused = pause_before_capture; clock.pause(); }
         if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
