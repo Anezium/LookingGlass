@@ -4414,6 +4414,11 @@ interactions
             let allocations=scope.finish();
             println!("[lg/snapshot-pickups] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,pickup_input.bytes(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(pickup_input.overflow()));
         }
+        if snapshot_enabled {
+            let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();
+            let (bytes,overflow)=steam.extract_render_input();let allocations=scope.finish();
+            println!("[lg/snapshot-particles] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
+        } else {steam.clear_render_input();}
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         if snapshot_enabled {
