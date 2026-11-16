@@ -3454,7 +3454,8 @@ impl Npcs {
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         let inputs = self.actor_inputs.as_ref().filter(|i| i.valid_for(&self.snapshot_registry));
-        for id in 0..self.actors.len() {
+        let draw_count = inputs.map_or_else(|| self.actors.len(), |_| self.snapshot_registry.slots.len());
+        for id in 0..draw_count {
             if let Some(input) = inputs.and_then(|i| i.ants.iter().find(|a| a.slot == id)) {
                 if !input.visible { continue; }
                 let (identity, model_slot) = self.snapshot_registry.slots[input.slot];
