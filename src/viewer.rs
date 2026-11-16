@@ -36,7 +36,10 @@ pub fn config() -> macroquad::conf::Conf {
     #[cfg(not(target_os = "vita"))]
     let (width, height, high_dpi) = (1200, 680, true);
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-    let (width, height, high_dpi) = if crate::sim_maps::probe::enabled() { probe_window_request() } else { (width, height, high_dpi) };
+    let (width, height, high_dpi) = if crate::sim_maps::probe::enabled()
+        || std::env::var_os("LOOKING_GLASS_TIMING_WINDOW").is_some() {
+        probe_window_request()
+    } else { (width, height, high_dpi) };
     macroquad::conf::Conf {
         miniquad_conf: Conf {
             window_title: "Looking Glass".into(),
@@ -793,7 +796,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     // Host fidelity captures keep the probe's 960x544 window, the Vita's screen, instead of
     // the saved display size. Opt-in, so other probe baselines keep their window.
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-    let keep_window = crate::sim_maps::probe::enabled() && std::env::var_os("LOOKING_GLASS_PROBE_KEEP_WINDOW").is_some();
+    let keep_window = (crate::sim_maps::probe::enabled() && std::env::var_os("LOOKING_GLASS_PROBE_KEEP_WINDOW").is_some())
+        || std::env::var_os("LOOKING_GLASS_TIMING_WINDOW").is_some();
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let keep_window = false;
     if !keep_window { preferences.display(); }
