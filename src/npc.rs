@@ -770,6 +770,10 @@ impl PuppetInput {
             + self.handoff.as_ref().map_or(0, |p| p.local.len()*std::mem::size_of::<Transform>())
     }
     pub(crate) fn bones(&self) -> usize { self.pose.len() }
+    pub(crate) fn with_attachments(mut self, value: bool) -> Self {
+        self.attachments = value;
+        self
+    }
 }
 impl Puppet {
     pub(crate) fn snapshot_bones(&self) -> usize { self.0.data.skeleton.bones.len() }

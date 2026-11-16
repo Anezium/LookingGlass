@@ -575,6 +575,8 @@ fn run() -> Result<()> {
             "--snapshot-hud-resource-check" => mode = "snapshot-hud-resource",
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             "--snapshot-potears2-render-check" => mode = "snapshot-potears2-render",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-encounters-render-check" => mode = "snapshot-encounters",
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             "--snapshot-cheshire-render-check" => mode = "snapshot-cheshire-render",
             "--snapshot-alice-render-check" => mode = "snapshot-alice-render",
@@ -1286,6 +1288,14 @@ fn run() -> Result<()> {
             }
         });
         return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    if mode == "snapshot-encounters" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e)=encounters::snapshot_render_check(&mut assets).await {
+                eprintln!("Snapshot encounters failed: {e:#}"); std::process::exit(1);
+            }
+        }); return Ok(());
     }
     #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
     if let Some(family)=mode.strip_prefix("snapshot-npc-") {

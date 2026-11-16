@@ -281,6 +281,11 @@ impl LevelArt {
             return LevelDispatch { visit: self.snapshot_visit.id(), selected: [false; 10],
                 registered: Vec::new(), school_staging: false, cheshire: None, overflow: true };
         }
+        match (&mut self.encounters, &i.encounters) {
+            (Some(a), Some(s)) => a.extract_snapshot(s),
+            (Some(a), None) => a.clear_snapshot(),
+            _ => {}
+        }
         for (art, slot) in self.levels.iter_mut().zip(&i.levels) {
             if let Some(a)=art { a.extract_snapshot(&*slot.ctl,story); }
         }
@@ -379,9 +384,11 @@ impl LevelArt {
         }
         }
         if selected[9] { if let (Some(a), Some(s)) = (&mut self.encounters, &i.encounters) {
-            a.school_staging = dispatch.map_or_else(|| i.school.as_ref()
-                .is_some_and(|s| s.scene_id() == Some(crate::school::cinema::THEATRE)), |d| d.school_staging);
-            a.draw(s, fullbright, atmosphere, camera);
+            if dispatch.is_none() || !a.draw_snapshot(fullbright, atmosphere, camera) {
+                a.school_staging = dispatch.map_or_else(|| i.school.as_ref()
+                    .is_some_and(|s| s.scene_id() == Some(crate::school::cinema::THEATRE)), |d| d.school_staging);
+                a.draw(s, fullbright, atmosphere, camera);
+            }
         }
         }
         if let Some(command) = dispatch {
@@ -4485,7 +4492,8 @@ interactions
         let tail_terminal_fence = quit_after_frame || options.frames.is_some_and(|n| frame+1>=n);
         let snapshot_tail_fenced = !snapshot_enabled || hud_snapshot.is_none() || tail_save_fence
             || tail_survey_fence || tail_diagnostic_fence || tail_terminal_fence;
-        if !snapshot_enabled {for art in level_art.levels.iter_mut().flatten() {art.clear_snapshot();}}
+        if !snapshot_enabled {for art in level_art.levels.iter_mut().flatten() {art.clear_snapshot();}
+            if let Some(a)=&mut level_art.encounters {a.clear_snapshot();}}
         let mut snapshot_rejected=false;
         let level_dispatch = snapshot_enabled.then(|| {
             let scope = crate::kernel_alloc::Scope::begin(); let start = std::time::Instant::now();
@@ -4494,7 +4502,8 @@ interactions
             println!("[lg/snapshot-dispatch] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",
                 frame, std::mem::size_of::<LevelDispatch>() + input.registered.capacity()
                     + level_art.levels.iter().flatten().map(|a|a.snapshot_bytes()).sum::<usize>()
-                    + input.cheshire.as_ref().map_or(0, |i| i.bytes()),
+                    + input.cheshire.as_ref().map_or(0, |i| i.bytes())
+                    + level_art.encounters.as_ref().map_or(0,|a|a.snapshot_bytes()),
                 start.elapsed().as_secs_f64()*1_000_000., allocations, u8::from(input.overflow));
             input
         });
@@ -4612,7 +4621,7 @@ interactions
             art(level_art.school2.is_some(), "school2");
             art(level_art.duchess.is_some(), "duchess");
             art(level_art.pandemonium.is_some(), "pandemonium");
-            art(level_art.encounters.is_some(), "encounters");
+            art(level_art.encounters.as_ref().is_some_and(|a| !a.snapshot_ready()), "encounters");
             let registered: Vec<_> = level_art.levels.iter().zip(&interactions.levels)
                 .filter_map(|(a,s)| a.as_ref().map(|a| (s.reg.id, a.snapshot_effects_empty(), a.snapshot_ready()))).collect();
             for (id, empty, ready) in &registered {
