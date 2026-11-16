@@ -23,7 +23,7 @@ os.close(fd)
 try:
     assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()==head
     env=dict(os.environ,CARGO_TARGET_DIR=str(TARGET),RUSTFLAGS='--cfg observer_free_B',CARGO_BUILD_JOBS='4')
-    cmd=['cargo','+nightly-2026-10-11','build','--offline','--locked','--release','--features','native_timing,frame_total_only,sim_maps_probe']
+    cmd=['/Users/anezium/.cargo/bin/cargo','+nightly-2026-10-11','build','--offline','--locked','--release','--features','native_timing,frame_total_only,sim_maps_probe']
     with (OUT/'build-host.log').open('w') as log:
         result=subprocess.run(cmd,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT)
     assert result.returncode==0, 'build failed; see build-host.log'
