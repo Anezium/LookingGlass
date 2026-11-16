@@ -683,7 +683,7 @@ impl Art {
     fn publish_input(&mut self, fullbright: bool, atmosphere: &crate::environment::Atmosphere, camera: Vec3) -> bool {
         let Some(input) = &self.snapshot_input else { return false; };
         if input.generation != self.snapshot_visit.id()
-            || input.props.iter().any(|p| p.slot>=self.snapshot_props.len()) || input.cinema.overflow { return false; }
+            || input.props.iter().any(|p| p.slot>=self.snapshot_props.len()) || !self.cinema.valid_input(&input.cinema) { return false; }
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for p in &input.props {

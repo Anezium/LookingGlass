@@ -1004,6 +1004,13 @@ impl Art {
         Input { commands, overflow }
     }
 
+    pub(crate) fn valid_input(&self, input: &Input) -> bool {
+        !input.overflow && input.commands.len() <= 16384 && input.commands.iter().all(|command| match command {
+            Command::Puppet(slot, p) => *slot < 4 && self.puppet(*slot).valid_input(p),
+            Command::Leaf(_, _, Some(p)) => self.turtle.valid_input(p),
+            _ => true,
+        })
+    }
     pub(crate) fn draw_input(&mut self, input: &Input,
         atmosphere: &crate::environment::Atmosphere, camera: Vec3, bright: bool) {
         for p in [&mut self.alice, &mut self.turtle, &mut self.rabbit, &mut self.ant] {

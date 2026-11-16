@@ -365,6 +365,25 @@ pub async fn snapshot_handoff_check(assets: &mut Assets) -> Result<()> {
                 last_control = art.cinema.alice.handoff_pose().cloned();
                 let (_, overflow) = art.extract(i.pool.as_ref().unwrap());
                 ensure!(!overflow, "Control exceeded Pool input limits");
+                // Rejection is whole-batch and happens before any GPU publication.
+                let generation = art.snapshot_input.as_ref().unwrap().generation;
+                art.snapshot_input.as_mut().unwrap().generation = 0;
+                ensure!(!art.publish_input(false, &scene.atmosphere, camera.eye), "Stale Pool registry accepted");
+                art.snapshot_input.as_mut().unwrap().generation = generation;
+                if let Some(slot) = art.snapshot_input.as_ref().unwrap().props.first().map(|p| p.slot) {
+                    art.snapshot_input.as_mut().unwrap().props[0].slot = usize::MAX;
+                    ensure!(!art.publish_input(false, &scene.atmosphere, camera.eye), "Invalid prop slot accepted");
+                    art.snapshot_input.as_mut().unwrap().props[0].slot = slot;
+                }
+                let command_slot = art.snapshot_input.as_ref().unwrap().cinema.commands.iter().position(|c|
+                    matches!(c, cinema::Command::Puppet(_, _)));
+                if let Some(index) = command_slot {
+                    let cinema::Command::Puppet(slot, _) = &mut art.snapshot_input.as_mut().unwrap().cinema.commands[index] else { unreachable!() };
+                    let original = *slot; *slot = usize::MAX;
+                    ensure!(!art.publish_input(false, &scene.atmosphere, camera.eye), "Invalid Puppet slot accepted");
+                    let cinema::Command::Puppet(slot, _) = &mut art.snapshot_input.as_mut().unwrap().cinema.commands[index] else { unreachable!() };
+                    *slot = original;
+                }
                 returns.expect(&visit, 4, frame as u64);
                 handoff_render_begin(&visit, frame as u64);
                 art.draw(i.pool.as_ref().unwrap(), false, &scene.atmosphere, camera.eye);

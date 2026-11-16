@@ -787,6 +787,11 @@ impl Puppet {
             time, alive: !clip.starts_with("death"), transform, scale,
             attachments: self.1, frozen: clip == "death_frozen" }
     }
+    pub(crate) fn valid_input(&self, input: &PuppetInput) -> bool {
+        input.pose.len() == self.0.data.skeleton.bones.len()
+            && (input.scales.is_empty() || input.scales.len() == input.pose.len())
+            && input.handoff.as_ref().is_none_or(|p| p.local.len() == input.pose.len())
+    }
     pub(crate) fn draw_input(&mut self, input: &PuppetInput, fullbright: bool) {
         if let (Some(dst), Some(src)) = (&mut self.4, &input.handoff) {
             dst.clone_from(src); dst.rendered = crate::render_snapshot::handoff_render_stamp();
