@@ -651,10 +651,12 @@ impl Store {
                 crate::phase_census::skin(actor,mesh.vertices.len(),0);
                 let vertices = self.output_len..self.output_len+mesh.vertices.len();
                 self.output_len = vertices.end;
+                let reuse_output=crate::render::vita_renderer::config().actor_skin_output_reuse
+                    && crate::render_fx::actor_publication::reusable_output(output);
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                if reuse_output {crate::sim_maps::count("skin_output_reused_vertices",mesh.vertices.len() as u64);}
                 i.surfaces.push(Surface { mesh:mesh_id, vertices, cpu:surface.cpu(),
-                    revision:Revision {identity:0,vertices:[0;2]}, output, mode,
-                    reuse_output: crate::render::vita_renderer::config().actor_skin_output_reuse
-                        && crate::render_fx::actor_publication::reusable_output(output),
+                    revision:Revision {identity:0,vertices:[0;2]}, output, mode, reuse_output,
                     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))] oracle });
                 #[cfg(feature="actor_diagnostics")]
                 crate::render_fx::retained::count("actor_direct_surfaces",1);
