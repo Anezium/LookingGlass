@@ -418,6 +418,8 @@ impl Snark {
         };
         let delta = aim - body.center;
         let distance = delta.length();
+        tally!("snark_sight_notarget", u64::from(notarget));
+        tally!("snark_sight_far", u64::from(distance >= 1000.));
         // `visible` reads only these predicates. With the switch on, the two cheap
         // tests run first and the blocked traversal answers the segment without a
         // fraction or normal; with it off this is the unchanged trace and test.
@@ -426,7 +428,7 @@ impl Snark {
                 span!("snark_los_ns");
                 tally!("snark_los_sweeps", 1);
                 tally!("snark_los_blocked_path", 1);
-                !world.sweep_blocked(body.center, aim, Vec3::splat(0.5))
+                !world.sight_blocked(body.center, aim, Vec3::splat(0.5))
             }
         } else {
             let trace = {

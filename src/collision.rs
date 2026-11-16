@@ -1266,10 +1266,17 @@ impl World {
     /// fraction is never NaN (`clip_hull` stores only finite values), so `fraction < 1` and
     /// `!(fraction >= 1)` are the same test.
     pub(crate) fn sweep_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
+        self.sweep_blocked_with(start, end, half, false)
+    }
+    /// The same predicate for a call site that reads only this boolean, selectable on
+    /// its own switch. Used by the Snark sight arm, so that arm does not widen any
+    /// other caller's path.
+    pub(crate) fn sight_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
+        self.sweep_blocked_with(start, end, half, true)
+    }
+    fn sweep_blocked_with(&self, start: Vec3, end: Vec3, half: Vec3, force: bool) -> bool {
         let full = |t: Trace| t.start_solid || t.fraction < 1.;
-        if !crate::sim_maps::sweep_blocked() && !crate::sim_maps::sweep_any()
-            && !crate::sim_maps::snark_sight_blocked()
-        {
+        if !force && !crate::sim_maps::sweep_blocked() && !crate::sim_maps::sweep_any() {
             return full(self.sweep(start, end, half));
         }
         let _census = crate::phase_census::query_sweep(self,start,end,half,1,None);
