@@ -315,7 +315,8 @@ pub(crate) fn test_errors() -> u64 { STATE.with(|s| s.borrow().errors) }
 mod tests {
     use super::*;
     fn field(text: &str, name: &str) -> f64 {
-        text.split_whitespace()
+        text.replace(',', " ")
+            .split_whitespace()
             .map(|f| f.strip_prefix("leaf=").or_else(|| f.strip_prefix("counter=")).unwrap_or(f))
             .find(|f| f.starts_with(&format!("{name}=")))
             .unwrap_or_else(|| panic!("{name} in {text}"))
