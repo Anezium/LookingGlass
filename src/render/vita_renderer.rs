@@ -4558,7 +4558,7 @@ mod tests {
         };
         // The RC13 packages add only their replay keys to the RC13 release.
         check_package("PL-rc13-release-play04.json", include_bytes!("../../configs/PL-rc13-release-play04.json"), None, &defaults, &rc13_baseline);
-        check_package("PL-rc13-wchess1.json", include_bytes!("../../configs/PL-rc13-wchess1.json"), Some("wchess1"), &defaults, &baseline);
+        check_package("PL-rc13-wchess1.json", include_bytes!("../../configs/PL-rc13-wchess1.json"), Some("wchess1"), &defaults, &rc13_baseline);
         // The RC12 packages keep their frozen bytes and add only their replay keys
         // to the frozen RC12 release.
         check_package("PL-rc12-release-play04.json", include_bytes!("../../configs/PL-rc12-release-play04.json"), None, &defaults, &rc12);
