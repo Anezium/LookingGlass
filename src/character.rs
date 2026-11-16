@@ -522,7 +522,6 @@ impl Animator {
 
 /// Single renderer resource slot, qualified by the Character lifetime/restore generation.
 /// No controller, texture, mesh or pointer is carried by this input.
-#[derive(Default)]
 struct BodyInput {
     visit: u64,
     pose: Vec<Transform>,
@@ -537,6 +536,13 @@ struct BodyInput {
     held: crate::weapons::HeldInput,
     show_held: bool,
     attachments: Vec<(usize, usize, f32, f32)>,
+}
+impl Default for BodyInput {
+    fn default() -> Self {
+        Self { visit:0, pose:Vec::new(), transform:Transform {translation:Vec3::ZERO,rotation:Quat::IDENTITY},
+            scale:1., face_time:0., alive:true, water_time:0., water:(false,None), power:Default::default(), frozen:false,
+            held:Default::default(), show_held:false, attachments:Vec::new() }
+    }
 }
 impl BodyInput {
     fn valid(&self, visit: u64, bones: usize) -> bool {
