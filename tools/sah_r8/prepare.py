@@ -4,6 +4,7 @@ R=Path(__file__).resolve().parents[2];T=R/'tools/sah_r8';O=Path(sys.argv[1]).res
 for d in ['console','scripts','configs','proof']:(O/d).mkdir(parents=True,exist_ok=True)
 for f in (T/'console').glob('*.py'):shutil.copy2(f,O/'console'/f.name)
 for f in T.glob('*.py'):shutil.copy2(f,O/'scripts'/f.name)
+shutil.copy2(R/'tools/report_files.py',O/'scripts/report_files.py')
 for n in ['vita-sim-all.json','native-timing-disabled.json','profile_mode-full.txt','profile_mode-fullbench.txt']:shutil.copy2(R/'tools/lever_matrix_r4/configs'/n,O/'configs'/n)
 base=json.loads((R/'tools/lever_matrix_r4/configs/PL-baseline.json').read_text());base.update(collision_sah=False,audio_static_cache=False,phase_census=False)
 for arm,sah,census in [('baseline',False,False),('sah',True,False),('baseline-census',False,True),('sah-census',True,True)]:

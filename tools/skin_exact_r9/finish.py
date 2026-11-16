@@ -19,6 +19,7 @@ if a.manifest_only:
  raise SystemExit(0)
 
 for f in T.glob('*.py'):shutil.copy2(f,O/'scripts'/f.name)
+shutil.copy2(R/'tools/report_files.py',O/'scripts/report_files.py')
 head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip();build=json.loads((O/'proof/BUILD-COMMAND.json').read_text())
 write(O/'PACKAGE-IDENTITY.json',dict(package='alice-skin-exact-r9',engine_source_revision=build['revision'],branch='vita-skin-exact-r9-20261024',branch_head=head))
 write(O/'proof/SOURCE-IDENTITY.json',dict(engine_revision=build['revision'],tooling_head=head,files={str(f.relative_to(R)):sha(f) for f in sorted((R/'src').rglob('*.rs'))}))

@@ -7,6 +7,7 @@ R=Path('/Users/anezium/vita-work/lg-phase-census-r5');T=R/'tools/phase_census_r5
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 # Keep reproducibility code outside the repository alongside the sealed artifacts.
 for f in T.glob('*.py'):shutil.copy2(f,O/'scripts'/f.name)
+shutil.copy2(R/'tools/report_files.py',O/'scripts/report_files.py')
 for n in ['README.md','DESIGN.md','CONSOLE-BRIEF.md']:shutil.copy2(T/n,O/n)
 source={'revision':json.loads((O/'proof/BUILD-COMMAND.json').read_text())['revision'],'tooling_head_at_seal':subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip(),'r4_base':'81f3d1eb1fe4303ff955afee491ef10a7ceecb2a','files':{str(f.relative_to(R)):sha(f) for f in sorted((R/'src').rglob('*.rs'))},'host_binary_sha256':json.loads((O/'proof/HOST-RENDER.json').read_text())['binary_sha256'],'host_build_log':'logs/host-sealed-build.log'}
 branch=subprocess.check_output(['git','branch','--show-current'],cwd=R,text=True).strip()

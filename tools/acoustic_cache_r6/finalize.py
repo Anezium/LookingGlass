@@ -22,6 +22,7 @@ if args.manifest_only:
  print('Verified ZIP and refreshed manifest:',len(manifest),'files')
  sys.exit(0)
 for f in T.glob('*.py'):shutil.copy2(f,O/'scripts'/f.name)
+shutil.copy2(R/'tools/report_files.py',O/'scripts/report_files.py')
 for n in ['README.md','DESIGN.md']:shutil.copy2(T/n,O/n)
 receipt=json.loads((O/'proof/BUILD-COMMAND.json').read_text());head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip()
 write(O/'PACKAGE-IDENTITY.json',dict(package='alice-acoustic-cache-r6',engine_source_revision=receipt['revision'],branch='vita-acoustic-cache-r6-20261024',branch_head=head))
