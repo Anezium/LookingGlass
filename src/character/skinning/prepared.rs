@@ -130,15 +130,22 @@ pub(crate) fn sample(
 ) -> Vec<Transform> {
     let _census=crate::phase_census::span(crate::phase_census::Region::ActorPose);
     if !overlap::gathering() && !overlap::ready() {
+        let _value = crate::gather_census::span(crate::gather_census::Leaf::PoseEval);
+        crate::gather_census::count(crate::gather_census::Counter::SampleEvaluations);
         return prepare();
     }
     SAMPLES.with(|c| {
         let mut c = c.borrow_mut();
         let key = (clip, time.to_bits(), looping);
         if let Some(entry) = c.entries[..c.count].iter().find(|e| e.key == key) {
+            crate::gather_census::count(crate::gather_census::Counter::SampleHits);
             return entry.values.clone();
         }
-        let values = prepare();
+        let values = {
+            let _value = crate::gather_census::span(crate::gather_census::Leaf::PoseEval);
+            crate::gather_census::count(crate::gather_census::Counter::SampleEvaluations);
+            prepare()
+        };
         if overlap::gathering() && c.count < LIMIT {
             let index = c.count;
             c.count += 1;
@@ -161,14 +168,18 @@ pub(crate) fn pose(
 ) -> PoseHandle {
     let _census=crate::phase_census::span(crate::phase_census::Region::ActorPose);
     if !overlap::gathering() && !overlap::ready() {
+        let _value = crate::gather_census::span(crate::gather_census::Leaf::PoseEval);
+        crate::gather_census::count(crate::gather_census::Counter::PoseEvaluations);
         let (pose, scales) = prepare();
+        crate::gather_census::count_n(crate::gather_census::Counter::BonesEvaluated, pose.len() as u64);
         return PoseHandle::Owned(Pose {
             pose,
             scales,
             ..Default::default()
         });
     }
-    PoseHandle::Shared(POSES.with(|c| {
+    let filled = std::cell::Cell::new(false);
+    let prepared = POSES.with(|c| {
         c.borrow_mut().get(
             |v| {
                 v.key == key
@@ -181,6 +192,8 @@ pub(crate) fn pose(
                         .all(|(a, b)| a.0 == b.0 && a.1.to_bits() == b.1.to_bits())
             },
             |v| {
+                let _value = crate::gather_census::span(crate::gather_census::Leaf::PoseEval);
+                filled.set(true);
                 v.key = key;
                 v.mouth = mouth.to_bits();
                 v.local.clear();
@@ -188,9 +201,13 @@ pub(crate) fn pose(
                 v.roots.clear();
                 v.roots.extend_from_slice(roots);
                 (v.pose, v.scales) = prepare();
+                crate::gather_census::count(crate::gather_census::Counter::PoseEvaluations);
+                crate::gather_census::count_n(crate::gather_census::Counter::BonesEvaluated, v.pose.len() as u64);
             },
         )
-    }))
+    });
+    if !filled.get() { crate::gather_census::count(crate::gather_census::Counter::PoseHits); }
+    PoseHandle::Shared(prepared)
 }
 pub(super) fn palette<R>(
     pose: &[Transform],

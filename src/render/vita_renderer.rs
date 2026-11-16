@@ -229,6 +229,9 @@ pub struct Config {
     pub frame_phase_probe: bool,
     /// Fixed-storage elapsed census; opt in only for a bounded benchmark.
     pub phase_census: bool,
+    /// Actor-gather leaf census: one `[lg/spike] gather` mean line over the spike window.
+    /// Default off; diagnostic, never a release setting.
+    pub gather_census: bool,
     /// Select mutable skin from actual frame consumers; keep inherited visual policy.
     pub skin_actual_consumers: bool,
     pub mover_far_lazy: bool,
@@ -579,6 +582,7 @@ impl Default for Config {
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             phase_census: false,
+            gather_census: false,
             skin_actual_consumers: true,
             mover_far_lazy: true,
             mover_lazy_publish: true,

@@ -215,6 +215,9 @@ pub(crate) fn begin_frame() {
                 log_ms = now.elapsed().as_secs_f64() * 1000.;
             }
         }
+        crate::gather_census::frame_closed(f.number, |line| {
+            OUT.with(|o| o.borrow_mut().push(|text| text.push_str(line)));
+        });
         let number = f.number + 1;
         let mark = f.gxm_mark;
         *f = Frame { number, begin: Some(now), block: Some((Sim::Input as usize, now)), gxm_start: mark,

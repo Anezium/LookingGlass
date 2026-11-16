@@ -1277,6 +1277,7 @@ impl Model {
         }
         drop(_leaf);
         let _attachments=crate::phase_census::span(crate::phase_census::Region::ActorAttachments);
+        crate::gather_census::count(crate::gather_census::Counter::Attachments);
         let tag_pose = |bone: usize| Transform {
             translation: transform.point(pose[bone].translation * d.def.scale * scale),
             rotation: transform.rotation * pose[bone].rotation,
@@ -1729,6 +1730,36 @@ struct Actor {
     falling: f32,
 }
 impl Actor {
+    /// Diagnostic controller kind for the gather census, matching the update loop's
+    /// derivation. Read-only: it never changes visibility, order or state.
+    fn gather_kind(&self) -> usize {
+        use crate::npc::profile::Kind;
+        let kind = if let Some(p) = &self.resident {
+            match &p.body {
+                resident::Body::Wildlife(_) => Kind::Wildlife,
+                resident::Body::Plant(_) => Kind::Plant,
+                resident::Body::Card(_) => Kind::Card,
+                resident::Body::Snark(_) => Kind::Snark,
+                resident::Body::Insect(_) => Kind::Insect,
+                resident::Body::Magma(_) => Kind::Magma,
+                resident::Body::Diamond(_) => Kind::Diamond,
+                resident::Body::Boojum(_) => Kind::Boojum,
+                resident::Body::Ladybug(_) => Kind::Ladybug,
+            }
+        } else if self.clock.is_some() { Kind::Clockwork }
+        else if self.imp.is_some() { Kind::FireImp }
+        else if let Some(p) = &self.chess {
+            match p.kind {
+                crate::chess::Kind::Pawn => Kind::Pawn,
+                crate::chess::Kind::Knight => Kind::Knight,
+                crate::chess::Kind::Bishop => Kind::Bishop,
+                crate::chess::Kind::Rook => Kind::Rook,
+            }
+        } else if self.ant.is_some() { Kind::Ant }
+        else if self.guard.is_some() { Kind::Guard }
+        else { Kind::Ambient };
+        kind as usize
+    }
     /// The bounds `Npcs::restore` enforces on every saved actor.
     fn validate_save(&self) -> Result<()> {
         ensure!(
@@ -3388,6 +3419,8 @@ impl Npcs {
             {
                 continue;
             }
+            let _gather_kind = crate::gather_census::active()
+                .then(|| crate::gather_census::kind(actor.gather_kind()));
             if !crate::character::skinning::overlap::gather_only() {
             if let Some(p) = &actor.resident {
                 if let resident::Body::Card(g) = &p.body {

@@ -172,6 +172,7 @@ pub(crate) fn release_serial_fallback(
     meshes: &mut [Option<Mesh>],
     current: &OwnedSkin,
 ) -> bool {
+    let _fallback = crate::gather_census::span(crate::gather_census::Leaf::SerialFallback);
     let gathered = restore_serial_live(skeleton, meshes);
     let restored = if gathered {
         true
@@ -180,6 +181,9 @@ pub(crate) fn release_serial_fallback(
             current.transform, current.scale, current.fullbright, current.alpha)
     };
     let count = note_serial_fallback();
+    crate::gather_census::count(crate::gather_census::Counter::SerialFallbacks);
+    crate::gather_census::count_n(crate::gather_census::Counter::SerialSurfaces,
+        skeleton.surfaces.len() as u64);
     let source = if gathered { "gathered_draw" } else { "current_pose" };
     eprintln!("[lg/skin] serial fallback count={count} restored={restored} source={source} reason=live skin read without a consumer declaration before body preparation");
     restored
@@ -593,6 +597,8 @@ impl Store {
         crate::frame_profile::skinned_draw(!visible);
 
         let actor=super::identity::current();
+        crate::gather_census::count(if visible { crate::gather_census::Counter::ActorsDrawn }
+            else { crate::gather_census::Counter::ActorsCulled });
         if !visible {
             // The consumer key culled a body whose availability guard kept it prepared in
             // OFF. Charge OFF's reservation here, in the same position, before any later
@@ -637,6 +643,7 @@ impl Store {
                 let unchanged=previous.is_some_and(|(old,d)|same_surface_inputs(surface,old,d,p));
                 let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
                 let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorDirect);
+                let _prepare = crate::gather_census::span(crate::gather_census::Leaf::SkinPrepare);
                 crate::render_fx::actor_publication::prepare(mesh, surface.cpu(), unchanged, instance,
                     crate::render_fx::actor_publication::Key {actor:actor.unwrap(),surface:Arc::as_ptr(&surface.cpu()) as usize,occurrence:0})
             } else { None };
@@ -658,6 +665,8 @@ impl Store {
                 if reasons==0 {reasons=crate::phase_census::PUBLICATION;}
                 crate::phase_census::skin(actor,mesh.vertices.len(),reasons);
                 { let _census=crate::phase_census::span(crate::phase_census::Region::ActorSerial);
+                  let _serial=crate::gather_census::span(crate::gather_census::Leaf::SerialSkin);
+                  crate::gather_census::count_n(crate::gather_census::Counter::SerialSurfaces,1);
                   super::kernel(&mut super::Job { input:&surface.vertices, vertices:&mut mesh.vertices, indices:&mesh.indices },p); }
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 crate::sim_maps::probe::record_skin(oracle,&mesh.vertices,&mesh.indices);
@@ -669,8 +678,11 @@ impl Store {
                 #[cfg(feature="actor_diagnostics")]
                 crate::render_fx::retained::count("actor_mutable_consumer_surfaces",1);
             }
+            crate::gather_census::count_n(crate::gather_census::Counter::SurfacesSkinned,1);
+            crate::gather_census::count_n(crate::gather_census::Counter::VerticesSkinned,mesh.vertices.len() as u64);
         }
         if i.surfaces.len() > start {
+            crate::gather_census::count_n(crate::gather_census::Counter::BonesCaptured,p.pose.len() as u64);
             let d = Draw { instance, actor, key:skeleton as *const Skeleton as usize,
                 pose:i.pose.len()..i.pose.len()+p.pose.len(), scales:i.scales.len()..i.scales.len()+p.scales.len(),
                 palette:i.palette.len()..i.palette.len()+p.palette.len(), surfaces:start..i.surfaces.len(),
@@ -721,6 +733,7 @@ impl Store {
             }
             started += 1;
         }
+        crate::gather_census::count_n(crate::gather_census::Counter::LaneJobs, started as u64);
     }
     fn dispatch(&mut self) {
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorWorkerDispatch);
@@ -775,6 +788,7 @@ impl Store {
             }
             self.pending += 1;
         }
+        crate::gather_census::count_n(crate::gather_census::Counter::LaneJobs, self.pending as u64);
     }
     fn drain(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
         let start = MetricInstant::now();
@@ -972,10 +986,19 @@ impl Frame {
     pub(crate) fn begin() -> Self {
         let gather_start = MetricInstant::now();
         #[cfg(feature="vita_renderer")]
-        crate::render_fx::actor_publication::begin();
+        {
+            let _census = crate::gather_census::span(crate::gather_census::Leaf::FrameBeginPublication);
+            crate::render_fx::actor_publication::begin();
+        }
         assert!(PHASE.with(|p| p.get() == Phase::Idle));
-        STORE.with(|s| s.borrow_mut().as_mut().expect("overlap startup").reset());
-        super::prepared::begin();
+        {
+            let _census = crate::gather_census::span(crate::gather_census::Leaf::FrameBeginReset);
+            STORE.with(|s| s.borrow_mut().as_mut().expect("overlap startup").reset());
+        }
+        {
+            let _census = crate::gather_census::span(crate::gather_census::Leaf::FrameBeginPrepared);
+            super::prepared::begin();
+        }
         PHASE.with(|p| p.set(Phase::Gather));
         #[cfg(feature="vita_renderer")]
         if single_frame() && stream_enabled() { STORE.with(|s| s.borrow_mut().as_mut().unwrap().begin_stream()); }
@@ -1000,9 +1023,15 @@ impl Frame {
     pub(crate) fn dispatch(&mut self) {
         assert!(gathering());
         #[cfg(feature="vita_renderer")]
-        if single_frame() { crate::render_fx::actor_publication::hold(); }
+        {
+            let _census = crate::gather_census::span(crate::gather_census::Leaf::DispatchHold);
+            if single_frame() { crate::render_fx::actor_publication::hold(); }
+        }
         self.gather_us = self.gather_start.elapsed().as_micros() as u64;
-        STORE.with(|s| s.borrow_mut().as_mut().unwrap().dispatch());
+        {
+            let _census = crate::gather_census::span(crate::gather_census::Leaf::DispatchLanes);
+            STORE.with(|s| s.borrow_mut().as_mut().unwrap().dispatch());
+        }
         crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
             crate::light_profile::RenderMetrics { cpu_ns: self.gather_start.elapsed().as_nanos() as u64, ..Default::default() });
         PHASE.with(|p| p.set(Phase::Running));

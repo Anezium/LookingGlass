@@ -458,6 +458,7 @@ pub(crate) fn overlay_call() {
     if active() {STATE.with(|s| {let mut s=s.borrow_mut();
         if s.stack[..s.depth].contains(&(Region::ActorGather as usize)) {s.current.counters[7]+=1;}
     });}
+    crate::gather_census::count(crate::gather_census::Counter::Overlays);
 }
 pub(crate) fn count(index:usize,value:u64) {
     if active() { STATE.with(|s|s.borrow_mut().current.counters[index]+=value); }

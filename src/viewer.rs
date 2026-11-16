@@ -4162,11 +4162,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             let gather_clock = crate::pass_clock::scope(crate::pass_clock::ACTOR_GATHER);
             let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherStoryPose);
+            let gather_story = crate::gather_census::span(crate::gather_census::Leaf::StoryPose);
             level_art.story_pose(&story);
+            drop(gather_story);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherFrameBegin);
+            let gather_begin = crate::gather_census::span(crate::gather_census::Leaf::FrameBegin);
             crate::audio::game_stage(3);
             let mut frame = crate::character::skinning::overlap::Frame::begin();
+            drop(gather_begin);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherAlice);
+            let gather_alice = crate::gather_census::span(crate::gather_census::Leaf::AliceTraversal);
             if crate::character::skinning::overlap::single_frame() {
                 if draw_world && show_alice && stats.invisible <= 0. { crate::lighting::shadow(&scene.world, player.feet, 22.); }
                 alice.atmosphere(&scene.atmosphere, camera);
@@ -4174,12 +4179,19 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic()) {
                 alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
             }
+            drop(gather_alice);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherNpcs);
+            let gather_npcs = crate::gather_census::span(crate::gather_census::Leaf::NpcTraversal);
             npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
+            drop(gather_npcs);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherLevelArt);
+            let gather_art = crate::gather_census::span(crate::gather_census::Leaf::LevelArt);
             level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+            drop(gather_art);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherDispatch);
+            let gather_dispatch = crate::gather_census::span(crate::gather_census::Leaf::Dispatch);
             frame.dispatch();
+            drop(gather_dispatch);
             drop(census_leaf);
             drop(gather_clock);
             crate::audio::game_stage(0);

@@ -15,6 +15,7 @@ fn palette_bone(bone: &Transform, scale: f32) -> (Mat3, Vec3) {
 }
 fn fill_palette(output: &mut Vec<(Mat3, Vec3)>, pose: &[Transform], scales: &[f32]) {
     let _census=crate::phase_census::span(crate::phase_census::Region::ActorScalesPalette);
+    let _gather=crate::gather_census::span(crate::gather_census::Leaf::Palette);
     output.clear();
     output.extend(pose.iter().enumerate().map(|(i, bone)| {
         palette_bone(bone, scales.get(i).copied().unwrap_or(1.))

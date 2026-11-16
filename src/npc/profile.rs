@@ -39,6 +39,12 @@ pub(crate) enum Phase {
     Animation,
     Combat,
 }
+/// Number of controller kinds, for fixed-size diagnostic tables.
+pub(crate) const KIND_COUNT: usize = LABELS.len();
+/// The spike label of a controller kind, without the `npc_` prefix.
+pub(crate) fn name(kind: usize) -> &'static str {
+    LABELS.get(kind).map_or("unknown", |row| &row.0["npc_".len()..])
+}
 
 /// World-local query counts, enabled only while that world serves an NPC update.
 /// Static hull visits are accumulated by the existing traversal, not per-hull calls.
