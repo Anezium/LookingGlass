@@ -561,6 +561,7 @@ fn run() -> Result<()> {
             "--potears1-skip-route-check" => mode = "potears1-skip-route",
             "--potears1-render-check" => mode = "potears1-render",
             "--pool-render-check" => mode = "pool-render",
+            "--snapshot-handoff-render-check" => mode = "snapshot-handoff-render",
             "--beyond-render-check" => mode = "beyond-render",
             "--village-route-check" => mode = "village-route",
             "--village-cinematic-check" => mode = "village-cinematic",
@@ -1264,6 +1265,15 @@ fn run() -> Result<()> {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = beyond_render::check(&mut assets).await {
                 eprintln!("Beyond render failed: {e:#}");
+                std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
+    if mode == "snapshot-handoff-render" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = pool::cinema_check::snapshot_handoff_check(&mut assets).await {
+                eprintln!("Snapshot handoff check failed: {e:#}");
                 std::process::exit(1);
             }
         });

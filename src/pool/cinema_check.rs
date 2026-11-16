@@ -304,3 +304,90 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
     }
     Ok(())
 }
+
+/// Real scene/controller/asset control for the owned render return transaction.
+/// This intentionally samples only selected rendered frames, so a scene ending
+/// between samples must resume from the last draw rather than its current clock.
+pub async fn snapshot_handoff_check(assets: &mut Assets) -> Result<()> {
+    use crate::render_snapshot::{RenderVisit, HandoffReturn, HandoffCompletion,
+        handoff_render_begin, handoff_render_end};
+    let scene = crate::render::Scene::load(assets, "potears1")?;
+    let mut control_character = crate::character::Character::load(assets)?;
+    let mut extracted_character = crate::character::Character::load(assets)?;
+    for skip_at in [None, Some(0usize), Some(120usize)] {
+        for restore_at in [None, Some(90usize)] {
+            let (mut i, mut world, mut player, mut story) = setup(assets, &scene.map, cinema::ENTRY)?;
+            let mut art = super::Art::load(assets, i.pool.as_ref().unwrap())?;
+            let mut visit = RenderVisit::default();
+            let mut returns = HandoffReturn::default();
+            let mut last_control: Option<crate::cinematic::ActorPose> = None;
+            let mut finished = false;
+            let mut draws = 0;
+            for frame in 0..1800usize {
+                ensure!(returns.consume(&visit), "Missing render acknowledgement");
+                if restore_at == Some(frame) {
+                    let saved = i.snapshot();
+                    let mut restored = Interactions::load(&scene.map)?;
+                    restored.set_entry(assets, &scene.map, "potears1", None)?;
+                    restored.restore(&saved, &scene.map)?;
+                    i = restored; i.sync(&mut world);
+                    art = super::Art::load(assets, i.pool.as_ref().unwrap())?;
+                    visit = RenderVisit::default();
+                    ensure!(returns.consume(&visit) && returns.pose(&visit).is_none(), "Restore retained old rendered pose");
+                    last_control = None;
+                }
+                if skip_at == Some(frame) { ensure!(i.skip_cinematic(&scene.map, &mut world, &mut player, &mut story)?, "Skip rejected"); }
+                tick(&mut i, &scene.map, &mut world, &mut player, &mut story, 1./60.)?;
+                if !i.scripted() {
+                    let yaw = player.script_facing;
+                    control_character.resume_scene(&player, yaw, last_control.as_ref());
+                    extracted_character.resume_scene(&player, yaw, returns.pose(&visit));
+                    ensure!(serde_json::to_value(control_character.snapshot())? == serde_json::to_value(extracted_character.snapshot())?, "Actual Character handoff changed");
+                    finished = true; break;
+                }
+                // Model menu iterations with no renderer submission, and paused
+                // iterations with dt=0. Neither may replace the last local pose.
+                if frame == 75 {
+                    let before = serde_json::to_value(i.snapshot())?;
+                    for _ in 0..3 {
+                        ensure!(returns.consume(&visit), "Menu lost completion");
+                        i.advance_school(0., &scene.map, &mut world, &mut player)?;
+                    }
+                    ensure!(before == serde_json::to_value(i.snapshot())?, "Paused controller advanced");
+                }
+                if frame % 30 != 0 { continue; }
+                let camera = i.pool.as_ref().unwrap().camera().unwrap();
+                let view = Camera3D { position: camera.eye, target: camera.target, up: camera.up, ..Default::default() };
+                set_camera(&view);
+                art.cinema.story_pose(&story);
+                art.clear_input();
+                art.draw(i.pool.as_ref().unwrap(), false, &scene.atmosphere, camera.eye);
+                last_control = art.cinema.alice.handoff_pose().cloned();
+                let (_, overflow) = art.extract(i.pool.as_ref().unwrap());
+                ensure!(!overflow, "Control exceeded Pool input limits");
+                returns.expect(&visit, 4, frame as u64);
+                handoff_render_begin(&visit, frame as u64);
+                art.draw(i.pool.as_ref().unwrap(), false, &scene.atmosphere, camera.eye);
+                handoff_render_end();
+                let completion = HandoffCompletion::rendered(&visit, 4, frame as u64, art.cinema.alice.handoff_pose());
+                ensure!(returns.publish(completion) && returns.consume(&visit), "Rendered return rejected");
+                match (&last_control, returns.pose(&visit)) {
+                    (None, None) => {},
+                    (Some(a), Some(b)) => {
+                        ensure!(a.local.len()==b.local.len() && a.scale.to_bits()==b.scale.to_bits(), "Local pose shape changed");
+                        for (a,b) in a.local.iter().zip(&b.local).chain(std::iter::once((&a.transform,&b.transform))) {
+                            ensure!(a.translation.to_array().map(f32::to_bits)==b.translation.to_array().map(f32::to_bits)
+                                && a.rotation.to_array().map(f32::to_bits)==b.rotation.to_array().map(f32::to_bits), "Local pose bits changed");
+                        }
+                    }
+                    _ => anyhow::bail!("No-pose semantics changed"),
+                }
+                draws += 1;
+                next_frame().await;
+            }
+            ensure!(finished, "Arrival did not end");
+            println!("PASS snapshot handoff skip={skip_at:?} restore={restore_at:?} draws={draws}: local bits, pause/menu, last draw, Character resume");
+        }
+    }
+    Ok(())
+}
