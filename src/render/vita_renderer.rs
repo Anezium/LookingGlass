@@ -232,6 +232,11 @@ pub struct Config {
     /// Actor-gather leaf census: one `[lg/spike] gather` mean line over the spike window.
     /// Default off; diagnostic, never a release setting.
     pub gather_census: bool,
+    /// Exact cross-frame pose reuse inside actor gather: skip `face.pose`/`global_pose`
+    /// and the scale pass when every input (skeleton/face identity, local pose bits,
+    /// mouth bits, parent roots and bone-scale bits) is identical to the previous frame.
+    /// The stored output is returned unchanged; a miss recomputes. Default off.
+    pub gather_pose_reuse: bool,
     /// Select mutable skin from actual frame consumers; keep inherited visual policy.
     pub skin_actual_consumers: bool,
     pub mover_far_lazy: bool,
@@ -583,6 +588,7 @@ impl Default for Config {
             frame_phase_probe: false,
             phase_census: false,
             gather_census: false,
+            gather_pose_reuse: false,
             skin_actual_consumers: true,
             mover_far_lazy: true,
             mover_lazy_publish: true,
@@ -3626,7 +3632,7 @@ mod tests {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
             if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
-                || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" || key == "gather_census" {
+                || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" || key == "gather_census" || key == "gather_pose_reuse" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -3645,7 +3651,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "gather_census" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "gather_census" | "gather_pose_reuse" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

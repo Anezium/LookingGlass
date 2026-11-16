@@ -114,6 +114,13 @@ thread_local! {
     static PALETTES: RefCell<Cache<Palette>> = RefCell::default();
     static SAMPLES: RefCell<Samples> = RefCell::default();
 }
+#[inline]
+fn pose_reuse_enabled() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { overlap::gathering() && crate::render::vita_renderer::config().gather_pose_reuse }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
 pub(super) fn begin() {
     POSES.with(|c| c.borrow_mut().begin());
     PALETTES.with(|c| c.borrow_mut().begin());
@@ -192,6 +199,21 @@ pub(crate) fn pose(
                         .all(|(a, b)| a.0 == b.0 && a.1.to_bits() == b.1.to_bits())
             },
             |v| {
+                // Optional exact cross-frame reuse: the cache slot still holds last
+                // frame's inputs and output. Every input bit fed to the caller's
+                // closure is compared; a hit returns the stored output untouched.
+                let repeat = pose_reuse_enabled()
+                    && v.key == key
+                    && v.mouth == mouth.to_bits()
+                    && !v.pose.is_empty()
+                    && overlap::same_pose(&v.local, local)
+                    && v.roots.len() == roots.len()
+                    && v.roots.iter().zip(roots).all(|(a, b)| a.0 == b.0 && a.1.to_bits() == b.1.to_bits());
+                if repeat {
+                    filled.set(true);
+                    crate::gather_census::count(crate::gather_census::Counter::PoseReuses);
+                    return;
+                }
                 let _value = crate::gather_census::span(crate::gather_census::Leaf::PoseEval);
                 filled.set(true);
                 v.key = key;

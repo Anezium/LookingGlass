@@ -62,7 +62,7 @@ const COUNTERS: [&str; 16] = [
     "actors_visited", "actors_drawn", "actors_culled", "surfaces_skinned",
     "vertices_skinned", "bones_captured", "lane_jobs", "serial_surfaces",
     "pose_evaluations", "pose_hits", "bones_evaluated", "sample_evaluations",
-    "sample_hits", "overlays", "attachments", "serial_fallbacks",
+    "sample_hits", "overlays", "attachments", "serial_fallbacks", "pose_reuses",
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
@@ -83,6 +83,7 @@ pub(crate) enum Counter {
     Overlays,
     Attachments,
     SerialFallbacks,
+    PoseReuses,
 }
 
 #[inline]
@@ -252,14 +253,14 @@ fn write_summary(s: &State, out: &mut String) {
     for i in 0..leaves {
         if s.calls[i] == 0 && s.ns[i] == 0 { continue; }
         let name = if i < FIXED_NAMES.len() { FIXED_NAMES[i] } else { crate::npc::profile::name(i - FIXED_NAMES.len()) };
-        let _ = write!(out, "{}{}={:.4}/{:.4}/{}", if first { " leaf=" } else { "," },
+        let _ = write!(out, "{}{}:{:.4}/{:.4}/{}", if first { " leaf=" } else { "," },
             name, mean(s.ns[i]), mean(s.ns[i].saturating_sub(s.kids[i])), s.calls[i]);
         first = false;
     }
     if first { out.push_str(" leaf=-"); }
     let mut first = true;
     for (i, name) in COUNTERS.iter().enumerate() {
-        let _ = write!(out, "{}{}={:.3}", if first { " counter=" } else { "," },
+        let _ = write!(out, "{}{}:{:.3}", if first { " counter=" } else { "," },
             name, s.counters[i] as f64 / s.frames.max(1) as f64);
         first = false;
     }
