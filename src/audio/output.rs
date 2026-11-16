@@ -559,11 +559,17 @@ fn percentiles(values: &mut [f64]) -> [f64; 3] {
     }
     [values[n / 2], values[(n - 1) * 95 / 100], values[n - 1]]
 }
-fn print(report: &Report, config: block::Settings) {
+fn print(report: &Report, config: block::Settings) -> bool {
     match report {
-        Report::Policy(p, c) => eprintln!("[lg/audio-producer] {} ready_blocks={} cushion_ms={:.3} log_path={}",
-            p.describe(), c.cushion, c.cushion as f64 * 512. / 44.1, if c.log_thread { "reporter" } else { "producer" }),
+        Report::Policy(p, c) => {
+            eprintln!("[lg/audio-producer] {} ready_blocks={} cushion_ms={:.3} log_path={}",
+                p.describe(), c.cushion, c.cushion as f64 * 512. / 44.1, if c.log_thread { "reporter" } else { "producer" });
+            true
+        }
         Report::Window(w) => {
+            // The one-second statistics are diagnostics; the producer still builds the
+            // window and its timers, this only stops the text.
+            if !config.stats_log { return false; }
             let [p50, p95, max] = w.mix;
             eprintln!("[lg/audio-realtime] window_ms={} producer_blocks={} producer_mix_p50_ms={p50:.3} producer_mix_p95_ms={p95:.3} producer_mix_max_ms={max:.3} pcm_starved_blocks={} rejected_sinks={} intentional_pcm_flushes={} pcm_flush_silence_blocks={} queued_samples={} game_audio_lock_attempts=0 game_audio_lock_wait_max_us=0 producer_game_control_lock_attempts=0 producer_lock_wait_max_us=0 game_audio_api_max_us={} live_sink_peak={} game_stage={} game_stage_age_ms={} callback_source=bounded-pcm producer_gap_max_ms={:.3} producer_sleep_overshoot_max_ms={:.3} producer_gaps_over_block={} producer_log_ms={:.3} log_path={} dropped_reports={}",
                 w.window_ms, w.blocks, w.starved, w.rejected, w.flushes, w.flush_silence, w.queued, w.api_max_us, w.live_peak, w.game_stage.0, w.game_stage.1,
@@ -577,6 +583,7 @@ fn print(report: &Report, config: block::Settings) {
             if let Some([decode_ms, chunk_max_ms, chunks, underruns, ring_min_ms, streams]) = w.music {
                 eprintln!("[lg/audio-music] decode_ms={decode_ms:.3} chunk_max_ms={chunk_max_ms:.3} chunks={chunks} underrun_frames={underruns} ring_min_ms={ring_min_ms:.1} streams={streams}");
             }
+            true
         }
     }
 }
@@ -604,11 +611,12 @@ struct TestHooks {
     interval:Duration, policy_fail:bool, spawn_fail:bool, stack:usize,
     reporter_gate:Option<std::sync::mpsc::Receiver<()>>,
     reporter_seen:Option<std::sync::mpsc::Sender<usize>>,
+    reporter_printed:Option<std::sync::mpsc::Sender<usize>>,
     reporter_pass:Option<std::sync::mpsc::Sender<(bool,usize)>>,
     reporter_panic:bool,
 }
 #[cfg(test)]
-impl Default for TestHooks {fn default()->Self{Self{interval:Duration::from_secs(1),policy_fail:false,spawn_fail:false,stack:1024*1024,reporter_gate:None,reporter_seen:None,reporter_pass:None,reporter_panic:false}}}
+impl Default for TestHooks {fn default()->Self{Self{interval:Duration::from_secs(1),policy_fail:false,spawn_fail:false,stack:1024*1024,reporter_gate:None,reporter_seen:None,reporter_printed:None,reporter_pass:None,reporter_panic:false}}}
 pub(super) fn buffered_audio<S: PcmSource>(source:S, metrics:Arc<Metrics>, jobs:Option<super::offmain::Server>) -> std::io::Result<(Worker,Callback)> {
     buffered_body_jobs(source,metrics,block::settings(), #[cfg(feature="native_timing")] crate::native_timing::clock::Native, #[cfg(test)] TestHooks::default(), jobs)
 }
@@ -659,18 +667,24 @@ fn buffered_body_jobs<S: PcmSource, #[cfg(feature = "native_timing")] C: crate::
             if let Some(gate)=reporter_gate { let _=gate.recv_timeout(Duration::from_secs(5)); }
             #[cfg(test)]
             let mut seen=0usize;
+            #[cfg(test)]
+            let mut printed=0usize;
             loop {
                 let stopping = done.load(Ordering::Acquire);
                 while let Some(report) = inbox.pop() {
-                    print(&report, config);
+                    let emitted = print(&report, config);
                     #[cfg(test)]
-                    {seen+=1;}
+                    {seen+=1; printed+=usize::from(emitted);}
+                    #[cfg(not(test))]
+                    let _ = emitted;
                 }
                 #[cfg(test)]
                 if let Some(tx)=&reporter_pass {let _=tx.send((stopping,seen));}
                 if stopping {
                     #[cfg(test)]
                     if let Some(tx)=&reporter_seen{let _=tx.send(seen);}
+                    #[cfg(test)]
+                    if let Some(tx)=&hooks.reporter_printed{let _=tx.send(printed);}
                 }
                 if stopping {
                     break;

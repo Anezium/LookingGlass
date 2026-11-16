@@ -419,6 +419,9 @@ pub struct Config {
     /// The producer never prints: per-second windows go through a lock-free
     /// queue to a lowest-priority reporter thread.
     pub audio_log_thread: bool,
+    /// Periodic one-second audio statistics (`audio-realtime`, `audio-stage`,
+    /// `audio-voices`, `audio-music`). Default on; the release config turns it off.
+    pub audio_stats_log: bool,
     /// Music decodes on its own lower-priority thread into a PCM ring; the
     /// producer only copies decoded samples.
     pub audio_music_thread: bool,
@@ -643,6 +646,7 @@ impl Default for Config {
             audio_producer_affinity: 0x40000,
             audio_cushion_blocks: 2,
             audio_log_thread: false,
+            audio_stats_log: true,
             audio_music_thread: false,
             audio_music_priority: 170,
             shader_cache:"on".into(),
@@ -3671,14 +3675,53 @@ mod tests {
             }
         }
     }
+    // RC15 is RC14's shipped play config with the three potears1 switches on and the
+    // periodic audio statistics off, and nothing else changed. The levers stay off in
+    // the code defaults and in every earlier config.
+    #[test]
+    fn rc15_release_play_is_rc14_plus_the_levers_and_release_logging_off() {
+        const LEVERS: [&str; 3] = ["sim_snark_move_skip", "sim_snark_sight_blocked",
+                                   "sim_pool_name_match"];
+        let rc14 = parse_runtime_config(include_bytes!("../../configs/PL-rc13-release-play04.json"))
+            .unwrap().0;
+        let rc15 = parse_runtime_config(include_bytes!("../../configs/PL-rc15-release-play.json"))
+            .unwrap().0;
+        rc15.validate().unwrap();
+        let mut expected = serde_json::to_value(rc14).unwrap();
+        for lever in LEVERS {
+            assert_eq!(expected[lever], false, "RC14 ships {lever} off");
+            expected[lever] = true.into();
+        }
+        assert_eq!(expected["audio_stats_log"], true,
+                   "RC14 keeps the one-second audio statistics on");
+        expected["audio_stats_log"] = false.into();
+        assert_eq!(serde_json::to_value(rc15).unwrap(), expected,
+                   "RC15 is RC14 with the three potears1 levers on and periodic audio stats off");
+    }
+    #[test]
+    fn audio_stats_log_defaults_on_and_is_strict() {
+        assert!(Config::default().audio_stats_log);
+        assert!(serde_json::from_str::<Config>("{}").unwrap().audio_stats_log);
+        assert!(!serde_json::from_str::<Config>(r#"{"audio_stats_log":false}"#)
+            .unwrap().audio_stats_log);
+        for invalid in [serde_json::json!(0), serde_json::json!("off"), serde_json::Value::Null] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({"audio_stats_log": invalid}))
+                .is_err());
+        }
+        assert!(parse_runtime_config(include_bytes!("../../configs/PL-rc13-release-play04.json"))
+            .unwrap().0.audio_stats_log, "the RC14 config keeps today's behaviour");
+        assert!(!parse_runtime_config(include_bytes!("../../configs/PL-rc15-release-play.json"))
+            .unwrap().0.audio_stats_log, "the RC15 release config turns it off");
+    }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
     fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
-    /// Opt-in keys added after every frozen era file. Those files stay valid unchanged,
-    /// and their omitted key must read as an explicit off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match") }
+    /// Keys added after every frozen era file. Those files stay valid unchanged; an
+    /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
+    /// default-on release behaviour until a config turns it off.
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

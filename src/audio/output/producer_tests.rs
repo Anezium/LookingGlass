@@ -261,6 +261,60 @@ fn slow_reporter_drains_after_producer_closure_and_final_queue_drop_is_retained(
     drop(worker);
 }
 
+#[test]
+fn audio_stats_log_off_prints_no_periodic_window() {
+    #[cfg(feature = "native_timing")]
+    let _music_serial = native_music_test_guard();
+    for (stats_log, want) in [(true, None), (false, Some(1usize))] {
+        let (control, _mixer) = mixer_with(universe());
+        let mut cfg = block::settings();
+        cfg.log_thread = true;
+        cfg.stats_log = stats_log;
+        cfg.cushion = 1;
+        let (gate, rx) = mpsc::channel();
+        let (seen, counts) = mpsc::channel();
+        let (printed, print_counts) = mpsc::channel();
+        let hooks = TestHooks {
+            interval: Duration::ZERO,
+            reporter_gate: Some(rx),
+            reporter_seen: Some(seen),
+            reporter_printed: Some(printed),
+            ..TestHooks::default()
+        };
+        let (worker, mut cb) = buffered_body(
+            rodio::buffer::SamplesBuffer::new(2, 44100, vec![0.5; 44100 * 2]),
+            control.metrics.clone(),
+            cfg,
+            Native,
+            hooks,
+        )
+        .unwrap();
+        wait(|| worker.bootstrap.entry.get().is_some());
+        let mut c = Checked::new(Native);
+        let mut owner = worker.prepare_native(&mut c, Some([7; 16]));
+        owner.request_start(c.read());
+        for _ in 0..8 {
+            cb.by_ref().take(SAMPLES).for_each(drop);
+            wait(|| cb.ready.has_pending());
+        }
+        owner.request_seal(&mut c);
+        owner.collect(Duration::from_secs(2));
+        worker.stop.store(true, Ordering::Release);
+        wait(|| worker.bootstrap.loop_closed.load(Ordering::Acquire));
+        gate.send(()).unwrap();
+        let reports = counts.recv_timeout(Duration::from_secs(2)).unwrap();
+        let lines = print_counts.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(reports >= 2, "the periodic window still runs: {reports}");
+        match want {
+            Some(only_policy) => {
+                assert_eq!(lines, only_policy, "audio_stats_log=false must print no periodic stats")
+            }
+            None => assert_eq!(lines, reports, "the control prints every report"),
+        }
+        drop(worker);
+    }
+}
+
 #[derive(Clone)]
 struct StepClock {
     value: Arc<std::sync::atomic::AtomicU64>,

@@ -248,6 +248,9 @@ fn app_main() {
         use macroquad::miniquad::KeyCode;
         set_config(VitaConfig {
             compact_stream_buffers: true,
+            // Release diagnostics stay off: do not inherit miniquad's Some(10) default,
+            // which would start the per-10-second memory line and its reporter thread.
+            log_memory_every: None,
             // Every 10 frames unless the runtime config says otherwise. The r12c-era runners use
             // these lines as a hang heartbeat; measurement configs set 0 (r15b: +3-5 ms p95).
             log_frame_time_every: {
