@@ -831,6 +831,7 @@ impl Puppet {
         scale: f32,
         looping: bool,
     ) -> Option<Transform> {
+        let _tag = crate::gather_census::span(crate::gather_census::Leaf::TagSample);
         let d = &self.0.data;
         let tag = d.skeleton.bones.iter().position(|b| b.name == name)?;
         let mut local = d.clips.get(clip)?.sample(time, looping);
@@ -993,6 +994,8 @@ impl Puppet {
         let _consumer = crate::character::skinning::CullGuard::publication_reason(clip == "death_frozen",crate::phase_census::FROZEN);
         let material = self.3.clone();
         material.draw_dissolving(dissolve, || {
+            let _body = crate::gather_census::span(crate::gather_census::Leaf::BodyDraw);
+            crate::gather_census::count(crate::gather_census::Counter::BodiesVisited);
             self.0.draw_pose(
                 &local,
                 self.2,
@@ -1034,9 +1037,13 @@ impl Puppet {
             looping,
         );
         self.3.bind();
-        self.0.draw_pose(
-            &local, self.2, time, true, transform, scale, fullbright, self.1, &visual, None,
-        );
+        {
+            let _body = crate::gather_census::span(crate::gather_census::Leaf::BodyDraw);
+            crate::gather_census::count(crate::gather_census::Counter::BodiesVisited);
+            self.0.draw_pose(
+                &local, self.2, time, true, transform, scale, fullbright, self.1, &visual, None,
+            );
+        }
     }
     pub fn draw_guard(
         &mut self,

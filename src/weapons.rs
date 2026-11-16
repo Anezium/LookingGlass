@@ -1082,6 +1082,8 @@ impl Prop {
         time: f32,
         looping: bool,
     ) {
+        let _prop = crate::gather_census::span(crate::gather_census::Leaf::PropDraw);
+        crate::gather_census::count(crate::gather_census::Counter::PropsVisited);
         if crate::character::skinning::overlap::gather_only() { return; }
         #[cfg(feature="vita_renderer")]
         {

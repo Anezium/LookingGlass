@@ -38,6 +38,9 @@ pub(crate) enum Leaf {
     NpcAttachment,
     DispatchHold,
     DispatchLanes,
+    BodyDraw,
+    TagSample,
+    PropDraw,
     NpcKindBase,
 }
 /// One row per NPC controller kind; `src/npc/profile.rs` owns the names.
@@ -48,6 +51,7 @@ const FIXED_NAMES: [&str; Leaf::NpcKindBase as usize] = [
     "begin_publication", "begin_reset", "begin_prepared",
     "pose_eval", "palette", "skin_prepare", "serial_skin", "serial_fallback",
     "npc_overlay", "npc_attachment", "dispatch_hold", "dispatch_lanes",
+    "body_draw", "tag_sample", "prop_draw",
 ];
 const ROOT_STORY: u8 = 1 << 0;
 const ROOT_BEGIN: u8 = 1 << 1;
@@ -58,11 +62,12 @@ const ROOT_DISPATCH: u8 = 1 << 5;
 const ANY_TRAVERSAL: u8 = ROOT_ALICE | ROOT_NPC | ROOT_ART;
 /// Bracket depth; the measured tree is a root and at most two child levels.
 const DEPTH: usize = 8;
-const COUNTERS: [&str; 17] = [
+const COUNTERS: [&str; 19] = [
     "actors_visited", "actors_drawn", "actors_culled", "surfaces_skinned",
     "vertices_skinned", "bones_captured", "lane_jobs", "serial_surfaces",
     "pose_evaluations", "pose_hits", "bones_evaluated", "sample_evaluations",
     "sample_hits", "overlays", "attachments", "serial_fallbacks", "pose_reuses",
+    "bodies_visited", "props_visited",
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
@@ -84,6 +89,8 @@ pub(crate) enum Counter {
     Attachments,
     SerialFallbacks,
     PoseReuses,
+    BodiesVisited,
+    PropsVisited,
 }
 
 #[inline]
