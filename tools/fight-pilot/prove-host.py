@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real viewer record/replay proof; outputs remain outside Git, game data read-only."""
-import argparse,hashlib,json,os,re,shutil,struct,subprocess,time
+import argparse,hashlib,json,math,os,re,shutil,struct,subprocess,time
 from pathlib import Path
 SOURCE=Path(__file__).resolve().parents[2]
 LOCK=Path('/Users/anezium/vita-j0/mac-timing.lock')
@@ -51,9 +51,10 @@ def main():
   assert re.search(r'\[lg/replay\] done .* diff=0 .*event_mismatches=0 .*result=PASS',playback),'replay not exact'
   assert '[lg/pilot] enabled' not in playback,'pilot active during replay'
   path=root/'record/private'/tape
-  header=None;pad=None;keys=0;moving=attacks=frames=0;seconds=0.
+  header=None;pad=None;keys=0;moving=attacks=frames=0;seconds=0.;positions=[]
   for line in path.read_text().splitlines():
    if line.startswith('H '):header=json.loads(line[2:])
+   if line.startswith('C '):positions.append(tuple(map(float,line.split()[5].split(','))))
    if not line.startswith('F '):continue
    fields=line.split();frames+=1;seconds+=struct.unpack('!f',bytes.fromhex(fields[1]))[0]
    for f in fields[2:]:
@@ -64,11 +65,17 @@ def main():
    attacks+=int(bool(keys & (1<<header['keys'].index(341))))
   health=[float(v) for v in re.findall(r'boss_health=([0-9.]+)',recording)]
   dealt=sum(max(0,x-y) for x,y in zip(health,health[1:]))
-  taken=sum(map(float,re.findall(r'damage_taken=([0-9.]+)',recording)))
+  damage_rows=[tuple(map(float,v)) for v in re.findall(r'damage_taken=([0-9.]+) seconds=([0-9.]+)',recording)]
   contacts=re.findall(r'weapon_contact id=(\d+) damage=([0-9.]+)',recording)
-  assert dealt>0 and taken>0 and contacts and moving>0 and attacks>0,'combat proof incomplete'
+  displacement=max(math.dist(positions[0],v) for v in positions)
+  sampled_path=sum(math.dist(x,y) for x,y in zip(positions,positions[1:]))
+  first_fight=float(re.search(r'fight_start seconds=([0-9.]+)',recording)[1])
+  taken=sum(damage for damage,when in damage_rows if when>=first_fight)
+  stopped=re.search(r'\[lg/pilot\] stop map=hatter2 seconds=([0-9.]+) fight=([0-9.]+)',recording)
+  assert stopped,'missing bounded pilot stop'
+  assert dealt>0 and taken>0 and contacts and moving>0 and attacks>0 and displacement>1000,'combat proof incomplete'
   done=next(l for l in playback.splitlines() if l.startswith('[lg/replay] done '))
-  result=dict(map='hatter2',difficulty='normal',binary_sha256=sha(binary),tape_sha256=sha(path),frames=frames,tape_seconds=seconds,movement_frames=moving,attack_held_frames=attacks,weapon_contacts=len(contacts),sampled_boss_damage=dealt,damage_taken=taken,pilot_off_replay=done,console_contact=False)
+  result=dict(map='hatter2',difficulty='normal',binary_sha256=sha(binary),tape_sha256=sha(path),frames=frames,tape_seconds=seconds,first_fight_seconds=first_fight,fight_window_seconds=float(stopped[1])-first_fight,visible_target_fight_seconds=float(stopped[2]),max_displacement_units=displacement,sampled_path_units=sampled_path,movement_frames=moving,attack_held_frames=attacks,weapon_contacts=len(contacts),sampled_boss_damage=dealt,damage_taken=taken,pilot_off_replay=done,console_contact=False)
   (root/'proof.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2),flush=True)
  finally:
   if json.loads(LOCK.read_text()).get('pid')==os.getpid():LOCK.unlink()

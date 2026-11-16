@@ -68,7 +68,7 @@ pub struct Frame {
     pub mouse: (f32, f32),
     pub wheel: (f32, f32),
     /// Vita sticks as the game reads them (lx, ly, rx, ry); None when the read failed or the
-    /// system holds the pad. Always None on the host.
+    /// system holds the pad. A host pilot can install the same native stick bytes.
     pub pad: Option<[u8; 4]>,
     pub chars: Vec<char>,
     pub quit: bool,
@@ -132,7 +132,8 @@ pub(super) fn deactivate() {
     MODE.store(OFF, Relaxed);
     CHARS.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
-/// Install one step's input. The pad of a recording is filled in later by `vita_pad`.
+/// Install one step's input. A live recording fills its absent pad later via `vita_pad`;
+/// an input-only pilot supplies native bytes here before the recorder reads them.
 pub(super) fn install(frame: &Frame) {
     DT.store(frame.dt.to_bits(), Relaxed);
     store_u128(&KEYS_DOWN, frame.keys_down);

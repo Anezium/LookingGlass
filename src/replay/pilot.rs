@@ -97,7 +97,8 @@ impl Pilot {
             self.still = 0.;
         }
         let supported = map == "hatter2";
-        let stop = !supported
+        let stop = macroquad::input::is_key_pressed(KeyCode::Escape)
+            || !supported
             || self.seconds > 180.
             || self.deaths > 2
             || (self.still > 18. && !busy && self.fight == 0.)
