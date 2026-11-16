@@ -2153,7 +2153,7 @@ impl ResidentEffects {
 }
 impl Actor {
     fn snapshot_resident(&self) -> bool {
-        self.resident.as_ref().is_some_and(|p| matches!(p.body, resident::Body::Ladybug(_)))
+        self.resident.as_ref().is_some_and(|p| matches!(p.body, resident::Body::Ladybug(_) | resident::Body::Plant(_)))
     }
 }
 #[derive(Default)]
