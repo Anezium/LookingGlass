@@ -320,6 +320,27 @@ fn place(world: &World, feet: Vec3, yaw: f32) -> Option<Transform> {
     }
     None // In a narrow space, keep the voice and subtitle without embedding a body.
 }
+/// Numeric per-visit command; None is an accepted absent/invisible appearance.
+pub(crate) struct Input {
+    visit: u64,
+    body: Option<(crate::npc::PuppetInput, f32)>,
+}
+impl Input {
+    pub(crate) fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.body.as_ref().map_or(0, |(p,_)| p.bytes())
+    }
+}
+#[derive(Clone, Copy)]
+struct DrawValues { transform: Transform, time: f32, speaking: bool, dissolve: f32 }
+impl Hints {
+    fn draw_values(&self) -> Option<DrawValues> {
+        let a = self.appearance.as_ref()?;
+        let transform = a.transform?;
+        let opacity = a.beat.opacity();
+        (opacity > 0.).then_some(DrawValues { transform, time: a.beat.elapsed,
+            speaking: a.beat.speech_ready(true) && a.beat.leaving.is_none(), dissolve: 1. - opacity })
+    }
+}
 pub struct Art {
     model: crate::npc::Puppet,
     material: crate::character::SkinMaterial,
@@ -337,6 +358,22 @@ impl Art {
             material: crate::character::skin_material()?,
         })
     }
+    pub(crate) fn extract(&mut self, hints: &Hints, story: &Story, visit: u64) -> Input {
+        self.story_pose(story);
+        Input { visit, body: hints.draw_values().map(|v| (self.model.extract_draw(
+            if v.speaking { "sit_talk1" } else { "sit_idle1" }, v.time, true, v.transform, 1.), v.dissolve)) }
+    }
+    pub(crate) fn valid_input(&self, input: &Input, visit: u64) -> bool {
+        input.visit == visit && input.body.as_ref().is_none_or(|(p,_)| self.model.valid_input(p))
+    }
+    pub(crate) fn draw_input(&mut self, input: &Input, atmosphere: &crate::environment::Atmosphere,
+        camera: Vec3, fullbright: bool) {
+        if let Some((pose, dissolve)) = &input.body {
+            self.material.atmosphere(atmosphere, camera);
+            self.model.draw_input_dissolving(pose, fullbright, *dissolve);
+            gl_use_default_material();
+        }
+    }
     pub fn story_pose(&mut self, story: &Story) {
         self.model.mouth(story.mouth(&["summoned_cheshire"]));
     }
@@ -347,26 +384,11 @@ impl Art {
         camera: Vec3,
         fullbright: bool,
     ) {
-        let Some(a) = &hints.appearance else {
-            return;
-        };
-        let Some(transform) = a.transform else {
-            return;
-        };
-        let opacity = a.beat.opacity();
-        if opacity <= 0. {
-            return;
-        }
+        let Some(v) = hints.draw_values() else { return; };
         self.material.atmosphere(atmosphere, camera);
-        let speaking = a.beat.speech_ready(true) && a.beat.leaving.is_none();
         self.model.draw_dissolving(
-            if speaking { "sit_talk1" } else { "sit_idle1" },
-            a.beat.elapsed,
-            true,
-            transform,
-            1.,
-            fullbright,
-            1. - opacity,
+            if v.speaking { "sit_talk1" } else { "sit_idle1" },
+            v.time, true, v.transform, 1., fullbright, v.dissolve,
         );
         gl_use_default_material();
     }
@@ -428,4 +450,50 @@ mod tests {
         assert!(place(&wall, Vec3::ZERO, 0.).is_none());
         assert!(place(&World::fixture(&[]), Vec3::ZERO, 0.).is_none());
     }
+}
+
+/// Host real-asset control for absent, fading, speaking and leaving Cheshire.
+#[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+pub(crate) async fn snapshot_render_check(assets: &mut Assets) -> Result<()> {
+    let atmosphere = crate::environment::Atmosphere::default();
+    let mut art = Art::load(assets)?;
+    let view = Camera3D { position: vec3(150.,-190.,85.), target: Vec3::Z*38., up: Vec3::Z,
+        fovy: 65_f32.to_radians(), z_near: 2., z_far: 30000., ..Default::default() };
+    let mut checked = 0;
+    for case in 0..7 {
+        let mut reference = None;
+        for captured in [false, true] {
+            let mut hints = Hints { allowed: false, regions: vec![], fallback: vec![],
+                selected: None, next: 0, cooldown: 0., appearance: None };
+            if case > 0 {
+                let mut beat = CatBeat::new();
+                beat.elapsed = [0., 0., 0.7, 2.7, 3.5, 4., 5.][case];
+                if case >= 5 { beat.leaving = Some(if case == 5 {0.8} else {2.5}); }
+                hints.appearance = Some(Appearance { transform: (case != 1).then_some(Transform {
+                    translation: Vec3::ZERO, rotation: Quat::IDENTITY }), beat });
+            }
+            let mut story = Story::default();
+            let line = Line { watches: BTreeMap::new(), lips: Default::default(),
+                actor: "summoned_cheshire".into(), path: "test.wav".into(), text: "Hint".into(), duration: 1. };
+            story.summon_hint(line);
+            story.tick(0.25, false);
+            let visit = crate::render_snapshot::RenderVisit::default();
+            let input = captured.then(|| art.extract(&hints, &story, visit.id()));
+            if let Some(input) = &input {
+                anyhow::ensure!(art.valid_input(input, visit.id()) && !art.valid_input(input, 0), "Cheshire registry rejection failed");
+                hints.appearance = None; story = Story::default(); art.model.mouth(0.99);
+            }
+            clear_background(BLACK); set_camera(&view);
+            crate::render_fx::begin_view(&view, 2.5, &atmosphere, false);
+            if let Some(input) = &input { art.draw_input(input, &atmosphere, view.position, true); }
+            else { art.story_pose(&story); art.draw(&hints, &atmosphere, view.position, true); }
+            crate::render_fx::finish(); set_default_camera(); let image = get_screen_data();
+            if matches!(case, 2|3|4|5) { anyhow::ensure!(image.bytes.chunks_exact(4).filter(|p|p[..3] != [0,0,0]).count()>20, "Empty active Cheshire {case}"); }
+            if let Some(expected) = &reference { anyhow::ensure!(*expected == image.bytes, "Cheshire exact image differs {case}"); checked += 1; }
+            else { reference = Some(image.bytes); }
+            next_frame().await;
+        }
+    }
+    println!("PASS snapshot Cheshire: {checked} exact real-asset absent/active/fade/speech/leave controls with poisoned Hints/Story/mouth");
+    Ok(())
 }

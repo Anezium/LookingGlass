@@ -95,6 +95,25 @@ struct LevelArt {
     levels: Vec<Option<Box<dyn crate::level::LevelArt>>>,
 }
 
+/// Ordered resource slots follow LevelArt, never controller addresses. An
+/// incomplete selected family still dispatches live under its whole-frame fence.
+struct LevelDispatch {
+    visit: u64,
+    selected: [bool; 10],
+    registered: Vec<bool>,
+    school_staging: bool,
+    cheshire: Option<crate::cheshire::Input>,
+    overflow: bool,
+}
+impl LevelDispatch {
+    fn valid(&self, art: &LevelArt) -> bool {
+        !self.overflow && self.visit == art.snapshot_visit.id()
+            && self.registered.len() == art.levels.len()
+            && self.cheshire.as_ref().is_none_or(|i| art.cheshire.as_ref()
+                .is_some_and(|a| a.valid_input(i, self.visit)))
+    }
+}
+
 type RebuiltScene = (LevelArt, crate::npc::Npcs, crate::particles::Steam, Scene, Option<Character>);
 
 /// Allocate recovery state only after a failed transition. Keeping these awaits
@@ -252,22 +271,30 @@ impl LevelArt {
         }
         Ok(())
     }
-    fn story_pose(&mut self, story: &crate::story::Story) {
+    fn extract_dispatch(&mut self, i: &Interactions, hints: &crate::cheshire::Hints,
+        story: &crate::story::Story) -> LevelDispatch {
+        LevelDispatch { visit: self.snapshot_visit.id(),
+            selected: [i.fortress.is_some(), i.school.is_some(), i.village.is_some(),
+                i.pandemonium.is_some(), i.beyond.is_some(), i.pool.is_some(), i.gym.is_some(),
+                i.duchess.is_some(), i.school2.is_some(), i.encounters.is_some()],
+            registered: self.levels.iter().zip(&i.levels).map(|(a,_)| a.is_some()).collect(),
+            school_staging: i.school.as_ref().is_some_and(|s| s.scene_id() == Some(crate::school::cinema::THEATRE)),
+            cheshire: self.cheshire.as_mut().map(|a| a.extract(hints, story, self.snapshot_visit.id())),
+            overflow: self.levels.len() > 1024 || self.levels.len() != i.levels.len(),
+        }
+    }
+    fn story_pose(&mut self, story: &crate::story::Story, owned: bool) {
         if let Some(a) = &mut self.school {
             a.first.story_pose(story);
         }
-        if let Some(a) = &mut self.pool {
-            a.cinema.story_pose(story);
-        }
+        if !owned { if let Some(a) = &mut self.pool { a.cinema.story_pose(story); } }
         if let Some(a) = &mut self.fortress {
             a.story_pose(story);
         }
         if let Some(a) = &mut self.village {
             a.story_pose(story);
         }
-        if let Some(art) = &mut self.cheshire {
-            art.story_pose(story);
-        }
+        if !owned { if let Some(art) = &mut self.cheshire { art.story_pose(story); } }
         if let Some(art) = &mut self.pandemonium {
             art.story_pose(story);
         }
@@ -284,49 +311,66 @@ impl LevelArt {
     fn draw(
         &mut self,
         i: &Interactions,
+        dispatch: Option<&LevelDispatch>,
         hints: &crate::cheshire::Hints,
         atmosphere: &crate::environment::Atmosphere,
         camera: Vec3,
         fullbright: bool,
     ) {
-        if let (Some(a), Some(f)) = (&mut self.fortress, &i.fortress) {
+        let dispatch = dispatch.filter(|d| d.valid(self));
+        let selected = dispatch.map_or([true; 10], |d| d.selected);
+        if selected[0] { if let (Some(a), Some(f)) = (&mut self.fortress, &i.fortress) {
             a.draw(f, atmosphere, camera, fullbright);
         }
-        if let Some(a) = &mut self.cheshire {
-            a.draw(hints, atmosphere, camera, fullbright);
         }
-        if let (Some(a), Some(s)) = (&mut self.school, &i.school) {
+        if let Some(a) = &mut self.cheshire {
+            if let Some(input) = dispatch.and_then(|d| d.cheshire.as_ref()) {
+                a.draw_input(input, atmosphere, camera, fullbright);
+            } else { a.draw(hints, atmosphere, camera, fullbright); }
+        }
+        if selected[1] { if let (Some(a), Some(s)) = (&mut self.school, &i.school) {
             a.draw(s, fullbright, atmosphere, camera);
         }
-        if let (Some(a), Some(v)) = (&mut self.village, &i.village) {
+        }
+        if selected[2] { if let (Some(a), Some(v)) = (&mut self.village, &i.village) {
             a.draw(&v.cinema, atmosphere, camera, fullbright);
         }
-        if let (Some(a), Some(s)) = (&mut self.pandemonium, &i.pandemonium) {
+        }
+        if selected[3] { if let (Some(a), Some(s)) = (&mut self.pandemonium, &i.pandemonium) {
             a.draw(s, fullbright, atmosphere, camera);
         }
-        if let (Some(a), Some(s)) = (&mut self.beyond, &i.beyond) {
+        }
+        if selected[4] { if let (Some(a), Some(s)) = (&mut self.beyond, &i.beyond) {
             a.draw(s, fullbright, atmosphere, camera);
         }
-        if let (Some(a), Some(s)) = (&mut self.pool, &i.pool) {
+        }
+        if selected[5] { if let Some(a) = &mut self.pool {
+            if dispatch.is_none() || !a.publish_input(fullbright, atmosphere, camera) {
+                if let Some(s) = &i.pool { a.draw(s, fullbright, atmosphere, camera); }
+            }
+        }
+        }
+        if selected[6] { if let (Some(a), Some(s)) = (&mut self.gym, &i.gym) {
             a.draw(s, fullbright, atmosphere, camera);
         }
-        if let (Some(a), Some(s)) = (&mut self.gym, &i.gym) {
+        }
+        if selected[7] { if let (Some(a), Some(s)) = (&mut self.duchess, &i.duchess) {
             a.draw(s, fullbright, atmosphere, camera);
         }
-        if let (Some(a), Some(s)) = (&mut self.duchess, &i.duchess) {
+        }
+        if selected[8] { if let (Some(a), Some(s)) = (&mut self.school2, &i.school2) {
             a.draw(s, fullbright, atmosphere, camera);
         }
-        if let (Some(a), Some(s)) = (&mut self.school2, &i.school2) {
+        }
+        if selected[9] { if let (Some(a), Some(s)) = (&mut self.encounters, &i.encounters) {
+            a.school_staging = dispatch.map_or_else(|| i.school.as_ref()
+                .is_some_and(|s| s.scene_id() == Some(crate::school::cinema::THEATRE)), |d| d.school_staging);
             a.draw(s, fullbright, atmosphere, camera);
         }
-        if let (Some(a), Some(s)) = (&mut self.encounters, &i.encounters) {
-            a.school_staging = i
-                .school
-                .as_ref()
-                .is_some_and(|s| s.scene_id() == Some(crate::school::cinema::THEATRE));
-            a.draw(s, fullbright, atmosphere, camera);
         }
-        for (art, slot) in self.levels.iter_mut().zip(&i.levels) {
+        for (index, art) in self.levels.iter_mut().enumerate() {
+            if dispatch.is_some_and(|d| !d.registered[index]) { continue; }
+            let slot = &i.levels[index];
             if let Some(a) = art {
                 a.draw(&*slot.ctl, atmosphere, camera, fullbright);
             }
@@ -336,10 +380,14 @@ impl LevelArt {
     fn effects(
         &mut self,
         i: &Interactions,
+        dispatch: Option<&LevelDispatch>,
         camera: Vec3,
         atmosphere: &crate::environment::Atmosphere,
     ) {
-        for (art, slot) in self.levels.iter_mut().zip(&i.levels) {
+        let dispatch = dispatch.filter(|d| d.valid(self));
+        for (index, art) in self.levels.iter_mut().enumerate() {
+            if dispatch.is_some_and(|d| !d.registered[index]) { continue; }
+            let slot = &i.levels[index];
             if let Some(a) = art {
                 a.effects(&*slot.ctl, camera, atmosphere);
             }
@@ -4370,6 +4418,16 @@ interactions
                 frame, selection.bytes(), selection.capacity_bytes(), us, allocations);
             selection
         });
+        let level_dispatch = snapshot_enabled.then(|| {
+            let scope = crate::kernel_alloc::Scope::begin(); let start = std::time::Instant::now();
+            let input = level_art.extract_dispatch(&interactions, &hints, &story);
+            let allocations = scope.finish();
+            println!("[lg/snapshot-dispatch] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",
+                frame, std::mem::size_of::<LevelDispatch>() + input.registered.capacity()
+                    + input.cheshire.as_ref().map_or(0, |i| i.bytes()),
+                start.elapsed().as_secs_f64()*1_000_000., allocations, u8::from(input.overflow));
+            input
+        });
         if snapshot_enabled {
             // Script state is resolved before cinematic pose extraction; materials
             // and lazy mesh/effect publication remain on the renderer thread.
@@ -4510,18 +4568,19 @@ interactions
         // qualify a schema; absent instances still leave dispatcher reads live.
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if snapshot_enabled && std::env::var_os("LOOKING_GLASS_SNAPSHOT_FENCE_CENSUS").is_some() {
-            let mut blockers = vec!["level.dispatch.controller_presence".to_owned(),
-                "level.dispatch.interactions_hints".to_owned(),
-                "hud.resource_handles".to_owned(), "tail.unconditional".to_owned()];
+            let mut blockers = vec!["hud.resource_handles".to_owned(), "tail.unconditional".to_owned()];
+            if !level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)) {
+                blockers.push("level.dispatch.rejected".into());
+            }
             let mut art = |present: bool, name: &str| { if present { blockers.push(format!("story.{name}")); } };
-            art(level_art.cheshire.is_some(), "cheshire");
+
             art(level_art.fortress.is_some(), "fortress");
             art(level_art.village.is_some(), "village");
             art(level_art.school.is_some(), "school");
             art(level_art.gym.is_some(), "gym");
             art(level_art.beyond.is_some(), "beyond");
             // Pool's body is owned, but story_pose still reads Story in the dispatcher.
-            art(level_art.pool.is_some(), "pool_story_dispatch");
+
             art(level_art.school2.is_some(), "school2");
             art(level_art.duchess.is_some(), "duchess");
             art(level_art.pandemonium.is_some(), "pandemonium");
@@ -4566,7 +4625,7 @@ interactions
             let snapshot_gather_start = snapshot_enabled.then(std::time::Instant::now);
             let gather_clock = crate::pass_clock::scope(crate::pass_clock::ACTOR_GATHER);
             let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherStoryPose);
-            level_art.story_pose(&story);
+            level_art.story_pose(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)));
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherFrameBegin);
             crate::audio::game_stage(3);
             let frame_index_for_snapshot = frame;
@@ -4582,7 +4641,7 @@ interactions
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherNpcs);
             npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherLevelArt);
-            level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+            level_art.draw(&interactions, level_dispatch.as_ref(), &hints, &scene.atmosphere, camera, fullbright);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherDispatch);
             if let Some(start) = snapshot_gather_start {
                 let (bytes, draws, bones, surfaces) = frame.snapshot_census();
@@ -4665,10 +4724,10 @@ interactions
         {
             let _characters_profile = crate::frame_profile::span("characters_level_art");
             #[cfg(feature="vita_renderer")]
-            if skin_frame.is_none() { level_art.story_pose(&story); }
+            if skin_frame.is_none() { level_art.story_pose(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art))); }
             #[cfg(not(feature="vita_renderer"))]
-            level_art.story_pose(&story);
-            level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
+            level_art.story_pose(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)));
+            level_art.draw(&interactions, level_dispatch.as_ref(), &hints, &scene.atmosphere, camera, fullbright);
         }
         } // world-only diagnostic mask includes all character work
         #[cfg(feature="vita_renderer")]
@@ -4757,7 +4816,7 @@ interactions
                 if let (Some(d), Some(art)) = (&interactions.duchess, &mut level_art.duchess) {
                     art.effects(d, camera, &scene.atmosphere);
                 }
-                level_art.effects(&interactions, camera, &scene.atmosphere);
+                level_art.effects(&interactions, level_dispatch.as_ref(), camera, &scene.atmosphere);
                 }
                 alice.draw_effects(camera, fullbright, if snapshot_enabled {dynamic_input.alice_effects}else{show_alice});
                 if let Some(input)=aim_input.as_ref().filter(|i|aim_pointer.valid_input(i,level_art.snapshot_visit.id())) {aim_pointer.draw_input(input,level_art.snapshot_visit.id(),if active{dt}else{0.},camera,&scene.atmosphere);}
@@ -5754,5 +5813,21 @@ mod reference_input_tests {
         chapters.open(0, 36);
         chapters.select(chapters.selected + 1, 36);
         assert_eq!(chapters.selected, 1);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_dispatch_tests {
+    use super::*;
+    #[test]
+    fn dispatch_visit_overflow_and_registry_shape_reject_before_publication() {
+        let art = LevelArt::default();
+        let mut input = LevelDispatch { visit: art.snapshot_visit.id(), selected: [false; 10],
+            registered: vec![], school_staging: false, cheshire: None, overflow: false };
+        assert!(input.valid(&art));
+        input.overflow = true; assert!(!input.valid(&art)); input.overflow = false;
+        input.registered.push(false); assert!(!input.valid(&art)); input.registered.clear();
+        let restored = LevelArt::default(); assert!(!input.valid(&restored));
+        input.visit = 0; assert!(!input.valid(&art));
     }
 }

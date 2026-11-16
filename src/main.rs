@@ -561,6 +561,7 @@ fn run() -> Result<()> {
             "--potears1-skip-route-check" => mode = "potears1-skip-route",
             "--potears1-render-check" => mode = "potears1-render",
             "--pool-render-check" => mode = "pool-render",
+            "--snapshot-cheshire-render-check" => mode = "snapshot-cheshire-render",
             "--snapshot-alice-render-check" => mode = "snapshot-alice-render",
             "--snapshot-handoff-render-check" => mode = "snapshot-handoff-render",
             "--beyond-render-check" => mode = "beyond-render",
@@ -1270,6 +1271,12 @@ fn run() -> Result<()> {
             }
         });
         return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    if mode == "snapshot-cheshire-render" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = cheshire::snapshot_render_check(&mut assets).await { eprintln!("Snapshot Cheshire failed: {e:#}"); std::process::exit(1); }
+        }); return Ok(());
     }
     if mode == "snapshot-alice-render" {
         macroquad::Window::from_config(viewer::config(), async move {

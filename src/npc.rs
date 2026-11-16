@@ -793,13 +793,16 @@ impl Puppet {
             && input.handoff.as_ref().is_none_or(|p| p.local.len() == input.pose.len())
     }
     pub(crate) fn draw_input(&mut self, input: &PuppetInput, fullbright: bool) {
+        self.draw_input_dissolving(input, fullbright, 0.);
+    }
+    pub(crate) fn draw_input_dissolving(&mut self, input: &PuppetInput, fullbright: bool, dissolve: f32) {
         if let (Some(dst), Some(src)) = (&mut self.4, &input.handoff) {
             dst.clone_from(src); dst.rendered = crate::render_snapshot::handoff_render_stamp();
         }
         let _consumer = crate::character::skinning::CullGuard::publication_reason(
             input.frozen, crate::phase_census::FROZEN);
         let material = self.3.clone();
-        material.draw_dissolving(0., || self.0.draw_resolved_pose(
+        material.draw_dissolving(dissolve, || self.0.draw_resolved_pose(
             &input.pose, &input.scales, 0., input.time, input.alive, input.transform,
             input.scale, fullbright, input.attachments, &input.visual, None));
         if input.frozen { self.0.draw_frozen(); }
