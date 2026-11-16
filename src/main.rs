@@ -1276,11 +1276,12 @@ fn run() -> Result<()> {
         return Ok(());
     }
     #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
-    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
     if mode == "snapshot-hud-resource" {
-        if let Err(e) = render_snapshot::hud_resource_check(&mut assets).await { eprintln!("Snapshot HUD failed: {e:#}"); std::process::exit(1); }
-        return;
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = render_snapshot::hud_resource_check(&mut assets).await { eprintln!("Snapshot HUD failed: {e:#}"); std::process::exit(1); }
+        }); return Ok(());
     }
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
     if mode == "snapshot-cheshire-render" {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = cheshire::snapshot_render_check(&mut assets).await { eprintln!("Snapshot Cheshire failed: {e:#}"); std::process::exit(1); }
