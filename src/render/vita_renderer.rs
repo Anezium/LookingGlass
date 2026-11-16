@@ -430,6 +430,8 @@ pub struct Config {
     pub route_world_wish: bool,
     /// Record a play into this tape file (src/replay). Empty: off. Needs replay_start.
     pub replay_record: String,
+    /// Input-only fight recording diagnostic. Never enabled in release configs.
+    pub replay_fight_pilot: bool,
     /// Replay this tape file instead of the pad. Empty: off.
     pub replay_play: String,
     /// Where a recording starts: "save:<slot>" or "chapter:<map>[$<entrance>][@<difficulty>]".
@@ -643,6 +645,7 @@ impl Default for Config {
             route_heading_lock:true,
             route_world_wish: false,
             replay_record: String::new(),
+            replay_fight_pilot: false,
             replay_play: String::new(),
             replay_start: String::new(),
             replay_check_every: 30,

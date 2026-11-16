@@ -12,6 +12,7 @@
 //! a recording stores it, a replay compares with it and reports the first step that differs.
 pub mod input;
 pub mod tape;
+pub mod pilot;
 
 use crate::save::{Game, Loaded, Slot, Store};
 use anyhow::{bail, ensure, Context, Result};
@@ -141,7 +142,7 @@ pub enum Step {
 }
 
 enum Mode {
-    Record { writer: Option<tape::Writer>, pending: Option<input::Frame>, synthetic: bool, aim: Option<(f32, f32)> },
+    Record { writer: Option<tape::Writer>, pending: Option<input::Frame>, synthetic: bool, aim: Option<(f32, f32)>, pilot: Option<input::Frame> },
     Replay { reader: Box<tape::Reader>, total: u64 },
 }
 pub struct Session {
@@ -184,7 +185,7 @@ impl Session {
         if settings.record.is_empty() && settings.play.is_empty() { return Ok(None); }
         validate_settings(&settings)?;
         let mut session = Self {
-            mode: Mode::Record { writer: None, pending: None, synthetic: false, aim: None },
+            mode: Mode::Record { writer: None, pending: None, synthetic: false, aim: None, pilot: None },
             name: String::new(), settings: settings.clone(), step: 0, resume: None, last_map: None, last_alive: None,
             events: 0, checks: 0, matched: 0, differed: 0, first_difference: None, event_mismatches: 0,
             started: std::time::Instant::now(), ended: false,
@@ -260,8 +261,11 @@ impl Session {
         println!("[lg/replay] record {name} start={} map={} entry={:?} difficulty={} synthetic={synthetic}",
             settings.start, start.map, start.entry, start.difficulty);
         session.name = name;
-        session.mode = Mode::Record { writer: Some(writer), pending: None, synthetic, aim: None };
+        session.mode = Mode::Record { writer: Some(writer), pending: None, synthetic, aim: None, pilot: None };
         Ok(Some(session))
+    }
+    pub fn pilot_frame(&mut self, frame: input::Frame) {
+        if let Mode::Record { pilot, .. } = &mut self.mode { *pilot = Some(frame); }
     }
     pub fn take_resume(&mut self) -> Option<Loaded> { self.resume.take() }
     /// A synthetic host recording steers toward the nearest hostile; see input::synthetic.
@@ -308,7 +312,7 @@ impl Session {
         let (check, cost_us) = probe.as_ref().map(|p| check_row(step, p)).unzip();
         let cost = cost_us.map_or_else(String::new, |us| format!(" cost_us={us}"));
         match &mut self.mode {
-            Mode::Record { writer, pending, synthetic, aim } => {
+            Mode::Record { writer, pending, synthetic, aim, pilot } => {
                 let w = writer.as_mut().context("recording writer closed")?;
                 // Host test of the failure path: LOOKING_GLASS_REPLAY_FAIL_AT=<step>.
                 #[cfg(not(target_os = "vita"))]
@@ -338,6 +342,7 @@ impl Session {
                 } else { input::capture_live() };
                 #[cfg(target_os = "vita")]
                 let f = { let _ = (synthetic, aim); input::capture_live() };
+                let f = pilot.take().unwrap_or(f);
                 if step == 0 { input::activate(false); }
                 input::install(&f);
                 *pending = Some(f);

@@ -822,6 +822,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     anyhow::ensure!(!(replay.is_some() && route_session.is_some()), "replay and route diagnostics are exclusive");
     let replay_resume = replay.as_mut().and_then(|r| r.take_resume());
     let store = if replay.as_ref().is_some_and(|r| r.replaying()) { store.discarding_writes() } else { store };
+    let mut fight_pilot = crate::replay::pilot::Pilot::open(replay.as_ref().is_some_and(|r| !r.replaying()))?;
     let mut replay_end: Option<&'static str> = None;
     eprintln!("[lg/startup] save store ready elapsed_ms={:.3} store_construct_ms={:.3} viewer_elapsed_ms={:.3}",save_store_start.elapsed().as_secs_f64()*1000.,store_start.elapsed().as_secs_f64()*1000.,startup.elapsed().as_secs_f64()*1000.);
     #[cfg(feature="vita_renderer")]
@@ -1487,6 +1488,24 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         // One tape step per viewer frame, before any input or frame time is read.
         if let Some(r) = &mut replay {
+            if r.running() && !r.replaying() {
+                if let Some(pilot) = &mut fight_pilot {
+                    let mut threats = Vec::new();
+                    if !story.busy() {
+                        threats.extend(npcs.targets().into_iter().filter(|t| npcs.route_engaged(t.id, player.eye())));
+                        if let Some(t) = interactions.duchess.as_ref().and_then(|d| d.target()) { threats.push(t); }
+                        if let Some(s) = &interactions.encounters { threats.extend(s.targets()); }
+                        if let Some(s) = &interactions.school2 { threats.extend(s.targets()); }
+                        threats.extend(interactions.levels_targets().into_iter().filter(|t| {
+                            crate::level::hit_owner(&interactions.levels, t.id)
+                                .is_some_and(|s| interactions.levels[s].ctl.hostile_target(t.id))
+                        }));
+                    }
+                    r.pilot_frame(pilot.frame(&maps[current], &player, yaw, pitch, stats.alive(),
+                        stats.sanity(), story.busy(), &threats, &scene.world,
+                        alice.ready_to_attack(stats.equipped().unwrap_or(crate::weapons::UNARMED)), stats.selected(), &preferences));
+                }
+            }
             if r.wants_aim() {
                 let wrap = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
                 r.aim(npcs.targets().iter().map(|t| {
@@ -2666,7 +2685,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 #[cfg(target_os = "vita")]
                 input.vita_look(&preferences, elapsed, &mut yaw, &mut pitch);
                 #[cfg(not(target_os = "vita"))]
-                if crate::replay::input::cross() {
+                if crate::replay::input::native_sticks() {
                     input.vita_look(&preferences, elapsed, &mut yaw, &mut pitch);
                 } else {
                 let look = input.look(&preferences);
@@ -3677,6 +3696,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 hit.kind = hit.kind.means();
             } else {
                 hit.damage = stats.attack_damage(hit.damage);
+            }
+            if fight_pilot.is_some() && replay.as_ref().is_some_and(|r| r.running() && !r.replaying()) {
+                println!("[lg/pilot] weapon_contact id={} damage={} kind={:?}", hit.id, hit.damage, hit.kind);
             }
             if hit.id == crate::duchess::ID {
                 // A projectile still in flight after Alice dies must not lock retry in a defeat cinematic.

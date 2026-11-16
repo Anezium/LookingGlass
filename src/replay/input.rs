@@ -145,9 +145,7 @@ pub(super) fn install(frame: &Frame) {
     MOUSE_POS.store(pair_bits(frame.mouse), Relaxed);
     WHEEL.store(pair_bits(frame.wheel), Relaxed);
     QUIT.store(frame.quit, Relaxed);
-    if mode() == REPLAY {
-        PAD.store(pad_bits(frame.pad), Relaxed);
-    }
+    PAD.store(pad_bits(frame.pad), Relaxed);
     let mut chars = CHARS.lock().unwrap_or_else(|p| p.into_inner());
     chars.clear();
     // Served by pop() from the end, like macroquad: store reversed.
@@ -256,14 +254,14 @@ pub fn cross() -> bool {
 /// The host side of a cross replay: the recorded stick read, or none outside a replay.
 #[cfg(not(target_os = "vita"))]
 pub fn vita_pad() -> Option<[u8; 4]> {
-    if mode() == REPLAY { bits_pad(PAD.load(Relaxed)) } else { None }
+    if active() { bits_pad(PAD.load(Relaxed)) } else { None }
 }
 
 /// The Vita stick read used by gameplay (lx, ly, rx, ry). Recording reads the console and keeps
 /// the value for the tape; replay returns the recorded value and never reads the pad.
 #[cfg(target_os = "vita")]
 pub fn vita_pad() -> Option<[u8; 4]> {
-    if mode() == REPLAY {
+    if mode() == REPLAY || bits_pad(PAD.load(Relaxed)).is_some() {
         return bits_pad(PAD.load(Relaxed));
     }
     // VitaSDK psp2common/ctrl.h SceCtrlData (0x20 bytes).
@@ -280,6 +278,15 @@ pub fn vita_pad() -> Option<[u8; 4]> {
         PAD.store(pad_bits(pad), Relaxed);
     }
     pad
+}
+
+/// A tape containing analog input uses the native stick path on the host too.
+/// This depends only on tape input, never on whether the pilot is enabled.
+pub fn native_sticks() -> bool {
+    cfg!(target_os = "vita") || cross() || (active() && last_pad().is_some())
+}
+pub(super) fn hold_key(frame: &mut Frame, key: KeyCode) {
+    frame.keys_down |= 1 << key_bit(key).expect("known backend key");
 }
 
 /// Host recordings without a person: keys, mouse buttons and mouse motion from a script, with

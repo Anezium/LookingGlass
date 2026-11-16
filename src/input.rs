@@ -377,7 +377,7 @@ impl Input {
         self.disconnected = self.pad.connected && raw.is_none() && self.using_pad;
         self.pad
             .update(raw, focused, prefs.pad_deadzone, get_frame_time().min(0.1));
-        if cfg!(target_os = "vita") || crate::replay::input::cross() {
+        if crate::replay::input::native_sticks() {
             if !self.focused {
                 self.vita_neutral = true;
                 self.vita_look_neutral = true;
@@ -490,7 +490,7 @@ impl Input {
             return false;
         }
         // The backend quantizes the Vita stick to W/A/S/D; use its analog read instead.
-        if (cfg!(target_os = "vita") || crate::replay::input::cross()) && matches!(name, "W" | "S" | "A" | "D") { return false; }
+        if (crate::replay::input::native_sticks()) && matches!(name, "W" | "S" | "A" | "D") { return false; }
         (!self.blocked.contains(name) && physical(name, edge))
             || row.is_some_and(|i| {
                 let mask = pad_mask(&prefs.pad_bindings[i]);
