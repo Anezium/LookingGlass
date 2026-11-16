@@ -504,6 +504,10 @@ impl Art {
             })
             .collect();
         input.rejected = false;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var_os("LOOKING_GLASS_SNAPSHOT_REJECT_ENCOUNTERS").is_some() {
+            input.visit = 0;
+        }
         self.input = Some(input);
     }
     pub(crate) fn draw_snapshot(
