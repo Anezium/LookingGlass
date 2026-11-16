@@ -38,3 +38,6 @@ __pycache__/
 *.pem
 *.key
 *.log
+
+# Private fight-pilot build cache; removed at handoff.
+/target-pilot/
