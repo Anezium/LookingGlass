@@ -28,11 +28,15 @@ class Record(unittest.TestCase):
   self.assertEqual(r.returncode==0,ok,r.stdout+r.stderr)
  def start(self):self.run_step('start',True,'--self',str(self.binary),'--config',str(self.cfg))
  def clean(self):
-  with (self.root/'logs/arms.log').open('a') as f:f.write('[lg/replay] recorded fp-hatter2-01.lgtape steps=1200 reason=menu checks=40 events=1 seconds=60.0\n')
+  with (self.root/'logs/arms.log').open('a') as f:f.write('[lg/replay] recorded '+json.loads(self.cfg.read_text())['replay_record']+' steps=1200 reason=menu checks=40 events=1 seconds=60.0\n')
  def test_lifecycle(self):
   self.start();self.clean();self.run_step('recover');self.run_step('get');self.run_step('restore')
   calls=(self.root/'calls').read_text();self.assertIn('restore --keep-saves',calls);self.assertNotIn('restore\n',calls)
   self.assertTrue((self.root/'fp-hatter2-01.lgtape.receipt.json').exists())
+ def test_centipede_lifecycle(self):
+  c=json.loads(self.cfg.read_text());c.update(replay_record='fp-centipede1-01.lgtape',replay_start='chapter:centipede1@normal');self.cfg.write_text(json.dumps(c))
+  self.start();self.clean();self.run_step('recover');self.run_step('get');self.run_step('restore')
+  self.assertTrue((self.root/'fp-centipede1-01.lgtape.receipt.json').exists())
  def test_missing_clean_line_blocks_recover(self):self.start();self.run_step('recover',False)
  def test_no_second_take(self):self.start();self.start_fails()
  def start_fails(self):self.run_step('start',False,'--self',str(self.binary),'--config',str(self.cfg))
