@@ -3580,7 +3580,7 @@ mod tests {
     fn release_fallback_renderer_is_explicit_played_baseline_without_recording() {
         use sha2::{Digest, Sha256};
         let played_bytes = include_bytes!("../../configs/PL-played-rc3.json");
-        assert_eq!(format!("{:x}", Sha256::digest(played_bytes)), "def605c0bd92a38281cb86fd9c20e36a794946999569e3a1f4131e1d0bba7c33");
+        assert_eq!(format!("{:x}", Sha256::digest(played_bytes)), "91af0b463eba918abdd0d2ce5cf8c9204b6f77499465009a44d61e0fec1fee4e");
         let bytes = include_bytes!("../../configs/PL-release.json");
         let raw: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         let defaults = serde_json::to_value(Config::default()).unwrap();
@@ -4375,13 +4375,13 @@ mod tests {
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "c71ce47388460bdb5f4145395fa605bed98c64186a8f5328bba091b7c0d58e01");
-        assert_eq!(format!("{:x}", Sha256::digest(rc12_bytes)), "4b1a1503b00b7826258a54fff0e69e5bdbd3a609f440bc13aaa2926aae9cb9f5");
-        assert_eq!(format!("{:x}", Sha256::digest(rc11_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
-        assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
-        assert_eq!(format!("{:x}", Sha256::digest(rc9_bytes)), "9dbf482cf40ff440dd74ecc5c6be45aaf5c3cb0b06da3bfc0fe47a4b76466cac");
-        assert_eq!(format!("{:x}", Sha256::digest(rc8_bytes)), "a5d21beec0d15648cc94f209bbe0adf1fa387430c0df18a1a5e10ad2756f6f2b");
-        assert_eq!(format!("{:x}", Sha256::digest(rc7_bytes)), "593778fbe24338cbb2c8d00a8504286d5c26018dbc2bc663500221095bfd2b80");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "98c9d5b3a5bec6c3c3e93ab81c2c1ddd3548fbae6cdd261ee2fce246dd610496");
+        assert_eq!(format!("{:x}", Sha256::digest(rc12_bytes)), "3afc7619f371bea16332f5ca54738faf8402d6f9e0664c8a3dd3df3362e384aa");
+        assert_eq!(format!("{:x}", Sha256::digest(rc11_bytes)), "94f8899d1b95b375bb3414614557d841802fb8235e6bade1bec2ac08b6215ad0");
+        assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "730e6aaeabb664faf89842bb424a28973078fed8115facd218a9951405242b8d");
+        assert_eq!(format!("{:x}", Sha256::digest(rc9_bytes)), "ac73375556a9adeb7ad4fd274f37ee566c93dfe2c0a68869143ac712dd5ba6cc");
+        assert_eq!(format!("{:x}", Sha256::digest(rc8_bytes)), "cc16ad0f3bd69ff1df0090233d092d5a939b5a721d39fd400da00fb74b945f73");
+        assert_eq!(format!("{:x}", Sha256::digest(rc7_bytes)), "d5bf4fc9483272baba3b9c1f184880ad4d2d6331cfbbacddb36f555b4e50f52b");
         assert_eq!(format!("{:x}", Sha256::digest(sim_bytes)), "fa64b0c5b79c52d8e028f7fc9d0d3dd2eec57b7641dfc8f76b34212bdcb3334b");
         let (release, rejected) = parse_runtime_config(release_bytes).unwrap();
         assert!(rejected.is_none());

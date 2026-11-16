@@ -158,6 +158,7 @@
   "log_frame_time_every": 10,
   "sim_trigger_facts_reuse": true,
   "actor_publication_occurrences": true,
+  "actor_occurrence_limit": 4,
   "actor_deferred_layers": true,
   "actor_publication_uv_reuse": true,
   "prop_occurrence_reuse": true,
@@ -188,5 +189,6 @@
   "ant_corpse_opaque_shader": true,
   "water_draw_join": true,
   "actor_consumer_frustum_cull": true,
-  "fx_unlit_exact": true
+  "fx_unlit_exact": true,
+  "actor_hidden_mask": false
 }

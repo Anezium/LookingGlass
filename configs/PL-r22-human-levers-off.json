@@ -101,5 +101,7 @@
   "sim_sight_query_reuse": false,
   "sim_hatter_door_candidates": false,
   "actor_publication_occurrences": false,
-  "actor_deferred_layers": false
+  "actor_occurrence_limit": 4,
+  "actor_deferred_layers": false,
+  "actor_hidden_mask": false
 }

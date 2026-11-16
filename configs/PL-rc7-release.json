@@ -159,6 +159,7 @@
   "log_frame_time_every": 0,
   "sim_trigger_facts_reuse": true,
   "actor_publication_occurrences": true,
+  "actor_occurrence_limit": 4,
   "actor_deferred_layers": true,
   "actor_publication_uv_reuse": true,
   "prop_occurrence_reuse": true,
@@ -183,5 +184,6 @@
   "spike_log_ms": 0.0,
   "audio_combat_preload": false,
   "sim_sweep_blocked": false,
-  "actor_near_cull": 0.0
+  "actor_near_cull": 0.0,
+  "actor_hidden_mask": false
 }

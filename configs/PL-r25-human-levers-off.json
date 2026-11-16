@@ -101,11 +101,13 @@
   "sim_sight_query_reuse": false,
   "sim_hatter_door_candidates": false,
   "actor_publication_occurrences": false,
+  "actor_occurrence_limit": 4,
   "actor_deferred_layers": false,
   "collision_sah": true,
   "skin_actual_consumers": true,
   "audio_static_cache": true,
   "actor_publication_uv_reuse": false,
   "prop_occurrence_reuse": false,
-  "fx_observe_move": false
+  "fx_observe_move": false,
+  "actor_hidden_mask": false
 }
