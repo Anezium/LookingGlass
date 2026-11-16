@@ -44,6 +44,10 @@ pub struct Config {
     pub submit_alpha_state: bool,
     /// Reuse bounded source-list storage when rebuilding exact FX merge plans.
     pub submit_fx_plan_scratch: bool,
+    /// Cache per-face global poses using complete numeric inputs and bone hierarchy.
+    pub submit_pose_cache: bool,
+    /// Balance synchronous merge copy lanes by bytes rather than source count.
+    pub submit_merge_balance: bool,
     /// Miniquad timing report cadence in frames; omitted keeps the historical 10, null or 0
     /// disables it. Measurement runs set 0: the report adds 3-5 ms to p95 (r15b).
     pub log_frame_time_every: Option<u32>,
@@ -506,6 +510,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             diag_submit_timing: false, submit_alpha_state: false, submit_fx_plan_scratch: false,
+            submit_pose_cache: false, submit_merge_balance: false,
             log_frame_time_every: Some(10),
             sim_trigger_facts_reuse: true,
             sim_hatter_door_candidates: true,
@@ -3642,7 +3647,7 @@ mod tests {
     fn round5_keys_are_strict_and_off_in_historical_configs() {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
-            if key.starts_with("diag_skip_") || matches!(key.as_str(), "submit_alpha_state" | "submit_fx_plan_scratch") || key == "diag_submit_timing" || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
+            if key.starts_with("diag_skip_") || matches!(key.as_str(), "submit_alpha_state" | "submit_fx_plan_scratch" | "submit_pose_cache" | "submit_merge_balance") || key == "diag_submit_timing" || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
                 || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
@@ -3662,7 +3667,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "diag_submit_timing" | "submit_alpha_state" | "submit_fx_plan_scratch" | "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "diag_submit_timing" | "submit_alpha_state" | "submit_fx_plan_scratch" | "submit_pose_cache" | "submit_merge_balance" | "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

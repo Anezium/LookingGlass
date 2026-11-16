@@ -184,6 +184,16 @@ struct Blink {
 pub struct Face {
     rig: Rig,
     blink: Option<Blink>,
+    #[cfg(feature="vita_renderer")]
+    pose_cache: std::cell::RefCell<Option<PoseCache>>,
+}
+#[cfg(feature="vita_renderer")]
+struct PoseCache {
+    local: Vec<Transform>,
+    parents: Vec<Option<usize>>,
+    mouth: u32,
+    angle: u32,
+    value: Vec<Transform>,
 }
 impl Face {
     pub fn load(
@@ -223,7 +233,9 @@ impl Face {
         } else {
             None
         };
-        Ok(Self { rig, blink })
+        Ok(Self { rig, blink,
+            #[cfg(feature="vita_renderer")] pose_cache: Default::default(),
+        })
     }
     pub fn mouth_angle(&mut self, degrees: f32) {
         if degrees.is_finite() && (0. ..=90.).contains(&degrees) {
@@ -231,6 +243,26 @@ impl Face {
         }
     }
     pub fn pose(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32) -> Vec<Transform> {
+        #[cfg(feature="vita_renderer")]
+        if crate::render::vita_renderer::config().submit_pose_cache {
+            let mut cache = self.pose_cache.borrow_mut();
+            if let Some(c) = cache.as_ref().filter(|c| c.mouth == mouth.to_bits()
+                && c.angle == self.rig.angle.to_bits()
+                && crate::character::skinning::overlap::same_pose(&c.local, local)
+                && c.parents.len() == skeleton.bones.len()
+                && c.parents.iter().zip(&skeleton.bones).all(|(p,b)| *p == b.parent)) {
+                crate::sim_maps::count("submit_pose_cache_hits", 1);
+                return c.value.clone();
+            }
+            let value = self.pose_uncached(skeleton, local, mouth);
+            *cache = Some(PoseCache { local: local.to_vec(),
+                parents: skeleton.bones.iter().map(|b| b.parent).collect(),
+                mouth: mouth.to_bits(), angle: self.rig.angle.to_bits(), value: value.clone() });
+            return value;
+        }
+        self.pose_uncached(skeleton, local, mouth)
+    }
+    fn pose_uncached(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32) -> Vec<Transform> {
         let mut local = local.to_vec();
         self.rig.apply(&mut local, mouth);
         skeleton.global_pose(&local)
@@ -468,6 +500,29 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature="vita_renderer")]
+    #[test]
+    fn retained_face_pose_checks_numeric_inputs_hierarchy_and_rig() {
+        crate::render::vita_renderer::with_config(|c| c.submit_pose_cache = true, || {
+            let mut skeleton = Skeleton { bones: vec![crate::skeletal::Bone { parent: None, name: "root".into() },
+                crate::skeletal::Bone { parent: Some(0), name: "tag_mouth".into() }], surfaces: vec![], skin_bounds: vec![] };
+            let mut face = Face { rig: Rig::new(&skeleton, &Settings::default()), blink: None, pose_cache: Default::default() };
+            let mut local = vec![Transform { rotation: Quat::IDENTITY, translation: Vec3::X }; 2];
+            for change in 0..8 {
+                if change == 2 { local[0].translation.x = -0.; }
+                if change == 3 { local[0].translation.x = 0.; }
+                if change == 4 { skeleton.bones[1].parent = None; }
+                if change == 5 { face.mouth_angle(35.); }
+                if change == 6 { local[1].rotation = Quat::from_rotation_y(0.2); }
+                let mouth = if change == 7 { 0.75 } else { 0.25 };
+                let expected = face.pose_uncached(&skeleton, &local, mouth);
+                for _ in 0..2 {
+                    let actual = face.pose(&skeleton, &local, mouth);
+                    assert!(crate::character::skinning::overlap::same_pose(&expected, &actual));
+                }
+            }
+        });
+    }
     #[test]
     fn authored_default_and_headwatch_are_bounded_pauseable_and_saved() {
         let sk = Skeleton {

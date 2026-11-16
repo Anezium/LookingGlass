@@ -891,7 +891,7 @@ fn same_transform(a: Transform, b: Transform) -> bool {
     a.translation.to_array().map(f32::to_bits) == b.translation.to_array().map(f32::to_bits)
         && a.rotation.to_array().map(f32::to_bits) == b.rotation.to_array().map(f32::to_bits)
 }
-pub(super) fn same_pose(a: &[Transform], b: &[Transform]) -> bool {
+pub(crate) fn same_pose(a: &[Transform], b: &[Transform]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(&a, &b)| same_transform(a, b))
 }
 pub(super) fn same_floats(a: &[f32], b: &[f32]) -> bool {

@@ -998,13 +998,32 @@ fn pack_kernel<const RANGES: bool>(sources: &[PackSource], vertices: &mut [Verte
 }
 fn pack_sources_mode<const RANGES: bool>(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16], copy_indices: bool, worker: bool) {
     if worker && vertices.len() >= 256 && sources.len() >= 2 {
-        let mid = sources.len()/2;
+        let mid = if crate::render::vita_renderer::config().submit_merge_balance {
+            copy_split::<RANGES>(sources, copy_indices)
+        } else { sources.len()/2 };
         let vb = sources[mid].vertex_offset; let ib = sources[mid].index_offset;
         let (va,vz) = vertices.split_at_mut(vb); let (ia,iz) = indices.split_at_mut(ib);
         let (a,z) = sources.split_at(mid);
         crate::character::skinning::overlap::cpu_pair(
             ||pack_kernel::<RANGES>(a,va,ia,0,0,copy_indices), ||pack_kernel::<RANGES>(z,vz,iz,vb,ib,copy_indices));
     } else { pack_kernel::<RANGES>(sources,vertices,indices,0,0,copy_indices); }
+}
+// Keep source boundaries, output offsets and kernels unchanged. Empty/reused vertex
+// ranges cost nothing; indices still cost work when topology must be rebuilt.
+fn copy_split<const RANGES: bool>(sources: &[PackSource], copy_indices: bool) -> usize {
+    let cost = |s: &PackSource| {
+        (if !RANGES || !s.keep_vertices { s.vertex_len * std::mem::size_of::<Vertex>() } else { 0 })
+            + if copy_indices { s.index_len * std::mem::size_of::<u16>() } else { 0 }
+    };
+    let total: usize = sources.iter().map(cost).sum();
+    let mut left = 0usize;
+    let mut best = (usize::MAX, sources.len()/2);
+    for mid in 1..sources.len() {
+        left += cost(&sources[mid-1]);
+        let difference = left.abs_diff(total-left);
+        if difference < best.0 { best = (difference, mid); }
+    }
+    best.1
 }
 #[cfg(test)]
 fn pack_sources(sources: &[PackSource], vertices: &mut [Vertex], indices: &mut [u16], copy_indices: bool, worker: bool) {
@@ -1730,6 +1749,16 @@ pub(crate) fn finish_world(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn byte_balanced_split_respects_reused_ranges_and_index_work() {
+        let source = |vertex_len, keep_vertices| PackSource { vertices: 0, vertex_len,
+            indices: 0, index_len: 6, vertex_offset: 0, index_offset: 0, keep_vertices };
+        let mut sources = vec![source(900,false), source(20,false), source(20,false), source(20,false)];
+        assert_eq!(copy_split::<false>(&sources, true), 1);
+        sources[0].keep_vertices = true;
+        assert_eq!(copy_split::<true>(&sources, false), 2);
+        assert!((1..sources.len()).contains(&copy_split::<true>(&sources, true)));
+    }
     #[test]
     fn destination_scratch_preserves_rebuilt_plans_and_bounds_spare_storage() {
         let mut reference = MergeCache::default();
