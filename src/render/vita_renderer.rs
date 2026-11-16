@@ -2338,6 +2338,8 @@ impl Renderer {
                 // Parameter signatures include the model id and isolate each moving batch.
                 // All groups in a parameter therefore have identical model bits this pass.
                 let already_checked = alpha_once && self.parameters[g.parameter].alpha_serial == self.alpha_parameter_serial;
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                if already_checked {crate::sim_maps::count("world_alpha_parameter_once_hits",1);}
                 let model = if already_checked { Mat4::IDENTITY } else if reuse { self.models[id].unwrap() }
                     else { model_matrix(&g.recipe, time, transforms).unwrap() };
                 let build_started = if liquid { water_probe::tick() } else { None };
