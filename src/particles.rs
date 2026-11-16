@@ -1262,6 +1262,13 @@ impl Steam {
             add_counter(Counter::PuffsBirths, self.puffs.len() as u32 - retained);
         }
     }
+    pub(crate) fn render_samples(&self, out: &mut Vec<crate::render_snapshot::ParticleInput>) {
+        out.clear();
+        out.extend(self.puffs.iter().map(|p| crate::render_snapshot::ParticleInput {
+            emitter: p.emitter, position: p.position, age: p.age, life: p.life,
+            size: p.size, roll: p.roll,
+        }));
+    }
     pub(crate) fn live_puffs(&self)->u64 {self.puffs.len() as u64}
     pub fn depths(&self, camera: Vec3, direction: Vec3) -> impl Iterator<Item = (usize, f32)> + '_ {
         self.puffs

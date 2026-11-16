@@ -940,6 +940,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut paused = false;
     let mut pitch = 0.0f32;
     let mut frame = 0;
+    let mut dynamic_input = crate::render_snapshot::DynamicInput::default();
     let mut menu = false;
     let mut inventory_menu = false;
     let mut help_until = 0.0;
@@ -4310,6 +4311,31 @@ interactions
             println!("[lg/snapshot] frame={} hud_bytes={} extraction_us={:.3} allocations={} save={}",
                 frame, snapshot.bytes(), us, snapshot_allocations, captured_save.is_some());
         }
+        // This second census does not claim the particle/pickup consumers have
+        // been converted. Only transforms below consume this prototype arena.
+        if snapshot_enabled {
+            use macroquad::camera::Camera;
+            let scope = crate::kernel_alloc::Scope::begin();
+            let start = std::time::Instant::now();
+            dynamic_input.view = world_camera.matrix();
+            dynamic_input.environment_clock = environment_clock;
+            dynamic_input.pickup_clock = pickup_clock;
+            dynamic_input.fog = scene.atmosphere.distance;
+            dynamic_input.liquid = scene.atmosphere.liquid;
+            dynamic_input.transforms.clear();
+            dynamic_input.transforms.extend_from_slice(&transforms);
+            steam.render_samples(&mut dynamic_input.particles);
+            dynamic_input.pickups.clear();
+            dynamic_input.pickups.extend(pickups.iter().enumerate().map(|(handle, p)|
+                crate::render_snapshot::PickupInput { handle, position: p.origin,
+                    collected: stats.collected.contains(&p.id) }));
+            let us = start.elapsed().as_secs_f64() * 1_000_000.;
+            let allocations = scope.finish();
+            println!("[lg/snapshot-dynamic] frame={} bytes={} capacity_bytes={} extraction_us={:.3} allocations={} transforms={} particles={} pickups={}",
+                frame, dynamic_input.bytes(), dynamic_input.capacity_bytes(), us, allocations,
+                dynamic_input.transforms.len(), dynamic_input.particles.len(), dynamic_input.pickups.len());
+        }
+        let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         crate::spike_log::render_begin();
         overlap_probe.begin();
@@ -4360,11 +4386,13 @@ interactions
                 viewer_block = crate::frame_profile::span("skin_gather");
                 crate::frame_profile::set_owner(crate::frame_profile::Owner::Characters);
             }
+            let snapshot_gather_start = snapshot_enabled.then(std::time::Instant::now);
             let gather_clock = crate::pass_clock::scope(crate::pass_clock::ACTOR_GATHER);
             let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherStoryPose);
             level_art.story_pose(&story);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherFrameBegin);
             crate::audio::game_stage(3);
+            let frame_index_for_snapshot = frame;
             let mut frame = crate::character::skinning::overlap::Frame::begin();
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherAlice);
             if crate::character::skinning::overlap::single_frame() {
@@ -4379,6 +4407,11 @@ interactions
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherLevelArt);
             level_art.draw(&interactions, &hints, &scene.atmosphere, camera, fullbright);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherDispatch);
+            if let Some(start) = snapshot_gather_start {
+                let (bytes, draws, bones, surfaces) = frame.snapshot_census();
+                println!("[lg/snapshot-skin] frame={} bytes={} draws={} bones={} surfaces={} gather_us={:.3}",
+                    frame_index_for_snapshot, bytes, draws, bones, surfaces, start.elapsed().as_secs_f64()*1_000_000.);
+            }
             frame.dispatch();
             drop(census_leaf);
             drop(gather_clock);

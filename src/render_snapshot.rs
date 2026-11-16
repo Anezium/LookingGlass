@@ -100,3 +100,34 @@ pub(crate) struct TailInput {
     #[cfg(feature="native_timing")]
     pub timing: crate::native_timing::State,
 }
+
+/// Compact census/prototype samples. Handles are indices scoped to one visit;
+/// they must be paired with a retained visit generation before asynchronous use.
+#[derive(Clone, Copy)]
+pub(crate) struct ParticleInput {
+    pub emitter: usize, pub position: Vec3, pub age: f32,
+    pub life: f32, pub size: f32, pub roll: f32,
+}
+#[derive(Clone, Copy)]
+pub(crate) struct PickupInput { pub handle: usize, pub position: Vec3, pub collected: bool }
+#[derive(Default)]
+pub(crate) struct DynamicInput {
+    pub view: Mat4, pub environment_clock: f32, pub pickup_clock: f32,
+    pub fog: Vec4, pub liquid: Vec4,
+    pub transforms: Vec<(usize, Vec3, Quat)>,
+    pub particles: Vec<ParticleInput>, pub pickups: Vec<PickupInput>,
+}
+impl DynamicInput {
+    pub fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.transforms.len() * std::mem::size_of::<(usize, Vec3, Quat)>()
+            + self.particles.len() * std::mem::size_of::<ParticleInput>()
+            + self.pickups.len() * std::mem::size_of::<PickupInput>()
+    }
+    pub fn capacity_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.transforms.capacity() * std::mem::size_of::<(usize, Vec3, Quat)>()
+            + self.particles.capacity() * std::mem::size_of::<ParticleInput>()
+            + self.pickups.capacity() * std::mem::size_of::<PickupInput>()
+    }
+}
