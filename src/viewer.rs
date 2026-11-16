@@ -1498,7 +1498,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         if let Some(s) = &interactions.school2 { threats.extend(s.targets()); }
                         threats.extend(interactions.levels_targets().into_iter().filter(|t| {
                             crate::level::hit_owner(&interactions.levels, t.id)
-                                .is_some_and(|s| interactions.levels[s].ctl.hostile_target(t.id))
+                                .is_some_and(|s| interactions.levels[s].ctl.hostile_target(t.id)
+                                    && (maps[current] != "hatter2" || interactions.levels[s].ctl.music_mood() == Some("action")))
                         }));
                     }
                     r.pilot_frame(pilot.frame(&maps[current], &player, yaw, pitch, stats.alive(),
