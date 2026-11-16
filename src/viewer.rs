@@ -109,6 +109,7 @@ impl LevelDispatch {
     fn valid(&self, art: &LevelArt) -> bool {
         !self.overflow && self.visit == art.snapshot_visit.id()
             && self.registered.len() == art.levels.len()
+            && self.cheshire.is_some() == art.cheshire.is_some()
             && self.cheshire.as_ref().is_none_or(|i| art.cheshire.as_ref()
                 .is_some_and(|a| a.valid_input(i, self.visit)))
     }
@@ -375,8 +376,8 @@ impl LevelArt {
         }
         for (index, art) in self.levels.iter_mut().enumerate() {
             if dispatch.is_some_and(|d| !d.registered[index]) { continue; }
-            let slot = &i.levels[index];
             if let Some(a) = art {
+                let slot = &i.levels[index];
                 a.draw(&*slot.ctl, atmosphere, camera, fullbright);
             }
         }
@@ -395,8 +396,8 @@ impl LevelArt {
         let dispatch = dispatch.filter(|d| d.valid(self));
         for (index, art) in self.levels.iter_mut().enumerate() {
             if dispatch.is_some_and(|d| !d.registered[index]) { continue; }
-            let slot = &i.levels[index];
             if let Some(a) = art {
+                let slot = &i.levels[index];
                 a.effects(&*slot.ctl, camera, atmosphere);
             }
         }
@@ -4818,11 +4819,15 @@ interactions
                 }
                 }
                 if !empty_level_effects {
-                if let (Some(p), Some(art)) = (&interactions.pandemonium, &mut level_art.pandemonium) {
-                    art.draw_effects(p, camera, &scene.atmosphere);
+                if level_dispatch.as_ref().filter(|d| d.valid(&level_art)).is_none_or(|d| d.selected[3]) {
+                    if let (Some(p), Some(art)) = (&interactions.pandemonium, &mut level_art.pandemonium) {
+                        art.draw_effects(p, camera, &scene.atmosphere);
+                    }
                 }
-                if let (Some(d), Some(art)) = (&interactions.duchess, &mut level_art.duchess) {
-                    art.effects(d, camera, &scene.atmosphere);
+                if level_dispatch.as_ref().filter(|d| d.valid(&level_art)).is_none_or(|d| d.selected[7]) {
+                    if let (Some(d), Some(art)) = (&interactions.duchess, &mut level_art.duchess) {
+                        art.effects(d, camera, &scene.atmosphere);
+                    }
                 }
                 level_art.effects_dispatch(&interactions, level_dispatch.as_ref(), camera, &scene.atmosphere);
                 }
