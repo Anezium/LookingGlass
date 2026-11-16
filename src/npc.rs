@@ -2142,6 +2142,7 @@ struct ResidentInput {
 }
 enum ResidentEffects {
     BiteOnly,
+    Wildlife { active: bool, input: wildlife_art::Input },
     Ladybug { active: bool, acorns: Vec<(Vec3, f32)>, bursts: Vec<(Vec3, f32)> },
     Plant { kind: crate::plants::Kind, shots: Vec<crate::plants::Shot> },
 }
@@ -2149,6 +2150,7 @@ impl ResidentEffects {
     fn bytes(&self) -> usize {
         match self {
             Self::BiteOnly => 0,
+            Self::Wildlife { .. } => std::mem::size_of::<wildlife_art::Input>(),
             Self::Ladybug { acorns, bursts, .. } => (acorns.len()+bursts.len())*std::mem::size_of::<(Vec3,f32)>(),
             Self::Plant { shots, .. } => shots.len()*std::mem::size_of::<crate::plants::Shot>(),
         }
@@ -2157,7 +2159,8 @@ impl ResidentEffects {
 impl Actor {
     fn snapshot_resident(&self) -> bool {
         self.resident.as_ref().is_some_and(|p| matches!(&p.body, resident::Body::Ladybug(_) | resident::Body::Plant(_))
-            || matches!(&p.body, resident::Body::Snark(b) if b.kind == crate::snark::Kind::BiteOnly))
+            || matches!(&p.body, resident::Body::Snark(b) if b.kind == crate::snark::Kind::BiteOnly)
+            || matches!(&p.body, resident::Body::Wildlife(b) if b.kind.rock()))
     }
 }
 #[derive(Default)]
@@ -2403,7 +2406,10 @@ impl Npcs {
             let p = actor.resident.as_ref().expect("selected resident");
             // Reject malformed bite-only state before animation lookup or any copying.
             if let resident::Body::Snark(b) = &p.body {
-                if b.validate().is_err() { inputs.overflow=true; break; }
+                if b.validate().is_err() || b.kind.model()!=actor.spawn.model || !self.models[actor.model].data.clips.contains_key(b.clip()) { inputs.overflow=true; break; }
+            }
+            if let resident::Body::Wildlife(b) = &p.body {
+                if b.validate().is_err() || b.kind.model()!=actor.spawn.model || !self.models[actor.model].data.clips.contains_key(b.clip()) { inputs.overflow=true; break; }
             }
             let dead = p.health() <= 0.;
             let mut visible = (dead || !crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors))
@@ -2423,12 +2429,13 @@ impl Npcs {
                 }
                 resident::Body::Plant(b) => (b.clip(),b.sample_time(d),b.loops(),b.visual_scale(d),true,b.frozen,0.),
                 resident::Body::Snark(b) => (b.clip(),b.sample_time(),b.loops(),b.visual_scale(d),true,b.frozen,0.),
+                resident::Body::Wildlife(b) => (b.clip(),b.sample_time(d),b.loops(),b.visual_scale(d),true,b.frozen,0.),
                 _ => unreachable!("selected resolved resident"),
             };
             let body = if body_visible && scale > 0. {
                 if d.skeleton.bones.len() > MAX_BONES.saturating_sub(bones) { inputs.overflow=true; break; }
                 bones += d.skeleton.bones.len();
-                let animation = &d.clips[clip]; let local = animation.sample(time, looping);
+                let Some(animation)=d.clips.get(clip) else {inputs.overflow=true;break;}; let local = animation.sample(time, looping);
                 let mut pose = model.face.pose(&d.skeleton, &local, 0.);
                 let scales = if model.bone_scales.is_empty() { Vec::new() }
                     else { crate::skeletal::scale_pose(&d.skeleton, &mut pose, &model.bone_scales) };
@@ -2442,6 +2449,7 @@ impl Npcs {
                 // BiteOnly has no projectiles, tongue, or smoke. Validation above
                 // excludes ranged states; other Snark kinds retain the live fence.
                 resident::Body::Snark(_) => ResidentEffects::BiteOnly,
+                resident::Body::Wildlife(b) => ResidentEffects::Wildlife { active:p.active, input:wildlife_art::Input::capture(b,model) },
                 resident::Body::Ladybug(b) => {
                     let count = if visible && p.active { b.acorns.len().saturating_add(b.bursts.len()) } else { 0 };
                     if count > MAX_EFFECTS.saturating_sub(effects) { inputs.overflow=true; break; }
@@ -3864,6 +3872,12 @@ impl Npcs {
                 if !crate::character::skinning::overlap::gather_only() {
                     match &input.effects {
                         ResidentEffects::BiteOnly => {},
+                        ResidentEffects::Wildlife { active, input } => {
+                            if !*active { self.material.bind(); continue; }
+                            let model=&self.models[model_slot];
+                            self.wildlife_art.entry(id).or_insert_with(||wildlife_art::Art::new(model))
+                                .draw_input(input,model,camera,atmosphere,&self.attack_fx);
+                        },
                         ResidentEffects::Ladybug { active, acorns, bursts } => {
                             if !*active { self.material.bind(); continue; }
                             if let Some(prop) = &mut self.acorn {

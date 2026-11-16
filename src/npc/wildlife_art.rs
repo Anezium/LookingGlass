@@ -4,6 +4,27 @@ use crate::{
     clockwork::Rig,
     wildlife::{Creature, Phase},
 };
+// Owned visual input: no Creature, target lookup, or World survives publication.
+pub(super) struct Input {
+    phase: Phase, time: f32, frozen: bool, visual_scale: f32,
+    transform: Transform, scale: f32, clip: &'static str, looping: bool,
+    web: Option<(Vec3, Vec3)>, beam: Option<(Vec3, Vec3, bool)>,
+}
+impl Input {
+    pub fn capture(g: &Creature, model: &Model) -> Self {
+        let data = &model.data;
+        let transform = Transform { translation:g.feet, rotation:Quat::from_rotation_z(g.yaw) };
+        Self { phase:g.phase,time:g.time,frozen:g.frozen,visual_scale:g.visual_scale(data),
+            transform,scale:g.scale,clip:g.clip(),looping:g.loops(),
+            web:g.web.map(|end|(g.target(0).center,end)),
+            beam:g.beam.map(|end| {
+                let from=if g.kind.jabber() { g.feet+transform.rotation*data.tag(g.clip(),g.time,"tag_beam").translation*g.scale }
+                    else { g.target(0).center };
+                (from,end,g.kind.jabber())
+            }),
+        }
+    }
+}
 pub(super) struct Art {
     effect: Option<crate::particles::Attached>,
     templates: BTreeMap<String, crate::particles::Attached>,
@@ -26,26 +47,18 @@ impl Art {
         }
     }
     pub fn draw(&mut self, g: &Creature, model: &Model, camera: Vec3, atmosphere: &Atmosphere, beams: &attack_fx::Art) {
-        let data = &model.data;
-        if let Some(anchor) = g.web {
+        self.draw_input(&Input::capture(g,model),model,camera,atmosphere,beams);
+    }
+    pub fn draw_input(&mut self, g: &Input, model: &Model, camera: Vec3, atmosphere: &Atmosphere, beams: &attack_fx::Art) {
+        let data=&model.data;
+        if let Some((start,end))=g.web {
             gl_use_default_material();
-            crate::render_fx::legacy_line(g.target(0).center, anchor, Color::new(0.8, 0.8, 0.8, 0.6));
+            crate::render_fx::legacy_line(start,end,Color::new(0.8,0.8,0.8,0.6));
         }
-        if let Some(end) = g.beam {
+        if let Some((from,end,jabber))=g.beam {
             gl_use_default_material();
-            let from = if g.kind.jabber() {
-                g.feet
-                    + Quat::from_rotation_z(g.yaw)
-                        * data.tag(g.clip(), g.time, "tag_beam").translation
-                        * g.scale
-            } else {
-                g.target(0).center
-            };
-            if g.kind.jabber() {
-                beams.lightning(from, end, camera, (g.time-data.clips[g.clip()].frame_time).max(0.), 1000., false, atmosphere);
-            } else {
-                crate::render_fx::legacy_line(from, end, Color::new(0.45, 0.75, 1., 0.7));
-            }
+            if jabber { beams.lightning(from,end,camera,(g.time-data.clips[g.clip].frame_time).max(0.),1000.,false,atmosphere); }
+            else { crate::render_fx::legacy_line(from,end,Color::new(0.45,0.75,1.,0.7)); }
         }
         if self.phase != Some(g.phase) || g.time < self.time {
             if let Some(effect) = &mut self.effect {
@@ -55,20 +68,17 @@ impl Art {
         }
         self.phase = Some(g.phase);
         self.time = g.time;
-        if g.frozen || g.visual_scale(data) <= 0. {
+        if g.frozen || g.visual_scale <= 0. {
             return;
         }
-        let transform = Transform {
-            translation: g.feet,
-            rotation: Quat::from_rotation_z(g.yaw),
-        };
-        let clip = &data.clips[g.clip()];
+        let transform = g.transform;
+        let clip = &data.clips[g.clip];
         let visual = data.events.visual(
-            g.clip(),
+            g.clip,
             g.time,
             clip.duration(),
             clip.frame_time,
-            g.loops(),
+            g.looping,
         );
         self.attachments
             .retain(|tag, _| visual.attachments.contains_key(tag));
@@ -85,7 +95,7 @@ impl Art {
                 a.age,
                 g.scale * a.scale,
                 |at, child_tag| {
-                    let local = data.tag(g.clip(), born + at, tag);
+                    let local = data.tag(g.clip, born + at, tag);
                     let mut pose = Transform {
                         translation: transform.point(local.translation * g.scale),
                         rotation: transform.rotation * local.rotation,
@@ -109,8 +119,8 @@ impl Art {
             |at, tag| {
                 if let Some(tag) = tag {
                     let local = data.tag(
-                        g.clip(),
-                        if g.loops() {
+                        g.clip,
+                        if g.looping {
                             at.rem_euclid(clip.duration())
                         } else {
                             at
@@ -127,7 +137,7 @@ impl Art {
             },
             |name, at, default| {
                 data.events
-                    .visual(g.clip(), at, clip.duration(), clip.frame_time, g.loops())
+                    .visual(g.clip, at, clip.duration(), clip.frame_time, g.looping)
                     .emitters
                     .get(name)
                     .copied()
