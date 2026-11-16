@@ -2548,6 +2548,9 @@ impl Visuals {
         self.heavy.render_records()+self.ice.render_records()+self.jacks.render_records()+self.bombs.render_records()+self.dice.render_records()
             +self.projectiles.len()+self.blasts.len()+self.sparks.len()+self.trail.len()+self.flight_trails.len()>16384
     }
+    pub(crate) fn valid_held_input(&self,input:&HeldInput)->bool {
+        input.commands.len()<=3 && input.commands.iter().all(|&(slot,_,_,_,_)|slot<self.props.len())
+    }
     pub(crate) fn valid_effects_input(&self,input:&EffectsInput)->bool {
         input.heavy.records()+input.ice.records()+input.jacks.records()+input.bombs.records()+input.dice.records()
             +input.projectiles.len()+input.blasts.len()+input.sparks.len()+input.trail.len()+input.flight_trails.len()<=16384

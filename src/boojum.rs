@@ -335,7 +335,8 @@ impl Boojum {
         }
     }
     pub(crate) fn extract_waves(&self,out:&mut Vec<crate::render_snapshot::WaveInput>) {
-        out.extend(self.waves.iter().map(|w|crate::render_snapshot::WaveInput::Boojum(w.position,w.direction,w.age)));
+        let remaining=16385usize.saturating_sub(out.len());
+        out.extend(self.waves.iter().take(remaining).map(|w|crate::render_snapshot::WaveInput::Boojum(w.position,w.direction,w.age)));
     }
     pub fn draw_waves(&self) {
         for w in &self.waves {

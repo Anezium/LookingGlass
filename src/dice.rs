@@ -1835,7 +1835,7 @@ pub(crate) struct RenderView<'a> {
 }
 impl RenderInput {
     pub(crate) fn records(&self)->usize { self.dice.len()+self.bolts.len()+self.beams.len() }
-    pub(crate) fn heap_bytes(&self)->usize { self.dice.len()*std::mem::size_of::<Die>() + self.bolts.len()*std::mem::size_of::<Bolt>() + self.beams.len()*std::mem::size_of::<Beam>() + self.puppet.as_ref().map_or(0,|(_,p)|p.bytes()) }
+    pub(crate) fn heap_bytes(&self)->usize { self.dice.len()*std::mem::size_of::<Die>() + self.bolts.len()*std::mem::size_of::<Bolt>() + self.beams.len()*std::mem::size_of::<Beam>() + self.puppet.as_ref().map_or(0,|(_,p)|p.bytes()-std::mem::size_of::<crate::npc::PuppetInput>()) }
     pub(crate) fn view(&self) -> RenderView<'_> { RenderView {dice: &self.dice,demon: &self.demon,bolts: &self.bolts,beams: &self.beams} }
 }
 impl State {

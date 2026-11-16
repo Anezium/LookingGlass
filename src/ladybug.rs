@@ -888,7 +888,8 @@ impl Art {
         }
     }
     pub(crate) fn extract_effects(b:&Ladybug,out:&mut Vec<crate::render_snapshot::WaveInput>) {
-        out.extend(b.bursts.iter().map(|w|crate::render_snapshot::WaveInput::Ladybug(w.position,w.age)));
+        let remaining=16385usize.saturating_sub(out.len());
+        out.extend(b.bursts.iter().take(remaining).map(|w|crate::render_snapshot::WaveInput::Ladybug(w.position,w.age)));
     }
     pub fn effects(b: &Ladybug) {
         for burst in &b.bursts {

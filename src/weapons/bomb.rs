@@ -112,7 +112,7 @@ impl Data {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Bomb {
     #[serde(default)]
     pub trail: super::trail::Trail,
@@ -141,7 +141,7 @@ impl Bomb {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Flame {
     #[serde(default)]
     pub trail: super::trail::Trail,
@@ -596,4 +596,14 @@ impl State {
         out.bombs.clone_from(&self.bombs);
         out.flames.clone_from(&self.flames);
     }
+}
+
+impl Clone for Bomb {
+    fn clone(&self)->Self { Self {trail:self.trail.clone(),id:self.id.clone(),alternate:self.alternate.clone(),position:self.position.clone(),velocity:self.velocity.clone(),angles:self.angles.clone(),age:self.age.clone(),resting:self.resting.clone(),flames:self.flames.clone(),popped:self.popped.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.trail.clone_from(&other.trail);self.id.clone_from(&other.id);self.alternate.clone_from(&other.alternate);self.position.clone_from(&other.position);self.velocity.clone_from(&other.velocity);self.angles.clone_from(&other.angles);self.age.clone_from(&other.age);self.resting.clone_from(&other.resting);self.flames.clone_from(&other.flames);self.popped.clone_from(&other.popped);}
+}
+
+impl Clone for Flame {
+    fn clone(&self)->Self { Self {trail:self.trail.clone(),position:self.position.clone(),velocity:self.velocity.clone(),age:self.age.clone(),id:self.id.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.trail.clone_from(&other.trail);self.position.clone_from(&other.position);self.velocity.clone_from(&other.velocity);self.age.clone_from(&other.age);self.id.clone_from(&other.id);}
 }

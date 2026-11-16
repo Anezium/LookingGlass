@@ -312,6 +312,9 @@ impl Acting {
             out.push((slot, bone, attachment.scale, attachment.age));
         }
     }
+    pub(crate) fn valid_attachments(&self,input:&[(usize,usize,f32,f32)])->bool {
+        input.iter().all(|&(slot,_,_,_)|slot<self.props.len())
+    }
     pub(crate) fn draw_attachments(&mut self, input: &[(usize, usize, f32, f32)], pose: &[Transform], transform: Transform, scale: f32, bright: bool) {
         for &(slot, bone, size, age) in input {
             self.props.values_mut().nth(slot).unwrap().draw_frame(

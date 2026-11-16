@@ -24,7 +24,7 @@ pub(super) enum Kind {
     Comet,
     Cannon,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct Shot {
     pub id: u32,
     pub kind: Kind,
@@ -73,7 +73,7 @@ impl Shot {
         }
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct Charge {
     pub id: u32,
     pub alternate: bool,
@@ -93,7 +93,7 @@ pub(super) struct Volley {
     pub next: u32,
     pub previous: Option<usize>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct Impact {
     pub id: u32,
     pub kind: Kind,
@@ -781,4 +781,19 @@ impl State {
         out.impacts.clone_from(&self.impacts);
         out.ignition=self.ignition;
     }
+}
+
+impl Clone for Shot {
+    fn clone(&self)->Self { Self {id:self.id.clone(),kind:self.kind.clone(),position:self.position.clone(),velocity:self.velocity.clone(),age:self.age.clone(),trail:self.trail.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.id.clone_from(&other.id);self.kind.clone_from(&other.kind);self.position.clone_from(&other.position);self.velocity.clone_from(&other.velocity);self.age.clone_from(&other.age);self.trail.clone_from(&other.trail);}
+}
+
+impl Clone for Charge {
+    fn clone(&self)->Self { Self {id:self.id.clone(),alternate:self.alternate.clone(),age:self.age.clone(),tick:self.tick.clone(),pose:self.pose.clone(),end:self.end.clone(),trail:self.trail.clone(),ground:self.ground.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.id.clone_from(&other.id);self.alternate.clone_from(&other.alternate);self.age.clone_from(&other.age);self.tick.clone_from(&other.tick);self.pose.clone_from(&other.pose);self.end.clone_from(&other.end);self.trail.clone_from(&other.trail);self.ground.clone_from(&other.ground);}
+}
+
+impl Clone for Impact {
+    fn clone(&self)->Self { Self {id:self.id.clone(),kind:self.kind.clone(),origin:self.origin.clone(),normal:self.normal.clone(),actor:self.actor.clone(),age:self.age.clone(),source:self.source.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.id.clone_from(&other.id);self.kind.clone_from(&other.kind);self.origin.clone_from(&other.origin);self.normal.clone_from(&other.normal);self.actor.clone_from(&other.actor);self.age.clone_from(&other.age);self.source.clone_from(&other.source);}
 }

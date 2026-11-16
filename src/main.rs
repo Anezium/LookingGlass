@@ -561,6 +561,7 @@ fn run() -> Result<()> {
             "--potears1-skip-route-check" => mode = "potears1-skip-route",
             "--potears1-render-check" => mode = "potears1-render",
             "--pool-render-check" => mode = "pool-render",
+            "--snapshot-alice-render-check" => mode = "snapshot-alice-render",
             "--snapshot-handoff-render-check" => mode = "snapshot-handoff-render",
             "--beyond-render-check" => mode = "beyond-render",
             "--village-route-check" => mode = "village-route",
@@ -1269,6 +1270,11 @@ fn run() -> Result<()> {
             }
         });
         return Ok(());
+    }
+    if mode == "snapshot-alice-render" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e)=character::snapshot_render_check(&mut assets).await {eprintln!("Snapshot Alice check failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
     }
     if mode == "snapshot-handoff-render" {
         macroquad::Window::from_config(viewer::config(), async move {

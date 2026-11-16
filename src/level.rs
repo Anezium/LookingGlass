@@ -429,7 +429,7 @@ pub trait LevelArt: Any {
     ) {
     }
     fn story_pose(&mut self, _story: &Story) {}
-    /// The default effect body is empty; overriding producers must opt out.
+    /// An empty effect schema is explicit; unregistered families remain fenced.
     fn snapshot_effects_empty(&self) -> bool { false }
     /// Effects drawn with the particle pass, after the world.
     fn effects(&mut self, _level: &dyn LevelController, _camera: Vec3, _atmosphere: &Atmosphere) {}

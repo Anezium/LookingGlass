@@ -16,7 +16,7 @@ pub(super) enum Kind {
     Ball,
     Burst,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Jack {
     pub id: u32,
     pub kind: Kind,
@@ -536,4 +536,9 @@ impl State {
     pub(super) fn extract_render(&self, out:&mut RenderInput) {
         out.pieces.clone_from(&self.pieces);
     }
+}
+
+impl Clone for Jack {
+    fn clone(&self)->Self { Self {id:self.id.clone(),kind:self.kind.clone(),position:self.position.clone(),velocity:self.velocity.clone(),age:self.age.clone(),trail:self.trail.clone(),silent:self.silent.clone(),returning:self.returning.clone(),target:self.target.clone(),parent:self.parent.clone(),next_seek:self.next_seek.clone(),last_contact:self.last_contact.clone(),trace:self.trace.clone(),split:self.split.clone(),remove_at:self.remove_at.clone(),seed:self.seed.clone(),previous:self.previous.clone(),bounce_seek:self.bounce_seek.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.id.clone_from(&other.id);self.kind.clone_from(&other.kind);self.position.clone_from(&other.position);self.velocity.clone_from(&other.velocity);self.age.clone_from(&other.age);self.trail.clone_from(&other.trail);self.silent.clone_from(&other.silent);self.returning.clone_from(&other.returning);self.target.clone_from(&other.target);self.parent.clone_from(&other.parent);self.next_seek.clone_from(&other.next_seek);self.last_contact.clone_from(&other.last_contact);self.trace.clone_from(&other.trace);self.split.clone_from(&other.split);self.remove_at.clone_from(&other.remove_at);self.seed.clone_from(&other.seed);self.previous.clone_from(&other.previous);self.bounce_seek.clone_from(&other.bounce_seek);}
 }

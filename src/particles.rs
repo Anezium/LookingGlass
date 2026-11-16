@@ -3098,3 +3098,17 @@ pub(crate) mod tests {
         assert_eq!(b.persisted[0].slots.capacity(), 1024);
     }
 }
+
+#[cfg(test)]
+mod snapshot_render_tests {
+    use super::*;
+    #[test]
+    fn captured_world_puffs_survive_live_mutation_and_retire_on_restore() {
+        let mut steam=super::tests::world_test_steam();
+        steam.puffs.push(Puff{sweep:Default::default(),position:Vec3::X,constraint_center:Vec3::ZERO,velocity:Vec3::Y,accel:Vec3::ZERO,age:0.2,life:1.,size:2.,roll:0.3,emitter:0});
+        assert!(!steam.extract_render_input().1);steam.puffs[0].position=Vec3::Z;
+        assert_eq!(steam.render_puffs()[0].position,Vec3::X);
+        let runtime=steam.runtime();steam.restore_runtime(runtime);assert_eq!(steam.render_puffs()[0].position,Vec3::Z);
+        steam.puffs[0].emitter=steam.emitters.len();assert!(steam.extract_render_input().1);assert!(steam.snapshot_input.is_none());
+    }
+}

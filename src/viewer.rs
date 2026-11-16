@@ -4393,7 +4393,7 @@ interactions
             let us = start.elapsed().as_secs_f64()*1_000_000.;
             if overflow { handoff_return.retire(); handoff_minimum_frame = frame as u64; }
             snapshot_frames += 1;
-            // Alice, level art and later 3D consumers still lack complete schemas.
+            // Unconverted level art, NPC families and contact shadows remain live.
             // Until all are converted this is a whole-frame serial fence, including
             // overflow, save/checkpoint success/failure acknowledgement and retry.
             snapshot_fenced_frames += 1;
@@ -4404,6 +4404,7 @@ interactions
             let scope=crate::kernel_alloc::Scope::begin();
             let start=std::time::Instant::now();
             let (bytes,overflow)=alice.extract_body(player.feet);
+            if overflow {handoff_return.retire();handoff_minimum_frame=frame as u64;}
             let allocations=scope.finish();
             println!("[lg/snapshot-alice] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
         } else { alice.clear_body_input(); }
@@ -4412,12 +4413,14 @@ interactions
             #[cfg(target_os="vita")] let will_draw=!crate::frame_profile::mode().no_world() && !world_only;
             #[cfg(not(target_os="vita"))] let will_draw=!world_only;
             power_art.extract_input(&pickups,&stats,&save::visit_key(&maps[current],entry_spawn.as_deref()),camera,pickup_clock,will_draw,&mut pickup_input);
+            if pickup_input.overflow() {handoff_return.retire();handoff_minimum_frame=frame as u64;}
             let allocations=scope.finish();
             println!("[lg/snapshot-pickups] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,pickup_input.bytes(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(pickup_input.overflow()));
         }
         if snapshot_enabled {
             let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();
-            let (bytes,overflow)=steam.extract_render_input();let allocations=scope.finish();
+            let (bytes,overflow)=steam.extract_render_input();
+            if overflow {handoff_return.retire();handoff_minimum_frame=frame as u64;}let allocations=scope.finish();
             println!("[lg/snapshot-particles] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
         } else {steam.clear_render_input();}
         let empty_level_effects=snapshot_enabled && interactions.pandemonium.is_none() && interactions.duchess.is_none()
@@ -4426,7 +4429,7 @@ interactions
             let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();wave_input.clear();
             if let Some(s)=&interactions.encounters{s.extract_waves(&mut wave_input);}
             if let Some(s)=&interactions.school2{for b in &s.boojums{b.extract_waves(&mut wave_input);}}
-            let overflow=wave_input.len()>16384;if overflow {wave_input.clear();}
+            let overflow=wave_input.len()>16384;if overflow {wave_input.clear();handoff_return.retire();handoff_minimum_frame=frame as u64;}
             let allocations=scope.finish();
             println!("[lg/snapshot-waves] frame={} bytes={} extraction_us={:.3} allocations={} overflow={} level_effects_complete={}",frame,std::mem::size_of_val(&wave_input)+wave_input.len()*std::mem::size_of::<crate::render_snapshot::WaveInput>(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow),u8::from(empty_level_effects));overflow
         } else {false};
