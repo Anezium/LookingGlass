@@ -2141,12 +2141,14 @@ struct ResidentInput {
     effects: ResidentEffects,
 }
 enum ResidentEffects {
+    BiteOnly,
     Ladybug { active: bool, acorns: Vec<(Vec3, f32)>, bursts: Vec<(Vec3, f32)> },
     Plant { kind: crate::plants::Kind, shots: Vec<crate::plants::Shot> },
 }
 impl ResidentEffects {
     fn bytes(&self) -> usize {
         match self {
+            Self::BiteOnly => 0,
             Self::Ladybug { acorns, bursts, .. } => (acorns.len()+bursts.len())*std::mem::size_of::<(Vec3,f32)>(),
             Self::Plant { shots, .. } => shots.len()*std::mem::size_of::<crate::plants::Shot>(),
         }
@@ -2154,7 +2156,8 @@ impl ResidentEffects {
 }
 impl Actor {
     fn snapshot_resident(&self) -> bool {
-        self.resident.as_ref().is_some_and(|p| matches!(p.body, resident::Body::Ladybug(_) | resident::Body::Plant(_)))
+        self.resident.as_ref().is_some_and(|p| matches!(&p.body, resident::Body::Ladybug(_) | resident::Body::Plant(_))
+            || matches!(&p.body, resident::Body::Snark(b) if b.kind == crate::snark::Kind::BiteOnly))
     }
 }
 #[derive(Default)]
@@ -2398,6 +2401,10 @@ impl Npcs {
         for (slot, actor) in self.actors.iter().enumerate().filter(|(_,a)| a.snapshot_resident()) {
             if inputs.overflow { break; }
             let p = actor.resident.as_ref().expect("selected resident");
+            // Reject malformed bite-only state before animation lookup or any copying.
+            if let resident::Body::Snark(b) = &p.body {
+                if b.validate().is_err() { inputs.overflow=true; break; }
+            }
             let dead = p.health() <= 0.;
             let mut visible = (dead || !crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors))
                 && !self.scene_hidden.contains(&actor.spawn.name) && !self.registry_owns(actor)
@@ -2415,6 +2422,7 @@ impl Npcs {
                     (clip,time,loops,b.visual_scale(),b.carrying,b.frozen,b.electric)
                 }
                 resident::Body::Plant(b) => (b.clip(),b.sample_time(d),b.loops(),b.visual_scale(d),true,b.frozen,0.),
+                resident::Body::Snark(b) => (b.clip(),b.sample_time(),b.loops(),b.visual_scale(d),true,b.frozen,0.),
                 _ => unreachable!("selected resolved resident"),
             };
             let body = if body_visible && scale > 0. {
@@ -2431,6 +2439,9 @@ impl Npcs {
             // Bound every effect vector before copying. Ladybug effects require
             // active residency; Plant projectiles precede that gate in the legacy path.
             let effect_input = match &p.body {
+                // BiteOnly has no projectiles, tongue, or smoke. Validation above
+                // excludes ranged states; other Snark kinds retain the live fence.
+                resident::Body::Snark(_) => ResidentEffects::BiteOnly,
                 resident::Body::Ladybug(b) => {
                     let count = if visible && p.active { b.acorns.len().saturating_add(b.bursts.len()) } else { 0 };
                     if count > MAX_EFFECTS.saturating_sub(effects) { inputs.overflow=true; break; }
@@ -3852,6 +3863,7 @@ impl Npcs {
                 let _preserve = crate::character::skinning::CullGuard::preserve(input.preserve);
                 if !crate::character::skinning::overlap::gather_only() {
                     match &input.effects {
+                        ResidentEffects::BiteOnly => {},
                         ResidentEffects::Ladybug { active, acorns, bursts } => {
                             if !*active { self.material.bind(); continue; }
                             if let Some(prop) = &mut self.acorn {

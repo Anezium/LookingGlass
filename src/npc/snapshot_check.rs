@@ -1,11 +1,12 @@
 //! Host real-asset controls for accepted and rejected NPC input batches.
 use super::*;
 pub(crate) async fn check(assets: &mut Assets, family: &str) -> Result<()> {
-    let map = Bsp::parse(&assets.read("maps/potears2.bsp")?)?;
-    let mut npcs = Npcs::load(assets,&map,"potears2",None,false,false)?;
+    let map_name = if family == "snark" { "potears1" } else { "potears2" };
+    let map = Bsp::parse(&assets.read(&format!("maps/{map_name}.bsp"))?)?;
+    let mut npcs = Npcs::load(assets,&map,map_name,None,false,false)?;
     npcs.scene_hidden.clear(); npcs.levels.clear();
     let models: &[&str] = match family {
-        "ambient" => &["c_bill"], "ladybug" => &["c_ladybug"],
+        "snark" => &["c_snark_biteonly"], "ambient" => &["c_bill"], "ladybug" => &["c_ladybug"],
         "plant" => &["c_bloodrose","c_evilmushroom"], _ => anyhow::bail!("Unknown snapshot family"),
     };
     let atmosphere = Atmosphere::default();
@@ -35,6 +36,11 @@ pub(crate) async fn check(assets: &mut Assets, family: &str) -> Result<()> {
                         if case==4 {b.frozen=true;b.health=0.;b.phase=crate::plants::Phase::Dead;}
                         b.shots=vec![crate::plants::Shot {serial:77,position:vec3(30.,0.,70.),direction:Vec3::X,age:0.2}];
                     }
+                    resident::Body::Snark(b)=>{
+                        b.feet=Vec3::Z*60.;b.time=0.4;
+                        b.phase=if case==3 {crate::snark::Phase::Bite} else {crate::snark::Phase::Idle};
+                        if case==4 {b.frozen=true;b.health=0.;b.phase=crate::snark::Phase::Dead;}
+                    }
                     _=>anyhow::bail!("Unexpected fixture resident"),
                 }
             }
@@ -42,7 +48,8 @@ pub(crate) async fn check(assets: &mut Assets, family: &str) -> Result<()> {
             if case==5 {actor.spawn.origin=Vec3::splat(10000.);actor.footing=Some(actor.spawn.origin);
                 if let Some(p)=&mut actor.resident {match &mut p.body {
                     resident::Body::Ladybug(b)=>b.feet=Vec3::splat(10000.),
-                    resident::Body::Plant(b)=>b.feet=Vec3::splat(10000.),_=>{}}}}
+                    resident::Body::Plant(b)=>b.feet=Vec3::splat(10000.),
+                    resident::Body::Snark(b)=>b.feet=Vec3::splat(10000.),_=>{}}}}
             let mut reference=None;
             for captured in [false,true] {
                 npcs.actors=vec![actor.clone()]; npcs.clear_actor_inputs(); npcs.visual_lod.clear(); npcs.spores.clear();
@@ -78,6 +85,7 @@ pub(crate) async fn check(assets: &mut Assets, family: &str) -> Result<()> {
                 match &mut p.body {
                     resident::Body::Ladybug(b)=>{b.feet=Vec3::ZERO;b.bursts=vec![crate::ladybug::Burst {position:Vec3::ZERO,age:0.2};16385];}
                     resident::Body::Plant(b)=>{b.feet=Vec3::ZERO;b.shots=vec![crate::plants::Shot {serial:0,position:Vec3::ZERO,direction:Vec3::X,age:0.2};16385];}
+                    resident::Body::Snark(b)=>{b.shots=vec![crate::snark::Shot {serial:0,position:Vec3::ZERO,direction:Vec3::X,age:0.2};16385];}
                     _=>{}
                 }
             }

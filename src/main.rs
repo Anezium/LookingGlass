@@ -567,6 +567,8 @@ fn run() -> Result<()> {
             "--snapshot-npc-ladybug-check" => mode = "snapshot-npc-ladybug",
             #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
             "--snapshot-npc-plant-check" => mode = "snapshot-npc-plant",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-npc-snark-check" => mode = "snapshot-npc-snark",
             #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
             "--snapshot-hud-resource-check" => mode = "snapshot-hud-resource",
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
