@@ -4330,6 +4330,10 @@ interactions
             use macroquad::camera::Camera;
             let scope = crate::kernel_alloc::Scope::begin();
             let start = std::time::Instant::now();
+            dynamic_input.alice_feet=player.feet;
+            dynamic_input.alice_visible=show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic());
+            dynamic_input.alice_shadow=show_alice && stats.invisible<=0.;
+            dynamic_input.alice_ghost=stats.invisible>0.;dynamic_input.alice_effects=show_alice;
             dynamic_input.view = world_camera.matrix();
             dynamic_input.environment_clock = environment_clock;
             dynamic_input.pickup_clock = pickup_clock;
@@ -4398,7 +4402,7 @@ interactions
         if snapshot_enabled {
             let scope=crate::kernel_alloc::Scope::begin();
             let start=std::time::Instant::now();
-            let (bytes,overflow)=alice.extract_body(player.feet);
+            let (bytes,overflow)=alice.extract_body(dynamic_input.alice_feet);
             if overflow {handoff_return.retire();handoff_minimum_frame=frame as u64;}
             let allocations=scope.finish();
             println!("[lg/snapshot-alice] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
@@ -4517,11 +4521,11 @@ interactions
             let mut frame = crate::character::skinning::overlap::Frame::begin();
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherAlice);
             if crate::character::skinning::overlap::single_frame() {
-                if draw_world && show_alice && stats.invisible <= 0. { crate::lighting::shadow(&scene.world, player.feet, 22.); }
+                if draw_world && (if snapshot_enabled {dynamic_input.alice_shadow} else {show_alice && stats.invisible<=0.}) { crate::lighting::shadow(&scene.world, if snapshot_enabled {dynamic_input.alice_feet}else{player.feet}, 22.); }
                 alice.atmosphere(&scene.atmosphere, camera);
             }
-            if show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic()) {
-                alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
+            if (if snapshot_enabled {dynamic_input.alice_visible} else {show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic())}) {
+                alice.draw_ghost(if snapshot_enabled {dynamic_input.alice_feet}else{player.feet}, fullbright, if snapshot_enabled {dynamic_input.alice_ghost}else{stats.invisible>0.});
             }
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherNpcs);
             npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
@@ -4586,15 +4590,15 @@ interactions
         if !world_only && !crate::character::skinning::overlap::single_frame() {
         {
             let _characters_profile = crate::frame_profile::span("characters_setup");
-            if draw_world && show_alice && stats.invisible <= 0. {
-                crate::lighting::shadow(&scene.world, player.feet, 22.);
+            if draw_world && (if snapshot_enabled {dynamic_input.alice_shadow} else {show_alice && stats.invisible<=0.}) {
+                crate::lighting::shadow(&scene.world, if snapshot_enabled {dynamic_input.alice_feet}else{player.feet}, 22.);
             }
             alice.atmosphere(&scene.atmosphere, camera);
         }
         {
             let _characters_profile = crate::frame_profile::span("characters_alice");
-            if show_alice && !interactions.school.as_ref().is_some_and(|s| s.cinematic()) {
-                alice.draw_ghost(player.feet, fullbright, stats.invisible > 0.);
+            if (if snapshot_enabled {dynamic_input.alice_visible} else {show_alice && !interactions.school.as_ref().is_some_and(|s| s.cinematic())}) {
+                alice.draw_ghost(if snapshot_enabled {dynamic_input.alice_feet}else{player.feet}, fullbright, if snapshot_enabled {dynamic_input.alice_ghost}else{stats.invisible>0.});
             }
         }
         {
@@ -4703,7 +4707,7 @@ interactions
                 }
                 level_art.effects(&interactions, camera, &scene.atmosphere);
                 }
-                alice.draw_effects(camera, fullbright, show_alice);
+                alice.draw_effects(camera, fullbright, if snapshot_enabled {dynamic_input.alice_effects}else{show_alice});
                 if let Some(input)=aim_input.as_ref().filter(|i|aim_pointer.valid_input(i,level_art.snapshot_visit.id())) {aim_pointer.draw_input(input,level_art.snapshot_visit.id(),if active{dt}else{0.},camera,&scene.atmosphere);}
                 else {
                 let can_aim = !interactions.level_blocks_weapons() && !flying

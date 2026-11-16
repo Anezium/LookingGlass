@@ -1083,7 +1083,8 @@ impl Art {
         });
     }
     pub(crate) fn valid_render_input(&self,input:&RenderInput)->bool {
-        input.puppet.as_ref().is_none_or(|(slot,p)|*slot<self.puppets.len() && self.puppets[*slot].valid_input(p) && p.bones()<=65536)
+        summon_binding(input.demon.as_ref().map(|d|d.kind),input.puppet.as_ref().map(|(slot,_)|*slot),self.puppets.len().min(self.poof.len()))
+            && input.puppet.as_ref().is_none_or(|(slot,p)|self.puppets[*slot].valid_input(p) && p.bones()<=65536)
     }
     pub(crate) fn draw_owned(&mut self,input:&RenderInput,bright:bool) {
         if let Some((slot,pose))=&input.puppet { self.puppets[*slot].draw_input(pose,bright); }
@@ -1846,5 +1847,20 @@ impl State {
         out.demon.clone_from(&self.demon);
         out.bolts.clone_from(&self.bolts);
         out.beams.clone_from(&self.beams);
+    }
+}
+
+fn summon_binding(kind:Option<usize>,slot:Option<usize>,resources:usize)->bool {
+    match (kind,slot) {(None,None)=>true,(Some(kind),Some(slot))=>kind==slot && slot<resources,_=>false}
+}
+#[cfg(test)]
+mod snapshot_binding_tests {
+    use super::summon_binding;
+    #[test]
+    fn summon_binding_rejects_missing_wrong_and_retired_resource_slots() {
+        assert!(summon_binding(None,None,3));assert!(summon_binding(Some(0),Some(0),3));
+        assert!(!summon_binding(Some(1),Some(0),3));assert!(!summon_binding(None,Some(0),3));
+        assert!(!summon_binding(Some(0),None,3));assert!(!summon_binding(Some(3),Some(3),3));
+        assert!(!summon_binding(Some(0),Some(0),0));
     }
 }

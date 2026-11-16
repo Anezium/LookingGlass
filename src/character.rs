@@ -3378,7 +3378,7 @@ mod snapshot_input_tests {
     use super::*;
     #[test]
     fn body_input_owns_values_and_rejects_stale_generation_shape_and_bones() {
-        fn owns_send_values<T:Send>(){} owns_send_values::<BodyInput>();
+        fn owns_send_values<T:Send>(){} owns_send_values::<BodyInput>();owns_send_values::<crate::render_snapshot::DynamicInput>();
         let visit=crate::render_snapshot::RenderVisit::default();
         let replaced=crate::render_snapshot::RenderVisit::default();
         let mut input=BodyInput::default();input.visit=visit.id();input.pose.push(input.transform);

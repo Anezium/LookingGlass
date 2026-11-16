@@ -109,6 +109,7 @@ pub(crate) struct ParticleInput {
 }
 #[derive(Default)]
 pub(crate) struct DynamicInput {
+    pub alice_feet:Vec3, pub alice_visible:bool, pub alice_shadow:bool, pub alice_ghost:bool, pub alice_effects:bool,
     pub view: Mat4, pub environment_clock: f32, pub pickup_clock: f32,
     pub fog: Vec4, pub liquid: Vec4,
     pub transforms: Vec<(usize, Vec3, Quat)>,
