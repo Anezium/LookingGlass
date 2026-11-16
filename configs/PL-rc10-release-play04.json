@@ -38,7 +38,6 @@
   "fx_merge_in_place": true,
   "fx_worker_prep": true,
   "frame_phase_probe": false,
-  "gather_census": false,
   "phase_census": false,
   "skin_actual_consumers": true,
   "mover_far_lazy": true,
