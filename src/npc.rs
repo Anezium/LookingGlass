@@ -1185,6 +1185,18 @@ impl Model {
         visual: &crate::animation_events::VisualState,
         piece: Option<(&str, &str, bool)>,
     ) {
+        let _identity = self.skin_identity.scope_unless_set();
+        self.visible.fill(false);
+        self.electric_attachments.clear();
+        self.electric_props.clear();
+        if scale <= 0. {
+            return;
+        }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let _actor_timing=crate::character::skinning::census::actor(
+            self.skin_identity, &self.data.def.path, &self.data.def.model,
+            self.data.skeleton.bones.len(), &self.data.meta.attachments, transform, scale,
+            self.late_skin_overlays, self.afterimage_normals);
         let d = &self.data;
         let prepared = crate::character::skinning::prepared::pose(
             (&d.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
@@ -1196,7 +1208,7 @@ impl Model {
                 (pose, scales)
             },
         );
-        self.draw_resolved_pose(&prepared.pose, &prepared.scales, mouth, time, alive,
+        self.publish_resolved_pose(&prepared.pose, &prepared.scales, time, alive,
             transform, scale, fullbright, attachments, visual, piece);
     }
     #[allow(clippy::too_many_arguments)]
@@ -1218,6 +1230,15 @@ impl Model {
             self.skin_identity, &self.data.def.path, &self.data.def.model,
             self.data.skeleton.bones.len(), &self.data.meta.attachments, transform, scale,
             self.late_skin_overlays, self.afterimage_normals);
+        self.publish_resolved_pose(pose, scales, time, alive, transform, scale,
+            fullbright, attachments, visual, piece);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn publish_resolved_pose(
+        &mut self, pose: &[Transform], scales: &[f32], time: f32, alive: bool,
+        transform: Transform, scale: f32, fullbright: bool, attachments: bool,
+        visual: &crate::animation_events::VisualState, piece: Option<(&str, &str, bool)>,
+    ) {
         let d = &self.data;
         self.face.blink(&mut self.meshes, time, alive);
         let mut removed = Vec::new();
