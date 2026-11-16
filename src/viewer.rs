@@ -2809,8 +2809,20 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
                 let was_cinematic = interactions.scripted();
                 let mover_dt = if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt };
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                let _movers_companions = crate::sim_maps::timer("movers_companions_ns");
                 interactions.companions_for_movers(&npcs.companions());
-                interactions.actors_for_movers(&npcs.targets());
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                drop(_movers_companions);
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                let _movers_targets = crate::sim_maps::timer("movers_targets_ns");
+                let mover_targets = npcs.targets();
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                {
+                    drop(_movers_targets);
+                    crate::sim_maps::count("movers_target_rows", mover_targets.len() as u64);
+                }
+                interactions.actors_for_movers(&mover_targets);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 if crate::sim_maps::probe::mover_replay_enabled() {
                     if let Some(s) = &interactions.school2 { crate::sim_maps::probe::mover_ride(s.moving_tops(), &mut player); }

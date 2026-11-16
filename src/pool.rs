@@ -155,9 +155,27 @@ pub fn supported(e: &BTreeMap<String, String>) -> bool {
         })
 }
 fn ride(n: &str) -> Option<usize> {
+    if crate::sim_maps::pool_name_match() {
+        // The same four names, matched without building one String per candidate.
+        let rest = n.strip_prefix("rideleaf")?.strip_suffix("obj")?;
+        return match rest.as_bytes() {
+            [b @ b'1'..=b'4'] => Some((b - b'1') as usize),
+            _ => None,
+        };
+    }
     (0..4).find(|i| n == format!("rideleaf{}obj", i + 1))
 }
 fn train(n: &str) -> Option<(usize, usize)> {
+    if crate::sim_maps::pool_name_match() {
+        // The same eight names, "leaftrain1a_obj" through "leaftrain2d_obj".
+        let rest = n.strip_prefix("leaftrain")?;
+        return match rest.as_bytes() {
+            [g @ (b'1' | b'2'), s @ b'a'..=b'd', b'_', b'o', b'b', b'j'] => {
+                Some(((g - b'1') as usize, (s - b'a') as usize))
+            }
+            _ => None,
+        };
+    }
     for group in 0..2 {
         for slot in 0..4 {
             if n == format!("leaftrain{}{}_obj", group + 1, (b'a' + slot as u8) as char) {
@@ -264,11 +282,19 @@ impl Pool {
     fn train_time(&self, group: usize, slot: usize) -> Option<(usize, f32)> {
         let (path, start) = self.state.trains[group]?;
         let interval = [15., 15., 13., 8.][path];
-        let name = format!("leaftrain{}{}_obj", group + 1, (b'a' + slot as u8) as char);
-        let t = self.state.age
-            - self.state.blocked_time.get(&name).copied().unwrap_or(0.)
-            - start
-            - slot as f32 * interval;
+        let blocked = if crate::sim_maps::pool_name_match() {
+            // The blocked clock is keyed by the mover's name; find that entry without
+            // building the name. Keys are unique, so this is the get() the format! did.
+            self.state
+                .blocked_time
+                .iter()
+                .find(|(name, _)| train(name) == Some((group, slot)))
+                .map_or(0., |(_, time)| *time)
+        } else {
+            let name = format!("leaftrain{}{}_obj", group + 1, (b'a' + slot as u8) as char);
+            self.state.blocked_time.get(&name).copied().unwrap_or(0.)
+        };
+        let t = self.state.age - blocked - start - slot as f32 * interval;
         (t >= 0.).then_some((path, t.rem_euclid(4. * interval)))
     }
     fn active(&self, n: &str) -> bool {
@@ -496,14 +522,26 @@ impl Pool {
         player: &mut Player,
         fixed: &[Collider],
     ) -> Result<()> {
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _advance_span = crate::sim_maps::timer("pool_advance_ns");
         if dt <= 0. {
             return Ok(());
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _old_span = crate::sim_maps::timer("pool_old_colliders_ns");
         let old_colliders = self
             .objects
             .iter()
             .map(|o| o.collider.clone())
             .collect::<Vec<_>>();
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        {
+            drop(_old_span);
+            crate::sim_maps::count("pool_old_collider_clones", old_colliders.len() as u64);
+            crate::sim_maps::count("pool_advance_calls", 1);
+        }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _rider_span = crate::sim_maps::timer("pool_rider_ns");
         let rider = self
             .objects
             .iter()
@@ -524,16 +562,35 @@ impl Pool {
                     && hit.normal.z > 0.65
             })
             .map(|o| (o.name.clone(), o.pose));
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        {
+            drop(_rider_span);
+            crate::sim_maps::count("pool_rider_probes", self.objects.len() as u64);
+        }
         self.state.age += dt.min(0.1);
         let turtle_time = self.turtle_path.nodes[self.turtle_path.nodes.len() - 2].time + 0.5;
         if self.state.turtle[0].is_some_and(|t| self.state.age - t >= turtle_time) {
             let drop = self.state.turtle[0].unwrap() + turtle_time;
             self.state.drops[1].get_or_insert(drop);
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _rebuild_span = crate::sim_maps::timer("pool_rebuild_ns");
         self.rebuild(map)?;
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        drop(_rebuild_span);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _cinema_span = crate::sim_maps::timer("pool_cinema_ns");
         self.advance_cinema(dt.min(0.1), world, player)?;
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        drop(_cinema_span);
         if self.scene_id().is_some() {
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _boulder_span = crate::sim_maps::timer("pool_boulders_ns");
             self.advance_boulders(dt.min(0.1), player);
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            drop(_boulder_span);
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _publish_span = crate::sim_maps::timer("pool_publish_ns");
             world.set_dynamic(fixed.iter().cloned().chain(self.colliders()).collect());
             return Ok(());
         }
@@ -549,7 +606,13 @@ impl Pool {
                 }
             }
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _publish_span = crate::sim_maps::timer("pool_publish_ns");
         world.set_dynamic(fixed.iter().cloned().chain(self.colliders()).collect());
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        drop(_publish_span);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _clear_span = crate::sim_maps::timer("pool_body_clear_ns");
         if !world.body_clear(feet) && world.body_clear(player.feet) {
             feet = player.feet;
         }
@@ -562,6 +625,8 @@ impl Pool {
                 }
             }
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        drop(_clear_span);
         if world.body_clear(feet) {
             player.feet = feet;
         } else {
@@ -627,7 +692,13 @@ impl Pool {
         }
         // Resolve leaf carrying against last frame's rock hulls before moving
         // hazards. A rock contact must not rewind its own timer or damage cue.
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _boulders_span = crate::sim_maps::timer("pool_boulders_ns");
         self.advance_boulders(dt.min(0.1), player);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        drop(_boulders_span);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _final_publish_span = crate::sim_maps::timer("pool_publish_ns");
         world.set_dynamic(fixed.iter().cloned().chain(self.colliders()).collect());
         Ok(())
     }
@@ -683,5 +754,44 @@ impl Art {
         }
         gl_use_default_material();
         self.cinema.draw(pool, atmosphere, camera, fullbright);
+    }
+}
+
+#[cfg(test)]
+mod name_match_tests {
+    use super::*;
+    /// The parsed match must accept exactly the names the format! loop accepted, and
+    /// nothing else. Every candidate and its near misses are compared in both arms.
+    #[test]
+    fn parsed_mover_names_match_the_allocating_loop_exactly() {
+        let mut names: Vec<String> = Vec::new();
+        for i in 1..=6 {
+            names.push(format!("rideleaf{i}obj"));
+            names.push(format!("rideleaf{i}objx"));
+            names.push(format!("rideleaf{i}"));
+            names.push(format!("xrideleaf{i}obj"));
+            names.push(format!("rideleaf{i}obj "));
+        }
+        for group in 1..=3 {
+            for slot in 'a'..='f' {
+                names.push(format!("leaftrain{group}{slot}_obj"));
+                names.push(format!("leaftrain{group}{slot}_objx"));
+                names.push(format!("leaftrain{group}{slot}"));
+                names.push(format!("leaftrain{group}{slot}_ob"));
+                names.push(format!("xleaftrain{group}{slot}_obj"));
+            }
+        }
+        names.extend(["".into(), "rideleafobj".into(), "leaftrain_obj".into(),
+                      "rideleaf10obj".into(), "leaftrain1e_obj".into(),
+                      "rideleaf1OBJ".into(), "woblily1obj".into(), "swingingbranchobj".into()]);
+        for name in &names {
+            let on = crate::sim_maps::with_arm_switch("pool_name_match", true, || {
+                (ride(name), train(name))
+            });
+            let off = crate::sim_maps::with_arm_switch("pool_name_match", false, || {
+                (ride(name), train(name))
+            });
+            assert_eq!(on, off, "{name}");
+        }
     }
 }

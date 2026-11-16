@@ -316,3 +316,27 @@ fn malformed_saves_reject_extra_attacks_nan_and_resurrection() {
     ];
     assert!(p.validate().is_err());
 }
+
+/// The skip arm must be indistinguishable: a zero delta leaves the feet and every
+/// other field untouched, and a real delta still moves the Snark.
+#[test]
+fn zero_delta_movement_is_unchanged_with_the_skip_arm_on_or_off() {
+    let w = pool(32);
+    for skip in [false, true] {
+        let mut p = fish(Kind::Water);
+        let before = p.feet;
+        crate::sim_maps::with_arm_switch("snark_move_skip", skip, || {
+            p.movement(&w, Vec3::ZERO, true);
+        });
+        assert_eq!(p.feet, before, "skip={skip}");
+        // A blocked zero step at the same place, and the dry-land variant.
+        crate::sim_maps::with_arm_switch("snark_move_skip", skip, || {
+            p.movement(&w, Vec3::ZERO, false);
+        });
+        assert_eq!(p.feet, before, "skip={skip}");
+        crate::sim_maps::with_arm_switch("snark_move_skip", skip, || {
+            p.movement(&w, vec3(2., 0.5, 0.), true);
+        });
+        assert_ne!(p.feet, before, "skip={skip} real delta still moves");
+    }
+}

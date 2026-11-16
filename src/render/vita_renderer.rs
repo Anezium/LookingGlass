@@ -48,6 +48,12 @@ pub struct Config {
     pub sim_npc_sight_candidates: bool,
     pub sim_npc_sight_cache: bool,
     pub sim_npc_target_stack: bool,
+    /// Skip a Snark movement step whose delta is exactly zero. Same state, no sweep.
+    pub sim_snark_move_skip: bool,
+    /// Answer the Snark sight segment as the yes/no blocked predicate instead of a full trace.
+    pub sim_snark_sight_blocked: bool,
+    /// Match Pool mover names without building one String per candidate.
+    pub sim_pool_name_match: bool,
     /// Defer Clockwork door traces until their exact range/facing predicates pass.
     /// Default on since r22 (console ABBA, hatter1: -6.29 to -7.31 ms).
     pub sim_hatter_door_candidates: bool,
@@ -528,6 +534,9 @@ impl Default for Config {
             sim_npc_sight_candidates: true,
             sim_npc_sight_cache: true,
             sim_npc_target_stack: true,
+            sim_snark_move_skip: false,
+            sim_snark_sight_blocked: false,
+            sim_pool_name_match: false,
             lights_static_cache: true,
             sim_dynamic_buckets: false,
             collision_sah: true,
@@ -3637,16 +3646,44 @@ mod tests {
         assert!(serde_json::from_str::<Config>(r#"{"sim_sweep_any":true}"#).unwrap().sim_sweep_any);
         assert!(serde_json::from_str::<Config>(r#"{"sim_sweep_any":1}"#).is_err());
     }
+    // The three potears1 arms are exact work removals, not visual choices: every one
+    // ships off, accepts only a boolean, and survives a round trip with the others off.
+    #[test]
+    fn potears1_arms_ship_off_and_are_strict_booleans() {
+        const FIELDS: [&str; 3] = ["sim_snark_move_skip", "sim_snark_sight_blocked",
+                                   "sim_pool_name_match"];
+        for field in FIELDS {
+            let defaults = serde_json::to_value(Config::default()).unwrap();
+            assert_eq!(defaults[field], false, "{field}");
+            let empty = serde_json::to_value(serde_json::from_str::<Config>("{}").unwrap()).unwrap();
+            assert_eq!(empty[field], false, "{field}");
+            for invalid in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
+                assert!(serde_json::from_value::<Config>(serde_json::json!({field: invalid})).is_err());
+            }
+            for enabled in [false, true] {
+                let config: Config = serde_json::from_value(
+                    serde_json::json!({field: enabled})).unwrap();
+                config.validate().unwrap();
+                let actual = serde_json::to_value(config).unwrap();
+                for other in FIELDS {
+                    assert_eq!(actual[other], if other == field { enabled } else { false });
+                }
+            }
+        }
+    }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
     fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    /// Opt-in keys added after every frozen era file. Those files stay valid unchanged,
+    /// and their omitted key must read as an explicit off.
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-            && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+            && !later_opt_in_key(k) && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -4302,7 +4339,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && !later_opt_in_key(k) && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -4524,7 +4561,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) || key == "shader_cache_namespace" || key == "water_draw_join" || key == "alpha_model_pvs" || key == "fx_unlit_exact" { written[key] = value.clone(); }
+            if round5_key(key) || later_opt_in_key(key) { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
@@ -4598,7 +4635,7 @@ mod tests {
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
                     && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-                    && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
+                    && !later_opt_in_key(k) && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();

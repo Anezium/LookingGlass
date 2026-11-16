@@ -1267,7 +1267,11 @@ impl World {
     /// `!(fraction >= 1)` are the same test.
     pub(crate) fn sweep_blocked(&self, start: Vec3, end: Vec3, half: Vec3) -> bool {
         let full = |t: Trace| t.start_solid || t.fraction < 1.;
-        if !crate::sim_maps::sweep_blocked() && !crate::sim_maps::sweep_any() { return full(self.sweep(start, end, half)); }
+        if !crate::sim_maps::sweep_blocked() && !crate::sim_maps::sweep_any()
+            && !crate::sim_maps::snark_sight_blocked()
+        {
+            return full(self.sweep(start, end, half));
+        }
         let _census = crate::phase_census::query_sweep(self,start,end,half,1,None);
         if self.sweep_memo.borrow().active {
             let key = Self::query_key(start, end, half);

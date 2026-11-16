@@ -9,6 +9,19 @@ use macroquad::prelude::*;
 #[cfg(test)]
 mod tests;
 const STEP: f32 = 1. / 120.;
+/// Host-only attribution spans. The production and Vita builds contain no timer.
+macro_rules! span {
+    ($name:literal) => {
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _span = crate::sim_maps::timer($name);
+    };
+}
+macro_rules! tally {
+    ($name:literal, $n:expr) => {
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        crate::sim_maps::count($name, $n as u64);
+    };
+}
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -270,8 +283,19 @@ impl Snark {
         None
     }
     fn movement(&mut self, world: &World, delta: Vec3, wet_only: bool) {
+        span!("snark_movement_ns");
+        tally!("snark_movement_calls", 1);
+        tally!("snark_movement_zero_delta", u64::from(delta == Vec3::ZERO));
+        // A zero step cannot move the feet: the sweep can only say whether the
+        // ground it already stands on is solid, and both branches leave the state
+        // untouched. The axis slide below passes zero axes here as well.
+        if crate::sim_maps::snark_move_skip() && delta == Vec3::ZERO {
+            tally!("snark_movement_zero_skipped", 1);
+            return;
+        }
         // Small substeps also constrain large knockback to the connected liquid.
         let steps = (delta.length() / 2.).ceil().clamp(1., 40.) as usize;
+        tally!("snark_movement_sweeps", steps);
         let delta = delta / steps as f32;
         for _ in 0..steps {
             let body = self.target(0);
@@ -280,7 +304,13 @@ impl Snark {
                 break;
             }
             let advance = delta * trace.fraction;
-            if !wet_only || self.kind.wet(world, self.feet + advance) {
+            if !wet_only
+                || {
+                    span!("snark_liquid_ns");
+                    tally!("snark_liquid_queries", 1);
+                    self.kind.wet(world, self.feet + advance)
+                }
+            {
                 self.feet += advance;
             }
             if trace.fraction < 1. {
@@ -289,7 +319,10 @@ impl Snark {
         }
     }
     fn projectiles(&mut self, world: &World, eye: Vec3, out: &mut Feedback) {
+        span!("snark_projectiles_ns");
         let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Combat);
+        tally!("snark_projectile_calls", 1);
+        tally!("snark_projectile_target_scans", 1);
         let targets = self.opponents.bodies(eye);
         for acid in &mut self.acid {
             acid.time += STEP;
@@ -352,6 +385,8 @@ impl Snark {
                 * self.scale
     }
     pub fn step(&mut self, world: &World, eye: Vec3, data: &impl Rig, out: &mut Feedback) {
+        span!("snark_step_ns");
+        tally!("snark_substeps", 1);
         self.projectiles(world, eye, out);
         if self.health <= 0. {
             self.time = (self.time + STEP).min(data.duration(self.kind.model(), self.clip()) + 3.);
@@ -363,21 +398,44 @@ impl Snark {
         }
         self.cooldown = (self.cooldown - STEP).max(0.);
         self.pain = (self.pain - STEP).max(0.);
-        let wet = self.kind.wet(world, self.feet);
+        let wet = {
+            span!("snark_liquid_ns");
+            tally!("snark_liquid_queries", 1);
+            self.kind.wet(world, self.feet)
+        };
         let recoil = self.recoil.step(STEP, world, self.target(0));
         self.movement(world, recoil, wet);
         let body = self.target(0);
-        let (aim, notarget, victim) = self.opponents.aim(
-            world,
-            body.center,
-            eye,
-            self.notarget,
-            !matches!(self.phase, Phase::Idle | Phase::Swim | Phase::Pain),
-        );
+        let (aim, notarget, victim) = {
+            span!("snark_aim_ns");
+            self.opponents.aim(
+                world,
+                body.center,
+                eye,
+                self.notarget,
+                !matches!(self.phase, Phase::Idle | Phase::Swim | Phase::Pain),
+            )
+        };
         let delta = aim - body.center;
         let distance = delta.length();
-        let trace = world.sweep(body.center, aim, Vec3::splat(0.5));
-        let visible = !notarget && distance < 1000. && !trace.start_solid && trace.fraction >= 1.;
+        // `visible` reads only these predicates. With the switch on, the two cheap
+        // tests run first and the blocked traversal answers the segment without a
+        // fraction or normal; with it off this is the unchanged trace and test.
+        let visible = if crate::sim_maps::snark_sight_blocked() {
+            !notarget && distance < 1000. && {
+                span!("snark_los_ns");
+                tally!("snark_los_sweeps", 1);
+                tally!("snark_los_blocked_path", 1);
+                !world.sweep_blocked(body.center, aim, Vec3::splat(0.5))
+            }
+        } else {
+            let trace = {
+                span!("snark_los_ns");
+                tally!("snark_los_sweeps", 1);
+                world.sweep(body.center, aim, Vec3::splat(0.5))
+            };
+            !notarget && distance < 1000. && !trace.start_solid && trace.fraction >= 1.
+        };
         if visible && self.phase != Phase::Pain {
             let angle = (delta.y.atan2(delta.x) - self.yaw + std::f32::consts::PI)
                 .rem_euclid(std::f32::consts::TAU)
@@ -387,7 +445,11 @@ impl Snark {
         }
         let facing = delta.truncate().length_squared() < 1.
             || vec2(self.yaw.cos(), self.yaw.sin()).dot(delta.truncate().normalize_or_zero()) > 0.6;
-        let duration = data.duration(self.kind.model(), self.clip());
+        let duration = {
+            span!("snark_clip_lookup_ns");
+            tally!("snark_clip_duration_lookups", 1);
+            data.duration(self.kind.model(), self.clip())
+        };
         let airborne_attack = matches!(self.phase, Phase::Rise | Phase::Spit | Phase::Tongue);
         if !wet && !airborne_attack {
             self.fall = (self.fall + 600. * STEP).min(600.);
@@ -398,6 +460,7 @@ impl Snark {
         self.tongue = None;
         match self.phase {
             Phase::Idle | Phase::Swim => {
+                span!("snark_swim_phase_ns");
                 if !visible || !wet {
                     if self.phase != Phase::Idle {
                         self.set(Phase::Idle);
@@ -412,7 +475,11 @@ impl Snark {
                     && self.cooldown == 0.
                     && self.time >= 1.
                     && distance < 550.
-                    && !self.kind.wet(world, aim)
+                    && {
+                        span!("snark_liquid_ns");
+                        tally!("snark_liquid_queries", 1);
+                        !self.kind.wet(world, aim)
+                    }
                 {
                     self.random = self.random.wrapping_mul(1664525).wrapping_add(1013904223);
                     self.ranged_tongue = distance < 250. && self.random & 1 == 0;

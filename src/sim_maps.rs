@@ -377,6 +377,46 @@ macro_rules! hedge_switch {
 hedge_switch!(lights_static_cache, lights_static_cache);
 hedge_switch!(dynamic_buckets, sim_dynamic_buckets);
 
+// Round 27 potears1 arms. Each one answers the same question with less work; the
+// console arms measure them one at a time, and the tests override them per thread.
+macro_rules! arm_switch {
+    ($name:ident, $field:ident) => {
+        pub fn $name() -> bool {
+            #[cfg(test)] { arm_test_switches().get(stringify!($name)).copied().unwrap_or(false) }
+            #[cfg(all(not(test), feature="vita_renderer"))]
+            { crate::render::vita_renderer::config().$field }
+            #[cfg(all(not(test), not(feature="vita_renderer")))] { false }
+        }
+    };
+}
+/// Skip a Snark movement step whose delta is exactly zero: the sweep can only
+/// report the ground the Snark already stands on, and no branch changes state.
+arm_switch!(snark_move_skip, sim_snark_move_skip);
+/// Answer the Snark sight segment as the documented yes/no blocked predicate
+/// instead of building a fraction and a normal nobody reads.
+arm_switch!(snark_sight_blocked, sim_snark_sight_blocked);
+/// Match Pool mover names without building one String per candidate.
+arm_switch!(pool_name_match, sim_pool_name_match);
+#[cfg(test)]
+fn arm_test_switches() -> std::collections::BTreeMap<&'static str, bool> {
+    ARM_TEST.with(|a| a.borrow().clone())
+}
+#[cfg(test)]
+thread_local! { static ARM_TEST: std::cell::RefCell<std::collections::BTreeMap<&'static str, bool>> = std::cell::RefCell::new(std::collections::BTreeMap::new()); }
+#[cfg(test)]
+pub(crate) fn with_arm_switch<T>(name: &'static str, enabled: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(&'static str, Option<bool>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ARM_TEST.with(|a| { let mut a = a.borrow_mut();
+                match self.1 { Some(previous) => { a.insert(self.0, previous); } None => { a.remove(self.0); } } });
+        }
+    }
+    let previous = ARM_TEST.with(|a| a.borrow_mut().insert(name, enabled));
+    let _reset = Reset(name, previous);
+    run()
+}
+
 macro_rules! think_switch {
     ($name:ident, $field:ident, $index:expr) => {
         pub fn $name() -> bool {
