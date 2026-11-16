@@ -512,7 +512,7 @@ mod tests {
         Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0,
             model: Mat4::IDENTITY.to_cols_array().map(f32::to_bits),
             time: 0_f32.to_bits(), time_uv: false, time_gain: false,
-            list_serial: 0, class: 0 }
+            list_serial: 0, alpha_serial: 0, class: 0 }
     }
     fn serial_list(parameters: usize) -> WorldList {
         WorldList::new(&[], &[], &[], parameters)
