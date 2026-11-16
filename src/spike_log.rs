@@ -151,7 +151,7 @@ impl Frame {
         let ms = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64() * 1000.;
         let _ = write!(out, "[lg/spike] frame={} ms={:.2} sim={:.2} render={:.2} hud={:.2} present={:.2}",
             self.number, ms(begin, now), ms(begin, render), ms(render, hud), ms(hud, cpu_end), ms(cpu_end, now));
-        if overlap_enabled() {
+        if split_enabled() {
             // Clamp to render: a last simulation read in HUD/tail leaves zero
             // render-only work that could overlap without extracting more state.
             let split = self.world_last.unwrap_or(hud).max(render).min(hud);
@@ -407,8 +407,16 @@ pub(crate) fn overlap_enabled() -> bool {
     { false }
 }
 pub(crate) fn world_last_read() {
-    if on() && overlap_enabled() { FRAME.with(|f| f.borrow_mut().world_last = Some(Instant::now())); }
+    if on() && split_enabled() { FRAME.with(|f| f.borrow_mut().world_last = Some(Instant::now())); }
 }
 pub(crate) fn overlap_burn(ms: f64, render_ms: f64, bytes: u64) {
     if on() { FRAME.with(|f| { let mut f=f.borrow_mut(); f.burn_ms=ms; f.burn_render_ms=render_ms; f.burn_bytes=bytes; }); }
+}
+
+/// Split observation alone never changes CPU reservation or starts the burn.
+fn split_enabled() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { overlap_enabled() || crate::render::vita_renderer::config().diag_snapshot }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
 }

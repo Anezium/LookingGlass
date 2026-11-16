@@ -4335,6 +4335,13 @@ interactions
                 frame, dynamic_input.bytes(), dynamic_input.capacity_bytes(), us, allocations,
                 dynamic_input.transforms.len(), dynamic_input.particles.len(), dynamic_input.pickups.len());
         }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let extracted_probe_state = (snapshot_enabled && crate::sim_maps::probe::enabled()).then(|| serde_json::json!({
+            "player": player, "stats": stats, "interactions": interactions.snapshot(),
+            "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
+            "character": alice.snapshot(), "environment_clock": environment_clock,
+            "pickup_clock": pickup_clock, "transforms": transforms,
+        }));
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         crate::spike_log::render_begin();
@@ -4634,6 +4641,10 @@ interactions
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
+        crate::spike_log::world_last_read();
+        let snapshot_tail_fenced = !snapshot_enabled || freeze_capture || save_requested || autosave_requested
+            || pending_menu_save.is_some() || pending_menu_newgame.is_some() || finale_checkpoint_requested.is_some()
+            || crate::transition_memory::host_probe();
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
         #[cfg(feature = "vita_renderer")]
@@ -5059,10 +5070,9 @@ interactions
         crate::light_profile::cpu_end();
         crate::frame_phases::mark(2);
         crate::spike_log::cpu_end();
-        // HUD/timing above still read story, player, stats and interactions. Thus no
-        // suffix of the existing render region is safe for concurrent simulation.
-        // Later replay/probe/tail reads only move this boundary further right.
-        crate::spike_log::world_last_read();
+        // Save completion and optional diagnostics are serial fences. Ordinary
+        // enabled frames have consumed owned HUD/timing/probe inputs above.
+        if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
         #[cfg(target_os = "vita")]
         {
             crate::frame_phases::mark(3);
@@ -5080,9 +5090,9 @@ interactions
             profile_report_due = report_due;
         }
         #[cfg(target_os="vita")]
-        if let Some(s)=&mut r13_survey {s.accept(active && stats.alive() && !paused && !menu && !inventory_menu && !console.open
-            && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none() && !story.busy()
-            && !interactions.school.as_ref().is_some_and(|s|s.cinematic()));}
+        if let Some(s)=&mut r13_survey {s.accept(active && tail_snapshot.as_ref().map_or_else(|| stats.alive(), |s| s.alive) && !paused && !menu && !inventory_menu && !console.open
+            && !tail_snapshot.as_ref().map_or_else(|| skip_id.is_some() || pand_cinematic || scripted_camera.is_some() || story.busy()
+            || interactions.school.as_ref().is_some_and(|s|s.cinematic()), |s| s.cinema));}
         #[cfg(not(target_os="vita"))]
         if !route_running {crate::frame_profile::end_creation_frame();}
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -5094,12 +5104,15 @@ interactions
             #[cfg(feature = "vita_renderer")]
             crate::sim_maps::probe::record_exact_frame(&maps[current], frame, matches!(frame, 0 | 59 | 60 | 119 | 120 | 179))?;
             crate::sim_maps::probe::shot(frame)?;
-            crate::sim_maps::probe::end(frame, &maps[current], active, &serde_json::json!({
-                "player": player, "stats": stats, "interactions": interactions.snapshot(),
-                "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
-                "character": alice.snapshot(), "environment_clock": environment_clock,
-                "pickup_clock": pickup_clock, "transforms": transforms,
-            }));
+            let state = if let Some(state) = &extracted_probe_state { state } else {
+                &serde_json::json!({
+                    "player": player, "stats": stats, "interactions": interactions.snapshot(),
+                    "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
+                    "character": alice.snapshot(), "environment_clock": environment_clock,
+                    "pickup_clock": pickup_clock, "transforms": transforms,
+                })
+            };
+            crate::sim_maps::probe::end(frame, &maps[current], active, state);
         }
         #[cfg(feature = "vita_renderer")]
         let presented_probe = load_probe.take();
@@ -5122,7 +5135,7 @@ interactions
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::phase_census::accept(active, frame > 60);
-        if quit_after_frame { crate::spike_log::world_last_read(); break; }
+        if quit_after_frame { if snapshot_tail_fenced { crate::spike_log::world_last_read(); } break; }
         if options.frames.is_some_and(|limit| frame >= limit) {
             #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
             println!("[lg/vita-renderer] host frame report {}",crate::render::vita_renderer::report());
@@ -5139,7 +5152,7 @@ interactions
         if context_before != (menu, inventory_menu, console.open, paused) {
             input.suppress();
         }
-        crate::spike_log::world_last_read();
+        if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
         crate::frame_phases::mark(9);
         drop(census_tail);
         next_frame().await;
@@ -5148,8 +5161,9 @@ interactions
         audio.scene_presented();
         #[cfg(target_os="vita")]
         if let Some(s)=&mut r13_survey {
-            s.presented(&maps[current],stats.alive(),is_key_pressed(KeyCode::Tab))?;
+            s.presented(&maps[current],tail_snapshot.as_ref().map_or_else(|| stats.alive(), |s| s.alive),is_key_pressed(KeyCode::Tab))?;
             if s.take_snapshot() {
+                crate::spike_log::world_last_read();
                 crate::allocation_census::snapshot("presented");
                 if crate::allocation_census::enabled() {
                     crate::allocation_census::payload("live_collision",scene.world.census_payload());
@@ -5157,7 +5171,7 @@ interactions
                 }
             }
         }
-        crate::spike_log::world_last_read();
+        if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
     }
     crate::spike_log::end_play();
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
