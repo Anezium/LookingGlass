@@ -42,6 +42,9 @@ struct State {
     direct_capped:u64,
     /// Draw index per (actor, surface) in this frame; cleared, not freed, each frame.
     occurrences:HashMap<(ActorId,usize),u16>, occurrences_on:bool,
+    /// Runtime bound from `actor_occurrence_limit`; 0 in a bare test State means the
+    /// historical MAX_OCCURRENCES.
+    occurrence_limit:u16,
     /// actor_publication_uv_reuse, latched per frame. `uv_edits` counts announced live UV edits.
     uv_reuse_on:bool, uv_edits:u32,
     /// Reused UVs that disagreed with the live mesh. Tests and the host probe compare; the Vita never does.
@@ -86,7 +89,8 @@ impl State {
     fn occurrence(&mut self,key:Key)->Option<Key> {
         if !self.occurrences_on {return Some(key);}
         let n=self.occurrences.entry((key.actor,key.surface)).or_insert(0);
-        if *n>=MAX_OCCURRENCES {
+        let limit=if self.occurrence_limit==0 {MAX_OCCURRENCES} else {self.occurrence_limit};
+        if *n>=limit {
             #[cfg(any(feature="actor_diagnostics",all(feature="sim_maps_probe",not(target_os="vita"))))]
             retained::count("actor_publication_occurrence_limit",1);
             return None;
@@ -655,7 +659,10 @@ pub(crate) fn begin() {
     ACTIVE.with(|a|a.set(enabled));
     DEFERRED.with(|d|d.set(enabled && deferred_layers()));
     // Latched once per frame: every prepare in this frame uses the same value.
-    if enabled { STATE.with(|s| {let mut s=s.borrow_mut();s.occurrences_on=publication_occurrences();s.uv_reuse_on=publication_uv_reuse();s.next_frame();}); }
+    if enabled {
+        let limit=c.actor_occurrence_limit.clamp(1,64);
+        STATE.with(|s| {let mut s=s.borrow_mut();s.occurrences_on=publication_occurrences();s.occurrence_limit=limit;s.uv_reuse_on=publication_uv_reuse();s.next_frame();});
+    }
 }
 pub(crate) fn end() {
     DEFERRED.with(|d|d.set(false));

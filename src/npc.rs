@@ -726,6 +726,8 @@ struct Model {
     electric: Option<std::rc::Rc<crate::electric::Art>>,
     burst: Option<crate::dismember::burst::Art>,
     visible: Vec<bool>,
+    /// Static `meta.hidden` decisions, one per skeleton surface.
+    base_hidden: Vec<bool>,
     props: BTreeMap<String, Prop>,
     effects: BTreeMap<String, crate::particles::Attached>,
     magma_skins: Option<magma_art::Skins>,
@@ -1221,25 +1223,36 @@ impl Model {
         let scales = &prepared.scales;
         self.face.blink(&mut self.meshes, time, alive);
         let mut removed = Vec::new();
+        #[cfg(feature = "vita_renderer")]
+        let static_hidden = crate::render::vita_renderer::config().actor_hidden_mask
+            && piece.is_none()
+            && visual.surfaces.is_empty();
+        #[cfg(not(feature = "vita_renderer"))]
+        let static_hidden = false;
         for (i, surface) in d.skeleton.surfaces.iter().enumerate() {
-            let mut hidden = d
-                .meta
-                .hidden
-                .iter()
-                .any(|p| crate::animation_events::matches(p, &surface.name));
-            for (pattern, value) in &visual.surfaces {
-                if crate::animation_events::matches(pattern, &surface.name) {
-                    hidden = *value;
+            let mut hidden = if static_hidden {
+                self.base_hidden[i]
+            } else {
+                d.meta
+                    .hidden
+                    .iter()
+                    .any(|p| crate::animation_events::matches(p, &surface.name))
+            };
+            if !static_hidden {
+                for (pattern, value) in &visual.surfaces {
+                    if crate::animation_events::matches(pattern, &surface.name) {
+                        hidden = *value;
+                    }
                 }
-            }
-            if let Some((pattern, cap, fragment)) = piece {
-                hidden = if surface.name == cap {
-                    false
-                } else if fragment {
-                    !crate::animation_events::matches(pattern, &surface.name)
-                } else {
-                    hidden || crate::animation_events::matches(pattern, &surface.name)
-                };
+                if let Some((pattern, cap, fragment)) = piece {
+                    hidden = if surface.name == cap {
+                        false
+                    } else if fragment {
+                        !crate::animation_events::matches(pattern, &surface.name)
+                    } else {
+                        hidden || crate::animation_events::matches(pattern, &surface.name)
+                    };
+                }
             }
             if hidden {
                 removed.push((i, self.meshes[i].take()));
@@ -1662,6 +1675,12 @@ impl Model {
                 effect.orient_velocity("sparkle");
             }
         }
+        let base_hidden = data
+            .skeleton
+            .surfaces
+            .iter()
+            .map(|surface| data.meta.hidden.iter().any(|p| crate::animation_events::matches(p, &surface.name)))
+            .collect();
         Ok(Self {
             skin_identity: Default::default(),
             late_skin_overlays: false,
@@ -1669,6 +1688,7 @@ impl Model {
             live_skin_current: true,
             current_skin: None,
             visible: vec![false; meshes.len()],
+            base_hidden,
             bone_scales: Vec::new(),
             electric: Some(crate::electric::Art::load(assets, specs)?),
             burst: matches!(name, "cardguard_club" | "cardguard_diamond")

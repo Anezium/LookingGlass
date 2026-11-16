@@ -157,6 +157,12 @@ pub struct Config {
     /// Give each repeated draw of one actor surface in a frame its own publication
     /// bank, up to four per frame. Default on since r22 (console ABBA, skool2: -1.84 / -2.16 ms).
     pub actor_publication_occurrences: bool,
+    /// Maximum publication banks one (actor, surface) may take per frame when
+    /// `actor_publication_occurrences` is on. 4 is the historical bound; higher values
+    /// keep repeated draws of one shared model on the worker lanes instead of the
+    /// serial kernel. Exact by the same oracle. Default 4.
+    #[serde(default = "default_actor_occurrence_limit")]
+    pub actor_occurrence_limit: u16,
     /// Skin non-simple actor layer recipes on the workers (raw kernel bytes) and build
     /// their layers on the game thread after collect. Default on since r22
     /// (console ABBA, wchess2: -4.47 to -5.01 ms).
@@ -237,6 +243,10 @@ pub struct Config {
     /// mouth bits, parent roots and bone-scale bits) is identical to the previous frame.
     /// The stored output is returned unchanged; a miss recomputes. Default off.
     pub gather_pose_reuse: bool,
+    /// Cache the static `meta.hidden` surface mask per model. When the frame carries
+    /// no event-surface override and no animation piece, the per-surface wildcard
+    /// scan is replaced by a bool lookup. Exact by construction. Default off.
+    pub actor_hidden_mask: bool,
     /// Select mutable skin from actual frame consumers; keep inherited visual policy.
     pub skin_actual_consumers: bool,
     pub mover_far_lazy: bool,
@@ -504,6 +514,8 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
     });
     Ok(maps)
 }
+fn default_actor_occurrence_limit() -> u16 { 4 }
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -569,6 +581,7 @@ impl Default for Config {
             worker_probe: false, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             actor_publication_occurrences: true,
+            actor_occurrence_limit: 4,
             actor_deferred_layers: true,
             actor_publication_uv_reuse: true,
             prop_occurrence_reuse: true,
@@ -589,6 +602,7 @@ impl Default for Config {
             phase_census: false,
             gather_census: false,
             gather_pose_reuse: false,
+            actor_hidden_mask: false,
             skin_actual_consumers: true,
             mover_far_lazy: true,
             mover_lazy_publish: true,
