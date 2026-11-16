@@ -2333,6 +2333,8 @@ impl Renderer {
                 let g = &self.groups[id];
                 let liquid = g.liquid;
                 if liquid && !water_parameters.contains(&g.parameter) { water_parameters.push(g.parameter); }
+                // Parameter signatures include the model id and isolate each moving batch.
+                // All groups in a parameter therefore have identical model bits this pass.
                 let already_checked = alpha_once && self.parameters[g.parameter].alpha_serial == self.alpha_parameter_serial;
                 let model = if already_checked { Mat4::IDENTITY } else if reuse { self.models[id].unwrap() }
                     else { model_matrix(&g.recipe, time, transforms).unwrap() };
@@ -5282,7 +5284,7 @@ mod tests {
             let eye=vec3(3.,5.,7.);
             let u=uniforms(&recipe,0.,eye,model,projection,false,Vec2::ONE);
             let mut p=Parameter {recipe,bits:u.bits(),uniforms:u,generation:1,model:model.to_cols_array().map(f32::to_bits),
-                time:0,time_uv:dynamic,time_gain:true, list_serial:0, class:0 };
+                time:0,time_uv:dynamic,time_gain:true, list_serial:0, alpha_serial:0, class:0 };
             for time in [-0.,0.3,3.,20.,0.,f32::from_bits(0x7fc00001)] {
                 let expected=uniforms(&p.recipe,time,eye,model,projection,false,Vec2::ONE).bits();
                 let scope=crate::kernel_alloc::Scope::begin();
