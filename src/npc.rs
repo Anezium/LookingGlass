@@ -2177,6 +2177,35 @@ pub struct Npcs {
     pub greetings: u64,
 }
 impl Npcs {
+    /// Host-only census of incomplete schemas, including dispatch visibility reads.
+    /// Presence is intentional: a hidden actor still consults live state before returning.
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    pub(crate) fn snapshot_fence_census(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for actor in &self.actors {
+            if actor.ant.is_some() { continue; }
+            let family = if let Some(p) = &actor.resident {
+                match &p.body {
+                    resident::Body::Boojum(_) => "boojum",
+                    resident::Body::Ladybug(_) => "ladybug",
+                    resident::Body::Diamond(_) => "diamond",
+                    resident::Body::Plant(_) => "plant",
+                    resident::Body::Card(_) => "card",
+                    resident::Body::Snark(_) => "snark",
+                    resident::Body::Insect(_) => "insect",
+                    resident::Body::Magma(_) => "magma",
+                    resident::Body::Wildlife(_) => "wildlife",
+                }
+            } else if actor.clock.is_some() { "clockwork" }
+            else if actor.imp.is_some() { "fire_imp" }
+            else if actor.chess.is_some() { "chess" }
+            else if actor.guard.is_some() { "guard" }
+            else if actor.guide.is_some() { "companion" }
+            else { "ambient" };
+            *counts.entry(format!("npc.{family}.{}", actor.spawn.model)).or_insert(0) += 1;
+        }
+        counts
+    }
     /// Resolve complete Ant inputs at the simulation boundary. All other art
     /// remains explicitly fenced until its own schema and consumer are converted.
     pub(crate) fn extract_ants(&mut self, camera: Vec3, direction: Vec3) -> (usize, usize, bool) {

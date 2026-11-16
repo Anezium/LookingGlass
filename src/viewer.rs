@@ -4506,6 +4506,49 @@ interactions
             p.camera(&world_camera, player.feet, paused, skip_id);
             p.stage("skin-gather-begin");
         }
+        // Observational census only. This does not change fence placement or
+        // qualify a schema; absent instances still leave dispatcher reads live.
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if snapshot_enabled && std::env::var_os("LOOKING_GLASS_SNAPSHOT_FENCE_CENSUS").is_some() {
+            let mut blockers = vec!["level.dispatch.controller_presence".to_owned(),
+                "level.dispatch.interactions_hints".to_owned(),
+                "hud.resource_handles".to_owned(), "tail.unconditional".to_owned()];
+            let mut art = |present: bool, name: &str| { if present { blockers.push(format!("story.{name}")); } };
+            art(level_art.cheshire.is_some(), "cheshire");
+            art(level_art.fortress.is_some(), "fortress");
+            art(level_art.village.is_some(), "village");
+            art(level_art.school.is_some(), "school");
+            art(level_art.gym.is_some(), "gym");
+            art(level_art.beyond.is_some(), "beyond");
+            // Pool's body is owned, but story_pose still reads Story in the dispatcher.
+            art(level_art.pool.is_some(), "pool_story_dispatch");
+            art(level_art.school2.is_some(), "school2");
+            art(level_art.duchess.is_some(), "duchess");
+            art(level_art.pandemonium.is_some(), "pandemonium");
+            art(level_art.encounters.is_some(), "encounters");
+            let registered: Vec<_> = level_art.levels.iter().zip(&interactions.levels)
+                .filter_map(|(a,s)| a.as_ref().map(|a| (s.reg.id, a.snapshot_effects_empty()))).collect();
+            for (id, empty) in &registered {
+                blockers.push(format!("story.registered.{id}"));
+                if !empty { blockers.push(format!("effects.registered.{id}")); }
+            }
+            if interactions.pandemonium.is_some() { blockers.push("effects.pandemonium".into()); }
+            if interactions.duchess.is_some() { blockers.push("effects.duchess".into()); }
+            let npc = npcs.snapshot_fence_census();
+            blockers.extend(npc.keys().cloned());
+            let save = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
+                || pending_menu_save.is_some() || pending_menu_newgame.is_some();
+            if save { blockers.push("tail.save_checkpoint".into()); }
+            if saves_writable { blockers.push("tail.preview_policy".into()); }
+            if quit_after_frame || options.frames.is_some_and(|n|frame+1>=n) { blockers.push("tail.terminal".into()); }
+            // Transition loading happens before extraction and is not a rendered tape frame.
+            println!("SNAPSHOT_FENCE_CENSUS {}", serde_json::json!({
+                "frame": frame, "map": maps[current], "blockers": blockers, "npc_instances": npc,
+                "save_requested": save, "saves_writable": saves_writable,
+                "registered": registered, "transition_in_render": false, "survey": false,
+                "handoff_boundary": level_art.pool.is_some(),
+            }));
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let host_gather=std::time::Instant::now();
         #[cfg(feature="vita_renderer")]
