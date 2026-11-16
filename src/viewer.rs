@@ -4430,6 +4430,23 @@ interactions
             let allocations=scope.finish();
             println!("[lg/snapshot-waves] frame={} bytes={} extraction_us={:.3} allocations={} overflow={} level_effects_complete={}",frame,std::mem::size_of_val(&wave_input)+wave_input.len()*std::mem::size_of::<crate::render_snapshot::WaveInput>(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow),u8::from(empty_level_effects));overflow
         } else {false};
+        let aim_input=if snapshot_enabled {
+            let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();
+            let can_aim = !interactions.level_blocks_weapons() && !flying
+                && !pand_cinematic
+                && scripted_camera.is_none()
+                && !story.busy()
+                && !menu
+                && !inventory_menu
+                && !console.open
+                && stats.alive()
+                && player.script_motion == 0
+                && player.ledge.is_none()
+                && !player.climbing();
+            let input=aim_pointer.resolve(&crate::combat::Context{world:&scene.world,targets:&targets},crate::targeting::Sight{eye:player.eye(),direction,weapon:can_aim.then(||stats.equipped()).flatten()},level_art.snapshot_visit.id());
+            let allocations=scope.finish();
+            println!("[lg/snapshot-aim] frame={} bytes={} extraction_us={:.3} allocations={} overflow=0",frame,std::mem::size_of_val(&input),start.elapsed().as_secs_f64()*1_000_000.,allocations);Some(input)
+        } else {None};
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         if snapshot_enabled {
@@ -4687,6 +4704,8 @@ interactions
                 level_art.effects(&interactions, camera, &scene.atmosphere);
                 }
                 alice.draw_effects(camera, fullbright, show_alice);
+                if let Some(input)=aim_input.as_ref().filter(|i|aim_pointer.valid_input(i,level_art.snapshot_visit.id())) {aim_pointer.draw_input(input,level_art.snapshot_visit.id(),if active{dt}else{0.},camera,&scene.atmosphere);}
+                else {
                 let can_aim = !interactions.level_blocks_weapons() && !flying
                     && !pand_cinematic
                     && scripted_camera.is_none()
@@ -4712,6 +4731,7 @@ interactions
                     camera,
                     &scene.atmosphere,
                 );
+                }
                 if snapshot_enabled && power_art.valid_input(&pickup_input) {hud.draw_pickup_markers(&pickup_input.markers,pickup_clock);}
                 else {hud.draw_pickups(&pickups,&stats,camera,pickup_clock);}
             }
