@@ -319,9 +319,9 @@ mod tests {
         text.replace(',', " ")
             .split_whitespace()
             .map(|f| f.strip_prefix("leaf=").or_else(|| f.strip_prefix("counter=")).unwrap_or(f))
-            .find(|f| f.starts_with(&format!("{name}=")))
+            .find(|f| f.starts_with(&format!("{name}:")))
             .unwrap_or_else(|| panic!("{name} in {text}"))
-            .split('=').nth(1).unwrap().split('/').next().unwrap().parse().unwrap()
+            .split(':').nth(1).unwrap().split('/').next().unwrap().parse().unwrap()
     }
     #[test]
     fn inactive_gather_keeps_no_time_or_counters() {
@@ -387,7 +387,7 @@ mod tests {
             frame_closed(number, |line| lines.push(line.to_string()));
         }
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("[lg/spike] gather window=10..12 frames=3 measured=0 leaf=- counter=actors_visited=0.000"));
+        assert!(lines[0].starts_with("[lg/spike] gather window=10..12 frames=3 measured=0 leaf=- counter=actors_visited:0.000"));
         assert!(!active());
     }
 }
