@@ -570,6 +570,8 @@ fn run() -> Result<()> {
             #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
             "--snapshot-hud-resource-check" => mode = "snapshot-hud-resource",
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-potears2-render-check" => mode = "snapshot-potears2-render",
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             "--snapshot-cheshire-render-check" => mode = "snapshot-cheshire-render",
             "--snapshot-alice-render-check" => mode = "snapshot-alice-render",
             "--snapshot-handoff-render-check" => mode = "snapshot-handoff-render",
@@ -1293,6 +1295,12 @@ fn run() -> Result<()> {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = render_snapshot::hud_resource_check(&mut assets).await { eprintln!("Snapshot HUD failed: {e:#}"); std::process::exit(1); }
         }); return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if mode == "snapshot-potears2-render" {
+        macroquad::Window::from_config(viewer::config(),async move {
+            if let Err(e)=levels::potears2::snapshot_render_check(&mut assets).await {eprintln!("Snapshot potears2 failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
     }
     #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
     if mode == "snapshot-cheshire-render" {

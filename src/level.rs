@@ -429,6 +429,13 @@ pub trait LevelArt: Any {
     ) {
     }
     fn story_pose(&mut self, _story: &Story) {}
+    /// Optional complete registered-art schema. Default families stay serial.
+    fn extract_snapshot(&mut self, _level: &dyn LevelController, _story: &Story) -> (usize, bool) { (0, false) }
+    fn snapshot_ready(&self) -> bool { false }
+    fn clear_snapshot(&mut self) {}
+    fn draw_snapshot(&mut self, _atmosphere: &Atmosphere, _camera: Vec3, _fullbright: bool) -> bool { false }
+    fn effects_snapshot(&mut self, _camera: Vec3, _atmosphere: &Atmosphere) -> bool { false }
+
     /// An empty effect schema is explicit; unregistered families remain fenced.
     fn snapshot_effects_empty(&self) -> bool { false }
     /// Effects drawn with the particle pass, after the world.

@@ -772,6 +772,7 @@ impl PuppetInput {
     pub(crate) fn bones(&self) -> usize { self.pose.len() }
 }
 impl Puppet {
+    pub(crate) fn snapshot_bones(&self) -> usize { self.0.data.skeleton.bones.len() }
     pub(crate) fn extract_draw(&self, clip: &str, time: f32, looping: bool,
         transform: Transform, scale: f32) -> PuppetInput {
         let d = &self.0.data;
@@ -2266,7 +2267,6 @@ pub struct Npcs {
 impl Npcs {
     /// Host-only census of incomplete schemas, including dispatch visibility reads.
     /// Presence is intentional: a hidden actor still consults live state before returning.
-    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
     pub(crate) fn snapshot_fence_census(&self) -> std::collections::BTreeMap<String, usize> {
         let mut counts = std::collections::BTreeMap::new();
         for actor in &self.actors {

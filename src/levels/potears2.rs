@@ -803,3 +803,6 @@ mod tests {
         assert!(s.validate(visit).is_err());
     }
 }
+
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) use scene::snapshot_render_check;

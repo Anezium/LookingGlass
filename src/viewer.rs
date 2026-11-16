@@ -277,8 +277,12 @@ impl LevelArt {
         // Check both shapes before walking or allocating the registry. A rejected
         // command is fixed size and can only select the serial fenced fallback.
         if self.levels.len() > 1024 || self.levels.len() != i.levels.len() {
+            for a in self.levels.iter_mut().take(1024).flatten() {a.clear_snapshot();}
             return LevelDispatch { visit: self.snapshot_visit.id(), selected: [false; 10],
                 registered: Vec::new(), school_staging: false, cheshire: None, overflow: true };
+        }
+        for (art, slot) in self.levels.iter_mut().zip(&i.levels) {
+            if let Some(a)=art { a.extract_snapshot(&*slot.ctl,story); }
         }
         LevelDispatch { visit: self.snapshot_visit.id(),
             selected: [i.fortress.is_some(), i.school.is_some(), i.village.is_some(),
@@ -313,7 +317,7 @@ impl LevelArt {
             art.story_pose(story);
         }
         for art in self.levels.iter_mut().flatten() {
-            art.story_pose(story);
+            if !owned || !art.snapshot_ready() { art.story_pose(story); }
         }
     }
     fn draw(&mut self, i: &Interactions, hints: &crate::cheshire::Hints,
@@ -385,8 +389,9 @@ impl LevelArt {
                 if !present { continue; }
                 // This family's body remains incomplete and fenced. Only that
                 // family may borrow its controller; absent dispatch is world-free.
-                if let (Some(a), Some(slot)) = (&mut self.levels[index], i.levels.get(index)) {
-                    a.draw(&*slot.ctl, atmosphere, camera, fullbright);
+                if let Some(a)=&mut self.levels[index] {
+                    if a.draw_snapshot(atmosphere,camera,fullbright) {continue;}
+                    if let Some(slot)=i.levels.get(index) {a.draw(&*slot.ctl,atmosphere,camera,fullbright);}
                 }
             }
         } else {
@@ -411,8 +416,9 @@ impl LevelArt {
             for (index, present) in command.registered.iter().copied().enumerate() {
                 if !present { continue; }
                 // Registered effects remain an explicitly fenced family.
-                if let (Some(a), Some(slot)) = (&mut self.levels[index], i.levels.get(index)) {
-                    a.effects(&*slot.ctl, camera, atmosphere);
+                if let Some(a)=&mut self.levels[index] {
+                    if a.effects_snapshot(camera,atmosphere) {continue;}
+                    if let Some(slot)=i.levels.get(index) {a.effects(&*slot.ctl,camera,atmosphere);}
                 }
             }
         } else {
@@ -4479,6 +4485,8 @@ interactions
         let tail_terminal_fence = quit_after_frame || options.frames.is_some_and(|n| frame+1>=n);
         let snapshot_tail_fenced = !snapshot_enabled || hud_snapshot.is_none() || tail_save_fence
             || tail_survey_fence || tail_diagnostic_fence || tail_terminal_fence;
+        if !snapshot_enabled {for art in level_art.levels.iter_mut().flatten() {art.clear_snapshot();}}
+        let mut snapshot_rejected=false;
         let level_dispatch = snapshot_enabled.then(|| {
             let scope = crate::kernel_alloc::Scope::begin(); let start = std::time::Instant::now();
             let input = level_art.extract_dispatch(&interactions, &hints, &story);
@@ -4500,7 +4508,7 @@ interactions
                 let allocations = scope.finish();
                 println!("[lg/snapshot-pool] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",
                     frame, bytes, start.elapsed().as_secs_f64()*1_000_000., allocations, u8::from(overflow));
-                if overflow { handoff_return.retire(); handoff_minimum_frame = frame as u64; }
+                if overflow { snapshot_rejected=true; handoff_return.retire(); handoff_minimum_frame = frame as u64; }
             }
         } else if let Some(art) = &mut level_art.pool { art.clear_input(); }
         if snapshot_enabled {
@@ -4509,20 +4517,16 @@ interactions
             let (bytes, ants, overflow) = npcs.extract_ants(camera, (target-camera).normalize_or_zero());
             let allocations = scope.finish();
             let us = start.elapsed().as_secs_f64()*1_000_000.;
-            if overflow { handoff_return.retire(); handoff_minimum_frame = frame as u64; }
+            if overflow { snapshot_rejected=true; handoff_return.retire(); handoff_minimum_frame = frame as u64; }
             snapshot_frames += 1;
-            // Unconverted level art, NPC families and contact shadows remain live.
-            // Until all are converted this is a whole-frame serial fence, including
-            // overflow, save/checkpoint success/failure acknowledgement and retry.
-            snapshot_fenced_frames += 1;
-            println!("[lg/snapshot-actors] frame={} bytes={} extraction_us={:.3} allocations={} ants={} overflow={} fenced=1 frames={} fenced_frames={}",
-                frame, bytes, us, allocations, ants, u8::from(overflow), snapshot_frames, snapshot_fenced_frames);
+            println!("[lg/snapshot-actors] frame={} bytes={} extraction_us={:.3} allocations={} ants={} overflow={}",
+                frame, bytes, us, allocations, ants, u8::from(overflow));
         } else { npcs.clear_actor_inputs(); }
         if snapshot_enabled {
             let scope=crate::kernel_alloc::Scope::begin();
             let start=std::time::Instant::now();
             let (bytes,overflow)=alice.extract_body(dynamic_input.alice_feet);
-            if overflow {handoff_return.retire();handoff_minimum_frame=frame as u64;}
+            if overflow { snapshot_rejected=true;handoff_return.retire();handoff_minimum_frame=frame as u64;}
             let allocations=scope.finish();
             println!("[lg/snapshot-alice] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
         } else { alice.clear_body_input(); }
@@ -4531,14 +4535,14 @@ interactions
             #[cfg(target_os="vita")] let will_draw=!crate::frame_profile::mode().no_world() && !world_only;
             #[cfg(not(target_os="vita"))] let will_draw=!world_only;
             power_art.extract_input(&pickups,&stats,&save::visit_key(&maps[current],entry_spawn.as_deref()),camera,pickup_clock,will_draw,&mut pickup_input);
-            if pickup_input.overflow() {handoff_return.retire();handoff_minimum_frame=frame as u64;}
+            if pickup_input.overflow() {snapshot_rejected=true;handoff_return.retire();handoff_minimum_frame=frame as u64;}
             let allocations=scope.finish();
             println!("[lg/snapshot-pickups] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,pickup_input.bytes(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(pickup_input.overflow()));
         }
         if snapshot_enabled {
             let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();
             let (bytes,overflow)=steam.extract_render_input();
-            if overflow {handoff_return.retire();handoff_minimum_frame=frame as u64;}let allocations=scope.finish();
+            if overflow { snapshot_rejected=true;handoff_return.retire();handoff_minimum_frame=frame as u64;}let allocations=scope.finish();
             println!("[lg/snapshot-particles] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
         } else {steam.clear_render_input();}
         let empty_level_effects=snapshot_enabled && interactions.pandemonium.is_none() && interactions.duchess.is_none()
@@ -4547,7 +4551,7 @@ interactions
             let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();wave_input.clear();
             if let Some(s)=&interactions.encounters{s.extract_waves(&mut wave_input);}
             if let Some(s)=&interactions.school2{for b in &s.boojums{b.extract_waves(&mut wave_input);}}
-            let overflow=wave_input.len()>16384;if overflow {wave_input.clear();handoff_return.retire();handoff_minimum_frame=frame as u64;}
+            let overflow=wave_input.len()>16384;if overflow { snapshot_rejected=true;wave_input.clear();handoff_return.retire();handoff_minimum_frame=frame as u64;}
             let allocations=scope.finish();
             println!("[lg/snapshot-waves] frame={} bytes={} extraction_us={:.3} allocations={} overflow={} level_effects_complete={}",frame,std::mem::size_of_val(&wave_input)+wave_input.len()*std::mem::size_of::<crate::render_snapshot::WaveInput>(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow),u8::from(empty_level_effects));overflow
         } else {false};
@@ -4579,6 +4583,73 @@ interactions
             println!("[lg/snapshot-shadow] frame={} bytes={} extraction_us={:.3} allocations={} queries={} overflow=0",frame,std::mem::size_of_val(&input),start.elapsed().as_secs_f64()*1_000_000.,allocations,queries);
             Some(input)
         } else {None};
+        // Canonical audited blocker set, resolved before rendering. The same
+        // set controls the real last-read boundary and the host census.
+        let snapshot_blockers = if snapshot_enabled {
+            let mut blockers = Vec::new();
+            if snapshot_rejected || !power_art.valid_input(&pickup_input)
+                || aim_input.as_ref().is_none_or(|i| !aim_pointer.valid_input(i,level_art.snapshot_visit.id())) {
+                blockers.push("input.rejected".to_owned());
+            }
+            #[cfg(feature="vita_renderer")]
+            if load_probe.is_some() {blockers.push("diagnostic.load_probe".to_owned());}
+            if hud_snapshot.is_none() { blockers.push("hud.rejected".to_owned()); }
+            if tail_survey_fence { blockers.push("tail.survey".to_owned()); }
+            if tail_diagnostic_fence { blockers.push("tail.diagnostic".to_owned()); }
+            if !level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)) {
+                blockers.push("level.dispatch.rejected".into());
+            }
+            let mut art = |present: bool, name: &str| { if present { blockers.push(format!("story.{name}")); } };
+
+            art(level_art.fortress.is_some(), "fortress");
+            art(level_art.village.is_some(), "village");
+            art(level_art.school.is_some(), "school");
+            art(level_art.gym.is_some(), "gym");
+            art(level_art.beyond.is_some(), "beyond");
+            // Pool story values are resolved before its owned body extraction.
+            art(level_art.school2.is_some(), "school2");
+            art(level_art.duchess.is_some(), "duchess");
+            art(level_art.pandemonium.is_some(), "pandemonium");
+            art(level_art.encounters.is_some(), "encounters");
+            let registered: Vec<_> = level_art.levels.iter().zip(&interactions.levels)
+                .filter_map(|(a,s)| a.as_ref().map(|a| (s.reg.id, a.snapshot_effects_empty(), a.snapshot_ready()))).collect();
+            for (id, empty, ready) in &registered {
+                if !ready { blockers.push(format!("story.registered.{id}")); }
+                if !empty && !ready { blockers.push(format!("effects.registered.{id}")); }
+                // Hatter1's legacy empty declaration is unsound for electricity.
+                if *id=="hatter1" && !ready && *empty {blockers.push(format!("effects.registered.{id}"));}
+            }
+            if interactions.pandemonium.is_some() { blockers.push("effects.pandemonium".into()); }
+            if interactions.duchess.is_some() { blockers.push("effects.duchess".into()); }
+            let npc = npcs.snapshot_fence_census();
+            blockers.extend(npc.keys().cloned());
+            let save = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
+                || pending_menu_save.is_some() || pending_menu_newgame.is_some();
+            if save { blockers.push("tail.save_checkpoint".into()); }
+
+            if quit_after_frame || options.frames.is_some_and(|n|frame+1>=n) { blockers.push("tail.terminal".into()); }
+            // Transition loading happens before extraction and is not a rendered tape frame.
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if std::env::var_os("LOOKING_GLASS_SNAPSHOT_FENCE_CENSUS").is_some() {
+            println!("SNAPSHOT_FENCE_CENSUS {}", serde_json::json!({
+                "frame": frame, "map": maps[current], "blockers": blockers, "npc_instances": npc,
+                "save_requested": save, "saves_writable": saves_writable,
+                "registered": registered, "transition_in_render": false, "survey": false,
+                "handoff_boundary": level_art.pool.is_some(),
+            }));
+            }
+            blockers
+        } else {Vec::new()};
+        let snapshot_world_free=snapshot_blockers.is_empty() && !snapshot_tail_fenced;
+        crate::spike_log::world_free_decision(snapshot_world_free);
+        if snapshot_enabled {
+            snapshot_fenced_frames += u64::from(!snapshot_world_free);
+            println!("[lg/snapshot-fence] frame={} fenced={} frames={} fenced_frames={}",
+                frame,u8::from(!snapshot_world_free),snapshot_frames,snapshot_fenced_frames);
+        }
+        // All simulation queries and rejection decisions precede this boundary.
+        // Remaining families/failures keep the conservative end-of-3D marker.
+        crate::spike_log::world_last_read();
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         if snapshot_enabled {
@@ -4622,54 +4693,8 @@ interactions
         }
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe {
-            p.camera(&world_camera, player.feet, paused, skip_id);
+            p.camera(&world_camera, tail_snapshot.as_ref().map_or_else(||player.feet,|s|s.feet), paused, skip_id);
             p.stage("skin-gather-begin");
-        }
-        // Observational census only. This does not change fence placement or
-        // qualify a schema; absent instances still leave dispatcher reads live.
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        if snapshot_enabled && std::env::var_os("LOOKING_GLASS_SNAPSHOT_FENCE_CENSUS").is_some() {
-            let mut blockers = Vec::new();
-            if hud_snapshot.is_none() { blockers.push("hud.rejected".to_owned()); }
-            if tail_survey_fence { blockers.push("tail.survey".to_owned()); }
-            if tail_diagnostic_fence { blockers.push("tail.diagnostic".to_owned()); }
-            if !level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)) {
-                blockers.push("level.dispatch.rejected".into());
-            }
-            let mut art = |present: bool, name: &str| { if present { blockers.push(format!("story.{name}")); } };
-
-            art(level_art.fortress.is_some(), "fortress");
-            art(level_art.village.is_some(), "village");
-            art(level_art.school.is_some(), "school");
-            art(level_art.gym.is_some(), "gym");
-            art(level_art.beyond.is_some(), "beyond");
-            // Pool story values are resolved before its owned body extraction.
-            art(level_art.school2.is_some(), "school2");
-            art(level_art.duchess.is_some(), "duchess");
-            art(level_art.pandemonium.is_some(), "pandemonium");
-            art(level_art.encounters.is_some(), "encounters");
-            let registered: Vec<_> = level_art.levels.iter().zip(&interactions.levels)
-                .filter_map(|(a,s)| a.as_ref().map(|a| (s.reg.id, a.snapshot_effects_empty()))).collect();
-            for (id, empty) in &registered {
-                blockers.push(format!("story.registered.{id}"));
-                if !empty { blockers.push(format!("effects.registered.{id}")); }
-            }
-            if interactions.pandemonium.is_some() { blockers.push("effects.pandemonium".into()); }
-            if interactions.duchess.is_some() { blockers.push("effects.duchess".into()); }
-            let npc = npcs.snapshot_fence_census();
-            blockers.extend(npc.keys().cloned());
-            let save = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
-                || pending_menu_save.is_some() || pending_menu_newgame.is_some();
-            if save { blockers.push("tail.save_checkpoint".into()); }
-
-            if quit_after_frame || options.frames.is_some_and(|n|frame+1>=n) { blockers.push("tail.terminal".into()); }
-            // Transition loading happens before extraction and is not a rendered tape frame.
-            println!("SNAPSHOT_FENCE_CENSUS {}", serde_json::json!({
-                "frame": frame, "map": maps[current], "blockers": blockers, "npc_instances": npc,
-                "save_requested": save, "saves_writable": saves_writable,
-                "registered": registered, "transition_in_render": false, "survey": false,
-                "handoff_boundary": level_art.pool.is_some(),
-            }));
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let host_gather=std::time::Instant::now();
@@ -4960,7 +4985,7 @@ interactions
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
-        crate::spike_log::world_last_read();
+        if !snapshot_world_free {crate::spike_log::world_last_read();}
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
         #[cfg(feature = "vita_renderer")]
