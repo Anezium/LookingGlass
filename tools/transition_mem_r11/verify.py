@@ -60,6 +60,6 @@ result=dict(status='PASS',engine_revision=engine,branch=subprocess.check_output(
 (O/'proof/FINAL-VERIFICATION.json').write_text(json.dumps(result,indent=2)+'\n')
 # The detached seal covers this inventory plus the final r11d report, avoiding
 # a report/inventory self-reference. Every other artifact is in this inventory.
-files={str(p.relative_to(O)):dict(bytes=p.stat().st_size,sha256=sha(p)) for p in sorted(O.rglob('*')) if p.is_file() and not is_report_file(p.name, '-R11D') and p.name not in ['ARTIFACT-SHA256.json','SEAL-R11D.json']}
+files={str(p.relative_to(O)):dict(bytes=p.stat().st_size,sha256=sha(p)) for p in sorted(O.rglob('*')) if p.is_file() and not (p.parent==O and (is_report_file(p.name, '-R11D') or p.name in ['ARTIFACT-SHA256.json','SEAL-R11D.json']))}
 (O/'ARTIFACT-SHA256.json').write_text(json.dumps(files,indent=2)+'\n')
 print('PASS',len(files),'artifacts; native hardware gate unrun')

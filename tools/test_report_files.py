@@ -173,3 +173,22 @@ class ReportNameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RootOnlyExclusionTest(unittest.TestCase):
+    """Only root-level seal artifacts leave the R11 inventory; nested copies stay hashed."""
+
+    def test_nested_seal_artifacts_stay_in_inventory(self):
+        import tempfile
+        from report_files import is_report_file
+        with tempfile.TemporaryDirectory() as tmp:
+            O = Path(tmp)
+            (O / "proof").mkdir()
+            for rel in ["ARTIFACT-SHA256.json", "SEAL-R11D.json", "REPORT-R11D.md",
+                        "proof/ARTIFACT-SHA256.json", "proof/SEAL-R11D.json", "proof/REPORT-R11D.md",
+                        "REPORT.md"]:
+                (O / rel).write_text("x")
+            kept = sorted(str(p.relative_to(O)) for p in O.rglob("*") if p.is_file() and not (
+                p.parent == O and (is_report_file(p.name, "-R11D") or p.name in ["ARTIFACT-SHA256.json", "SEAL-R11D.json"])))
+            self.assertEqual(kept, ["REPORT.md", "proof/ARTIFACT-SHA256.json",
+                                    "proof/REPORT-R11D.md", "proof/SEAL-R11D.json"])
