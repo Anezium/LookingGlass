@@ -535,6 +535,7 @@ impl LevelArt for Art {
         match level.downcast_ref::<PoolTwo>() {Some(o)=>self.capture(o,story),None=>{self.input=None;(0,true)}}
     }
     fn snapshot_ready(&self) -> bool {self.input.as_ref().is_some_and(|i|self.valid(i))}
+    fn snapshot_bytes(&self) -> usize {self.input.as_ref().map_or(0,ArtInput::bytes)}
     fn clear_snapshot(&mut self) {self.input=None;}
     fn draw_snapshot(&mut self, atmosphere: &crate::environment::Atmosphere, camera: Vec3, fullbright: bool) -> bool {
         if !self.snapshot_ready() {return false;}

@@ -432,6 +432,7 @@ pub trait LevelArt: Any {
     /// Optional complete registered-art schema. Default families stay serial.
     fn extract_snapshot(&mut self, _level: &dyn LevelController, _story: &Story) -> (usize, bool) { (0, false) }
     fn snapshot_ready(&self) -> bool { false }
+    fn snapshot_bytes(&self) -> usize {0}
     fn clear_snapshot(&mut self) {}
     fn draw_snapshot(&mut self, _atmosphere: &Atmosphere, _camera: Vec3, _fullbright: bool) -> bool { false }
     fn effects_snapshot(&mut self, _camera: Vec3, _atmosphere: &Atmosphere) -> bool { false }

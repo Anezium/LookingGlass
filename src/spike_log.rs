@@ -57,6 +57,7 @@ struct Frame {
     hud: Option<Instant>,
     world_last: Option<Instant>,
     world_free: bool,
+    snapshot_frame: Option<u64>,
     burn_ms: f64,
     burn_render_ms: f64,
     burn_bytes: u64,
@@ -134,7 +135,7 @@ impl Frame {
         let ms=|a:Instant,b:Instant|b.saturating_duration_since(a).as_secs_f64()*1000.;
         let render_ms=ms(render,hud);let free_ms=ms(split,hud);
         println!("SNAPSHOT_RENDER_SHARE {{\"frame\":{},\"world_free\":{},\"render_ms\":{:.9},\"world_ms\":{:.9},\"free_ms\":{:.9},\"free_fraction\":{:.9}}}",
-            self.number.saturating_sub(1),self.world_free,render_ms,ms(render,split),free_ms,
+            self.snapshot_frame.unwrap_or(self.number.saturating_sub(1)),self.world_free,render_ms,ms(render,split),free_ms,
             if render_ms>0. {free_ms/render_ms}else{0.});
     }
     /// Charges the GXM time since the last mark to the open region and opens `next`.
@@ -439,6 +440,6 @@ fn split_enabled() -> bool {
 }
 
 /// Records the audited boundary decision; does not alter scheduling or reserve a core.
-pub(crate) fn world_free_decision(value: bool) {
-    if on() {FRAME.with(|f|f.borrow_mut().world_free=value);}
+pub(crate) fn world_free_decision(value: bool, frame: u64) {
+    if on() {FRAME.with(|f|{let mut f=f.borrow_mut();f.world_free=value;f.snapshot_frame=Some(frame);});}
 }

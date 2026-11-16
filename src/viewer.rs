@@ -4493,6 +4493,7 @@ interactions
             let allocations = scope.finish();
             println!("[lg/snapshot-dispatch] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",
                 frame, std::mem::size_of::<LevelDispatch>() + input.registered.capacity()
+                    + level_art.levels.iter().flatten().map(|a|a.snapshot_bytes()).sum::<usize>()
                     + input.cheshire.as_ref().map_or(0, |i| i.bytes()),
                 start.elapsed().as_secs_f64()*1_000_000., allocations, u8::from(input.overflow));
             input
@@ -4593,6 +4594,7 @@ interactions
             }
             #[cfg(feature="vita_renderer")]
             if load_probe.is_some() {blockers.push("diagnostic.load_probe".to_owned());}
+            if scene.snapshot_portals_fenced() {blockers.push("render.camera_portal_lighting".to_owned());}
             if hud_snapshot.is_none() { blockers.push("hud.rejected".to_owned()); }
             if tail_survey_fence { blockers.push("tail.survey".to_owned()); }
             if tail_diagnostic_fence { blockers.push("tail.diagnostic".to_owned()); }
@@ -4641,7 +4643,7 @@ interactions
             blockers
         } else {Vec::new()};
         let snapshot_world_free=snapshot_blockers.is_empty() && !snapshot_tail_fenced;
-        crate::spike_log::world_free_decision(snapshot_world_free);
+        crate::spike_log::world_free_decision(snapshot_world_free,frame as u64);
         if snapshot_enabled {
             snapshot_fenced_frames += u64::from(!snapshot_world_free);
             println!("[lg/snapshot-fence] frame={} fenced={} frames={} fenced_frames={}",
