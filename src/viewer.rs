@@ -187,11 +187,9 @@ impl LevelArt {
         self.handoff_source().map(|(_, pose)| pose)
     }
     fn handoff_completion(&self, frame: u64, minimum_frame: u64) -> crate::render_snapshot::HandoffCompletion {
-        let source = self.handoff_source().filter(|(_, p)|
+        let pose = self.pool.as_ref().and_then(|art| art.cinema.alice.handoff_pose()).filter(|p|
             p.rendered.is_some_and(|(visit, drawn)| visit == self.snapshot_visit.id() && drawn >= minimum_frame));
-        crate::render_snapshot::HandoffCompletion::rendered(&self.snapshot_visit,
-            source.map_or(usize::MAX, |(slot, _)| slot),
-            source.and_then(|(_, p)| p.rendered.map(|(_, drawn)| drawn)).unwrap_or(frame), source.map(|(_, pose)| pose))
+        crate::render_snapshot::HandoffCompletion::rendered(&self.snapshot_visit, 4, frame, pose)
     }
     fn prepare(
         &mut self,
@@ -3438,7 +3436,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             spawn_landing = true;
             weapon_click = None;
             weapon_buttons.block();
-            alice.resume_scene(&player, yaw, if snapshot_handoff {
+            alice.resume_scene(&player, yaw, if snapshot_handoff && level_art.pool.is_some() {
                 handoff_return.pose(&level_art.snapshot_visit)
             } else { level_art.handoff_pose() });
         }
@@ -4402,7 +4400,10 @@ interactions
         } else { npcs.clear_actor_inputs(); }
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
-        if snapshot_enabled { crate::render_snapshot::handoff_render_begin(&level_art.snapshot_visit, frame as u64); }
+        if snapshot_enabled {
+            if level_art.pool.is_some() { handoff_return.expect(&level_art.snapshot_visit, 4, frame as u64); }
+            crate::render_snapshot::handoff_render_begin(&level_art.snapshot_visit, frame as u64);
+        }
         crate::spike_log::render_begin();
         overlap_probe.begin();
         #[cfg(target_os = "vita")]
@@ -4567,11 +4568,10 @@ interactions
         } // world-only diagnostic mask includes all character work
         #[cfg(feature="vita_renderer")]
         drop(skin_frame);
-        if snapshot_enabled {
+        if snapshot_enabled && level_art.pool.is_some() {
             let start = std::time::Instant::now();
             let scope = crate::kernel_alloc::Scope::begin();
             let completion = level_art.handoff_completion(frame as u64, handoff_minimum_frame);
-            handoff_return.expect(&completion);
             assert!(handoff_return.publish(completion));
             let allocations = scope.finish();
             println!("[lg/snapshot-handoff] frame={} bytes={} extraction_us={:.3} allocations={}",

@@ -178,10 +178,10 @@ impl HandoffReturn {
             .map(|p| p.local.len()*std::mem::size_of::<crate::skeletal::Transform>()).sum::<usize>()
     }
     pub fn retire(&mut self) { *self = Self::default(); }
-    pub fn expect(&mut self, completion: &HandoffCompletion) {
-        if self.visit != completion.tag.visit { self.retire(); }
-        self.visit = completion.tag.visit;
-        self.expected = Some(completion.tag);
+    pub fn expect(&mut self, visit: &RenderVisit, slot: usize, frame: u64) {
+        if self.visit != visit.0 { self.retire(); }
+        self.visit = visit.0;
+        self.expected = Some(HandoffTag { visit: visit.0, slot, frame });
         self.pending = None;
     }
     pub fn publish(&mut self, completion: HandoffCompletion) -> bool {
@@ -220,7 +220,7 @@ mod handoff_tests {
         let mut state = HandoffReturn::default();
         let mut source = pose(4.);
         let completion = HandoffCompletion::rendered(&visit, 3, 10, Some(&source));
-        state.expect(&completion);
+        state.expect(&visit, 3, 10);
         assert!(!state.consume(&visit));
         assert!(state.pose(&visit).is_none());
         assert!(!state.publish(HandoffCompletion::rendered(&visit, 4, 10, Some(&source))));
@@ -234,7 +234,7 @@ mod handoff_tests {
         for _ in 0..4 { assert!(state.consume(&visit)); }
         assert_eq!(state.pose(&visit).unwrap().local[0].translation.x, 4.);
         let next = HandoffCompletion::rendered(&visit, 3, 11, Some(&pose(7.)));
-        state.expect(&next); assert!(state.publish(next)); assert!(state.consume(&visit));
+        state.expect(&visit, 3, 11); assert!(state.publish(next)); assert!(state.consume(&visit));
         assert_eq!(state.pose(&visit).unwrap().local[0].translation.x, 7.);
     }
     #[test]
@@ -242,14 +242,14 @@ mod handoff_tests {
         let first = RenderVisit::default(); let restored = RenderVisit::default();
         let mut state = HandoffReturn::default();
         let completion = HandoffCompletion::rendered(&first, 0, 1, Some(&pose(1.)));
-        state.expect(&completion); assert!(state.publish(completion)); assert!(state.consume(&first));
+        state.expect(&first, 0, 1); assert!(state.publish(completion)); assert!(state.consume(&first));
         assert!(state.consume(&restored)); assert!(state.pose(&restored).is_none());
         assert!(!state.publish(HandoffCompletion::rendered(&first, 0, 1, Some(&pose(2.)))));
         let empty = HandoffCompletion::rendered(&restored, 0, 2, None);
-        state.expect(&empty); assert!(state.publish(empty)); assert!(state.consume(&restored));
+        state.expect(&restored, 0, 2); assert!(state.publish(empty)); assert!(state.consume(&restored));
         assert!(state.pose(&restored).is_none());
         let failed = HandoffCompletion::rendered(&restored, 0, 3, Some(&pose(3.)));
-        state.expect(&failed); state.retire(); assert!(!state.publish(failed));
+        state.expect(&restored, 0, 3); state.retire(); assert!(!state.publish(failed));
         assert!(state.pose(&restored).is_none());
     }
 }
