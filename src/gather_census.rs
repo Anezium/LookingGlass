@@ -222,15 +222,16 @@ impl Drop for KindScope {
 pub(crate) fn kind(kind: usize) -> KindScope {
     if kind >= KINDS { return KindScope { leaf: 0, start: None, level: 0 }; }
     let leaf = Leaf::NpcKindBase as usize + kind;
-    let scope = enter(leaf, ROOT_NPC);
-    if scope.start.is_some() {
+    let mut scope = enter(leaf, ROOT_NPC);
+    let start = scope.start.take();
+    if start.is_some() {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             s.kind_calls[kind] += 1;
             s.counters[Counter::ActorsVisited as usize] += 1;
         });
     }
-    KindScope { leaf: scope.leaf, start: scope.start, level: scope.level }
+    KindScope { leaf: scope.leaf, start, level: scope.level }
 }
 pub(crate) fn count(counter: Counter) { count_n(counter, 1); }
 pub(crate) fn count_n(counter: Counter, value: u64) {
