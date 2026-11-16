@@ -4324,8 +4324,8 @@ interactions
             println!("[lg/snapshot] frame={} hud_bytes={} extraction_us={:.3} allocations={} save={}",
                 frame, snapshot.bytes(), us, snapshot_allocations, captured_save.is_some());
         }
-        // This second census does not claim the particle/pickup consumers have
-        // been converted. Only transforms below consume this prototype arena.
+        // Shared transform/view input. Particle and pickup consumers now own
+        // their dedicated arenas; do not duplicate their old census payloads.
         if snapshot_enabled {
             use macroquad::camera::Camera;
             let scope = crate::kernel_alloc::Scope::begin();
@@ -4337,16 +4337,11 @@ interactions
             dynamic_input.liquid = scene.atmosphere.liquid;
             dynamic_input.transforms.clear();
             dynamic_input.transforms.extend_from_slice(&transforms);
-            steam.render_samples(&mut dynamic_input.particles);
-            dynamic_input.pickups.clear();
-            dynamic_input.pickups.extend(pickups.iter().enumerate().map(|(handle, p)|
-                crate::render_snapshot::PickupInput { handle, position: p.origin,
-                    collected: stats.collected.contains(&p.id) }));
             let us = start.elapsed().as_secs_f64() * 1_000_000.;
             let allocations = scope.finish();
             println!("[lg/snapshot-dynamic] frame={} bytes={} capacity_bytes={} extraction_us={:.3} allocations={} transforms={} particles={} pickups={}",
                 frame, dynamic_input.bytes(), dynamic_input.capacity_bytes(), us, allocations,
-                dynamic_input.transforms.len(), dynamic_input.particles.len(), dynamic_input.pickups.len());
+                dynamic_input.transforms.len(), 0, 0);
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let extracted_probe_state = (snapshot_enabled && crate::sim_maps::probe::enabled()).then(|| serde_json::json!({

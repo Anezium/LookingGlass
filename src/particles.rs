@@ -536,10 +536,31 @@ struct Puff {
     roll: f32,
     emitter: usize,
 }
+impl Puff {
+    fn render_input(&self)->crate::render_snapshot::ParticleInput {
+        crate::render_snapshot::ParticleInput{emitter:self.emitter,position:self.position,age:self.age,life:self.life,size:self.size,roll:self.roll}
+    }
+}
+/// Borrowed serial fallback or owned snapshot values; neither iterator allocates.
+#[derive(Clone,Copy)]
+enum RenderPuffs<'a> { Live(&'a [Puff]), Input(&'a [crate::render_snapshot::ParticleInput]) }
+enum RenderPuffIter<'a> { Live(std::slice::Iter<'a,Puff>), Input(std::slice::Iter<'a,crate::render_snapshot::ParticleInput>) }
+impl<'a> RenderPuffs<'a> {
+    fn len(self)->usize {match self {Self::Live(p)=>p.len(),Self::Input(p)=>p.len()}}
+    fn is_empty(self)->bool {self.len()==0}
+    fn at(self,index:usize)->crate::render_snapshot::ParticleInput {match self {Self::Live(p)=>p[index].render_input(),Self::Input(p)=>p[index]}}
+    fn iter(self)->RenderPuffIter<'a> {match self {Self::Live(p)=>RenderPuffIter::Live(p.iter()),Self::Input(p)=>RenderPuffIter::Input(p.iter())}}
+}
+impl Iterator for RenderPuffIter<'_> {
+    type Item=crate::render_snapshot::ParticleInput;
+    fn next(&mut self)->Option<Self::Item> {match self {Self::Live(p)=>p.next().map(Puff::render_input),Self::Input(p)=>p.next().copied()}}
+    fn size_hint(&self)->(usize,Option<usize>) {let n=match self {Self::Live(p)=>p.len(),Self::Input(p)=>p.len()};(n,Some(n))}
+}
+impl ExactSizeIterator for RenderPuffIter<'_> {}
 #[cfg(feature="vita_renderer")]
 mod quad;
 #[derive(Default)]
-struct SteamInput { generation:u64, puffs:Vec<Puff> }
+struct SteamInput { generation:u64, puffs:Vec<crate::render_snapshot::ParticleInput> }
 pub struct Steam {
     snapshot_visit:crate::render_snapshot::RenderVisit,
     snapshot_input:Option<SteamInput>,
@@ -570,16 +591,17 @@ impl Steam {
         let overflow=self.puffs.len()>16384 || self.puffs.iter().any(|p|p.emitter>=self.emitters.len());
         if overflow {return (0,true);}
         self.snapshot_arena.generation=self.snapshot_visit.id();
-        self.snapshot_arena.puffs.clone_from(&self.puffs);
-        let bytes=std::mem::size_of::<SteamInput>()+self.puffs.len()*std::mem::size_of::<Puff>();
+        self.snapshot_arena.puffs.clear();
+        self.snapshot_arena.puffs.extend(self.puffs.iter().map(Puff::render_input));
+        let bytes=std::mem::size_of::<SteamInput>()+self.puffs.len()*std::mem::size_of::<crate::render_snapshot::ParticleInput>();
         self.snapshot_input=Some(std::mem::take(&mut self.snapshot_arena));
         (bytes,false)
     }
-    fn render_puffs(&self)->&[Puff] {
+    fn render_puffs(&self)->RenderPuffs<'_> {
         if let Some(input)=&self.snapshot_input {
-            if input.generation==self.snapshot_visit.id() { return &input.puffs; }
+            if input.generation==self.snapshot_visit.id() { return RenderPuffs::Input(&input.puffs); }
         }
-        &self.puffs
+        RenderPuffs::Live(&self.puffs)
     }
 
     pub(crate) fn runtime(&self) -> Runtime {
@@ -1315,7 +1337,7 @@ impl Steam {
         crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::QuadSets,1);
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             if let Some(direction) = direction.filter(|_| crate::render_fx::world_puff_batches_active()) {
-                self.quads.borrow_mut().prepare_world(&self.render_puffs(), &self.emitters, camera, direction);
+                self.quads.borrow_mut().prepare_world(self.render_puffs(), &self.emitters, camera, direction);
                 return;
             }
             // Preserve the same sorted per-puff registration order, but avoid
@@ -1327,10 +1349,10 @@ impl Steam {
                 && (crate::sim_maps::fx_attached_persist()
                     || self.render_puffs().iter().all(|p| self.emitters[p.emitter].additive))
             {
-                self.quads.borrow_mut().prepare_attached(&self.render_puffs(), &self.emitters, camera);
+                self.quads.borrow_mut().prepare_attached(self.render_puffs(), &self.emitters, camera);
                 return;
             }
-            self.quads.borrow_mut().prepare(&self.render_puffs(), &self.emitters, camera, direction);
+            self.quads.borrow_mut().prepare(self.render_puffs(), &self.emitters, camera, direction);
         }
     }
     /// One attached set in registration order, when `prepare_quads` took the raw path. The
@@ -1343,7 +1365,7 @@ impl Steam {
             || order.iter().any(|&(i, _)| quads.raw_ref(i).is_none()) { return false; }
         crate::sim_maps::count("fx_funnel_registered_raw", order.len() as u64);
         crate::render_fx::world_puff_quads(order.iter().map(|&(i, _)| {
-            let p = &self.render_puffs()[i];
+            let p = self.render_puffs().at(i);
             let e = &self.emitters[p.emitter];
             // Stage::frame is 0 for at most one image, whatever the age.
             let frame = if e.stage.images.len() <= 1 { 0 } else { e.stage.frame(p.age) };
@@ -1358,21 +1380,21 @@ impl Steam {
         if crate::render_fx::retained_active() && crate::render::vita_renderer::config().particle_producer_reuse {
             if let Some(vertices) = self.quads.borrow().raw_quad(index) {
                 crate::sim_maps::count("fx_funnel_registered_raw", 1);
-                let e = &self.emitters[self.render_puffs()[index].emitter];
-                crate::render_fx::world_puff_quad_identified(vertices, e.textures.get(e.stage.frame(self.render_puffs()[index].age)).cloned(), e.upload_identities.get(e.stage.frame(self.render_puffs()[index].age)).copied(),
+                let e = &self.emitters[self.render_puffs().at(index).emitter];
+                crate::render_fx::world_puff_quad_identified(vertices, e.textures.get(e.stage.frame(self.render_puffs().at(index).age)).cloned(), e.upload_identities.get(e.stage.frame(self.render_puffs().at(index).age)).copied(),
                     if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
                 return;
             }
             if let Some(geometry) = self.quads.borrow().geometry(index) {
                 crate::sim_maps::count("fx_funnel_registered_publication", 1);
-                let e = &self.emitters[self.render_puffs()[index].emitter];
-                crate::render_fx::effect_geometry_identified(geometry, e.textures.get(e.stage.frame(self.render_puffs()[index].age)).cloned(), e.upload_identities.get(e.stage.frame(self.render_puffs()[index].age)).copied(),
+                let e = &self.emitters[self.render_puffs().at(index).emitter];
+                crate::render_fx::effect_geometry_identified(geometry, e.textures.get(e.stage.frame(self.render_puffs().at(index).age)).cloned(), e.upload_identities.get(e.stage.frame(self.render_puffs().at(index).age)).copied(),
                     if e.additive { crate::materials::Blend::Add } else { crate::materials::Blend::Alpha });
                 return;
             }
         }
         crate::sim_maps::count("fx_funnel_registered_legacy", 1);
-        let e = &self.emitters[self.render_puffs()[index].emitter];
+        let e = &self.emitters[self.render_puffs().at(index).emitter];
         #[cfg(feature="vita_renderer")]
         if !crate::render_fx::retained_active(){gl_use_material(&self.materials[usize::from(e.additive)]);}
         #[cfg(not(feature="vita_renderer"))]
@@ -1383,7 +1405,7 @@ impl Steam {
     fn puff_mesh(&self, index: usize, camera: Vec3, direction: Vec3) -> Mesh {
         let right = direction.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
         let up = right.cross(direction).normalize_or_zero();
-        let p = &self.render_puffs()[index];
+        let p = self.render_puffs().at(index);
         let e = &self.emitters[p.emitter];
         let radius = e.spec.grown(p.size, p.age);
         let x = (right * p.roll.cos() + up * p.roll.sin()) * radius;
@@ -2151,7 +2173,7 @@ pub(crate) mod tests {
         // CPU producer entry used by prepare_quads, no retained renderer/GL.
         let _quads=crate::phase_census::span(crate::phase_census::Region::FxQuadBuild);
         crate::phase_census::count_under(crate::phase_census::Region::Fx,crate::phase_census::Counter::QuadSets,1);
-        attached.steam.quads.borrow_mut().prepare(&attached.steam.puffs,&attached.steam.emitters,Vec3::Z*100.,None);
+        attached.steam.quads.borrow_mut().prepare(RenderPuffs::Live(&attached.steam.puffs),&attached.steam.emitters,Vec3::Z*100.,None);
     }
 
     /// A set that uses every per-birth branch of the sampler.
@@ -3107,8 +3129,8 @@ mod snapshot_render_tests {
         let mut steam=super::tests::world_test_steam();
         steam.puffs.push(Puff{sweep:Default::default(),position:Vec3::X,constraint_center:Vec3::ZERO,velocity:Vec3::Y,accel:Vec3::ZERO,age:0.2,life:1.,size:2.,roll:0.3,emitter:0});
         assert!(!steam.extract_render_input().1);steam.puffs[0].position=Vec3::Z;
-        assert_eq!(steam.render_puffs()[0].position,Vec3::X);
-        let runtime=steam.runtime();steam.restore_runtime(runtime);assert_eq!(steam.render_puffs()[0].position,Vec3::Z);
+        assert_eq!(steam.render_puffs().at(0).position,Vec3::X);
+        let runtime=steam.runtime();steam.restore_runtime(runtime);assert_eq!(steam.render_puffs().at(0).position,Vec3::Z);
         steam.puffs[0].emitter=steam.emitters.len();assert!(steam.extract_render_input().1);assert!(steam.snapshot_input.is_none());
     }
 }
