@@ -349,7 +349,7 @@ mod tests {
         }
         STATE.with(|s| s.borrow_mut().frames = 1);
         let text = test_summary();
-        assert!(text.contains("npc="), "{text}");
+        assert!(text.contains("npc:"), "{text}");
         let npc = field(&text, "npc");
         let ambush = field(&text, "ambush");
         assert!(npc > ambush && npc > 5.0, "{text}");
