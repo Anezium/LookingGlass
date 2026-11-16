@@ -4982,8 +4982,8 @@ interactions
             viewer_block = crate::frame_profile::span("frame_hud");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
-        let hud_stats = hud_snapshot.as_ref().map_or(&stats, |s| &s.stats);
-        let hud_breath = hud_snapshot.as_ref().map_or(&player.breath, |s| &s.breath);
+        let hud_stats = hud_snapshot.as_ref().map_or_else(|| &stats, |s| &s.stats);
+        let hud_breath = hud_snapshot.as_ref().map_or_else(|| &player.breath, |s| &s.breath);
         let hud_immersion = hud_snapshot.as_ref().map_or_else(|| player.immersion.level, |s| s.immersion);
         let hud_script_motion = hud_snapshot.as_ref().map_or_else(|| player.script_motion, |s| s.script_motion);
         let hud_swimming = hud_snapshot.as_ref().map_or_else(|| player.swimming, |s| s.swimming);

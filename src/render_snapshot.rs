@@ -82,14 +82,35 @@ impl HudCommand {
 pub(crate) struct Painter<'a> {
     ui: &'a std::rc::Rc<crate::ui::Ui>,
     out: &'a mut Vec<HudCommand>,
+    bytes: usize,
 }
 impl<'a> Painter<'a> {
-    pub fn new(ui: &'a std::rc::Rc<crate::ui::Ui>, out: &'a mut Vec<HudCommand>) -> Self { Self { ui, out } }
-    fn push(&mut self, primitive: Primitive) { self.out.push(HudCommand { ui: self.ui.resource_id(), primitive }); }
+    pub fn new(ui: &'a std::rc::Rc<crate::ui::Ui>, out: &'a mut Vec<HudCommand>) -> Self {
+        let bytes = out.len()*std::mem::size_of::<HudCommand>()
+            + out.iter().map(HudCommand::text_capacity).sum::<usize>();
+        Self { ui, out, bytes }
+    }
+    fn reject(&mut self) {
+        if self.out.len() <= 16384 && self.out.last().is_none_or(|c| c.ui != 0) {
+            self.out.push(HudCommand { ui: 0, primitive: Primitive::Rectangle(0.,0.,0.,0.,BLACK) });
+        }
+    }
+    fn room(&mut self, text: usize) -> bool {
+        if self.out.len() >= 16384 || self.out.last().is_some_and(|c| c.ui == 0)
+            || text > (4*1024*1024usize).saturating_sub(self.bytes + std::mem::size_of::<HudCommand>()) {
+            self.reject(); false
+        } else { true }
+    }
+    fn push(&mut self, primitive: Primitive) {
+        if !self.room(0) { return; }
+        let command = HudCommand { ui: self.ui.resource_id(), primitive };
+        self.bytes += std::mem::size_of::<HudCommand>() + command.text_capacity();
+        self.out.push(command);
+    }
     pub fn dialog(&mut self, r: Rect) { self.push(Primitive::Dialog(r)); }
-    pub fn label(&mut self, t: &str, x: f32, y: f32, size: f32, c: Color) { self.push(Primitive::Label(t.into(), x, y, size, c)); }
+    pub fn label(&mut self, t: &str, x: f32, y: f32, size: f32, c: Color) { if self.room(t.len()) { self.push(Primitive::Label(t.into(), x, y, size, c)); } }
     pub fn rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, c: Color) { self.push(Primitive::Rectangle(x, y, w, h, c)); }
-    pub fn boss(&mut self, t: &str, remaining: f32) { self.push(Primitive::Boss(t.into(), remaining)); }
+    pub fn boss(&mut self, t: &str, remaining: f32) { if self.room(t.len()) { self.push(Primitive::Boss(t.into(), remaining)); } }
 }
 
 /// Bounded by the eight authored fade sources; no per-frame vector allocation.
@@ -323,6 +344,13 @@ pub(crate) async fn hud_resource_check(assets: &mut crate::assets::Assets) -> an
         else { reference = Some(image.bytes); }
         next_frame().await;
     }
+    let mut bounded = Vec::new();
+    let mut painter = Painter::new(&ui, &mut bounded);
+    for _ in 0..20000 { painter.rectangle(0.,0.,1.,1.,WHITE); }
+    anyhow::ensure!(bounded.len() == 16385 && bounded.iter().any(|c| !c.valid()), "HUD count not bounded/rejected");
+    let mut oversized = Vec::new();
+    Painter::new(&ui, &mut oversized).label(&"x".repeat(4*1024*1024+1),0.,0.,12.,WHITE);
+    anyhow::ensure!(oversized.len() == 1 && !oversized[0].valid() && oversized[0].text_capacity() == 0, "Oversized HUD text copied");
     let old = ui.resource_id(); drop(ui);
     anyhow::ensure!(commands.iter().all(|c| !c.valid()), "Retired UI accepted");
     let replacement = crate::ui::Ui::load(assets)?;
