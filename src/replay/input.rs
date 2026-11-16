@@ -262,7 +262,7 @@ pub fn vita_pad() -> Option<[u8; 4]> {
 /// the value for the tape; replay returns the recorded value and never reads the pad.
 #[cfg(target_os = "vita")]
 pub fn vita_pad() -> Option<[u8; 4]> {
-    if mode() == REPLAY || bits_pad(PAD.load(Relaxed)).is_some() {
+    if mode() == REPLAY || (mode() == RECORD && bits_pad(PAD.load(Relaxed)).is_some()) {
         return bits_pad(PAD.load(Relaxed));
     }
     // VitaSDK psp2common/ctrl.h SceCtrlData (0x20 bytes).
