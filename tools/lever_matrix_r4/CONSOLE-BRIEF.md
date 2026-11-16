@@ -2,7 +2,7 @@
 
 Prepared on the Mac only. Another agent owns the console. This package makes no claim about Vita wall time, continuous peak heap, audible continuity or console rendering. Do not act until the current owner has exhaustively restored the device, inspected HOME and explicitly handed back sole ownership. Historical ownership receipts do not admit entry.
 
-OUT is `/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r4`; Python is `/Users/anezium/vita-j0/venv/bin/python`. Read SOL-REPORT.md, PACKAGE-MATRIX.json, package VERIFICATION.json, DESIGN.md and CONSOLE-PROTOCOL.json. INHERITED-R3-BRIEF.md preserves the detailed operational history and amendments; its OUT, packages, SELF identities and FX/material-sort/uniform-persist sessions are archival. Only this brief's two sessions and exact protocol labels are admitted for later review. All 12 launches are PENDING.
+OUT is `/Users/anezium/vita-j0/resume-2026-10-24/alice-lever-matrix-r4`; Python is `/Users/anezium/vita-j0/venv/bin/python`. Read REPORT.md, PACKAGE-MATRIX.json, package VERIFICATION.json, DESIGN.md and CONSOLE-PROTOCOL.json. INHERITED-R3-BRIEF.md preserves the detailed operational history and amendments; its OUT, packages, SELF identities and FX/material-sort/uniform-persist sessions are archival. Only this brief's two sessions and exact protocol labels are admitted for later review. All 12 launches are PENDING.
 
 ## Two separately admitted sessions
 

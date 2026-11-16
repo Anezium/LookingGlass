@@ -38,7 +38,7 @@ nor the shot driver was contacted. The parked console's next run remains r11c
 SELF 78e81848e6797272b0d7b981b479b18601c98e3360456ead22b3bf31ea1078d9,
 unchanged. `proof/R11C-READ-ONLY.json` fingerprints every original r11c file;
 `proof/PACKAGE-LESSONS-R11D.json` verifies that directory remains byte-identical.
-REVIEW-R3.md and SOL-REPORT-R11C.md were read in full first.
+REVIEW-R3.md and REPORT-R11C.md were read in full first.
 
 ## R3-M1: exact cause and source fix
 
@@ -159,7 +159,7 @@ round 2's alleged LG portal double-delete crash was unreachable. Both fixes stay
 
 The fork pins, material destructor, weak-atlas cleanup and backend capacity
 reclamation remain unchanged. Source/licence byte equality, exact isolated fork
-unit tests and the synthetic GL regressions all pass again. Historical SOL report
+unit tests and the synthetic GL regressions all pass again. Historical report
 copies in this new output have a prominent correction; their sealed r11c originals
 are untouched. The report generator and test descriptions are corrected too.
 
@@ -275,8 +275,8 @@ Final df:
 {cleanup['df_after'].rstrip()}
 ```
 '''
-(O/'SOL-REPORT-R11D.md').write_text(report)
+(O/'REPORT-R11D.md').write_text(report)
 files = {name:dict(bytes=(O/name).stat().st_size,sha256=sha(O/name)) for name in
-         ['ARTIFACT-SHA256.json','SOL-REPORT-R11D.md','CONSOLE-PACKAGE.zip']}
+         ['ARTIFACT-SHA256.json','REPORT-R11D.md','CONSOLE-PACKAGE.zip']}
 (O/'SEAL-R11D.json').write_text(json.dumps(dict(schema=1,console_executed=False,files=files),indent=2)+'\n')
-print('Wrote SOL-REPORT-R11D.md and SEAL-R11D.json')
+print('Wrote REPORT-R11D.md and SEAL-R11D.json')

@@ -2,7 +2,7 @@
 
 Mac-only preparation. Another agent owns the console. No Vita, shot driver, route lookup or console helper was contacted. This package does not admit ownership. All console measurements are PENDING.
 
-OUT is /Users/anezium/vita-j0/resume-2026-10-24/alice-acoustic-cache-r6. PY is /Users/anezium/vita-j0/venv/bin/python. Use /opt/homebrew/bin/bash. Read SOL-REPORT.md, DESIGN.md, PACKAGE-MATRIX.json and CONSOLE-PROTOCOL.json before admission.
+OUT is /Users/anezium/vita-j0/resume-2026-10-24/alice-acoustic-cache-r6. PY is /Users/anezium/vita-j0/venv/bin/python. Use /opt/homebrew/bin/bash. Read REPORT.md, DESIGN.md, PACKAGE-MATRIX.json and CONSOLE-PROTOCOL.json before admission.
 
 Use one common r6 SELF for every arm. A uses PL-baseline.json, byte-identical to r5 A; audio_static_cache is omitted and defaults false. B uses PL-cache.json, the sole effective difference audio_static_cache=true. phase_census=false in ALL eight wall gate arms. Old probes, off-main, sorting/merge/uniform switches remain disabled.
 
@@ -72,7 +72,7 @@ Call session.stage('human-restore','human-restore') ONLY after the final measure
 ## Orchestrator amendments (from REVIEW.md, appended verbatim)
 
 
-1. Host kernel timings (SOL-REPORT.md:34-35) are not evidence of Vita benefit and must not appear in RESULTS as a forecast. The host kernel uses 6 real Hedge3 room rays, 8 synthetic ~174-unit rays and no effect rays, against a BSP-only world with three test boxes. On r5 Hedge3, room plus ambient cost about 5.0-5.2 ms per firing (21 rays, every other frame) and about 5 repeated effect rays cost about 6.4 ms per frame. How that splits between static traversal and live completion is unmeasured. Only this ABBA decides.
+1. Host kernel timings (REPORT.md:34-35) are not evidence of Vita benefit and must not appear in RESULTS as a forecast. The host kernel uses 6 real Hedge3 room rays, 8 synthetic ~174-unit rays and no effect rays, against a BSP-only world with three test boxes. On r5 Hedge3, room plus ambient cost about 5.0-5.2 ms per firing (21 rays, every other frame) and about 5 repeated effect rays cost about 6.4 ms per frame. How that splits between static traversal and live completion is unmeasured. Only this ABBA decides.
 
 2. Prefer the 10-launch plan, so that both optional census runs happen, whenever admission has the entire 147-minute budget and the required expiry margin. Otherwise run exactly the eight wall launches. Do not invent a 9-launch variant: it was not covered by the offline e2e test.
 

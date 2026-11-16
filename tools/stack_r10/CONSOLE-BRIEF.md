@@ -1,6 +1,6 @@
 # Alice r10 stack, console handoff, not executed
 
-Mac-only preparation. Another agent owns the console. This package does not admit ownership and does not contact the Vita or the shot driver. Read SOL-REPORT.md, READING-RULES.md, AMENDMENTS-R10.md and CONSOLE-PROTOCOL.json before admission. AMENDMENTS.md and AMENDMENTS-3.md are the inherited r8 procedure. Where they name s9, a single SAH switch, or a 1-byte config delta, AMENDMENTS-R10.md replaces them.
+Mac-only preparation. Another agent owns the console. This package does not admit ownership and does not contact the Vita or the shot driver. Read REPORT.md, READING-RULES.md, AMENDMENTS-R10.md and CONSOLE-PROTOCOL.json before admission. AMENDMENTS.md and AMENDMENTS-3.md are the inherited r8 procedure. Where they name s9, a single SAH switch, or a 1-byte config delta, AMENDMENTS-R10.md replaces them.
 
 OUT is /Users/anezium/vita-j0/resume-2026-10-24/alice-stack-r10. PY is /Users/anezium/vita-j0/venv/bin/python. Use that interpreter with PYTHONDONTWRITEBYTECODE=1. Do not pass python -I.
 

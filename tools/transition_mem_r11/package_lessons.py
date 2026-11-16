@@ -3,7 +3,7 @@ from pathlib import Path
 import hashlib,json,subprocess,sys,zipfile
 R=Path(__file__).resolve().parents[2];O=Path(sys.argv[1]).resolve();old=O.with_name('alice-transition-mem-r11')
 sha=lambda b:hashlib.sha256(b).hexdigest();rows=[]
-names=['CONSOLE-BRIEF.md','SOL-REPORT.md','AMENDMENT-R11.md','AMENDMENT-R11B.md']
+names=['CONSOLE-BRIEF.md','REPORT.md','AMENDMENT-R11.md','AMENDMENT-R11B.md']
 names += [f'configs/{n}' for n in ['PL-baseline.json','PL-stack.json','vita-sim-all.json','native-timing-disabled.json','profile_mode-full.txt']]
 names += [f'console/{n}.py' for n in ['title_safety','restore-files','restore-ledgers','restore-arm','verify-self','ack','baseline-r3','save-proof','pilot','verify-human-entry','map_identity','session','preserve','admit','operate','check-session-budget','host-log-receiver','verify-arm-self']]
 for name in names:

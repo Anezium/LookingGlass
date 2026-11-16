@@ -73,7 +73,7 @@ images at the same camera/time/pose/options, including sky, portals/mirrors,
 water and transparency, then measure the three sub-spans on the bench and in
 nopreview. No console result is inferred from host tests.
 
-The design follows Astra section 3. The pure projected-error helper and injected
+The design follows the reviewed design notes, section 3. The pure projected-error helper and injected
 test callbacks permit window-free LOD tests; production uses the same projection
 and screen height as before. Bounds snapshots and a contiguous-range check make
 the proposed invalidation and Full assumptions explicit.

@@ -2,7 +2,7 @@
 
 Prepared on the Mac only. Another agent owns the console. No Vita, route lookup, shot driver, receiver, staging helper or device-control call was made during preparation. This document prepares a later console owner; it does not admit ownership. Do not act until the current owner has exhaustively restored the device, inspected HOME and explicitly handed back sole ownership.
 
-OUT is `/Users/anezium/vita-j0/resume-2026-10-24/alice-phase-census-r5`. PY is `/Users/anezium/vita-j0/venv/bin/python`. Use `/opt/homebrew/bin/bash` on the Mac. Read SOL-REPORT.md, DESIGN.md, PACKAGE-MATRIX.json, both package VERIFICATION.json files and CONSOLE-PROTOCOL.json before admission. All eight launches remain PENDING. The VPK/ELF/VELF are local artifacts; never install or transfer them.
+OUT is `/Users/anezium/vita-j0/resume-2026-10-24/alice-phase-census-r5`. PY is `/Users/anezium/vita-j0/venv/bin/python`. Use `/opt/homebrew/bin/bash` on the Mac. Read REPORT.md, DESIGN.md, PACKAGE-MATRIX.json, both package VERIFICATION.json files and CONSOLE-PROTOCOL.json before admission. All eight launches remain PENDING. The VPK/ELF/VELF are local artifacts; never install or transfer them.
 
 ## One session, two independent ABBA blocks
 

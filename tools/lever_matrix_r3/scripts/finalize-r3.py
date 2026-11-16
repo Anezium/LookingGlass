@@ -66,12 +66,12 @@ Removed **{sum(x['bytes'] for x in removed):,} bytes** of task caches/test-layou
 {df.strip()}
 ```
 '''
-(O/'SOL-REPORT.md').write_text(report)
-seal={str(p.relative_to(O)):sha(p) for p in sorted(O.rglob('*')) if p.is_file() and p.name not in ('ARTIFACT-SHA256.json','FINAL-AUDIT.json','SOL-REPORT.md')}
+(O/'REPORT.md').write_text(report)
+seal={str(p.relative_to(O)):sha(p) for p in sorted(O.rglob('*')) if p.is_file() and p.name not in ('ARTIFACT-SHA256.json','FINAL-AUDIT.json','REPORT.md')}
 write(O/'ARTIFACT-SHA256.json',seal)
 assert all(sha(O/name)==digest for name,digest in seal.items())
 write(O/'FINAL-AUDIT.json',dict(status='PASS',sealed_files=len(seal),seal_sha256=sha(O/'ARTIFACT-SHA256.json'),
-    report_sha256=sha(O/'SOL-REPORT.md'),head=head,remote_head=remote,source_clean=True,
+    report_sha256=sha(O/'REPORT.md'),head=head,remote_head=remote,source_clean=True,
     common_self_sha256=v['self_sha256'],console_contact=False,driver_contact=False,all_runs_pending=True,
     scope='Host implementation/preparation complete; individual world cost and all new native runtime results unmeasured'))
-print(json.dumps(dict(status='PASS',sealed_files=len(seal),removed_bytes=sum(x['bytes'] for x in removed),report=str(O/'SOL-REPORT.md'))))
+print(json.dumps(dict(status='PASS',sealed_files=len(seal),removed_bytes=sum(x['bytes'] for x in removed),report=str(O/'REPORT.md'))))

@@ -20,7 +20,7 @@ SELF 78e81848e6797272b0d7b981b479b18601c98e3360456ead22b3bf31ea1078d9.
    common to both arms. No other map or replacement save is authorized.
 4. Record each arm's first in-game Hedge3 uordblks/arena/fordblks and name the
    matching earlier console result. The r11c host +783,234-byte regression has
-   now been attributed and removed; consult SOL-REPORT-R11D for measured values.
+   now been attributed and removed; consult REPORT-R11D for measured values.
    This replaces D3's obsolete statement that its cause is unknown.
 5. If existing native_timing totals are present on Hedge3, report median/p95
    without additional launches, samples or console time (D4).

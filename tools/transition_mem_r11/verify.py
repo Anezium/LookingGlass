@@ -53,11 +53,11 @@ assert load('proof/SESSION-E2E-ZIP.json')['tested_zip_sha256']==sha(O/'CONSOLE-P
 assert all(not f.name.startswith('session-') for f in O.iterdir())
 with zipfile.ZipFile(O/'CONSOLE-PACKAGE.zip') as z:assert not any(n.startswith('session-') for n in z.namelist())
 assert not (O/'target-vita').exists() and not (O/'tmp').exists()
-assert (O/'SOL-REPORT.md').is_file()
+assert (O/'REPORT.md').is_file()
 result=dict(status='PASS',engine_revision=engine,branch=subprocess.check_output(['git','branch','--show-current'],cwd=R,text=True).strip(),branch_head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip(),console_executed=False,vita_contact=False,shot_driver_contact=False,hardware_170_MiB_gate='NOT_EXECUTED',self_sha256=native['self_sha256'],vpk_sha256=native['vpk_sha256'],console_zip_sha256=sha(O/'CONSOLE-PACKAGE.zip'),session_directories_absent=True,task_caches_removed=True)
 (O/'proof/FINAL-VERIFICATION.json').write_text(json.dumps(result,indent=2)+'\n')
 # The detached seal covers this inventory plus the final r11d report, avoiding
 # a report/inventory self-reference. Every other artifact is in this inventory.
-files={str(p.relative_to(O)):dict(bytes=p.stat().st_size,sha256=sha(p)) for p in sorted(O.rglob('*')) if p.is_file() and str(p.relative_to(O)) not in ['ARTIFACT-SHA256.json','SOL-REPORT-R11D.md','SEAL-R11D.json']}
+files={str(p.relative_to(O)):dict(bytes=p.stat().st_size,sha256=sha(p)) for p in sorted(O.rglob('*')) if p.is_file() and str(p.relative_to(O)) not in ['ARTIFACT-SHA256.json','REPORT-R11D.md','SEAL-R11D.json']}
 (O/'ARTIFACT-SHA256.json').write_text(json.dumps(files,indent=2)+'\n')
 print('PASS',len(files),'artifacts; native hardware gate unrun')

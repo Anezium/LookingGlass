@@ -21,12 +21,12 @@ correction = '''> R11d correction to this historical report: LG uses sample_coun
 > everywhere, with a separately owned resolve texture. No LG portal double-delete
 > crash was reachable. The miniquad fix is a defensive guard against deleting a
 > possibly recycled GL name. The macroquad sample_count=0 ownership fix is correct
-> but currently unused by LG. See SOL-REPORT-R11D for the corrected evidence and
+> but currently unused by LG. See REPORT-R11D for the corrected evidence and
 > the attributed frame-one future-layout regression. This is a new package copy;
 > the original sealed report is unchanged.
 
 '''
-for name in ['SOL-REPORT.md', 'SOL-REPORT-R11B.md', 'SOL-REPORT-R11C.md']:
+for name in ['REPORT.md', 'REPORT-R11B.md', 'REPORT-R11C.md']:
     path = O / name
     path.write_text(correction + path.read_text())
 plan = dict(fixed_before_execution=True, warmup_cycles=3, cycles_per_operation=30,

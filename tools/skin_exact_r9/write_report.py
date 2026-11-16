@@ -75,5 +75,5 @@ f'- SELF: {v["self_bytes"]:,} bytes; SHA-256 `{v["self_sha256"]}`.',f'- VPK SHA-
 f'Deleted {cleanup["removed_bytes"]:,} logical bytes of per-task native target/tmp baseline checkout, copied test executables, duplicate conversion outputs and Python/shader caches. The requested shared host target /Users/anezium/vita-j0/cargo-target-host is retained. No per-task cache remains.','',
 '```',subprocess.check_output(['df','-h',str(O)],text=True).strip(),'```','',
 'ARTIFACT-SHA256.json excludes itself and this report to avoid circular hashes. PACKAGE-VERIFICATION.json seals every ZIP member; SOURCE-IDENTITY.json records source hashes and the two revision roles. No console evidence is manufactured.']
-(O/'SOL-REPORT.md').write_text('\n'.join(text)+'\n')
-print('Wrote SOL-REPORT.md with consumer inventory, source locations, proofs, artifact hashes and disk state')
+(O/'REPORT.md').write_text('\n'.join(text)+'\n')
+print('Wrote REPORT.md with consumer inventory, source locations, proofs, artifact hashes and disk state')

@@ -376,7 +376,7 @@ Anode runs of the integrated build after each of the three foundations that chan
   - F3a: `--level-swap-check` (78), `tools/test_visibility.ps1` (116), `tools/test_render_fx.ps1`, `--visibility-check`; writer 95200 and a separate reader 59876 with all nine legacy lines, the Duchess line and 59 restarted cases; 900-frame skool1, skool2 and gvillage `--new-game` smoke runs.
   - F3b: `tools/test_campaign_chain.ps1` headless strict chain; `--campaign-save-chain-write` (writer 50316) then a separate `--campaign-save-chain-read` (reader 97648) with restarted auto and slot1 saves for visits 01 to 03 and an auto-only save for visit 04; `--level-swap-check` (78), `tools/test_visibility.ps1` (116), `tools/test_render_fx.ps1`, `--visibility-check`; the unfiltered `--save-check-write` (writer 39644) and separate reader (21048) with all nine legacy lines, the Duchess line and the final PASS; 900-frame skool1 and gvillage smoke runs.
 - Anode reported no audio device; audible output not verified.
-- Limits: the visit 04 fortress2 native fixture is auto-only, because the writer stores the pre-exit manual slot only for a leg that passed and fortress2 is the chain's current frontier; it becomes a full pair when that leg is tuned to pass. The chain reaches visit 3 only. Exit codes and PASS lines are the claim; captures were kept but are not visually reviewed here. Another agent on the machine (Codex) shared the seat, and the lease queue worked without contention failures.
+- Limits: the visit 04 fortress2 native fixture is auto-only, because the writer stores the pre-exit manual slot only for a leg that passed and fortress2 is the chain's current frontier; it becomes a full pair when that leg is tuned to pass. The chain reaches visit 3 only. Exit codes and PASS lines are the claim; captures were kept but are not visually reviewed here. Another agent on the machine shared the seat, and the lease queue worked without contention failures.
 - Evidence: `private/F2-native/`, `private/F3a-native/`, `private/F3b-native/`, `private/campaign-chain/`, `private/campaign-save-chain/`.
 
 ## Campaign chain check, F3b (2026-09-29)
@@ -1270,7 +1270,7 @@ bounded arrival correction; neither map's full scenes or route are complete.
   signature is identical to the previous baseline. No reserved hit range or
   existing event key changes.
 
-Logs and captures: `private/codex-main-fixes/arrival-*`. All verification used
+Logs and captures: `arrival-*` in the private main-fixes tree. All verification used
 isolated saves/settings and disabled audio. Other late-level gaps, original
 arrival staging and the wider recorded playtest backlog remain open.
 
@@ -1301,7 +1301,7 @@ executable exists, using the separate playtest save folder.
   The unfiltered save writer/reader passed in separate processes. Seven real
   strict-chain boundary saves also survived fresh-process reload and resave.
 
-Evidence is under `private/codex-main-fixes/`. Runs used isolated settings and
+Evidence is in the private main-fixes tree. Runs used isolated settings and
 saves with audio disabled. Rope flexibility, later-map arrival safety, breath
 sources, water-edge traversal and the other recorded playtest issues remain
 separate work; these checks do not establish original-game visual parity.
