@@ -286,10 +286,17 @@ impl Snark {
         span!("snark_movement_ns");
         tally!("snark_movement_calls", 1);
         tally!("snark_movement_zero_delta", u64::from(delta == Vec3::ZERO));
-        // A zero step cannot move the feet: the sweep can only say whether the
-        // ground it already stands on is solid, and both branches leave the state
-        // untouched. The axis slide below passes zero axes here as well.
-        if crate::sim_maps::snark_move_skip() && delta == Vec3::ZERO {
+        // A zero step cannot move a finite, non-negative-zero `feet`: the full path's
+        // only state write is `self.feet += delta * fraction`, which adds ±0.0 per
+        // axis. That addition is an exact identity (IEEE 754) except for a -0.0 axis,
+        // where adding +0.0 yields +0.0; a -0.0 or non-finite axis therefore takes
+        // the full path so the result stays bit-identical. Everything else on that
+        // path is a read: `Snark::target`, `World::sweep` and `Kind::wet`. The axis
+        // slide below passes zero axes here as well.
+        if crate::sim_maps::snark_move_skip()
+            && delta == Vec3::ZERO
+            && Self::zero_step_is_identity(self.feet)
+        {
             tally!("snark_movement_zero_skipped", 1);
             return;
         }
@@ -317,6 +324,13 @@ impl Snark {
                 break;
             }
         }
+    }
+    /// True when `feet += delta * fraction` with `delta == Vec3::ZERO` cannot change
+    /// a single bit: every component is finite and none is a negative zero.
+    fn zero_step_is_identity(feet: Vec3) -> bool {
+        [feet.x, feet.y, feet.z]
+            .iter()
+            .all(|v| v.is_finite() && v.to_bits() != (-0.0f32).to_bits())
     }
     fn projectiles(&mut self, world: &World, eye: Vec3, out: &mut Feedback) {
         span!("snark_projectiles_ns");

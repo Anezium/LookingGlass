@@ -37,6 +37,9 @@ fn pool(mask: i32) -> World {
 fn fish(kind: Kind) -> Snark {
     Snark::new(kind, Vec3::ZERO, 0., 1., 7)
 }
+fn feet_bits(p: &Snark) -> [u32; 3] {
+    [p.feet.x.to_bits(), p.feet.y.to_bits(), p.feet.z.to_bits()]
+}
 fn run(p: &mut Snark, w: &World, eye: Vec3, n: usize) -> Feedback {
     let mut f = Feedback::default();
     for _ in 0..n {
@@ -317,26 +320,57 @@ fn malformed_saves_reject_extra_attacks_nan_and_resurrection() {
     assert!(p.validate().is_err());
 }
 
-/// The skip arm must be indistinguishable: a zero delta leaves the feet and every
+/// The skip arm must be bit-identical: a zero delta leaves the feet and every
 /// other field untouched, and a real delta still moves the Snark.
 #[test]
 fn zero_delta_movement_is_unchanged_with_the_skip_arm_on_or_off() {
     let w = pool(32);
     for skip in [false, true] {
         let mut p = fish(Kind::Water);
-        let before = p.feet;
+        let before = feet_bits(&p);
         crate::sim_maps::with_arm_switch("snark_move_skip", skip, || {
             p.movement(&w, Vec3::ZERO, true);
         });
-        assert_eq!(p.feet, before, "skip={skip}");
+        assert_eq!(feet_bits(&p), before, "skip={skip}");
         // A blocked zero step at the same place, and the dry-land variant.
         crate::sim_maps::with_arm_switch("snark_move_skip", skip, || {
             p.movement(&w, Vec3::ZERO, false);
         });
-        assert_eq!(p.feet, before, "skip={skip}");
+        assert_eq!(feet_bits(&p), before, "skip={skip}");
         crate::sim_maps::with_arm_switch("snark_move_skip", skip, || {
             p.movement(&w, vec3(2., 0.5, 0.), true);
         });
-        assert_ne!(p.feet, before, "skip={skip} real delta still moves");
+        assert_ne!(feet_bits(&p), before, "skip={skip} real delta still moves");
     }
+}
+
+/// Bit-exactness also covers signed zero: the full path adds +0.0 to every axis, so
+/// a -0.0 foot becomes +0.0. The cheap path must not return early in that state.
+#[test]
+fn zero_delta_movement_matches_off_bits_with_signed_zero_feet() {
+    let w = pool(32);
+    for feet in [vec3(-0.0, -0.0, -0.0), vec3(-0.0, 12.5, -3.0)] {
+        for wet_only in [false, true] {
+            let mut results = Vec::new();
+            for skip in [false, true] {
+                let mut p = fish(Kind::Water);
+                p.feet = feet;
+                crate::sim_maps::with_arm_switch("snark_move_skip", skip, || {
+                    p.movement(&w, Vec3::ZERO, wet_only);
+                });
+                results.push(feet_bits(&p));
+            }
+            assert_eq!(
+                results[0], results[1],
+                "skip must match OFF bit for bit, feet={feet:?} wet_only={wet_only}"
+            );
+        }
+    }
+    // Pin the OFF behaviour this test protects: a free position canonicalises -0.0.
+    let mut p = fish(Kind::Water);
+    p.feet = vec3(-0.0, -0.0, -0.0);
+    crate::sim_maps::with_arm_switch("snark_move_skip", false, || {
+        p.movement(&w, Vec3::ZERO, false);
+    });
+    assert_eq!(feet_bits(&p), [0.0f32.to_bits(); 3]);
 }
