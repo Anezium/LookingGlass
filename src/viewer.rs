@@ -1503,11 +1503,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         }));
                     }
                     let pilot_state = if pilot.sample_due() {
-                        interactions.levels.iter().find(|s| s.ctl.id() == "hatter2").map(|s| s.ctl.snapshot())
+                        interactions.levels.iter().find(|s| s.ctl.id() == maps[current]).map(|s| s.ctl.snapshot())
                     } else { None };
                     r.pilot_frame(pilot.frame(&maps[current], &player, yaw, pitch, stats.alive(),
                         stats.sanity(), story.busy() || interactions.scene_id_after(None).is_some(), &threats, &scene.world,
-                        alice.ready_to_attack(stats.equipped().unwrap_or(crate::weapons::UNARMED)), stats.selected(), pilot_state, &preferences));
+                        alice.ready_to_attack(stats.equipped().unwrap_or(crate::weapons::UNARMED)), stats.selected(), stats.will(), pilot_state, &preferences));
                 }
             }
             if r.wants_aim() {

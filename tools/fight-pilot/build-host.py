@@ -10,7 +10,7 @@ head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).stri
 print('HEAD before build',head,flush=True)
 assert shutil.disk_usage(ROOT).free>=41*2**30
 if not TARGET.exists():subprocess.run(['/bin/cp','-cR',str(SEED),str(TARGET)],check=True)
-env=dict(os.environ,CARGO_TARGET_DIR=str(TARGET),RUSTFLAGS='--cfg observer_free_B',CARGO_BUILD_JOBS='4')
+env=dict(os.environ,CARGO_TARGET_DIR=str(TARGET),RUSTFLAGS='--cfg observer_free_B',CARGO_BUILD_JOBS='4',CARGO_PROFILE_RELEASE_OPT_LEVEL='1',CARGO_PROFILE_RELEASE_LTO='false',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='64')
 cmd=['/Users/anezium/.cargo/bin/cargo','+nightly-2026-10-11','build','--offline','--locked','--release','--features','native_timing,frame_total_only,sim_maps_probe']
 with (OUT/('build-host-'+head[:7]+'.log')).open('w') as log:
     result=subprocess.run(cmd,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -19,5 +19,5 @@ assert shutil.disk_usage(ROOT).free>=41*2**30
 binary=OUT/('looking-glass-'+head[:7])
 shutil.copy2(TARGET/'release/looking-glass',binary)
 assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()==head
-(OUT/'host-build.json').write_text(json.dumps(dict(head=head,binary=str(binary),sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),command=cmd,target=str(TARGET)),indent=2)+'\n')
+(OUT/'host-build.json').write_text(json.dumps(dict(head=head,binary=str(binary),sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),command=cmd,target=str(TARGET),host_profile='release override opt-level=1 lto=false codegen-units=64; exactness proof only'),indent=2)+'\n')
 print(binary,flush=True)

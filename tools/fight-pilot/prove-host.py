@@ -6,18 +6,18 @@ SOURCE=Path(__file__).resolve().parents[2]
 DATA=Path('/Users/anezium/vita-work/alice-data/Alice1/bin/base')
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def main():
- p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--analyze-existing',action='store_true');a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--map',default='hatter2',choices=['hatter2','centipede1']);p.add_argument('--analyze-existing',action='store_true');a=p.parse_args()
  root=a.out.resolve();root.mkdir(parents=True,exist_ok=a.analyze_existing);binary=a.binary.resolve()
  assert shutil.disk_usage(root).free>=41*2**30
  cfg=json.loads((SOURCE/'configs/PL-rc13-release-play04.json').read_text())
  cfg.update(replay_record='',replay_play='',replay_start='',replay_stop_after=0,replay_check_every=30,replay_state_every=300)
- tape='fp-hatter2-host-01.lgtape'
+ tape=f'fp-{a.map}-host-01.lgtape'
  env={k:v for k,v in os.environ.items() if not k.startswith('LOOKING_GLASS_')}
  env['LOOKING_GLASS_VITA_CONTROLS']='1'
  def run(mode):
   cell=root/mode;private=cell/'private';private.mkdir(parents=True)
   config=dict(cfg,replay_fight_pilot=mode=='record')
-  if mode=='record':config.update(replay_record=tape,replay_start='chapter:hatter2@normal')
+  if mode=='record':config.update(replay_record=tape,replay_start=f'chapter:{a.map}@normal')
   else:config.update(replay_play=tape);shutil.copy2(root/'record/private'/tape,private/tape)
   (private/'vita_renderer.json').write_text(json.dumps(config,indent=2)+'\n')
   logfile=cell/'run.log';command=[str(binary),'--data',str(DATA),'--save-dir',str(private/'saves'),'--no-audio']
@@ -59,17 +59,17 @@ def main():
   attacks+=int(bool(keys & (1<<header['keys'].index(0xffe3))))
  assert end and end['reason']=='menu' and end['steps']==frames,'unclean/truncated tape'
  health=[float(v) for v in re.findall(r'boss_health=([0-9.]+)',recording)]
- dealt=sum(max(0,x-y) for x,y in zip(health,health[1:]))
+ dealt=sum(max(0,x-y) for x,y in zip(health,health[1:])) if a.map=='hatter2' else sum(map(float,re.findall(r'health_loss=([0-9.]+)',recording)))
  damage_rows=[tuple(map(float,v)) for v in re.findall(r'damage_taken=([0-9.]+) seconds=([0-9.]+)',recording)]
  contacts=re.findall(r'weapon_contact id=(\d+) damage=([0-9.]+)',recording)
  displacement=max(math.dist(positions[0],v) for v in positions)
  sampled_path=sum(math.dist(x,y) for x,y in zip(positions,positions[1:]))
  first_fight=float(re.search(r'fight_start seconds=([0-9.]+)',recording)[1])
  taken=sum(damage for damage,when in damage_rows if when>=first_fight)
- stopped=re.search(r'\[lg/pilot\] stop map=hatter2 seconds=([0-9.]+) fight=([0-9.]+)',recording)
+ stopped=re.search(r'\[lg/pilot\] stop map='+re.escape(a.map)+r' seconds=([0-9.]+) fight=([0-9.]+)',recording)
  assert stopped,'missing bounded pilot stop'
  assert dealt>0 and taken>0 and contacts and moving>0 and attacks>0 and displacement>1000,'combat proof incomplete'
  done=next(l for l in playback.splitlines() if l.startswith('[lg/replay] done '))
- result=dict(map='hatter2',difficulty='normal',binary_sha256=sha(binary),tape_sha256=sha(path),frames=frames,tape_seconds=seconds,first_fight_seconds=first_fight,fight_window_seconds=float(stopped[1])-first_fight,visible_target_fight_seconds=float(stopped[2]),max_displacement_units=displacement,sampled_path_units=sampled_path,movement_frames=moving,attack_held_frames=attacks,weapon_contacts=len(contacts),sampled_boss_damage=dealt,damage_taken=taken,pilot_off_replay=done,console_contact=False)
+ result=dict(map=a.map,difficulty='normal',binary_sha256=sha(binary),tape_sha256=sha(path),frames=frames,tape_seconds=seconds,first_fight_seconds=first_fight,fight_window_seconds=float(stopped[1])-first_fight,visible_target_fight_seconds=float(stopped[2]),max_displacement_units=displacement,sampled_path_units=sampled_path,movement_frames=moving,attack_held_frames=attacks,weapon_contacts=len(contacts),sampled_enemy_damage=dealt,damage_taken=taken,pilot_off_replay=done,console_contact=False)
  (root/'proof.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2),flush=True)
 if __name__=='__main__':main()
