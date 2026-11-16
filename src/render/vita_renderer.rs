@@ -5298,6 +5298,13 @@ mod tests {
         }
     }
     #[test]
+    fn render_work_reuse_candidates_are_default_off() {
+        let c=Config::default();
+        assert!(!c.world_alpha_parameter_once && !c.actor_skin_output_reuse);
+        let c:Config=serde_json::from_slice(include_bytes!("../../configs/PL-release.json")).unwrap();
+        assert!(!c.world_alpha_parameter_once && !c.actor_skin_output_reuse);
+    }
+    #[test]
     fn world_reuse_switches_and_exact_view_inputs() {
         let c = Config::default();
         assert!(c.world_view_reuse && c.world_parameter_reuse && c.uniform_field_cache);
