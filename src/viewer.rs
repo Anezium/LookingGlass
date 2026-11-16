@@ -4586,8 +4586,7 @@ interactions
             art(level_art.school.is_some(), "school");
             art(level_art.gym.is_some(), "gym");
             art(level_art.beyond.is_some(), "beyond");
-            // Pool's body is owned, but story_pose still reads Story in the dispatcher.
-
+            // Pool story values are resolved before its owned body extraction.
             art(level_art.school2.is_some(), "school2");
             art(level_art.duchess.is_some(), "duchess");
             art(level_art.pandemonium.is_some(), "pandemonium");

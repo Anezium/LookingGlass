@@ -473,10 +473,13 @@ pub(crate) async fn snapshot_render_check(assets: &mut Assets) -> Result<()> {
                     translation: Vec3::ZERO, rotation: Quat::IDENTITY }), beat });
             }
             let mut story = Story::default();
-            let line = Line { watches: BTreeMap::new(), lips: Default::default(),
+            let line = Line { watches: BTreeMap::new(),
+                lips: crate::facial::LipTrack::parse(b"1 8 128 128 128 128 128 128 128 128")?,
                 actor: "summoned_cheshire".into(), path: "test.wav".into(), text: "Hint".into(), duration: 1. };
             story.summon_hint(line);
+            story.tick(0., false);
             story.tick(0.25, false);
+            anyhow::ensure!(story.mouth(&["summoned_cheshire"]) > 0.4, "Missing active lip control");
             let visit = crate::render_snapshot::RenderVisit::default();
             let input = captured.then(|| art.extract(&hints, &story, visit.id()));
             if let Some(input) = &input {
