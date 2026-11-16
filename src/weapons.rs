@@ -1403,7 +1403,7 @@ pub(crate) struct EffectsInput {
     heavy: heavy::RenderInput, ice: ice::RenderInput, jacks: jacks::RenderInput,
     bombs: bomb::RenderInput, dice: crate::dice::RenderInput,
     projectiles: Vec<Projectile>, blasts: Vec<blast::Blast>, sparks: Vec<Spark>,
-    trail: Vec<Trail>, flight_trails: Vec<Trail>, first_person: bool,
+    trail: Vec<Trail>, flight_trails: Vec<Trail>, first_person: bool, view_muzzle: Option<Vec3>,
 }
 impl EffectsInput {
     pub(crate) fn bytes(&self)->usize {
@@ -2529,6 +2529,15 @@ impl Visuals {
         }
         gl_use_default_material();
     }
+    pub(crate) fn render_effects_overflow(&self)->bool {
+        self.heavy.render_records()+self.ice.render_records()+self.jacks.render_records()+self.bombs.render_records()+self.dice.render_records()
+            +self.projectiles.len()+self.blasts.len()+self.sparks.len()+self.trail.len()+self.flight_trails.len()>16384
+    }
+    pub(crate) fn valid_effects_input(&self,input:&EffectsInput)->bool {
+        input.heavy.records()+input.ice.records()+input.jacks.records()+input.bombs.records()+input.dice.records()
+            +input.projectiles.len()+input.blasts.len()+input.sparks.len()+input.trail.len()+input.flight_trails.len()<=16384
+            && input.projectiles.iter().all(|p|p.prop()<self.props.len()) && self.dice_art.valid_render_input(&input.dice)
+    }
     pub(crate) fn extract_effects(&self, out:&mut EffectsInput) {
         self.heavy.extract_render(&mut out.heavy); self.ice.extract_render(&mut out.ice);
         self.jacks.extract_render(&mut out.jacks); self.bombs.extract_render(&mut out.bombs);
@@ -2536,7 +2545,7 @@ impl Visuals {
         self.dice_art.extract_render_pose(&mut out.dice);
         out.projectiles.clone_from(&self.projectiles); out.blasts.clone_from(&self.blasts);
         out.sparks.clone_from(&self.sparks); out.trail.clone_from(&self.trail); out.flight_trails.clone_from(&self.flight_trails);
-        out.first_person=self.first_person;
+        out.first_person=self.first_person; out.view_muzzle=self.heavy_art.view_muzzle;
     }
     pub fn draw_effects(
         &mut self,
@@ -2749,7 +2758,7 @@ impl Visuals {
             });
         }
         self.heavy_art.draw_input(
-            input.heavy.view(),
+            input.heavy.view(), input.view_muzzle,
             camera,
             fullbright,
             input.first_person,

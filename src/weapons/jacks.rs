@@ -526,10 +526,12 @@ pub(super) struct RenderView<'a> {
     pub(super) pieces: &'a [Jack],
 }
 impl RenderInput {
+    pub(super) fn records(&self)->usize { self.pieces.len() }
     pub(super) fn heap_bytes(&self)->usize { self.pieces.len()*std::mem::size_of::<Jack>() + self.pieces.iter().map(|p|p.trail.bytes()).sum::<usize>() }
     pub(super) fn view(&self) -> RenderView<'_> { RenderView {pieces: &self.pieces} }
 }
 impl State {
+    pub(super) fn render_records(&self)->usize { self.pieces.len() }
     pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {pieces: &self.pieces} }
     pub(super) fn extract_render(&self, out:&mut RenderInput) {
         out.pieces.clone_from(&self.pieces);

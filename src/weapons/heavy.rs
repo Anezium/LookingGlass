@@ -767,10 +767,12 @@ pub(super) struct RenderView<'a> {
     pub(super) ignition: Option<(f64, Transform)>,
 }
 impl RenderInput {
+    pub(super) fn records(&self)->usize { self.volleys.len()+self.shots.len()+self.impacts.len() }
     pub(super) fn heap_bytes(&self)->usize { self.volleys.len()*std::mem::size_of::<Volley>() + self.shots.len()*std::mem::size_of::<Shot>() + self.impacts.len()*std::mem::size_of::<Impact>() + self.charge.as_ref().map_or(0,|c|c.trail.bytes()) + self.shots.iter().map(|s|s.trail.bytes()).sum::<usize>() + self.impacts.iter().filter_map(|i|i.source.as_ref()).map(|s|s.trail.bytes()).sum::<usize>() }
     pub(super) fn view(&self) -> RenderView<'_> { RenderView {charge: &self.charge,volleys: &self.volleys,shots: &self.shots,impacts: &self.impacts,ignition: self.ignition} }
 }
 impl State {
+    pub(super) fn render_records(&self)->usize { self.volleys.len()+self.shots.len()+self.impacts.len() }
     pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {charge: &self.charge,volleys: &self.volleys,shots: &self.shots,impacts: &self.impacts,ignition: self.ignition} }
     pub(super) fn extract_render(&self, out:&mut RenderInput) {
         out.charge.clone_from(&self.charge);

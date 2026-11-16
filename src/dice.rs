@@ -1082,6 +1082,9 @@ impl Art {
                 Transform {translation:d.feet,rotation:Quat::from_rotation_z(d.yaw)},[1.25,1.5,2.][d.kind]*growth))
         });
     }
+    pub(crate) fn valid_render_input(&self,input:&RenderInput)->bool {
+        input.puppet.as_ref().is_none_or(|(slot,p)|*slot<self.puppets.len() && self.puppets[*slot].valid_input(p) && p.bones()<=65536)
+    }
     pub(crate) fn draw_owned(&mut self,input:&RenderInput,bright:bool) {
         if let Some((slot,pose))=&input.puppet { self.puppets[*slot].draw_input(pose,bright); }
     }
@@ -1831,10 +1834,12 @@ pub(crate) struct RenderView<'a> {
     pub(crate) beams: &'a [Beam],
 }
 impl RenderInput {
+    pub(crate) fn records(&self)->usize { self.dice.len()+self.bolts.len()+self.beams.len() }
     pub(crate) fn heap_bytes(&self)->usize { self.dice.len()*std::mem::size_of::<Die>() + self.bolts.len()*std::mem::size_of::<Bolt>() + self.beams.len()*std::mem::size_of::<Beam>() + self.puppet.as_ref().map_or(0,|(_,p)|p.bytes()) }
     pub(crate) fn view(&self) -> RenderView<'_> { RenderView {dice: &self.dice,demon: &self.demon,bolts: &self.bolts,beams: &self.beams} }
 }
 impl State {
+    pub(crate) fn render_records(&self)->usize { self.dice.len()+self.bolts.len()+self.beams.len() }
     pub(crate) fn render_view(&self) -> RenderView<'_> { RenderView {dice: &self.dice,demon: &self.demon,bolts: &self.bolts,beams: &self.beams} }
     pub(crate) fn extract_render(&self, out:&mut RenderInput) {
         out.dice.clone_from(&self.dice);

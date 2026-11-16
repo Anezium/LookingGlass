@@ -565,10 +565,12 @@ pub(super) struct RenderView<'a> {
 }
 impl RenderView<'_> { pub(super) fn flowing(&self, at:f32, alternate:bool)->bool { self.pulses.iter().any(|&(a,b,alt)|alt==alternate && at as f64+1e-6>=a && (at as f64)<b) } }
 impl RenderInput {
+    pub(super) fn records(&self)->usize { self.walls.len()+self.pulses.len() }
     pub(super) fn heap_bytes(&self)->usize { self.walls.len()*std::mem::size_of::<Wall>() + self.pulses.len()*std::mem::size_of::<(f64,f64,bool)>() + self.trail.bytes() }
     pub(super) fn view(&self) -> RenderView<'_> { RenderView {walls: &self.walls,shell: &self.shell,clock: self.clock,trail: &self.trail,pulses: &self.pulses} }
 }
 impl State {
+    pub(super) fn render_records(&self)->usize { self.walls.len()+self.pulses.len() }
     pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {walls: &self.walls,shell: &self.shell,clock: self.clock,trail: &self.trail,pulses: &self.pulses} }
     pub(super) fn extract_render(&self, out:&mut RenderInput) {
         out.walls.clone_from(&self.walls);

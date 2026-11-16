@@ -1164,6 +1164,7 @@ impl Character {
     }
     pub(crate) fn extract_body(&mut self, feet: Vec3) -> (usize, bool) {
         self.clear_body_input();
+        if self.actions.pose.len()!=self.skeleton.bones.len() || self.actions.pose.len()>65536 || self.visuals.render_effects_overflow() { return (0,true); }
         let input=&mut self.body_arena;
         input.visit=self.snapshot_visit.id();
         self.face.pose_into(&self.skeleton,&self.actions.pose,self.mouth,&mut self.body_scratch,&mut input.pose);
@@ -1176,7 +1177,7 @@ impl Character {
             && !self.acting.hide_weapon() && !input.power.performing;
         self.visuals.extract_held(&self.actions,&self.anchors,&mut input.held);
         self.visuals.extract_effects(&mut input.effects);
-        let overflow=!input.valid(self.snapshot_visit.id(),self.skeleton.bones.len());
+        let overflow=!input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) || !self.visuals.valid_effects_input(&input.effects);
         let bytes=input.bytes();
         if !overflow { self.body_input=Some(std::mem::take(input)); }
         (bytes,overflow)
@@ -1366,7 +1367,7 @@ impl Character {
             },
             || {
                 if let Some(input) = self.body_input.take() {
-                    if input.valid(self.snapshot_visit.id(), self.skeleton.bones.len()) {
+                    if input.valid(self.snapshot_visit.id(), self.skeleton.bones.len()) && self.visuals.valid_effects_input(&input.effects) {
                         self.publish_body(&input, fullbright, ghost);
                     } else { self.draw_body(feet, fullbright, ghost); }
                     self.body_input = Some(input);
@@ -1377,7 +1378,7 @@ impl Character {
     }
     pub fn draw_effects(&mut self, camera: Vec3, fullbright: bool, show_alice: bool) {
         if let Some(input)=self.body_input.take() {
-            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) {
+            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) && self.visuals.valid_effects_input(&input.effects) {
                 self.visuals.draw_effects_input(&input.effects,&self.material,camera,fullbright,show_alice);
             } else { self.visuals.draw_effects(&self.material,camera,fullbright,show_alice); }
             self.body_input=Some(input);

@@ -939,6 +939,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut handoff_return = crate::render_snapshot::HandoffReturn::default();
     let mut handoff_minimum_frame = 0u64;
     let mut snapshot_frames = 0u64;
+    let mut pickup_input=crate::powerups::PickupInput::default();
     let mut snapshot_fenced_frames = 0u64;
     let mut dynamic_input = crate::render_snapshot::DynamicInput::default();
     let mut menu = false;
@@ -4405,6 +4406,14 @@ interactions
             let allocations=scope.finish();
             println!("[lg/snapshot-alice] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
         } else { alice.clear_body_input(); }
+        if snapshot_enabled {
+            let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();
+            #[cfg(target_os="vita")] let will_draw=!crate::frame_profile::mode().no_world() && !world_only;
+            #[cfg(not(target_os="vita"))] let will_draw=!world_only;
+            power_art.extract_input(&pickups,&stats,&save::visit_key(&maps[current],entry_spawn.as_deref()),camera,pickup_clock,will_draw,&mut pickup_input);
+            let allocations=scope.finish();
+            println!("[lg/snapshot-pickups] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,pickup_input.bytes(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(pickup_input.overflow()));
+        }
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         if snapshot_enabled {
@@ -4599,6 +4608,9 @@ interactions
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         if draw_world && !world_only {
+            if snapshot_enabled && power_art.valid_input(&pickup_input) {
+                power_art.draw_input(&pickup_input,&scene.atmosphere,camera);
+            } else {
             power_art.draw(
                 &pickups,
                 &stats,
@@ -4607,6 +4619,7 @@ interactions
                 camera,
                 pickup_clock,
             );
+                    }
         }
         drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Fx);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -4678,7 +4691,8 @@ interactions
                     camera,
                     &scene.atmosphere,
                 );
-                hud.draw_pickups(&pickups, &stats, camera, pickup_clock);
+                if snapshot_enabled && power_art.valid_input(&pickup_input) {hud.draw_pickup_markers(&pickup_input.markers,pickup_clock);}
+                else {hud.draw_pickups(&pickups,&stats,camera,pickup_clock);}
             }
         }
         if draw_world && !world_only {

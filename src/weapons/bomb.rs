@@ -585,10 +585,12 @@ pub(super) struct RenderView<'a> {
     pub(super) flames: &'a [Flame],
 }
 impl RenderInput {
+    pub(super) fn records(&self)->usize { self.bombs.len()+self.flames.len() }
     pub(super) fn heap_bytes(&self)->usize { self.bombs.len()*std::mem::size_of::<Bomb>() + self.flames.len()*std::mem::size_of::<Flame>() + self.bombs.iter().map(|p|p.trail.bytes()).sum::<usize>() + self.flames.iter().map(|p|p.trail.bytes()).sum::<usize>() }
     pub(super) fn view(&self) -> RenderView<'_> { RenderView {bombs: &self.bombs,flames: &self.flames} }
 }
 impl State {
+    pub(super) fn render_records(&self)->usize { self.bombs.len()+self.flames.len() }
     pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {bombs: &self.bombs,flames: &self.flames} }
     pub(super) fn extract_render(&self, out:&mut RenderInput) {
         out.bombs.clone_from(&self.bombs);
