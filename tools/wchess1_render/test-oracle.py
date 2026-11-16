@@ -1,6 +1,8 @@
 import copy,unittest
 import host_oracle as h
 class Oracle(unittest.TestCase):
+    def test_anchor_row_without_render_metrics(self):
+        self.assertEqual(h.normalize(dict(frame=0,render=None)),dict(frame=0,render=None,counters={}))
     def test_only_observers_removed(self):
         a=dict(frame=1,state_sha256='abc',actor_skin=[1],submitted_packets=[dict(gpu_slot=2,vertices='a')],counters=dict(work=2,dynamic_colliders_tested=3,actor_mem_bytes=42),render={'actors':dict(cpu_ns=3,draws=4)})
         b=copy.deepcopy(a);b['submitted_packets'][0]['gpu_slot']=7;b['counters']['dynamic_colliders_tested']=5;b['render']['actors']['cpu_ns']=9

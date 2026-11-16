@@ -64,7 +64,7 @@ def normalize(row):
         and not k.startswith(('actor_mem_', 'actor_publication_mem_'))
         and k not in ('dynamic_colliders_tested','dynamic_colliders_rejected',
                       'skin_output_reused_vertices','world_alpha_parameter_once_hits')}
-    for metrics in row.get('render', {}).values():
+    for metrics in (row.get('render') or {}).values():
         for key in list(metrics):
             if key.endswith('_ns'): metrics.pop(key)
     for packet in row.get('submitted_packets', []):
