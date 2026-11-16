@@ -3645,7 +3645,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "gather_census" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
