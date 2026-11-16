@@ -315,7 +315,9 @@ pub(crate) fn test_errors() -> u64 { STATE.with(|s| s.borrow().errors) }
 mod tests {
     use super::*;
     fn field(text: &str, name: &str) -> f64 {
-        text.split_whitespace().find(|f| f.starts_with(&format!("{name}=")))
+        text.split_whitespace()
+            .map(|f| f.strip_prefix("leaf=").or_else(|| f.strip_prefix("counter=")).unwrap_or(f))
+            .find(|f| f.starts_with(&format!("{name}=")))
             .unwrap_or_else(|| panic!("{name} in {text}"))
             .split('=').nth(1).unwrap().split('/').next().unwrap().parse().unwrap()
     }
@@ -367,7 +369,10 @@ mod tests {
         STATE.with(|s| { let s = s.borrow(); assert_eq!(s.ns[Leaf::PoseEval as usize], 0); });
         {
             let _a = span(Leaf::AliceTraversal);
-            let _p = span(Leaf::PoseEval);
+            {
+                let _p = span(Leaf::PoseEval);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
         }
         STATE.with(|s| { let s = s.borrow(); assert!(s.ns[Leaf::PoseEval as usize] > 0); });
     }
