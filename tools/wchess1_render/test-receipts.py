@@ -14,6 +14,7 @@ PACKAGE = Path(__file__).resolve().parent
 def load_receipts(root):
     spec = importlib.util.spec_from_file_location('receipts', PACKAGE / 'verify-session.py')
     module = importlib.util.module_from_spec(spec)
+    module.__file__ = str(root / 'verify-session.py')
     spec.loader.exec_module(module)
     module.P = root
     return module
@@ -26,7 +27,7 @@ def sha(data):
 class Receipts(unittest.TestCase):
     def fixture(self, root):
         back = root / 'backup.json'
-        (root / 'READY.json').write_text((PACKAGE / 'READY.json').read_text())
+        (root / 'READY.json').write_text(json.dumps(dict(arms=[], self_sha256='0' * 64)))
         self.owner, self.config, self.save = b'owner SELF', b'{"owner": true}', b'save bytes'
         rows = [
             dict(path='ux0:/app/ALICELG01/eboot.bin', sha256=sha(self.owner), kind='self'),
