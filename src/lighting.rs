@@ -230,6 +230,43 @@ pub fn croquet(position: Vec3) -> Vec<Light> {
             .collect()
     })
 }
+/// Fixed-size collision results; texture and generated vertices remain renderer-owned.
+#[derive(Clone,Copy)]
+pub(crate) struct ShadowInput {center:Vec3,tangent:Vec3,bitangent:Vec3,radius:f32,alpha:[u8;26]}
+impl ShadowInput {
+    fn position(&self,index:usize)->(Vec3,Vec2) {
+        if index==0 {return (self.center,Vec2::splat(0.5));}
+        let a=(index-1) as f32*std::f32::consts::TAU/24.;
+        (self.center+(self.tangent*a.cos()+self.bitangent*a.sin())*self.radius,vec2(a.cos(),a.sin())*0.5+Vec2::splat(0.5))
+    }
+}
+fn shadow_geometry(world:&World,feet:Vec3,radius:f32)->(Option<ShadowInput>,u32) {
+    let hit=world.sweep(feet+Vec3::Z*4.,feet-Vec3::Z*160.,Vec3::ZERO);
+    if hit.fraction>=1. || hit.normal.z<0.4 {return (None,1);}
+    let center=(feet+Vec3::Z*4.).lerp(feet-Vec3::Z*160.,hit.fraction)+hit.normal*0.3;
+    let strength=(0.55*(1.-feet.distance(center)/160.)).clamp(0.,0.55);
+    let tangent=hit.normal.cross(Vec3::X).normalize_or_zero();let bitangent=hit.normal.cross(tangent);
+    let mut input=ShadowInput{center,tangent,bitangent,radius,alpha:[0;26]};
+    for i in 0..26 {
+        let position=input.position(i).0;
+        let h=world.sweep(position+hit.normal*2.,position-hit.normal*5.,Vec3::ZERO);
+        input.alpha[i]=if h.fraction<1. {(strength*255.) as u8}else{0};
+    }
+    (Some(input),27)
+}
+pub(crate) fn resolve_shadow(world:&World,feet:Vec3,radius:f32)->(Option<ShadowInput>,u32) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) {return (None,0);}
+    shadow_geometry(world,feet,radius)
+}
+pub(crate) fn draw_shadow_input(input:&Option<ShadowInput>) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) {return;}
+    let Some(input)=input else{return;};
+    let Some(texture)=SHADOW.with(|s|s.borrow().clone()) else{return;};
+    let mut vertices=Vec::new();let mut indices=Vec::new();
+    for i in 0..26 {let (position,uv)=input.position(i);vertices.push(Vertex{position,uv,normal:Vec4::ZERO,color:[0,0,0,input.alpha[i]]});}
+    for i in 1..=24 {indices.extend([0,i,i+1]);}
+    crate::render_fx::effect(&Mesh{upload_identity:None,surface:None,vertices,indices,texture:Some(texture)},crate::materials::Blend::Alpha);
+}
 pub fn shadow(world: &World, feet: Vec3, radius: f32) {
     if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) { return; }
     let Some(texture) = SHADOW.with(|s| s.borrow().clone()) else {
@@ -466,4 +503,20 @@ pub(crate) fn selected_bits() -> Vec<Vec<u32>> {
         bits.extend([l.radius.to_bits(), u32::from(l.only_models), u32::from(l.flare)]);
         bits
     }).collect())
+}
+
+#[cfg(test)]
+mod snapshot_shadow_tests {
+    use super::*;
+    #[test]
+    fn shadow_collision_input_is_owned_clips_pit_rims_and_handles_no_support() {
+        fn send<T:Send>(){}send::<ShadowInput>();
+        let mut world=World::fixture(&[(vec3(-4.,-4.,-20.),vec3(4.,4.,-10.))]);
+        let (input,queries)=shadow_geometry(&world,Vec3::ZERO,22.);let input=input.unwrap();assert_eq!(queries,27);
+        assert!(input.alpha[0]>0);assert!(input.alpha[1..].iter().all(|a|*a==0));
+        let original=input.position(0).0.to_array().map(f32::to_bits);
+        world=World::fixture(&[]);assert!(shadow_geometry(&world,Vec3::ZERO,22.).0.is_none());
+        assert_eq!(input.position(0).0.to_array().map(f32::to_bits),original);
+        assert!((0..26).all(|i|input.position(i).0.is_finite()));
+    }
 }
