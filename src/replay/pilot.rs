@@ -17,6 +17,7 @@ pub struct Pilot {
     last_threat: f32,
     dealt: f32,
     taken: f32,
+    neutral_until: f32,
 }
 impl Default for Pilot {
     fn default() -> Self {
@@ -35,6 +36,7 @@ impl Default for Pilot {
             last_threat: 0.,
             dealt: 0.,
             taken: 0.,
+            neutral_until: 0.,
         }
     }
 }
@@ -103,6 +105,8 @@ impl Pilot {
         if !self.was_alive && alive {
             self.waypoint = 0;
             self.health.clear();
+            // Input::suppress requires both sticks to be neutral after checkpoint restore.
+            self.neutral_until = self.seconds + 0.3;
         }
         self.was_alive = alive;
         if sanity < self.last_sanity {
@@ -153,7 +157,7 @@ impl Pilot {
             if (self.seconds * 2.) as u32 % 2 == 0 {
                 press(KeyCode::E);
             }
-        } else if self.seconds < 1. {
+        } else if self.seconds < 1. || self.seconds < self.neutral_until {
             // Neutral unlocks both stick latches after load; click resumes a loaded chapter.
             if self.seconds > 0.4 && self.seconds < 0.6 {
                 press(KeyCode::LeftControl);
