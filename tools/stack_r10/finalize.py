@@ -50,5 +50,5 @@ if args.main_admission:
  final=json.loads((O/'proof/FINAL-VERIFICATION.json').read_text())
  final.update(mode='main-admission',session_directories_absent=True,source_main_session_absent=True,source_smoke_session_verified=False,hardware_smoke=False,zip_session_directories_absent=True,sealed_members_match_local_files=True,common_self=common_self,main_admission_e2e_sha256=sha(O/'proof/SESSION-E2E-MAIN-ADMISSION.json'),main_admission_negative_fixtures_sha256=sha(O/'proof/MAIN-ADMISSION-NEGATIVE-FIXTURES.json'),console_executed=False,driver_contact=False)
  write(O/'proof/FINAL-VERIFICATION.json',final)
-write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f))for f in sorted(O.rglob('*'))if f.is_file()and not is_report_file(f.name) and f.name not in ['ARTIFACT-SHA256.json','E2E-MAIN-FIX.md']and not any(p in ('target-vita','tmp','__pycache__')for p in f.relative_to(O).parts)})
+write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f))for f in sorted(O.rglob('*'))if f.is_file()and not is_report_file(f.name, '') and f.name not in ['ARTIFACT-SHA256.json','E2E-MAIN-FIX.md']and not any(p in ('target-vita','tmp','__pycache__')for p in f.relative_to(O).parts)})
 print('Sealed common SELF, ZIP excludes session evidence, source main path absent; no device action')

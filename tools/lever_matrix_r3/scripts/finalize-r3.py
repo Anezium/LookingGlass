@@ -69,7 +69,7 @@ Removed **{sum(x['bytes'] for x in removed):,} bytes** of task caches/test-layou
 ```
 '''
 (O/'REPORT.md').write_text(report)
-seal={str(p.relative_to(O)):sha(p) for p in sorted(O.rglob('*')) if p.is_file() and not is_report_file(p.name) and p.name not in ('ARTIFACT-SHA256.json','FINAL-AUDIT.json')}
+seal={str(p.relative_to(O)):sha(p) for p in sorted(O.rglob('*')) if p.is_file() and not is_report_file(p.name, '') and p.name not in ('ARTIFACT-SHA256.json','FINAL-AUDIT.json')}
 write(O/'ARTIFACT-SHA256.json',seal)
 assert all(sha(O/name)==digest for name,digest in seal.items())
 write(O/'FINAL-AUDIT.json',dict(status='PASS',sealed_files=len(seal),seal_sha256=sha(O/'ARTIFACT-SHA256.json'),

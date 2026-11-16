@@ -1,5 +1,6 @@
 """Report-name compatibility against fixtures shaped like preserved evidence."""
 from pathlib import Path
+import hashlib
 import json
 import subprocess
 import sys
@@ -93,9 +94,59 @@ class ReportNameTests(unittest.TestCase):
             write(root / "ARTIFACT-SHA256.json", "{}")
             write(root / "proof" / "RESULT.json", "{}")
             names = {p.name for p in sorted(root.rglob("*"))
-                     if p.is_file() and not r.is_report_file(p.name)
+                     if p.is_file() and not r.is_report_file(p.name, "")
                      and p.name != "ARTIFACT-SHA256.json"}
             self.assertEqual(names, {"RESULT.json"})
+
+    def test_original_only_exclusion_keeps_the_staged_reports(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name in ["TEAM-REPORT.md", "TEAM-REPORT-R11B.md",
+                         "TEAM-REPORT-R11C.md", "TEAM-REPORT-R11D.md",
+                         "PROOF.json"]:
+                write(root / name, name)
+            kept = {p.name for p in root.iterdir()
+                    if not r.is_report_file(p.name, "")}
+            self.assertEqual(kept, {"TEAM-REPORT-R11B.md", "TEAM-REPORT-R11C.md",
+                                    "TEAM-REPORT-R11D.md", "PROOF.json"})
+
+    def test_r11d_only_exclusion_keeps_the_earlier_reports(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for name in ["TEAM-REPORT.md", "TEAM-REPORT-R11B.md",
+                         "TEAM-REPORT-R11C.md", "TEAM-REPORT-R11D.md",
+                         "PROOF.json"]:
+                write(root / name, name)
+            kept = {p.name for p in root.iterdir()
+                    if not r.is_report_file(p.name, "-R11D")}
+            self.assertEqual(kept, {"TEAM-REPORT.md", "TEAM-REPORT-R11B.md",
+                                    "TEAM-REPORT-R11C.md", "PROOF.json"})
+            self.assertEqual(r.report_path(root, "-R11D").name, "TEAM-REPORT-R11D.md")
+            self.assertEqual(r.report_path(root).name, "TEAM-REPORT.md")
+
+    def test_verify_seal_script_accepts_a_preserved_r11_layout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = ["TEAM-REPORT.md", "TEAM-REPORT-R11B.md",
+                     "TEAM-REPORT-R11C.md", "TEAM-REPORT-R11D.md",
+                     "CONSOLE-PACKAGE.zip"]
+            for name in names:
+                write(root / name, "content of " + name)
+            inventory = {name: {"bytes": (root / name).stat().st_size,
+                                "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()}
+                         for name in names if name != "TEAM-REPORT-R11D.md"}
+            write(root / "ARTIFACT-SHA256.json", json.dumps(inventory))
+            sealed = ["ARTIFACT-SHA256.json", "TEAM-REPORT-R11D.md", "CONSOLE-PACKAGE.zip"]
+            seal = {"files": {name: {"bytes": (root / name).stat().st_size,
+                                     "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()}
+                              for name in sealed}}
+            write(root / "SEAL-R11D.json", json.dumps(seal))
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "tools/transition_mem_r11/verify_seal.py"), str(root)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("PASS detached seal and", result.stdout)
 
     def test_setup_script_copies_a_preserved_legacy_layout(self):
         with tempfile.TemporaryDirectory() as temp:

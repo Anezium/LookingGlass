@@ -45,7 +45,7 @@ with zipfile.ZipFile(O/'CONSOLE-PACKAGE.zip','w',compression=zipfile.ZIP_DEFLATE
    f=O/'packages'/arm/n;z.write(f,str(f.relative_to(O)))
  for n in ['log-integrity.py','bind_helpers.py']:
   f=O/'scripts'/n;z.write(f,str(f.relative_to(O)))
-manifest={str(f.relative_to(O)):{'bytes':f.stat().st_size,'sha256':sha(f)} for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name) and f.name not in ['ARTIFACT-SHA256.json','A1-FIX.md','A1B-FIX.md']}
+manifest={str(f.relative_to(O)):{'bytes':f.stat().st_size,'sha256':sha(f)} for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name, '') and f.name not in ['ARTIFACT-SHA256.json','A1-FIX.md','A1B-FIX.md']}
 (O/'ARTIFACT-SHA256.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print('Removed',sum(r['bytes'] for r in removed),'bytes; sealed',len(manifest),'artifacts')
 print(after)

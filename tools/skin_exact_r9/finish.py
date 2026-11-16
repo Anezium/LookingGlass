@@ -14,7 +14,7 @@ if a.manifest_only:
   assert z.testzip() is None and set(z.namelist())==set(verification['members'])
   for name,record in verification['members'].items():
    raw=z.read(name);assert len(raw)==record['bytes'] and hashlib.sha256(raw).hexdigest()==record['sha256'] and raw==(O/name).read_bytes()
- write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name) and f.name != 'ARTIFACT-SHA256.json'})
+ write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name, '') and f.name != 'ARTIFACT-SHA256.json'})
  print('Verified unchanged ZIP and refreshed complete artifact manifest')
  raise SystemExit(0)
 
@@ -53,5 +53,5 @@ with zipfile.ZipFile(O/'CONSOLE-PACKAGE.zip') as z:
  assert all(members[str(f.relative_to(O))]['sha256']==sha(f) for f in files)
 write(O/'proof/PACKAGE-VERIFICATION.json',dict(status='PASS',zip_sha256=sha(O/'CONSOLE-PACKAGE.zip'),members=members,session_paths_absent=True,console_executed=False))
 # The report is edited after disk cleanup; exclude it to avoid a circular seal.
-write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name) and f.name != 'ARTIFACT-SHA256.json'})
+write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f)) for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name, '') and f.name != 'ARTIFACT-SHA256.json'})
 print('Sealed',len(members),'console members; session directories absent; no device access')

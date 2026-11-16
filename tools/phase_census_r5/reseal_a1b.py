@@ -88,7 +88,7 @@ validation.update(status='PASS',head=head,engine_build_revision=ENGINE,working_t
  engine_tests_rerun_for_A1B=False,package_identity='PACKAGE-IDENTITY.json')
 write(O/'proof/FINAL-VALIDATION.json',validation)
 excluded={'ARTIFACT-SHA256.json','A1-FIX.md','A1B-FIX.md'}
-manifest={str(path.relative_to(O)):dict(bytes=path.stat().st_size,sha256=sha(path)) for path in sorted(O.rglob('*')) if path.is_file() and not is_report_file(path.name) and path.name not in excluded}
+manifest={str(path.relative_to(O)):dict(bytes=path.stat().st_size,sha256=sha(path)) for path in sorted(O.rglob('*')) if path.is_file() and not is_report_file(path.name, '') and path.name not in excluded}
 write(O/'ARTIFACT-SHA256.json',manifest)
 for name,record in manifest.items():assert (O/name).stat().st_size==record['bytes'] and sha(O/name)==record['sha256'],name
 manifest_hash=sha(O/'ARTIFACT-SHA256.json')

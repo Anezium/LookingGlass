@@ -11,7 +11,7 @@ inventory=json.loads((O/'ARTIFACT-SHA256.json').read_text())
 for name,row in inventory.items():
  p=O/name;assert p.stat().st_size==row['bytes'] and sha(p)==row['sha256'],name
 actual={str(p.relative_to(O)) for p in O.rglob('*') if p.is_file()}
-report=report_path(O)
+report=report_path(O, '-R11D')
 assert actual==set(inventory)|{'ARTIFACT-SHA256.json',report.name,'SEAL-R11D.json'},'Missing or extra artifact'
 assert not any(p.name.startswith('session-') for p in O.iterdir())
 assert not list(O.rglob('__pycache__'))

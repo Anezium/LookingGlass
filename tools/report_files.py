@@ -33,8 +33,10 @@ def report_suffix(name):
     return None if canonical is None else canonical[len(MARKER):-len(".md")]
 
 
-def is_report_file(name):
-    return canonical_report_name(name) is not None
+def is_report_file(name, suffix=None):
+    """True for any report name, or only the report with the requested suffix."""
+    actual = report_suffix(name)
+    return actual is not None and (suffix is None or actual == suffix)
 
 
 def report_path(directory, suffix=""):
