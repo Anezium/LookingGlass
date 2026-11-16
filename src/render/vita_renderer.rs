@@ -184,6 +184,8 @@ pub struct Config {
     pub world_pass_clock: bool,
     /// Opaque world pass from dense records. Same GL calls in the same order. Default off.
     pub world_list_submit: bool,
+    /// Check each immutable world-alpha parameter once per pass. Default off.
+    pub world_alpha_parameter_once: bool,
     /// All world groups in a few shared buffers, not one VBO and IBO per group. Draw order and
     /// vertex bytes stay. Default off.
     pub world_shared_buffers: bool,
@@ -568,7 +570,7 @@ impl Default for Config {
             fx_attached_persist: false,
             mover_advance_reuse: false,
             world_pass_clock: false,
-            world_list_submit: false,
+            world_list_submit: false, world_alpha_parameter_once: false,
             world_shared_buffers: false,
             world_gxm: "off".into(),
             tls_fast: "off".into(),
@@ -1275,6 +1277,7 @@ struct Parameter {
     time_gain: bool,
     /// The `world_list_submit` pass that last checked this parameter, and its payload's class there.
     list_serial: u32,
+    alpha_serial: u64,
     class: u32,
 }
 impl Parameter {
@@ -1305,6 +1308,7 @@ pub struct Renderer {
     parameters: Vec<Parameter>,
     parameter_key: Option<[u32; 51]>,
     parameter_generation: u64,
+    alpha_parameter_serial: u64,
     field_uniforms: [super::uniform_fields::Cache; 2],
     pvs: Pvs,
     water_join: Option<water_join::State>,
@@ -1933,7 +1937,7 @@ impl Renderer {
                 TcMod::Scroll(_) | TcMod::Rotate(_) | TcMod::Stretch(_) | TcMod::Turb(_)));
             let time_gain = recipe.stage.rgb.is_some() || recipe.stage.alpha.is_some();
             Parameter { recipe, bits: u.bits(), uniforms: u, generation: 0, model: [0;16],
-                time: 0_f32.to_bits(), time_uv, time_gain, list_serial: 0, class: 0 }
+                time: 0_f32.to_bits(), time_uv, time_gain, list_serial: 0, alpha_serial: 0, class: 0 }
         }).collect();
         resources.committed = true;
         let list = c.world_list_submit.then(|| world_list::WorldList::new(&groups, &pipelines, &low_pipelines, parameter_count));
@@ -1941,7 +1945,7 @@ impl Renderer {
             list,
             gxm: gxm::State::published(gxm::Mode::parse(&c.world_gxm).unwrap_or(gxm::Mode::Off), groups.len(), &shader::meta()),
             _game_thread: crate::game_thread::GameThread::new(),
-            parameters, parameter_key: None, parameter_generation: 0,
+            parameters, parameter_key: None, parameter_generation: 0, alpha_parameter_serial: 0,
             field_uniforms: std::array::from_fn(|_| super::uniform_fields::Cache::new(shader::meta())),
             alpha_order: Vec::with_capacity(groups.len()),
             prepared: Vec::with_capacity(groups.len()),
@@ -2316,19 +2320,28 @@ impl Renderer {
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 if world_list::negative("world-list-swap-order") && list.items.len() > 12 { list.items.swap(5, 11); }
             } else {
+            let alpha_once = alpha && parameter_reuse && config().world_alpha_parameter_once;
+            if alpha_once {
+                self.alpha_parameter_serial = self.alpha_parameter_serial.wrapping_add(1);
+                if self.alpha_parameter_serial == 0 {
+                    for p in &mut self.parameters { p.alpha_serial = 0; }
+                    self.alpha_parameter_serial = 1;
+                }
+            }
             let mut water_parameters: Vec<usize> = Vec::new();
             for &(depth, id) in &self.alpha_order {
                 let g = &self.groups[id];
                 let liquid = g.liquid;
                 if liquid && !water_parameters.contains(&g.parameter) { water_parameters.push(g.parameter); }
-                let model = if reuse { self.models[id].unwrap() }
+                let already_checked = alpha_once && self.parameters[g.parameter].alpha_serial == self.alpha_parameter_serial;
+                let model = if already_checked { Mat4::IDENTITY } else if reuse { self.models[id].unwrap() }
                     else { model_matrix(&g.recipe, time, transforms).unwrap() };
                 let build_started = if liquid { water_probe::tick() } else { None };
                 let mut built = false;
                 let u = if parameter_reuse {
                     let p = &mut self.parameters[g.parameter];
                     let model_bits = model.to_cols_array().map(f32::to_bits);
-                    if p.generation != self.parameter_generation || p.model != model_bits {
+                    if !already_checked && (p.generation != self.parameter_generation || p.model != model_bits) {
                         p.uniforms = uniforms(&p.recipe, time, eye, model, projection, fullbright, scene.atlas_grid);
                         p.uniforms.atmosphere(&scene.atmosphere, eye);
                         p.bits = p.uniforms.bits();
@@ -2337,9 +2350,15 @@ impl Renderer {
                         p.time = time.to_bits();
                         builds += 1;
                         built = true;
-                    } else if split && p.time != time.to_bits() {
+                    } else if !already_checked && split && p.time != time.to_bits() {
                         p.update_time(time);
                         time_updates += 1;
+                    }
+                    if alpha_once { p.alpha_serial = self.alpha_parameter_serial; }
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    if already_checked {
+                        assert_eq!(p.model, self.models[id].unwrap().to_cols_array().map(f32::to_bits),
+                            "alpha parameters must share the exact model");
                     }
                     None
                 } else {
