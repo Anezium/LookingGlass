@@ -1201,7 +1201,7 @@ impl Model {
     }
     #[allow(clippy::too_many_arguments)]
     fn draw_resolved_pose(
-        &mut self, pose: &[Transform], scales: &[(usize, f32)], _mouth: f32,
+        &mut self, pose: &[Transform], scales: &[f32], _mouth: f32,
         time: f32, alive: bool, transform: Transform, scale: f32,
         fullbright: bool, attachments: bool, visual: &crate::animation_events::VisualState,
         piece: Option<(&str, &str, bool)>,
@@ -2007,7 +2007,7 @@ impl SnapshotRegistry {
 }
 struct AntBodyInput {
     pose: Vec<Transform>,
-    scales: Vec<(usize, f32)>,
+    scales: Vec<f32>,
     visual: crate::animation_events::VisualState,
     transform: Transform,
     scale: f32,
@@ -2037,7 +2037,7 @@ impl ActorInputs {
             + self.ants.iter().map(|a| a.shots.len()*std::mem::size_of::<crate::ant::Bullet>()
                 + a.blasts.len()*std::mem::size_of::<crate::ant::Blast>()
                 + a.body.as_ref().map_or(0, |b| b.pose.len()*std::mem::size_of::<Transform>()
-                    + b.scales.len()*std::mem::size_of::<(usize,f32)>()
+                    + b.scales.len()*std::mem::size_of::<f32>()
                     // Owned visual strings/trees are counted separately below.
                     + b.visual.payload_bytes())).sum::<usize>()
     }
@@ -2120,7 +2120,7 @@ impl Npcs {
             visible &= !actor.guide.as_ref().is_some_and(|g| !g.visible());
             let offset = actor.target()-camera;
             let body_visible = visible && !(offset.length_squared()>3500.*3500.
-                || (offset.length_squared()>200.*200. && offset.normalize().dot(direction)<-0.3));
+                || (offset.length_squared()>200.*200. && offset.normalize().dot(direction)< -0.3));
             let model = &self.models[actor.model];
             let scale = ant.visual_scale(&model.data);
             let body = if body_visible && scale>0. {
