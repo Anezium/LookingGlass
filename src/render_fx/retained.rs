@@ -942,6 +942,35 @@ struct MergeCache {
     destination_ids: Vec<usize>,
     candidates: Vec<(usize, usize, usize, PacketKey, bool)>,
     packing: Vec<PackSource>,
+    // Spare source lists only: at most 64 allocations of capacity <=256 per bank.
+    source_scratch: Vec<Vec<usize>>,
+}
+/// Rebuild exactly the reference's target/source order. Only allocation storage is reused.
+fn rebuild_destinations(cache: &mut MergeCache, reuse: bool) {
+    if reuse {
+        for (_, mut sources) in cache.destinations.drain(..) {
+            if sources.capacity() <= 256 && cache.source_scratch.len() < 64 {
+                sources.clear();
+                cache.source_scratch.push(sources);
+            }
+        }
+    } else { cache.destinations.clear(); }
+    for &(target, source) in &cache.steps {
+        if let Some((_, sources)) = cache.destinations.iter_mut().find(|(t,_)| {
+            crate::sim_maps::count("fx_merge_destination_comparisons", 1); *t == target
+        }) { sources.push(source); }
+        else {
+            let sources = if reuse {
+                let mut sources = if let Some(sources) = cache.source_scratch.pop() {
+                    count("vita_submit_fx_plan_sources_reused", 1);
+                    sources
+                } else { Vec::new() };
+                sources.push(source);
+                sources
+            } else { vec![source] };
+            cache.destinations.push((target, sources));
+        }
+    }
 }
 /// Descriptors borrow immutable CPU arrays until pack_sources has drained both workers.
 /// No Mesh, Rc, texture or renderer handle is present in a worker closure.
@@ -1009,6 +1038,7 @@ fn merge_cached_options<'a>(
     // Packet topology/state is cached. Changed vertex ranges always stream anew.
     // A world packet or actor is a barrier for particle material regrouping.
     let local_reuse = crate::sim_maps::merge_local_reuse();
+    let submit_signature = crate::submit_clock::scope("joint_signature");
     let census_signature = crate::phase_census::span(crate::phase_census::Region::MergeSignature);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let signature_span = crate::frame_profile::span("fx_merge_signature");
@@ -1042,6 +1072,8 @@ fn merge_cached_options<'a>(
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     drop(signature_span);
     drop(census_signature);
+    drop(submit_signature);
+    let submit_plan = crate::submit_clock::scope("joint_plan");
     let census_plan = crate::phase_census::span(crate::phase_census::Region::MergePlan);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     let plan_span = crate::frame_profile::span("fx_merge_plan");
@@ -1093,11 +1125,7 @@ fn merge_cached_options<'a>(
         }
         cache.candidates = candidates;
         cache.previous_signature.clone_from(&signature);
-        cache.destinations.clear();
-        for &(target, source) in &cache.steps {
-            if let Some((_, sources)) = cache.destinations.iter_mut().find(|(t,_)| { crate::sim_maps::count("fx_merge_destination_comparisons", 1); *t == target }) { sources.push(source); }
-            else { cache.destinations.push((target, vec![source])); }
-        }
+        rebuild_destinations(cache, crate::render::vita_renderer::config().submit_fx_plan_scratch);
         if !local_reuse { cache.versions.clear(); cache.outputs.clear(); }
         else {
             cache.versions.retain(|id,_| cache.destinations.iter().any(|(target,_)| target == id));
@@ -1110,6 +1138,8 @@ fn merge_cached_options<'a>(
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     drop(plan_span);
     drop(census_plan);
+    drop(submit_plan);
+    let _submit_copy = crate::submit_clock::scope("joint_copy");
     let _census_copy = crate::phase_census::span(crate::phase_census::Region::MergeCopy);
     crate::phase_census::path_count(crate::phase_census::Counter::MergeDestinations, cache.destinations.len() as u64);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1364,14 +1394,11 @@ pub(crate) fn finish_world(
         gpu.ring_phase = 1;
     }
     gpu.stats = Stats::default();
-    // Field shadows belong to private shader handles: binding world/HUD programs or
-    // changing depth does not write these programs' uniform values. Retention leaves
-    // pipeline/binding fences intact and still compares every field by exact bits.
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
-    if !crate::render::vita_renderer::config().submit_uniform_retain { gpu.field_uniforms.interrupt(); }
-    if let Some(l) = &mut gpu.lite { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
-    if let Some(l) = &mut gpu.corpse_opaque { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
+    gpu.field_uniforms.interrupt();
+    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
+    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
     let (mut groups, mut puffs, camera, direction, dropped) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
@@ -1464,6 +1491,7 @@ pub(crate) fn finish_world(
     let mut recycled = std::mem::take(&mut gpu.recycle_storage); recycled.clear();
     let c = crate::render::vita_renderer::config();
     if c.fx_prepare_cache {
+        let _submit_observe = crate::submit_clock::scope("joint_observe");
         let _observe_leaf=crate::phase_census::span(crate::phase_census::Region::MergeObserve);
         let storage = &mut gpu.preparation[gpu.ring_phase];
         let observe_move = crate::sim_maps::fx_observe_move();
@@ -1593,9 +1621,9 @@ pub(crate) fn finish_world(
     }
     let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     count("vita_joint_alpha_groups", list.len() as u64);
-    if !crate::render::vita_renderer::config().submit_uniform_retain { gpu.field_uniforms.interrupt(); }
-    if let Some(l) = &mut gpu.lite { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
-    if let Some(l) = &mut gpu.corpse_opaque { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
+    gpu.field_uniforms.interrupt();
+    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
+    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
     gpu.submit_cache.interrupt(); // External depth-mask change at the alpha boundary.
     unsafe {
         macroquad::miniquad::gl::glDepthMask(0);
@@ -1614,9 +1642,9 @@ pub(crate) fn finish_world(
                 Source::World(id) => {
                     gpu.uniform_cache.interrupt();
                     gpu.submit_cache.interrupt();
-                    if !crate::render::vita_renderer::config().submit_uniform_retain { gpu.field_uniforms.interrupt(); }
-                    if let Some(l) = &mut gpu.lite { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
-                    if let Some(l) = &mut gpu.corpse_opaque { if !crate::render::vita_renderer::config().submit_uniform_retain { l.fields.interrupt(); } l.uniforms.interrupt(); }
+                    gpu.field_uniforms.interrupt();
+                    if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
+                    if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
                     let start = world_totals.and_then(|t| t.borrow().start());
                     let world_started = MetricInstant::now();
                     // Only immediately adjacent world callbacks share state. An actor, even one
@@ -1656,6 +1684,7 @@ pub(crate) fn finish_world(
     });
     gl_use_default_material();
     drop(pass_leaf);
+    let _submit_recycle = crate::submit_clock::scope("joint_recycle");
     let _leaf=crate::phase_census::span(crate::phase_census::Region::FinishRecycle);
     let _recycle_timer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::FinishRecycle);
     gpu.submit_cache.interrupt();
@@ -1701,6 +1730,32 @@ pub(crate) fn finish_world(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn destination_scratch_preserves_rebuilt_plans_and_bounds_spare_storage() {
+        let mut reference = MergeCache::default();
+        let mut reused = MergeCache::default();
+        reused.steps = vec![(0,1),(0,2)];
+        rebuild_destinations(&mut reused, false);
+        let storage = reused.destinations[0].1.as_ptr();
+        reused.steps = vec![(4,5),(4,6)];
+        rebuild_destinations(&mut reused, true);
+        assert_eq!(reused.destinations[0].1.as_ptr(), storage);
+        assert_eq!(reused.destinations, vec![(4,vec![5,6])]);
+        for frame in 0..200 {
+            let count = if frame % 9 == 0 { 0 } else { (frame * 17) % 400 };
+            let steps: Vec<_> = (0..count).map(|i| ((i * 7 + frame) % 37, i)).collect();
+            reference.steps.clone_from(&steps); reused.steps = steps;
+            rebuild_destinations(&mut reference, false);
+            rebuild_destinations(&mut reused, true);
+            assert_eq!(reference.destinations, reused.destinations);
+            assert!(reused.source_scratch.len() <= 64);
+            assert!(reused.source_scratch.iter().all(|s| s.is_empty() && s.capacity() <= 256));
+        }
+        reused.destinations = (0..100).map(|i| (i, Vec::with_capacity(if i%2==0 {512} else {128}))).collect();
+        reused.steps.clear(); rebuild_destinations(&mut reused, true);
+        assert!(reused.source_scratch.len() <= 64);
+        assert!(reused.source_scratch.iter().all(|s|s.capacity() <= 256));
+    }
     #[test]
     fn world_state_reuse_never_crosses_actor_puff_or_frame_boundaries() {
         let mut run = WorldContinuity::default();

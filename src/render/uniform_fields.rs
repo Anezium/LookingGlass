@@ -47,14 +47,10 @@ impl Cache {
             self.resolved = true;
         }
         if !enabled { ctx.apply_uniforms_from_bytes(values.as_ptr().cast(), values.len() * 4); }
-        let sparse = enabled && crate::render::vita_renderer::config().submit_uniform_sparse;
         let mut traffic = Traffic::default();
         for field in &self.fields {
             let changed = !enabled || !self.valid || field.range.clone()
                 .any(|i| self.previous[i] != values[i].to_bits());
-            if sparse && changed {
-                for i in field.range.clone() { self.previous[i] = values[i].to_bits(); }
-            }
             if field.location != -1 && changed {
                 if enabled { unsafe {
                     let data = values.as_ptr().add(field.range.start);
@@ -71,7 +67,7 @@ impl Cache {
                 traffic.bytes += (field.range.len() * 4) as u64;
             }
         }
-        if enabled && !sparse {
+        if enabled {
             for (dst, src) in self.previous.iter_mut().zip(values) { *dst = src.to_bits(); }
         }
         self.valid = enabled;

@@ -40,10 +40,10 @@ pub enum Clocks {
 pub struct Config {
     /// Buffered main-thread submission clocks; requires spike logging. Default off.
     pub diag_submit_timing: bool,
-    /// Retain private actor-program uniform shadows across world/pass/frame boundaries.
-    pub submit_uniform_retain: bool,
-    /// Update only changed field shadows rather than rewriting the full block per draw.
-    pub submit_uniform_sparse: bool,
+    /// Reuse complete backend state only across uninterrupted adjacent alpha-world callbacks.
+    pub submit_alpha_state: bool,
+    /// Reuse bounded source-list storage when rebuilding exact FX merge plans.
+    pub submit_fx_plan_scratch: bool,
     /// Miniquad timing report cadence in frames; omitted keeps the historical 10, null or 0
     /// disables it. Measurement runs set 0: the report adds 3-5 ms to p95 (r15b).
     pub log_frame_time_every: Option<u32>,
@@ -505,7 +505,7 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
 impl Default for Config {
     fn default() -> Self {
         Self {
-            diag_submit_timing: false, submit_uniform_retain: false, submit_uniform_sparse: false,
+            diag_submit_timing: false, submit_alpha_state: false, submit_fx_plan_scratch: false,
             log_frame_time_every: Some(10),
             sim_trigger_facts_reuse: true,
             sim_hatter_door_candidates: true,
@@ -2100,6 +2100,7 @@ impl Renderer {
         transforms: &[(usize, Vec3, Quat)],
     ) -> super::DrawStats {
         use crate::light_profile::{RenderMetrics, RenderPhase};
+        let _submit_prepare = crate::submit_clock::scope(if alpha {"alpha_prepare"} else {"world_opaque"});
         let phase = if alpha { RenderPhase::WorldAlpha } else { RenderPhase::WorldOpaque };
         crate::render_tail::end();
         let _owner = crate::render_tail::owner(phase);
@@ -2113,6 +2114,7 @@ impl Renderer {
         let _census_world = crate::phase_census::span(if alpha {crate::phase_census::Region::AlphaPrepare} else {crate::phase_census::Region::WorldOpaque});
         water_probe::begin(alpha);
         let probe_draw = water_probe::tick();
+        let submit_visibility = crate::submit_clock::scope("world_visibility");
         let census_visibility = crate::phase_census::span(crate::phase_census::Region::WorldVisibility);
         let visibility_started = MetricInstant::now();
         let visibility_span = crate::frame_profile::span("vita_cluster_frustum");
@@ -2243,6 +2245,7 @@ impl Renderer {
         count("vita_world_visibility_cache_hits", hits);
         drop(visibility_span);
         drop(census_visibility);
+        drop(submit_visibility);
         if !alpha { water_probe::add_n(|f| &mut f.opaque_groups, self.alpha_order.len() as u64); }
         let sort_started = water_probe::tick();
         if alpha && !config().world_alpha {self.alpha_order.clear();}
@@ -2264,6 +2267,7 @@ impl Renderer {
         let probe_parameters = water_probe::tick();
         self.prepared.clear();
         {
+            let _submit_parameters = crate::submit_clock::scope("world_parameters");
             let _census = crate::phase_census::span(crate::phase_census::Region::WorldParameters);
             let parameters_started = MetricInstant::now();
             let _parameters = crate::frame_profile::span("vita_world_parameters");
@@ -2910,7 +2914,7 @@ impl Renderer {
         if self.alpha_fill.active() { self.alpha_fill.interrupt(); }
         let totals = std::cell::RefCell::new(crate::frame_profile::Totals::<3>::profile_only());
         let mut adjacent_state = state_cache::Cache::new();
-        let adjacent = config().world_adjacent_batch;
+        let adjacent = config().world_adjacent_batch || config().submit_alpha_state;
         let result = crate::render_fx::retained::finish_world(&mut gpu, &world, interop_flush, |event| {
             use crate::render_fx::retained::WorldEvent;
             let WorldEvent::Draw(id, continuation) = event else {
@@ -3638,7 +3642,7 @@ mod tests {
     fn round5_keys_are_strict_and_off_in_historical_configs() {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
-            if key.starts_with("diag_skip_") || key.starts_with("submit_uniform_") || key == "diag_submit_timing" || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
+            if key.starts_with("diag_skip_") || matches!(key.as_str(), "submit_alpha_state" | "submit_fx_plan_scratch") || key == "diag_submit_timing" || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
                 || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
@@ -3658,7 +3662,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "diag_submit_timing" | "submit_uniform_retain" | "submit_uniform_sparse" | "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "diag_submit_timing" | "submit_alpha_state" | "submit_fx_plan_scratch" | "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

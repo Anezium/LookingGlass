@@ -2,6 +2,8 @@
 //! may nest: report joint_finish/sky/water as parents/subsets, never sum all columns.
 use std::{cell::RefCell, fmt::Write, time::Instant};
 pub(crate) const NAMES: &[&str] = &[
+    "world_opaque", "world_visibility", "world_parameters", "alpha_prepare",
+    "joint_signature", "joint_plan", "joint_copy", "joint_observe", "joint_recycle",
     "actor_gather", "actor_collect", "actor_publication", "world", "sky", "world_alpha", "water",
     "joint_finish", "joint_sort", "joint_prepare_merge", "present_prep",
     "actor_upload", "actor_uniform_build", "actor_state", "actor_bindings", "actor_uniform_apply", "actor_draw",
