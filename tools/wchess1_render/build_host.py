@@ -17,36 +17,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = Path('/Users/anezium/vita-work/lg-wchess1')
-TARGET = Path('/Users/anezium/vita-j0/cargo-target-host')
+TARGET = Path(os.environ.get('WCHESS_HOST_TARGET_DIR', '/Users/anezium/vita-j0/cargo-target-host'))
+FEATURES = os.environ.get('WCHESS_HOST_FEATURES', 'native_timing,vita_renderer,frame_total_only,sim_maps_probe')
 LABEL = sys.argv[1] if len(sys.argv) > 1 else 'base'
 BIN = ROOT / 'bin' / ('lg-host-' + LABEL)
 RELEASE = SOURCE / 'configs/PL-release.json'
 LOCK = Path('/Users/anezium/vita-j0/mac-timing.lock')
-
-
-def acquire(task):
-    """Wait for the shared host timing lock (cargo's own lock covers the target)."""
-    deadline = time.monotonic() + 3600
-    while True:
-        try:
-            fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError('host timing lock wait exceeded an hour')
-            print('waiting for host timing lock', flush=True)
-            time.sleep(60)
-            continue
-        os.write(fd, json.dumps(dict(pid=os.getpid(), task=task)).encode())
-        os.close(fd)
-        return
-
-
-def release():
-    try:
-        if json.loads(LOCK.read_text()).get('pid') == os.getpid():
-            LOCK.unlink()
-    except (OSError, ValueError):
-        pass
 
 
 def main():
@@ -71,7 +47,7 @@ def main():
         result = subprocess.run([
             'cargo', 'build', '--release', '--offline', '--locked',
             '--message-format=json-render-diagnostics',
-            '--features', 'native_timing,vita_renderer,frame_total_only,sim_maps_probe',
+            '--features', FEATURES,
         ], cwd=SOURCE, env=env, stdout=out, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         raise SystemExit('build failed; see ' + str(log))
@@ -97,7 +73,7 @@ def main():
         raise SystemExit('cargo served a binary older than this build')
     shutil.copy2(built, BIN)
     sha = hashlib.sha256(BIN.read_bytes()).hexdigest()
-    binding = dict(label=LABEL, head=head, dirty=status.strip().splitlines(),
+    binding = dict(label=LABEL, head=head, features=FEATURES, dirty=status.strip().splitlines(),
                    release_sha256=release_sha, binary_sha256=sha,
                    bytes=BIN.stat().st_size, fresh=record['fresh'],
                    artifact=str(built), compiler_log=str(log))
@@ -109,8 +85,4 @@ def main():
 
 
 if __name__ == '__main__':
-    acquire('potears1 sim host build ' + LABEL)
-    try:
-        main()
-    finally:
-        release()
+    main()

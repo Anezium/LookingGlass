@@ -244,8 +244,4 @@ def main():
 
 
 if __name__ == '__main__':
-    acquire('potears1 host oracle ' + ' '.join(sys.argv[1:]))
-    try:
-        main()
-    finally:
-        release()
+    main()

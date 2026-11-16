@@ -2,7 +2,7 @@
 
 Root supplies a backed-up, observed-closed session with its receiver running, the
 packaged SELF installed and the first arm's config installed. Each invocation runs
-exactly one 1200-step wchess1 tape with the 481-frame spike window on, then stops
+exactly one full 1200- or 6375-step tape with its 481-frame spike window on, then stops
 at the kit's pending root observation. Root inspects the printed PNG and runs
 `closed --observed` before the next step; restore stays a separate root command.
 
