@@ -283,7 +283,8 @@ impl LevelArt {
             overflow: self.levels.len() > 1024 || self.levels.len() != i.levels.len(),
         }
     }
-    fn story_pose(&mut self, story: &crate::story::Story, owned: bool) {
+    fn story_pose(&mut self, story: &crate::story::Story) { self.story_pose_dispatch(story, false); }
+    fn story_pose_dispatch(&mut self, story: &crate::story::Story, owned: bool) {
         if let Some(a) = &mut self.school {
             a.first.story_pose(story);
         }
@@ -308,7 +309,11 @@ impl LevelArt {
             art.story_pose(story);
         }
     }
-    fn draw(
+    fn draw(&mut self, i: &Interactions, hints: &crate::cheshire::Hints,
+        atmosphere: &crate::environment::Atmosphere, camera: Vec3, fullbright: bool) {
+        self.draw_dispatch(i, None, hints, atmosphere, camera, fullbright);
+    }
+    fn draw_dispatch(
         &mut self,
         i: &Interactions,
         dispatch: Option<&LevelDispatch>,
@@ -377,7 +382,10 @@ impl LevelArt {
         }
     }
     /// Registered controllers' effects, drawn with the particle pass.
-    fn effects(
+    fn effects(&mut self, i: &Interactions, camera: Vec3, atmosphere: &crate::environment::Atmosphere) {
+        self.effects_dispatch(i, None, camera, atmosphere);
+    }
+    fn effects_dispatch(
         &mut self,
         i: &Interactions,
         dispatch: Option<&LevelDispatch>,
@@ -4625,7 +4633,7 @@ interactions
             let snapshot_gather_start = snapshot_enabled.then(std::time::Instant::now);
             let gather_clock = crate::pass_clock::scope(crate::pass_clock::ACTOR_GATHER);
             let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherStoryPose);
-            level_art.story_pose(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)));
+            level_art.story_pose_dispatch(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)));
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherFrameBegin);
             crate::audio::game_stage(3);
             let frame_index_for_snapshot = frame;
@@ -4641,7 +4649,7 @@ interactions
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherNpcs);
             npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherLevelArt);
-            level_art.draw(&interactions, level_dispatch.as_ref(), &hints, &scene.atmosphere, camera, fullbright);
+            level_art.draw_dispatch(&interactions, level_dispatch.as_ref(), &hints, &scene.atmosphere, camera, fullbright);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherDispatch);
             if let Some(start) = snapshot_gather_start {
                 let (bytes, draws, bones, surfaces) = frame.snapshot_census();
@@ -4724,10 +4732,10 @@ interactions
         {
             let _characters_profile = crate::frame_profile::span("characters_level_art");
             #[cfg(feature="vita_renderer")]
-            if skin_frame.is_none() { level_art.story_pose(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art))); }
+            if skin_frame.is_none() { level_art.story_pose_dispatch(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art))); }
             #[cfg(not(feature="vita_renderer"))]
-            level_art.story_pose(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)));
-            level_art.draw(&interactions, level_dispatch.as_ref(), &hints, &scene.atmosphere, camera, fullbright);
+            level_art.story_pose_dispatch(&story, level_dispatch.as_ref().is_some_and(|d| d.valid(&level_art)));
+            level_art.draw_dispatch(&interactions, level_dispatch.as_ref(), &hints, &scene.atmosphere, camera, fullbright);
         }
         } // world-only diagnostic mask includes all character work
         #[cfg(feature="vita_renderer")]
@@ -4816,7 +4824,7 @@ interactions
                 if let (Some(d), Some(art)) = (&interactions.duchess, &mut level_art.duchess) {
                     art.effects(d, camera, &scene.atmosphere);
                 }
-                level_art.effects(&interactions, level_dispatch.as_ref(), camera, &scene.atmosphere);
+                level_art.effects_dispatch(&interactions, level_dispatch.as_ref(), camera, &scene.atmosphere);
                 }
                 alice.draw_effects(camera, fullbright, if snapshot_enabled {dynamic_input.alice_effects}else{show_alice});
                 if let Some(input)=aim_input.as_ref().filter(|i|aim_pointer.valid_input(i,level_art.snapshot_visit.id())) {aim_pointer.draw_input(input,level_art.snapshot_visit.id(),if active{dt}else{0.},camera,&scene.atmosphere);}
