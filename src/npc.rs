@@ -1185,6 +1185,27 @@ impl Model {
         visual: &crate::animation_events::VisualState,
         piece: Option<(&str, &str, bool)>,
     ) {
+        let d = &self.data;
+        let prepared = crate::character::skinning::prepared::pose(
+            (&d.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
+            local, mouth, &self.bone_scales, || {
+                let mut pose = self.face.pose(&d.skeleton, local, mouth);
+                let scales = if self.bone_scales.is_empty() { Vec::new() }
+                    else { let _census=crate::phase_census::span(crate::phase_census::Region::ActorScalesPalette);
+                        crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.bone_scales) };
+                (pose, scales)
+            },
+        );
+        self.draw_resolved_pose(&prepared.pose, &prepared.scales, mouth, time, alive,
+            transform, scale, fullbright, attachments, visual, piece);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn draw_resolved_pose(
+        &mut self, pose: &[Transform], scales: &[(usize, f32)], _mouth: f32,
+        time: f32, alive: bool, transform: Transform, scale: f32,
+        fullbright: bool, attachments: bool, visual: &crate::animation_events::VisualState,
+        piece: Option<(&str, &str, bool)>,
+    ) {
         let _identity = self.skin_identity.scope_unless_set();
         self.visible.fill(false);
         self.electric_attachments.clear();
@@ -1198,18 +1219,6 @@ impl Model {
             self.data.skeleton.bones.len(), &self.data.meta.attachments, transform, scale,
             self.late_skin_overlays, self.afterimage_normals);
         let d = &self.data;
-        let prepared = crate::character::skinning::prepared::pose(
-            (&d.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
-            local, mouth, &self.bone_scales, || {
-                let mut pose = self.face.pose(&d.skeleton, local, mouth);
-                let scales = if self.bone_scales.is_empty() { Vec::new() }
-                    else { let _census=crate::phase_census::span(crate::phase_census::Region::ActorScalesPalette);
-                        crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.bone_scales) };
-                (pose, scales)
-            },
-        );
-        let pose = &prepared.pose;
-        let scales = &prepared.scales;
         self.face.blink(&mut self.meshes, time, alive);
         let mut removed = Vec::new();
         for (i, surface) in d.skeleton.surfaces.iter().enumerate() {
@@ -1984,7 +1993,58 @@ fn near_cull_skips_only_close_dead_bodies_and_is_off_at_zero() {
     assert!(!near_cull(80., true, || 80.));
     assert!(!near_cull(80., false, || 1.));
 }
+/// Renderer-owned slots. Recreated on every visit/restore, never saved or sent.
+#[derive(Default)]
+struct SnapshotRegistry {
+    generation: u64,
+    slots: Vec<(crate::character::skinning::identity::ActorId, usize)>,
+}
+impl SnapshotRegistry {
+    fn retire(&mut self) {
+        self.generation = crate::character::skinning::identity::next_instance();
+        self.slots.clear();
+    }
+}
+struct AntBodyInput {
+    pose: Vec<Transform>,
+    scales: Vec<(usize, f32)>,
+    visual: crate::animation_events::VisualState,
+    transform: Transform,
+    scale: f32,
+    time: f32,
+    alive: bool,
+    frozen: bool,
+    electric: f32,
+}
+struct AntInput {
+    slot: usize,
+    visible: bool,
+    preserve: bool,
+    corpse: bool,
+    body: Option<AntBodyInput>,
+    shots: Vec<crate::ant::Bullet>,
+    blasts: Vec<crate::ant::Blast>,
+}
+#[derive(Default)]
+struct ActorInputs {
+    generation: u64,
+    ants: Vec<AntInput>,
+    overflow: bool,
+}
+impl ActorInputs {
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.ants.len()*std::mem::size_of::<AntInput>()
+            + self.ants.iter().map(|a| a.shots.len()*std::mem::size_of::<crate::ant::Bullet>()
+                + a.blasts.len()*std::mem::size_of::<crate::ant::Blast>()
+                + a.body.as_ref().map_or(0, |b| b.pose.len()*std::mem::size_of::<Transform>()
+                    + b.scales.len()*std::mem::size_of::<(usize,f32)>()
+                    // Owned visual strings/trees are counted separately below.
+                    + b.visual.payload_bytes())).sum::<usize>()
+    }
+}
 pub struct Npcs {
+    snapshot_registry: SnapshotRegistry,
+    actor_inputs: Option<ActorInputs>,
     // GPU-only state, discarded on restore/level change and never serialized.
     visual_lod: BTreeMap<usize, visual_lod::Cache>,
     attack_fx: std::rc::Rc<attack_fx::Art>,
@@ -2032,6 +2092,62 @@ pub struct Npcs {
     pub greetings: u64,
 }
 impl Npcs {
+    /// Resolve complete Ant inputs at the simulation boundary. All other art
+    /// remains explicitly fenced until its own schema and consumer are converted.
+    pub(crate) fn extract_ants(&mut self, camera: Vec3, direction: Vec3) -> (usize, usize, bool) {
+        const MAX_ACTORS: usize = 1024;
+        const MAX_BONES: usize = 65536;
+        const MAX_EFFECTS: usize = 16384;
+        let changed = self.snapshot_registry.slots.len() != self.actors.len()
+            || self.snapshot_registry.slots.iter().zip(&self.actors)
+                .any(|((id, model), a)| *id != a.skin_identity || *model != a.model);
+        if changed || self.snapshot_registry.generation == 0 {
+            self.snapshot_registry.retire();
+            self.snapshot_registry.slots.extend(self.actors.iter().map(|a| (a.skin_identity,a.model)));
+        }
+        let mut inputs = ActorInputs { generation: self.snapshot_registry.generation, ..Default::default() };
+        let mut bones = 0;
+        let mut effects = 0;
+        for (slot, actor) in self.actors.iter().enumerate() {
+            let Some(ant) = &actor.ant else { continue };
+            let corpse = ant.health <= 0.;
+            let mut visible = ant.enabled && !self.scene_hidden.contains(&actor.spawn.name)
+                && !self.registry_owns(actor) && (!actor.spawn.hidden || actor.story_visible)
+                && !((corpse && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::AntCorpses))
+                    || (!corpse && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors)));
+            #[cfg(feature="vita_renderer")]
+            { visible &= !actor.near_culled(camera, crate::render::vita_renderer::config().actor_near_cull); }
+            visible &= !actor.guide.as_ref().is_some_and(|g| !g.visible());
+            let offset = actor.target()-camera;
+            let body_visible = visible && !(offset.length_squared()>3500.*3500.
+                || (offset.length_squared()>200.*200. && offset.normalize().dot(direction)<-0.3));
+            let model = &self.models[actor.model];
+            let scale = ant.visual_scale(&model.data);
+            let body = if body_visible && scale>0. {
+                let clip = &model.data.clips[ant.clip()];
+                let time = if ant.frozen { ant.time.min(clip.frame_time*5.) } else { ant.time };
+                bones += model.data.skeleton.bones.len();
+                if bones > MAX_BONES { inputs.overflow = true; break; }
+                let local = clip.sample(time, ant.loops());
+                let mut pose = model.face.pose(&model.data.skeleton, &local, 0.);
+                let scales = if model.bone_scales.is_empty() { Vec::new() }
+                    else { crate::skeletal::scale_pose(&model.data.skeleton, &mut pose, &model.bone_scales) };
+                Some(AntBodyInput { pose, scales,
+                    visual: model.data.events.visual(ant.clip(),time,clip.duration(),clip.frame_time,ant.loops()),
+                    transform: Transform { translation: ant.feet, rotation: Quat::from_rotation_z(ant.yaw) },
+                    scale, time: ant.time, alive: !corpse, frozen: ant.frozen, electric: ant.electric })
+            } else { None };
+            effects += ant.shots.len()+ant.blasts.len();
+            if effects>MAX_EFFECTS || inputs.ants.len()>=MAX_ACTORS { inputs.overflow=true; break; }
+            inputs.ants.push(AntInput { slot, visible, corpse, preserve: actor.electric>0., body,
+                shots: if visible { ant.shots.clone() } else { Vec::new() },
+                blasts: if visible { ant.blasts.clone() } else { Vec::new() } });
+        }
+        let result = (inputs.bytes(), inputs.ants.len(), inputs.overflow);
+        self.actor_inputs = Some(inputs);
+        result
+    }
+    pub(crate) fn clear_actor_inputs(&mut self) { self.actor_inputs = None; }
     pub(crate) fn check_school2_ownership(&self) -> Result<()> {
         let diamonds = self
             .actors
@@ -2091,6 +2207,8 @@ impl Npcs {
         }
     }
     pub fn restore(&mut self, s: &Snapshot) -> Result<()> {
+        self.snapshot_registry.retire();
+        self.actor_inputs = None;
         self.visual_lod.clear();
         if let Some(g) = &self.garden { g.validate(s.garden.as_ref())?; }
         self.card_art.clear();
@@ -2568,6 +2686,8 @@ impl Npcs {
         );
         let garden = garden::Logic::load(map,name,&mut actors)?;
         Ok(Self {
+            snapshot_registry: SnapshotRegistry::default(),
+            actor_inputs: None,
             visual_lod: BTreeMap::new(),
             attack_fx: attack_fx::Art::load(assets, &specs)?,
             garden,
@@ -3328,7 +3448,36 @@ impl Npcs {
         let mut lod_counts = [0u64; 5];
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
-        for (id, actor) in self.actors.iter().enumerate() {
+        let inputs = self.actor_inputs.as_ref().filter(|i| !i.overflow
+            && i.generation == self.snapshot_registry.generation);
+        for id in 0..self.actors.len() {
+            if let Some(input) = inputs.and_then(|i| i.ants.iter().find(|a| a.slot == id)) {
+                if !input.visible { continue; }
+                let (identity, model_slot) = self.snapshot_registry.slots[input.slot];
+                let _identity = identity.scope();
+                let _preserve = crate::character::skinning::CullGuard::preserve(input.preserve);
+                if !crate::character::skinning::overlap::gather_only() {
+                    if let Some(props) = &mut self.ant_shots {
+                        for shot in &input.shots { crate::ant::draw_shot(props, shot, fullbright); }
+                        crate::ant::draw_blast_inputs(&input.blasts);
+                        self.material.bind();
+                    }
+                }
+                if let Some(body) = &input.body {
+                    #[cfg(feature="vita_renderer")]
+                    let _corpse = crate::render_fx::corpse_triangles::scope(input.corpse);
+                    let _consumer = crate::character::skinning::CullGuard::publication_reason(body.frozen,crate::phase_census::FROZEN);
+                    let _electric = crate::character::skinning::CullGuard::reason(body.electric>0.,crate::phase_census::ELECTRIC);
+                    self.material.bind();
+                    let model = &mut self.models[model_slot];
+                    model.draw_resolved_pose(&body.pose, &body.scales, 0.,body.time,body.alive,
+                        body.transform,body.scale,fullbright,true,&body.visual,None);
+                    if body.frozen { model.draw_frozen(); }
+                    model.draw_electric(body.electric);
+                }
+                continue;
+            }
+            let actor = &self.actors[id];
             let corpse = actor.ant.as_ref().is_some_and(|a| a.health <= 0.);
             let dead = corpse || actor.resident.as_ref().is_some_and(|p|p.health()<=0.)
                 || actor.clock.as_ref().is_some_and(|p|p.health<=0.) || actor.imp.as_ref().is_some_and(|p|p.health<=0.)

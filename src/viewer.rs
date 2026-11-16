@@ -940,6 +940,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut paused = false;
     let mut pitch = 0.0f32;
     let mut frame = 0;
+    let mut snapshot_frames = 0u64;
+    let mut snapshot_fenced_frames = 0u64;
     let mut dynamic_input = crate::render_snapshot::DynamicInput::default();
     let mut menu = false;
     let mut inventory_menu = false;
@@ -4358,6 +4360,20 @@ interactions
                 frame, selection.bytes(), selection.capacity_bytes(), us, allocations);
             selection
         });
+        if snapshot_enabled {
+            let start = std::time::Instant::now();
+            let scope = crate::kernel_alloc::Scope::begin();
+            let (bytes, ants, overflow) = npcs.extract_ants(camera, (target-camera).normalize_or_zero());
+            let allocations = scope.finish();
+            let us = start.elapsed().as_secs_f64()*1_000_000.;
+            snapshot_frames += 1;
+            // Alice, level art and later 3D consumers still lack complete schemas.
+            // Until all are converted this is a whole-frame serial fence, including
+            // overflow, save/checkpoint success/failure acknowledgement and retry.
+            snapshot_fenced_frames += 1;
+            println!("[lg/snapshot-actors] frame={} bytes={} extraction_us={:.3} allocations={} ants={} overflow={} fenced=1 frames={} fenced_frames={}",
+                frame, bytes, us, allocations, ants, u8::from(overflow), snapshot_frames, snapshot_fenced_frames);
+        } else { npcs.clear_actor_inputs(); }
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         crate::spike_log::render_begin();
@@ -4663,9 +4679,8 @@ interactions
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         crate::spike_log::world_last_read();
-        let snapshot_tail_fenced = !snapshot_enabled || freeze_capture || save_requested || autosave_requested
-            || pending_menu_save.is_some() || pending_menu_newgame.is_some() || finale_checkpoint_requested.is_some()
-            || crate::transition_memory::host_probe();
+        // Every opt-in frame is fenced while any 3D art schema remains incomplete.
+        let snapshot_tail_fenced = true;
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
         #[cfg(feature = "vita_renderer")]
