@@ -29,8 +29,9 @@ No claimed Vita planning cost or fight performance is inferred from host timing.
 
 ## Host proof
 
-Run from this worktree. The tools use the shared host cache and `mac-timing.lock`,
-wait in 60-second intervals for at most 30 minutes, and refuse less than 41 GiB free.
+Run from this worktree. Builds and exact replay proofs do not use `mac-timing.lock` (root release-week rule).
+The host builder APFS-clones the shared cache into this worktree's `target-pilot` to avoid
+Cargo contention; remove that cache at handoff. All builders refuse less than 41 GiB free.
 
 ```sh
 python3 tools/fight-pilot/build-host.py

@@ -6,8 +6,8 @@ SOURCE=Path(__file__).resolve().parents[2]
 DATA=Path('/Users/anezium/vita-work/alice-data/Alice1/bin/base')
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def main():
- p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--out',required=True,type=Path);a=p.parse_args()
- root=a.out.resolve();root.mkdir(parents=True,exist_ok=False);binary=a.binary.resolve()
+ p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--analyze-existing',action='store_true');a=p.parse_args()
+ root=a.out.resolve();root.mkdir(parents=True,exist_ok=a.analyze_existing);binary=a.binary.resolve()
  assert shutil.disk_usage(root).free>=41*2**30
  cfg=json.loads((SOURCE/'configs/PL-rc13-release-play04.json').read_text())
  cfg.update(replay_record='',replay_play='',replay_start='',replay_stop_after=0,replay_check_every=30,replay_state_every=300)
@@ -36,15 +36,18 @@ def main():
    finally:
     if proc.poll() is None:proc.terminate();proc.wait(timeout=15)
   return logfile.read_text(errors='replace')
- recording=run('record')
+ recording=(root/'record/run.log').read_text() if a.analyze_existing else run('record')
+ assert re.search(r'\[lg/replay\] recorded .* reason=menu ',recording),'missing clean recording log'
  assert '[lg/pilot] fight_start' in recording,'did not reach a visible fight'
- playback=run('play')
+ playback=(root/'play/run.log').read_text() if a.analyze_existing else run('play')
  assert re.search(r'\[lg/replay\] done .* diff=0 .*event_mismatches=0 .*result=PASS',playback),'replay not exact'
+ assert json.loads((root/'play/private/vita_renderer.json').read_text())['replay_fight_pilot'] is False
  assert '[lg/pilot] enabled' not in playback,'pilot active during replay'
  path=root/'record/private'/tape
- header=None;pad=None;keys=0;moving=attacks=frames=0;seconds=0.;positions=[]
+ header=None;end=None;pad=None;keys=0;moving=attacks=frames=0;seconds=0.;positions=[]
  for line in path.read_text().splitlines():
   if line.startswith('H '):header=json.loads(line[2:])
+  if line.startswith('END '):end=json.loads(line[4:])
   if line.startswith('C '):positions.append(tuple(map(float,line.split()[5].split(','))))
   if not line.startswith('F '):continue
   fields=line.split();frames+=1;seconds+=struct.unpack('!f',bytes.fromhex(fields[1]))[0]
@@ -52,8 +55,9 @@ def main():
    if f.startswith('pad='):pad=None if f[4:]=='-' else bytes.fromhex(f[4:])
    if f.startswith('kd='):keys=int(f[3:],16)
   moving+=int(pad is not None and pad[:2]!=bytes([128,128]))
-  # Header stores the pinned key table; 341 is miniquad LeftControl.
-  attacks+=int(bool(keys & (1<<header['keys'].index(341))))
+  # Header stores pinned miniquad/X11 codes; LeftControl is 0xffe3.
+  attacks+=int(bool(keys & (1<<header['keys'].index(0xffe3))))
+ assert end and end['reason']=='menu' and end['steps']==frames,'unclean/truncated tape'
  health=[float(v) for v in re.findall(r'boss_health=([0-9.]+)',recording)]
  dealt=sum(max(0,x-y) for x,y in zip(health,health[1:]))
  damage_rows=[tuple(map(float,v)) for v in re.findall(r'damage_taken=([0-9.]+) seconds=([0-9.]+)',recording)]
