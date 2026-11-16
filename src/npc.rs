@@ -2138,7 +2138,10 @@ impl Npcs {
             let Some(ant) = &actor.ant else { continue };
             let corpse = ant.health <= 0.;
             let mut visible = ant.enabled && !self.scene_hidden.contains(&actor.spawn.name)
-                && !self.registry_owns(actor) && (!actor.spawn.hidden || actor.story_visible)
+                && !self.registry_owns(actor) && !self.legacy_owns(actor)
+                && (!(actor.spawn.hidden || (self.owns_pandemonium
+                    && matches!(actor.spawn.name.as_str(), "rope_cat" | "cards_cat")))
+                    || actor.story_visible)
                 && !((corpse && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::AntCorpses))
                     || (!corpse && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors)));
             #[cfg(feature="vita_renderer")]
@@ -2207,6 +2210,25 @@ impl Npcs {
                 .levels
                 .iter()
                 .any(|r| (r.owns_npc)(&actor.spawn.name, &actor.spawn.model))
+    }
+    fn legacy_owns(&self, actor: &Actor) -> bool {
+        (self.owns_duchess
+                && matches!(
+                    actor.spawn.name.as_str(),
+                    "billthelizard" | "mockturtle" | "walkyrocks"
+                ))
+                || (self.owns_ladybugs && actor.spawn.model == "c_ladybug")
+                || (self.owns_pandemonium
+                    && (actor.spawn.model.starts_with("cardguard_")
+                        || matches!(
+                            actor.spawn.name.as_str(),
+                            "airship_gnome"
+                                | "elder_gnome1"
+                                | "leave_gnome"
+                                | "minecart_torchgnome1"
+                                | "minecart_torchgnome2"
+                                | "minecart_torchgnome3"
+                        )))
     }
     pub fn scene_hidden(&mut self, names: &[&str]) {
         self.scene_hidden = names.iter().map(|n| n.to_string()).collect();
@@ -3536,26 +3558,7 @@ impl Npcs {
             if self.registry_owns(actor) {
                 continue;
             }
-            if (self.owns_duchess
-                && matches!(
-                    actor.spawn.name.as_str(),
-                    "billthelizard" | "mockturtle" | "walkyrocks"
-                ))
-                || (self.owns_ladybugs && actor.spawn.model == "c_ladybug")
-                || (self.owns_pandemonium
-                    && (actor.spawn.model.starts_with("cardguard_")
-                        || matches!(
-                            actor.spawn.name.as_str(),
-                            "airship_gnome"
-                                | "elder_gnome1"
-                                | "leave_gnome"
-                                | "minecart_torchgnome1"
-                                | "minecart_torchgnome2"
-                                | "minecart_torchgnome3"
-                        )))
-            {
-                continue;
-            }
+            if self.legacy_owns(actor) { continue; }
             if (actor.spawn.hidden
                 || (self.owns_pandemonium
                     && matches!(actor.spawn.name.as_str(), "rope_cat" | "cards_cat")))
