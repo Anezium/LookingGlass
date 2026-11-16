@@ -262,6 +262,10 @@ impl Art {
     pub fn atmosphere(&self, atmosphere: &Atmosphere, camera: Vec3) {
         *self.view.borrow_mut() = (atmosphere.clone(), camera);
     }
+    pub(crate) fn render_state(&self) -> (bool, Option<f32>) { (self.visible, self.warning) }
+    pub(crate) fn draw_input(&mut self, state: (bool, Option<f32>), pose: &[Transform], body: Transform, scale: f32, time: f32, bright: bool) {
+        self.draw_resolved(state, pose, body, scale, time, bright);
+    }
     pub fn draw(
         &mut self,
         pose: &[Transform],
@@ -270,15 +274,18 @@ impl Art {
         time: f32,
         fullbright: bool,
     ) {
+        self.draw_resolved((self.visible, self.warning), pose, body, scale, time, fullbright);
+    }
+    fn draw_resolved(&mut self, state: (bool, Option<f32>), pose: &[Transform], body: Transform, scale: f32, time: f32, fullbright: bool) {
         let tag = |index: usize| Transform {
             translation: body.point(pose[index].translation * scale),
             rotation: body.rotation * pose[index].rotation,
         };
-        if self.visible {
+        if state.0 {
             self.shell
                 .draw_frame(tag(self.back), scale, fullbright, time, true);
         }
-        if let Some(age) = self.warning {
+        if let Some(age) = state.1 {
             let mouth = tag(self.mouth);
             let (atmosphere, camera) = &*self.view.borrow();
             self.bubbles.draw(

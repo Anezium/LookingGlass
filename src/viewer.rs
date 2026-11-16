@@ -4398,6 +4398,13 @@ interactions
             println!("[lg/snapshot-actors] frame={} bytes={} extraction_us={:.3} allocations={} ants={} overflow={} fenced=1 frames={} fenced_frames={}",
                 frame, bytes, us, allocations, ants, u8::from(overflow), snapshot_frames, snapshot_fenced_frames);
         } else { npcs.clear_actor_inputs(); }
+        if snapshot_enabled {
+            let scope=crate::kernel_alloc::Scope::begin();
+            let start=std::time::Instant::now();
+            let (bytes,overflow)=alice.extract_body(player.feet);
+            let allocations=scope.finish();
+            println!("[lg/snapshot-alice] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
+        } else { alice.clear_body_input(); }
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         if snapshot_enabled {

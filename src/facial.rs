@@ -235,6 +235,17 @@ impl Face {
         self.rig.apply(&mut local, mouth);
         skeleton.global_pose(&local)
     }
+    pub(crate) fn pose_into(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32, scratch: &mut Vec<Transform>, world: &mut Vec<Transform>) {
+        scratch.clear(); scratch.extend_from_slice(local);
+        self.rig.apply(scratch, mouth);
+        world.clear();
+        for (bone, &pose) in skeleton.bones.iter().zip(scratch.iter()) {
+            world.push(match bone.parent {
+                Some(p) => Transform { rotation: (world[p].rotation * pose.rotation).normalize(), translation: world[p].point(pose.translation) },
+                None => pose,
+            });
+        }
+    }
     pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
         if let Some(b) = &self.blink {
             if let Some(mesh) = &mut meshes[b.surface] {

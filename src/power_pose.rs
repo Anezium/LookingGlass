@@ -102,6 +102,10 @@ impl State {
     pub fn interrupt(&mut self) {
         self.performing = false;
     }
+    /// Render values only; animation blending and its local pose stay in simulation.
+    pub(crate) fn render_state(&self) -> Self {
+        Self { form: self.form, age: self.age, performing: self.performing, ..Self::default() }
+    }
     pub fn skin(&self) -> Option<Form> {
         self.form.filter(|_| self.age >= 2.5)
     }

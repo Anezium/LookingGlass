@@ -520,7 +520,40 @@ impl Animator {
     }
 }
 
+/// Single renderer resource slot, qualified by the Character lifetime/restore generation.
+/// No controller, texture, mesh or pointer is carried by this input.
+#[derive(Default)]
+struct BodyInput {
+    visit: u64,
+    pose: Vec<Transform>,
+    transform: Transform,
+    scale: f32,
+    face_time: f32,
+    alive: bool,
+    water_time: f32,
+    water: (bool, Option<f32>),
+    power: crate::power_pose::State,
+    frozen: bool,
+    held: crate::weapons::HeldInput,
+    show_held: bool,
+    attachments: Vec<(usize, usize, f32, f32)>,
+}
+impl BodyInput {
+    fn valid(&self, visit: u64, bones: usize) -> bool {
+        self.visit == visit && self.pose.len() == bones && bones <= 65536 && self.attachments.len() <= 1024
+            && self.attachments.iter().all(|&(_, bone, _, _)| bone < bones)
+    }
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.pose.len()*std::mem::size_of::<Transform>()
+            + self.attachments.len()*std::mem::size_of::<(usize, usize, f32, f32)>()
+            + self.held.bytes()-std::mem::size_of::<crate::weapons::HeldInput>()
+    }
+}
 pub struct Character {
+    snapshot_visit: crate::render_snapshot::RenderVisit,
+    body_input: Option<BodyInput>,
+    body_arena: BodyInput,
+    body_scratch: Vec<Transform>,
     skin_identity: skinning::identity::ActorId,
     pub weapon_notice: Option<&'static str>,
     _material_layers: Vec<std::rc::Rc<crate::render_fx::Surface>>,
@@ -563,6 +596,7 @@ impl Character {
         }
     }
     pub fn restore(&mut self, s: &Snapshot) -> Result<()> {
+        self.retire_body_input();
         s.validate(self.skeleton.bones.len())?;
         self.power_pose.state = s.power.clone();
         self.foot_state = s.feet.clone();
@@ -693,6 +727,7 @@ impl Character {
         let actions = Actions::load(assets, skeleton.bones.len(), &animator.pose)?;
         let visuals = Visuals::load(assets)?;
         Ok(Self {
+            snapshot_visit: Default::default(), body_input: None, body_arena: Default::default(), body_scratch: Vec::new(),
             skin_identity: Default::default(),
             weapon_notice: None,
             foot_rig,
@@ -724,6 +759,7 @@ impl Character {
         })
     }
     pub fn reset(&mut self, player: &Player, yaw: f32) {
+        self.retire_body_input();
         self.water_art.reset();
         self.water_art.sync(player);
         self.power_pose.state.interrupt();
@@ -1112,6 +1148,30 @@ impl Character {
             story.mouth(&["fakeplayer", "player", "alice"])
         };
     }
+    fn retire_body_input(&mut self) {
+        self.clear_body_input(); self.snapshot_visit=Default::default();
+    }
+    pub(crate) fn clear_body_input(&mut self) {
+        if let Some(input)=self.body_input.take() { self.body_arena=input; }
+    }
+    pub(crate) fn extract_body(&mut self, feet: Vec3) -> (usize, bool) {
+        self.clear_body_input();
+        let input=&mut self.body_arena;
+        input.visit=self.snapshot_visit.id();
+        self.face.pose_into(&self.skeleton,&self.actions.pose,self.mouth,&mut self.body_scratch,&mut input.pose);
+        input.transform=Transform { translation:feet+Vec3::Z*self.animator.offset, rotation:Quat::from_rotation_z(self.facing) };
+        input.scale=self.scale; input.face_time=self.face_time; input.alive=self.animator.motion!=Motion::Death;
+        input.water_time=self.animator.time; input.water=self.water_art.render_state();
+        input.power=self.power_pose.state.render_state(); input.frozen=self.visuals.ice_locked();
+        self.acting.render_attachments(&mut input.attachments,&self.skeleton);
+        input.show_held=!matches!(self.animator.motion,Motion::Death|Motion::Rope|Motion::Cart|Motion::Airship)
+            && !self.acting.hide_weapon() && !input.power.performing;
+        self.visuals.extract_held(&self.actions,&self.anchors,&mut input.held);
+        let overflow=!input.valid(self.snapshot_visit.id(),self.skeleton.bones.len());
+        let bytes=input.bytes();
+        if !overflow { self.body_input=Some(std::mem::take(input)); }
+        (bytes,overflow)
+    }
     pub fn draw(&mut self, feet: Vec3, fullbright: bool) {
         self.draw_ghost(feet, fullbright, false);
     }
@@ -1212,6 +1272,81 @@ impl Character {
         }
         gl_use_default_material();
     }
+    fn publish_body(&mut self, input: &BodyInput, fullbright: bool, ghost: bool) {
+        let _identity = self.skin_identity.scope();
+        let pose = &input.pose;
+        let feet = input.transform.translation;
+        self.power_art
+            .skin(&mut self.meshes, &input.power);
+        if input.power.skin().is_none() {
+            self.face.blink(
+                &mut self.meshes,
+                input.face_time,
+                input.alive,
+            );
+        }
+        let mut hidden = Vec::new();
+        for (i, surface) in self.skeleton.surfaces.iter().enumerate() {
+            if input.power.hidden(&surface.name) {
+                hidden.push((i, self.meshes[i].take()));
+            }
+        }
+        let rotation = input.transform.rotation;
+        let _skin_guard = skinning::CullGuard::preserve(input.frozen
+            || input.power.form == Some(crate::power_pose::Form::Rage));
+        let skin_visible = draw_skin(
+            &self.skeleton,
+            &mut self.meshes,
+            &pose,
+            Transform {
+                translation: feet,
+                rotation,
+            },
+            input.scale,
+            fullbright,
+        );
+        if skinning::overlap::gather_only() {
+            for (i, mesh) in hidden { self.meshes[i] = mesh; }
+            return;
+        }
+        if skin_visible {
+            self.visuals.frozen_body_input(&self.meshes, input.frozen);
+            self.power_art.surface_effects(&self.meshes, &input.power);
+        }
+        for (i, mesh) in hidden {
+            self.meshes[i] = mesh;
+        }
+        self.power_art.draw(
+            &input.power,
+            &pose,
+            Transform {
+                translation: feet,
+                rotation,
+            },
+            input.scale,
+            fullbright,
+        );
+        self.material.bind_appearance(Appearance {
+            ghost,
+            ..Default::default()
+        });
+        self.acting.draw_attachments(&input.attachments, pose, input.transform, input.scale, fullbright);
+        if input.alive {
+            self.water_art.draw_input(
+                input.water, &pose,
+                Transform {
+                    translation: feet,
+                    rotation,
+                },
+                input.scale,
+                input.water_time,
+                fullbright,
+            );
+            self.material.bind_appearance(Appearance { ghost, ..Default::default() });
+        }
+        if input.show_held { self.visuals.draw_held_input(&input.held, fullbright); }
+        gl_use_default_material();
+    }
     pub fn draw_ghost(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
         if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors) { return; }
         let material = self.material.clone();
@@ -1220,7 +1355,14 @@ impl Character {
                 ghost,
                 ..Default::default()
             },
-            || self.draw_body(feet, fullbright, ghost),
+            || {
+                if let Some(input) = self.body_input.take() {
+                    if input.valid(self.snapshot_visit.id(), self.skeleton.bones.len()) {
+                        self.publish_body(&input, fullbright, ghost);
+                    } else { self.draw_body(feet, fullbright, ghost); }
+                    self.body_input = Some(input);
+                } else { self.draw_body(feet, fullbright, ghost); }
+            },
         );
         if !skinning::overlap::gather_only() { gl_use_default_material(); }
     }

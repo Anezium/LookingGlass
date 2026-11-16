@@ -1383,6 +1383,19 @@ fn projectile_impact_sound(model: usize, flesh: bool) -> &'static str {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct HeldInput {
+    commands: Vec<(usize, Transform, f32, f32, bool)>,
+    cannon: Option<(Transform, f32, f32)>,
+    wand: Option<(Transform, f32, f32)>,
+    mist: Option<(Transform, f32, f32)>,
+    returning: Option<(Transform, f32)>,
+    eye: Vec3,
+    view_scale: f32,
+}
+impl HeldInput {
+    pub(crate) fn bytes(&self) -> usize { std::mem::size_of::<Self>() + self.commands.len() * std::mem::size_of::<(usize, Transform, f32, f32, bool)>() }
+}
 pub struct Visuals {
     heavy: heavy::State,
     heavy_art: heavy_art::Art,
@@ -1528,6 +1541,9 @@ impl Visuals {
     }
     pub fn stop_ice(&mut self) {
         self.ice.stop();
+    }
+    pub(crate) fn frozen_body_input(&self, meshes: &[Option<Mesh>], frozen: bool) {
+        if frozen { self.ice_art.frozen_body(meshes); }
     }
     pub fn frozen_body(&self, meshes: &[Option<Mesh>]) {
         if self.ice.locked() {
@@ -2323,6 +2339,34 @@ impl Visuals {
             self.blasts.drain(..self.blasts.len() - 64);
         }
     }
+    pub(crate) fn extract_held(&self, actions: &Actions, anchors: &[Transform; 3], out: &mut HeldInput) {
+        out.commands.clear(); out.cannon=None; out.wand=None; out.mist=None; out.returning=None;
+        out.eye=self.eye; out.view_scale=self.view_scale;
+        let (index, scale) = actions.equipment();
+        if index == UNARMED { return; }
+        let size=scale*self.view_scale;
+        if index == 8 && actions.playing.as_ref().is_some_and(|p| p.clip==19 && p.time>=0.05 && p.time<1.10) {
+            out.cannon=Some((anchors[0],size,actions.playing.as_ref().unwrap().time-0.05));
+        } else if index==4 && actions.playing.as_ref().is_some_and(|p|p.clip==12) {
+            out.wand=Some((anchors[0],size,self.ice.clock as f32));
+        } else {
+            let time=if index==9 { actions.playing.as_ref().filter(|p|p.clip==11).map_or(0.,|p|p.time) } else { 0. };
+            out.commands.push((index,anchors[0],size,time,false));
+        }
+        if let Some(p)=&actions.playing {
+            if p.clip==9 && (3.0..13.0).contains(&p.frame()) { out.commands.push((11,anchors[if p.frame()<7. {1}else{2}],1.,0.,false)); }
+            if p.clip==6 && (3.0..7.0).contains(&p.frame()) { out.commands.push((10,anchors[1],1.,0.,false)); }
+        }
+        if [0,3,5].contains(&index) { out.returning=actions.return_age().map(|age|(anchors[0],age)); }
+        if index==4 { out.mist=Some((anchors[0],size,self.ice.clock as f32)); }
+    }
+    pub(crate) fn draw_held_input(&mut self, input: &HeldInput, fullbright: bool) {
+        if let Some((at,size,time))=input.cannon { self.heavy_art.cannon(at,size,time,fullbright); }
+        if let Some((at,size,time))=input.wand { self.ice_art.wand(at,size,time,fullbright); }
+        for &(slot,at,size,time,looping) in &input.commands { self.props[slot].draw_frame(at,size,fullbright,time,looping); }
+        if let Some((at,age))=input.returning { crate::render::depth_read_only(||self.draw_return_input(at,age,input.eye,input.view_scale)); }
+        if let Some((at,size,time))=input.mist { self.ice_art.held_mist(at,size,time,input.eye); }
+    }
     pub fn draw_held(&mut self, actions: &Actions, anchors: &[Transform; 3], fullbright: bool) {
         let (index, scale) = actions.equipment();
         if index == UNARMED {
@@ -2373,7 +2417,7 @@ impl Visuals {
         }
         if [0, 3, 5].contains(&index) {
             if let Some(age) = actions.return_age() {
-                crate::render::depth_read_only(|| self.draw_return(anchors[0], age));
+                crate::render::depth_read_only(|| self.draw_return_input(anchors[0], age, self.eye, self.view_scale));
             }
         }
         if index == 4 {
@@ -2385,8 +2429,8 @@ impl Visuals {
             );
         }
     }
-    fn draw_return(&self, anchor: Transform, age: f32) {
-        let forward = (self.eye - anchor.translation)
+    fn draw_return_input(&self, anchor: Transform, age: f32, eye: Vec3, view_scale: f32) {
+        let forward = (eye - anchor.translation)
             .try_normalize()
             .unwrap_or(Vec3::X);
         let right = forward.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::Y);
@@ -2409,14 +2453,14 @@ impl Visuals {
                     continue;
                 }
                 let center =
-                    anchor.point((direction * (radius - speed * t) + offset) * self.view_scale);
+                    anchor.point((direction * (radius - speed * t) + offset) * view_scale);
                 let alpha = (t / 0.2).min(1.) * (1. - t / 0.6);
                 let color = Color::new(1., 1., 1., alpha).into();
                 let corners = [-right - up, right - up, right + up, -right + up];
                 let uv = [vec2(0., 1.), vec2(1., 1.), vec2(1., 0.), vec2(0., 0.)];
                 for i in [0, 1, 2, 0, 2, 3] {
                     vertices.push(Vertex {
-                        position: center + corners[i] * 2. * self.view_scale,
+                        position: center + corners[i] * 2. * view_scale,
                         uv: uv[i],
                         color,
                         normal: Vec4::ZERO,
