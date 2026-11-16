@@ -24,7 +24,7 @@ pub(crate) struct HudInput {
     pub script_motion: u8,
     pub swimming: bool,
     pub scripted: bool,
-    pub fades: Vec<Color>,
+    pub fades: Fades,
     pub subtitle: Option<Subtitle>,
     pub skip: bool,
     pub level: Vec<HudCommand>,
@@ -36,7 +36,6 @@ impl HudInput {
         std::mem::size_of::<Self>()
             + self.prompt.as_ref().map_or(0, String::capacity)
             + self.objective.as_ref().map_or(0, String::capacity)
-            + self.fades.capacity() * std::mem::size_of::<Color>()
             + self.level.capacity() * std::mem::size_of::<HudCommand>()
             + self.level.iter().map(HudCommand::text_capacity).sum::<usize>()
             + self.subtitle.as_ref().map_or(0, |s| s.text.capacity() + s.speaker.capacity())
@@ -81,4 +80,23 @@ impl<'a> Painter<'a> {
     pub fn label(&mut self, t: &str, x: f32, y: f32, size: f32, c: Color) { self.push(Primitive::Label(t.into(), x, y, size, c)); }
     pub fn rectangle(&mut self, x: f32, y: f32, w: f32, h: f32, c: Color) { self.push(Primitive::Rectangle(x, y, w, h, c)); }
     pub fn boss(&mut self, t: &str, remaining: f32) { self.push(Primitive::Boss(t.into(), remaining)); }
+}
+
+/// Bounded by the eight authored fade sources; no per-frame vector allocation.
+#[derive(Default)]
+pub(crate) struct Fades { colors: [Color; 8], len: usize }
+impl Fades {
+    pub fn push(&mut self, color: Color) { self.colors[self.len] = color; self.len += 1; }
+}
+impl<'a> IntoIterator for &'a Fades {
+    type Item = &'a Color;
+    type IntoIter = std::slice::Iter<'a, Color>;
+    fn into_iter(self) -> Self::IntoIter { self.colors[..self.len].iter() }
+}
+pub(crate) struct TailInput {
+    pub alive: bool,
+    pub feet: Vec3,
+    pub cinema: bool,
+    #[cfg(feature="native_timing")]
+    pub timing: crate::native_timing::State,
 }

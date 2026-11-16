@@ -4222,7 +4222,7 @@ interactions
 
         }}; }
         macro_rules! resolve_fades { () => {{
-            let mut colors = Vec::with_capacity(8);
+            let mut colors = crate::render_snapshot::Fades::default();
                 let cover = camera_handoff.overlay();
                 if cover.a > 0. {
                     colors.push(cover);
@@ -4281,7 +4281,7 @@ interactions
         #[cfg(not(feature="vita_renderer"))]
         let snapshot_enabled = false;
         let extraction_start = snapshot_enabled.then(std::time::Instant::now);
-        if snapshot_enabled { crate::kernel_alloc::begin(); }
+        let snapshot_scope = snapshot_enabled.then(crate::kernel_alloc::Scope::begin);
         let hud_snapshot = snapshot_enabled.then(|| crate::render_snapshot::HudInput {
             prompt: if !world_only && active { resolve_prompt!() } else { None },
             objective: if !world_only { resolve_objective!(get_time() < help_until) } else { None },
@@ -4292,12 +4292,19 @@ interactions
             fades: resolve_fades!(), subtitle: story.subtitle_input(), skip: resolve_skip!(),
             level: { let mut commands = Vec::new(); level_art.hud_input(&interactions, &mut commands); commands },
         });
+        let tail_snapshot = snapshot_enabled.then(|| crate::render_snapshot::TailInput {
+            alive: stats.alive(), feet: player.feet,
+            cinema: skip_id.is_some() || pand_cinematic || scripted_camera.is_some() || story.busy()
+                || interactions.school.as_ref().is_some_and(|s| s.cinematic()),
+            #[cfg(feature="native_timing")]
+            timing: timing_state!(),
+        });
         let captured_save = if snapshot_enabled && (pending_menu_save.is_some()
             || (pending_menu_newgame.is_some() && saves_writable && stats.alive() && !post_game)
             || ((save_requested || autosave_requested) && saves_writable && stats.alive())) {
             Some(game_snapshot!())
         } else { None };
-        let snapshot_allocations = if snapshot_enabled { crate::kernel_alloc::finish() } else { 0 };
+        let snapshot_allocations = snapshot_scope.map_or(0, crate::kernel_alloc::Scope::finish);
         if let (Some(start), Some(snapshot)) = (extraction_start, &hud_snapshot) {
             let us = start.elapsed().as_secs_f64() * 1_000_000.;
             println!("[lg/snapshot] frame={} hud_bytes={} extraction_us={:.3} allocations={} save={}",
@@ -4989,7 +4996,7 @@ interactions
         drop(frame_profile);
         crate::character::skinning_bench_end();
         #[cfg(feature="native_timing")]
-        if let Some(text)=timing.schedule_anchor(timing_state!()) {
+        if let Some(text)=timing.schedule_anchor(tail_snapshot.as_ref().map_or_else(|| timing_state!(), |s| s.timing)) {
             if text.as_str().starts_with("run=") {
                 use crate::native_timing::overlay;
                 draw_rectangle(0.,0.,screen_width(),overlay::BOX_HEIGHT as f32,BLACK);
@@ -5007,12 +5014,11 @@ interactions
             if paused { reasons |= nt::PAUSED; }
             if !focused { reasons |= nt::UNFOCUSED; }
             if menu || inventory_menu || console_input { reasons |= nt::OVERLAY; }
-            if !stats.alive() { reasons |= nt::DEAD; }
+            if !tail_snapshot.as_ref().map_or_else(|| stats.alive(), |s| s.alive) { reasons |= nt::DEAD; }
             if flying { reasons |= nt::FLYING; }
             if !simulate { reasons |= nt::FROZEN_SIM; }
-            if skip_id.is_some() || pand_cinematic || scripted_camera.is_some() || story.busy()
-                || interactions.school.as_ref().is_some_and(|s| s.cinematic()) { reasons |= nt::CINEMA; }
-            r.end(timing_state!(), reasons);
+            if tail_snapshot.as_ref().map_or_else(|| skip_id.is_some() || pand_cinematic || scripted_camera.is_some() || story.busy() || interactions.school.as_ref().is_some_and(|s| s.cinematic()), |s| s.cinema) { reasons |= nt::CINEMA; }
+            r.end(tail_snapshot.as_ref().map_or_else(|| timing_state!(), |s| s.timing), reasons);
         });
         drop(profiler_path);
         drop(census_block);
@@ -5027,8 +5033,7 @@ interactions
         #[cfg(target_os = "vita")]
         {
             crate::frame_phases::mark(3);
-            let gameplay = active && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none()
-                && !story.busy() && !interactions.school.as_ref().is_some_and(|s| s.cinematic());
+            let gameplay = active && !tail_snapshot.as_ref().map_or_else(|| skip_id.is_some() || pand_cinematic || scripted_camera.is_some() || story.busy() || interactions.school.as_ref().is_some_and(|s| s.cinematic()), |s| s.cinema);
             let report_due = crate::frame_profile::end_frame(&maps[current], gameplay);
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.measured(crate::frame_profile::native_timing_measured_id()));
@@ -5036,7 +5041,7 @@ interactions
                 && bench_camera.is_none()
             {
                 bench_camera = Some((camera, target, gameplay_alice));
-                println!("bench: camera frozen map={} feet={:?}", maps[current], player.feet);
+                println!("bench: camera frozen map={} feet={:?}", maps[current], tail_snapshot.as_ref().map_or_else(|| player.feet, |s| s.feet));
             }
             // Report at the next begin_frame, once the wall sample is complete.
             profile_report_due = report_due;
