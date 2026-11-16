@@ -10,6 +10,7 @@ import struct
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 import check_source as c
 
@@ -69,6 +70,17 @@ class PinnedSourceTests(unittest.TestCase):
             self.assertFalse(c.allowed(path), path)
         self.assertTrue(c.audit_data("src/texture.tga", b"\0" * 16))
         self.assertTrue(c.audit_data("src/binary.rs", b"\0binary"))
+
+    def test_rc15_release_play_config_requires_and_then_accepts_an_exact_pin(self):
+        path = "configs/PL-rc15-release-play.json"
+        data = b'{\n  "log_frame_time_every": 0\n}\n'
+        self.assertFalse(c.allowed(path))
+        errors = c.audit_data(path, data)
+        self.assertTrue(any("Not an approved source path" in e for e in errors), errors)
+        with patch.dict(c.PINNED_FILES, {path: hashlib.sha256(data).hexdigest()}):
+            self.assertEqual(c.audit_data(path, data), [])
+            self.assertTrue(any("Unreviewed pinned source content" in e
+                                for e in c.audit_data(path, data + b"\n")))
 
     def test_worktree_audit_is_green(self):
         result = subprocess.run(
