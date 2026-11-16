@@ -148,6 +148,8 @@ pub struct Config {
     pub worker_probe: bool,
     /// Overlap kill-test instrumentation and dedicated CPU1 reservation. Default off.
     pub diag_overlap: bool,
+    /// Serial owned HUD input extraction experiment; no scheduling changes.
+    pub diag_snapshot: bool,
     /// Memory-touching CPU1 load per render frame; zero disables the burn thread.
     pub diag_overlap_burn_ms: u32,
     pub skin_workers: usize,
@@ -562,7 +564,7 @@ impl Default for Config {
             world_parameter_time_split: true,
             uniform_field_cache: true,
             render_draw_timing: false,
-            worker_probe: false, diag_overlap: false, diag_overlap_burn_ms: 0, skin_workers: 2, skin_overlap: true,
+            worker_probe: false, diag_snapshot: false, diag_overlap: false, diag_overlap_burn_ms: 0, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             actor_publication_occurrences: true,
             actor_deferred_layers: true,
@@ -3630,7 +3632,7 @@ mod tests {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
             if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
-                || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" || key == "diag_overlap" {
+                || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" || key == "diag_overlap" || key == "diag_snapshot" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -3649,7 +3651,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "diag_overlap" | "diag_overlap_burn_ms" | "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "diag_snapshot" | "diag_overlap" | "diag_overlap_burn_ms" | "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

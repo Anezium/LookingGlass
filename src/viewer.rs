@@ -4112,6 +4112,188 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             p.gate_particles(&mut steam);
         }
         interactions.place_level_particles(&mut steam);
+        // All resolvers execute without issuing graphics calls. The opt-in runs
+        // them before submission; the control preserves the original HUD phase.
+        macro_rules! resolve_prompt { () => {{
+                use crate::interaction::friendly::{use_owner, UseOwner};
+                let rope = player.rope_prompt(&scene.world);
+                let world_rope = interactions
+                    .pandemonium
+                    .as_ref()
+                    .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
+                let talk =
+                    interactions.conversation(&scene.world, player.eye(), direction, &npcs, &story);
+                let world = interactions.prompt(&scene.world, player.eye(), direction);
+                let owner = use_owner(
+                    story.busy(),
+                    interactions.scripted(),
+                    rope.is_some(),
+                    world_rope,
+                    talk.is_some(),
+                    world.is_some(),
+                );
+                let prompt = match owner {
+                    UseOwner::Talk => talk.map(|c| c.prompt()),
+                    UseOwner::SharedRope => rope.map(str::to_owned),
+                    UseOwner::World => world.map(str::to_owned),
+                    _ => None,
+                };
+            prompt
+        }}; }
+        macro_rules! resolve_objective { ($help:expr) => {{
+            let help = $help;
+            let objective = interactions
+                .school
+                .as_ref()
+                .filter(|_| help)
+                .map(|s| s.objective())
+                .or_else(|| {
+                    interactions
+                        .school2
+                        .as_ref()
+                        .filter(|_| help)
+                        .map(|s| s.quest.objective())
+                })
+                .or_else(|| {
+                    interactions
+                        .pandemonium
+                        .as_ref()
+                        .filter(|_| help)
+                        .map(|p| p.objective())
+                })
+                .or_else(|| {
+                    interactions
+                        .fortress
+                        .as_ref()
+                        .filter(|_| help)
+                        .map(|f| f.objective())
+                })
+                .or_else(|| {
+                    interactions
+                        .pool
+                        .as_ref()
+                        .filter(|_| help)
+                        .map(|p| p.objective())
+                })
+                .or_else(|| interactions.levels_objective().filter(|_| help))
+                .or_else(|| help.then(|| story.objective().map(str::to_owned)).flatten());
+            objective
+        }}; }
+        macro_rules! resolve_skip { () => {{
+interactions
+                    .village
+                    .as_ref()
+                    .is_some_and(|v| v.cinema.active())
+                    || interactions
+                        .fortress
+                        .as_ref()
+                        .is_some_and(|f| f.state.cinema.active())
+                    || interactions
+                        .duchess
+                        .as_ref()
+                        .and_then(|d| d.scene_id())
+                        .is_some()
+                    || interactions
+                        .pandemonium
+                        .as_ref()
+                        .and_then(|p| p.scene_id())
+                        .is_some()
+                    || interactions
+                        .beyond
+                        .as_ref()
+                        .is_some_and(|b| b.scene_id().is_some())
+                    || interactions.scene_id_after(None).is_some()
+                    || interactions
+                        .pool
+                        .as_ref()
+                        .is_some_and(|p| p.scene_id().is_some())
+                    || interactions
+                        .school
+                        .as_ref()
+                        .is_some_and(|s| s.scene_id().is_some())
+
+        }}; }
+        macro_rules! resolve_fades { () => {{
+            let mut colors = Vec::with_capacity(8);
+                let cover = camera_handoff.overlay();
+                if cover.a > 0. {
+                    colors.push(cover);
+                }
+                if let Some(f) = &interactions.fortress {
+                    let (mut color, alpha) = f.cinema.fade(&f.state.cinema);
+                    color.a = alpha;
+                    if alpha > 0. {
+                        colors.push(color);
+                    }
+                }
+                if let Some(p) = &interactions.pandemonium {
+                    let fade = p.fade();
+                    if fade > 0. {
+                        colors.push(Color { a: fade, ..p.fade_color() });
+                    }
+                }
+                if let Some(v) = &interactions.village {
+                    let (mut color, alpha) = v.cinema.fade();
+                    color.a = alpha;
+                    if alpha > 0. {
+                        colors.push(color);
+                    }
+                }
+                if let Some(p) = &interactions.pool {
+                    let (mut color, alpha) = p.fade();
+                    color.a = alpha;
+                    if alpha > 0. {
+                        colors.push(color);
+                    }
+                }
+                if let Some(s) = &interactions.school {
+                    let (mut color, alpha) = s.scene_fade();
+                    color.a = alpha;
+                    if alpha > 0. {
+                        colors.push(color);
+                    }
+                }
+                if let Some(b) = &interactions.beyond {
+                    let (mut color, alpha) = b.scene_fade();
+                    color.a = alpha;
+                    if alpha > 0. {
+                        colors.push(color);
+                    }
+                }
+                if let Some((mut color, alpha)) = interactions.fade_after(None) {
+                    color.a = alpha;
+                    if alpha > 0. {
+                        colors.push(color);
+                    }
+                }
+            colors
+        }}; }
+        #[cfg(feature="vita_renderer")]
+        let snapshot_enabled = crate::render::vita_renderer::config().diag_snapshot;
+        #[cfg(not(feature="vita_renderer"))]
+        let snapshot_enabled = false;
+        let extraction_start = snapshot_enabled.then(std::time::Instant::now);
+        if snapshot_enabled { crate::kernel_alloc::begin(); }
+        let hud_snapshot = snapshot_enabled.then(|| crate::render_snapshot::HudInput {
+            prompt: if !world_only && active { resolve_prompt!() } else { None },
+            objective: if !world_only { resolve_objective!(get_time() < help_until) } else { None },
+            help: get_time() < help_until,
+            stats: stats.hud_input(), breath: player.breath.clone(),
+            immersion: player.immersion.level, script_motion: player.script_motion,
+            swimming: player.swimming, scripted: interactions.scripted(),
+            fades: resolve_fades!(), subtitle: story.subtitle_input(), skip: resolve_skip!(),
+        });
+        let captured_save = if snapshot_enabled && (pending_menu_save.is_some()
+            || (pending_menu_newgame.is_some() && saves_writable && stats.alive() && !post_game)
+            || ((save_requested || autosave_requested) && saves_writable && stats.alive())) {
+            Some(game_snapshot!())
+        } else { None };
+        let snapshot_allocations = if snapshot_enabled { crate::kernel_alloc::finish() } else { 0 };
+        if let (Some(start), Some(snapshot)) = (extraction_start, &hud_snapshot) {
+            let us = start.elapsed().as_secs_f64() * 1_000_000.;
+            println!("[lg/snapshot] frame={} hud_bytes={} extraction_us={:.3} allocations={} save={}",
+                frame, snapshot.bytes(), us, snapshot_allocations, captured_save.is_some());
+        }
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         crate::spike_log::render_begin();
         overlap_probe.begin();
@@ -4438,6 +4620,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_hud");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
+        let hud_stats = hud_snapshot.as_ref().map_or(&stats, |s| &s.stats);
+        let hud_breath = hud_snapshot.as_ref().map_or(&player.breath, |s| &s.breath);
+        let hud_immersion = hud_snapshot.as_ref().map_or_else(|| player.immersion.level, |s| s.immersion);
+        let hud_script_motion = hud_snapshot.as_ref().map_or_else(|| player.script_motion, |s| s.script_motion);
+        let hud_swimming = hud_snapshot.as_ref().map_or_else(|| player.swimming, |s| s.swimming);
+        let hud_scripted = hud_snapshot.as_ref().map_or_else(|| interactions.scripted(), |s| s.scripted);
         let mut hud_path=crate::phase_census::span(crate::phase_census::Region::HudDraw);
         crate::phase_census::count_under(crate::phase_census::Region::Hud,crate::phase_census::Counter::HudDraw,1);
         set_default_camera();
@@ -4452,29 +4640,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 drop(hud_path);
                 let search_path=crate::phase_census::span(crate::phase_census::Region::HudSearch);
                 crate::phase_census::count_under(crate::phase_census::Region::Hud,crate::phase_census::Counter::HudSearch,1);
-                use crate::interaction::friendly::{use_owner, UseOwner};
-                let rope = player.rope_prompt(&scene.world);
-                let world_rope = interactions
-                    .pandemonium
-                    .as_ref()
-                    .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
-                let talk =
-                    interactions.conversation(&scene.world, player.eye(), direction, &npcs, &story);
-                let world = interactions.prompt(&scene.world, player.eye(), direction);
-                let owner = use_owner(
-                    story.busy(),
-                    interactions.scripted(),
-                    rope.is_some(),
-                    world_rope,
-                    talk.is_some(),
-                    world.is_some(),
-                );
-                let prompt = match owner {
-                    UseOwner::Talk => talk.map(|c| c.prompt()),
-                    UseOwner::SharedRope => rope.map(str::to_owned),
-                    UseOwner::World => world.map(str::to_owned),
-                    _ => None,
-                };
+                let prompt = if let Some(snapshot) = &hud_snapshot {
+                    snapshot.prompt.clone()
+                } else { resolve_prompt!() };
                 drop(search_path);
                 hud_path=crate::phase_census::span(crate::phase_census::Region::HudDraw);
                 crate::phase_census::count_under(crate::phase_census::Region::Hud,crate::phase_census::Counter::HudDraw,1);
@@ -4483,50 +4651,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     ui.toast(&prompt, screen_height() - 112.);
                 }
             }
-            let help = get_time() < help_until;
-            if player.immersion.level == 3
-                && stats.alive()
+            let help = hud_snapshot.as_ref().map_or_else(|| get_time() < help_until, |s| s.help);
+            if hud_immersion == 3
+                && hud_stats.alive()
                 && !menu
                 && !inventory_menu
                 && !console_input
             {
-                crate::hud::air(&player.breath, &ui);
+                crate::hud::air(hud_breath, &ui);
             }
-            let objective = interactions
-                .school
-                .as_ref()
-                .filter(|_| help)
-                .map(|s| s.objective())
-                .or_else(|| {
-                    interactions
-                        .school2
-                        .as_ref()
-                        .filter(|_| help)
-                        .map(|s| s.quest.objective())
-                })
-                .or_else(|| {
-                    interactions
-                        .pandemonium
-                        .as_ref()
-                        .filter(|_| help)
-                        .map(|p| p.objective())
-                })
-                .or_else(|| {
-                    interactions
-                        .fortress
-                        .as_ref()
-                        .filter(|_| help)
-                        .map(|f| f.objective())
-                })
-                .or_else(|| {
-                    interactions
-                        .pool
-                        .as_ref()
-                        .filter(|_| help)
-                        .map(|p| p.objective())
-                })
-                .or_else(|| interactions.levels_objective().filter(|_| help))
-                .or_else(|| help.then(|| story.objective().map(str::to_owned)).flatten());
+            let objective = if let Some(snapshot) = &hud_snapshot {
+                snapshot.objective.clone()
+            } else { resolve_objective!(help) };
             let show_details = help || menu;
             if paused && !menu && !inventory_menu && !console_input && !help {
                 ui.paused(&if crate::preferences::Preferences::vita_emulation() {
@@ -4569,9 +4705,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 } else {
                     preferences.controls_text(if flying {
                         "W A S D move   Q / E down / up   Shift faster"
-                    } else if player.script_motion == 1 {
+                    } else if hud_script_motion == 1 {
                         "W A S D swing   Space / Ctrl climb   E release"
-                    } else if player.swimming {
+                    } else if hud_swimming {
                         "W A S D swim   Space rise   Ctrl dive   E use"
                     } else {
                         "W A S D move   Space jump   Shift run   E interact"
@@ -4637,18 +4773,23 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     input.desktop_pad(),
                 );
             }
-            if (!show_details || inventory_menu) && !interactions.scripted() {
+            if (!show_details || inventory_menu) && !hud_scripted {
                 let inventory_path=inventory_menu.then(||crate::phase_census::span(crate::phase_census::Region::HudMenus));
                 if inventory_menu {crate::phase_census::count_under(crate::phase_census::Region::Hud,crate::phase_census::Counter::HudMenus,1);}
-                hud.draw(&stats, &catalog, inventory_menu, &input, &preferences);
+                hud.draw(hud_stats, &catalog, inventory_menu, &input, &preferences);
                 drop(inventory_path);
                 #[cfg(feature = "vita_renderer")]
                 { hud_submitted = true; }
-                if !paused && !inventory_menu && !console_input && stats.alive() {
+                if !paused && !inventory_menu && !console_input && hud_stats.alive() {
                     hud.draw_notice(&input, &preferences);
                 }
             }
-            if !menu && !inventory_menu && !console_input && stats.alive() {
+            if !menu && !inventory_menu && !console_input && hud_stats.alive() {
+                if let Some(snapshot) = &hud_snapshot {
+                    for color in &snapshot.fades {
+                        draw_rectangle(0., 0., screen_width(), screen_height(), *color);
+                    }
+                } else {
                 let cover = camera_handoff.overlay();
                 if cover.a > 0. {
                     draw_rectangle(0., 0., screen_width(), screen_height(), cover);
@@ -4709,44 +4850,19 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         draw_rectangle(0., 0., screen_width(), screen_height(), color);
                     }
                 }
+                }
                 if preferences.subtitles {
-                    story.draw(&input.label(&preferences, "E"), &ui);
+                    if let Some(snapshot) = &hud_snapshot {
+                        if let Some(subtitle) = &snapshot.subtitle {
+                            subtitle.draw(&input.label(&preferences, "E"), &ui);
+                        }
+                    } else { story.draw(&input.label(&preferences, "E"), &ui); }
                 }
                 if let (Some(d), Some(art)) = (&interactions.duchess, &level_art.duchess) {
                     art.hud(d);
                 }
                 level_art.hud(&interactions);
-                if interactions
-                    .village
-                    .as_ref()
-                    .is_some_and(|v| v.cinema.active())
-                    || interactions
-                        .fortress
-                        .as_ref()
-                        .is_some_and(|f| f.state.cinema.active())
-                    || interactions
-                        .duchess
-                        .as_ref()
-                        .and_then(|d| d.scene_id())
-                        .is_some()
-                    || interactions
-                        .pandemonium
-                        .as_ref()
-                        .and_then(|p| p.scene_id())
-                        .is_some()
-                    || interactions
-                        .beyond
-                        .as_ref()
-                        .is_some_and(|b| b.scene_id().is_some())
-                    || interactions.scene_id_after(None).is_some()
-                    || interactions
-                        .pool
-                        .as_ref()
-                        .is_some_and(|p| p.scene_id().is_some())
-                    || interactions
-                        .school
-                        .as_ref()
-                        .is_some_and(|s| s.scene_id().is_some())
+                if hud_snapshot.as_ref().map_or_else(|| resolve_skip!(), |s| s.skip)
                 {
                     skip_scene.draw(
                         &ui,
@@ -4782,14 +4898,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(hud_timer);
         if let Some(slot) = pending_menu_save.take() {
-            escape_menu.message = match store.write_with_preview(slot, &game_snapshot!(), save_frame.preview().as_ref()) {
-                Ok(()) => { retry.remember(game_snapshot!()); played = true; format!("Game saved in {}", slot.title()) }
+            escape_menu.message = match store.write_with_preview(slot, &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()), save_frame.preview().as_ref()) {
+                Ok(()) => { retry.remember(captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!())); played = true; format!("Game saved in {}", slot.title()) }
                 Err(e) => format!("Save failed: {e:#}"),
             };
         }
         if let Some(difficulty) = pending_menu_newgame.take() {
             let saved = if saves_writable && stats.alive() && !post_game {
-                store.write_with_preview(Slot::Auto, &game_snapshot!(), save_frame.preview().as_ref())
+                store.write_with_preview(Slot::Auto, &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()), save_frame.preview().as_ref())
             } else { Ok(()) };
             if !saves_enabled {
                 escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
@@ -4827,11 +4943,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 };
                 match store.write_with_preview(
                     slot,
-                    &game_snapshot!(),
+                    &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()),
                     save_frame.preview().as_ref(),
                 ) {
                     Ok(()) => {
-                        retry.remember(game_snapshot!());
+                        retry.remember(captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()));
                         played = true;
                         hud.announce(if slot == Slot::Quick {
                             "Game saved / F9 to load"

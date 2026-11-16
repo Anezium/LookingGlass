@@ -806,6 +806,13 @@ impl Story {
             _ => None,
         }
     }
+    pub(crate) fn subtitle_input(&self) -> Option<crate::render_snapshot::Subtitle> {
+        let line = self.line()?;
+        Some(crate::render_snapshot::Subtitle {
+            text: line.text.clone(), speaker: speaker(&line.path).to_owned(),
+            elapsed: self.current.as_ref().unwrap().elapsed, duration: line.duration,
+        })
+    }
     pub fn draw(&self, use_key: &str, ui: &crate::ui::Ui) {
         let Some(line) = self.line() else {
             return;

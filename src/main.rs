@@ -66,6 +66,7 @@ mod fortress_route;
 mod frozen;
 mod gym;
 mod hud;
+mod render_snapshot;
 mod input;
 mod interaction;
 mod inventory;
