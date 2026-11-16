@@ -374,10 +374,9 @@ impl LevelArt {
             a.draw(s, fullbright, atmosphere, camera);
         }
         }
-        for (index, art) in self.levels.iter_mut().enumerate() {
+        for (index, (art, slot)) in self.levels.iter_mut().zip(&i.levels).enumerate() {
             if dispatch.is_some_and(|d| !d.registered[index]) { continue; }
             if let Some(a) = art {
-                let slot = &i.levels[index];
                 a.draw(&*slot.ctl, atmosphere, camera, fullbright);
             }
         }
@@ -394,10 +393,9 @@ impl LevelArt {
         atmosphere: &crate::environment::Atmosphere,
     ) {
         let dispatch = dispatch.filter(|d| d.valid(self));
-        for (index, art) in self.levels.iter_mut().enumerate() {
+        for (index, (art, slot)) in self.levels.iter_mut().zip(&i.levels).enumerate() {
             if dispatch.is_some_and(|d| !d.registered[index]) { continue; }
             if let Some(a) = art {
-                let slot = &i.levels[index];
                 a.effects(&*slot.ctl, camera, atmosphere);
             }
         }
