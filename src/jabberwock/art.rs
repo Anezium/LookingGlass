@@ -128,6 +128,7 @@ impl LevelArt for Art {
                 .draw_frame(o.data.points["eye_altar"], 1., bright, s.clock, true);
         }
     }
+    fn snapshot_effects_empty(&self)->bool {false}
     fn effects(
         &mut self,
         l: &dyn LevelController,

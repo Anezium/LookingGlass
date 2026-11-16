@@ -262,3 +262,24 @@ pub(crate) fn handoff_render_begin(visit: &RenderVisit, frame: u64) {
 }
 pub(crate) fn handoff_render_end() { HANDOFF_RENDER_STAMP.with(|stamp| stamp.set(None)); }
 pub(crate) fn handoff_render_stamp() -> Option<(u64, u64)> { HANDOFF_RENDER_STAMP.with(|stamp| stamp.get()) }
+
+/// Ordered numeric wave/impact descriptions. Geometry remains renderer work.
+pub(crate) enum WaveInput { Boojum(Vec3,Vec3,f32), Ladybug(Vec3,f32) }
+impl WaveInput {
+    pub(crate) fn draw(&self) {
+        match *self {
+            Self::Boojum(position,direction,age)=>{
+                let right=direction.cross(Vec3::Z).normalize_or_zero();let up=right.cross(direction);
+                let radius=4.+age*40.;let color=Color::new(0.65,0.85,1.,(1.-age)*0.6);
+                for i in 0..16 {let a=i as f32*std::f32::consts::TAU/16.;let b=(i+1) as f32*std::f32::consts::TAU/16.;
+                    crate::render_fx::line(position+(right*a.cos()+up*a.sin())*radius,position+(right*b.cos()+up*b.sin())*radius,color);}
+            },
+            Self::Ladybug(position,age)=>{
+                let r=12.+age*250.;let color=Color::new(1.,0.65,0.15,(1.-age/0.6)*0.8);
+                for i in 0..24 {let a=i as f32*std::f32::consts::TAU/24.;let c=(i+1) as f32*std::f32::consts::TAU/24.;
+                    crate::render_fx::legacy_line(position+vec3(a.cos(),a.sin(),0.)*r,position+vec3(c.cos(),c.sin(),0.)*r,color);
+                    crate::render_fx::legacy_line(position,position+vec3(a.cos(),a.sin(),((i%5) as f32-2.)*0.4)*r*0.5,color);}
+            }
+        }
+    }
+}

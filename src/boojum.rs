@@ -334,6 +334,9 @@ impl Boojum {
             State::Dead => {}
         }
     }
+    pub(crate) fn extract_waves(&self,out:&mut Vec<crate::render_snapshot::WaveInput>) {
+        out.extend(self.waves.iter().map(|w|crate::render_snapshot::WaveInput::Boojum(w.position,w.direction,w.age)));
+    }
     pub fn draw_waves(&self) {
         for w in &self.waves {
             let right = w.direction.cross(Vec3::Z).normalize_or_zero();

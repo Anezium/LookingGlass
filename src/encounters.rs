@@ -380,6 +380,12 @@ impl Encounters {
         }
         out
     }
+    pub(crate) fn extract_waves(&self,out:&mut Vec<crate::render_snapshot::WaveInput>) {
+        for a in self.actors.iter().filter(|a|a.active && a.enabled) {
+            if let Enemy::Boojum(b)=&a.enemy {b.extract_waves(out);}
+            if let Enemy::Ladybug(b)=&a.enemy {crate::ladybug::Art::extract_effects(b,out);}
+        }
+    }
     pub fn draw_waves(&self) {
         for a in self.actors.iter().filter(|a| a.active && a.enabled) {
             if let Enemy::Boojum(b) = &a.enemy {

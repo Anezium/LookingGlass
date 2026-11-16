@@ -939,6 +939,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut handoff_return = crate::render_snapshot::HandoffReturn::default();
     let mut handoff_minimum_frame = 0u64;
     let mut snapshot_frames = 0u64;
+    let mut wave_input=Vec::new();
     let mut pickup_input=crate::powerups::PickupInput::default();
     let mut snapshot_fenced_frames = 0u64;
     let mut dynamic_input = crate::render_snapshot::DynamicInput::default();
@@ -4419,6 +4420,16 @@ interactions
             let (bytes,overflow)=steam.extract_render_input();let allocations=scope.finish();
             println!("[lg/snapshot-particles] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
         } else {steam.clear_render_input();}
+        let empty_level_effects=snapshot_enabled && interactions.pandemonium.is_none() && interactions.duchess.is_none()
+            && level_art.levels.iter().flatten().all(|a|a.snapshot_effects_empty());
+        let wave_overflow=if snapshot_enabled {
+            let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();wave_input.clear();
+            if let Some(s)=&interactions.encounters{s.extract_waves(&mut wave_input);}
+            if let Some(s)=&interactions.school2{for b in &s.boojums{b.extract_waves(&mut wave_input);}}
+            let overflow=wave_input.len()>16384;if overflow {wave_input.clear();}
+            let allocations=scope.finish();
+            println!("[lg/snapshot-waves] frame={} bytes={} extraction_us={:.3} allocations={} overflow={} level_effects_complete={}",frame,std::mem::size_of_val(&wave_input)+wave_input.len()*std::mem::size_of::<crate::render_snapshot::WaveInput>(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow),u8::from(empty_level_effects));overflow
+        } else {false};
         let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         if snapshot_enabled {
@@ -4655,6 +4666,8 @@ interactions
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
             }
             if !world_only {
+                if snapshot_enabled && !wave_overflow {for wave in &wave_input{wave.draw();}}
+                else {
                 if let Some(s) = &interactions.encounters {
                     s.draw_waves();
                 }
@@ -4663,6 +4676,8 @@ interactions
                         b.draw_waves();
                     }
                 }
+                }
+                if !empty_level_effects {
                 if let (Some(p), Some(art)) = (&interactions.pandemonium, &mut level_art.pandemonium) {
                     art.draw_effects(p, camera, &scene.atmosphere);
                 }
@@ -4670,6 +4685,7 @@ interactions
                     art.effects(d, camera, &scene.atmosphere);
                 }
                 level_art.effects(&interactions, camera, &scene.atmosphere);
+                }
                 alice.draw_effects(camera, fullbright, show_alice);
                 let can_aim = !interactions.level_blocks_weapons() && !flying
                     && !pand_cinematic
