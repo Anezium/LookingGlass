@@ -3590,12 +3590,16 @@ mod tests {
         assert_eq!(played["log_frame_time_every"], 10);
         played["log_frame_time_every"] = 0.into();
         // RC8, RC9 and RC10 deliberately enable the defaults measured on 2026-11-14 and 2026-11-15;
-        // RC12 enables the shared upload. RC13 keeps the model alpha PVS cull off.
+        // RC12 enables the shared upload. RC13 keeps the model alpha PVS cull off. RC15 turns
+        // the three potears1 levers on and the periodic audio statistics off (the release
+        // fallback is what a fresh install without a private config runs).
         for key in ["sim_flight_memo", "ant_corpse_triangle_cull", "ant_corpse_opaque_shader", "water_draw_join",
-                    "actor_consumer_frustum_cull", "fx_unlit_exact", "load_texture_share"] { played[key] = true.into(); }
+                    "actor_consumer_frustum_cull", "fx_unlit_exact", "load_texture_share",
+                    "sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match"] { played[key] = true.into(); }
+        played["audio_stats_log"] = false.into();
         // Compare typed values on both sides: to_value widens f32 (e.g. the
         // played audio gain 0.001), unlike its original JSON decimal spelling.
-        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown and the seven measured defaults may change parsed played values");
+        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown, the seven measured defaults and the four RC15 release keys may change parsed played values");
         let added = raw.as_object().unwrap().iter().filter(|(key, _)| played_raw.get(*key).is_none()).map(|(key, value)| (key.clone(), value.clone())).collect::<serde_json::Map<_, _>>();
         assert_eq!(serde_json::Value::Object(added), serde_json::json!({
             "world_adjacent_batch":false,"exact_blends":false,"sky_cube_finish":false,
@@ -3605,7 +3609,8 @@ mod tests {
             "sky_cube_capture_only":false,"sky_cube_refresh":0,"audio_combat_preload":false,"sky_cube":false,
             "sim_flight_memo":true,"ant_corpse_triangle_cull":true,"ant_corpse_opaque_shader":true,
             "water_draw_join":true,"actor_consumer_frustum_cull":true,"fx_unlit_exact":true,
-            "alpha_model_pvs":false
+            "alpha_model_pvs":false,"sim_snark_move_skip":true,"sim_snark_sight_blocked":true,
+            "sim_pool_name_match":true,"audio_stats_log":false
         }));
         assert_eq!(raw["water_draw_join"], true, "RC9 enables the measured water draw join");
         assert_eq!(raw["actor_consumer_frustum_cull"], true, "RC10 enables the measured consumer cull");
@@ -3697,6 +3702,29 @@ mod tests {
         expected["audio_stats_log"] = false.into();
         assert_eq!(serde_json::to_value(rc15).unwrap(), expected,
                    "RC15 is RC14 with the three potears1 levers on and periodic audio stats off");
+    }
+    #[test]
+    fn rc15_play_config_is_the_release_fallback_plus_the_measurement_keys() {
+        let release = parse_runtime_config(include_bytes!("../../configs/PL-release.json"))
+            .unwrap().0;
+        let play = parse_runtime_config(include_bytes!("../../configs/PL-rc15-release-play.json"))
+            .unwrap().0;
+        play.validate().unwrap();
+        let release_value = serde_json::to_value(release).unwrap();
+        let play_value = serde_json::to_value(play).unwrap();
+        for (key, expected) in [("sim_snark_move_skip", true),
+                                ("sim_snark_sight_blocked", true),
+                                ("sim_pool_name_match", true),
+                                ("audio_stats_log", false)] {
+            assert_eq!(release_value[key], expected,
+                       "a fresh install runs the compiled fallback, which must ship {key}={expected}");
+            assert_eq!(play_value[key], expected, "{key} in the play config");
+        }
+        let mut expected = release_value;
+        expected["replay_play"] = "a2-04.lgtape".into();
+        expected["log_frame_time_every"] = 10.into();
+        assert_eq!(play_value, expected,
+                   "the RC15 play config is the release fallback plus only the two measurement keys");
     }
     #[test]
     fn audio_stats_log_defaults_on_and_is_strict() {
@@ -4421,7 +4449,7 @@ mod tests {
         }
     }
     #[test]
-    fn rc13_release_inputs_are_rc12_with_the_model_alpha_cull_off_and_package_configs_add_only_their_keys() {
+    fn release_inputs_add_only_their_declared_keys_and_packages_add_their_replay_keys() {
         use sha2::{Digest, Sha256};
         let release_bytes = include_bytes!("../../configs/PL-release.json");
         let rc12_bytes = include_bytes!("../../configs/PL-rc12-release.json");
@@ -4431,7 +4459,7 @@ mod tests {
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "c71ce47388460bdb5f4145395fa605bed98c64186a8f5328bba091b7c0d58e01");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "0485a570c7c648971fd06c48320e16b79aefec6aabb3c1d42b761e2d64c1b8fc");
         assert_eq!(format!("{:x}", Sha256::digest(rc12_bytes)), "4b1a1503b00b7826258a54fff0e69e5bdbd3a609f440bc13aaa2926aae9cb9f5");
         assert_eq!(format!("{:x}", Sha256::digest(rc11_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
         assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
@@ -4471,7 +4499,18 @@ mod tests {
         assert_eq!(baseline["world_shared_buffers"], true);
         assert_eq!(baseline["world_parameter_reuse"], true);
         assert_eq!(baseline["water_stage_merge"], "off");
-        assert_eq!(baseline, rc12, "RC13 release keeps every RC12 value; the model alpha cull stays off");
+        let mut rc12_with_rc15 = rc12.clone();
+        for key in ["sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match", "audio_stats_log"] {
+            rc12_with_rc15[key] = baseline[key].clone();
+        }
+        assert_eq!(baseline, rc12_with_rc15, "RC15 release keeps every RC12 value except the four RC15 keys");
+        // The RC13 package predates the four RC15 keys; check it against the RC15 release
+        // with those keys reverted, so its frozen bytes stay the RC13 baseline.
+        let mut rc13_baseline = baseline.clone();
+        for key in ["sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match"] {
+            rc13_baseline[key] = false.into();
+        }
+        rc13_baseline["audio_stats_log"] = true.into();
         let mut variant = rc12.clone();
         variant["load_texture_share"] = rc11["load_texture_share"].clone();
         assert_eq!(variant, rc11, "RC12 release keeps every RC11 value, with sharing on");
@@ -4518,7 +4557,7 @@ mod tests {
             assert_eq!(&variant, against, "{name} changes only its declared keys against its release");
         };
         // The RC13 packages add only their replay keys to the RC13 release.
-        check_package("PL-rc13-release-play04.json", include_bytes!("../../configs/PL-rc13-release-play04.json"), None, &defaults, &baseline);
+        check_package("PL-rc13-release-play04.json", include_bytes!("../../configs/PL-rc13-release-play04.json"), None, &defaults, &rc13_baseline);
         check_package("PL-rc13-wchess1.json", include_bytes!("../../configs/PL-rc13-wchess1.json"), Some("wchess1"), &defaults, &baseline);
         // The RC12 packages keep their frozen bytes and add only their replay keys
         // to the frozen RC12 release.

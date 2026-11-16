@@ -190,5 +190,9 @@
   "water_draw_join": true,
   "actor_consumer_frustum_cull": true,
   "fx_unlit_exact": true,
-  "alpha_model_pvs": false
+  "alpha_model_pvs": false,
+  "sim_snark_move_skip": true,
+  "sim_snark_sight_blocked": true,
+  "sim_pool_name_match": true,
+  "audio_stats_log": false
 }

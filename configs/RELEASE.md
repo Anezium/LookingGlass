@@ -72,6 +72,18 @@ have visible samples; 2,736 pixels differ at frame 165), so it is not a release
 default yet. `PL-rc12-release.json` keeps the RC12 release bytes for comparison;
 the RC13 release keeps every RC12 value.
 
+RC15 turns on the three potears1 simulation levers (`sim_snark_move_skip`,
+`sim_snark_sight_blocked`, `sim_pool_name_match`) and sets `audio_stats_log`
+false. The levers are exact work removals measured on the Vita on 2026-11-16 and
+checked against the RC14 configuration frame by frame on the host; the periodic
+audio statistics are release diagnostics, not gameplay state. Because a fresh
+install has no `ux0:data/alice/private/vita_renderer.json`, this compiled input
+is what those users run: it must carry the same four RC15 values as the shipped
+play config. `PL-rc15-release-play.json` is this fallback plus only the two
+measurement keys (`replay_play=a2-04.lgtape`, `log_frame_time_every=10`), and the
+unit tests enforce that relationship. `PL-rc13-release-play04.json` keeps the
+RC14 package bytes for comparison.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
