@@ -5,7 +5,8 @@ from pathlib import Path
 SOURCE=Path(__file__).resolve().parents[2]
 ROOT=Path('/Users/anezium/vita-j0/plan-2026-11-12/release-week/fight-pilot')
 TARGET=ROOT/'target-vita'
-SEED=Path('/Users/anezium/vita-work/alice-r25-production-native-build/target-vita')
+SEED=Path('/Users/anezium/vita-j0/plan-2026-11-12/rc15/target-rc15/target-vita')
+assert SEED.is_dir(), 'native build cache is absent; choose an existing cache before cloning'
 LIB=Path('/Users/anezium/vita-j0/plan-2026-11-12/rc14/lib-no-prelude')
 assert hashlib.sha256((LIB/'libSceShaccCgExt.a').read_bytes()).hexdigest()=='0e340441f6909c1169b6f33bcd6e0223ffa91c9d7ce5155f3b27eb1bdd0b38a5'
 head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=SOURCE,text=True).strip()
