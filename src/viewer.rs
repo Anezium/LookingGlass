@@ -274,11 +274,17 @@ impl LevelArt {
     }
     fn extract_dispatch(&mut self, i: &Interactions, hints: &crate::cheshire::Hints,
         story: &crate::story::Story) -> LevelDispatch {
+        // Check both shapes before walking or allocating the registry. A rejected
+        // command is fixed size and can only select the serial fenced fallback.
+        if self.levels.len() > 1024 || self.levels.len() != i.levels.len() {
+            return LevelDispatch { visit: self.snapshot_visit.id(), selected: [false; 10],
+                registered: Vec::new(), school_staging: false, cheshire: None, overflow: true };
+        }
         LevelDispatch { visit: self.snapshot_visit.id(),
             selected: [i.fortress.is_some(), i.school.is_some(), i.village.is_some(),
                 i.pandemonium.is_some(), i.beyond.is_some(), i.pool.is_some(), i.gym.is_some(),
                 i.duchess.is_some(), i.school2.is_some(), i.encounters.is_some()],
-            registered: self.levels.iter().zip(&i.levels).map(|(a,_)| a.is_some()).collect(),
+            registered: self.levels.iter().map(Option::is_some).collect(),
             school_staging: i.school.as_ref().is_some_and(|s| s.scene_id() == Some(crate::school::cinema::THEATRE)),
             cheshire: self.cheshire.as_mut().map(|a| a.extract(hints, story, self.snapshot_visit.id())),
             overflow: self.levels.len() > 1024 || self.levels.len() != i.levels.len(),
@@ -374,10 +380,18 @@ impl LevelArt {
             a.draw(s, fullbright, atmosphere, camera);
         }
         }
-        for (index, (art, slot)) in self.levels.iter_mut().zip(&i.levels).enumerate() {
-            if dispatch.is_some_and(|d| !d.registered[index]) { continue; }
-            if let Some(a) = art {
-                a.draw(&*slot.ctl, atmosphere, camera, fullbright);
+        if let Some(command) = dispatch {
+            for (index, present) in command.registered.iter().copied().enumerate() {
+                if !present { continue; }
+                // This family's body remains incomplete and fenced. Only that
+                // family may borrow its controller; absent dispatch is world-free.
+                if let (Some(a), Some(slot)) = (&mut self.levels[index], i.levels.get(index)) {
+                    a.draw(&*slot.ctl, atmosphere, camera, fullbright);
+                }
+            }
+        } else {
+            for (art, slot) in self.levels.iter_mut().zip(&i.levels) {
+                if let Some(a) = art { a.draw(&*slot.ctl, atmosphere, camera, fullbright); }
             }
         }
     }
@@ -393,10 +407,17 @@ impl LevelArt {
         atmosphere: &crate::environment::Atmosphere,
     ) {
         let dispatch = dispatch.filter(|d| d.valid(self));
-        for (index, (art, slot)) in self.levels.iter_mut().zip(&i.levels).enumerate() {
-            if dispatch.is_some_and(|d| !d.registered[index]) { continue; }
-            if let Some(a) = art {
-                a.effects(&*slot.ctl, camera, atmosphere);
+        if let Some(command) = dispatch {
+            for (index, present) in command.registered.iter().copied().enumerate() {
+                if !present { continue; }
+                // Registered effects remain an explicitly fenced family.
+                if let (Some(a), Some(slot)) = (&mut self.levels[index], i.levels.get(index)) {
+                    a.effects(&*slot.ctl, camera, atmosphere);
+                }
+            }
+        } else {
+            for (art, slot) in self.levels.iter_mut().zip(&i.levels) {
+                if let Some(a) = art { a.effects(&*slot.ctl, camera, atmosphere); }
             }
         }
     }

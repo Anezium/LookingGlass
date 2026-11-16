@@ -297,3 +297,36 @@ mod hud_ownership_tests {
         assert!(!HudCommand { ui: u64::MAX, primitive: Primitive::Dialog(Rect::default()) }.valid());
     }
 }
+
+/// Real-resource control: packets exercise each primitive and old identities
+/// cannot resolve after their graphics owner is retired/recreated.
+#[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+pub(crate) async fn hud_resource_check(assets: &mut crate::assets::Assets) -> anyhow::Result<()> {
+    let ui = crate::ui::Ui::load(assets)?;
+    let rect = Rect::new(32., 32., 200., 100.);
+    let mut commands = Vec::new();
+    let mut painter = Painter::new(&ui, &mut commands);
+    painter.dialog(rect); painter.label("Owned HUD", 64., 80., 18., WHITE);
+    painter.rectangle(42., 180., 80., 8., RED); painter.boss("Test boss", 0.5);
+    assert!(commands.iter().all(HudCommand::valid));
+    let mut reference = None;
+    for owned in [false, true] {
+        clear_background(BLACK); set_default_camera();
+        if owned { for command in &commands { command.draw(); } }
+        else {
+            ui.dialog(rect); ui.label("Owned HUD", 64., 80., 18., WHITE);
+            draw_rectangle(42., 180., 80., 8., RED); crate::hud::boss_meter(&ui, "Test boss", 0.5);
+        }
+        let image = get_screen_data();
+        anyhow::ensure!(image.bytes.chunks_exact(4).filter(|p| p[..3] != [0,0,0]).count() > 20, "Empty HUD control");
+        if let Some(expected) = &reference { anyhow::ensure!(*expected == image.bytes, "HUD pixels differ"); }
+        else { reference = Some(image.bytes); }
+        next_frame().await;
+    }
+    let old = ui.resource_id(); drop(ui);
+    anyhow::ensure!(commands.iter().all(|c| !c.valid()), "Retired UI accepted");
+    let replacement = crate::ui::Ui::load(assets)?;
+    anyhow::ensure!(replacement.resource_id() != old && commands.iter().all(|c| !c.valid()), "Recreated UI accepted old command");
+    println!("PASS snapshot HUD: exact primitives, retired/recreated resource rejection");
+    Ok(())
+}

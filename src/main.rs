@@ -561,6 +561,9 @@ fn run() -> Result<()> {
             "--potears1-skip-route-check" => mode = "potears1-skip-route",
             "--potears1-render-check" => mode = "potears1-render",
             "--pool-render-check" => mode = "pool-render",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-hud-resource-check" => mode = "snapshot-hud-resource",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             "--snapshot-cheshire-render-check" => mode = "snapshot-cheshire-render",
             "--snapshot-alice-render-check" => mode = "snapshot-alice-render",
             "--snapshot-handoff-render-check" => mode = "snapshot-handoff-render",
@@ -1273,6 +1276,11 @@ fn run() -> Result<()> {
         return Ok(());
     }
     #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    if mode == "snapshot-hud-resource" {
+        if let Err(e) = render_snapshot::hud_resource_check(&mut assets).await { eprintln!("Snapshot HUD failed: {e:#}"); std::process::exit(1); }
+        return;
+    }
     if mode == "snapshot-cheshire-render" {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = cheshire::snapshot_render_check(&mut assets).await { eprintln!("Snapshot Cheshire failed: {e:#}"); std::process::exit(1); }
