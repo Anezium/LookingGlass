@@ -3,7 +3,8 @@
 
 The bundle carries, for every LGPL library the release links statically:
 
-- the exact source tree at the linked revision, exported from a public clone;
+- the exact source tree at the linked revision, exported from a public clone,
+  without the upstream sample media that is not needed to build or relink;
 - the licence files of that revision;
 - the exact object code and archives the release link read (except the library
   archives themselves and the SDK archives), the exact linker command, the
@@ -326,6 +327,10 @@ def extract_source(source_repo, revision, destination, name):
                 fail("unsafe path in the " + name + " archive: " + member_name)
             if member.issym() or member.islnk():
                 fail("link in the " + name + " archive: " + member_name)
+            if Path(member_name).parts[:1] == ("samples",):
+                # Upstream sample media (Elephants Dream, skyboxes, Bunny, Boing Ball)
+                # is not needed to build or relink the library and is not redistributed.
+                continue
             if name == "SceShaccCgExt" and member_name == "include/sce_intrinsics.h":
                 continue
             archive.extract(member, destination)
@@ -335,6 +340,8 @@ def extract_source(source_repo, revision, destination, name):
                         "--apply", str(destination)], check=True)
         if (destination / "include/sce_intrinsics.h").exists():
             fail("excluded intrinsic header survived source export")
+    if (destination / "samples").exists():
+        fail("excluded sample media survived source export: " + name)
 
 
 def library_member_records(pin, archive_path, objcopy, selection_members=None):
@@ -749,7 +756,8 @@ American McGee's Alice links statically:
 
 - `sources/vitaGL/`, `sources/vitaShaRK/`, `sources/pthread-embedded/`,
   `sources/SceShaccCgExt/` - the complete source tree of each library at the
-  revision the release linked, exported from Git. Each tree carries its
+  revision the release linked, exported from Git, without the upstream
+  `samples/` media that is not needed to build or relink. Each tree carries its
   upstream licence files. SceShaccCgExt omits the optional intrinsic prelude and
   its load (modified 2026-11-15); see `SceShaccCgExt-no-prelude.patch`.
 - `licenses/` - the full licence texts shipped in the package: GPL-3.0,

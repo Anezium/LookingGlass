@@ -1142,7 +1142,7 @@ SceShaccCgExt
 License: LGPL-2.1
 Source: https://github.com/bythos14/SceShaccCgExt at d3c83ef, LGPL-2.1; modified 2026-11-15 to remove the optional intrinsic prelude and its load (tools/patches/SceShaccCgExt-no-prelude.patch)
 Archives in the link: libSceShaccCgExt.a
-Sony intrinsics prelude: resolved. The owner approved shipping SceShaccCgExt without the optional intrinsic prelude on 2026-11-15. The upstream include/sce_intrinsics.h is not built, linked, packaged or offered, and the library no longer loads it. The console comparison of the two library builds is recorded at https://github.com/Anezium/Alice-American-McGees-PSVita-Port/blob/4cc323f5a306220a2c5b76425a452fecac80c573/docs/validation/ALICE-NO-PRELUDE-SLOT-2026-11-15.md: 45 of 45 shader-cache payloads were byte-identical with and without it.
+Sony intrinsics prelude: resolved. The owner approved shipping SceShaccCgExt without the optional intrinsic prelude on 2026-11-15. The upstream include/sce_intrinsics.h is not built, linked, packaged or offered, and the library no longer loads it. The console check of that date recorded 45 of 45 shader-cache payloads byte-identical with and without it; the check is retained in the release evidence, and the public project source is https://github.com/Anezium/LookingGlass.
 Red-black tree: src/shacccg_ext_oop.cpp contains a red-black tree copied from https://github.com/Dynmi/RedBlackTree, whose rbtree.h names its author as Haris Wang (GitHub: Dynmi). The upstream repository has no licence file and its files state no licence. The author and repository are credited in the CREDITS section and in CREDITS.txt; no licence is claimed for that code.
 
 --- licenses/SceShaccCgExt-LICENSE ---

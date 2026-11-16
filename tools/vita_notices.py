@@ -139,10 +139,10 @@ C_LIBRARIES = [
         "notes": ["Sony intrinsics prelude: resolved. The owner approved shipping SceShaccCgExt "
                   "without the optional intrinsic prelude on 2026-11-15. The upstream "
                   "include/sce_intrinsics.h is not built, linked, packaged or offered, and the "
-                  "library no longer loads it. The console comparison of the two library builds "
-                  "is recorded at "
-                  "https://github.com/Anezium/Alice-American-McGees-PSVita-Port/blob/4cc323f5a306220a2c5b76425a452fecac80c573/docs/validation/ALICE-NO-PRELUDE-SLOT-2026-11-15.md"
-                  ": 45 of 45 shader-cache payloads were byte-identical with and without it.",
+                  "library no longer loads it. The console check of that date recorded 45 of 45 "
+                  "shader-cache payloads byte-identical with and without it; the check is "
+                  "retained in the release evidence, and the public project source is "
+                  "https://github.com/Anezium/LookingGlass.",
                   "Red-black tree: " + RBTREE_CREDIT["file"] + " contains a red-black tree copied "
                   "from " + RBTREE_CREDIT["url"] + ", whose rbtree.h names its author as "
                   + RBTREE_CREDIT["author"] + " (GitHub: " + RBTREE_CREDIT["handle"] + "). The "

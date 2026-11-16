@@ -692,5 +692,35 @@ with zipfile.ZipFile(out, 'w') as archive:
             self.assertRegex(checksum, r"^[0-9a-f]{64}$")
 
 
+class SourceExportControls(unittest.TestCase):
+    def test_sample_media_is_excluded_and_library_files_kept(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp) / "repo"
+            (repo / "src").mkdir(parents=True)
+            (repo / "samples" / "video").mkdir(parents=True)
+            (repo / "samples" / "video" / "clip.mp4").write_bytes(b"sample media")
+            (repo / "samples" / "skybox.jpg").write_bytes(b"sample image")
+            (repo / "src" / "lib.c").write_text("int f(void) { return 0; }\n")
+            (repo / "LICENSE").write_text("licence text\n")
+            (repo / "logo.png").write_bytes(b"logo")
+
+            def git(*args):
+                subprocess.run(["git", "-C", str(repo), *args], check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            git("init", "-q")
+            git("add", "-A")
+            git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "-qm", "fixture")
+            head = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+            destination = Path(temp) / "export"
+            BUNDLE.extract_source(repo, head, destination, "vitaGL")
+            self.assertTrue((destination / "src" / "lib.c").is_file())
+            self.assertTrue((destination / "LICENSE").is_file())
+            self.assertTrue((destination / "logo.png").is_file())
+            self.assertFalse((destination / "samples").exists())
+            self.assertFalse(any("samples" in path.parts for path in destination.rglob("*")))
+
+
 if __name__ == "__main__":
     unittest.main()

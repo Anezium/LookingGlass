@@ -102,11 +102,11 @@ source, extension flag and other patches. The source bundle ships the patched
 source and `SceShaccCgExt-no-prelude.patch`, with dated modification notices.
 
 **Status: resolved by the owner on 2026-11-15.** The owner approved shipping
-SceShaccCgExt without the prelude after the console check recorded in
-[ALICE-NO-PRELUDE-SLOT-2026-11-15.md](https://github.com/Anezium/Alice-American-McGees-PSVita-Port/blob/4cc323f5a306220a2c5b76425a452fecac80c573/docs/validation/ALICE-NO-PRELUDE-SLOT-2026-11-15.md):
-45 of 45 shader-cache payloads were byte-identical with and without the
-prelude. This removal does not resolve the other independent licence questions
-identified in the release audit.
+SceShaccCgExt without the prelude after the console check of that date recorded
+45 of 45 shader-cache payloads byte-identical with and without it; the check is
+retained in the release evidence, and the public project source is
+<https://github.com/Anezium/LookingGlass>. This removal does not resolve the
+other independent licence questions identified in the release audit.
 
 ### Licence evidence gaps accepted by the owner (2026-11-15)
 
