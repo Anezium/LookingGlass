@@ -516,3 +516,22 @@ impl State {
         self.pieces.retain(|p| p.age + 1e-8 < p.remove_at);
     }
 }
+
+/// Owned per-effect render values, without simulation owner or graphics resources.
+#[derive(Default)]
+pub(super) struct RenderInput {
+    pub(super) pieces: Vec<Jack>,
+}
+pub(super) struct RenderView<'a> {
+    pub(super) pieces: &'a [Jack],
+}
+impl RenderInput {
+    pub(super) fn heap_bytes(&self)->usize { self.pieces.len()*std::mem::size_of::<Jack>() + self.pieces.iter().map(|p|p.trail.bytes()).sum::<usize>() }
+    pub(super) fn view(&self) -> RenderView<'_> { RenderView {pieces: &self.pieces} }
+}
+impl State {
+    pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {pieces: &self.pieces} }
+    pub(super) fn extract_render(&self, out:&mut RenderInput) {
+        out.pieces.clone_from(&self.pieces);
+    }
+}

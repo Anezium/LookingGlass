@@ -256,9 +256,19 @@ impl Art {
         first_person: bool,
         body: &crate::character::SkinMaterial,
     ) {
+        self.draw_input(s.render_view(), camera, fullbright, first_person, body);
+    }
+    pub(crate) fn draw_input(
+        &mut self,
+        s: super::heavy::RenderView<'_>,
+        camera: Vec3,
+        fullbright: bool,
+        first_person: bool,
+        body: &crate::character::SkinMaterial,
+    ) {
         let mut active = BTreeSet::new();
         let atmosphere = self.atmosphere.borrow();
-        if let Some(c) = &s.charge {
+        if let Some(c) = s.charge {
             let source = Transform {
                 translation: self.view_muzzle.unwrap_or(c.pose.translation),
                 ..c.pose
@@ -373,7 +383,7 @@ impl Art {
                     );
             }
         }
-        for v in &s.volleys {
+        for v in s.volleys.iter() {
             let key = (8, v.id);
             active.insert(key);
             self.emitters
@@ -423,7 +433,7 @@ impl Art {
                     );
             }
         }
-        for p in &s.impacts {
+        for p in s.impacts.iter() {
             let pose = Transform {
                 translation: p.origin,
                 rotation: Quat::from_rotation_arc(Vec3::X, p.normal),

@@ -1074,8 +1074,22 @@ impl Art {
             atmosphere: Default::default(),
         })
     }
+    pub(crate) fn extract_render_pose(&self, input:&mut RenderInput) {
+        input.puppet=input.demon.as_ref().map(|d| {
+            let growth=match d.phase { Phase::Appear=>(d.time/0.7).clamp(0.01,1.), Phase::Vanish=>(1.-d.time/0.5).max(0.), _=>1. };
+            let (clip,looping)=d.clip();
+            (d.kind,self.puppets[d.kind].extract_draw(clip,d.time,looping,
+                Transform {translation:d.feet,rotation:Quat::from_rotation_z(d.yaw)},[1.25,1.5,2.][d.kind]*growth))
+        });
+    }
+    pub(crate) fn draw_owned(&mut self,input:&RenderInput,bright:bool) {
+        if let Some((slot,pose))=&input.puppet { self.puppets[*slot].draw_input(pose,bright); }
+    }
     pub fn draw(&mut self, state: &State, fullbright: bool) {
-        if let Some(d) = &state.demon {
+        self.draw_input(state.render_view(), fullbright);
+    }
+    pub(crate) fn draw_input(&mut self, state: RenderView<'_>, fullbright: bool) {
+        if let Some(d) = state.demon {
             let growth = match d.phase {
                 Phase::Appear => (d.time / 0.7).clamp(0.01, 1.),
                 Phase::Vanish => (1. - d.time / 0.5).max(0.),
@@ -1096,8 +1110,11 @@ impl Art {
         }
     }
     pub fn effects(&mut self, state: &State, camera: Vec3) {
+        self.effects_input(state.render_view(), camera);
+    }
+    pub(crate) fn effects_input(&mut self, state: RenderView<'_>, camera: Vec3) {
         let atmosphere = self.atmosphere.borrow();
-        if let Some(d) = &state.demon {
+        if let Some(d) = state.demon {
             let pose = Transform {
                 translation: d.center(),
                 rotation: Quat::from_rotation_z(d.yaw),
@@ -1141,7 +1158,7 @@ impl Art {
         }
         self.emitters
             .retain(|id, _| state.bolts.iter().any(|p| p.id == *id));
-        for p in &state.bolts {
+        for p in state.bolts.iter() {
             let pose = Transform {
                 translation: p.position,
                 rotation: Quat::from_rotation_arc(Vec3::X, p.velocity.normalize_or_zero()),
@@ -1795,5 +1812,34 @@ mod tests {
                 .is_empty());
         }
         assert!(s.demon.is_none());
+    }
+}
+
+/// Owned per-effect render values, without simulation owner or graphics resources.
+#[derive(Default)]
+pub(crate) struct RenderInput {
+    pub(crate) puppet: Option<(usize,crate::npc::PuppetInput)>,
+    pub(crate) dice: Vec<Die>,
+    pub(crate) demon: Option<Demon>,
+    pub(crate) bolts: Vec<Bolt>,
+    pub(crate) beams: Vec<Beam>,
+}
+pub(crate) struct RenderView<'a> {
+    pub(crate) dice: &'a [Die],
+    pub(crate) demon: &'a Option<Demon>,
+    pub(crate) bolts: &'a [Bolt],
+    pub(crate) beams: &'a [Beam],
+}
+impl RenderInput {
+    pub(crate) fn heap_bytes(&self)->usize { self.dice.len()*std::mem::size_of::<Die>() + self.bolts.len()*std::mem::size_of::<Bolt>() + self.beams.len()*std::mem::size_of::<Beam>() + self.puppet.as_ref().map_or(0,|(_,p)|p.bytes()) }
+    pub(crate) fn view(&self) -> RenderView<'_> { RenderView {dice: &self.dice,demon: &self.demon,bolts: &self.bolts,beams: &self.beams} }
+}
+impl State {
+    pub(crate) fn render_view(&self) -> RenderView<'_> { RenderView {dice: &self.dice,demon: &self.demon,bolts: &self.bolts,beams: &self.beams} }
+    pub(crate) fn extract_render(&self, out:&mut RenderInput) {
+        out.dice.clone_from(&self.dice);
+        out.demon.clone_from(&self.demon);
+        out.bolts.clone_from(&self.bolts);
+        out.beams.clone_from(&self.beams);
     }
 }

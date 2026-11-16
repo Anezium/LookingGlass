@@ -1324,12 +1324,14 @@ fn launch_from_eye(
         (target - origin).try_normalize().unwrap_or(direction),
     )
 }
+#[derive(Clone)]
 struct Spark {
     position: Vec3,
     velocity: Vec3,
     life: f32,
     color: Color,
 }
+#[derive(Clone)]
 struct Trail {
     a: Vec3,
     b: Vec3,
@@ -1395,6 +1397,21 @@ pub(crate) struct HeldInput {
 }
 impl HeldInput {
     pub(crate) fn bytes(&self) -> usize { std::mem::size_of::<Self>() + self.commands.len() * std::mem::size_of::<(usize, Transform, f32, f32, bool)>() }
+}
+#[derive(Default)]
+pub(crate) struct EffectsInput {
+    heavy: heavy::RenderInput, ice: ice::RenderInput, jacks: jacks::RenderInput,
+    bombs: bomb::RenderInput, dice: crate::dice::RenderInput,
+    projectiles: Vec<Projectile>, blasts: Vec<blast::Blast>, sparks: Vec<Spark>,
+    trail: Vec<Trail>, flight_trails: Vec<Trail>, first_person: bool,
+}
+impl EffectsInput {
+    pub(crate) fn bytes(&self)->usize {
+        std::mem::size_of::<Self>() + self.heavy.heap_bytes()+self.ice.heap_bytes()+self.jacks.heap_bytes()+self.bombs.heap_bytes()+self.dice.heap_bytes()
+            + self.projectiles.len()*std::mem::size_of::<Projectile>() + self.projectiles.iter().map(|p|p.trail.bytes()).sum::<usize>()
+            + self.blasts.len()*std::mem::size_of::<blast::Blast>() + self.sparks.len()*std::mem::size_of::<Spark>()
+            + (self.trail.len()+self.flight_trails.len())*std::mem::size_of::<Trail>()
+    }
 }
 pub struct Visuals {
     heavy: heavy::State,
@@ -2480,11 +2497,12 @@ impl Visuals {
         }
     }
     /// Only the local swing ribbon belongs in the weapon pass. World effects stay depth-tested.
-    fn draw_electric_trail(&self) {
+    fn draw_electric_trail(&self) { self.draw_electric_trail_input(&self.trail); }
+    fn draw_electric_trail_input(&self, trail: &[Trail]) {
         let mut vertices = Vec::new();
-        append_swing(&mut vertices, &self.trail, true);
+        append_swing(&mut vertices, trail, true);
         if !vertices.is_empty() {
-            let age = self.trail.first().map_or(0., |t| 0.2 - t.life);
+            let age = trail.first().map_or(0., |t| 0.2 - t.life);
             crate::render_fx::skin_effect(
                 &Mesh { upload_identity: None, surface: Some(self._swipe_surface.clone()),
                     indices: (0..vertices.len() as u16).collect(),
@@ -2510,6 +2528,15 @@ impl Visuals {
             });
         }
         gl_use_default_material();
+    }
+    pub(crate) fn extract_effects(&self, out:&mut EffectsInput) {
+        self.heavy.extract_render(&mut out.heavy); self.ice.extract_render(&mut out.ice);
+        self.jacks.extract_render(&mut out.jacks); self.bombs.extract_render(&mut out.bombs);
+        self.dice.extract_render(&mut out.dice);
+        self.dice_art.extract_render_pose(&mut out.dice);
+        out.projectiles.clone_from(&self.projectiles); out.blasts.clone_from(&self.blasts);
+        out.sparks.clone_from(&self.sparks); out.trail.clone_from(&self.trail); out.flight_trails.clone_from(&self.flight_trails);
+        out.first_person=self.first_person;
     }
     pub fn draw_effects(
         &mut self,
@@ -2622,6 +2649,124 @@ impl Visuals {
             (&self.bombs, &self.bomb_data),
             &self.projectiles,
             &self.blasts,
+            camera,
+            fullbright,
+            body_material,
+        );
+        gl_use_default_material();
+    }
+    pub(crate) fn draw_effects_input(
+        &mut self,
+        input: &EffectsInput,
+        body_material: &crate::character::SkinMaterial,
+        camera: Vec3,
+        fullbright: bool,
+        show_trail: bool,
+    ) {
+        body_material.bind();
+        self.dice_art.draw_owned(&input.dice, fullbright);
+        self.dice_art.effects_input(input.dice.view(), camera);
+        body_material.bind();
+        for d in &input.dice.dice {
+            self.props[12].draw(
+                Transform {
+                    translation: d.position,
+                    rotation: Quat::from_rotation_x(d.age * 7.)
+                        * Quat::from_rotation_y(d.age * 11.),
+                },
+                1.,
+                fullbright,
+            );
+        }
+        for p in &input.projectiles {
+            self.props[p.prop()].draw_frame(p.pose(), 1., fullbright, p.age as f32, true);
+        }
+        gl_use_material(&self.effect_material);
+        let mut vertices = Vec::new();
+        let mut triangle = |points: [Vec3; 3], color: Color| {
+            for position in points {
+                vertices.push(Vertex {
+                    position,
+                    uv: Vec2::splat(0.5),
+                    color: color.into(),
+                    normal: Vec4::ZERO,
+                });
+            }
+        };
+        for beam in &input.dice.beams {
+            let side = (camera - beam.b).cross(beam.b - beam.a).normalize_or_zero()
+                * if beam.kind == 1 { 4. } else { 1.8 };
+            let color = if beam.kind == 1 {
+                Color::new(1., 0.3, 0.06, 0.8)
+            } else {
+                Color::new(0.55, 0.75, 1., 0.9)
+            };
+            triangle([beam.a - side, beam.b - side, beam.b + side], color);
+            triangle([beam.a - side, beam.b + side, beam.a + side], color);
+        }
+        for t in &input.flight_trails {
+            let right = (camera - t.b).cross(t.b - t.a).normalize_or_zero() * 0.8;
+            let c = Color::new(t.color.r, t.color.g, t.color.b, t.life / 0.18 * 0.6);
+            triangle([t.a - right, t.b - right, t.b + right], c);
+            triangle([t.a - right, t.b + right, t.a + right], c);
+        }
+        if show_trail {
+            self.draw_electric_trail_input(&input.trail);
+            append_swing(&mut vertices, &input.trail, false);
+        }
+        for s in &input.sparks {
+            let right = (camera - s.position).cross(Vec3::Z).normalize_or_zero() * 2.5;
+            let up = Vec3::Z * 2.5;
+            let proximity = ((camera.distance(s.position) - 8.) / 32.).clamp(0., 1.);
+            let c = Color::new(
+                s.color.r,
+                s.color.g,
+                s.color.b,
+                (s.life * 3.).min(1.) * proximity,
+            );
+            let corners = [
+                s.position - right - up,
+                s.position + right - up,
+                s.position + right + up,
+                s.position - right + up,
+            ];
+            let uv = [vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)];
+            for i in [0, 1, 2, 0, 2, 3] {
+                vertices.push(Vertex {
+                    position: corners[i],
+                    uv: uv[i],
+                    color: c.into(),
+                    normal: Vec4::ZERO,
+                });
+            }
+        }
+        if !vertices.is_empty() {
+            crate::sim_maps::count("imm_weapon_mesh", 1);
+            draw_mesh(&Mesh { upload_identity: None, surface: None,
+                indices: (0..vertices.len() as u16).collect(),
+                vertices,
+                texture: Some(self.spark_texture.clone()),
+            });
+        }
+        self.heavy_art.draw_input(
+            input.heavy.view(),
+            camera,
+            fullbright,
+            input.first_person,
+            body_material,
+        );
+        self.ice_art.draw_input(
+            input.ice.view(),
+            &self.ice_data,
+            input.jacks.view(),
+            camera,
+            fullbright,
+            body_material,
+        );
+        self.bomb_art.draw_input(
+            (input.bombs.view(), &self.bomb_data),
+            &input.projectiles,
+            &input.blasts,
             camera,
             fullbright,
             body_material,

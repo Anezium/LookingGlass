@@ -749,3 +749,34 @@ mod tests {
         );
     }
 }
+
+/// Owned per-effect render values, without simulation owner or graphics resources.
+#[derive(Default)]
+pub(super) struct RenderInput {
+    pub(super) charge: Option<Charge>,
+    pub(super) volleys: Vec<Volley>,
+    pub(super) shots: Vec<Shot>,
+    pub(super) impacts: Vec<Impact>,
+    pub(super) ignition: Option<(f64, Transform)>,
+}
+pub(super) struct RenderView<'a> {
+    pub(super) charge: &'a Option<Charge>,
+    pub(super) volleys: &'a [Volley],
+    pub(super) shots: &'a [Shot],
+    pub(super) impacts: &'a [Impact],
+    pub(super) ignition: Option<(f64, Transform)>,
+}
+impl RenderInput {
+    pub(super) fn heap_bytes(&self)->usize { self.volleys.len()*std::mem::size_of::<Volley>() + self.shots.len()*std::mem::size_of::<Shot>() + self.impacts.len()*std::mem::size_of::<Impact>() + self.charge.as_ref().map_or(0,|c|c.trail.bytes()) + self.shots.iter().map(|s|s.trail.bytes()).sum::<usize>() + self.impacts.iter().filter_map(|i|i.source.as_ref()).map(|s|s.trail.bytes()).sum::<usize>() }
+    pub(super) fn view(&self) -> RenderView<'_> { RenderView {charge: &self.charge,volleys: &self.volleys,shots: &self.shots,impacts: &self.impacts,ignition: self.ignition} }
+}
+impl State {
+    pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {charge: &self.charge,volleys: &self.volleys,shots: &self.shots,impacts: &self.impacts,ignition: self.ignition} }
+    pub(super) fn extract_render(&self, out:&mut RenderInput) {
+        out.charge.clone_from(&self.charge);
+        out.volleys.clone_from(&self.volleys);
+        out.shots.clone_from(&self.shots);
+        out.impacts.clone_from(&self.impacts);
+        out.ignition=self.ignition;
+    }
+}

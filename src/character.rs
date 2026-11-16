@@ -533,6 +533,7 @@ struct BodyInput {
     water: (bool, Option<f32>),
     power: crate::power_pose::State,
     frozen: bool,
+    effects: crate::weapons::EffectsInput,
     held: crate::weapons::HeldInput,
     show_held: bool,
     attachments: Vec<(usize, usize, f32, f32)>,
@@ -541,7 +542,7 @@ impl Default for BodyInput {
     fn default() -> Self {
         Self { visit:0, pose:Vec::new(), transform:Transform {translation:Vec3::ZERO,rotation:Quat::IDENTITY},
             scale:1., face_time:0., alive:true, water_time:0., water:(false,None), power:Default::default(), frozen:false,
-            held:Default::default(), show_held:false, attachments:Vec::new() }
+            effects:Default::default(), held:Default::default(), show_held:false, attachments:Vec::new() }
     }
 }
 impl BodyInput {
@@ -552,6 +553,7 @@ impl BodyInput {
     fn bytes(&self) -> usize {
         std::mem::size_of::<Self>() + self.pose.len()*std::mem::size_of::<Transform>()
             + self.attachments.len()*std::mem::size_of::<(usize, usize, f32, f32)>()
+            + self.effects.bytes()-std::mem::size_of::<crate::weapons::EffectsInput>()
             + self.held.bytes()-std::mem::size_of::<crate::weapons::HeldInput>()
     }
 }
@@ -1173,6 +1175,7 @@ impl Character {
         input.show_held=!matches!(self.animator.motion,Motion::Death|Motion::Rope|Motion::Cart|Motion::Airship)
             && !self.acting.hide_weapon() && !input.power.performing;
         self.visuals.extract_held(&self.actions,&self.anchors,&mut input.held);
+        self.visuals.extract_effects(&mut input.effects);
         let overflow=!input.valid(self.snapshot_visit.id(),self.skeleton.bones.len());
         let bytes=input.bytes();
         if !overflow { self.body_input=Some(std::mem::take(input)); }
@@ -1373,8 +1376,12 @@ impl Character {
         if !skinning::overlap::gather_only() { gl_use_default_material(); }
     }
     pub fn draw_effects(&mut self, camera: Vec3, fullbright: bool, show_alice: bool) {
-        self.visuals
-            .draw_effects(&self.material, camera, fullbright, show_alice);
+        if let Some(input)=self.body_input.take() {
+            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) {
+                self.visuals.draw_effects_input(&input.effects,&self.material,camera,fullbright,show_alice);
+            } else { self.visuals.draw_effects(&self.material,camera,fullbright,show_alice); }
+            self.body_input=Some(input);
+        } else { self.visuals.draw_effects(&self.material,camera,fullbright,show_alice); }
     }
     pub fn draw_first_person(&mut self, fullbright: bool) {
         self.material.bind();

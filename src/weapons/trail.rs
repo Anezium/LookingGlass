@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct Trail(Vec<(f32, Transform)>);
 impl Trail {
+    pub(super) fn bytes(&self)->usize { self.0.len()*std::mem::size_of::<(f32,Transform)>() }
     pub fn record(&mut self, age: f32, pose: Transform) {
         if self.0.last().is_some_and(|p| age <= p.0) {
             return;
