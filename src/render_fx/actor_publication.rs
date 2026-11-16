@@ -21,7 +21,7 @@ const MEMORY_ROWS:usize=36;
 #[derive(Default)]
 struct Bank { key:Option<Key>, last_used:u64, slots:[Option<Rc<prepared::Geometry>>;2], cpu:[Option<Arc<SkinSurface>>;2], mode:[Option<PublicationMode>;2], epoch:[u64;2], instance:[Option<u64>;2],
     /// The live vertex array whose UVs each slot last copied, and the edit count of that copy.
-    uv_live:[usize;2], uv_edits:[u32;2] }
+    uv_live:[usize;2], uv_edits:[u32;2], completed:[bool;2] }
 /// A non-simple recipe whose raw skin a worker writes into `bank`/`slot`. Its layers are
 /// built on the game thread after a successful drain, into the placeholder at `group`.
 /// Game-thread only: the Rc<Surface> and captured draw values never reach a worker.
@@ -29,6 +29,7 @@ struct Deferred { group:usize, bank:usize, slot:usize, surface:Rc<Surface>, came
 #[derive(Default)]
 struct State {
     banks:Vec<Bank>, lookup:HashMap<Key,usize>,
+    reusable_output:usize,
     #[cfg(test)] cursor:usize,
     /// (group, bank, slot, vertex charge) of direct groups that receive geometry in complete().
     pending:Vec<(usize,usize,usize,usize)>,
@@ -219,6 +220,7 @@ impl State {
     }
     fn reserve_at(&mut self,mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,alpha:PublicationMode,id:usize)->Option<(usize,usize,usize)> {
         let s=self;
+        s.reusable_output=0;
         if id>=SURFACES {return None;}
         while s.banks.len()<=id {s.banks.push(Bank::default());}
         let slot=s.banks[id].slots.iter().enumerate().position(|(slot,g)|
@@ -265,10 +267,17 @@ impl State {
             g.mesh.indices.clear();g.mesh.indices.reserve_exact(cpu.indices.len());
             g.mesh.indices.extend_from_slice(&cpu.indices);
         }
-        if !(unchanged && bank.instance[slot]==Some(instance) && same_cpu && same_uv && bank.mode[slot]==Some(alpha) && bank.epoch[slot]==s.epoch.saturating_sub(1)) {g.advance_owned(!same_cpu);}
+        let identical=unchanged && bank.instance[slot]==Some(instance) && same_cpu && same_uv
+            && bank.mode[slot]==Some(alpha) && bank.epoch[slot]==s.epoch.saturating_sub(1);
+        if !identical {g.advance_owned(!same_cpu);}
+        // A reservation is not proof that the previous worker finished successfully.
+        // Reuse only a completed slot whose storage is exclusively owned here.
+        let reusable=identical && bank.completed[slot] && !resized && alpha!=PublicationMode::Raw;
+        bank.completed[slot]=false;
         bank.instance[slot]=Some(instance);
         bank.mode[slot]=Some(alpha);bank.epoch[slot]=s.epoch;
         let output=g.mesh.vertices.as_mut_ptr() as usize;
+        if reusable {s.reusable_output=output;}
         let new_capacity=(g.vertices.capacity(),g.indices.capacity());
         bank.cpu[slot]=Some(cpu);
         s.vertex_capacity=s.vertex_capacity-old_capacity.0+new_capacity.0;
@@ -807,6 +816,9 @@ pub(crate) fn hold() {
         std::mem::swap(&mut s.held,&mut f.groups);std::mem::swap(&mut s.held_puffs,&mut f.world_puffs);
     }); s.staged_held=true; });
 }
+pub(crate) fn reusable_output(output:usize)->bool {
+    STATE.with(|s|s.borrow().reusable_output==output && output!=0)
+}
 pub(crate) fn complete() {
     STATE.with(|s| {
         let mut s=s.borrow_mut();
@@ -862,6 +874,7 @@ pub(crate) fn complete() {
         emit_memory_phase(&mut s, "deferred-built", pre_clear_deferred);
         for n in 0..s.pending.len() {
             let (group,bank,slot,_)=s.pending[n];
+            s.banks[bank].completed[slot]=true;
             let geometry=s.banks[bank].slots[slot].as_ref().unwrap().clone();
             for pass in &mut s.held[group].passes {pass.geometry=Some(geometry.clone());}
         }

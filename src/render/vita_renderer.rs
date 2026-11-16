@@ -186,6 +186,8 @@ pub struct Config {
     pub world_list_submit: bool,
     /// Check each immutable world-alpha parameter once per pass. Default off.
     pub world_alpha_parameter_once: bool,
+    /// Reuse a completed owned skin output with identical numeric inputs. Default off.
+    pub actor_skin_output_reuse: bool,
     /// All world groups in a few shared buffers, not one VBO and IBO per group. Draw order and
     /// vertex bytes stay. Default off.
     pub world_shared_buffers: bool,
@@ -570,7 +572,7 @@ impl Default for Config {
             fx_attached_persist: false,
             mover_advance_reuse: false,
             world_pass_clock: false,
-            world_list_submit: false, world_alpha_parameter_once: false,
+            world_list_submit: false, world_alpha_parameter_once: false, actor_skin_output_reuse: false,
             world_shared_buffers: false,
             world_gxm: "off".into(),
             tls_fast: "off".into(),

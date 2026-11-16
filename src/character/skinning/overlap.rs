@@ -192,6 +192,7 @@ struct Surface {
     revision: Revision,
     output: usize,
     mode: PublicationMode,
+    reuse_output: bool,
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     oracle:usize,
 }
@@ -340,6 +341,7 @@ unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[
             let census_time=std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").map(|_|std::time::Instant::now());
             for surface_id in draw.surfaces.clone() {
                 let surface = &*surfaces.add(surface_id);
+                if surface.reuse_output { continue; }
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
                 let output = std::slice::from_raw_parts_mut(
                     if surface.output == 0 { (task_output as *mut Vertex).add(surface.vertices.start) }
@@ -578,7 +580,7 @@ impl Store {
                     else {self.previous.get(i.surfaces.len())
                         .filter(|old| old.vertices == vertices && Arc::ptr_eq(&old.cpu, &cpu))
                         .map_or_else(Revision::new, |old| old.revision)};
-                i.surfaces.push(Surface { mesh, vertices, cpu, revision, output: 0, mode: PublicationMode::Opaque255,
+                i.surfaces.push(Surface { mesh, vertices, cpu, revision, output: 0, mode: PublicationMode::Opaque255, reuse_output: false,
                     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))] oracle:usize::MAX });
             }
         }
@@ -651,6 +653,8 @@ impl Store {
                 self.output_len = vertices.end;
                 i.surfaces.push(Surface { mesh:mesh_id, vertices, cpu:surface.cpu(),
                     revision:Revision {identity:0,vertices:[0;2]}, output, mode,
+                    reuse_output: crate::render::vita_renderer::config().actor_skin_output_reuse
+                        && crate::render_fx::actor_publication::reusable_output(output),
                     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))] oracle });
                 #[cfg(feature="actor_diagnostics")]
                 crate::render_fx::retained::count("actor_direct_surfaces",1);
