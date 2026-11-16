@@ -2032,6 +2032,11 @@ struct ActorInputs {
     overflow: bool,
 }
 impl ActorInputs {
+    fn valid_for(&self, registry: &SnapshotRegistry) -> bool {
+        !self.overflow && self.generation != 0 && self.generation == registry.generation
+            && self.ants.iter().all(|a| a.slot < registry.slots.len())
+            && self.ants.windows(2).all(|a| a[0].slot < a[1].slot)
+    }
     fn bytes(&self) -> usize {
         std::mem::size_of::<Self>() + self.ants.len()*std::mem::size_of::<AntInput>()
             + self.ants.iter().map(|a| a.shots.len()*std::mem::size_of::<crate::ant::Bullet>()
@@ -3448,8 +3453,7 @@ impl Npcs {
         let mut lod_counts = [0u64; 5];
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
-        let inputs = self.actor_inputs.as_ref().filter(|i| !i.overflow
-            && i.generation == self.snapshot_registry.generation);
+        let inputs = self.actor_inputs.as_ref().filter(|i| i.valid_for(&self.snapshot_registry));
         for id in 0..self.actors.len() {
             if let Some(input) = inputs.and_then(|i| i.ants.iter().find(|a| a.slot == id)) {
                 if !input.visible { continue; }
@@ -4508,6 +4512,34 @@ impl crate::cards::Rig for Data {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actor_snapshot_rejects_stale_overflow_and_malformed_batches() {
+        let mut registry = SnapshotRegistry::default();
+        registry.retire();
+        registry.slots.push((Default::default(), 0));
+        let ant = || AntInput { slot: 0, visible: true, preserve: false, corpse: false,
+            body: None, shots: Vec::new(), blasts: Vec::new() };
+        let mut input = ActorInputs { generation: registry.generation, ants: vec![ant()], overflow: false };
+        assert!(input.valid_for(&registry));
+        input.overflow = true;
+        assert!(!input.valid_for(&registry));
+        input.overflow = false;
+        input.ants[0].slot = 1;
+        assert!(!input.valid_for(&registry));
+        input.ants[0].slot = 0;
+        input.ants.push(ant());
+        assert!(!input.valid_for(&registry));
+        input.ants.pop();
+        let previous = registry.generation;
+        registry.retire();
+        registry.slots.push((Default::default(),0));
+        assert_ne!(previous, registry.generation);
+        assert!(!input.valid_for(&registry));
+        // A failed restore retires first too: stale inputs cannot become valid
+        // merely because the replacement visit has the same slot count/model.
+        registry.retire();
+        assert!(!input.valid_for(&registry));
+    }
     #[test]
     fn maze_precache_upgrade_accepts_only_the_reviewed_hidden_flag() {
         let mut current = actor().spawn;
