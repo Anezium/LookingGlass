@@ -130,7 +130,6 @@ impl State {
         (dt - self.stopped).max(0.)
     }
     pub fn clear_effects(&mut self) {
-        self.snapshot_visit=Default::default();
         self.rage = 0.;
         self.tea = 0.;
         self.stopped = 0.;
@@ -315,6 +314,7 @@ impl Art {
         }
     }
     pub fn clear_effects(&mut self) {
+        self.snapshot_visit=Default::default();
         self.collected.clear();
         self.essence.clear_effects();
         for e in self.collection_fx.values() { e.clear(); }
