@@ -266,6 +266,23 @@ impl LevelArt for Art {
             }
         }
     }
+    fn hud_input(&self, l: &dyn LevelController, out: &mut Vec<crate::render_snapshot::HudCommand>) {
+        let mut paint = crate::render_snapshot::Painter::new(&self.ui, out);
+        let o = l.downcast_ref::<Encounter>().unwrap();
+        if matches!(o.saved.phase, Phase::Arrival | Phase::Cat | Phase::Fight) {
+            let w = 240.;
+            let x = (screen_width() - w) * 0.5;
+            paint.dialog(Rect::new(x - 22., 12., w + 44., 48.));
+            paint.label("MAD HATTER", x, 30., 18., WHITE);
+            paint.rectangle(
+                x,
+                39.,
+                w * (o.saved.boss.health / 2600.),
+                7.,
+                Color::new(0.65, 0.16, 0.21, 0.9),
+            );
+        }
+        }
     fn hud(&mut self, l: &dyn LevelController) {
         let o = l.downcast_ref::<Encounter>().unwrap();
         if matches!(o.saved.phase, Phase::Arrival | Phase::Cat | Phase::Fight) {

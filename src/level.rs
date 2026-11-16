@@ -432,6 +432,7 @@ pub trait LevelArt: Any {
     /// Effects drawn with the particle pass, after the world.
     fn effects(&mut self, _level: &dyn LevelController, _camera: Vec3, _atmosphere: &Atmosphere) {}
     fn hud(&mut self, _level: &dyn LevelController) {}
+    fn hud_input(&self, _level: &dyn LevelController, _out: &mut Vec<crate::render_snapshot::HudCommand>) {}
     /// The pose Alice resumes from when a scene hands control back.
     fn handoff_pose(&self) -> Option<&ActorPose> {
         None

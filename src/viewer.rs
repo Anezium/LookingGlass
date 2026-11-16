@@ -349,6 +349,14 @@ impl LevelArt {
             }
         }
     }
+    fn hud_input(&self, i: &Interactions, out: &mut Vec<crate::render_snapshot::HudCommand>) {
+        if let (Some(art), Some(d)) = (&self.duchess, &i.duchess) {
+            art.hud_input(d, out);
+        }
+        for (art, slot) in self.levels.iter().zip(&i.levels) {
+            if let Some(a) = art { a.hud_input(&*slot.ctl, out); }
+        }
+    }
     /// Registered controllers' HUD elements.
     fn hud(&mut self, i: &Interactions) {
         for (art, slot) in self.levels.iter_mut().zip(&i.levels) {
@@ -4282,6 +4290,7 @@ interactions
             immersion: player.immersion.level, script_motion: player.script_motion,
             swimming: player.swimming, scripted: interactions.scripted(),
             fades: resolve_fades!(), subtitle: story.subtitle_input(), skip: resolve_skip!(),
+            level: { let mut commands = Vec::new(); level_art.hud_input(&interactions, &mut commands); commands },
         });
         let captured_save = if snapshot_enabled && (pending_menu_save.is_some()
             || (pending_menu_newgame.is_some() && saves_writable && stats.alive() && !post_game)
@@ -4858,10 +4867,14 @@ interactions
                         }
                     } else { story.draw(&input.label(&preferences, "E"), &ui); }
                 }
+                if let Some(snapshot) = &hud_snapshot {
+                    for command in &snapshot.level { command.draw(); }
+                } else {
                 if let (Some(d), Some(art)) = (&interactions.duchess, &level_art.duchess) {
                     art.hud(d);
                 }
                 level_art.hud(&interactions);
+                }
                 if hud_snapshot.as_ref().map_or_else(|| resolve_skip!(), |s| s.skip)
                 {
                     skip_scene.draw(
