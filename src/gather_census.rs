@@ -148,6 +148,11 @@ impl State {
     }
 }
 thread_local! { static STATE: RefCell<State> = const { RefCell::new(State::ZERO) }; }
+#[cfg(test)]
+thread_local! { static TEST_NS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
+/// Tests inject exact durations; production always reads the bracket clock.
+#[cfg(test)]
+pub(crate) fn test_elapsed(ns: Option<u64>) { TEST_NS.with(|n| n.set(ns)); }
 
 #[inline]
 pub(crate) fn on() -> bool {
@@ -194,6 +199,9 @@ fn enter(leaf: usize, root_allowed: u8) -> Scope {
 }
 fn leave(leaf: usize, level: usize, start: Option<Instant>) {
     let Some(start) = start else { return; };
+    #[cfg(test)]
+    let elapsed = TEST_NS.with(|n| n.get()).unwrap_or_else(|| start.elapsed().as_nanos() as u64);
+    #[cfg(not(test))]
     let elapsed = start.elapsed().as_nanos() as u64;
     STATE.with(|s| {
         let mut s = s.borrow_mut();
@@ -202,11 +210,36 @@ fn leave(leaf: usize, level: usize, start: Option<Instant>) {
         if is_root(leaf) { s.root_mask &= !root_bit(leaf); s.touched = true; }
         s.ns[leaf] += elapsed;
         s.calls[leaf] += 1;
-        for i in 0..level {
-            let parent = s.stack[i];
+        // Charge the immediate parent only. Each level subtracts its direct
+        // children once; charging every ancestor would double-count a nested
+        // child in the root and be hidden by saturating_sub.
+        if level > 0 {
+            let parent = s.stack[level - 1];
             s.kids[parent] += elapsed;
         }
     });
+}
+/// Inclusive minus direct children, with saturation surfaced by `validate_charges`.
+fn exclusive_ns(s: &State, leaf: usize) -> u64 {
+    s.ns[leaf].saturating_sub(s.kids[leaf])
+}
+/// A child can never outlast its parent, and the exclusive leaves must add up to
+/// the root inclusive. Either failure is an error, never a silent zero.
+fn validate_charges(s: &mut State) {
+    let mut exclusive = 0u64;
+    let mut roots = 0u64;
+    for leaf in 0..LEAVES {
+        if s.kids[leaf] > s.ns[leaf] {
+            s.errors += 1;
+        }
+        exclusive = exclusive.saturating_add(exclusive_ns(s, leaf));
+        if is_root(leaf) {
+            roots = roots.saturating_add(s.ns[leaf]);
+        }
+    }
+    if exclusive != roots {
+        s.errors += 1;
+    }
 }
 impl Drop for Scope {
     fn drop(&mut self) { leave(self.leaf, self.level, self.start.take()); }
@@ -254,7 +287,7 @@ fn write_summary(s: &State, out: &mut String) {
         if s.calls[i] == 0 && s.ns[i] == 0 { continue; }
         let name = if i < FIXED_NAMES.len() { FIXED_NAMES[i] } else { crate::npc::profile::name(i - FIXED_NAMES.len()) };
         let _ = write!(out, "{}{}:{:.4}/{:.4}/{}", if first { " leaf=" } else { "," },
-            name, mean(s.ns[i]), mean(s.ns[i].saturating_sub(s.kids[i])), s.calls[i]);
+            name, mean(s.ns[i]), mean(exclusive_ns(s, i)), s.calls[i]);
         first = false;
     }
     if first { out.push_str(" leaf=-"); }
@@ -293,6 +326,7 @@ pub(crate) fn frame_closed(number: u64, push: impl FnOnce(&str)) {
         if s.root_mask != 0 || s.depth != 0 { s.errors += 1; }
         if s.touched { s.measured += 1; s.touched = false; }
         if number == s.window_last {
+            validate_charges(&mut s);
             write_summary(&s, &mut line);
             s.finished = true;
             emit = true;
@@ -311,6 +345,14 @@ pub(crate) fn test_summary() -> String {
 pub(crate) fn test_counters() -> [u64; COUNTERS.len()] { STATE.with(|s| s.borrow().counters) }
 #[cfg(test)]
 pub(crate) fn test_errors() -> u64 { STATE.with(|s| s.borrow().errors) }
+#[cfg(test)]
+pub(crate) fn test_validate() { STATE.with(|s| validate_charges(&mut s.borrow_mut())); }
+#[cfg(test)]
+pub(crate) fn test_ns(leaf: usize) -> u64 { STATE.with(|s| s.borrow().ns[leaf]) }
+#[cfg(test)]
+pub(crate) fn test_exclusive(leaf: usize) -> u64 {
+    STATE.with(|s| exclusive_ns(&s.borrow(), leaf))
+}
 
 #[cfg(test)]
 mod tests {
@@ -356,6 +398,60 @@ mod tests {
         assert_eq!(test_errors(), 0);
         assert_eq!(test_counters()[Counter::ActorsVisited as usize], 1);
     }
+    #[test]
+    fn nested_leaves_charge_only_their_immediate_parent() {
+        test_force(true);
+        test_open(10, 12);
+        let kind_leaf = Leaf::NpcKindBase as usize + 3;
+        {
+            let npc = span(Leaf::NpcTraversal);
+            let kind_scope = { test_elapsed(Some(1_000_000)); kind(3) };
+            let pose = { test_elapsed(Some(400_000)); span(Leaf::PoseEval) };
+            test_elapsed(Some(400_000));
+            drop(pose);
+            test_elapsed(Some(1_000_000));
+            drop(kind_scope);
+            test_elapsed(Some(1_500_000));
+            drop(npc);
+        }
+        test_elapsed(None);
+        assert_eq!(test_ns(Leaf::NpcTraversal as usize), 1_500_000);
+        assert_eq!(test_ns(Leaf::NpcKindBase as usize + 3), 1_000_000);
+        assert_eq!(test_ns(Leaf::PoseEval as usize), 400_000);
+        assert_eq!(test_exclusive(Leaf::PoseEval as usize), 400_000);
+        assert_eq!(test_exclusive(Leaf::NpcKindBase as usize + 3), 600_000);
+        assert_eq!(test_exclusive(Leaf::NpcTraversal as usize), 500_000);
+        STATE.with(|s| s.borrow_mut().frames = 1);
+        let text = test_summary();
+        assert!(text.contains("npc:1.5000/0.5000/1"), "{text}");
+        assert!(text.contains("ambush:1.0000/0.6000/1"), "{text}");
+        test_validate();
+        assert_eq!(test_errors(), 0, "{text}");
+        assert_eq!(STATE.with(|s| s.borrow().kids[Leaf::PoseEval as usize]), 0);
+        assert_eq!(STATE.with(|s| s.borrow().kids[kind_leaf]), 400_000);
+    }
+
+    #[test]
+    fn a_child_longer_than_its_parent_is_an_error_not_a_silent_zero() {
+        test_force(true);
+        test_open(10, 12);
+        {
+            let npc = span(Leaf::NpcTraversal);
+            let kind_scope = { test_elapsed(Some(100)); kind(3) };
+            let pose = { test_elapsed(Some(400)); span(Leaf::PoseEval) };
+            test_elapsed(Some(400));
+            drop(pose);
+            test_elapsed(Some(100));
+            drop(kind_scope);
+            test_elapsed(Some(100));
+            drop(npc);
+        }
+        test_elapsed(None);
+        assert_eq!(test_exclusive(Leaf::NpcKindBase as usize + 3), 0);
+        test_validate();
+        assert!(test_errors() >= 1);
+    }
+
     #[test]
     fn kind_outside_the_npc_traversal_is_ignored() {
         test_force(true);

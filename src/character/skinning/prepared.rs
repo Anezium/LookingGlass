@@ -66,7 +66,9 @@ impl<T: Default> Cache<T> {
 }
 #[derive(Default)]
 pub(crate) struct Pose {
-    key: (usize, usize),
+    /// Skeleton pointer, face pointer, then the mutable face rig content that
+    /// `Face::pose` reads (mouth bone, max mouth angle bits).
+    key: (usize, usize, usize, u32),
     local: Vec<Transform>,
     mouth: u32,
     roots: Vec<(usize, f32)>,
@@ -167,7 +169,7 @@ pub(super) fn assert_consumed() {
     PALETTES.with(|c| c.borrow().assert_consumed());
 }
 pub(crate) fn pose(
-    key: (usize, usize),
+    key: (usize, usize, usize, u32),
     local: &[Transform],
     mouth: f32,
     roots: &[(usize, f32)],
@@ -267,14 +269,14 @@ mod tests {
         let first = local(1.);
         let second = local(2.);
         let roots = [(0, 1.4)];
-        let a = pose((7, 9), &first, 0.1, &[], || (first.clone(), vec![]));
-        let b = pose((7, 9), &second, 0.2, &roots, || (second.clone(), vec![1.4]));
+        let a = pose((7, 9, usize::MAX, 0), &first, 0.1, &[], || (first.clone(), vec![]));
+        let b = pose((7, 9, usize::MAX, 0), &second, 0.2, &roots, || (second.clone(), vec![1.4]));
         let ptr_a = palette(&a.pose, &a.scales, |p| p.as_ptr());
         let ptr_b = palette(&b.pose, &b.scales, |p| p.as_ptr());
         frame.dispatch();
         frame.collect();
-        let aa = pose((7, 9), &first, 0.1, &[], || panic!("pose recomputed"));
-        let bb = pose((7, 9), &second, 0.2, &roots, || {
+        let aa = pose((7, 9, usize::MAX, 0), &first, 0.1, &[], || panic!("pose recomputed"));
+        let bb = pose((7, 9, usize::MAX, 0), &second, 0.2, &roots, || {
             panic!("scaled pose recomputed")
         });
         assert!(std::ptr::eq(&*a, &*aa));
@@ -286,20 +288,59 @@ mod tests {
         frame.assert_consumed();
         drop(frame);
     }
+    fn face_pose_key(face: &crate::facial::Face) -> (usize, usize, usize, u32) {
+        let key = face.pose_key();
+        (0x51, face as *const _ as usize, key.0, key.1)
+    }
+    #[test]
+    fn mutable_face_rig_angle_cannot_reuse_a_stale_pose() {
+        overlap::startup(1, false);
+        let input = local(1.);
+        let mut face = crate::facial::test_face(10.);
+        crate::render::vita_renderer::with_config(|c| c.gather_pose_reuse = true, || {
+            let mut frame = overlap::Frame::begin();
+            drop(pose(face_pose_key(&face), &input, 0.5, &[], || (input.clone(), vec![])));
+            frame.dispatch();
+            frame.collect();
+            drop(frame);
+            // Unchanged face content: the opt-in reuse must actually hit.
+            let mut reused = false;
+            let mut frame = overlap::Frame::begin();
+            drop(pose(face_pose_key(&face), &input, 0.5, &[], || {
+                reused = true;
+                (input.clone(), vec![])
+            }));
+            assert!(!reused, "unchanged inputs must reuse");
+            frame.dispatch();
+            frame.collect();
+            drop(frame);
+            // Only the mutable rig angle changes; pointer, local, mouth and roots stay.
+            face.mouth_angle(45.);
+            let mut recomputed = false;
+            let mut frame = overlap::Frame::begin();
+            drop(pose(face_pose_key(&face), &input, 0.5, &[], || {
+                recomputed = true;
+                (input.clone(), vec![])
+            }));
+            assert!(recomputed, "a changed rig angle must miss the pose key");
+            frame.dispatch();
+            frame.collect();
+        });
+    }
     #[test]
     fn changed_inputs_and_new_frames_cannot_reuse_stale_preparation() {
         overlap::startup(1, false);
         let input = local(1.);
         for changed in 0..5 {
             let mut frame = overlap::Frame::begin();
-            let a = pose((7, 9), &input, 0.1, &[(0, 1.)], || {
+            let a = pose((7, 9, usize::MAX, 0), &input, 0.1, &[(0, 1.)], || {
                 (input.clone(), vec![1.])
             });
             frame.dispatch();
             frame.collect();
             let different = local(2.);
             let result = pose(
-                if changed == 0 { (8, 9) } else { (7, 9) },
+                if changed == 0 { (8, 9, usize::MAX, 0) } else { (7, 9, usize::MAX, 0) },
                 if changed == 1 { &different } else { &input },
                 if changed == 2 { 0.2 } else { 0.1 },
                 if changed == 3 { &[(0, 2.)] } else { &[(0, 1.)] },
@@ -315,7 +356,7 @@ mod tests {
         }
         // Same inputs in a later frame require a new evaluation.
         let _frame = overlap::Frame::begin();
-        let result = pose((7, 9), &input, 0.1, &[(0, 1.)], || (local(3.), vec![3.]));
+        let result = pose((7, 9, usize::MAX, 0), &input, 0.1, &[(0, 1.)], || (local(3.), vec![3.]));
         assert_eq!(result.pose[0].translation, Vec3::X * 3.);
     }
     #[test]
@@ -376,7 +417,7 @@ mod tests {
     #[test]
     fn serial_presentation_does_not_allocate_cache_handles_or_clone_inputs() {
         let input = local(1.);
-        let prepared = pose((7, 9), &input, 0.1, &[], || (input.clone(), vec![]));
+        let prepared = pose((7, 9, usize::MAX, 0), &input, 0.1, &[], || (input.clone(), vec![]));
         match prepared {
             PoseHandle::Owned(p) => {
                 assert!(p.local.is_empty());

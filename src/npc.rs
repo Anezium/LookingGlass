@@ -1198,8 +1198,10 @@ impl Model {
             self.data.skeleton.bones.len(), &self.data.meta.attachments, transform, scale,
             self.late_skin_overlays, self.afterimage_normals);
         let d = &self.data;
+        let face_key = self.face.pose_key();
         let prepared = crate::character::skinning::prepared::pose(
-            (&d.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
+            (&d.skeleton as *const Skeleton as usize, &self.face as *const _ as usize,
+             face_key.0, face_key.1),
             local, mouth, &self.bone_scales, || {
                 let mut pose = self.face.pose(&d.skeleton, local, mouth);
                 let scales = if self.bone_scales.is_empty() { Vec::new() }

@@ -235,6 +235,11 @@ impl Face {
         self.rig.apply(&mut local, mouth);
         skeleton.global_pose(&local)
     }
+    /// Everything `Face::pose` reads from the face itself. `rig.angle` is mutable
+    /// through `mouth_angle`, so the face pointer alone is not a content key.
+    pub(crate) fn pose_key(&self) -> (usize, u32) {
+        (self.rig.mouth.unwrap_or(usize::MAX), self.rig.angle.to_bits())
+    }
     pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
         if let Some(b) = &self.blink {
             if let Some(mesh) = &mut meshes[b.surface] {
@@ -250,6 +255,13 @@ impl Face {
                 );
             }
         }
+    }
+}
+#[cfg(test)]
+pub(crate) fn test_face(degrees: f32) -> Face {
+    Face {
+        rig: Rig { mouth: Some(0), angle: degrees.to_radians() },
+        blink: None,
     }
 }
 fn blinking(time: f32, period: f32) -> bool {

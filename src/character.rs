@@ -1118,8 +1118,10 @@ impl Character {
     fn draw_body(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
         let _identity = self.skin_identity.scope();
         let feet = feet + Vec3::Z * self.animator.offset;
+        let face_key = self.face.pose_key();
         let prepared = skinning::prepared::pose(
-            (&self.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
+            (&self.skeleton as *const Skeleton as usize, &self.face as *const _ as usize,
+             face_key.0, face_key.1),
             &self.actions.pose, self.mouth, &[],
             || (self.face.pose(&self.skeleton, &self.actions.pose, self.mouth), Vec::new()),
         );
