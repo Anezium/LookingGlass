@@ -94,7 +94,8 @@ impl SkySurfaces {
     /// The static sky surfaces of the scene. `None` when the map has none or neither key is on.
     pub(super) fn new(scene: &Scene, ctx: &mut dyn RenderingBackend, resources: &mut ConstructionResources) -> Result<Option<Self>> {
         let c = config();
-        if !c.sky || c.authored_sky || !(c.sky_depth || c.sky_cube) { return Ok(None); }
+        let live = c.sky_live && (scene.sky_origin.is_some() || !scene.sky_candidates.is_empty());
+        if !c.sky || c.authored_sky || !(c.sky_depth || c.sky_cube || live) { return Ok(None); }
         // A map with a sky camera but no sky face still shows the room in its holes.
         let room = c.sky_cube && scene.sky_origin.is_some();
         let mut skipped = 0;
@@ -206,6 +207,20 @@ impl SkySurfaces {
                 ctx.draw(0, count, 1);
                 draws += 1;
             }
+        }
+        draws
+    }
+    /// `sky_live`: the faces into depth only, one draw per chunk. `portal_only` leaves out the
+    /// faces that carry a sky shader, which the caller then draws with their stages.
+    pub(super) fn draw_depth(&self, ctx: &mut dyn RenderingBackend, projection: Mat4, portal_only: bool) -> u64 {
+        let groups = if portal_only { &self.chunks[..1] } else { &self.chunks[..] };
+        let mut draws = 0;
+        for &(vertex, index, count) in groups.iter().flatten() {
+            if draws == 0 { ctx.apply_pipeline(&self.depth.1); }
+            ctx.apply_bindings(&Bindings { vertex_buffers: vec![vertex], index_buffer: index, images: vec![] });
+            if draws == 0 { ctx.apply_uniforms(UniformsSource::table(&DepthUniforms { mvp: projection })); }
+            ctx.draw(0, count, 1);
+            draws += 1;
         }
         draws
     }

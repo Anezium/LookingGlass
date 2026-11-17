@@ -119,7 +119,7 @@ impl Drop for SkyCube {
 }
 /// The host's Depth32 attachment, as `scale.rs` builds it for the scaled 3D target.
 #[cfg(not(target_os = "vita"))]
-fn host_depth(target: &RenderTarget, width: u32, height: u32) -> macroquad::miniquad::TextureId {
+pub(crate) fn host_depth(target: &RenderTarget, width: u32, height: u32) -> macroquad::miniquad::TextureId {
     use macroquad::miniquad::{gl, PassAction, RawId, TextureAccess, TextureFormat, TextureParams, TextureSource};
     let ctx = unsafe { get_internal_gl() }.quad_context;
     let depth = ctx.new_texture(TextureAccess::RenderTarget, TextureSource::Empty, TextureParams {
