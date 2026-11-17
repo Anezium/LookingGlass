@@ -3610,7 +3610,8 @@ mod tests {
         for key in ["sim_flight_memo", "ant_corpse_triangle_cull", "ant_corpse_opaque_shader", "water_draw_join",
                     "actor_consumer_frustum_cull", "fx_unlit_exact", "load_texture_share",
                     "sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match",
-                    "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader"] { played[key] = true.into(); }
+                    "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader",
+                    "actor_frontface_cull"] { played[key] = true.into(); }
         played["audio_stats_log"] = false.into();
         // Compare typed values on both sides: to_value widens f32 (e.g. the
         // played audio gain 0.001), unlike its original JSON decimal spelling.
@@ -3627,7 +3628,7 @@ mod tests {
             "alpha_model_pvs":false,"sim_snark_move_skip":true,"sim_snark_sight_blocked":true,
             "sim_pool_name_match":true,"audio_stats_log":false,
             "audio_loop_resident":true,"audio_cue_prefetch":true,
-            "actor_discard_free_shader":true,"actor_frontface_cull":false
+            "actor_discard_free_shader":true,"actor_frontface_cull":true
         }));
         assert_eq!(raw["water_draw_join"], true, "RC9 enables the measured water draw join");
         assert_eq!(raw["actor_consumer_frustum_cull"], true, "RC10 enables the measured consumer cull");
@@ -3721,9 +3722,9 @@ mod tests {
                    "RC15 is RC14 with the three potears1 levers on and periodic audio stats off");
     }
     // RC16 is the RC15 shipped play config with the three device-measured fight fixes on
-    // and the picture-changing front-face cull explicitly kept off. Nothing else changed.
+    // and the owner-approved front-face cull on. Nothing else changed.
     #[test]
-    fn rc16_release_play_is_rc15_plus_the_three_exact_fixes() {
+    fn rc16_release_play_is_rc15_plus_the_four_release_keys() {
         let rc15 = parse_runtime_config(include_bytes!("../../configs/PL-rc15-release-play.json"))
             .unwrap().0;
         let rc16 = parse_runtime_config(include_bytes!("../../configs/PL-rc16-release-play.json"))
@@ -3734,12 +3735,12 @@ mod tests {
         assert_eq!(expected["audio_cue_prefetch"], false, "RC15 ships the cue prefetch off");
         assert_eq!(expected["actor_discard_free_shader"], false, "RC15 ships the actor shader off");
         assert_eq!(expected["actor_frontface_cull"], false, "RC15 ships the front-face cull off");
-        for key in ["audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader"] {
+        for key in ["audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader",
+                    "actor_frontface_cull"] {
             expected[key] = true.into();
         }
-        expected["actor_frontface_cull"] = false.into();
         assert_eq!(serde_json::to_value(rc16).unwrap(), expected,
-                   "RC16 is RC15 with the three exact fight fixes on and the front-face cull off");
+                   "RC16 is RC15 with the three exact fight fixes and the approved cull on");
     }
     #[test]
     fn rc16_play_config_is_the_release_fallback_plus_the_measurement_keys() {
@@ -3757,7 +3758,7 @@ mod tests {
                                 ("audio_loop_resident", true),
                                 ("audio_cue_prefetch", true),
                                 ("actor_discard_free_shader", true),
-                                ("actor_frontface_cull", false)] {
+                                ("actor_frontface_cull", true)] {
             assert_eq!(release_value[key], expected,
                        "a fresh install runs the compiled fallback, which must ship {key}={expected}");
             assert_eq!(play_value[key], expected, "{key} in the play config");
@@ -3768,18 +3769,30 @@ mod tests {
         assert_eq!(play_value, expected,
                    "the RC16 play config is the release fallback plus only the two measurement keys");
     }
-    // The owner decision on the picture-changing cull is still pending, so no shipped
-    // RC16 input may enable it.
+    // The owner approved the picture-changing cull on 2026-11-17. The four RC16 keys
+    // are true in both shipped inputs; every earlier config keeps them off/absent.
     #[test]
-    fn actor_frontface_cull_is_false_in_every_shipped_config() {
+    fn rc16_keys_are_true_in_every_shipped_config() {
+        const KEYS: [&str; 4] = ["audio_loop_resident", "audio_cue_prefetch",
+                                 "actor_discard_free_shader", "actor_frontface_cull"];
         for bytes in [&include_bytes!("../../configs/PL-release.json")[..],
-                      &include_bytes!("../../configs/PL-rc16-release-play.json")[..],
-                      &include_bytes!("../../configs/PL-rc15-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc16-release-play.json")[..]] {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            for key in KEYS {
+                let value = serde_json::to_value(&c).unwrap()[key].clone();
+                assert_eq!(value, true, "a shipped RC16 input ships {key}=false");
+            }
+        }
+        for bytes in [&include_bytes!("../../configs/PL-rc15-release-play.json")[..],
                       &include_bytes!("../../configs/PL-rc13-release-play04.json")[..],
                       &include_bytes!("../../configs/PL-rc1.json")[..]] {
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none());
-            assert!(!c.actor_frontface_cull, "a shipped RC16 input enables the picture-changing cull");
+            for key in KEYS {
+                let value = serde_json::to_value(&c).unwrap()[key].clone();
+                assert_eq!(value, false, "a pre-RC16 input ships {key}=true");
+            }
         }
         assert!(!Config::default().actor_frontface_cull);
         assert!(serde_json::from_str::<Config>(r#"{"actor_frontface_cull":true}"#)
@@ -4554,7 +4567,7 @@ mod tests {
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "23552bfeae8276613aaeba983b2686b29b953a4c4f032133c49f0c75383523bd");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "f5cc708fa7ef4b58a6ef00d6ec29d682b06dfca4738e654955a7ff69dce0e84a");
         assert_eq!(format!("{:x}", Sha256::digest(rc12_bytes)), "4b1a1503b00b7826258a54fff0e69e5bdbd3a609f440bc13aaa2926aae9cb9f5");
         assert_eq!(format!("{:x}", Sha256::digest(rc11_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
         assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
@@ -4605,7 +4618,8 @@ mod tests {
         // the RC13 baseline.
         let mut rc13_baseline = baseline.clone();
         for key in ["sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match",
-                    "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader"] {
+                    "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader",
+                    "actor_frontface_cull"] {
             rc13_baseline[key] = false.into();
         }
         rc13_baseline["audio_stats_log"] = true.into();
