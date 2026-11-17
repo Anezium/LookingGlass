@@ -502,7 +502,8 @@ impl Gpu {
         }).flatten().map(|shader|Lite {uniforms:UniformCache::default(),shader,pipelines:BTreeMap::new(),fields:crate::render::uniform_fields::Cache::new(meta())});
         // A failed additive program leaves its packets on the route they had before.
         let c = crate::render::vita_renderer::config();
-        let fx_add = [(c.fx_add_lean, add_program::LEAN), (c.fx_add_lean && c.fx_add_fog_free, add_program::FOG_FREE)];
+        let sources = add_program::sources();
+        let fx_add = [(c.fx_add_lean, &sources[0]), (c.fx_add_lean && c.fx_add_fog_free, &sources[1])];
         let fx_add = [0, 1].map(|i| fx_add[i].0.then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name = crate::shader_cache::Name::new(add_program::NAMES[i]);
@@ -2496,7 +2497,8 @@ mod tests {
         harmless.appearance.power = 0.5;
         sequence.push(harmless);
         let counts = sequence.iter().fold([0u64; 3], |mut counts, p| {
-            counts[match route(p, false, true) { Route::Full => 0, Route::Lite => 1, Route::CorpseOpaque => 2 }] += 1;
+            counts[match route(p, false, true) { Route::Full => 0, Route::Lite => 1, Route::CorpseOpaque => 2,
+                Route::AddLean | Route::AddFogFree => unreachable!("route never returns an additive program") }] += 1;
             counts
         });
         assert_eq!(counts, [3, 3, 0], "both routes must be exercised");

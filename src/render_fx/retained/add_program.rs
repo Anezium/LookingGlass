@@ -5,15 +5,22 @@
 //! a packet most of `render::FRAGMENT` cannot run or multiplies by one:
 //!
 //! - both `gl_FragCoord` discards test `FxAppearance.x > 0` and `FxAppearance.y > 0.5`: false;
-//! - `ClampUV = 0` makes the coordinate `mix` return `uv`;
-//! - `Cutout = 0` fails every cutout range, so neither cutout `discard` runs;
+//! - `ClampUV = 0` makes the coordinate `mix` return `uv` (line kept, see below);
+//! - `Cutout = 0` fails every cutout range, so neither cutout `discard` runs (lines kept);
 //! - `FxModel = 1` skips the light atlas fetch, and `Lit = 0` makes the lighting factor one;
 //! - the packed dynamic lights are zero (`lighting::packed`), so that term adds zero;
 //! - `FxAppearance.z` and `.w` are zero: no tint, no filter fade;
 //! - `SkyFade` is zero in every retained payload: no backdrop fetch.
 //!
-//! `fx_add_lean` keeps the texture fetch, the alpha product, `diffuse.rgb*Gain.rgb`, the vertex
-//! colour product and the unchanged `fogged` call. Nothing else is compiled.
+//! `fx_add_lean` keeps the coordinate line, the texture fetch, the alpha product, the two
+//! cutout tests, `diffuse.rgb*Gain.rgb`, the vertex colour product and the unchanged `fogged`
+//! call. Nothing else is compiled.
+//!
+//! The coordinate line and the cutout tests stay verbatim although they do nothing for an
+//! admitted packet. Without them the host GPU reads the texture through another path, and thin
+//! minified sprites (the potears1 waterfall drops) change by up to 9/255 on a few dozen pixels
+//! while every fragment count stays the same. A first version without them failed the strict
+//! pixel oracle on both potears1 tapes for that reason.
 //!
 //! Both sources declare the four varyings of the full program in its order, used or not. The
 //! vertex program is shared, and a console GL layer that numbered interpolants by declaration
@@ -28,11 +35,14 @@ use super::*;
 pub(super) const LEAN: &str = r#"#version 100
 precision mediump float;
 varying highp vec2 uv; varying highp vec3 lm; varying lowp vec4 color;
-uniform sampler2D Texture; uniform vec4 Gain; uniform float FogMode;
+uniform sampler2D Texture; uniform float ClampUV; uniform float Cutout; uniform vec4 Gain; uniform float FogMode;
+uniform float CutoutReference;
 // FOG
 void main(){
- vec4 diffuse=texture2D(Texture,uv);
+ vec2 coords=mix(uv,clamp(uv,vec2(0.001),vec2(0.999)),ClampUV);vec4 diffuse=texture2D(Texture,coords);
  float alpha=diffuse.a*Gain.a*color.a;
+ if((Cutout>0.5&&Cutout<1.5&&alpha<=0.0)||(Cutout>1.5&&Cutout<2.5&&alpha<0.5)||(Cutout>2.5&&Cutout<3.5&&alpha>=0.5)||(Cutout>3.5&&Cutout<4.5&&alpha<0.35))discard;
+ if((Cutout>4.5&&Cutout<5.5&&alpha<CutoutReference)||(Cutout>5.5&&Cutout<6.5&&alpha<=CutoutReference)||(Cutout>6.5&&Cutout<7.5&&alpha>=CutoutReference)||(Cutout>7.5&&alpha>CutoutReference))discard;
  vec3 rgb=diffuse.rgb*Gain.rgb;
  rgb*=color.rgb;
  rgb=fogged(rgb,FogMode);
@@ -42,14 +52,29 @@ pub(super) const FOG_FREE: &str = r#"#version 100
 precision mediump float;
 varying highp vec2 uv; varying highp vec3 lm; varying lowp vec4 color;
 varying highp vec3 worldPosition;
-uniform sampler2D Texture; uniform vec4 Gain;
+uniform sampler2D Texture; uniform float ClampUV; uniform float Cutout; uniform vec4 Gain;
+uniform float CutoutReference;
 void main(){
- vec4 diffuse=texture2D(Texture,uv);
+ vec2 coords=mix(uv,clamp(uv,vec2(0.001),vec2(0.999)),ClampUV);vec4 diffuse=texture2D(Texture,coords);
  float alpha=diffuse.a*Gain.a*color.a;
+ if((Cutout>0.5&&Cutout<1.5&&alpha<=0.0)||(Cutout>1.5&&Cutout<2.5&&alpha<0.5)||(Cutout>2.5&&Cutout<3.5&&alpha>=0.5)||(Cutout>3.5&&Cutout<4.5&&alpha<0.35))discard;
+ if((Cutout>4.5&&Cutout<5.5&&alpha<CutoutReference)||(Cutout>5.5&&Cutout<6.5&&alpha<=CutoutReference)||(Cutout>6.5&&Cutout<7.5&&alpha>=CutoutReference)||(Cutout>7.5&&alpha>CutoutReference))discard;
  vec3 rgb=diffuse.rgb*Gain.rgb;
  rgb*=color.rgb;
  gl_FragColor=vec4(rgb,alpha);
 }"#;
+/// The two program sources. A host probe build can read replacements from a folder
+/// (`lean.frag`, `fog-free.frag`) while a pixel difference is being attributed. Never compiled
+/// for the console.
+pub(super) fn sources() -> [String; 2] {
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    if let Some(folder) = std::env::var_os("LOOKING_GLASS_FX_ADD_SOURCES") {
+        let read = |name: &str, built_in: &str| std::fs::read_to_string(std::path::Path::new(&folder).join(name))
+            .unwrap_or_else(|_| built_in.to_owned());
+        return [read("lean.frag", LEAN), read("fog-free.frag", FOG_FREE)];
+    }
+    [LEAN.to_owned(), FOG_FREE.to_owned()]
+}
 pub(super) const NAMES: [&str; 2] = ["retained-fx-add-lean", "retained-fx-add-fog-free"];
 
 /// Blend indices of `Blend::Add` and `Blend::AlphaAdd`, the `fx_add` class of `gpu_timing`.
@@ -173,18 +198,26 @@ mod tests {
             assert!(full.contains(kept), "{kept}");
             assert!(LEAN.contains(kept), "{kept}");
         }
-        assert!(full.contains("vec4 diffuse=texture2D(Texture,coords);") && LEAN.contains("vec4 diffuse=texture2D(Texture,uv);"));
+        // The texture read and both cutout tests are the full program's lines, byte for byte.
+        let verbatim: Vec<&str> = full.lines().filter(|l| l.contains("texture2D(Texture,coords)")
+            || l.contains("float alpha=") || (l.contains("Cutout>") && l.contains("discard;"))).collect();
+        assert_eq!(verbatim.len(), 4);
+        for source in [LEAN, FOG_FREE] {
+            for line in &verbatim { assert_eq!(source.lines().filter(|l| l == line).count(), 1, "{line}"); }
+            assert_eq!(source.matches("discard").count(), 2);
+        }
         assert!(full.contains("rgb=diffuse.rgb*mix(vec3(1.0),lighting,Lit*(1.0-Fullbright))*Gain.rgb;"));
         assert!(full.contains("if(FxModel>0.5&&Lit<0.5)rgb*=color.rgb;"));
         for source in [LEAN, FOG_FREE] {
             assert!(source.contains("vec3 rgb=diffuse.rgb*Gain.rgb;") && source.contains(" rgb*=color.rgb;"));
-            for gone in ["discard", "LightAtlas", "SkyBackdrop", "dynamicLight", "FxAppearance", "Cutout", "gl_FragCoord"] {
+            for gone in ["LightAtlas", "SkyBackdrop", "dynamicLight", "FxAppearance", "gl_FragCoord", "lighting", "Fullbright"] {
                 assert!(!source.contains(gone), "{gone}");
             }
         }
-        assert_eq!(FOG_FREE, LEAN.replace(" uniform float FogMode;\n// FOG", "")
+        assert_eq!(FOG_FREE, LEAN.replace(" uniform float FogMode;", "").replace("\n// FOG", "")
             .replace("varying lowp vec4 color;\n", "varying lowp vec4 color;\nvarying highp vec3 worldPosition;\n")
             .replace(" rgb=fogged(rgb,FogMode);\n", ""));
+        assert_eq!(sources(), [LEAN.to_owned(), FOG_FREE.to_owned()]);
         assert!(!FOG_FREE.contains("fog"));
         // The interpolant declarations match the full program's, in its order.
         let varyings = |source: &str| source.split(';').map(str::trim).filter(|d| d.contains("varying "))
