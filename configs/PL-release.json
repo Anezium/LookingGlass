@@ -192,7 +192,7 @@
   "water_draw_join": true,
   "actor_consumer_frustum_cull": true,
   "actor_discard_free_shader": true,
-  "actor_frontface_cull": true,
+  "actor_frontface_cull": false,
   "fx_unlit_exact": true,
   "alpha_model_pvs": false,
   "sim_snark_move_skip": true,

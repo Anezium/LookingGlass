@@ -88,15 +88,17 @@ RC16 turns on the two main-thread audio fixes (`audio_loop_resident`,
 `audio_cue_prefetch`) and the exact actor shader specialization
 (`actor_discard_free_shader`). All three were measured on the Vita on 2026-11-17
 and checked exact on the host against the RC15 configuration, frame by frame and
-sample by sample. The owner approved the picture-changing
-`actor_frontface_cull` on 2026-11-17 after the host screenshots; it is on in both
-shipped inputs, and the host oracle records the resulting picture differences per
-tape for the release report. Because a fresh install has no
+sample by sample. The picture-changing `actor_frontface_cull` is off in both
+shipped inputs and everywhere else: the 2026-11-17 device/host evidence shows it
+removes visible surfaces (Alice's apron straps and back ruffles, the gvillage
+rabbit-hole tunnel, pickup inner faces), so it waits for a later ants-only design.
+Because a fresh install has no
 `ux0:data/alice/private/vita_renderer.json`, this compiled input is what those
 users run: it carries the same eight RC15/RC16 values as the shipped play config.
 `PL-rc16-release-play.json` is this fallback plus only the two measurement keys
 (`replay_play=a2-04.lgtape`, `log_frame_time_every=10`), and the unit tests
-enforce that relationship and pin the four RC16 keys in both shipped inputs.
+enforce that relationship, pin the three exact keys true and the front-face cull
+false in both shipped inputs.
 `PL-rc15-release-play.json` keeps the RC15 package bytes for comparison.
 
 The 20 renderer keys added after the played RC3 input are explicit neutral
