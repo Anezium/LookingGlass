@@ -1502,12 +1502,23 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                                     && (maps[current] != "hatter2" || interactions.levels[s].ctl.music_mood() == Some("action")))
                         }));
                     }
-                    let pilot_state = if pilot.sample_due() {
-                        interactions.levels.iter().find(|s| s.ctl.id() == maps[current]).map(|s| s.ctl.snapshot())
+                    let pilot_sample = if pilot.sample_due() {
+                        let level = interactions.levels.iter().find(|s| s.ctl.id() == maps[current]).map(|s| s.ctl.snapshot());
+                        let legacy = if crate::replay::pilot::needs_legacy(&maps[current]) {
+                            Some(serde_json::json!({
+                                "encounters": interactions.encounters.as_ref().map(|s| serde_json::to_value(s.snapshot()).unwrap_or_default()),
+                                "duchess": interactions.duchess.as_ref().map(|s| serde_json::to_value(s.snapshot()).unwrap_or_default()),
+                            }))
+                        } else { None };
+                        let npcs = if crate::replay::pilot::needs_npcs(&maps[current]) {
+                            serde_json::to_value(npcs.snapshot()).ok()
+                        } else { None };
+                        Some(crate::replay::pilot::Sample { level, legacy, npcs })
                     } else { None };
+                    if let Some(sample) = pilot_sample { pilot.sample(&maps[current], sample); }
                     r.pilot_frame(pilot.frame(&maps[current], &player, yaw, pitch, stats.alive(),
                         stats.sanity(), story.busy() || interactions.scene_id_after(None).is_some(), &threats, &scene.world,
-                        alice.ready_to_attack(stats.equipped().unwrap_or(crate::weapons::UNARMED)), stats.selected(), stats.will(), pilot_state, &preferences));
+                        alice.ready_to_attack(stats.equipped().unwrap_or(crate::weapons::UNARMED)), stats.selected(), stats.will(), &preferences));
                 }
             }
             if r.wants_aim() {

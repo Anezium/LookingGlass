@@ -2,7 +2,7 @@
 """Write separate test configs, never edit the shipped baseline."""
 import argparse,hashlib,json
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--out',required=True,type=Path);p.add_argument('--map',choices=['hatter2','centipede1'],default='hatter2');p.add_argument('--name');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--out',required=True,type=Path);p.add_argument('--map',choices=['hatter2','centipede1','skool1','grounds1','grounds2','jlair2','potears3','qlair','hatter1','fortress1','utemple','wchess2'],default='hatter2');p.add_argument('--name');a=p.parse_args()
 assert not a.out.exists(),'use a new output directory'
 source=Path(__file__).resolve().parents[2]/'configs/PL-rc13-release-play04.json'
 base=json.loads(source.read_text());a.out.mkdir(parents=True)

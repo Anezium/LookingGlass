@@ -32,7 +32,7 @@ def main():
         assert not marker.exists(), 'one tape at a time'
         assert a.binary and a.config
         c=json.loads(a.config.read_text()); tape=c['replay_record']
-        assert c['replay_fight_pilot'] is True and not c['replay_play'] and c['replay_start'] in ('chapter:hatter2@normal','chapter:centipede1@normal')
+        assert c['replay_fight_pilot'] is True and not c['replay_play'] and c['replay_start'] in tuple(f'chapter:{m}@normal' for m in ('hatter2','centipede1','skool1','grounds1','grounds2','jlair2','potears3','qlair','hatter1','fortress1','utemple','wchess2'))
         assert re.fullmatch(r'[a-zA-Z0-9_.-]+\.lgtape',tape)
         state=json.loads((root/'state.json').read_text())
         assert state['game']=='closed' and not state.get('pending'), 'root must observe/acknowledge closed first'

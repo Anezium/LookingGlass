@@ -6,7 +6,7 @@ SOURCE=Path(__file__).resolve().parents[2]
 DATA=Path('/Users/anezium/vita-work/alice-data/Alice1/bin/base')
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def main():
- p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--map',default='hatter2',choices=['hatter2','centipede1']);p.add_argument('--analyze-existing',action='store_true');a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--out',required=True,type=Path);p.add_argument('--map',default='hatter2',choices=['hatter2','centipede1','skool1','grounds1','grounds2','jlair2','potears3','qlair','hatter1','fortress1','utemple','wchess2']);p.add_argument('--analyze-existing',action='store_true');a=p.parse_args()
  root=a.out.resolve();root.mkdir(parents=True,exist_ok=a.analyze_existing);binary=a.binary.resolve()
  assert shutil.disk_usage(root).free>=41*2**30
  cfg=json.loads((SOURCE/'configs/PL-rc13-release-play04.json').read_text())
@@ -59,7 +59,7 @@ def main():
   attacks+=int(bool(keys & (1<<header['keys'].index(0xffe3))))
  assert end and end['reason']=='menu' and end['steps']==frames,'unclean/truncated tape'
  health=[float(v) for v in re.findall(r'boss_health=([0-9.]+)',recording)]
- dealt=sum(max(0,x-y) for x,y in zip(health,health[1:])) if a.map=='hatter2' else sum(map(float,re.findall(r'health_loss=([0-9.]+)',recording)))
+ dealt=sum(max(0,x-y) for x,y in zip(health,health[1:])) if a.map in ('hatter2','grounds1','jlair2') else sum(map(float,re.findall(r'health_loss=([0-9.]+)',recording)))
  damage_rows=[tuple(map(float,v)) for v in re.findall(r'damage_taken=([0-9.]+) seconds=([0-9.]+)',recording)]
  contacts=re.findall(r'weapon_contact id=(\d+) damage=([0-9.]+)',recording)
  displacement=max(math.dist(positions[0],v) for v in positions)
@@ -68,8 +68,10 @@ def main():
  taken=sum(damage for damage,when in damage_rows if when>=first_fight)
  stopped=re.search(r'\[lg/pilot\] stop map='+re.escape(a.map)+r' seconds=([0-9.]+) fight=([0-9.]+)',recording)
  assert stopped,'missing bounded pilot stop'
- assert dealt>0 and taken>0 and contacts and moving>0 and attacks>0 and displacement>1000,'combat proof incomplete'
+ # Map-specific walking sanity: arena maps start the fight near the chapter spawn.
+ walk_min={'skool1':300,'grounds1':300,'jlair2':200,'potears3':400,'qlair':400,'grounds2':600,'fortress1':500}.get(a.map,1000)
+ assert dealt>0 and taken>0 and contacts and moving>0 and attacks>0 and displacement>=walk_min,'combat proof incomplete'
  done=next(l for l in playback.splitlines() if l.startswith('[lg/replay] done '))
- result=dict(map=a.map,difficulty='normal',binary_sha256=sha(binary),tape_sha256=sha(path),frames=frames,tape_seconds=seconds,first_fight_seconds=first_fight,fight_window_seconds=float(stopped[1])-first_fight,visible_target_fight_seconds=float(stopped[2]),max_displacement_units=displacement,sampled_path_units=sampled_path,movement_frames=moving,attack_held_frames=attacks,weapon_contacts=len(contacts),sampled_enemy_damage=dealt,damage_taken=taken,pilot_off_replay=done,console_contact=False)
+ result=dict(map=a.map,difficulty='normal',binary_sha256=sha(binary),tape_sha256=sha(path),frames=frames,tape_seconds=seconds,first_fight_seconds=first_fight,fight_window_seconds=float(stopped[1])-first_fight,visible_target_fight_seconds=float(stopped[2]),max_displacement_units=displacement,walk_min_units=walk_min,sampled_path_units=sampled_path,movement_frames=moving,attack_held_frames=attacks,weapon_contacts=len(contacts),sampled_enemy_damage=dealt,damage_taken=taken,pilot_off_replay=done,console_contact=False)
  (root/'proof.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2),flush=True)
 if __name__=='__main__':main()
