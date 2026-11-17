@@ -291,13 +291,11 @@ fn prefetch_level_clips(
             candidates.push((*path).to_owned());
         }
     }
-    if map.entities.iter().any(|e| {
-        e.get("classname").is_some_and(|c| c.to_lowercase().starts_with("enemies_"))
-    }) {
-        for path in COMBAT_EFFECTS {
-            if seen.insert((*path).to_owned()) {
-                candidates.push((*path).to_owned());
-            }
+    // The placed enemy kinds' own code tables (Ants, corporals, Ladybugs) and
+    // Alice's combat cries, exactly the set `audio_combat_preload` names.
+    for path in combat_preload(map) {
+        if seen.insert(path.to_owned()) {
+            candidates.push(path.to_owned());
         }
     }
     for path in placed_actor_cues(assets, map) {
