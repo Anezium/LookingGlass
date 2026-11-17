@@ -120,6 +120,7 @@ const FORTRESS: &[Vec3] = &[
     vec3(-3380., 2700., 0.),
     vec3(-3230., 2730., 0.),
     vec3(-3230., 3050., 0.),
+    vec3(-3098., 3068., 118.),
     vec3(-360., -2410., -192.),
     vec3(-400., -2240., -192.),
     vec3(-448., -1810., 32.),
@@ -261,7 +262,7 @@ fn plan(map: &str) -> Option<Plan> {
             reach: 300.,
             boss: false,
             clear: false,
-            time_limit: 210.,
+            time_limit: 260.,
         },
         "utemple" => Plan {
             wave_first: false,
