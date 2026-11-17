@@ -1,8 +1,11 @@
 # Fight pilot (private test candidate)
 
-Default off (`replay_fight_pilot=false`); no release config is changed. The current
-pilot supports hatter2 and centipede1. Read the external REPORT.md before using any build.
-A source commit or successful compilation alone does not qualify a tape or device build.
+Default off (`replay_fight_pilot=false`); no release config is changed. Proven maps:
+hatter2, centipede1, grounds1, grounds2 and jlair2. `prove-host.py` also accepts
+skool1, potears3, qlair, hatter1, fortress1, utemple and wchess2 for a worker to test,
+but no config or claim for those is delivered: their plans are bounded attempts, not
+proofs. Read the external REPORT.md before using any build. A source commit or
+successful compilation alone does not qualify a tape or device build.
 
 The viewer supplies live player state and hostile combat targets before `Session::begin_step`.
 The pilot substitutes ordinary SceCtrl stick bytes and the pinned backend's translated
@@ -17,15 +20,30 @@ and registered level controllers filtered by `hostile_target`. Puzzle shot surfa
 Alice's ice and summon are deliberately excluded from hostile planning. Hatter's action
 music is used to avoid fighting the visible idle boss before the clock fight starts.
 The driver applies horizontal/vertical aim through real stick curves, cycles to Cards
-with the D-pad, checks visibility and weapon readiness, and strafes in combat. It
-releases all synthetic inputs during a scene. It caps total time at 180 seconds,
-visible-target combat at 45 seconds for hatter2 and 60 for centipede1, retries at two and a non-scene approach stall at
-18 seconds. It stops via ordinary Escape/Start, so `reason=menu` is required.
+with the D-pad, checks visibility and weapon readiness, and strafes in combat. Older
+maps that need a route first (`after_goals`) walk the full approach before acquiring
+targets; this avoids dormant balcony guards that are visible but not reachable.
+It releases all synthetic inputs during a scene. It caps total time at 180 seconds
+(210-260 where the intro is long), visible-target combat at 45 seconds for hatter2 and
+60-75 for the others, retries at three deaths and a non-scene approach stall at 18
+seconds (30 while holding a vertical lift goal). It stops via ordinary Escape/Start,
+so `reason=menu` is required.
 
-Health telemetry samples the Hatter controller's existing read-only snapshot at 1 Hz;
-weapon-contact output is not by itself proof of health loss. Host proof requires a
-positive sampled enemy-health reduction and positive player damage, plus an exact replay.
+Health telemetry samples the owning controller's read-only snapshot at 1 Hz. Hatter2
+and grounds1 read `boss.health`; centipede1 reads the live Ant ids; grounds2 reads
+company actors; jlair2 reads the Jabberspawn waves because its boss is invulnerable
+by design; skool1/potears3 read the legacy encounters/Duchess snapshots; hatter1 and
+utemple walk the NPC actor snapshot; qlair reads `queen1/queen2`; wchess2 reads the
+castle cast. Every source is keyed by a stable identity, cleared after a retry, and
+ignores health increases. Weapon-contact output is not by itself proof of health
+loss. Host proof requires a positive sampled enemy-health reduction and positive player
+damage, plus an exact replay. Sampling can miss damage dealt and healed between 1 Hz
+samples; it can also miss a target killed and replaced inside one sample.
 No claimed Vita planning cost or fight performance is inferred from host timing.
+
+Skips recorded on 2026-11-17 (see the batch REPORT for evidence): skool1, potears3,
+qlair, hatter1, fortress1, utemple, wchess2. Their plans remain in the source as
+bounded attempts for the next worker; none is a delivered map.
 
 ## Host proof
 
@@ -58,7 +76,7 @@ P=/absolute/new/fight-session
 KIT=/Users/anezium/vita-j0/plan-2026-11-12/rc1-session/rc1kit.py
 SRC=/Users/anezium/vita-work/lg-fight-pilot
 SELF=/absolute/reviewed-test-package/eboot.bin
-MAP=centipede1 # or hatter2; one take at a time
+MAP=grounds1 # or grounds2, jlair2, hatter2, centipede1; one take at a time
 python3 "$SRC/tools/fight-pilot/make-config.py" --map "$MAP" --out "$P/configs-$MAP"
 # Verify kit SHA-256 = 93f434a6286b2180bd66d89ffad1394b7f27b5e385296c67a70b2271256558b3.
 # Root: acquire slot, preflight, start arms receiver, observe, inspect the exact PNG,
@@ -124,20 +142,25 @@ The fake-kit test qualifies orchestration only, not console gameplay or performa
 
 ## Handoff: adding the next map
 
-The authorized scope of this batch ends after centipede1. Next worker owns skool1
-(longer fights), then grounds1, grounds2, jlair2, potears3 and qlair.
+Delivered/proven maps: hatter2, centipede1, grounds1, grounds2, jlair2. Plans for
+skool1, potears3, qlair, hatter1, fortress1, utemple and wchess2 exist but failed
+host proof on 2026-11-17; the exact stopping points are in the batch REPORT.
+Next worker should start with the closest failures below.
 
 1. Read the relevant production controller and route. Approach sources:
    `src/levels/centipede1/check.rs::drive` (Flora), `src/school_route.rs::run`
    (skool1), `src/levels/grounds2/route.rs`, `src/jabberwock/check.rs` and its
    route helpers (grounds1/jlair2 registrations delegate to Jabberwock),
-   `src/duchess_check.rs` (potears3), `src/levels/qlair/check.rs::drive_inner`.
+   `src/duchess_check.rs` (potears3), `src/levels/qlair/check.rs::drive_inner`,
+   `src/levels/hatter1/route_steps.json`, `src/fortress_route.rs`,
+   `src/levels/utemple/check.rs::drive`, `src/levels/wchess2/check.rs::COURSE`.
    Borrow a short waypoint approach, not their separate 120 Hz controls/timing.
-2. Extend `src/replay/pilot.rs`: supported-map match, per-map waypoint list, combat
-   distance/weapon choice, bounded time/retry/stall limits and completion. Commands
-   must remain Frame input only. Never edit player/controller state or game data.
-   Keep 0.3 s neutral input after checkpoint restoration: Input::suppress latches
-   each stick until neutral. Keep menu stop/manual Start and all default flags off.
+2. Extend `src/replay/pilot.rs`: per-map `Plan` (goals, aim/vertical/reach/boss/
+   clear/after_goals/wave_first/time limits), combat distance/weapon choice, bounded
+   time/retry/stall limits and completion. Commands must remain Frame input only.
+   Never edit player/controller state or game data. Keep 0.3 s neutral input after
+   checkpoint restoration: Input::suppress latches each stick until neutral. Keep
+   menu stop/manual Start and all default flags off.
 3. Targets are gathered at the top of `src/viewer.rs`, immediately before
    Session::begin_step. Compare its production combat target gather later in that file:
    NPCs, Duchess, encounter/school controllers and registered level targets.
@@ -145,13 +168,12 @@ The authorized scope of this batch ends after centipede1. Next worker owns skool
    LevelController::hostile_target show filtering. Puzzle shot surfaces, ice,
    allies and protected pupils are not automatic hostile aim targets. Hatter2 needs
    fight-phase gating; do not apply its action-music gate blindly to Flora/other maps.
-4. Add read-only health telemetry. The viewer currently passes the registered
-   controller snapshot whose id equals the map. Hatter2 uses boss.health;
-   centipede1 tracks ants[].ant.id/health at 1 Hz. Legacy skool1/potears3 owners may
-   require encounters/NPC/Duchess snapshots instead. Key health by stable identity,
-   clear tracking after retry, ignore health increases, and document sampling limits.
-   Contacts are not proof of applied damage. Do not silently count target disappearance
-   as a kill or let respawn/array-index reuse masquerade as health loss.
+4. Add read-only health telemetry. `Pilot::sample` receives the registered controller
+   snapshot, a legacy encounters/duchess snapshot and (for NPC-owned enemies) the NPC
+   actor snapshot, all at 1 Hz. Key health by stable identity, clear tracking after
+   retry, ignore health increases, and document sampling limits. Contacts are not proof
+   of applied damage. Do not silently count target disappearance as a kill or let
+   respawn/array-index reuse masquerade as health loss.
 5. Add the map to the choices in prove-host.py and make-config.py and to the accepted
    chapter starts in record.py. Extend the map-specific health analysis in prove-host.py.
    Generate separate test configs outside Git. Never change a shipped config.
@@ -166,16 +188,46 @@ The authorized scope of this batch ends after centipede1. Next worker owns skool
    original recorded tape. Require full-tape done PASS, all checks matched, diff=0,
    event_mismatches=0. Header preferences carry the recorded controls; the pilot must
    not be invoked during replay. Preserve negative runs; do not weaken proof assertions.
+   The map-specific walk floor in prove-host.py only adapts the old 1000-unit check to
+   maps whose first fight is close to the spawn; movement, contacts and damage remain
+   required.
 8. Revalidate hatter2/centipede1 if shared input/combat behavior changes. Once a batch
    is proven, commit clean inputs and run build-vita.py once. It makes a private test
    SELF/VPK using the pinned RC14 no-prelude archive. Keep the original pinned kit
    untouched. Verify hashes and gates, update report/status, push and remove private
    target-pilot and target-vita caches at handoff. Root alone operates the console.
+   build-vita.py now uses a worktree `target-vita` and can start without a seed cache.
+
+Known stopping points from 2026-11-17 (all bounded, no hang):
+
+- skool1: dormant t188 balcony guards are visible from the lower floor but unreachable;
+  with `after_goals` the school route reaches the moved-shelf/lift climb at
+  (-2304,2800,-256) and holds there, but the authored shelf/lift sequence (trigger at
+  (144,4360,-208)) is not reachable by straight approach. Needs a real path around the
+  library and a lift ride. Three host attempts.
+- potears3: the Jackbomb pickup and Duchess fight are reached, but the pilot gets
+  3 deaths in ~17 s of visible target and deals nothing (furniture breaks the sweep and
+  her attacks out-range the 420 approach). Needs a dodge/keep-away pattern and a longer
+  Cards reach.
+- qlair: the corridor to (0,-520) ends in a 100-damage fall/hazard before the Queen1
+  contact. Needs the authored corridor path/trigger, not a straight +Y walk.
+- hatter1: the first Clockwork climb reaches (-2720,3296,416) once, then a 100-damage
+  death and the respawn cannot repeat the climb; the start has no nearby pathnodes.
+  Needs a route around the first blocked lip.
+- fortress1: the portal is now entered and the split-room guard fight starts
+  (20 contacts), but the encounter snapshot was not sampled in that run and no player
+  damage was taken in 6 s; needs `needs_legacy` for fortress1 encounters and a longer
+  fight.
+- utemple: no swim/rise input in the pilot; the turtle/guide path is unreachable.
+- wchess2: the Castling course is a 150-point maze; the first nine points reach no
+  enemy. Needs the full COARSE course or a later staged fight.
 
 Pitfalls actually encountered:
 
 - Pinned miniquad key codes are X11 values: LeftControl=0xffe3, not GLFW 341. Read
   the tape header key table; do not import an unrelated key-code numbering scheme.
+- In the Vita preset, Primary attack is Ctrl, jump is Enter and interact is Space;
+  Enter is also retry. Space jumps, not Enter.
 - Cached injected Vita sticks must be used only during RECORD/REPLAY. After stop,
   real physical input must resume. test_native_pad.py extracts the production native
   function and tests it with an inert local SceCtrl stub; no device is contacted.
@@ -186,12 +238,19 @@ Pitfalls actually encountered:
   while controller enemies fight; full state hashes and owner health matter.
 - Cards funding is finite. Flora falls back to the ordinary Knife through D-pad
   cycling, rather than repeatedly selecting unfunded Cards. No inventory/stat edits.
+- Holding Right cycles the whole inventory; the pilot now steps once per 0.4 s and
+  stops on the wanted slot. This mattered on potears3 (four owned weapons).
+- The Jabberwock lair boss is invulnerable (health 99999 by design); damage lands on
+  the Jabberspawn waves, which spawn at 30 s and 60 s of fight time. Sample
+  `waves[].actor.health`, and prefer wave targets over the boss base id.
+- School and Fortress are legacy owners: there is no registered controller snapshot
+  for them; encounters health comes from `interactions.encounters`.
 - Check-sampled path includes traversal and retry displacement; report it as sampled,
   and separate the full fight span from visible-target combat seconds. Player damage
   after fight start can include falls; do not claim every point was an enemy hit.
 - A host-generated tape has platform=host. Root must record a new platform=vita tape
   with the private SELF, then derive native windows. Do not reuse host frame numbers.
-- The old production native cache path was archived. build-vita.py uses the retained
-  RC15 cache as a seed only, copies it privately, and pins the RC14 archive separately.
+- build-vita.py used to need the RC15 seed; it was removed at the previous handoff.
+  The script now builds in a private worktree `target-vita` when no seed exists.
 - A successful SELF build is not native play/replay qualification. No console result,
   p95, CPU planning cost or full-map release verdict is inferred from these host proofs.
