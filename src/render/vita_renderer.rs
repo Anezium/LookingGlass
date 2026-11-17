@@ -92,8 +92,8 @@ pub struct Config {
     pub actor_opaque_shader: bool,
     /// Remove unreachable discard instructions from certified actor layers, including blends. Default off.
     pub actor_discard_free_shader: bool,
-    /// Picture-changing experiment: cull back-facing actor triangles. Owner approval required. Default off.
-    pub actor_backface_cull: bool,
+    /// Picture-changing experiment: cull GL front-facing actor triangles. Owner approval required. Default off.
+    pub actor_frontface_cull: bool,
     /// Cull script-owned bodies when single preparation has no mutable consumer.
     pub actor_consumer_frustum_cull: bool,
     pub diag_skip_fx: bool,
@@ -529,7 +529,7 @@ impl Default for Config {
             diag_skip_live_actors: false,
             actor_opaque_shader: false,
             actor_discard_free_shader: false,
-            actor_backface_cull: false,
+            actor_frontface_cull: false,
             actor_consumer_frustum_cull: false,
             diag_skip_fx: false,
             diag_skip_decals: false,
@@ -3646,7 +3646,7 @@ mod tests {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
             if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
-                || key == "actor_backface_cull" || key == "actor_discard_free_shader" || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
+                || key == "actor_frontface_cull" || key == "actor_discard_free_shader" || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -3751,7 +3751,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_backface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.

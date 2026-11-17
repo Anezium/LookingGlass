@@ -741,13 +741,13 @@ impl Gpu {
             // Every retained pipeline has CullFace::Nothing. Restore that state before
             // any world callback or cached pipeline use. This opt-in can remove authored
             // double-sided faces and is deliberately classified as picture-changing.
-            let backface = c.actor_backface_cull && !p.effect;
-            unsafe { if backface {
+            let cull = c.actor_frontface_cull && !p.effect;
+            unsafe { if cull {
                 macroquad::miniquad::gl::glEnable(0x0B44); // GL_CULL_FACE
-                macroquad::miniquad::gl::glCullFace(0x0405); // GL_BACK
+                macroquad::miniquad::gl::glCullFace(0x0404); // GL_FRONT; experimental authored winding
             } }
             ctx.draw(0, p.geometry().indices.len() as i32, 1);
-            unsafe { if backface { macroquad::miniquad::gl::glDisable(0x0B44); } }
+            unsafe { if cull { macroquad::miniquad::gl::glDisable(0x0B44); } }
         }
         #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
         if let Some(start) = census_started {
