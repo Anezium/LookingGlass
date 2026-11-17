@@ -8,7 +8,7 @@ thread_local! { static OPAQUE: RefCell<HashMap<macroquad::miniquad::TextureId,Te
 fn all_opaque(rgba:&[u8]) -> bool { !rgba.is_empty() && rgba.len()%4==0 && rgba.chunks_exact(4).all(|p|p[3]==255) }
 pub(crate) fn note_texture(texture:&Texture2D, rgba:&[u8]) {
     let c=crate::render::vita_renderer::config();
-    if !c.ant_corpse_opaque_shader && !c.actor_opaque_shader && !c.actor_discard_free_shader {return;}
+    if !c.ant_corpse_opaque_shader && !c.actor_opaque_shader {return;}
     OPAQUE.with(|table| {
         let mut table=table.borrow_mut();
         if table.len()>=4096 {table.clear();}
@@ -22,12 +22,17 @@ fn opaque_texture(texture:Option<&Texture2D>) -> bool {
     texture.is_none_or(|t|OPAQUE.with(|table|table.borrow().get(&t.raw_miniquad_id()).is_some_and(|old| *old==t.weak_clone())))
 }
 pub(super) fn eligible(p:&Pass) -> bool {
-    p.blend_index==0 && !p.depth_equal && discard_free(p)
+    p.blend_index==0 && !p.depth_equal && rejection_free(p)
 }
 /// Blending and depth equality do not affect whether a fragment can execute discard.
 /// Preserve all output arithmetic and all pipeline state; reject every appearance/cutout
 /// whose rejection predicate is not certified false for the complete primitive.
 pub(super) fn discard_free(p:&Pass) -> bool {
+    // Potears1's strict host oracle rejects the broad certified-texture route:
+    // packets match but some pixels differ. Keep that route on the original shader.
+    p.cutout==0. && rejection_free(p)
+}
+fn rejection_free(p:&Pass) -> bool {
     !p.effect && p.appearance.dissolve==0. && !p.appearance.ghost
         && (p.cutout==0. || (p.cutout==4. && p.gain.w==1.
             && opaque_texture(p.mesh.texture.as_ref()) && p.geometry().vertices.iter().all(|v|v.color[3]==255)))
@@ -50,6 +55,7 @@ mod tests {
             material:None,lit:true,clamp:false,cutout:4.,cutout_reference:0.5,gain:Vec4::ONE,
             fog:0.,model:true,appearance:Appearance::default(),filter_fade:0.};
         assert!(eligible(&p));
+        assert!(!discard_free(&p), "certified cutout remains on the original actor shader");
         p.gain.w=0.3;assert!(!eligible(&p));p.gain.w=1.;
         p.mesh.vertices[0].color[3]=0;assert!(!eligible(&p));
         p.cutout=0.;assert!(eligible(&p)); // no alpha rejection in the full program
