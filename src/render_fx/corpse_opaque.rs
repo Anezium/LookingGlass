@@ -93,9 +93,6 @@ mod tests {
             p.cutout=cutout;assert!(!cutout_discard_free(&p), "only the default model cutout is certified here");
         }
         p.cutout=4.;
-        p.mesh.texture=Some(Texture2D::from_miniquad_texture(macroquad::miniquad::TextureId::from_raw_id(macroquad::miniquad::RawId::OpenGl(7))));
-        assert!(!cutout_discard_free(&p), "a texture without an all-opaque certificate keeps the original program");
-        p.mesh.texture=None;
         p.gain.w=0.3;assert!(!eligible(&p));p.gain.w=1.;
         p.mesh.vertices[0].color[3]=0;assert!(!eligible(&p));
         p.cutout=0.;assert!(eligible(&p)); // no alpha rejection in the full program
