@@ -28,11 +28,15 @@ pub(super) fn eligible(p:&Pass) -> bool {
 /// Preserve all output arithmetic and all pipeline state; reject every appearance/cutout
 /// whose rejection predicate is not certified false for the complete primitive.
 pub(super) fn discard_free(p:&Pass) -> bool {
-    // Potears1's strict host oracle rejects the broad certified-texture route:
-    // packets match but some pixels differ, including uncut non-environment actors.
-    // Keep the specialization scoped to uncut environment-material actor surfaces.
+    // Two strict pixel rejections narrowed this key: the broad certified-texture
+    // route changed potears1 pixels, and an environment-anywhere rule changed the
+    // garden3 marble statue by 1..2 channel units on 24 frames. The proven case is
+    // the chess bodies' two authored layers: environment reflection first, skin
+    // second. Require exactly that pair; single-layer pickups and multi-layer props
+    // with a trailing environment stage keep the original program.
     p.cutout==0. && rejection_free(p)
-        && p.mesh.surface.as_ref().is_some_and(|s| s.layers.iter().any(|l|l.stage.environment))
+        && p.mesh.surface.as_ref().is_some_and(|s| s.layers.len()==2
+            && s.layers[0].stage.environment && !s.layers[1].stage.environment)
 }
 fn rejection_free(p:&Pass) -> bool {
     !p.effect && p.appearance.dissolve==0. && !p.appearance.ghost
@@ -62,14 +66,33 @@ mod tests {
         p.mesh.vertices[0].color[3]=0;assert!(!eligible(&p));
         p.cutout=0.;assert!(eligible(&p)); // no alpha rejection in the full program
         assert!(!discard_free(&p), "ordinary actors retain their original program");
+        let layer=|environment|Layer {stage:Stage {environment,..Default::default()},textures:vec![],upload_identities:vec![]};
         p.mesh.surface=Some(Rc::new(Surface {
-            layers:vec![Layer {stage:Stage {environment:true,..Default::default()},textures:vec![],upload_identities:vec![]}],
+            layers:vec![layer(true),layer(false)],
             transparent:false,preserve_skin:true,
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             label:(false,None),
             actors:RefCell::default(),
         }));
-        assert!(discard_free(&p));
+        assert!(discard_free(&p), "two-stage environment+skin actor body");
+        let pair=p.mesh.surface.take().unwrap();
+        p.mesh.surface=Some(Rc::new(Surface {
+            layers:vec![layer(false),layer(false),layer(true)],
+            transparent:false,preserve_skin:true,
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            label:(true,Some("models/marble/skin01.tga".into())),
+            actors:RefCell::default(),
+        }));
+        assert!(!discard_free(&p), "trailing environment prop keeps the original program");
+        p.mesh.surface=Some(Rc::new(Surface {
+            layers:vec![layer(true)],
+            transparent:false,preserve_skin:true,
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            label:(true,Some("models/pickups/health_small".into())),
+            actors:RefCell::default(),
+        }));
+        assert!(!discard_free(&p), "single-layer pickup keeps the original program");
+        p.mesh.surface=Some(pair);
         p.appearance.dissolve=0.1;assert!(!eligible(&p));p.appearance.dissolve=0.;
         p.appearance.ghost=true;assert!(!eligible(&p));p.appearance.ghost=false;
         p.blend_index=1;assert!(!eligible(&p));assert!(discard_free(&p));p.blend_index=0;
