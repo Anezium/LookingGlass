@@ -320,6 +320,7 @@ pub struct Pilot {
     last_seek_log: f32,
     last_feet: Vec3,
     waiting: bool,
+    last_cycle: f32,
 }
 
 impl Pilot {
@@ -352,6 +353,7 @@ impl Pilot {
             last_seek_log: 0.,
             last_feet: Vec3::ZERO,
             waiting: false,
+            last_cycle: 0.,
         }))
     }
 
@@ -567,8 +569,11 @@ impl Pilot {
             } else {
                 1
             };
-            if selected != desired && (self.seconds * 4.) as u32 % 2 == 0 {
+            if selected != desired && self.seconds - self.last_cycle > 0.4 {
+                // One discrete D-pad step at a time: holding Right cycles the whole
+                // inventory and rarely lands on the wanted weapon on maps with several.
                 press(KeyCode::Right);
+                self.last_cycle = self.seconds;
             }
             let at_post = !p.after_goals || self.waypoint + 1 >= p.goals.len();
             let target = targets
