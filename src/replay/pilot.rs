@@ -30,6 +30,9 @@ struct Plan {
     boss: bool,
     /// May stop after an observed fight has both dealt and taken damage.
     clear: bool,
+    /// Reach the last approach point before acquiring targets; avoids dormant balcony
+    /// guards that are visible but not yet reachable.
+    after_goals: bool,
     time_limit: f32,
 }
 
@@ -55,9 +58,13 @@ const FLORA: &[Vec3] = &[
 /// School first visit: the first-monster trigger sits just ahead of the spawn and
 /// wakes group t188; the library balcony guards follow (src/school_route.rs).
 const SCHOOL: &[Vec3] = &[
-    vec3(-1888., 2050., -460.),
-    vec3(-1888., 2400., -470.),
-    vec3(-2300., 2400., -470.),
+    vec3(-1888., 2290., -512.),
+    vec3(-2340., 2368., -480.),
+    vec3(-2256., 2544., -480.),
+    vec3(-2304., 2624., -342.),
+    vec3(-2304., 2800., -256.),
+    vec3(-2304., 3248., -256.),
+    vec3(-1664., 3248., -256.),
 ];
 
 /// Grounds1: the intro hands Alice to `gdeath` facing the Jabberwock arena.
@@ -135,6 +142,7 @@ const CASTLING: &[Vec3] = &[
 fn plan(map: &str) -> Option<Plan> {
     let p = match map {
         "hatter2" => Plan {
+            after_goals: false,
             goals: HATTER2,
             fight_limit: 45.,
             aim: 3000.,
@@ -145,6 +153,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "centipede1" => Plan {
+            after_goals: false,
             goals: FLORA,
             fight_limit: 60.,
             aim: 1200.,
@@ -155,6 +164,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "skool1" => Plan {
+            after_goals: true,
             goals: SCHOOL,
             fight_limit: 75.,
             aim: 1200.,
@@ -165,6 +175,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "grounds1" => Plan {
+            after_goals: false,
             goals: GROUNDS_ARENA,
             fight_limit: 60.,
             aim: 2000.,
@@ -175,6 +186,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "grounds2" => Plan {
+            after_goals: true,
             goals: ROYALE,
             fight_limit: 75.,
             aim: 1200.,
@@ -185,6 +197,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "jlair2" => Plan {
+            after_goals: false,
             goals: LAIR,
             fight_limit: 60.,
             aim: 2000.,
@@ -195,6 +208,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "potears3" => Plan {
+            after_goals: true,
             goals: DUCHESS,
             fight_limit: 60.,
             aim: 1600.,
@@ -205,6 +219,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "qlair" => Plan {
+            after_goals: true,
             goals: QUEEN,
             fight_limit: 60.,
             aim: 2000.,
@@ -215,6 +230,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "hatter1" => Plan {
+            after_goals: true,
             goals: CLOCKWORK,
             fight_limit: 75.,
             aim: 1400.,
@@ -225,6 +241,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 210.,
         },
         "fortress1" => Plan {
+            after_goals: true,
             goals: FORTRESS,
             fight_limit: 60.,
             aim: 1200.,
@@ -235,6 +252,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 210.,
         },
         "utemple" => Plan {
+            after_goals: true,
             goals: TEMPLE,
             fight_limit: 60.,
             aim: 1200.,
@@ -245,6 +263,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "wchess2" => Plan {
+            after_goals: true,
             goals: CASTLING,
             fight_limit: 60.,
             aim: 1200.,
@@ -525,8 +544,10 @@ impl Pilot {
             if selected != desired && (self.seconds * 4.) as u32 % 2 == 0 {
                 press(KeyCode::Right);
             }
+            let at_post = !p.after_goals || self.waypoint + 1 >= p.goals.len();
             let target = targets
                 .iter()
+                .filter(|_| at_post)
                 .filter(|t| t.center.distance(player.eye()) < p.aim)
                 .filter(|t| (t.center.z - player.eye().z).abs() < p.vertical)
                 .filter(|t| {
