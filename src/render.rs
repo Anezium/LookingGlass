@@ -174,6 +174,9 @@ pub struct Scene {
     pub missing: Vec<String>,
     pub triangles: usize,
     sky_origin: Option<Vec3>,
+    /// `sky_live`: every point the level may use as its sky camera, read once at load.
+    #[cfg(feature = "vita_renderer")]
+    sky_candidates: Vec<Vec3>,
     sky_rotation: Quat,
     sky_motion: Option<crate::sky_sequence::Motion>,
     sky_props: Vec<Batch>,
@@ -1147,6 +1150,8 @@ fn draw_batch(
                 .distance_squared(camera)
         };
         triangles.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
+        #[cfg(all(feature = "vita_renderer", not(target_os = "vita")))]
+        if sky_stats::enabled() { sky_stats::add_sorted(triangles.len()); }
         batch.mesh.indices.clear();
         batch.mesh.indices.extend(triangles.into_iter().flatten());
     }
@@ -1280,6 +1285,8 @@ fn draw_batch(
             }
             #[cfg(target_os = "vita")]
             crate::frame_profile::record_lg_submission();
+            #[cfg(all(feature = "vita_renderer", not(target_os = "vita")))]
+            if sky_stats::enabled() { sky_stats::add_submission(mesh.vertices.len(), mesh.indices.len()); }
             draw_mesh(&mesh);
         } else {
             #[cfg(target_os = "vita")]
@@ -1292,6 +1299,8 @@ fn draw_batch(
             }
             #[cfg(target_os = "vita")]
             crate::frame_profile::record_lg_submission();
+            #[cfg(all(feature = "vita_renderer", not(target_os = "vita")))]
+            if sky_stats::enabled() { sky_stats::add_submission(batch.mesh.vertices.len(), batch.mesh.indices.len()); }
             draw_mesh(&batch.mesh);
         }
     }
@@ -1760,6 +1769,10 @@ impl Scene {
         let camera_portals = if retained_world { Vec::new() } else { camera_portal::load(assets, name, &map, &world, &specs)? };
         let mut groups = BTreeMap::<(usize, usize), usize>::new();
         let sky_origin = crate::sky::origin(assets, name, &map)?;
+        #[cfg(feature = "vita_renderer")]
+        let sky_candidates = if retained_world && vita_renderer::config().sky_live {
+            crate::sky::candidates(assets, name, &map)?
+        } else { Vec::new() };
         let mut sky_motions = crate::sky_sequence::motions(assets, &map, name)?;
         timing.mark("inline_models_portals_sky");
         for model in models {
@@ -2151,6 +2164,8 @@ impl Scene {
             missing,
             triangles,
             sky_origin,
+            #[cfg(feature = "vita_renderer")]
+            sky_candidates,
             sky_rotation: crate::sky::rotation(name),
             sky_motion: sky_motions.remove("skycamera01"),
             sky_props,

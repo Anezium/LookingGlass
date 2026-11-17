@@ -14,6 +14,7 @@ mod gxm;
 mod draw_cuts;
 mod alpha_fill;
 mod sky_surfaces;
+mod sky_room;
 mod water_join;
 mod water_probe;
 #[cfg(not(target_os = "vita"))]
@@ -322,6 +323,25 @@ pub struct Config {
     /// off), so scenery placed behind the sky stays hidden, as on the desktop renderer.
     /// No effect with `authored_sky` or `sky: false`. Default off.
     pub sky_depth: bool,
+    /// Draw the authored sky every frame from retained buffers of its own, in place of the
+    /// gradient: sky room opaque, room translucent, depth clear, sky faces (into depth where they
+    /// show the room, with their sky shader where they carry one), then the world. Every stage is
+    /// kept. Scrolling stages, sky props with scripted motion or vertex animation and sky camera
+    /// moves stay live. Keeps no legacy geometry. A map with neither a sky camera nor a sky
+    /// shader keeps the gradient. Excludes `authored_sky` and `sky_cube`. Default off.
+    pub sky_live: bool,
+    /// With `sky_live`: draw the translucent sky room layers too. Off is a cost diagnostic that
+    /// leaves only the opaque room. Default on.
+    pub sky_live_alpha: bool,
+    /// With `sky_live`: below 1, draw the sky room into its own target at this fraction of the 3D
+    /// target's width and height, then copy it over the 3D target with one full-screen triangle.
+    /// Cuts the fill of translucent sky layers at the price of one more GXM scene per frame and a
+    /// softer sky. 0.25 to 1; 1 draws the room straight into the 3D target. Default 1.
+    pub sky_live_scale: f32,
+    /// With `sky_live`: draw the sky through two lean fragment programs of its own (texture times
+    /// gain, and the same with the alpha test) instead of the world program. The sky is fullbright
+    /// and unfogged, so they compute what the world program computes there. Default on.
+    pub sky_live_lite: bool,
     pub cell_size: f32,
     /// Compare grouped actor/world alpha to the milestone-2 bridge.
     pub alpha_interop: bool,
@@ -644,6 +664,10 @@ impl Default for Config {
             sky_cube_capture_only: false,
             sky_cube_clear_only: false,
             sky_depth: false,
+            sky_live: false,
+            sky_live_alpha: true,
+            sky_live_scale: 1.,
+            sky_live_lite: true,
             cell_size: 256.,
             alpha_interop: true,
             actor_max_layers: 2,
@@ -817,6 +841,8 @@ impl Config {
         ensure!(matches!(self.gpu_experiment.as_str(),"unchanged"|"gpu111"|"gpu222"),"gpu_experiment must be unchanged, gpu111 or gpu222");
         ensure!(matches!(self.pvs_method.as_str(),"sources"|"legacy"),"pvs_method must be sources or legacy");
         ensure!((32..=1024).contains(&self.sky_cube_size), "sky_cube_size must be 32..1024");
+        ensure!(!self.sky_live || !(self.authored_sky || self.sky_cube), "sky_live excludes authored_sky and sky_cube");
+        ensure!(self.sky_live_scale.is_finite() && (0.25..=1.).contains(&self.sky_live_scale), "sky_live_scale must be 0.25 to 1");
         ensure!(
             self.cell_size.is_finite() && (64. ..=2048.).contains(&self.cell_size),
             "invalid cell_size"
@@ -1362,8 +1388,10 @@ pub struct Renderer {
     sky_pipeline: Pipeline,
     sky_shader: ShaderId,
     sky_bindings: Bindings,
-    /// `sky_depth` and `sky_cube`: the map's static sky surfaces.
+    /// `sky_depth`, `sky_cube` and `sky_live`: the map's static sky surfaces.
     sky_surfaces: Option<sky_surfaces::SkySurfaces>,
+    /// `sky_live`: the sky room sets, the sky shader faces and their programs.
+    sky_room: Option<sky_room::SkyRoom>,
     alpha_order: Vec<(f32, usize)>,
     prepared: Vec<Prepared>,
     fx_gpu: Option<crate::render_fx::retained::Gpu>,
@@ -1906,6 +1934,7 @@ impl Renderer {
         resources.buffers.extend(sky_bindings.vertex_buffers.iter().copied());
         resources.buffers.push(sky_bindings.index_buffer);
         let sky_surfaces = sky_surfaces::SkySurfaces::new(scene, ctx, &mut resources)?;
+        let sky_room = sky_room::SkyRoom::new(scene, ctx, &mut resources, shader);
         #[cfg(not(target_os = "vita"))]
         ensure!(std::env::var("LOOKING_GLASS_RETAINED_FAIL").as_deref() != Ok("after-upload"), "host diagnostic construction failure after upload");
         let upload_ms=upload_start.elapsed().as_secs_f64()*1000.;
@@ -2010,6 +2039,7 @@ impl Renderer {
             sky_shader,
             sky_bindings,
             sky_surfaces,
+            sky_room,
         })
     }
     /// `water_draw_join`: plan this frame's runs from the joint alpha list, then upload their
@@ -2501,6 +2531,10 @@ impl Renderer {
                 }
             });
             let background = self.sky_surfaces.as_ref().is_some_and(|s| s.has_background(cube.as_ref()));
+            // `sky_live`: the authored sky stands where the gradient stood. Holes in it show the
+            // target's clear colour, as with the legacy authored sky.
+            let live = self.sky_room.is_some();
+            let background = background || live;
             let start = totals.start();
             if !background {
                 ctx.apply_pipeline(&self.sky_pipeline);
@@ -2513,7 +2547,11 @@ impl Renderer {
             let start = totals.start();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::draw_query::mark("world_opaque","sky",0,None,0,None);
-            if !crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) {
+            let mut live_counts = sky_room::Counts::default();
+            if crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) {
+            } else if live {
+                live_counts = self.draw_sky_room(ctx, scene, eye, time, projection);
+            } else {
                 match (&self.sky_surfaces, &cube) {
                     (Some(s), Some(c)) if background => s.draw_background(ctx, &self.sky_bindings, projection, eye, c),
                     _ => ctx.draw(0, 3, 1),
@@ -2526,11 +2564,28 @@ impl Renderer {
             crate::light_profile::render_add(phase, RenderMetrics { draws: 1, pipelines: 1,
                 bindings: 1, uniform_uploads: 1, uniform_bytes: 32, uniform_gl_calls: 2, ..Default::default() });
             let mode = match (&self.sky_surfaces, &cube) {
+                _ if live => "live",
                 (Some(_), Some(_)) => "cube",
                 (Some(_), None) if config().sky_depth => "depth",
                 _ => "gradient",
             };
-            if let (Some(sky), true) = (&self.sky_surfaces, mode != "gradient") {
+            if live {
+                // Coverage counters of their own: every RC17 counter and render metric keeps its value.
+                let faces = if crate::gpu_timing::masked(crate::gpu_timing::MASK_SKY) { 0 } else {
+                    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                    crate::sim_maps::probe::draw_query::mark("sky_room","sky_faces_depth",0,None,0,None);
+                    let shaded = self.sky_room.as_ref().is_some_and(|room| room.has_faces());
+                    let depth = self.sky_surfaces.as_ref().map_or(0, |sky| sky.draw_depth(ctx, projection, shaded));
+                    self.draw_sky_faces(ctx, scene, eye, time, projection, &mut live_counts);
+                    depth
+                };
+                count("vita_sky_live_draws", live_counts.opaque + live_counts.alpha + live_counts.face_layers);
+                count("vita_sky_live_triangles", live_counts.triangles);
+                count("vita_sky_live_face_draws", faces);
+                count("vita_sky_live_target_draws", live_counts.copies);
+                count("vita_sky_live_lite_draws", live_counts.lite);
+                count("vita_sky_live_upload_bytes", live_counts.upload_bytes);
+            } else if let (Some(sky), true) = (&self.sky_surfaces, mode != "gradient") {
                 let _span = crate::frame_profile::span("vita_world_sky_surfaces");
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 crate::sim_maps::probe::draw_query::mark("world_opaque","sky_surfaces",0,None,0,None);
@@ -2541,8 +2596,9 @@ impl Renderer {
                     bindings: draws, uniform_uploads: 1, ..Default::default() });
             }
             #[cfg(not(target_os = "vita"))]
-            super::sky_stats::end(probe, mode, &format!("sky_surface_triangles={}",
-                self.sky_surfaces.as_ref().map_or(0, |s| s.triangles)));
+            super::sky_stats::end(probe, mode, &format!("sky_surface_triangles={} room_tested={} room_opaque_draws={} room_alpha_draws={} face_layer_draws={} lite_draws={} triangles={} upload_bytes={}",
+                self.sky_surfaces.as_ref().map_or(0, |s| s.triangles), live_counts.tested, live_counts.opaque,
+                live_counts.alpha, live_counts.face_layers, live_counts.lite, live_counts.triangles, live_counts.upload_bytes));
         }
         if alpha || !config().world_state_cache { unsafe {
             macroquad::miniquad::gl::glDepthMask(if alpha { 0 } else { 1 });
@@ -3163,6 +3219,7 @@ impl Drop for Renderer {
         ctx.delete_buffer(self.sky_bindings.vertex_buffers[0]);
         ctx.delete_buffer(self.sky_bindings.index_buffer);
         if let Some(sky) = &self.sky_surfaces { sky.delete(ctx); }
+        if let Some(room) = &mut self.sky_room { room.delete(ctx); }
     }
 }
 fn count(name: &'static str, n: u64) {
@@ -3908,7 +3965,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
@@ -5400,6 +5457,34 @@ mod tests {
         for size in [16, 2048] {
             let c = Config { sky_cube_size: size, ..Config::default() };
             assert!(c.validate().is_err(), "face size {size} rejected");
+        }
+    }
+    #[test]
+    fn sky_live_defaults_off_is_strict_and_excludes_the_other_sky_paths() {
+        let c = Config::default();
+        assert!(!c.sky_live && c.sky_live_alpha && c.sky_live_lite && c.sky_live_scale == 1.,
+            "sky_live defaults off; with it on: full resolution, all layers, the lite program");
+        let (c, rejected) = parse_runtime_config(br#"{"sky_live":true,"sky_live_alpha":false,"sky_live_scale":0.5,"sky_live_lite":false}"#).unwrap();
+        assert!(rejected.is_none() && c.sky_live && !c.sky_live_alpha && !c.sky_live_lite && c.sky_live_scale == 0.5);
+        c.validate().unwrap();
+        for scale in [0.1, 1.5, f32::NAN] {
+            let c = Config { sky_live: true, sky_live_scale: scale, ..Config::default() };
+            assert!(c.validate().is_err(), "scale {scale} rejected");
+        }
+        for (authored_sky, sky_cube) in [(true, false), (false, true)] {
+            let c = Config { sky_live: true, authored_sky, sky_cube, ..Config::default() };
+            assert!(c.validate().is_err(), "sky_live with authored_sky={authored_sky} sky_cube={sky_cube} rejected");
+        }
+        // A non-boolean is a rejected key, not a silent default.
+        for bad in [br#"{"sky_live":1}"#.as_slice(), br#"{"sky_live_alpha":"yes"}"#.as_slice(), br#"{"sky_live_scale":"half"}"#.as_slice(),
+                    br#"{"sky_live_lite":0}"#.as_slice()] {
+            let parsed = parse_runtime_config(bad);
+            assert!(parsed.is_err() || parsed.unwrap().1.is_some(), "strict type for {}", String::from_utf8_lossy(bad));
+        }
+        // Every shipped config keeps the gradient: none names the key.
+        for name in ["PL-release.json", "PL-rc17-release-play.json"] {
+            let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(format!("configs/{name}")).unwrap()).unwrap();
+            assert!(raw.get("sky_live").is_none() && raw.get("sky_live_scale").is_none(), "{name}");
         }
     }
     #[test]

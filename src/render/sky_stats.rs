@@ -47,22 +47,39 @@ pub(crate) fn end(probe: Option<Probe>, what: &str, extra: &str) {
 thread_local! {
     static PHASES: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     static VERTICES: Cell<u64> = const { Cell::new(0) };
+    /// Macroquad submissions of the legacy path: [draw calls, vertices uploaded, indices uploaded,
+    /// triangles sorted on the CPU].
+    static SUBMITTED: Cell<[u64; 4]> = const { Cell::new([0; 4]) };
+}
+/// One `draw_mesh` of the legacy path. Every layer sets uniforms first, which breaks Macroquad's
+/// batching, so one submission is one draw call with its own vertex and index upload.
+pub(crate) fn add_submission(vertices: usize, indices: usize) {
+    SUBMITTED.with(|s| { let mut v = s.get(); v[0] += 1; v[1] += vertices as u64; v[2] += indices as u64; s.set(v); });
+}
+/// Triangles of a translucent batch sorted back to front on the CPU.
+pub(crate) fn add_sorted(triangles: usize) {
+    SUBMITTED.with(|s| { let mut v = s.get(); v[3] += triangles as u64; s.set(v); });
 }
 /// Legacy vertices rewritten on the CPU (position pass plus one pass per layer), counted by
 /// `draw_batch` while the probe is on.
 pub(crate) fn add_vertices(n: usize) { VERTICES.with(|v| v.set(v.get() + n as u64)); }
 /// CPU split of one legacy sky draw. Each `mark` closes the phase since the previous one.
-pub(crate) struct Phases { last: Instant, batches: usize, triangles: usize, vertices: u64 }
+pub(crate) struct Phases { last: Instant, batches: usize, culled: usize, triangles: usize, vertices: u64, submitted: [u64; 4] }
 impl Phases {
     pub(crate) fn new() -> Option<Self> {
-        enabled().then(|| { PHASES.with(|p| p.borrow_mut().clear()); Self { last: Instant::now(), batches: 0, triangles: 0, vertices: VERTICES.with(Cell::get) } })
+        enabled().then(|| { PHASES.with(|p| p.borrow_mut().clear()); Self { last: Instant::now(), batches: 0, culled: 0, triangles: 0,
+            vertices: VERTICES.with(Cell::get), submitted: SUBMITTED.with(Cell::get) } })
     }
     pub(crate) fn mark(&mut self, name: &str, stats: &super::DrawStats) {
         let now = Instant::now();
         let vertices = VERTICES.with(Cell::get);
-        PHASES.with(|p| p.borrow_mut().push_str(&format!(" {name}=[ms={:.3},batches={},layer_triangles={},cpu_vertices={}]",
-            (now - self.last).as_secs_f64() * 1000., stats.batches - self.batches, stats.triangles - self.triangles, vertices - self.vertices)));
-        self.last = now; self.batches = stats.batches; self.triangles = stats.triangles; self.vertices = vertices;
+        let submitted = SUBMITTED.with(Cell::get);
+        let d: [u64; 4] = std::array::from_fn(|i| submitted[i] - self.submitted[i]);
+        PHASES.with(|p| p.borrow_mut().push_str(&format!(" {name}=[ms={:.3},batches={},layer_triangles={},cpu_vertices={},drawn_batches={},draw_calls={},upload_vertices={},upload_indices={},sorted_triangles={}]",
+            (now - self.last).as_secs_f64() * 1000., stats.batches - self.batches, stats.triangles - self.triangles, vertices - self.vertices,
+            (stats.batches - self.batches) - (stats.culled - self.culled), d[0], d[1], d[2], d[3])));
+        self.last = now; self.batches = stats.batches; self.culled = stats.culled; self.triangles = stats.triangles; self.vertices = vertices;
+        self.submitted = submitted;
     }
 }
 /// The phases of the last legacy sky draw, for `end`'s line.

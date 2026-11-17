@@ -79,6 +79,36 @@ pub fn origin(assets: &mut Assets, name: &str, map: &Bsp) -> Result<Option<Vec3>
     })
 }
 
+/// Every point a level may use as its sky camera: `script_skyorigin` entities, entities its
+/// script marks with `+skyorigin`, and entities named as a sky (the hedge `sky_camera*`, the
+/// grounds1 `sky_*`, the keep `*_sky`, `skycamera01`, `skymojo`). Placed model files with such
+/// a name (the hatter `sky_watch*`) are scenery, not cameras. `origin` picks at most one of
+/// these points and level code moves between them. A superset is harmless: the caller keeps the
+/// points that fall in distinct clusters and draws the one nearest to the live sky origin.
+#[cfg(feature = "vita_renderer")]
+pub fn candidates(assets: &mut Assets, name: &str, map: &Bsp) -> Result<Vec<Vec3>> {
+    let script = format!("maps/{name}.scr");
+    let mut names = BTreeSet::new();
+    if assets.contains(&script) {
+        let text = String::from_utf8_lossy(&assets.read(&script)?).into_owned();
+        for line in crate::materials::lines(&text) {
+            let line = line.join(" ");
+            if let Some((target, effect)) = line.split_once(".rendereffects") {
+                if effect.to_ascii_lowercase().contains("+skyorigin") {
+                    if let Some(target) = target.trim().strip_prefix('$') {
+                        names.insert(target.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    Ok(map.entities.iter().filter(|e| {
+        e.get("classname").is_some_and(|c| c == "script_skyorigin")
+            || e.get("targetname").is_some_and(|n| names.contains(n)
+                || (n.to_ascii_lowercase().contains("sky") && e.get("model").is_none_or(|m| m.starts_with('*'))))
+    }).filter_map(|e| e.get("origin").and_then(|p| crate::interaction::vector(p))).collect())
+}
+
 pub fn check(assets: &mut Assets) -> Result<()> {
     crate::particles::check(assets)?;
     let specs = crate::texture::read_materials(assets)?;
