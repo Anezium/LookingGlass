@@ -6,25 +6,25 @@
 //!
 //! - both `gl_FragCoord` discards test `FxAppearance.x > 0` and `FxAppearance.y > 0.5`: false;
 //! - `ClampUV = 0` makes the coordinate `mix` return `uv` (line kept, see below);
-//! - `Cutout = 0` fails every cutout range, so neither cutout `discard` runs (lines kept);
+//! - `Cutout = 0` fails every cutout range, so neither cutout `discard` runs;
 //! - `FxModel = 1` skips the light atlas fetch, and `Lit = 0` makes the lighting factor one;
 //! - the packed dynamic lights are zero (`lighting::packed`), so that term adds zero;
 //! - `FxAppearance.z` and `.w` are zero: no tint, no filter fade;
 //! - `SkyFade` is zero in every retained payload: no backdrop fetch.
 //!
-//! `fx_add_lean` keeps the coordinate line, the texture fetch, the alpha product, the two
-//! cutout tests, `diffuse.rgb*Gain.rgb`, the vertex colour product and the unchanged `fogged`
-//! call. Nothing else is compiled.
+//! `fx_add_lean` keeps the coordinate line, the texture fetch, the alpha product, one cutout
+//! test, `diffuse.rgb*Gain.rgb`, the vertex colour product and the unchanged `fogged` call.
+//! Nothing else is compiled.
 //!
-//! The coordinate line and the cutout tests stay verbatim although they do nothing for an
-//! admitted packet. Without them the host GPU reads the texture through another path, and thin
-//! minified sprites (the potears1 waterfall drops) change by up to 9/255 on a few dozen pixels
-//! while every fragment count stays the same. A first version without them failed the strict
-//! pixel oracle on both potears1 tapes for that reason.
-//!
-//! Both sources declare the four varyings of the full program in its order, used or not. The
-//! vertex program is shared, and a console GL layer that numbered interpolants by declaration
-//! order would otherwise hand `color` the light-map coordinates.
+//! The texture read is the full program's line, so texturing is untouched. The cutout test is
+//! `if(Cutout>0.5&&alpha<=0.0)discard;`, the first clause of the full program's chain without
+//! its upper bound. An admitted packet has `Cutout = 0`, so it never runs, but it has to be
+//! there: a program with no alpha-dependent `discard` makes the host GPU shade tiny sprites
+//! through another path. A first version without any `discard` failed the strict pixel oracle
+//! on both potears1 tapes (waterfall drops a few pixels wide, up to 9/255 on about a hundred
+//! pixels, same state, packets and per-draw fragment counts). Bisected on the host with
+//! `LOOKING_GLASS_FX_ADD_SOURCES`: any variant with an alpha-dependent `discard` is exact,
+//! with or without the coordinate line; any variant without one is not.
 //!
 //! `fx_add_fog_free` (needs `fx_add_lean`) also drops the `fogged` call when it returns its
 //! argument for every fragment of the packet: distance and liquid fog are off, and each fog
@@ -36,13 +36,11 @@ pub(super) const LEAN: &str = r#"#version 100
 precision mediump float;
 varying highp vec2 uv; varying highp vec3 lm; varying lowp vec4 color;
 uniform sampler2D Texture; uniform float ClampUV; uniform float Cutout; uniform vec4 Gain; uniform float FogMode;
-uniform float CutoutReference;
 // FOG
 void main(){
  vec2 coords=mix(uv,clamp(uv,vec2(0.001),vec2(0.999)),ClampUV);vec4 diffuse=texture2D(Texture,coords);
  float alpha=diffuse.a*Gain.a*color.a;
- if((Cutout>0.5&&Cutout<1.5&&alpha<=0.0)||(Cutout>1.5&&Cutout<2.5&&alpha<0.5)||(Cutout>2.5&&Cutout<3.5&&alpha>=0.5)||(Cutout>3.5&&Cutout<4.5&&alpha<0.35))discard;
- if((Cutout>4.5&&Cutout<5.5&&alpha<CutoutReference)||(Cutout>5.5&&Cutout<6.5&&alpha<=CutoutReference)||(Cutout>6.5&&Cutout<7.5&&alpha>=CutoutReference)||(Cutout>7.5&&alpha>CutoutReference))discard;
+ if(Cutout>0.5&&alpha<=0.0)discard;
  vec3 rgb=diffuse.rgb*Gain.rgb;
  rgb*=color.rgb;
  rgb=fogged(rgb,FogMode);
@@ -53,25 +51,25 @@ precision mediump float;
 varying highp vec2 uv; varying highp vec3 lm; varying lowp vec4 color;
 varying highp vec3 worldPosition;
 uniform sampler2D Texture; uniform float ClampUV; uniform float Cutout; uniform vec4 Gain;
-uniform float CutoutReference;
 void main(){
  vec2 coords=mix(uv,clamp(uv,vec2(0.001),vec2(0.999)),ClampUV);vec4 diffuse=texture2D(Texture,coords);
  float alpha=diffuse.a*Gain.a*color.a;
- if((Cutout>0.5&&Cutout<1.5&&alpha<=0.0)||(Cutout>1.5&&Cutout<2.5&&alpha<0.5)||(Cutout>2.5&&Cutout<3.5&&alpha>=0.5)||(Cutout>3.5&&Cutout<4.5&&alpha<0.35))discard;
- if((Cutout>4.5&&Cutout<5.5&&alpha<CutoutReference)||(Cutout>5.5&&Cutout<6.5&&alpha<=CutoutReference)||(Cutout>6.5&&Cutout<7.5&&alpha>=CutoutReference)||(Cutout>7.5&&alpha>CutoutReference))discard;
+ if(Cutout>0.5&&alpha<=0.0)discard;
  vec3 rgb=diffuse.rgb*Gain.rgb;
  rgb*=color.rgb;
  gl_FragColor=vec4(rgb,alpha);
 }"#;
 /// The two program sources. A host probe build can read replacements from a folder
-/// (`lean.frag`, `fog-free.frag`) while a pixel difference is being attributed. Never compiled
-/// for the console.
+/// (`lean.frag`, `fog-free.frag`) while a pixel difference is being attributed. The folder
+/// must be absolute (the game runs from another directory); a missing file stops the run,
+/// because a silent fallback would report the built-in programs under the variant's name.
+/// Never compiled for the console.
 pub(super) fn sources() -> [String; 2] {
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     if let Some(folder) = std::env::var_os("LOOKING_GLASS_FX_ADD_SOURCES") {
-        let read = |name: &str, built_in: &str| std::fs::read_to_string(std::path::Path::new(&folder).join(name))
-            .unwrap_or_else(|_| built_in.to_owned());
-        return [read("lean.frag", LEAN), read("fog-free.frag", FOG_FREE)];
+        let read = |name: &str| std::fs::read_to_string(std::path::Path::new(&folder).join(name))
+            .unwrap_or_else(|e| panic!("LOOKING_GLASS_FX_ADD_SOURCES {name}: {e}"));
+        return [read("lean.frag"), read("fog-free.frag")];
     }
     [LEAN.to_owned(), FOG_FREE.to_owned()]
 }
@@ -198,19 +196,28 @@ mod tests {
             assert!(full.contains(kept), "{kept}");
             assert!(LEAN.contains(kept), "{kept}");
         }
-        // The texture read and both cutout tests are the full program's lines, byte for byte.
+        // The texture read and the alpha product are the full program's lines, byte for byte.
         let verbatim: Vec<&str> = full.lines().filter(|l| l.contains("texture2D(Texture,coords)")
-            || l.contains("float alpha=") || (l.contains("Cutout>") && l.contains("discard;"))).collect();
-        assert_eq!(verbatim.len(), 4);
+            || l.contains("float alpha=")).collect();
+        assert_eq!(verbatim.len(), 2);
+        // One alpha-dependent cutout test stays: the first clause of the full chain. `lean_pass`
+        // admits only `Cutout < 0.5`, so it cannot run.
+        assert!(full.contains("if((Cutout>0.5&&Cutout<1.5&&alpha<=0.0)||"));
         for source in [LEAN, FOG_FREE] {
             for line in &verbatim { assert_eq!(source.lines().filter(|l| l == line).count(), 1, "{line}"); }
-            assert_eq!(source.matches("discard").count(), 2);
+            assert_eq!(source.matches("discard").count(), 1);
+            assert!(source.contains("\n if(Cutout>0.5&&alpha<=0.0)discard;\n"));
+            let (read, test) = (source.find("float alpha=").unwrap(), source.find("discard").unwrap());
+            assert!(read < test, "the test reads the sampled alpha");
         }
+        let mut cut = pass();
+        cut.cutout = 0.5;
+        assert!(!lean_pass(&cut), "a packet that could reach the kept test is not admitted");
         assert!(full.contains("rgb=diffuse.rgb*mix(vec3(1.0),lighting,Lit*(1.0-Fullbright))*Gain.rgb;"));
         assert!(full.contains("if(FxModel>0.5&&Lit<0.5)rgb*=color.rgb;"));
         for source in [LEAN, FOG_FREE] {
             assert!(source.contains("vec3 rgb=diffuse.rgb*Gain.rgb;") && source.contains(" rgb*=color.rgb;"));
-            for gone in ["LightAtlas", "SkyBackdrop", "dynamicLight", "FxAppearance", "gl_FragCoord", "lighting", "Fullbright"] {
+            for gone in ["LightAtlas", "SkyBackdrop", "dynamicLight", "FxAppearance", "gl_FragCoord", "lighting", "Fullbright", "CutoutReference"] {
                 assert!(!source.contains(gone), "{gone}");
             }
         }
