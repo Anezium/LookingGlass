@@ -9,6 +9,7 @@ pub(super) mod state_cache;
 pub(super) mod world_puffs;
 mod packet_cull;
 mod fill_cuts;
+mod add_program;
 use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
 use super::{Frame, Pass, FRAME};
 use crate::environment::Atmosphere;
@@ -371,6 +372,16 @@ pub(crate) enum Route {
     Full,
     Lite,
     CorpseOpaque,
+    /// `fx_add_lean`: the lean additive program, fog kept.
+    AddLean,
+    /// `fx_add_fog_free`: the lean additive program without the fog call.
+    AddFogFree,
+}
+/// `fx_add_lean` / `fx_add_fog_free`: the additive program for one effect packet, when its
+/// key is on, its program compiled and the packet admitted. `fog_free` runs only when asked.
+fn add_route(p: &Pass, programs: [bool; 2], fog_free: impl FnOnce() -> bool) -> Option<Route> {
+    if !programs[0] || !add_program::lean_pass(p) { return None; }
+    Some(if programs[1] && fog_free() { Route::AddFogFree } else { Route::AddLean })
 }
 fn route(p: &Pass, opaque: bool, specialized: bool) -> Route {
     if opaque {
@@ -389,6 +400,8 @@ fn submit_key(key: (usize, bool), route: Route, depth_write: bool) -> (usize, bo
         Route::Full => 0,
         Route::Lite => crate::render::BLEND_COUNT,
         Route::CorpseOpaque => 2 * crate::render::BLEND_COUNT,
+        Route::AddLean => 3 * crate::render::BLEND_COUNT,
+        Route::AddFogFree => 4 * crate::render::BLEND_COUNT,
     };
     (key.0 + offset, key.1, depth_write)
 }
@@ -399,6 +412,8 @@ pub(crate) struct Gpu {
     /// `fx_lite`: the lean program, its pipelines (same keys) and its own uniform cache.
     lite: Option<Lite>,
     corpse_opaque: Option<Lite>,
+    /// `fx_add_lean` and `fx_add_fog_free`: the two additive effect programs.
+    fx_add: [Option<Lite>; 2],
     buffers: Vec<Buffers>,
     white: Texture2D,
     ring_frame: usize,
@@ -418,6 +433,16 @@ pub(crate) struct Gpu {
     merge_meshes: [BTreeMap<usize, super::prepared::Geometry>; 2],
     puff_batches: [world_puffs::Bank; 2],
     bounds: packet_cull::Bounds,
+}
+/// The specialized program bank of a route: 0 lean/unlit-exact, 1 corpse, 2 and 3 additive.
+/// It borrows only the three bank fields, so the full program's caches stay usable.
+fn program_bank<'a>(lite: &'a mut Option<Lite>, corpse: &'a mut Option<Lite>, fx_add: &'a mut [Option<Lite>; 2],
+    bank: Option<usize>) -> Option<&'a mut Lite> {
+    match bank? {
+        0 => lite.as_mut(),
+        1 => corpse.as_mut(),
+        i => fx_add[i - 2].as_mut(),
+    }
 }
 pub(crate) struct Lite {
     uniforms: UniformCache<UNIFORM_FLOATS>,
@@ -475,6 +500,17 @@ impl Gpu {
             ctx.new_shader(ShaderSource::Glsl {vertex:crate::render::VERTEX,fragment:&fragment},meta())
                 .map_err(|e|eprintln!("[lg/vita-renderer] corpse opaque program failed, using original: {e:?}")).ok()
         }).flatten().map(|shader|Lite {uniforms:UniformCache::default(),shader,pipelines:BTreeMap::new(),fields:crate::render::uniform_fields::Cache::new(meta())});
+        // A failed additive program leaves its packets on the route they had before.
+        let c = crate::render::vita_renderer::config();
+        let sources = add_program::sources();
+        let fx_add = [(c.fx_add_lean, &sources[0]), (c.fx_add_lean && c.fx_add_fog_free, &sources[1])];
+        let fx_add = [0, 1].map(|i| fx_add[i].0.then(|| {
+            crate::frame_profile::shader_creation();
+            let _shader_name = crate::shader_cache::Name::new(add_program::NAMES[i]);
+            ctx.new_shader(ShaderSource::Glsl { vertex: crate::render::VERTEX,
+                fragment: &crate::environment::fragment(fx_add[i].1) }, meta())
+                .map_err(|e| eprintln!("[lg/vita-renderer] warning {} program failed, key off: {e:?}", add_program::NAMES[i])).ok()
+        }).flatten().map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) }));
         println!(
             "[lg/vita-renderer] actor READY grouped alpha, actor_max_layers={}",
             crate::render::vita_renderer::config().actor_max_layers
@@ -485,6 +521,7 @@ impl Gpu {
             pipelines: BTreeMap::new(),
             lite,
             corpse_opaque,
+            fx_add,
             buffers: Vec::new(),
             white,
             ring_frame: 0,
@@ -509,8 +546,9 @@ impl Gpu {
         }
         println!(
             "[lg/vita-renderer] actor pipeline objects prewarmed={} programs={}",
-            gpu.pipelines.len() + gpu.lite.as_ref().map_or(0, |l| l.pipelines.len()) + gpu.corpse_opaque.as_ref().map_or(0,|l|l.pipelines.len()),
-            1 + usize::from(gpu.lite.is_some()) + usize::from(gpu.corpse_opaque.is_some())
+            gpu.pipelines.len() + gpu.lite.as_ref().map_or(0, |l| l.pipelines.len()) + gpu.corpse_opaque.as_ref().map_or(0,|l|l.pipelines.len())
+                + gpu.fx_add.iter().flatten().map(|l| l.pipelines.len()).sum::<usize>(),
+            1 + usize::from(gpu.lite.is_some()) + usize::from(gpu.corpse_opaque.is_some()) + gpu.fx_add.iter().flatten().count()
         );
         Ok(gpu)
     }
@@ -620,7 +658,9 @@ impl Gpu {
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let shaders = std::iter::once((self.shader, &mut self.pipelines))
             .chain(self.lite.as_mut().map(|l| (l.shader, &mut l.pipelines)))
-            .chain(self.corpse_opaque.as_mut().filter(|_|{let c=crate::render::vita_renderer::config();key==(0,false) || c.actor_discard_free_shader || c.actor_cutout_discard_free}).map(|l|(l.shader,&mut l.pipelines)));
+            .chain(self.corpse_opaque.as_mut().filter(|_|{let c=crate::render::vita_renderer::config();key==(0,false) || c.actor_discard_free_shader || c.actor_cutout_discard_free}).map(|l|(l.shader,&mut l.pipelines)))
+            // The additive programs only ever draw the two additive blends.
+            .chain(self.fx_add.iter_mut().flatten().filter(|_| add_program::additive(key.0)).map(|l| (l.shader, &mut l.pipelines)));
         for (shader, pipelines) in shaders {
         pipelines.entry(key).or_insert_with(|| {
             crate::frame_profile::pipeline_creation();
@@ -675,15 +715,30 @@ impl Gpu {
                 crate::sim_maps::probe::frame(),ant_dead.unwrap(),opaque,p.geometry().indices.len()/3,p.geometry().vertices.len());
         }
 
-        let program = route(p, opaque, self.lite.is_some());
+        let program = add_route(p, [self.fx_add[0].is_some(), self.fx_add[1].is_some()], || add_program::fog_free(p, u))
+            .unwrap_or_else(|| route(p, opaque, self.lite.is_some()));
         let lite = program == Route::Lite;
         if lite { count(if crate::render::vita_renderer::config().fx_unlit_exact {
             "vita_fx_unlit_exact_draws"
         } else { "vita_fx_lite_draws" }, 1); }
-        let pipeline = match program {
-            Route::CorpseOpaque => self.corpse_opaque.as_ref().unwrap().pipelines.get(&key),
-            Route::Lite => self.lite.as_ref().unwrap().pipelines.get(&key),
-            Route::Full => self.pipelines.get(&key),
+        match program {
+            Route::AddLean => count("vita_fx_add_lean_draws", 1),
+            Route::AddFogFree => count("vita_fx_add_fog_free_draws", 1),
+            _ => {}
+        }
+        // The specialized bank this draw uses; `None` is the full program.
+        let bank = match program {
+            Route::Full => None,
+            Route::Lite => Some(0),
+            Route::CorpseOpaque => Some(1),
+            Route::AddLean => Some(2),
+            Route::AddFogFree => Some(3),
+        };
+        let pipeline = *match bank {
+            None => self.pipelines.get(&key),
+            Some(0) => self.lite.as_ref().unwrap().pipelines.get(&key),
+            Some(1) => self.corpse_opaque.as_ref().unwrap().pipelines.get(&key),
+            Some(i) => self.fx_add[i - 2].as_ref().unwrap().pipelines.get(&key),
         }
             .expect("prewarmed LG actor pipeline");
         // Several actor layers can share one uploaded vertex/index page.
@@ -698,7 +753,7 @@ impl Gpu {
                 (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
         } else { [true; 3] };
         if apply[0] {
-            ctx.apply_pipeline(pipeline);
+            ctx.apply_pipeline(&pipeline);
             unsafe { macroquad::miniquad::gl::glDepthMask(u8::from(depth_write)); }
             self.stats.pipeline_sets += 1;
         }
@@ -706,8 +761,7 @@ impl Gpu {
         // The old uniform-only probe remains independently selectable with the
         // new cache disabled. Both observe the complete bit-exact payload.
         let same = (c.gpu_state_probe || c.gpu_uniform_dedupe) && {
-            let cache=if opaque {&mut self.corpse_opaque.as_mut().unwrap().uniforms}
-                else if lite {&mut self.lite.as_mut().unwrap().uniforms} else {&mut self.uniform_cache};
+            let cache=match program_bank(&mut self.lite, &mut self.corpse_opaque, &mut self.fx_add, bank) { Some(l) => &mut l.uniforms, None => &mut self.uniform_cache };
             cache.observe(u)
         };
         if c.gpu_state_probe || c.gpu_uniform_dedupe {
@@ -718,7 +772,7 @@ impl Gpu {
         let mut traffic = crate::render::uniform_fields::Traffic::default();
         if skip { self.stats.uniform_skips += 1; }
         else {
-            let fields = if opaque {&mut self.corpse_opaque.as_mut().unwrap().fields} else if lite { &mut self.lite.as_mut().unwrap().fields } else { &mut self.field_uniforms };
+            let fields = match program_bank(&mut self.lite, &mut self.corpse_opaque, &mut self.fx_add, bank) { Some(l) => &mut l.fields, None => &mut self.field_uniforms };
             traffic = fields.apply(ctx, u, c.uniform_field_cache);
             self.stats.uniform_bytes += traffic.bytes;
         }
@@ -817,6 +871,10 @@ impl Drop for Gpu {
             ctx.delete_shader(l.shader);
         }
         if let Some(l) = &self.lite {
+            for p in l.pipelines.values() { ctx.delete_pipeline(*p); }
+            ctx.delete_shader(l.shader);
+        }
+        for l in self.fx_add.iter().flatten() {
             for p in l.pipelines.values() { ctx.delete_pipeline(*p); }
             ctx.delete_shader(l.shader);
         }
@@ -2439,7 +2497,8 @@ mod tests {
         harmless.appearance.power = 0.5;
         sequence.push(harmless);
         let counts = sequence.iter().fold([0u64; 3], |mut counts, p| {
-            counts[match route(p, false, true) { Route::Full => 0, Route::Lite => 1, Route::CorpseOpaque => 2 }] += 1;
+            counts[match route(p, false, true) { Route::Full => 0, Route::Lite => 1, Route::CorpseOpaque => 2,
+                Route::AddLean | Route::AddFogFree => unreachable!("route never returns an additive program") }] += 1;
             counts
         });
         assert_eq!(counts, [3, 3, 0], "both routes must be exercised");

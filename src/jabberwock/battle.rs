@@ -517,7 +517,14 @@ impl Boss {
                     );
                 }
                 if self.time >= duration {
-                    if !clear {
+                    // Host oracle fixture only; the console build has no such branch.
+                    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                    let breathe = crate::sim_maps::probe::jabberwock_fire();
+                    #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+                    let breathe = false;
+                    if breathe {
+                        self.set(Action::FireReady);
+                    } else if !clear {
                         self.set(Action::Ready);
                     } else if distance > 600. {
                         let direction = to.truncate().normalize_or_zero().extend(0.);

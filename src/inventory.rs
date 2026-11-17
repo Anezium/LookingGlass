@@ -308,6 +308,9 @@ impl Stats {
         }
     }
     pub fn damage(&mut self, amount: f32) {
+        // Host oracle fixture only; the console build has no such branch.
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        if crate::sim_maps::probe::jabberwock_fire() { return; }
         if !self.god && self.scripted_immunity == 0. && amount.is_finite() && amount > 0. {
             self.sanity = (self.sanity - amount * self.difficulty.incoming()).max(self.minimum_sanity.clamp(0., self.sanity.min(100.)));
             if !self.alive() {
