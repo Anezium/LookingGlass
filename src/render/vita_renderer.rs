@@ -3621,11 +3621,12 @@ mod tests {
         for key in ["sim_flight_memo", "ant_corpse_triangle_cull", "ant_corpse_opaque_shader", "water_draw_join",
                     "actor_consumer_frustum_cull", "fx_unlit_exact", "load_texture_share",
                     "sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match",
-                    "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader"] { played[key] = true.into(); }
+                    "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader",
+                    "actor_cutout_discard_free"] { played[key] = true.into(); }
         played["audio_stats_log"] = false.into();
         // Compare typed values on both sides: to_value widens f32 (e.g. the
         // played audio gain 0.001), unlike its original JSON decimal spelling.
-        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown, the seven measured defaults and the four RC15 release keys may change parsed played values");
+        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown, the seven measured defaults, the four RC15 release keys and the RC17 ant key may change parsed played values");
         let added = raw.as_object().unwrap().iter().filter(|(key, _)| played_raw.get(*key).is_none()).map(|(key, value)| (key.clone(), value.clone())).collect::<serde_json::Map<_, _>>();
         assert_eq!(serde_json::Value::Object(added), serde_json::json!({
             "world_adjacent_batch":false,"exact_blends":false,"sky_cube_finish":false,
@@ -3638,7 +3639,7 @@ mod tests {
             "alpha_model_pvs":false,"sim_snark_move_skip":true,"sim_snark_sight_blocked":true,
             "sim_pool_name_match":true,"audio_stats_log":false,
             "audio_loop_resident":true,"audio_cue_prefetch":true,
-            "actor_discard_free_shader":true,"actor_frontface_cull":false
+            "actor_discard_free_shader":true,"actor_cutout_discard_free":true,"actor_frontface_cull":false
         }));
         assert_eq!(raw["water_draw_join"], true, "RC9 enables the measured water draw join");
         assert_eq!(raw["actor_consumer_frustum_cull"], true, "RC10 enables the measured consumer cull");
@@ -3753,10 +3754,10 @@ mod tests {
                    "RC16 is RC15 with the three exact fight fixes and the cull explicitly off");
     }
     #[test]
-    fn rc16_play_config_is_the_release_fallback_plus_the_measurement_keys() {
+    fn rc17_play_config_is_the_release_fallback_plus_the_measurement_keys() {
         let release = parse_runtime_config(include_bytes!("../../configs/PL-release.json"))
             .unwrap().0;
-        let play = parse_runtime_config(include_bytes!("../../configs/PL-rc16-release-play.json"))
+        let play = parse_runtime_config(include_bytes!("../../configs/PL-rc17-release-play.json"))
             .unwrap().0;
         play.validate().unwrap();
         let release_value = serde_json::to_value(release).unwrap();
@@ -3768,6 +3769,7 @@ mod tests {
                                 ("audio_loop_resident", true),
                                 ("audio_cue_prefetch", true),
                                 ("actor_discard_free_shader", true),
+                                ("actor_cutout_discard_free", true),
                                 ("actor_frontface_cull", false)] {
             assert_eq!(release_value[key], expected,
                        "a fresh install runs the compiled fallback, which must ship {key}={expected}");
@@ -3777,24 +3779,53 @@ mod tests {
         expected["replay_play"] = "a2-04.lgtape".into();
         expected["log_frame_time_every"] = 10.into();
         assert_eq!(play_value, expected,
-                   "the RC16 play config is the release fallback plus only the two measurement keys");
+                   "the RC17 play config is the release fallback plus only the two measurement keys");
     }
-    // The picture-changing cull is off in every shipped input; the three exact fixes
-    // are on in both RC16 inputs. Every earlier config keeps all four off/absent.
+    // RC17 is RC16 with exactly the ant cutout discard-free key turned on: same shipped
+    // value for every other key, including the explicit front-face cull off.
+    #[test]
+    fn rc17_release_play_is_rc16_plus_the_exact_ant_key() {
+        let rc16 = parse_runtime_config(include_bytes!("../../configs/PL-rc16-release-play.json"))
+            .unwrap().0;
+        let rc17 = parse_runtime_config(include_bytes!("../../configs/PL-rc17-release-play.json"))
+            .unwrap().0;
+        rc17.validate().unwrap();
+        let mut expected = serde_json::to_value(rc16).unwrap();
+        assert_eq!(expected["actor_cutout_discard_free"], false,
+                   "RC16 predates the ant key and reads it off");
+        assert_eq!(expected["actor_frontface_cull"], false, "RC16 ships the cull off");
+        expected["actor_cutout_discard_free"] = true.into();
+        assert_eq!(serde_json::to_value(rc17).unwrap(), expected,
+                   "RC17 changes only actor_cutout_discard_free against RC16");
+    }
+    // The picture-changing cull is off in every shipped input; the four exact fixes
+    // are on in both RC17 inputs. RC16 keeps its own frozen polarity, and every
+    // earlier config keeps all five off/absent.
     #[test]
     fn actor_frontface_cull_is_false_in_every_shipped_config() {
-        const KEYS: [&str; 4] = ["audio_loop_resident", "audio_cue_prefetch",
-                                 "actor_discard_free_shader", "actor_frontface_cull"];
+        const KEYS: [&str; 5] = ["audio_loop_resident", "audio_cue_prefetch",
+                                 "actor_discard_free_shader", "actor_cutout_discard_free",
+                                 "actor_frontface_cull"];
         for bytes in [&include_bytes!("../../configs/PL-release.json")[..],
-                      &include_bytes!("../../configs/PL-rc16-release-play.json")[..]] {
+                      &include_bytes!("../../configs/PL-rc17-release-play.json")[..]] {
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none());
             for key in KEYS {
                 let value = serde_json::to_value(&c).unwrap()[key].clone();
                 let want = key != "actor_frontface_cull";
-                assert_eq!(value, want, "a shipped RC16 input has the wrong {key} polarity");
+                assert_eq!(value, want, "a shipped RC17 input has the wrong {key} polarity");
             }
         }
+        let (rc16, rejected) =
+            parse_runtime_config(include_bytes!("../../configs/PL-rc16-release-play.json")).unwrap();
+        assert!(rejected.is_none());
+        let rc16 = serde_json::to_value(rc16).unwrap();
+        for key in ["audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader"] {
+            assert_eq!(rc16[key], true, "the frozen RC16 input keeps {key} on");
+        }
+        assert_eq!(rc16["actor_cutout_discard_free"], false,
+                   "the frozen RC16 input predates the ant key");
+        assert_eq!(rc16["actor_frontface_cull"], false);
         for bytes in [&include_bytes!("../../configs/PL-rc15-release-play.json")[..],
                       &include_bytes!("../../configs/PL-rc13-release-play04.json")[..],
                       &include_bytes!("../../configs/PL-rc1.json")[..]] {
@@ -4578,7 +4609,7 @@ mod tests {
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "23552bfeae8276613aaeba983b2686b29b953a4c4f032133c49f0c75383523bd");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "9464c92d98893879eff802225e16eae9cd29f3be64820860014b84d0dd8e64f8");
         assert_eq!(format!("{:x}", Sha256::digest(rc12_bytes)), "4b1a1503b00b7826258a54fff0e69e5bdbd3a609f440bc13aaa2926aae9cb9f5");
         assert_eq!(format!("{:x}", Sha256::digest(rc11_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
         assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
@@ -4618,19 +4649,22 @@ mod tests {
         assert_eq!(baseline["world_shared_buffers"], true);
         assert_eq!(baseline["world_parameter_reuse"], true);
         assert_eq!(baseline["water_stage_merge"], "off");
-        let mut rc12_with_rc15 = rc12.clone();
+        let mut rc12_with_rc17 = rc12.clone();
         for key in ["sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match", "audio_stats_log",
-                    "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader", "actor_frontface_cull"] {
-            rc12_with_rc15[key] = baseline[key].clone();
+                    "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader",
+                    "actor_cutout_discard_free", "actor_frontface_cull"] {
+            rc12_with_rc17[key] = baseline[key].clone();
         }
-        assert_eq!(baseline, rc12_with_rc15, "RC16 release keeps every RC12 value except the eight RC15/RC16 keys");
-        // The RC13 package predates the four RC15 keys and the four RC16 keys; check it
-        // against the RC16 release with those keys reverted, so its frozen bytes stay
-        // the RC13 baseline.
+        assert_eq!(baseline, rc12_with_rc17, "RC17 release keeps every RC12 value except the nine RC15/RC16/RC17 keys");
+        assert_eq!(baseline["actor_cutout_discard_free"], true,
+                   "RC17 ships the exact ant cutout program on");
+        // The RC13 package predates the four RC15 keys, the four RC16 keys and the RC17
+        // ant key; check it against the RC17 release with those keys reverted, so its
+        // frozen bytes stay the RC13 baseline.
         let mut rc13_baseline = baseline.clone();
         for key in ["sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match",
                     "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader",
-                    "actor_frontface_cull"] {
+                    "actor_cutout_discard_free", "actor_frontface_cull"] {
             rc13_baseline[key] = false.into();
         }
         rc13_baseline["audio_stats_log"] = true.into();
@@ -4679,8 +4713,13 @@ mod tests {
             }
             assert_eq!(&variant, against, "{name} changes only its declared keys against its release");
         };
-        // The RC16 play package adds only its replay keys to the RC16 release.
-        check_package("PL-rc16-release-play.json", include_bytes!("../../configs/PL-rc16-release-play.json"), None, &defaults, &baseline);
+        // The RC17 play package adds only its replay keys to the RC17 release.
+        check_package("PL-rc17-release-play.json", include_bytes!("../../configs/PL-rc17-release-play.json"), None, &defaults, &baseline);
+        // The frozen RC16 play package adds only its replay keys to the frozen RC16 release,
+        // which is the RC17 release with the ant key off.
+        let mut rc16_baseline = baseline.clone();
+        rc16_baseline["actor_cutout_discard_free"] = false.into();
+        check_package("PL-rc16-release-play.json", include_bytes!("../../configs/PL-rc16-release-play.json"), None, &defaults, &rc16_baseline);
         // The RC13 packages add only their replay keys to the RC13 release.
         check_package("PL-rc13-release-play04.json", include_bytes!("../../configs/PL-rc13-release-play04.json"), None, &defaults, &rc13_baseline);
         check_package("PL-rc13-wchess1.json", include_bytes!("../../configs/PL-rc13-wchess1.json"), Some("wchess1"), &defaults, &rc13_baseline);

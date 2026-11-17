@@ -551,11 +551,18 @@ pub(crate) async fn check_loading_screen(assets: &mut Assets, options: &Options)
 }
 
 pub(crate) fn save_capture(path: &std::path::Path) -> Result<()> {
-    #[cfg(feature="native_timing")]
-    crate::native_timing::operations::attempt();
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
+    save_capture_into(path)
+}
+
+/// Write a capture into a directory that already exists. The console cannot create
+/// one: replay pictures go straight into the pre-existing `ux0:data/alice/private`
+/// (MKD is forbidden there), so this path never attempts a directory create.
+pub(crate) fn save_capture_into(path: &std::path::Path) -> Result<()> {
+    #[cfg(feature="native_timing")]
+    crate::native_timing::operations::attempt();
     let frame = get_screen_data();
     // OpenGL reads rows from the bottom; PNG stores rows from the top.
     let mut pixels = frame.bytes;
