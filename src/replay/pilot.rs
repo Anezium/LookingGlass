@@ -684,6 +684,13 @@ impl Pilot {
             let ry =
                 -axis(elevation - pitch, rates.y) * if preferences.invert_pad { -1. } else { 1. };
             let distance = d.truncate().length();
+            if target.is_some() && self.seconds - self.last_seek_log > 3. {
+                self.last_seek_log = self.seconds;
+                println!(
+                    "[lg/pilot] combat seconds={:.3} distance={:.0} turn={:.2} elevation={:.2} pitch={:.2} ready={ready} weapon={selected} desired={desired} will={will}",
+                    self.seconds, distance, turn, elevation, pitch
+                );
+            }
             let forward = if target.is_some() {
                 if distance > if desired == 0 { 85. } else { p.reach } {
                     0.75
