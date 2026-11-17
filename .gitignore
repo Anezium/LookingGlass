@@ -41,3 +41,4 @@ __pycache__/
 
 # Private fight-pilot build cache; removed at handoff.
 /target-pilot/
+/target-vita/
