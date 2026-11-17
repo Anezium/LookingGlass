@@ -56,6 +56,13 @@ pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_PROBE").is_some())
 }
+/// Host oracle fixture: the Jabberwock starts its fire breath whenever it is free to act and
+/// Alice takes no damage, so a replay keeps the breath on screen. The fight tapes diverge on
+/// the host before the boss ever breathes. Both compared arms run with the same setting.
+pub fn jabberwock_fire() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_JABBERWOCK_FIRE").is_some())
+}
 pub fn elapsed(actual: f32) -> f32 {
     if !enabled() { return actual; }
     static DT: OnceLock<f32> = OnceLock::new();
