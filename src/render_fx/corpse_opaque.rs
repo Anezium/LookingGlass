@@ -8,7 +8,7 @@ thread_local! { static OPAQUE: RefCell<HashMap<macroquad::miniquad::TextureId,Te
 fn all_opaque(rgba:&[u8]) -> bool { !rgba.is_empty() && rgba.len()%4==0 && rgba.chunks_exact(4).all(|p|p[3]==255) }
 pub(crate) fn note_texture(texture:&Texture2D, rgba:&[u8]) {
     let c=crate::render::vita_renderer::config();
-    if !c.ant_corpse_opaque_shader && !c.actor_opaque_shader {return;}
+    if !c.ant_corpse_opaque_shader && !c.actor_opaque_shader && !c.actor_discard_free_shader {return;}
     OPAQUE.with(|table| {
         let mut table=table.borrow_mut();
         if table.len()>=4096 {table.clear();}
@@ -22,7 +22,13 @@ fn opaque_texture(texture:Option<&Texture2D>) -> bool {
     texture.is_none_or(|t|OPAQUE.with(|table|table.borrow().get(&t.raw_miniquad_id()).is_some_and(|old| *old==t.weak_clone())))
 }
 pub(super) fn eligible(p:&Pass) -> bool {
-    !p.effect && p.blend_index==0 && !p.depth_equal && p.appearance.dissolve==0. && !p.appearance.ghost
+    p.blend_index==0 && !p.depth_equal && discard_free(p)
+}
+/// Blending and depth equality do not affect whether a fragment can execute discard.
+/// Preserve all output arithmetic and all pipeline state; reject every appearance/cutout
+/// whose rejection predicate is not certified false for the complete primitive.
+pub(super) fn discard_free(p:&Pass) -> bool {
+    !p.effect && p.appearance.dissolve==0. && !p.appearance.ghost
         && (p.cutout==0. || (p.cutout==4. && p.gain.w==1.
             && opaque_texture(p.mesh.texture.as_ref()) && p.geometry().vertices.iter().all(|v|v.color[3]==255)))
 }
@@ -49,10 +55,10 @@ mod tests {
         p.cutout=0.;assert!(eligible(&p)); // no alpha rejection in the full program
         p.appearance.dissolve=0.1;assert!(!eligible(&p));p.appearance.dissolve=0.;
         p.appearance.ghost=true;assert!(!eligible(&p));p.appearance.ghost=false;
-        p.blend_index=1;assert!(!eligible(&p));p.blend_index=0;
-        p.depth_equal=true;assert!(!eligible(&p));p.depth_equal=false;
-        p.effect=true;assert!(!eligible(&p));p.effect=false;
-        p.cutout=2.;assert!(!eligible(&p));
+        p.blend_index=1;assert!(!eligible(&p));assert!(discard_free(&p));p.blend_index=0;
+        p.depth_equal=true;assert!(!eligible(&p));assert!(discard_free(&p));p.depth_equal=false;
+        p.effect=true;assert!(!eligible(&p));assert!(!discard_free(&p));p.effect=false;
+        p.cutout=2.;assert!(!eligible(&p));assert!(!discard_free(&p));
     }
     #[test]
     fn incomplete_or_nonopaque_texels_are_not_certified() {
@@ -63,6 +69,7 @@ mod tests {
         assert!(c.actor_opaque_shader);
         assert!(!c.ant_corpse_opaque_shader);
         assert!(!crate::render::vita_renderer::Config::default().actor_opaque_shader);
+        assert!(!crate::render::vita_renderer::Config::default().actor_discard_free_shader);
     }
     #[test]
     fn specialization_removes_only_the_four_discard_statements() {

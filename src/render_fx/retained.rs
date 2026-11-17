@@ -439,7 +439,7 @@ pub(crate) fn lite_pass(p: &Pass) -> bool {
 /// combined selection can be pinned without a GL context.
 fn program_choice(c: &crate::render::vita_renderer::Config) -> (Option<Specialized>, bool) {
     (specialized_program(c.fx_lite, c.fx_unlit_exact),
-     c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+     c.ant_corpse_opaque_shader || c.actor_opaque_shader || c.actor_discard_free_shader)
 }
 impl Gpu {
     pub(crate) fn new() -> Result<Self> {
@@ -620,7 +620,7 @@ impl Gpu {
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let shaders = std::iter::once((self.shader, &mut self.pipelines))
             .chain(self.lite.as_mut().map(|l| (l.shader, &mut l.pipelines)))
-            .chain(self.corpse_opaque.as_mut().filter(|_|key==(0,false)).map(|l|(l.shader,&mut l.pipelines)));
+            .chain(self.corpse_opaque.as_mut().filter(|_|key==(0,false) || crate::render::vita_renderer::config().actor_discard_free_shader).map(|l|(l.shader,&mut l.pipelines)));
         for (shader, pipelines) in shaders {
         pipelines.entry(key).or_insert_with(|| {
             crate::frame_profile::pipeline_creation();
@@ -657,9 +657,11 @@ impl Gpu {
             .then(std::time::Instant::now);
         let key = (p.blend_index, p.depth_equal);
         let c=crate::render::vita_renderer::config();
-        let opaque = (ant_dead==Some(true) && c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+        let discard_free = c.actor_discard_free_shader && self.corpse_opaque.is_some() && super::corpse_opaque::discard_free(p);
+        if discard_free {count("vita_actor_discard_free_draws",1);}
+        let opaque = discard_free || (ant_dead==Some(true) && c.ant_corpse_opaque_shader || c.actor_opaque_shader)
             && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
-        if opaque {
+        if opaque && !discard_free {
             count(if ant_dead==Some(true) {"vita_ant_corpse_opaque_draws"} else {"vita_actor_opaque_draws"},1);
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
