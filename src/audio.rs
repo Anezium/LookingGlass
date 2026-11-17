@@ -2524,6 +2524,52 @@ mod tests {
         ensure!(overflow == 0, "level preload exceeded the audio cache");
         Ok(())
     }
+    /// A reissued looping cue (the measured cards_loop1 pattern: 33 new loop
+    /// voices over one fight) mixes to the same samples whether each voice decodes
+    /// again or clones the resident samples. The real mixer is pulled per frame.
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA"]
+    fn loop_reissue_mixed_samples_are_exact() -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let mut assets = Assets::open(&root)?;
+        let path = "sound/weapon/cards/cards_loop1.wav";
+        let (control, mut mixer) = output::mixer();
+        let frame = |mixer: &mut output::Mixer| {
+            let mut hash = Sha256::new();
+            for _ in 0..1470 {
+                let value = mixer.next().expect("mixer is endless");
+                hash.update(value.to_bits().to_le_bytes());
+            }
+            format!("{:x}", hash.finalize())
+        };
+        let play = |clip: Clip, sink: &Sink| {
+            sink.set_volume(0.);
+            sink.append(Pcm { clip, index: 0, looping: true, pan: Pan::new() });
+        };
+        let mut script = |assets: &mut Assets, retain: bool| {
+            let mut cache_samples = 0usize;
+            let mut world = BTreeMap::new();
+            let mut hashes = Vec::new();
+            for _ in 0..33 {
+                let clip = looping_clip(assets, path, &mut cache_samples, &mut world, retain)
+                    .expect("cards_loop1 decodes");
+                let sink = control.sink();
+                play(clip, &sink);
+                hashes.push(frame(&mut mixer));
+                // The sink stops its voice when the next reissue replaces it.
+            }
+            (hashes, cache_samples, world.len())
+        };
+        let (off, off_samples, off_clips) = script(&mut assets, false);
+        let (on, on_samples, on_clips) = script(&mut assets, true);
+        ensure!(off_clips == 0 && off_samples == 0, "control retained a loop clip");
+        ensure!(on_clips == 1 && on_samples > 0, "residency did not retain one clip");
+        ensure!(off == on, "reissued-loop mixed samples differ with residency on");
+        let fresh = decode_clip(assets.read(path)?)?;
+        ensure!(on_samples == fresh.samples.len(), "resident size differs from a fresh decode");
+        Ok(())
+    }
     /// Both clip candidates keep decoded samples byte-identical and bound memory.
     /// Run with LOOKING_GLASS_TEST_DATA; it decodes hatter2's real cues.
     #[test]
