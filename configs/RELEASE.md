@@ -101,6 +101,23 @@ enforce that relationship, pin the three exact keys true and the front-face cull
 false in both shipped inputs.
 `PL-rc15-release-play.json` keeps the RC15 package bytes for comparison.
 
+RC17 turns on the exact ant cutout program (`actor_cutout_discard_free`),
+measured on the Vita on 2026-11-17 (centipede1 fight p95 81.6 to 54.9 ms) and
+pixel-exact on the host and in 19 device capture pairs. Every other value is
+RC16's. `PL-rc16-release-play.json` keeps the RC16 package bytes for comparison.
+
+RC18 turns on three keys measured on the Vita on 2026-11-17/18. `fx_add_lean` and
+`fx_add_fog_free` draw additive effects with a shorter fragment program and, where
+the fog call provably returns its argument, without it: the jlair2 fight p95 goes
+from 123.8 to 62.9 ms, and device captures of the Jabberwock fire breath are
+byte-identical with and without them. `sky_live` draws the authored sky room
+(moving clouds, props and layers) through the retained renderer instead of the
+simplified gradient: +0.0 to +1.7 ms p95 on six maps and the hatter2 fight, at
+the defaults full size, lite program and all layers, which the shipped inputs do
+not name. `PL-rc18-release-play.json` is this fallback plus only the two
+measurement keys; `PL-rc17-release-play.json` keeps the RC17 package bytes for
+comparison, and the unit tests pin RC18 as RC17 plus exactly those three keys.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,

@@ -199,5 +199,8 @@
   "sim_snark_move_skip": true,
   "sim_snark_sight_blocked": true,
   "sim_pool_name_match": true,
-  "audio_stats_log": false
+  "audio_stats_log": false,
+  "fx_add_lean": true,
+  "fx_add_fog_free": true,
+  "sky_live": true
 }

@@ -41,7 +41,7 @@ CONFIG_FILES = {
 PINNED_FILES = {
     # Release documents, notices and review fixtures.
     "CREDITS.txt": "ccbc4212f9fc9a47cbcc3d0db285e3335a20041bc23996ca0f8169b289331b01",
-    "THIRD_PARTY_NOTICES-vita.txt": "e35a8e3d770fb472c01d49d1acb9641b78aef9f008c5f57296e6c0af57c90c3c",
+    "THIRD_PARTY_NOTICES-vita.txt": "ca7b0ec36a346cdc5ec6e17e9b3f9e3743bdac7f941b82e6928607d2b0ed222b",
     "docs/NATIVE-TIMING-PAIR-SPEC.example.json": "0f95e537ad012d54dfba38c63cf3f33f77096688a6a9b296c8744a463a081d3b",
     "examples/transition_texture_lifetime.rs": "8a5bca77466dcd7ded278701f0e0a176118bb8379af71c68021883c6b0d93768",
     "src/frame_total_gl_names.txt": "662e07e8c1886b29626caa105e9d84d25efaec21ad7f61bf5aedacc909aaf6d4",
@@ -148,9 +148,13 @@ PINNED_FILES = {
     "configs/PL-rc8-spike-play04.json": "05ea8f24e724f7af285cdaf71bb6d2911093ea229e26384c4915e681f0d074c6",
     "configs/PL-rc9-release-play04.json": "1526df21bc66e8d4651006c2df5871f889b145c0295dcf5c3e3cc863cc0d694e",
     "configs/PL-rc9-release.json": "9dbf482cf40ff440dd74ecc5c6be45aaf5c3cb0b06da3bfc0fe47a4b76466cac",
-    "configs/PL-release.json": "c71ce47388460bdb5f4145395fa605bed98c64186a8f5328bba091b7c0d58e01",
-    "configs/RELEASE.md": "310f0ecc367fa9e36e5d7adb6e5f336221e11eea17327a5a780f986ec825ddb5",
+    "configs/PL-release.json": "f3bb21e899cc0a8c1b9be4e9d0fbf4e561dffbcaaa4a025dba2c9049dbbefe17",
+    "configs/RELEASE.md": "0648809e44f4be13486e2abe16e62b4effdbfc818e4aa1c2144749b2c81f4c78",
     "configs/vita-sim/vita-sim-release.json": "fa64b0c5b79c52d8e028f7fc9d0d3dd2eec57b7641dfc8f76b34212bdcb3334b",
+    "configs/PL-rc15-release-play.json": "580f73ba3e3bd166fe2362e2e2a9ab229ad2080d0de8f1036b24d80975585c70",
+    "configs/PL-rc16-release-play.json": "00b79a6797366e4aca9871883eef74a3aea64d6963f18bac8010c73d6d689677",
+    "configs/PL-rc17-release-play.json": "728de54c49ec583aa3941de0ee16ca4f9f672795c5e5528f584d17f71db82749",
+    "configs/PL-rc18-release-play.json": "61ad98e302e6c9ddd0ed9994df5c6b230242cf7315b640840f63ddf84c242189",
     # Tooling, licence texts and test fixtures.
     "tools/config_record/fixtures/host-bad.json": "0baa0c4b95907662865e70a9946f546c486fca6e3808dc64bab650a16b2b5912",
     "tools/config_record/fixtures/host-bad.txt": "9744a970a2ce54da3cfc3de774339a1989d6b1e4207fafe0b5686329089d0da5",
@@ -257,7 +261,9 @@ PINNED_FILES = {
     "vita/sce_sys/icon0.png": "87fecbae90a292eedd79da63c552151a41b6ef6e76923fed53a24560de103e6a",
     "vita/sce_sys/livearea/contents/bg.png": "2d2480e5e23fd268a88ed36823837e7ee59afa9b9f193cafa78b24d2f1e13234",
     "vita/sce_sys/livearea/contents/startup.png": "c22f38eaaefd8d2f4e80061045af9588d1e5aa4675f588ed25fc4adfe6bf306a",
-    "vita/sce_sys/livearea/contents/template.xml": "d05246029bb3a0607106e6cc73c0055017663ef194bf7b5a351e23176fbb8cd3",
+    "vita/sce_sys/livearea/contents/template.xml": "c4b64ab985b6b782e240dac3ed0d525e13746bc338d1613fa467e3f371b49081",
+    "tools/actor_gpu/base/PL-rc15-release-play.json": "580f73ba3e3bd166fe2362e2e2a9ab229ad2080d0de8f1036b24d80975585c70",
+    "tools/actor_gpu/base/PROVENANCE.json": "28a1ab56efeeeaaa24aa84024cdb4e6001fb671cc7a274bf69cade4e04841fc3",
 }
 LIVEAREA_ART = {
     "vita/sce_sys/icon0.png": (128, 128),
@@ -292,6 +298,7 @@ UV_WRITE_FILES = {
     "src/render/vita_renderer.rs", "src/render_fx.rs", "src/render_fx/actor_publication.rs",
     "src/render_fx/prepared.rs", "src/render_fx/retained.rs", "src/render_fx/retained/state_cache.rs",
     "src/character/skinning/overlap.rs", "src/sim_maps/probe.rs", "src/weapons.rs",
+    "src/render/vita_renderer/sky_room.rs",
 }
 UV_WRITE = re.compile(rb"\.uv(?:\.[xy])?\s*(?:[-+*/]?=(?!=))|&mut\s+[\w.\[\]()]*\.uv\b")
 

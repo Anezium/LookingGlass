@@ -89,7 +89,7 @@ def generate():
         kind = 'icon' if 'icon0' in relative else 'startup' if 'startup' in relative else 'background'
         picture(size, kind).save(destination, optimize=False)
     xml = ('<?xml version="1.0" encoding="utf-8"?>\n'
-           '<livearea style="a1" format-ver="01.00" content-rev="1">\n'
+           '<livearea style="psmobile" format-ver="01.00" content-rev="1">\n'
            '  <livearea-background><image>bg.png</image></livearea-background>\n'
            '  <gate><startup-image>startup.png</startup-image></gate>\n'
            '</livearea>\n')
@@ -114,7 +114,7 @@ def check(vpk=None):
     if len(xml) > 32 * 1024 or b'\n' in other or b'\r' in other:
         raise ValueError('Template must be UTF-8 CRLF and below32KiB')
     tree = ET.fromstring(xml.decode('utf-8'))
-    if tree.tag != 'livearea' or tree.attrib != {'style': 'a1', 'format-ver': '01.00', 'content-rev': '1'}:
+    if tree.tag != 'livearea' or tree.attrib != {'style': 'psmobile', 'format-ver': '01.00', 'content-rev': '1'}:
         raise ValueError('Unexpected LiveArea template')
     if (tree.findtext('livearea-background/image') != 'bg.png' or
             tree.findtext('gate/startup-image') != 'startup.png'):
