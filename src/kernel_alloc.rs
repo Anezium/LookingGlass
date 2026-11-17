@@ -42,6 +42,7 @@ mod imp {
     }
     fn live_free(n: usize) { LIVE.fetch_sub(n, Relaxed); CHUNKS.fetch_sub(chunk(n), Relaxed); }
     pub fn live_bytes() -> usize { LIVE.load(Relaxed) }
+    pub fn peak_bytes() -> [usize;2] { [HIGH.load(Relaxed), CHUNK_HIGH.load(Relaxed)] }
     pub fn transition_begin() { HIGH.store(live_bytes(), Relaxed); CHUNK_HIGH.store(CHUNKS.load(Relaxed), Relaxed); }
     pub fn transition_finish() -> [usize;4] { [LIVE.load(Relaxed), HIGH.load(Relaxed), CHUNKS.load(Relaxed), CHUNK_HIGH.load(Relaxed)] }
     struct Allocator;
@@ -202,4 +203,4 @@ mod tests {
 }
 
 #[cfg(not(target_os="vita"))]
-pub(crate) use imp::{live_bytes,transition_begin,transition_finish};
+pub(crate) use imp::{live_bytes,peak_bytes,transition_begin,transition_finish};

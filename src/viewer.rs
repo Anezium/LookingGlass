@@ -4997,6 +4997,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     crate::spike_log::end_play();
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
+    // Host-only, sim_maps_probe-only: the allocator ledger's continuous peak since the
+    // map load began (transition_begin resets it) against the 192 MiB newlib ceiling.
+    // The host request ledger is a lower bound for the Vita's newlib chunks; the
+    // chunk model applies the 32-bit newlib minimum-chunk rounding.
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if replay.is_some() {
+        let [peak_live, peak_chunk] = crate::kernel_alloc::peak_bytes();
+        println!("[lg/host-heap] peak_live_bytes={peak_live} peak_newlib32_chunk_bytes={peak_chunk} heap_ceiling_bytes={}",
+            192 * 1024 * 1024);
+    }
     #[cfg(target_os = "vita")]
     let saves_writable = crate::frame_profile::saves_writable(saves_enabled, bench_session);
     #[cfg(not(target_os = "vita"))]
