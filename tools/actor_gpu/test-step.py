@@ -146,6 +146,12 @@ class GpuAblation(unittest.TestCase):
             for key in ['diag_skip_fx','diag_skip_live_actors','diag_skip_alpha_world']:
                 self.assertFalse(config.get(key,False))
 
+    def test_scene_delta_pairs_the_same_frame(self):
+        analyzer=load_module(PKG/'analyze.py','actor_gpu_analyzer_pairing')
+        self.assertEqual(analyzer.paired_scene_deltas([
+            {'sim_split':'scene:10.0','gxm_end':'1.0'},
+            {'sim_split':'scene:1.0','gxm_end':'10.0'}]),[9.0,9.0])
+
     def test_full_slot_end_to_end_and_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:
             fx = Fixture(tmp)

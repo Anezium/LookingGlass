@@ -34,6 +34,9 @@ def scene_ms(row):
     return float(match[1]) if match else 0.
 
 
+def paired_scene_deltas(rows):
+    return sorted(abs(scene_ms(row)-number(row, "gxm_end")) for row in rows)
+
 def main():
     manifest = json.loads((P / 'READY.json').read_text())
     results = json.loads((P / 'actor-gpu-step-results.json').read_text())
@@ -66,7 +69,7 @@ def main():
                 if name == 'scene':
                     scene_wait += float(ms)
         total_end = sum(ends)
-        close = sorted(abs(s - e) for s, e in zip(scenes, ends))
+        close = paired_scene_deltas(ordered)
         output.append(dict(
             arm=arm['name'], map=arm['map'], world_gxm=arm['world_gxm'], mask=arm['mask'],
             tape=arm['tape'], window=arm['window'], n=len(ordered),
