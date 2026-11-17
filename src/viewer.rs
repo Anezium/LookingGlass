@@ -1460,6 +1460,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }};
     }
+    // Reused only when `scene_transform_buffer` is on; empty otherwise.
+    let mut scene_transform_scratch: Vec<(usize, Vec3, Quat)> = Vec::new();
     loop {
         #[cfg(feature = "native_timing")]
         { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
@@ -3993,88 +3995,173 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             viewer_block = crate::frame_profile::span("frame_scene");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Scene);
         }
+        let census_scene_present = crate::scene_census::span(crate::scene_census::Leaf::Presentation);
+        crate::scene_census::count_n(crate::scene_census::Counter::Levels,
+            interactions.levels.len() as u64);
         let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPresentation);
-        scene.atmosphere.liquid =
-            crate::water::Liquid::from_contents(scene.world.liquid_at(camera)).tint();
-        interactions.presentation.apply(&mut scene);
-        if let Some(origin) = interactions.levels.iter().find_map(|s| s.ctl.sky_origin()) { scene.set_sky_origin(origin); }
-        let (mut mirror_extra, mut mirror_hide) = (Vec::new(), Vec::new());
-        for slot in &interactions.levels { let (extra, hide) = slot.ctl.reflection(); mirror_extra.extend(extra); mirror_hide.extend(hide); }
-        scene.set_reflection(mirror_extra, mirror_hide);
-        scene.set_reflection_actor(
-            interactions
-                .levels
-                .iter()
-                .find_map(|s| s.ctl.reflection_actor()),
-        );
-        if let Some(fog) = interactions.levels.iter().find_map(|s| s.ctl.scene_fog()) {
-            scene.atmosphere.distance = fog;
+        {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::Liquid);
+            scene.atmosphere.liquid =
+                crate::water::Liquid::from_contents(scene.world.liquid_at(camera)).tint();
         }
-        if let Some(distance) = interactions.levels.iter().find_map(|s| s.ctl.fog_distance()) {
-            scene.atmosphere.distance.w = distance;
+        {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::SkyApply);
+            interactions.presentation.apply(&mut scene);
         }
+        {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::LevelCamera);
+            let hooks_once = {
+                #[cfg(feature="vita_renderer")]
+                { crate::render::vita_renderer::config().scene_hooks_once }
+                #[cfg(not(feature="vita_renderer"))]
+                { false }
+            };
+            let (sky_origin, reflection_actor, scene_fog, fog_distance) = if hooks_once {
+                // The four hooks are read-only; one pass gives each its first match in the
+                // same level order the four separate `find_map` calls used.
+                let (mut sky, mut actor, mut fog, mut distance) = (None, None, None, None);
+                for slot in &interactions.levels {
+                    let ctl = &*slot.ctl;
+                    if sky.is_none() { sky = ctl.sky_origin(); }
+                    if actor.is_none() { actor = ctl.reflection_actor(); }
+                    if fog.is_none() { fog = ctl.scene_fog(); }
+                    if distance.is_none() { distance = ctl.fog_distance(); }
+                }
+                (sky, actor, fog, distance)
+            } else {
+                (
+                    interactions.levels.iter().find_map(|s| s.ctl.sky_origin()),
+                    interactions.levels.iter().find_map(|s| s.ctl.reflection_actor()),
+                    interactions.levels.iter().find_map(|s| s.ctl.scene_fog()),
+                    interactions.levels.iter().find_map(|s| s.ctl.fog_distance()),
+                )
+            };
+            if let Some(origin) = sky_origin { scene.set_sky_origin(origin); }
+            let (mut mirror_extra, mut mirror_hide) = (Vec::new(), Vec::new());
+            for slot in &interactions.levels { let (extra, hide) = slot.ctl.reflection(); mirror_extra.extend(extra); mirror_hide.extend(hide); }
+            crate::scene_census::count_n(crate::scene_census::Counter::MirrorExtra, mirror_extra.len() as u64);
+            crate::scene_census::count_n(crate::scene_census::Counter::MirrorHide, mirror_hide.len() as u64);
+            scene.set_reflection(mirror_extra, mirror_hide);
+            scene.set_reflection_actor(reflection_actor);
+            if let Some(fog) = scene_fog {
+                scene.atmosphere.distance = fog;
+            }
+            if let Some(distance) = fog_distance {
+                scene.atmosphere.distance.w = distance;
+            }
+        }
+        drop(census_scene_present);
+        let census_scene_prepare = crate::scene_census::span(crate::scene_census::Leaf::Prepare);
         drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPrepare3d);
         #[cfg(feature="vita_renderer")]
         let display_clear = !crate::render::vita_renderer::display_clear_skipped();
         #[cfg(not(feature="vita_renderer"))]
         let display_clear = true;
-        if display_clear { clear_background(scene.atmosphere.background()); }
+        if display_clear {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::DisplayClear);
+            clear_background(scene.atmosphere.background());
+        }
         #[cfg(feature="vita_renderer")]
-        crate::render::vita_renderer::prepare_3d(scene.atmosphere.background());
+        {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::Prepare3d);
+            crate::render::vita_renderer::prepare_3d(scene.atmosphere.background());
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::sample_world_viewport();
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.gl("prepare-3d-returned"); }
-        let world_camera = Camera3D {
-            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            aspect:crate::sim_maps::probe::enabled().then_some(960./544.),
-            #[cfg(feature="vita_renderer")]
-            viewport: crate::render::vita_renderer::world_viewport(),
-            position: camera,
-            target,
-            up: pand_camera.map_or(Vec3::Z, |c| c.up),
-            fovy: interactions
-                .beyond
-                .as_ref()
-                .and_then(|b| b.scene_fovy(screen_width() / screen_height()))
-                .or_else(|| {
-                    interactions
-                        .levels
-                        .iter()
-                        .find_map(|s| s.ctl.scene_fovy(screen_width() / screen_height()))
-                })
-                .unwrap_or(75.0f32.to_radians()),
-            z_near: 2.,
-            z_far: crate::render::draw_distance_far(30000.),
-            ..Default::default()
+        let world_camera = {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::CameraBuild);
+            Camera3D {
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                aspect:crate::sim_maps::probe::enabled().then_some(960./544.),
+                #[cfg(feature="vita_renderer")]
+                viewport: crate::render::vita_renderer::world_viewport(),
+                position: camera,
+                target,
+                up: pand_camera.map_or(Vec3::Z, |c| c.up),
+                fovy: interactions
+                    .beyond
+                    .as_ref()
+                    .and_then(|b| b.scene_fovy(screen_width() / screen_height()))
+                    .or_else(|| {
+                        interactions
+                            .levels
+                            .iter()
+                            .find_map(|s| s.ctl.scene_fovy(screen_width() / screen_height()))
+                    })
+                    .unwrap_or(75.0f32.to_radians()),
+                z_near: 2.,
+                z_far: crate::render::draw_distance_far(30000.),
+                ..Default::default()
+            }
         };
-        #[cfg(feature="vita_renderer")]
-        crate::render::vita_renderer::set_3d_camera(&world_camera);
-        #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
-        crate::sim_maps::probe::note_projection(world_camera.matrix());
-        #[cfg(not(feature="vita_renderer"))]
-        set_camera(&world_camera);
-        #[cfg(feature = "vita_renderer")]
-        crate::render::vita_renderer::record_view(&world_camera);
+        {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::CameraSet);
+            #[cfg(feature="vita_renderer")]
+            crate::render::vita_renderer::set_3d_camera(&world_camera);
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            crate::sim_maps::probe::note_projection(world_camera.matrix());
+            #[cfg(not(feature="vita_renderer"))]
+            set_camera(&world_camera);
+            #[cfg(feature = "vita_renderer")]
+            crate::render::vita_renderer::record_view(&world_camera);
+        }
         #[cfg(feature = "vita_renderer")]
         let world_only = crate::render::vita_renderer::world_only();
         #[cfg(not(feature = "vita_renderer"))]
         let world_only = false;
+        drop(census_scene_prepare);
+        let census_scene_transforms = crate::scene_census::span(crate::scene_census::Leaf::Transforms);
         drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraTransforms);
-        let mut transforms = interactions.transforms();
-        transforms.extend(scene.world.traversal.transforms(&player));
-        let rope_hand = interactions
-            .pandemonium
-            .as_ref()
-            .and_then(|p| p.rope_hand())
-            .or_else(|| {
-                player
-                    .rope
-                    .as_ref()
-                    .and_then(|g| scene.world.traversal.rope(g.id))
-                    .map(|r| (r.model, player.feet + Vec3::Z * 40.))
-            });
-        scene.update_ropes(world_dt, rope_hand, &transforms);
+        let mut transforms_owned: Vec<(usize, Vec3, Quat)> = Vec::new();
+        let transforms: &[(usize, Vec3, Quat)] = 'transforms: {
+            let reuse = {
+                #[cfg(feature="vita_renderer")]
+                { crate::render::vita_renderer::config().scene_transform_buffer }
+                #[cfg(not(feature="vita_renderer"))]
+                { false }
+            };
+            let out: &mut Vec<(usize, Vec3, Quat)> = if reuse {
+                scene_transform_scratch.clear();
+                &mut scene_transform_scratch
+            } else {
+                transforms_owned.clear();
+                &mut transforms_owned
+            };
+            {
+                let _census = crate::scene_census::span(crate::scene_census::Leaf::InteractionTransforms);
+                interactions.transforms_into(out);
+            }
+            crate::scene_census::count_n(crate::scene_census::Counter::Transforms, out.len() as u64);
+            let traversal_transforms = {
+                let _census = crate::scene_census::span(crate::scene_census::Leaf::TraversalTransforms);
+                scene.world.traversal.transforms(&player)
+            };
+            crate::scene_census::count_n(crate::scene_census::Counter::Traversal, traversal_transforms.len() as u64);
+            out.extend(traversal_transforms);
+            break 'transforms out.as_slice();
+        };
+        let rope_hand = {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::RopeHand);
+            interactions
+                .pandemonium
+                .as_ref()
+                .and_then(|p| p.rope_hand())
+                .or_else(|| {
+                    player
+                        .rope
+                        .as_ref()
+                        .and_then(|g| scene.world.traversal.rope(g.id))
+                        .map(|r| (r.model, player.feet + Vec3::Z * 40.))
+                })
+        };
+        crate::scene_census::count_n(crate::scene_census::Counter::Rope, u64::from(rope_hand.is_some()));
+        {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::RopeUpdate);
+            scene.update_ropes(world_dt, rope_hand, transforms);
+        }
+        drop(census_scene_transforms);
         drop(census_leaf);
         crate::spike_log::sim(crate::spike_log::Sim::Particles2);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Particles);
@@ -4128,7 +4215,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(target_os = "vita"))]
         let draw_world = true;
         if draw_world {
-            scene.prepare_camera_portals(&world_camera, environment_clock, fullbright, &transforms);
+            scene.prepare_camera_portals(&world_camera, environment_clock, fullbright, transforms);
         }
         {
             #[cfg(target_os = "vita")]
@@ -4200,7 +4287,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         drop(census_gather);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::span("actor_gather",host_gather.elapsed().as_secs_f64()*1000.);
-        scene.draw(camera, environment_clock, fullbright, false, &transforms);
+        scene.draw(camera, environment_clock, fullbright, false, transforms);
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &mut load_probe {
             p.world(scene.stats.batches, scene.stats.triangles, scene.retained_active());

@@ -32,18 +32,30 @@ pub(super) fn pass() -> Option<macroquad::miniquad::RenderPass> {
     })
 }
 pub(super) fn prepare(bg: Color) {
-    crate::render_tail::configure();
-    crate::render_tail::end();
-    log_framebuffer();
+    {
+        let _census = crate::scene_census::span(crate::scene_census::Leaf::RenderTail);
+        crate::render_tail::configure();
+        crate::render_tail::end();
+    }
+    {
+        let _census = crate::scene_census::span(crate::scene_census::Leaf::FrameLog);
+        log_framebuffer();
+    }
     if config().render_scale == 1. {
         // miniquad clear obeys the previous HUD's depth write mask.
-        begin(PassAction::Clear {
-            color: None,
-            depth: Some(1.),
-            stencil: None,
-        });
-        unsafe {
-            get_internal_gl().quad_context.end_render_pass();
+        {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::PassBegin);
+            begin(PassAction::Clear {
+                color: None,
+                depth: Some(1.),
+                stencil: None,
+            });
+        }
+        {
+            let _census = crate::scene_census::span(crate::scene_census::Leaf::PassEnd);
+            unsafe {
+                get_internal_gl().quad_context.end_render_pass();
+            }
         }
         return;
     }
@@ -133,13 +145,19 @@ pub(super) fn prepare(bg: Color) {
             );
         }
     });
-    begin(PassAction::Clear {
-        color: Some((bg.r, bg.g, bg.b, 1.)),
-        depth: Some(1.),
-        stencil: None,
-    });
-    unsafe {
-        get_internal_gl().quad_context.end_render_pass();
+    {
+        let _census = crate::scene_census::span(crate::scene_census::Leaf::PassBegin);
+        begin(PassAction::Clear {
+            color: Some((bg.r, bg.g, bg.b, 1.)),
+            depth: Some(1.),
+            stencil: None,
+        });
+    }
+    {
+        let _census = crate::scene_census::span(crate::scene_census::Leaf::PassEnd);
+        unsafe {
+            get_internal_gl().quad_context.end_render_pass();
+        }
     }
 }
 /// The 3D target's rectangle: what the world pass draws into, for a readback.

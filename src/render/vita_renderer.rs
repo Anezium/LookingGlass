@@ -229,6 +229,15 @@ pub struct Config {
     pub frame_phase_probe: bool,
     /// Fixed-storage elapsed census; opt in only for a bounded benchmark.
     pub phase_census: bool,
+    /// Split the spike line's `scene` bucket into its leaves, with call counts and one mean line
+    /// per spike window plus the per-frame worst leaf (`scene_census.rs`). Diagnostic; default off.
+    pub scene_census: bool,
+    /// Rewrite the scene transform list into one reused buffer instead of a fresh `Vec` per
+    /// frame. Same values and order. Default off.
+    pub scene_transform_buffer: bool,
+    /// Read the four level camera hooks (sky origin, reflection actor, fog, fog distance) in one
+    /// pass instead of four. Same values. Default off.
+    pub scene_hooks_once: bool,
     /// Select mutable skin from actual frame consumers; keep inherited visual policy.
     pub skin_actual_consumers: bool,
     pub mover_far_lazy: bool,
@@ -579,6 +588,9 @@ impl Default for Config {
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             phase_census: false,
+            scene_census: false,
+            scene_transform_buffer: false,
+            scene_hooks_once: false,
             skin_actual_consumers: true,
             mover_far_lazy: true,
             mover_lazy_publish: true,
@@ -3646,7 +3658,7 @@ mod tests {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-            && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+            && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && *k != "scene_census" && !round5_key(k)).cloned().collect::<Vec<_>>();
         keys.sort();
         keys
     }
@@ -4268,6 +4280,27 @@ mod tests {
         assert_eq!(on, off, "the A6 pair differs only in the four load keys");
     }
     #[test]
+    fn scene_census_is_default_off_and_a_strict_boolean() {
+        assert!(!Config::default().scene_census);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().scene_census);
+        assert!(serde_json::from_str::<Config>(r#"{"scene_census":true}"#).unwrap().scene_census);
+        assert!(serde_json::from_str::<Config>(r#"{"scene_census":1}"#).is_err());
+        assert!(serde_json::from_str::<Config>(r#"{"scene_census":"on"}"#).is_err());
+    }
+    #[test]
+    fn scene_scene_candidates_are_default_off_and_strict() {
+        let defaults = Config::default();
+        assert!(!defaults.scene_transform_buffer);
+        assert!(!defaults.scene_hooks_once);
+        let parsed = serde_json::from_str::<Config>(r#"{"scene_transform_buffer":true,"scene_hooks_once":true}"#).unwrap();
+        assert!(parsed.scene_transform_buffer && parsed.scene_hooks_once);
+        for key in ["scene_transform_buffer", "scene_hooks_once"] {
+            assert!(serde_json::from_str::<Config>(&format!(r#"{{"{key}":1}}"#)).is_err(), "{key}");
+            assert!(serde_json::from_str::<Config>(&format!(r#"{{"{key}":"on"}}"#)).is_err(), "{key}");
+            assert!(serde_json::to_value(&defaults).unwrap()[key].as_bool().is_some(), "{key}");
+        }
+    }
+    #[test]
     fn load_texture_share_is_off_by_default_and_a_strict_boolean() {
         assert!(!Config::default().load_texture_share);
         assert!(!serde_json::from_str::<Config>("{}").unwrap().load_texture_share);
@@ -4302,7 +4335,7 @@ mod tests {
             let defaults = serde_json::to_value(Config::default()).unwrap();
             assert!(!parse_runtime_config(bytes).unwrap().0.sim_sweep_any);
             let keys = |v: &serde_json::Value| v.as_object().unwrap().keys()
-                .filter(|k| *k != "sim_sweep_any" && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect::<Vec<_>>();
+                .filter(|k| *k != "sim_sweep_any" && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && *k != "scene_census" && !round5_key(k)).cloned().collect::<Vec<_>>();
             assert_eq!(keys(&raw), keys(&defaults));
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none()); c.validate().unwrap();
@@ -4524,7 +4557,7 @@ mod tests {
         assert!(!c.sim_sweep_any);
         written["sim_sweep_any"] = false.into();
         for (key,value) in serde_json::to_value(Config::default()).unwrap().as_object().unwrap() {
-            if round5_key(key) || key == "shader_cache_namespace" || key == "water_draw_join" || key == "alpha_model_pvs" || key == "fx_unlit_exact" { written[key] = value.clone(); }
+            if round5_key(key) || key == "shader_cache_namespace" || key == "water_draw_join" || key == "alpha_model_pvs" || key == "fx_unlit_exact" || key == "scene_census" { written[key] = value.clone(); }
         }
         assert_eq!(written, serde_json::to_value(Config::default()).unwrap());
     }
@@ -4598,7 +4631,7 @@ mod tests {
             let mut all: Vec<_> = defaults.as_object().unwrap().keys()
                 .filter(|k| !k.starts_with("replay_") && !A5.contains(&k.as_str()) && *k != "water_normals" && *k != "low_fog" && *k != "fog_sky" && *k != "exact_blends" && *k != "detail_layers"
                     && !k.starts_with("sky_cube") && *k != "sky_depth" && !A5_FIGHT.contains(&k.as_str()) && *k != "world_adjacent_batch" && *k != "sim_sweep_any"
-                    && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && !round5_key(k)).cloned().collect();
+                    && *k != "shader_cache_namespace" && *k != "water_draw_join" && *k != "alpha_model_pvs" && *k != "fx_unlit_exact" && *k != "scene_census" && !round5_key(k)).cloned().collect();
             written.sort(); all.sort();
             assert_eq!(written, all, "an RC1 config must write every runtime key");
             let (c, rejected) = parse_runtime_config(bytes).unwrap();

@@ -1037,7 +1037,14 @@ impl Interactions {
         }
     }
     pub fn transforms(&self) -> Vec<(usize, Vec3, Quat)> {
-        self.doors
+        let mut out = Vec::new();
+        self.transforms_into(&mut out);
+        out
+    }
+    /// The same values as `transforms` in the same order, written into a reused buffer.
+    pub fn transforms_into(&self, out: &mut Vec<(usize, Vec3, Quat)>) {
+        out.clear();
+        out.extend(self.doors
             .iter()
             .filter(|d| d.enabled && self.event_world.enabled(d.id))
             .map(|d| (d.model, d.origin, d.rotation()))
@@ -1057,8 +1064,7 @@ impl Interactions {
             .chain(self.pool.iter().flat_map(|g| g.transforms()))
             .chain(self.pandemonium.iter().flat_map(|g| g.transforms()))
             .chain(self.duchess.iter().flat_map(|g| g.transforms()))
-            .chain(self.levels.iter().flat_map(|l| l.ctl.transforms()))
-            .collect()
+            .chain(self.levels.iter().flat_map(|l| l.ctl.transforms())));
     }
     pub fn advance_school(
         &mut self,

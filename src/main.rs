@@ -137,6 +137,7 @@ mod frame_profile;
 mod frame_phases;
 mod spike_log;
 mod phase_census;
+mod scene_census;
 mod game_thread;
 mod skin_worker;
 #[cfg_attr(feature="frame_total_only", path="frame_total_profile.rs")]
