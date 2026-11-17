@@ -321,6 +321,7 @@ pub struct Pilot {
     last_feet: Vec3,
     waiting: bool,
     last_cycle: f32,
+    last_target: Vec3,
 }
 
 impl Pilot {
@@ -354,6 +355,7 @@ impl Pilot {
             last_feet: Vec3::ZERO,
             waiting: false,
             last_cycle: 0.,
+            last_target: Vec3::ZERO,
         }))
     }
 
@@ -583,8 +585,15 @@ impl Pilot {
                 .filter(|t| t.center.distance(player.eye()) < p.aim)
                 .filter(|t| (t.center.z - player.eye().z).abs() < p.vertical)
                 .filter(|t| {
-                    let trace = world.sight_sweep(player.eye(), t.center, Vec3::ZERO);
-                    !trace.start_solid && trace.fraction > 0.98
+                    // A boss's torso can sit behind low furniture; aim at the head and
+                    // accept a nearly clear sweep. Ordinary guards keep the strict test.
+                    let aim = if p.boss {
+                        t.center + Vec3::Z * 40.
+                    } else {
+                        t.center
+                    };
+                    let trace = world.sight_sweep(player.eye(), aim, Vec3::ZERO);
+                    !trace.start_solid && trace.fraction > if p.boss { 0.9 } else { 0.98 }
                 })
                 .min_by(|a, b| {
                     a.center
@@ -601,6 +610,7 @@ impl Pilot {
                 }
                 self.fight += elapsed;
                 self.last_threat = self.seconds;
+                self.last_target = t.center;
                 t.center
             } else {
                 if !p.goals.is_empty() {
@@ -652,6 +662,10 @@ impl Pilot {
                         goal.y += side.y * sign * amount;
                     }
                     vec3(goal.x, goal.y, player.eye().z)
+                } else if p.boss && self.fight > 0. {
+                    // Chase the last seen boss position instead of standing still when
+                    // furniture or a mover breaks the sweep for a few frames.
+                    vec3(self.last_target.x, self.last_target.y, player.eye().z)
                 } else {
                     let f = player.eye() + vec3(yaw.cos() * 32., yaw.sin() * 32., 0.);
                     vec3(f.x, f.y, player.eye().z)
