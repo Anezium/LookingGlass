@@ -1575,6 +1575,9 @@ pub(crate) fn finish_world(
                     "vertices":m.vertices.len(),"indices":m.indices.len(),"effect":p.effect,
                     "blend":p.blend_index,"equal":p.depth_equal,"depth_write":!groups[id].transparent,
                     "cutout":p.cutout,"discard_free":super::corpse_opaque::discard_free(p),
+                    "surface_layers":p.mesh.surface.as_ref().map(|s|s.layers.len()),
+                    "surface_transparent":p.mesh.surface.as_ref().map(|s|s.transparent),
+                    "stage_env":p.mesh.surface.as_ref().map(|s|s.layers.iter().map(|l|l.stage.environment).collect::<Vec<_>>()),
                     "label":p.mesh.surface.as_ref().map(|s|s.label.clone()),"bounds":[bounds.0.to_array(),bounds.1.to_array()],
                     "projected_long_side_display_pixels":projected}));
             }
