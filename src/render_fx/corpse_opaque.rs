@@ -29,8 +29,10 @@ pub(super) fn eligible(p:&Pass) -> bool {
 /// whose rejection predicate is not certified false for the complete primitive.
 pub(super) fn discard_free(p:&Pass) -> bool {
     // Potears1's strict host oracle rejects the broad certified-texture route:
-    // packets match but some pixels differ. Keep that route on the original shader.
+    // packets match but some pixels differ, including uncut non-environment actors.
+    // Keep the specialization scoped to uncut environment-material actor surfaces.
     p.cutout==0. && rejection_free(p)
+        && p.mesh.surface.as_ref().is_some_and(|s| s.layers.iter().any(|l|l.stage.environment))
 }
 fn rejection_free(p:&Pass) -> bool {
     !p.effect && p.appearance.dissolve==0. && !p.appearance.ghost
@@ -59,6 +61,15 @@ mod tests {
         p.gain.w=0.3;assert!(!eligible(&p));p.gain.w=1.;
         p.mesh.vertices[0].color[3]=0;assert!(!eligible(&p));
         p.cutout=0.;assert!(eligible(&p)); // no alpha rejection in the full program
+        assert!(!discard_free(&p), "ordinary actors retain their original program");
+        p.mesh.surface=Some(Rc::new(Surface {
+            layers:vec![Layer {stage:Stage {environment:true,..Default::default()},textures:vec![],upload_identities:vec![]}],
+            transparent:false,preserve_skin:true,
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            label:(false,None),
+            actors:RefCell::default(),
+        }));
+        assert!(discard_free(&p));
         p.appearance.dissolve=0.1;assert!(!eligible(&p));p.appearance.dissolve=0.;
         p.appearance.ghost=true;assert!(!eligible(&p));p.appearance.ghost=false;
         p.blend_index=1;assert!(!eligible(&p));assert!(discard_free(&p));p.blend_index=0;
