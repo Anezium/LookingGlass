@@ -439,7 +439,7 @@ pub(crate) fn lite_pass(p: &Pass) -> bool {
 /// combined selection can be pinned without a GL context.
 fn program_choice(c: &crate::render::vita_renderer::Config) -> (Option<Specialized>, bool) {
     (specialized_program(c.fx_lite, c.fx_unlit_exact),
-     c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+     c.ant_corpse_opaque_shader || c.actor_opaque_shader || c.actor_discard_free_shader)
 }
 impl Gpu {
     pub(crate) fn new() -> Result<Self> {
@@ -620,7 +620,7 @@ impl Gpu {
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let shaders = std::iter::once((self.shader, &mut self.pipelines))
             .chain(self.lite.as_mut().map(|l| (l.shader, &mut l.pipelines)))
-            .chain(self.corpse_opaque.as_mut().filter(|_|key==(0,false)).map(|l|(l.shader,&mut l.pipelines)));
+            .chain(self.corpse_opaque.as_mut().filter(|_|key==(0,false) || crate::render::vita_renderer::config().actor_discard_free_shader).map(|l|(l.shader,&mut l.pipelines)));
         for (shader, pipelines) in shaders {
         pipelines.entry(key).or_insert_with(|| {
             crate::frame_profile::pipeline_creation();
@@ -657,9 +657,11 @@ impl Gpu {
             .then(std::time::Instant::now);
         let key = (p.blend_index, p.depth_equal);
         let c=crate::render::vita_renderer::config();
-        let opaque = (ant_dead==Some(true) && c.ant_corpse_opaque_shader || c.actor_opaque_shader)
+        let discard_free = c.actor_discard_free_shader && self.corpse_opaque.is_some() && super::corpse_opaque::discard_free(p);
+        if discard_free {count("vita_actor_discard_free_draws",1);}
+        let opaque = discard_free || (ant_dead==Some(true) && c.ant_corpse_opaque_shader || c.actor_opaque_shader)
             && depth_write && self.corpse_opaque.is_some() && super::corpse_opaque::eligible(p);
-        if opaque {
+        if opaque && !discard_free {
             count(if ant_dead==Some(true) {"vita_ant_corpse_opaque_draws"} else {"vita_actor_opaque_draws"},1);
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -735,7 +737,18 @@ impl Gpu {
                     p.fog.to_bits(),p.model as u32,p.filter_fade.to_bits()],p.mesh.texture.as_ref());
         }
         let class = if p.effect { crate::gpu_timing::fx_class(p.blend_index) } else { crate::gpu_timing::MASK_ACTORS };
-        if !crate::gpu_timing::masked(class) { ctx.draw(0, p.geometry().indices.len() as i32, 1); }
+        if !crate::gpu_timing::masked(class) {
+            // Every retained pipeline has CullFace::Nothing. Restore that state before
+            // any world callback or cached pipeline use. This opt-in can remove authored
+            // double-sided faces and is deliberately classified as picture-changing.
+            let cull = c.actor_frontface_cull && !p.effect;
+            unsafe { if cull {
+                macroquad::miniquad::gl::glEnable(0x0B44); // GL_CULL_FACE
+                macroquad::miniquad::gl::glCullFace(0x0404); // GL_FRONT; experimental authored winding
+            } }
+            ctx.draw(0, p.geometry().indices.len() as i32, 1);
+            unsafe { if cull { macroquad::miniquad::gl::glDisable(0x0B44); } }
+        }
         #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
         if let Some(start) = census_started {
             let (_, texture) = crate::sim_maps::probe::draw_query::actor_label(
@@ -1550,6 +1563,21 @@ pub(crate) fn finish_world(
         let census_start=crate::character::skinning::census::active().then(std::time::Instant::now);
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if crate::character::skinning::census::active() {
+                let p=&groups[*group].passes[*pass];
+                let m=p.geometry();
+                let bounds=m.vertices.iter().fold((Vec3::splat(f32::INFINITY),Vec3::splat(f32::NEG_INFINITY)),
+                    |(lo,hi),v|(lo.min(v.position),hi.max(v.position)));
+                let projected=FRAME.with(|f|f.borrow().projection.and_then(|m|crate::render::projected_pixels(m,bounds.0,bounds.1)));
+                println!("ACTOR_GPU_DRAW {}",serde_json::json!({"frame":crate::sim_maps::probe::frame(),
+                    "group":group,"pass":pass,"owner":crate::character::skinning::census::owner(*group),
+                    "vertices":m.vertices.len(),"indices":m.indices.len(),"effect":p.effect,
+                    "blend":p.blend_index,"equal":p.depth_equal,"depth_write":!groups[id].transparent,
+                    "cutout":p.cutout,"discard_free":super::corpse_opaque::discard_free(p),
+                    "label":p.mesh.surface.as_ref().map(|s|s.label.clone()),"bounds":[bounds.0.to_array(),bounds.1.to_array()],
+                    "projected_long_side_display_pixels":projected}));
+            }
             gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent, groups[id].ant_dead);
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]

@@ -2,7 +2,13 @@
 use super::*;
 pub(crate) fn active()->bool {
     std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").is_some()
-        && (300..=360).contains(&crate::sim_maps::probe::frame())
+        && {
+            static FRAMES: std::sync::OnceLock<Option<Vec<u64>>> = std::sync::OnceLock::new();
+            let frames=FRAMES.get_or_init(||std::env::var("LOOKING_GLASS_ACTOR_CENSUS_FRAMES").ok()
+                .map(|s|s.split(',').map(|n|n.parse().expect("census frame number")).collect()));
+            frames.as_ref().map_or_else(||(300..=360).contains(&crate::sim_maps::probe::frame()),
+                |f|f.contains(&crate::sim_maps::probe::frame()))
+        }
 }
 use std::cell::{Cell,RefCell};
 use std::collections::HashMap;

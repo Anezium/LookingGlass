@@ -91,6 +91,10 @@ impl LevelArt for Art {
             } else {
                 a.piece.clip()
             };
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            if crate::character::skinning::census::active() {
+                println!("CHESS_GPU_PIECE {}",serde_json::json!({"frame":crate::sim_maps::probe::frame(),"name":a.name,"model":a.model,"feet":a.piece.feet.to_array()}));
+            }
             puppet.draw(
                 clip,
                 refusal.map_or(a.piece.time, |t| r.saved.age - t),

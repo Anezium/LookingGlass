@@ -22,7 +22,20 @@ fn opaque_texture(texture:Option<&Texture2D>) -> bool {
     texture.is_none_or(|t|OPAQUE.with(|table|table.borrow().get(&t.raw_miniquad_id()).is_some_and(|old| *old==t.weak_clone())))
 }
 pub(super) fn eligible(p:&Pass) -> bool {
-    !p.effect && p.blend_index==0 && !p.depth_equal && p.appearance.dissolve==0. && !p.appearance.ghost
+    p.blend_index==0 && !p.depth_equal && rejection_free(p)
+}
+/// Blending and depth equality do not affect whether a fragment can execute discard.
+/// Preserve all output arithmetic and all pipeline state; reject every appearance/cutout
+/// whose rejection predicate is not certified false for the complete primitive.
+pub(super) fn discard_free(p:&Pass) -> bool {
+    // Potears1's strict host oracle rejects the broad certified-texture route:
+    // packets match but some pixels differ, including uncut non-environment actors.
+    // Keep the specialization scoped to uncut environment-material actor surfaces.
+    p.cutout==0. && rejection_free(p)
+        && p.mesh.surface.as_ref().is_some_and(|s| s.layers.iter().any(|l|l.stage.environment))
+}
+fn rejection_free(p:&Pass) -> bool {
+    !p.effect && p.appearance.dissolve==0. && !p.appearance.ghost
         && (p.cutout==0. || (p.cutout==4. && p.gain.w==1.
             && opaque_texture(p.mesh.texture.as_ref()) && p.geometry().vertices.iter().all(|v|v.color[3]==255)))
 }
@@ -44,15 +57,25 @@ mod tests {
             material:None,lit:true,clamp:false,cutout:4.,cutout_reference:0.5,gain:Vec4::ONE,
             fog:0.,model:true,appearance:Appearance::default(),filter_fade:0.};
         assert!(eligible(&p));
+        assert!(!discard_free(&p), "certified cutout remains on the original actor shader");
         p.gain.w=0.3;assert!(!eligible(&p));p.gain.w=1.;
         p.mesh.vertices[0].color[3]=0;assert!(!eligible(&p));
         p.cutout=0.;assert!(eligible(&p)); // no alpha rejection in the full program
+        assert!(!discard_free(&p), "ordinary actors retain their original program");
+        p.mesh.surface=Some(Rc::new(Surface {
+            layers:vec![Layer {stage:Stage {environment:true,..Default::default()},textures:vec![],upload_identities:vec![]}],
+            transparent:false,preserve_skin:true,
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            label:(false,None),
+            actors:RefCell::default(),
+        }));
+        assert!(discard_free(&p));
         p.appearance.dissolve=0.1;assert!(!eligible(&p));p.appearance.dissolve=0.;
         p.appearance.ghost=true;assert!(!eligible(&p));p.appearance.ghost=false;
-        p.blend_index=1;assert!(!eligible(&p));p.blend_index=0;
-        p.depth_equal=true;assert!(!eligible(&p));p.depth_equal=false;
-        p.effect=true;assert!(!eligible(&p));p.effect=false;
-        p.cutout=2.;assert!(!eligible(&p));
+        p.blend_index=1;assert!(!eligible(&p));assert!(discard_free(&p));p.blend_index=0;
+        p.depth_equal=true;assert!(!eligible(&p));assert!(discard_free(&p));p.depth_equal=false;
+        p.effect=true;assert!(!eligible(&p));assert!(!discard_free(&p));p.effect=false;
+        p.cutout=2.;assert!(!eligible(&p));assert!(!discard_free(&p));
     }
     #[test]
     fn incomplete_or_nonopaque_texels_are_not_certified() {
@@ -63,6 +86,7 @@ mod tests {
         assert!(c.actor_opaque_shader);
         assert!(!c.ant_corpse_opaque_shader);
         assert!(!crate::render::vita_renderer::Config::default().actor_opaque_shader);
+        assert!(!crate::render::vita_renderer::Config::default().actor_discard_free_shader);
     }
     #[test]
     fn specialization_removes_only_the_four_discard_statements() {
