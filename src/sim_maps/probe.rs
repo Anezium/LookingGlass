@@ -551,7 +551,10 @@ pub mod draw_query {
         static LAST: OnceLock<u64> = OnceLock::new();
         let last = *LAST.get_or_init(|| std::env::var("LOOKING_GLASS_DRAW_QUERY_LAST")
             .ok().and_then(|value| value.parse().ok()).unwrap_or_else(target_frame));
-        let armed = frame >= target_frame() && frame <= last;
+        static FRAMES: OnceLock<Option<Vec<u64>>> = OnceLock::new();
+        let frames=FRAMES.get_or_init(||std::env::var("LOOKING_GLASS_DRAW_QUERY_FRAMES").ok()
+            .map(|s|s.split(',').map(|n|n.parse().expect("draw query frame number")).collect()));
+        let armed = frames.as_ref().map_or_else(||frame >= target_frame() && frame <= last,|f|f.contains(&frame));
         if armed {
             SAMPLE_FRAME.with(|value| value.set(frame));
             println!("DRAW_QUERY armed frame={frame} target={}", target_frame());
