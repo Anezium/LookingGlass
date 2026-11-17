@@ -1,0 +1,8 @@
+{
+  "branch": "vita-rc15-candidate-20261116",
+  "head": "610ee98358d0271d03ce87af0a6f0b6f40bd8193",
+  "note": "Byte-identical read-only copy of the RC15 play config, kept in the package so the arm configs can be rebuilt without the source checkout. The source file was not edited.",
+  "read_only": true,
+  "source_path": "/Users/anezium/vita-work/lg-rc15/configs/PL-rc15-release-play.json",
+  "source_sha256": "580f73ba3e3bd166fe2362e2e2a9ab229ad2080d0de8f1036b24d80975585c70"
+}
