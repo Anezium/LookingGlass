@@ -219,8 +219,11 @@ Known stopping points from 2026-11-17 (all bounded, no hang):
   damage was taken in 6 s; needs `needs_legacy` for fortress1 encounters and a longer
   fight.
 - utemple: no swim/rise input in the pilot; the turtle/guide path is unreachable.
-- wchess2: the Castling course is a 150-point maze; the first nine points reach no
-  enemy. Needs the full COARSE course or a later staged fight.
+- wchess2: the full 203-point Castling course was followed successfully (host attempt
+  host-wchess2-01) and every proof gate passed, but the 3303-point sampled cast-health
+  loss came from autonomous white-vs-red fighting, not the pilot's 3 contacts. That is
+  not attributable enemy damage, so the map is not accepted; the experiment was
+  reverted to keep the delivered source identical to its SELF.
 
 Pitfalls actually encountered:
 

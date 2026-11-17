@@ -12,7 +12,7 @@ hashes: /Users/anezium/vita-j0/plan-2026-11-12/release-week/fight-pilot/batch-gr
 Skipped after bounded host attempts, with stopping points in the batch REPORT:
 skool1 (dormant balcony guards, shelf/lift climb), potears3 (Duchess damage race),
 qlair (corridor fall), hatter1 (non-repeatable first climb), fortress1 (portal reached,
-fight too short), utemple (no swim input), wchess2 (maze course). No config or claim
+fight too short), utemple (no swim input), wchess2 (faction damage confounds). No config or claim
 is delivered for them; their plan entries stay as bounded attempts.
 
 No native device or p95 claim. No console/FTP/forbidden ports/Terminal.app/kit edits or
