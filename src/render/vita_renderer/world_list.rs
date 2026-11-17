@@ -166,13 +166,22 @@ fn adjacent_ranges(base: i32, count: i32, next_base: i32, next_count: i32) -> bo
 /// class once a pass, after its last write, and the table points at the first parameter that held
 /// those bits. Equal ids mean equal bits and different ids mean different bits, checked word for
 /// word when taken. Nothing is copied and the table never grows past the parameter count.
-pub(super) struct Classes { first: Vec<(u32, u32)> }
+pub(super) struct Classes { first: Vec<(u32, u32)>, pub(super) short_hash: bool }
 impl Classes {
-    pub fn new(parameters: usize) -> Self { Self { first: Vec::with_capacity(parameters) } }
+    pub fn new(parameters: usize) -> Self { Self { first: Vec::with_capacity(parameters), short_hash: false } }
     pub fn begin_pass(&mut self) { self.first.clear(); }
     /// `own` is the asking parameter, `bits_of` reads any parameter already in the table.
     pub fn class<'a>(&mut self, own: u32, bits: &[u32; 143], bits_of: impl Fn(u32) -> &'a [u32; 143]) -> u32 {
-        let hash = bits.iter().fold(0x811c_9dc5_u32, |h, w| (h ^ *w).wrapping_mul(0x0100_0193));
+        // The hash only rejects candidates. Even when all sampled words agree,
+        // class identity still compares every bit of the payload below.
+        let mix = |h: u32, w: u32| (h ^ w).wrapping_mul(0x0100_0193);
+        let hash = if self.short_hash {
+            // Model translation, UV transform, surface, gain, alpha and deform.
+            [28, 32, 44, 68, 69, 72, 76, 96].into_iter()
+                .fold(0x811c_9dc5, |h, i| mix(h, bits[i]))
+        } else {
+            bits.iter().copied().fold(0x811c_9dc5, mix)
+        };
         for (i, &(known, parameter)) in self.first.iter().enumerate() {
             if known == hash && bits_of(parameter) == bits { return i as u32; }
         }
@@ -404,6 +413,19 @@ mod tests {
         assert_eq!(classes.len(), 0);
         assert_eq!(classes.class(1, &b, of), 0, "ids mean nothing across passes");
         assert_eq!(classes.capacity(), capacity);
+    }
+    #[test]
+    fn short_hash_collisions_preserve_first_occurrence_ids() {
+        let mut rows = [[0u32; 143]; 4];
+        rows[1][142] = (-0.0_f32).to_bits();
+        rows[2][3] = f32::NAN.to_bits();
+        rows[3] = rows[1];
+        let mut classes = Classes::new(rows.len());
+        classes.short_hash = true;
+        let ids: Vec<_> = rows.iter().enumerate()
+            .map(|(i, bits)| classes.class(i as u32, bits, |j| &rows[j as usize]))
+            .collect();
+        assert_eq!(ids, [0, 1, 2, 1]);
     }
     fn vertex(tag: u32) -> WorldVertex {
         WorldVertex { position: [tag as f32, 0., 0.], uv: [0.; 2], color: [0; 4], lightmap: [0.; 4], normal: [0.; 3] }

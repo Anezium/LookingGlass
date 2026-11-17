@@ -147,6 +147,8 @@ pub struct Config {
     /// Coalesce certified adjacent opaque ranges and reuse uninterrupted world-alpha state.
     /// Never changes the order of world groups or crosses an actor/FX callback. Default off.
     pub world_adjacent_batch: bool,
+    /// Sample a short hash before the full opaque-world uniform equality check.
+    pub world_uniform_short_hash: bool,
     pub world_uniform_persist: bool,
     pub world_binding_cache: bool,
     pub world_gl_state_cache: bool,
@@ -581,6 +583,7 @@ impl Default for Config {
             world_material_sort: false,
             world_static_merge: false,
             world_adjacent_batch: false,
+            world_uniform_short_hash: false,
             world_uniform_persist: false,
             world_binding_cache: false,
             world_gl_state_cache: false,
@@ -1974,7 +1977,11 @@ impl Renderer {
                 time: 0_f32.to_bits(), time_uv, time_gain, list_serial: 0, class: 0 }
         }).collect();
         resources.committed = true;
-        let list = c.world_list_submit.then(|| world_list::WorldList::new(&groups, &pipelines, &low_pipelines, parameter_count));
+        let list = c.world_list_submit.then(|| {
+            let mut list = world_list::WorldList::new(&groups, &pipelines, &low_pipelines, parameter_count);
+            list.classes.short_hash = c.world_uniform_short_hash;
+            list
+        });
         Ok(Self {
             list,
             gxm: gxm::State::published(gxm::Mode::parse(&c.world_gxm).unwrap_or(gxm::Mode::Off), groups.len(), &shader::meta()),
@@ -2315,6 +2322,8 @@ impl Renderer {
                 let list = self.list.as_mut().unwrap();
                 list.begin_parameter_pass(&mut self.parameters);
                 let time_bits = time.to_bits();
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                let mut short_hashes = 0;
                 for &(_, id) in &self.alpha_order {
                     let draw = &list.draws[id];
                     let index = draw.parameter as usize;
@@ -2341,6 +2350,8 @@ impl Renderer {
                         let parameters = &self.parameters;
                         let class = list.classes.class(draw.parameter, &parameters[index].bits, |q| &parameters[q as usize].bits);
                         self.parameters[index].class = class;
+                        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                        if list.classes.short_hash { short_hashes += 1; }
                     }
                     let p = &self.parameters[index];
                     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -2351,6 +2362,8 @@ impl Renderer {
                     } else { draw.texture };
                     list.items.push(world_list::Item { group: id as u32, texture, uniforms: p.class });
                 }
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                if short_hashes != 0 { count("vita_world_short_hashes", short_hashes); }
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 if world_list::negative("world-list-swap-order") && list.items.len() > 12 { list.items.swap(5, 11); }
             } else {
@@ -3899,7 +3912,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "world_uniform_short_hash" | "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
