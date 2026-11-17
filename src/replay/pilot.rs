@@ -214,7 +214,7 @@ fn plan(map: &str) -> Option<Plan> {
             reach: 420.,
             boss: true,
             clear: false,
-            time_limit: 180.,
+            time_limit: 260.,
         },
         "potears3" => Plan {
             wave_first: false,
