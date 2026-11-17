@@ -26,6 +26,8 @@ LOCK = Path('/Users/anezium/vita-j0/mac-timing.lock')
 
 
 def main():
+    (ROOT/'bin').mkdir(exist_ok=True)
+    (ROOT/'logs').mkdir(exist_ok=True)
     if shutil.disk_usage('/Users').free < 41 * 1024**3:
         raise SystemExit('disk reserve below 41 GiB')
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=SOURCE, text=True).strip()

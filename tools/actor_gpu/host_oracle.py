@@ -45,8 +45,8 @@ TAPE_ROWS = {
 # binary with exactly one switch flipped.
 ARMS = {
     'base': ('base', {}, {}),
-    'arm-off': ('arm', {}, {}),
-    'discard-free': ('arm', {'actor_discard_free_shader': True}, {}),
+    'env-off': ('final', {}, {}),
+    'env-discard-free': ('final', {'actor_discard_free_shader': True}, {}),
 }
 
 KEEP = ['frame', 'map', 'active', 'state_sha256', 'joint_alpha_order', 'blend_world_order',

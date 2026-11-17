@@ -6,6 +6,7 @@ BASE=P/'base/PL-rc15-release-play.json'
 sha=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest()
 ARMS=[('control',{},'exact control'),('discard-free',{'actor_discard_free_shader':True},'exact candidate; native pixels pending'),('frontface',{'actor_frontface_cull':True},'PICTURE-CHANGING: owner approval required'),('combined',{'actor_discard_free_shader':True,'actor_frontface_cull':True},'PICTURE-CHANGING: owner approval required')]
 def main():
+ (P/'console-configs').mkdir(exist_ok=True)
  assert sha(BASE)=='580f73ba3e3bd166fe2362e2e2a9ab229ad2080d0de8f1036b24d80975585c70'
  base=json.loads(BASE.read_text());plan=[]
  for map,tape,window,origin in [('wchess1','rw-20261116-wchess1-01.lgtape',[796,1276],P.parent/'release-week/play-record/tapes'),('centipede1','fp-centipede1-01.lgtape',[376,856],P.parent/'release-week/fight-measure-01/tapes')]:
