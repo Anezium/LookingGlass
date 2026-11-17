@@ -84,6 +84,19 @@ measurement keys (`replay_play=a2-04.lgtape`, `log_frame_time_every=10`), and th
 unit tests enforce that relationship. `PL-rc13-release-play04.json` keeps the
 RC14 package bytes for comparison.
 
+RC16 turns on the two main-thread audio fixes (`audio_loop_resident`,
+`audio_cue_prefetch`) and the exact actor shader specialization
+(`actor_discard_free_shader`). All three were measured on the Vita on 2026-11-17
+and checked exact on the host against the RC15 configuration, frame by frame and
+sample by sample. The picture-changing `actor_frontface_cull` stays explicitly
+false: the owner decision is still pending. Because a fresh install has no
+`ux0:data/alice/private/vita_renderer.json`, this compiled input is what those
+users run: it carries the same eight RC15/RC16 values as the shipped play config.
+`PL-rc16-release-play.json` is this fallback plus only the two measurement keys
+(`replay_play=a2-04.lgtape`, `log_frame_time_every=10`), and the unit tests
+enforce that relationship and the false front-face cull in every shipped input.
+`PL-rc15-release-play.json` keeps the RC15 package bytes for comparison.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
