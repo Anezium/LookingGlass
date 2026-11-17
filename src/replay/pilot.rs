@@ -33,6 +33,8 @@ struct Plan {
     /// Reach the last approach point before acquiring targets; avoids dormant balcony
     /// guards that are visible but not yet reachable.
     after_goals: bool,
+    /// The lair boss is invulnerable; prefer its spawned waves.
+    wave_first: bool,
     time_limit: f32,
 }
 
@@ -142,6 +144,7 @@ const CASTLING: &[Vec3] = &[
 fn plan(map: &str) -> Option<Plan> {
     let p = match map {
         "hatter2" => Plan {
+            wave_first: false,
             after_goals: false,
             goals: HATTER2,
             fight_limit: 45.,
@@ -153,6 +156,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "centipede1" => Plan {
+            wave_first: false,
             after_goals: false,
             goals: FLORA,
             fight_limit: 60.,
@@ -164,6 +168,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "skool1" => Plan {
+            wave_first: false,
             after_goals: true,
             goals: SCHOOL,
             fight_limit: 75.,
@@ -175,6 +180,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "grounds1" => Plan {
+            wave_first: false,
             after_goals: false,
             goals: GROUNDS_ARENA,
             fight_limit: 60.,
@@ -186,6 +192,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "grounds2" => Plan {
+            wave_first: false,
             after_goals: true,
             goals: ROYALE,
             fight_limit: 75.,
@@ -197,9 +204,10 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "jlair2" => Plan {
+            wave_first: true,
             after_goals: false,
             goals: LAIR,
-            fight_limit: 60.,
+            fight_limit: 75.,
             aim: 2000.,
             vertical: 400.,
             reach: 420.,
@@ -208,6 +216,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "potears3" => Plan {
+            wave_first: false,
             after_goals: true,
             goals: DUCHESS,
             fight_limit: 60.,
@@ -219,6 +228,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "qlair" => Plan {
+            wave_first: false,
             after_goals: true,
             goals: QUEEN,
             fight_limit: 60.,
@@ -230,6 +240,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "hatter1" => Plan {
+            wave_first: false,
             after_goals: true,
             goals: CLOCKWORK,
             fight_limit: 75.,
@@ -241,6 +252,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 210.,
         },
         "fortress1" => Plan {
+            wave_first: false,
             after_goals: true,
             goals: FORTRESS,
             fight_limit: 60.,
@@ -252,6 +264,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 210.,
         },
         "utemple" => Plan {
+            wave_first: false,
             after_goals: true,
             goals: TEMPLE,
             fight_limit: 60.,
@@ -263,6 +276,7 @@ fn plan(map: &str) -> Option<Plan> {
             time_limit: 180.,
         },
         "wchess2" => Plan {
+            wave_first: false,
             after_goals: true,
             goals: CASTLING,
             fight_limit: 60.,
@@ -560,6 +574,7 @@ impl Pilot {
             let target = targets
                 .iter()
                 .filter(|_| at_post)
+                .filter(|t| !p.wave_first || t.id != 8_600_000)
                 .filter(|t| t.center.distance(player.eye()) < p.aim)
                 .filter(|t| (t.center.z - player.eye().z).abs() < p.vertical)
                 .filter(|t| {
