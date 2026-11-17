@@ -599,7 +599,18 @@ impl Pilot {
                             self.waypoint, self.seconds, player.feet, p.goals[self.waypoint]
                         );
                     }
-                    let goal = p.goals[self.waypoint];
+                    let mut goal = p.goals[self.waypoint];
+                    if self.still > 2. {
+                        // Slide along a blocking lip or doorway instead of pushing into it,
+                        // alternating sides with a growing offset. Bounded by the stall stop.
+                        let d = (goal - player.feet).truncate().normalize_or_zero();
+                        let side = vec2(-d.y, d.x);
+                        let phase = ((self.still - 2.) / 2.5) as u32;
+                        let sign = if phase % 2 == 0 { 1. } else { -1. };
+                        let amount = 120. * (1. + (phase / 2) as f32);
+                        goal.x += side.x * sign * amount;
+                        goal.y += side.y * sign * amount;
+                    }
                     vec3(goal.x, goal.y, player.eye().z)
                 } else {
                     let f = player.eye() + vec3(yaw.cos() * 32., yaw.sin() * 32., 0.);
@@ -667,6 +678,10 @@ impl Pilot {
                 && (elevation - pitch).abs() < 0.15
             {
                 super::input::hold_key(&mut frame, KeyCode::LeftControl);
+            }
+            if self.still > 1.6 && (self.seconds * 3.) as u32 % 2 == 0 {
+                // Real jump input clears small ledges and doorway lips.
+                super::input::hold_key(&mut frame, KeyCode::Space);
             }
             if self.still > 3. && (self.seconds * 2.) as u32 % 3 == 0 {
                 super::input::hold_key(&mut frame, KeyCode::Enter);
