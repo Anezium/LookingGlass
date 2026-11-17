@@ -1,6 +1,6 @@
 # r11c amendment, fixed before console data
 
-The original CONSOLE-BRIEF.md, SOL-REPORT.md, AMENDMENT-R11.md and
+The original CONSOLE-BRIEF.md, REPORT.md, AMENDMENT-R11.md and
 AMENDMENT-R11B.md remain historical sealed instructions. This amendment applies
 to the new r11c SELF and pinned dependency sources. Console execution is NOT RUN.
 

@@ -2,7 +2,7 @@
 
 Mac-only preparation. Another agent owns the console. No Vita, shot driver, route lookup or console helper was contacted. This package does not admit ownership. All console measurements are PENDING. The archive includes the offline preflight scripts; fresh console copies include the whole-log integrity gate.
 
-OUT is /Users/anezium/vita-j0/resume-2026-10-24/alice-skin-exact-r9. PY is /Users/anezium/vita-j0/venv/bin/python. Use /opt/homebrew/bin/bash. Read SOL-REPORT.md, DESIGN.md, PACKAGE-MATRIX.json and CONSOLE-PROTOCOL.json before admission.
+OUT is /Users/anezium/vita-j0/resume-2026-10-24/alice-skin-exact-r9. PY is /Users/anezium/vita-j0/venv/bin/python. Use /opt/homebrew/bin/bash. Read REPORT.md, DESIGN.md, PACKAGE-MATRIX.json and CONSOLE-PROTOCOL.json before admission.
 
 Use one common r9 SELF for every arm. A uses PL-baseline.json, byte-identical to r5 A; skin_actual_consumers is omitted and defaults false. B uses PL-skin.json, the sole effective difference skin_actual_consumers=true. phase_census=false in ALL eight wall gate arms. Old probes, off-main, sorting/merge/uniform switches remain disabled.
 

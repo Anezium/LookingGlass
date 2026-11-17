@@ -37,8 +37,8 @@ execution is **NOT RUN**. Neither the Vita (192.168.1.23) nor the shot driver wa
 contacted. All execution used this Mac; the rehearsal denies real sockets and
 process launches before importing console helpers.
 
-The review and original SOL-REPORT.md were read first. CONSOLE-BRIEF.md and the
-original SOL-REPORT.md are unchanged. All protocol changes are in the new
+The review and original REPORT.md were read first. CONSOLE-BRIEF.md and the
+original REPORT.md are unchanged. All protocol changes are in the new
 AMENDMENT-R11B.md, fixed before any console data. Original r11 JSON receipts and
 its old artifact inventory are retained in proof/r11-original.
 
@@ -199,7 +199,7 @@ removed. The shared host target is retained. Cleanup removed
 {cleanup['df_after'].strip()}
 ```
 '''
-(O/'SOL-REPORT-R11B.md').write_text(report,encoding='utf-8')
-seal=dict(schema=1,console_executed=False,files={name:dict(bytes=(O/name).stat().st_size,sha256=sha(O/name)) for name in ['ARTIFACT-SHA256.json','SOL-REPORT-R11B.md','CONSOLE-PACKAGE.zip']})
+(O/'REPORT-R11B.md').write_text(report,encoding='utf-8')
+seal=dict(schema=1,console_executed=False,files={name:dict(bytes=(O/name).stat().st_size,sha256=sha(O/name)) for name in ['ARTIFACT-SHA256.json','REPORT-R11B.md','CONSOLE-PACKAGE.zip']})
 (O/'SEAL-R11B.json').write_text(json.dumps(seal,indent=2)+'\n',encoding='utf-8')
-print('Wrote SOL-REPORT-R11B.md and detached SEAL-R11B.json')
+print('Wrote REPORT-R11B.md and detached SEAL-R11B.json')

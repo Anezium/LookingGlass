@@ -4,6 +4,8 @@ No native build, Vita transport, driver invocation or existing-session mutation.
 """
 from pathlib import Path
 import hashlib,json,os,subprocess,sys,zipfile
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from report_files import is_report_file
 R=Path('/Users/anezium/vita-work/lg-phase-census-r5');T=R/'tools/phase_census_r5';O=Path(sys.argv[1]).resolve()
 BRIEF='48857506bc84cb02f322c1fa16603bcd94727cd5435dc96cab39a4fa1b2173c0'
 ENGINE='62704971576f7e3d30499962388b69bf2ed692d7'
@@ -85,8 +87,8 @@ validation.update(status='PASS',head=head,engine_build_revision=ENGINE,working_t
  historical_engine_proofs_retained=True,native_local_checks_rerun=False,
  engine_tests_rerun_for_A1B=False,package_identity='PACKAGE-IDENTITY.json')
 write(O/'proof/FINAL-VALIDATION.json',validation)
-excluded={'ARTIFACT-SHA256.json','SOL-REPORT.md','A1-FIX.md','A1B-FIX.md'}
-manifest={str(path.relative_to(O)):dict(bytes=path.stat().st_size,sha256=sha(path)) for path in sorted(O.rglob('*')) if path.is_file() and path.name not in excluded}
+excluded={'ARTIFACT-SHA256.json','A1-FIX.md','A1B-FIX.md'}
+manifest={str(path.relative_to(O)):dict(bytes=path.stat().st_size,sha256=sha(path)) for path in sorted(O.rglob('*')) if path.is_file() and not is_report_file(path.name, '') and path.name not in excluded}
 write(O/'ARTIFACT-SHA256.json',manifest)
 for name,record in manifest.items():assert (O/name).stat().st_size==record['bytes'] and sha(O/name)==record['sha256'],name
 manifest_hash=sha(O/'ARTIFACT-SHA256.json')
@@ -150,7 +152,7 @@ The engine emits the frame-total completion record after census export. Post-exp
 - CONSOLE-PACKAGE.zip SHA-256: `{zip_hash}` ({zip_members} members, all equal local bytes).
 - proof/FINAL-VALIDATION.json: PASS, records the unchanged brief hash, engine revision, tooling HEAD, offline regression and no device/driver contact.
 
-No force push or co-author trailer. A1B-FIX.md, A1-FIX.md, SOL-REPORT.md and the manifest itself are excluded from the manifest to avoid circular hashes. The ZIP adds the sealed identity and heap-readout helper to the original operational member set.
+No force push or co-author trailer. A1B-FIX.md, A1-FIX.md, REPORT.md and the manifest itself are excluded from the manifest to avoid circular hashes. The ZIP adds the sealed identity and heap-readout helper to the original operational member set.
 '''
 (O/'A1B-FIX.md').write_text(report,encoding='utf-8')
 print('PASS clean branch and remote HEAD:',head)

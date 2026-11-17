@@ -28,7 +28,7 @@ was contacted. All tests and builds ran on this Mac. The offline rehearsal
 blocks real sockets and process launches before importing console helpers.
 Hardware qualification in REVIEW-R2 M3/M5/M6 remains outside this Mac-only task.
 
-The requested REVIEW-R2.md, REVIEW.md and SOL-REPORT-R11B.md were read first.
+The requested REVIEW-R2.md, REVIEW.md and REPORT-R11B.md were read first.
 The original r11/r11b output directory is unchanged. This package is its separate
 r11c successor; the sealed original brief, report and earlier amendments retain
 their bytes. AMENDMENT-R11C.md records C1/C2/C3 before console data.
@@ -202,7 +202,7 @@ caches were removed; the shared host target is retained. Removed this task:
 {cleanup['df_after'].strip()}
 ```
 '''
-(O/'SOL-REPORT-R11C.md').write_text(report)
-files={name:dict(bytes=(O/name).stat().st_size,sha256=sha(O/name)) for name in ['ARTIFACT-SHA256.json','SOL-REPORT-R11C.md','CONSOLE-PACKAGE.zip']}
+(O/'REPORT-R11C.md').write_text(report)
+files={name:dict(bytes=(O/name).stat().st_size,sha256=sha(O/name)) for name in ['ARTIFACT-SHA256.json','REPORT-R11C.md','CONSOLE-PACKAGE.zip']}
 (O/'SEAL-R11C.json').write_text(json.dumps(dict(schema=1,console_executed=False,files=files),indent=2)+'\n')
-print('Wrote SOL-REPORT-R11C.md and SEAL-R11C.json')
+print('Wrote REPORT-R11C.md and SEAL-R11C.json')

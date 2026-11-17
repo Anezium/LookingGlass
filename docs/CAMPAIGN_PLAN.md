@@ -22,7 +22,7 @@
 
 ### 0.1 Audience and mode of work
 
-This plan is for an autonomous agent running Sonnet 5.5 in ultracode mode, orchestrating Workflow scripts. The user approves the decision gates in §14. This file is the master document (goal, rules, phases, milestones, recipes). The per-visit "what exactly to build" lives in CAMPAIGN_LEVEL_SPECS.md.
+This plan is for an autonomous agent in ultracode mode, orchestrating Workflow scripts. The user approves the decision gates in §14. This file is the master document (goal, rules, phases, milestones, recipes). The per-visit "what exactly to build" lives in CAMPAIGN_LEVEL_SPECS.md.
 
 Use Workflow scripts for all substantive work: understanding, implementation, review and verification (recipes in §13). Stay in the loop between workflows. Read each result before starting the next phase.
 
@@ -1209,7 +1209,7 @@ Never run any of these on the user's desktop. Never fall back to the user's desk
 ### 12.3 One seat user at a time across parallel agents
 
 - Only **one** agent in the whole campaign drives the seat at any moment. Workflow subagents may share the parent's Anode MCP identity. Connections with the same agent ID share lease ownership, so **the lease cannot protect parallel subagents from each other**. The workflow script must serialize seat use itself: a single-holder promise chain or `limiter(1)` (§13c), and never more than one recipe-c workflow at a time.
-- Other agents on the machine, such as other Claude or Codex sessions, may also queue for the seat. Wait in line (`waitSeconds=300`, re-acquire within 5 s). Never try to evict them.
+- Other agents on the machine, such as other autonomous sessions, may also queue for the seat. Wait in line (`waitSeconds=300`, re-acquire within 5 s). Never try to evict them.
 - Keep leases short. Batch related window checks into one lease session per batch (render, saves, native play per visit), release between batches, and re-acquire. After any lease change, observe again before acting (`seat_windows`, `seat_screenshot`).
 - Only the recipe-13c native stage (which also runs the Phase 4 segments) touches Anode. Implementation, review, integration, diagnosis and chain agents never call a `seat_*` tool. The orchestrator never calls `seat_*` tools while any workflow is running, and never runs two recipe-13c workflows at once.
 
@@ -1996,7 +1996,7 @@ the staged machinery checks remain separate evidence.
 | DG-9 | 2026-09-29 | Audible checks (`--audio-test`, `--audio-regression-test`) are NOT run; every record states "not audibly verified". `--audio-capture` is never used. | User standing instruction; agent kept the plan's safe default | They play sound on the user's device; the standing "don't ask" instruction is not consent to that. Revisit only on an explicit request. |
 | DG-10 | 2026-09-29 | On any provenance doubt: do not proceed with the offending text. The integrator blocks the merge, the implementer rewrites the lines in its own words, and the work continues. No original text is ever quoted. | User standing instruction; agent kept the plan's safe default | `tools/provenance_check.py` enforces the 6-word rule on every merge. |
 | DG-11 | 2026-09-29 | Performance thresholds: the defaults in D10 (median frame time at most 16.7 ms and p95 at most 33 ms at 1280x720 in the Anode seat; controller step at most 2 ms per 120 Hz tick at peak actor count; level load at most 10 s). | User standing instruction; agent applied the plan's recommendation | Phase 4. |
-| DG-12 | 2026-09-29 | Do not land `campaign/integration` on `main` and do not install an exe into `target/release`. Each milestone exit reports "not landable: <n> uncommitted paths on main" while main has uncommitted work, and otherwise leaves the landing to the user. | User standing instruction; agent kept the plan's safe default | Landing rewrites the user's main branch and rule 7 forbids replacing the launcher exe; neither is a decision to make on their behalf. Workflow worktrees also leave an untracked `.claude/` in main until cleaned. |
+| DG-12 | 2026-09-29 | Do not land `campaign/integration` on `main` and do not install an exe into `target/release`. Each milestone exit reports "not landable: <n> uncommitted paths on main" while main has uncommitted work, and otherwise leaves the landing to the user. | User standing instruction; agent kept the plan's safe default | Landing rewrites the user's main branch and rule 7 forbids replacing the launcher exe; neither is a decision to make on their behalf. Workflow worktrees also leave an untracked agent configuration directory in main until cleaned. |
 | DG-13 | 2026-09-29 | No new crate dependency; `Cargo.lock` unchanged. | User standing instruction; agent applied the plan's recommendation | Any proposal that cannot avoid one is recorded as an open blocker for that task only. |
 | DG-14 | 2026-09-29 | Post-game: Continue resumes the pre-finale checkpoint; a campaign-complete marker is shown; Credits then Main. | User standing instruction; agent applied the plan's recommendation | M8. |
 | DG-15 | 2026-09-29 | Keep the pickup ledger keyed per map (current behaviour) until the original's return-visit respawn rule is researched (U7). | User standing instruction; agent applied the plan's recommendation | F3. |

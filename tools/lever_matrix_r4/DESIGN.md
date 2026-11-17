@@ -1,6 +1,6 @@
 # Alice lever matrix r4
 
-Two targeted repairs on r3 881988ec: immutable static collision backing shared by World and off-main audio; guarded renderer compaction plus borrowed exact uniform comparison. See SOL-REPORT.md for file:line changes, numeric host proofs, native disassembly, allocation accounting, limitations and hashes.
+Two targeted repairs on r3 881988ec: immutable static collision backing shared by World and off-main audio; guarded renderer compaction plus borrowed exact uniform comparison. See REPORT.md for file:line changes, numeric host proofs, native disassembly, allocation accounting, limitations and hashes.
 
 The backing is moved at World construction. Mutable colliders/caches and audio_complete ordering remain on main; actor/player masks are independent. Reset clears owned handles, and completed worker packets release their temporary geometry handle. Cached endpoint results retain their validity only within the same client scene. Queue capacity, fallback timeout, producer priority and audio settings are unchanged.
 

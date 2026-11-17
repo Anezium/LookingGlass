@@ -8,7 +8,7 @@ def at(file,needle):
   if needle in l:return f'`{file}:{i}`'
  raise AssertionError((file,needle))
 d=load('proof/HOST-CENSUS.json');film=load('film/proof/FULL-FILM-EQUALITY.json');v=load('packages/baseline/VERIFICATION.json');tests=load('proof/HOST-TESTS.json');cleanup=load('proof/CLEANUP.json');visual=load('proof/TRANSITION-VISUAL.json');e2e=load('proof/SESSION-E2E.json');engine=v['source_revision']
-lines=[f'''# Alice r11 transition memory — SOL report
+lines=[f'''# Alice r11 transition memory — report
 
 Release-before-build is implemented on `vita-transition-mem-r11-20261025`, based on the required r10b integration candidate e19f73c (engine d882a69). Final engine revision: `{engine}`. The outgoing World, static collision/SAH, scene renderer, NPCs, level art, particles and decoded level audio are released before the next scene is built. Save/Retry also release the outgoing Alice model. Host gameplay state, save payload, ordered render packet and final pixel proofs pass. The package is prepared, not executed. Neither 192.168.1.23 nor the shot driver was contacted.
 
@@ -80,5 +80,5 @@ The protocol carries en0 admission, fixed driver lifetime/budget, serial FTP, no
 Risks and limits remain explicit: native hardware crash freedom, <170 MiB uordblks, allocator fragmentation/arena headroom, actual vitaGL pool reclamation and audible continuity are unmeasured until the future sole owner runs the package. The host request ledger's conservative target-size bounds are not the exact target-ABI census originally requested; it includes larger host pointer containers and excludes C/GL/OS memory. The final successful-state and render proofs are exact for the supplied fixtures; arbitrary missing assets, external drivers and all possible maps are not exhaustively covered.
 
 Task-local native target/tmp and Python caches were removed; the requested shared host target is retained. Cleanup freed {cleanup['removed_bytes']/1048576:.1f} MiB of owned files. Final df:\n\n```text\n{cleanup['df_after'].strip()}\n```\n''')
-(O/'SOL-REPORT.md').write_text('\n'.join(lines),encoding='utf-8')
-print('Wrote SOL-REPORT.md')
+(O/'REPORT.md').write_text('\n'.join(lines),encoding='utf-8')
+print('Wrote REPORT.md')

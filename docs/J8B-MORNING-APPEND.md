@@ -1,7 +1,7 @@
 ## Host-side console A/B report (milestone 8b)
 
 Append this section to the existing `jalon-8/README-test.md`. It is staged here
-because the implementation brief restricts writes to the `sol-j8b` worktree.
+because the implementation brief restricts writes to its own worktree.
 
 Collect one console log per preset. Preserve separate directories for each run;
 download `frame_profile/`, `route-report.json`, and the matching

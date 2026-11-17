@@ -1,6 +1,6 @@
 # Lever matrix r4 reproducibility
 
-Build revision cd33c35f7ab093b053a634c0b89d4dcb5600e071 contains the engine fixes. Subsequent source-only tooling commits do not change engine bytes. See the external SOL-REPORT.md for measured results, hashes and limitations.
+Build revision cd33c35f7ab093b053a634c0b89d4dcb5600e071 contains the engine fixes. Subsequent source-only tooling commits do not change engine bytes. See the external REPORT.md for measured results, hashes and limitations.
 
 All commands run on the Mac. Never contact the Vita or driver during implementation/qualification. Use /opt/homebrew/bin/bash. No assets belong in this repository; probes read the external user-supplied PK3 directory. Host output always uses /Users/anezium/vita-j0/cargo-target-host. No cargo update.
 

@@ -3,7 +3,7 @@
 r11d resolves the round-3 frame-one baseline and persistent-recovery blockers.
 The current branch is `vita-transition-mem-r11d-20261025`; output is the separate
 `alice-transition-mem-r11d` directory. R11c is read-only and its parked-console
-run stays unchanged. Read SOL-REPORT-R11D.md and AMENDMENT-R11D.md in the new output.
+run stays unchanged. Read REPORT-R11D.md and AMENDMENT-R11D.md in the new output.
 The recovery loop is a boxed async helper allocated only on failure. Matched
 frame-one heap histograms on both maps/arms equal r11b exactly. The fork fixes
 remain: defensive deletion of possibly recycled GL names, and correct but
@@ -27,7 +27,7 @@ Session directories must remain absent. No console or shot-driver access is
 authorized during preparation. Older instructions below are historical.
 
 r11c supersedes r11b. The output is `alice-transition-mem-r11c` beside the
-original package. Read SOL-REPORT-R11C.md and AMENDMENT-R11C.md there. Source
+original package. Read REPORT-R11C.md and AMENDMENT-R11C.md there. Source
 changes to Macroquad/Miniquad now live in pinned Anezium forks; vendor/ is gone.
 `dependency_proof.py` verifies the published crate and every consumed fork source
 file. `texture_proof.py` requires r11b failures and isolates each layer's fix.
@@ -40,7 +40,7 @@ offline rehearsals include C1 headroom labels and the unchanged sealed-map rule.
 Console access remains forbidden during preparation.
 
 r11b supersedes the original preparation below. Its engine source is a937982,
-on the same branch. Read SOL-REPORT-R11B.md and AMENDMENT-R11B.md in the output
+on the same branch. Read REPORT-R11B.md and AMENDMENT-R11B.md in the output
 directory for the final results and fixed console policy. The console remains
 unrun. CONSOLE-BRIEF.md is preserved byte-for-byte.
 
@@ -60,7 +60,7 @@ and console ZIP without a hash cycle. Session directories stay absent.
 
 Base: `vita-stack-r10b-20261025`, e19f73c (engine d882a69). Implementation: c011075; final engine with failed-destination GPU recovery: ef8608c (complete New Game bracket: 6faa690). Branch: `vita-transition-mem-r11-20261025`. No assets belong in this repository.
 
-The output lives at `/Users/anezium/vita-j0/resume-2026-10-24/alice-transition-mem-r11/`. Read SOL-REPORT.md there for the ownership trace, allocation bounds, validation and limitations. CONSOLE-BRIEF.md is for a future sole owner; no console or shot driver was used during implementation.
+The output lives at `/Users/anezium/vita-j0/resume-2026-10-24/alice-transition-mem-r11/`. Read REPORT.md there for the ownership trace, allocation bounds, validation and limitations. CONSOLE-BRIEF.md is for a future sole owner; no console or shot driver was used during implementation.
 
 `prepare.py OUTPUT` assembles local helpers, configs and manifests. `build_native.py OUTPUT` uses the locked/offline r10c recipe and verifies ELF/process parameters, regenerated VELF/SELF equality and minimal VPK contents. `seal.py OUTPUT` checks the local command grammar and emits the console ZIP. It never imports transport code. The output's real session directory must stay absent during preparation.
 

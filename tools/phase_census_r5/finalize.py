@@ -1,10 +1,13 @@
 """Local-only package handoff, cache cleanup and evidence manifest."""
 from pathlib import Path
 import hashlib,json,os,re,shutil,subprocess,sys,zipfile
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from report_files import is_report_file
 R=Path('/Users/anezium/vita-work/lg-phase-census-r5');T=R/'tools/phase_census_r5';O=Path(sys.argv[1]).resolve()
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 # Keep reproducibility code outside the repository alongside the sealed artifacts.
 for f in T.glob('*.py'):shutil.copy2(f,O/'scripts'/f.name)
+shutil.copy2(R/'tools/report_files.py',O/'scripts/report_files.py')
 for n in ['README.md','DESIGN.md','CONSOLE-BRIEF.md']:shutil.copy2(T/n,O/n)
 source={'revision':json.loads((O/'proof/BUILD-COMMAND.json').read_text())['revision'],'tooling_head_at_seal':subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip(),'r4_base':'81f3d1eb1fe4303ff955afee491ef10a7ceecb2a','files':{str(f.relative_to(R)):sha(f) for f in sorted((R/'src').rglob('*.rs'))},'host_binary_sha256':json.loads((O/'proof/HOST-RENDER.json').read_text())['binary_sha256'],'host_build_log':'logs/host-sealed-build.log'}
 branch=subprocess.check_output(['git','branch','--show-current'],cwd=R,text=True).strip()
@@ -42,7 +45,7 @@ with zipfile.ZipFile(O/'CONSOLE-PACKAGE.zip','w',compression=zipfile.ZIP_DEFLATE
    f=O/'packages'/arm/n;z.write(f,str(f.relative_to(O)))
  for n in ['log-integrity.py','bind_helpers.py']:
   f=O/'scripts'/n;z.write(f,str(f.relative_to(O)))
-manifest={str(f.relative_to(O)):{'bytes':f.stat().st_size,'sha256':sha(f)} for f in sorted(O.rglob('*')) if f.is_file() and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md','A1-FIX.md','A1B-FIX.md']}
+manifest={str(f.relative_to(O)):{'bytes':f.stat().st_size,'sha256':sha(f)} for f in sorted(O.rglob('*')) if f.is_file() and not is_report_file(f.name, '') and f.name not in ['ARTIFACT-SHA256.json','A1-FIX.md','A1B-FIX.md']}
 (O/'ARTIFACT-SHA256.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print('Removed',sum(r['bytes'] for r in removed),'bytes; sealed',len(manifest),'artifacts')
 print(after)

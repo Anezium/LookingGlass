@@ -1,6 +1,8 @@
 """Seal the common-SELF handoff. Never imports transport or driver modules."""
 from pathlib import Path
 import argparse,hashlib,importlib.util,json,os,shutil,subprocess,sys,zipfile
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from report_files import is_report_file
 parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('package',type=Path);parser.add_argument('--main-admission',action='store_true');args=parser.parse_args()
 R=Path(__file__).resolve().parents[2];T=R/'tools/sah_r8';O=args.package.resolve()
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -47,5 +49,5 @@ if args.main_admission:
  final=json.loads((O/'proof/FINAL-VERIFICATION.json').read_text())
  final.update(mode='main-admission',session_directories_absent=False,source_main_session_absent=True,source_smoke_session_verified=True,zip_session_directories_absent=True,sealed_members_match_local_files=True,common_self=common_self,main_admission_e2e_sha256=sha(O/'proof/SESSION-E2E-MAIN-ADMISSION.json'),main_admission_negative_fixtures_sha256=sha(O/'proof/MAIN-ADMISSION-NEGATIVE-FIXTURES.json'),console_executed=False,driver_contact=False)
  write(O/'proof/FINAL-VERIFICATION.json',final)
-write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f))for f in sorted(O.rglob('*'))if f.is_file()and f.name not in ['ARTIFACT-SHA256.json','SOL-REPORT.md','E2E-MAIN-FIX.md']and not any(p in ('target-vita','tmp','__pycache__')for p in f.relative_to(O).parts)})
+write(O/'ARTIFACT-SHA256.json',{str(f.relative_to(O)):dict(bytes=f.stat().st_size,sha256=sha(f))for f in sorted(O.rglob('*'))if f.is_file()and not is_report_file(f.name, '') and f.name not in ['ARTIFACT-SHA256.json','E2E-MAIN-FIX.md']and not any(p in ('target-vita','tmp','__pycache__')for p in f.relative_to(O).parts)})
 print('Sealed common SELF, ZIP excludes session evidence, source main path absent; no device action')
