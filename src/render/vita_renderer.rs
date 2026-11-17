@@ -407,6 +407,12 @@ pub struct Config {
     pub audio_offmain: bool,
     /// Exact immutable acoustic traces on main; live geometry is always completed.
     pub audio_static_cache: bool,
+    /// Retain the decoded samples of a looping cue when its loop is reissued, so the
+    /// same file is not read and decoded again on a later frame. Sample-exact, off by default.
+    pub audio_loop_resident: bool,
+    /// Decode a bounded set of the level's own cue clips during load, before their first
+    /// request, so no fight frame pays a first-use read and decode. Sample-exact, off by default.
+    pub audio_cue_prefetch: bool,
     pub audio_block_mix: bool,
     pub audio_preresample: bool,
     pub audio_block_parameters: bool,
@@ -637,6 +643,8 @@ impl Default for Config {
             audio_pcm_worker: false,
             audio_offmain: false,
             audio_static_cache: true,
+            audio_loop_resident: false,
+            audio_cue_prefetch: false,
             audio_block_mix: false,
             audio_preresample: false,
             audio_block_parameters: false,
@@ -3743,13 +3751,39 @@ mod tests {
     }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
+    #[test]
+    fn audio_clip_candidates_default_off_and_are_strict() {
+        assert!(!Config::default().audio_loop_resident);
+        assert!(!Config::default().audio_cue_prefetch);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().audio_loop_resident);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().audio_cue_prefetch);
+        for key in ["audio_loop_resident", "audio_cue_prefetch"] {
+            for invalid in [serde_json::json!(0), serde_json::json!("on"), serde_json::Value::Null] {
+                assert!(serde_json::from_value::<Config>(serde_json::json!({key: invalid})).is_err());
+            }
+            let on: Config = serde_json::from_value(serde_json::json!({key: true})).unwrap();
+            on.validate().unwrap();
+            assert_eq!(serde_json::to_value(on).unwrap()[key], true);
+        }
+        // Every frozen configuration predates both keys and reads both as off.
+        for bytes in [&include_bytes!("../../configs/PL-rc1.json")[..],
+                      &include_bytes!("../../configs/PL-rc13-release-play04.json")[..],
+                      &include_bytes!("../../configs/PL-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc15-release-play.json")[..]] {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            assert!(!c.audio_loop_resident && !c.audio_cue_prefetch);
+        }
+    }
+    // Historical console configs must stay usable by their original SELF. Their omitted
+    // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
     fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
