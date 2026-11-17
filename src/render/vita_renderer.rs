@@ -390,6 +390,14 @@ pub struct Config {
     /// Eligible unlit effects keep the full fragment arithmetic and replace only the
     /// known-zero dynamic light result. Takes precedence over fx_lite. Default off.
     pub fx_unlit_exact: bool,
+    /// Additive effect packets (unlit, unclamped, uncut, no dissolve, ghost, tint or filter
+    /// fade) use a fragment program with only the texture, gain, vertex colour and fog
+    /// arithmetic of the full one. Takes precedence over fx_unlit_exact for them. Default off.
+    pub fx_add_lean: bool,
+    /// With fx_add_lean: a packet whose fog call provably returns its argument (distance and
+    /// liquid fog off, every fog volume off or clear of each eye-to-triangle hull) uses a
+    /// program without the fog call. Default off.
+    pub fx_add_fog_free: bool,
     /// Additive effects (drawn with source alpha) whose texture has alpha 0 in every texel add
     /// nothing; their puffs and effect groups are not drawn. No pixel changes. Default off.
     pub fx_add_zero_alpha_cut: bool,
@@ -647,7 +655,7 @@ impl Default for Config {
             skin_frustum_cull: true,
             fast_frustum: true,
             packet_frustum_cull: false, prop_frustum_cull: false, packet_min_pixels: 0., world_min_pixels: 0., world_texture_sort: false,
-            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, alpha_model_pvs: false, fx_lite: false, fx_unlit_exact: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
+            water_stage_merge: "off".into(), world_alpha_lite: false, water_draw_join: false, alpha_model_pvs: false, fx_lite: false, fx_unlit_exact: false, fx_add_lean: false, fx_add_fog_free: false, fx_add_zero_alpha_cut: false, fx_add_max_area: 0.,
             flat_actor_light: false, max_texture_dimension: None,
             draw_distance_cap: None, simple_fog: false, simple_dynamic_lights: false,
             gpu_state_probe: false,
@@ -796,6 +804,7 @@ impl Config {
         ensure!(!self.world_adjacent_batch || (self.world_list_submit && self.world_shared_buffers),
             "world_adjacent_batch requires world_list_submit and world_shared_buffers");
         ensure!(self.world_gxm=="off" || self.gpu_mask.is_empty(),"world_gxm excludes gpu_mask: a masked draw captures nothing");
+        ensure!(!self.fx_add_fog_free || self.fx_add_lean,"fx_add_fog_free requires fx_add_lean");
         ensure!(!self.skin_stream || (self.skin_overlap && self.actor_single_prepare && !self.actor_layer_reuse),"skin_stream requires skin_overlap and actor_single_prepare, and excludes actor_layer_reuse");
         ensure!(self.spike_log_ms.is_finite() && (0. ..=10000.).contains(&self.spike_log_ms),"spike_log_ms must be 0 (off) to 10000");
         ensure!(self.actor_near_cull.is_finite() && (0. ..=1000.).contains(&self.actor_near_cull),"actor_near_cull must be 0 (off) to 1000");
@@ -3669,7 +3678,7 @@ mod tests {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
             if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
-                || key == "actor_cutout_discard_free" || key == "actor_frontface_cull" || key == "actor_discard_free_shader" || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
+                || key == "fx_add_lean" || key == "fx_add_fog_free" || key == "actor_cutout_discard_free" || key == "actor_frontface_cull" || key == "actor_discard_free_shader" || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -3895,7 +3904,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "fx_add_lean" | "fx_add_fog_free" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
