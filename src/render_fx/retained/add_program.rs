@@ -130,17 +130,21 @@ pub(super) fn fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::materials::Stage;
+    // Built field by field: `render_fx::pass` asks for a world material outside a retained frame.
     fn pass() -> Pass {
-        let mut p = super::super::super::pass(
-            Mesh { upload_identity: None, surface: None,
+        Pass {
+            _game_thread: crate::game_thread::GameThread::default(), geometry: None, effect: true,
+            blend_index: crate::render::blend_index(crate::materials::Blend::AlphaAdd), depth_equal: false,
+            #[cfg(target_os = "vita")] world_static: None,
+            #[cfg(target_os = "vita")] world_geometry_counted: false,
+            mesh: Mesh { upload_identity: None, surface: None,
                 vertices: vec![Vertex::new(0., 0., 0., 0., 0., WHITE), Vertex::new(10., 0., 0., 1., 0., WHITE),
                     Vertex::new(10., 10., 0., 1., 1., WHITE), Vertex::new(0., 10., 0., 0., 1., WHITE)],
                 indices: vec![0, 1, 2, 0, 2, 3], texture: None },
-            &Stage { blend: crate::materials::Blend::AlphaAdd, ..Default::default() },
-            true, false, Default::default()).unwrap();
-        p.effect = true;
-        p
+            material: None, lit: false, clamp: false, cutout: 0., cutout_reference: 0.5, gain: Vec4::ONE,
+            fog: crate::render_fx::fog(crate::materials::Blend::AlphaAdd), model: true,
+            appearance: Default::default(), filter_fade: 0.,
+        }
     }
     fn payload(eye: Vec3) -> [f32; UNIFORM_FLOATS] {
         let mut u = [0.; UNIFORM_FLOATS];
