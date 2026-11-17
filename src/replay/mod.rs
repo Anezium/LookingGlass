@@ -416,6 +416,9 @@ impl Session {
         Ok(())
     }
     /// End after the viewer loop: the tape ran out, the step limit was hit, or the game quit.
+    /// The current replay step; the capture hook runs on the frame that presents it.
+    pub fn current_step(&self) -> u64 { self.step }
+
     pub fn finish(&mut self, reason: &str) {
         // A clean end from begin_step left no step in progress.
         if !self.ended && (reason == "tape-end" || reason == "step-limit") { self.step += 1; }

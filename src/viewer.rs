@@ -4979,6 +4979,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         crate::frame_phases::mark(9);
         drop(census_tail);
+        #[cfg(feature = "vita_renderer")]
+        if let Some(r) = &replay {
+            let step = r.current_step();
+            if crate::replay_capture::wanted(step) {
+                crate::replay_capture::save(step)?;
+            }
+        }
         next_frame().await;
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }

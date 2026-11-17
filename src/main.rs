@@ -150,6 +150,8 @@ mod kernel_alloc;
 #[cfg(feature="vita_renderer")]
 mod route_replay;
 mod replay;
+#[cfg(feature="vita_renderer")]
+mod replay_capture;
 mod vita_sim;
 mod viewmodel;
 mod village;

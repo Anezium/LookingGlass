@@ -459,6 +459,10 @@ pub struct Config {
     pub replay_state_every: u32,
     /// End a recording and the game after this many steps; 0 never (a person ends it with Start).
     pub replay_stop_after: u32,
+    /// Comma-separated replay steps at which to save a device PNG under private/. Empty: off.
+    pub capture_frames: String,
+    /// Filename tag for those PNGs (lowercase letters, digits and '-'). Empty with capture_frames: off.
+    pub capture_tag: String,
     pub pvs_cache: bool,
     pub pvs_method: String,
     pub pvs_verify: bool,
@@ -675,6 +679,8 @@ impl Default for Config {
             replay_check_every: 30,
             replay_state_every: 0,
             replay_stop_after: 0,
+            capture_frames: String::new(),
+            capture_tag: String::new(),
             pvs_cache: false,
             pvs_method: "sources".into(),
             pvs_verify: false,
@@ -729,6 +735,7 @@ impl Config {
         crate::replay::validate_settings(&crate::replay::Settings { record: self.replay_record.clone(),
             play: self.replay_play.clone(), start: self.replay_start.clone(), check_every: self.replay_check_every,
             state_every: self.replay_state_every, stop_after: self.replay_stop_after })?;
+        crate::replay_capture::validate(&self.capture_frames, &self.capture_tag)?;
         ensure!(!self.audio_offmain || self.audio_pcm_worker, "audio_offmain requires audio_pcm_worker");
         ensure!((160..=191).contains(&self.audio_producer_priority), "audio_producer_priority must be 160..191 (below skin workers)");
         ensure!(matches!(self.audio_producer_affinity,0x10000|0x20000|0x40000), "audio_producer_affinity must select CPU0, CPU1 or CPU2");
@@ -3857,7 +3864,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
