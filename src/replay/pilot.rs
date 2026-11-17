@@ -305,6 +305,7 @@ pub struct Pilot {
     neutral_until: f32,
     last_seek_log: f32,
     last_feet: Vec3,
+    waiting: bool,
 }
 
 impl Pilot {
@@ -336,6 +337,7 @@ impl Pilot {
             neutral_until: 0.,
             last_seek_log: 0.,
             last_feet: Vec3::ZERO,
+            waiting: false,
         }))
     }
 
@@ -513,7 +515,7 @@ impl Pilot {
         let stop = macroquad::input::is_key_pressed(KeyCode::Escape)
             || self.seconds > p.time_limit
             || self.deaths > 2
-            || (self.still > 18. && !busy && self.fight == 0.)
+            || (self.still > if self.waiting { 30. } else { 18. } && !busy && self.fight == 0.)
             || self.fight > p.fight_limit
             || clear;
         if stop {
@@ -560,6 +562,7 @@ impl Pilot {
                         .total_cmp(&b.center.distance_squared(player.eye()))
                 });
             let goal = if let Some(t) = target {
+                self.waiting = false;
                 if self.fight == 0. {
                     println!(
                         "[lg/pilot] fight_start seconds={:.3} id={} feet={:?} target={:?}",
@@ -600,7 +603,14 @@ impl Pilot {
                         );
                     }
                     let mut goal = p.goals[self.waypoint];
-                    if self.still > 2. {
+                    // A lift or mover is the only way up: hold position and let it carry
+                    // Alice, instead of sliding off the platform.
+                    self.waiting = player.feet.truncate().distance(goal.truncate()) < 75.
+                        && (player.feet.z - goal.z).abs() > 110.;
+                    if self.waiting {
+                        goal = player.feet;
+                    }
+                    if self.still > 2. && !self.waiting {
                         // Slide along a blocking lip or doorway instead of pushing into it,
                         // alternating sides with a growing offset. Bounded by the stall stop.
                         let d = (goal - player.feet).truncate().normalize_or_zero();
@@ -679,7 +689,7 @@ impl Pilot {
             {
                 super::input::hold_key(&mut frame, KeyCode::LeftControl);
             }
-            if self.still > 1.6 && (self.seconds * 3.) as u32 % 2 == 0 {
+            if !self.waiting && self.still > 1.6 && (self.seconds * 3.) as u32 % 2 == 0 {
                 // Real jump input clears small ledges and doorway lips.
                 super::input::hold_key(&mut frame, KeyCode::Space);
             }
