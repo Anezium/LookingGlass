@@ -6,6 +6,8 @@ use std::{cell::Cell, time::Instant};
 pub struct Settings {
     pub offmain: bool,
     pub static_cache: bool,
+    pub loop_resident: bool,
+    pub cue_prefetch: bool,
     pub mix: bool,
     pub preresample: bool,
     pub parameters: bool,
@@ -39,6 +41,8 @@ pub fn settings() -> Settings {
         Settings {
             offmain: c.audio_offmain && c.audio_pcm_worker,
             static_cache: c.audio_static_cache,
+            loop_resident: c.audio_loop_resident,
+            cue_prefetch: c.audio_cue_prefetch,
             mix: c.audio_block_mix,
             preresample: c.audio_preresample,
             parameters: c.audio_block_parameters,
@@ -62,6 +66,8 @@ pub fn settings() -> Settings {
         Settings {
             offmain: false,
             static_cache: false,
+            loop_resident: false,
+            cue_prefetch: false,
             mix: false,
             preresample: false,
             parameters: false,

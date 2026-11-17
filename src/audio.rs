@@ -1,6 +1,8 @@
 //! Audio from the user's archives. No original DLL, executable, or script execution.
 mod acoustics;
 mod offmain;
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+mod proof;
 mod static_cache;
 mod queue;
 pub mod sink;
@@ -222,6 +224,112 @@ fn audio_memory(event: &str, cache_samples: usize) {
     eprintln!("[lg/audio-memory] time_ms={time_ms} event={event} cache_samples={cache_samples} cache_bytes={} cap_bytes={} heap_used=unavailable heap_free_arena=unavailable",
         cache_samples * 4, CACHE_SAMPLES * 4);
 }
+/// `audio_cue_prefetch`: sounds a level's own code can emit that no authored
+/// speaker list or actor animation names. Extend only when a measured window
+/// reads one of these on its first play.
+fn level_cues(name: &str) -> &'static [&'static str] {
+    match name {
+        // The clock arena's fight gong and the Hatter's malfunction loop.
+        "hatter2" => &[
+            "sound/ambience/special/clock_gong_2.wav",
+            "sound/character/mad_hatter/death_malfunction.wav",
+        ],
+        _ => &[],
+    }
+}
+/// Every `sound` command of the animation models placed in this map, hostile
+/// actors first. Sorted so the retained prefix is identical for identical input.
+fn placed_actor_cues(assets: &mut Assets, map: &Bsp) -> Vec<String> {
+    let mut actors: Vec<(bool, String, String)> = map
+        .entities
+        .iter()
+        .filter_map(|e| {
+            let model = e.get("model")?.to_lowercase();
+            if !model.ends_with(".tik") {
+                return None;
+            }
+            let class = e.get("classname").map(|c| c.to_lowercase()).unwrap_or_default();
+            Some((!class.starts_with("enemies_"), class, model))
+        })
+        .collect();
+    actors.sort();
+    actors.dedup();
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (_, _, model) in actors {
+        let path = format!(
+            "models/{}",
+            model.trim_start_matches("models/").replace('\\', "/")
+        );
+        let Ok(events) = events::Model::load(assets, &path) else {
+            continue;
+        };
+        for sound in events.paths() {
+            if seen.insert(sound.to_owned()) {
+                out.push(sound.to_owned());
+            }
+        }
+    }
+    out
+}
+/// `audio_cue_prefetch`: decode the level's own cue clips on the load path, before
+/// their first request. `limit` bounds the added decoded bytes; a cue that does not
+/// fit is skipped and keeps the ordinary runtime read-and-decode path, so the
+/// playback samples and every parameter are unchanged. Returns (clips, bytes).
+fn prefetch_level_clips(
+    assets: &mut Assets,
+    name: &str,
+    map: &Bsp,
+    cache: &mut BTreeMap<String, Option<Clip>>,
+    cache_samples: &mut usize,
+    limit: usize,
+) -> (usize, usize) {
+    let mut candidates: Vec<String> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in level_cues(name) {
+        if seen.insert((*path).to_owned()) {
+            candidates.push((*path).to_owned());
+        }
+    }
+    // The placed enemy kinds' own code tables (Ants, corporals, Ladybugs) and
+    // Alice's combat cries, exactly the set `audio_combat_preload` names.
+    for path in combat_preload(map) {
+        if seen.insert(path.to_owned()) {
+            candidates.push(path.to_owned());
+        }
+    }
+    for path in placed_actor_cues(assets, map) {
+        if seen.insert(path.clone()) {
+            candidates.push(path);
+        }
+    }
+    let (mut clips, mut bytes) = (0usize, 0usize);
+    for path in candidates {
+        if cache.contains_key(&path) {
+            continue;
+        }
+        let Ok(clip) = assets.read(&path).and_then(decode_clip) else {
+            continue;
+        };
+        let size = clip.samples.len() * std::mem::size_of::<f32>();
+        if bytes + size > limit || *cache_samples + clip.samples.len() > CACHE_SAMPLES {
+            continue;
+        }
+        bytes += size;
+        clips += 1;
+        *cache_samples += clip.samples.len();
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        proof::decode("prefetch", &path, &clip.samples);
+        cache.insert(path.clone(), Some(clip));
+        audio_memory(&format!("prefetch:{path}"), *cache_samples);
+    }
+    (clips, bytes)
+}
+/// `audio_cue_prefetch` retains at most this many decoded bytes of level cue
+/// samples on top of the authored preload. Six MiB covers the measured fight
+/// cues (hatter2: code cues, Alice's combat cries and every Hatter attack are
+/// under 2 MiB); the worst map keeps about 20 MiB of heap headroom.
+const PREFETCH_BYTES: usize = 6 * 1024 * 1024;
 const MAX_PCM: usize = 8_000_000; // 32 MB per decoded effect, with a separate level cache budget.
 
 #[derive(Clone, Copy, Debug)]
@@ -517,8 +625,32 @@ struct Clip {
     samples: Arc<[f32]>,
     rate: u32,
 }
+/// Exact clip for a looping voice: a clone of the resident samples when present,
+/// otherwise one read and decode. `audio_loop_resident` retains that decode in the
+/// same bounded level cache, so a reissued loop does not read and decode the file
+/// again on a later frame. The samples and every playback parameter stay identical.
+fn looping_clip(
+    assets: &mut Assets,
+    path: &str,
+    cache_samples: &mut usize,
+    world_clips: &mut BTreeMap<String, Clip>,
+    retain: bool,
+) -> Option<Clip> {
+    if let Some(clip) = world_clips.get(path) {
+        return Some(clip.clone());
+    }
+    let clip = assets.read(path).and_then(decode_clip).ok()?;
+    if retain && *cache_samples + clip.samples.len() <= CACHE_SAMPLES {
+        *cache_samples += clip.samples.len();
+        world_clips.insert(path.to_owned(), clip.clone());
+        audio_memory(&format!("loop:{path}"), *cache_samples);
+    }
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    proof::decode("loop", path, &clip.samples);
+    Some(clip)
+}
 fn decode_clip(data: Vec<u8>) -> Result<Clip> {
-        let _r13_memory = crate::allocation_census::Scope::new(7);
+    let _r13_memory = crate::allocation_census::Scope::new(7);
     let decoder = Decoder::new(Cursor::new(data))?;
     let channels = decoder.channels() as usize;
     let rate = decoder.sample_rate();
@@ -820,6 +952,8 @@ pub struct Audio {
     missing: BTreeSet<String>,
     cache_samples: usize,
     limit_rejects: usize,
+    prefetch_clips: usize,
+    prefetch_bytes: usize,
     retiring: Vec<FadingMusic>,
     cues: BTreeMap<String, Music>,
     room: f32,
@@ -958,6 +1092,8 @@ impl Audio {
             missing: BTreeSet::new(),
             cache_samples: 0,
             limit_rejects: 0,
+            prefetch_clips: 0,
+            prefetch_bytes: 0,
             retiring: Vec::new(),
             cues: BTreeMap::new(),
             room: 0.,
@@ -1020,6 +1156,8 @@ impl Audio {
         self.missing.clear();
         self.cache_samples = 0;
         self.limit_rejects = 0;
+        self.prefetch_clips = 0;
+        self.prefetch_bytes = 0;
         self.last_sanity = None;
         self.reaction_gate = reaction::Gate::default();
         self.reaction = None;
@@ -1073,6 +1211,8 @@ impl Audio {
             });
             match result {
                 Ok(clip) => {
+                    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                    proof::decode("preload", path, &clip.samples);
                     cache.insert(path.into(), Some(clip));
                 }
                 Err(e) => {
@@ -1087,6 +1227,17 @@ impl Audio {
                     if PICKUP_EFFECTS.contains(&path) { self.missing.insert(path.into()); }
                 }
             }
+        }
+        if block::settings().cue_prefetch {
+            let (clips, bytes) = prefetch_level_clips(
+                assets, name, map, &mut cache, &mut cache_samples, PREFETCH_BYTES,
+            );
+            self.prefetch_clips = clips;
+            self.prefetch_bytes = bytes;
+            println!(
+                "[lg/audio-prefetch] map={name} clips={clips} bytes={bytes} cap_bytes={PREFETCH_BYTES} cache_bytes={}",
+                cache_samples * std::mem::size_of::<f32>()
+            );
         }
         self.cache_samples = cache_samples;
         self.world_clips = cache
@@ -1392,6 +1543,8 @@ impl Audio {
                             continue;
                         }
                         self.cache_samples += clip.samples.len();
+                        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                        proof::decode("runtime", &request.path, &clip.samples);
                         self.world_clips.insert(request.path.clone(), clip);
                         audio_memory(&format!("runtime:{}", request.path), self.cache_samples);
                     }
@@ -1454,7 +1607,9 @@ impl Audio {
         let _census = crate::phase_census::span(crate::phase_census::Region::Acoustics);
         let _owner = crate::phase_census::owner(crate::phase_census::Owner::Audio);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        SAH_MIXER.with(|s|{if let Some(s)=s.borrow_mut().as_mut(){for _ in 0..(dt*44100.*2.)as usize{let _=s.next();}}});
+        SAH_MIXER.with(|s|{if let Some(s)=s.borrow_mut().as_mut(){for _ in 0..(dt*44100.*2.)as usize{let sample=s.next().unwrap_or(0.);proof::mix_sample(sample);}}});
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        proof::mix_end();
         self.acoustic_clock -= dt;
         if self.acoustic_clock <= 0. {
             self.acoustic_clock = 0.1;
@@ -1535,11 +1690,8 @@ impl Audio {
                 l.effect.origin = Some(cue.origin);
                 continue;
             }
-            let clip = if let Some(clip) = self.world_clips.get(cue.path) {
-                Some(clip.clone())
-            } else {
-                assets.read(cue.path).and_then(decode_clip).ok()
-            };
+            let clip = looping_clip(assets, cue.path, &mut self.cache_samples, &mut self.world_clips,
+                block::settings().loop_resident);
             if let Some(clip) = clip {
                 let index = cue
                     .clock
@@ -1603,10 +1755,13 @@ impl Audio {
         if swimming && sanity > 0. {
             if self.swim_bed.is_none() {
                 if let Some(playback) = &self.playback {
-                    if let Ok(clip) = assets
-                        .read("sound/character/alice/swimloop.wav")
-                        .and_then(decode_clip)
-                    {
+                    if let Some(clip) = looping_clip(
+                        assets,
+                        "sound/character/alice/swimloop.wav",
+                        &mut self.cache_samples,
+                        &mut self.world_clips,
+                        block::settings().loop_resident,
+                    ) {
                         let sink = playback.sink();
                         sink.set_volume(0.);
                         sink.append(Pcm {
@@ -2358,12 +2513,114 @@ mod tests {
             audio.prepare(&mut assets, &World::fixture(&[]), Vec3::ZERO, false, 0.016);
             ensure!(audio.cache_samples == samples_before, "pickup runtime decode on {name}");
             let speech = audio.emitters.iter().filter(|e| speech(&e.spec.path)).count();
-            println!("AUDIO_PRELOAD map={name} preresample={} cache_bytes={} cap_bytes={} limit_rejects={} unavailable_status=\"{}\" emitters={} speech_emitters={speech}",
-                config.preresample, audio.cache_samples * 4, CACHE_SAMPLES * 4, audio.limit_rejects, audio.status, audio.emitters.len());
+            println!("AUDIO_PRELOAD map={name} preresample={} prefetch={} prefetch_clips={} prefetch_bytes={} cache_bytes={} cap_bytes={} limit_rejects={} unavailable_status=\"{}\" emitters={} speech_emitters={speech}",
+                config.preresample, config.cue_prefetch, audio.prefetch_clips, audio.prefetch_bytes,
+                audio.cache_samples * 4, CACHE_SAMPLES * 4, audio.limit_rejects, audio.status, audio.emitters.len());
             overflow += audio.limit_rejects;
         }
         println!("AUDIO_PRELOAD_SUMMARY maps={} limit_rejects={overflow}", maps.len());
         ensure!(overflow == 0, "level preload exceeded the audio cache");
+        Ok(())
+    }
+    /// A reissued looping cue (the measured cards_loop1 pattern: 33 new loop
+    /// voices over one fight) mixes to the same samples whether each voice decodes
+    /// again or clones the resident samples. The real mixer is pulled per frame.
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA"]
+    fn loop_reissue_mixed_samples_are_exact() -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let mut assets = Assets::open(&root)?;
+        let path = "sound/weapon/cards/cards_loop1.wav";
+        let (control, mut mixer) = output::mixer();
+        let frame = |mixer: &mut output::Mixer| {
+            let mut hash = Sha256::new();
+            for _ in 0..1470 {
+                let value = mixer.next().expect("mixer is endless");
+                hash.update(value.to_bits().to_le_bytes());
+            }
+            format!("{:x}", hash.finalize())
+        };
+        let play = |clip: Clip, sink: &Sink| {
+            sink.set_volume(0.);
+            sink.append(Pcm { clip, index: 0, looping: true, pan: Pan::new() });
+        };
+        let mut script = |assets: &mut Assets, retain: bool| {
+            let mut cache_samples = 0usize;
+            let mut world = BTreeMap::new();
+            let mut hashes = Vec::new();
+            for _ in 0..33 {
+                let clip = looping_clip(assets, path, &mut cache_samples, &mut world, retain)
+                    .expect("cards_loop1 decodes");
+                let sink = control.sink();
+                play(clip, &sink);
+                hashes.push(frame(&mut mixer));
+                // The sink stops its voice when the next reissue replaces it.
+            }
+            (hashes, cache_samples, world.len())
+        };
+        let (off, off_samples, off_clips) = script(&mut assets, false);
+        let (on, on_samples, on_clips) = script(&mut assets, true);
+        ensure!(off_clips == 0 && off_samples == 0, "control retained a loop clip");
+        ensure!(on_clips == 1 && on_samples > 0, "residency did not retain one clip");
+        ensure!(off == on, "reissued-loop mixed samples differ with residency on");
+        let fresh = decode_clip(assets.read(path)?)?;
+        ensure!(on_samples == fresh.samples.len(), "resident size differs from a fresh decode");
+        Ok(())
+    }
+    /// Both clip candidates keep decoded samples byte-identical and bound memory.
+    /// Run with LOOKING_GLASS_TEST_DATA; it decodes hatter2's real cues.
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA"]
+    fn clip_residency_and_level_prefetch_are_sample_exact() -> Result<()> {
+        let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let mut assets = Assets::open(&root)?;
+        let map = Bsp::parse(&assets.read("maps/hatter2.bsp")?)?;
+
+        // The loop clip: the first decode is played even with residency off, only
+        // retention differs. With residency on one decode enters the cache and the
+        // second loop reuses the same allocation without growing the cache.
+        let path = "sound/weapon/cards/cards_loop1.wav";
+        let mut off_map = BTreeMap::new();
+        let mut off_samples = 0usize;
+        let first = looping_clip(&mut assets, path, &mut off_samples, &mut off_map, false).unwrap();
+        let second = looping_clip(&mut assets, path, &mut off_samples, &mut off_map, false).unwrap();
+        ensure!(off_map.is_empty() && off_samples == 0, "off must not retain");
+        ensure!(first.samples[..] == second.samples[..] && first.rate == second.rate,
+            "loop playback samples differ between decodes");
+        let mut on_map = BTreeMap::new();
+        let mut on_samples = 0usize;
+        let retained = looping_clip(&mut assets, path, &mut on_samples, &mut on_map, true).unwrap();
+        let reused = looping_clip(&mut assets, path, &mut on_samples, &mut on_map, true).unwrap();
+        ensure!(on_samples == retained.samples.len() && on_map.len() == 1,
+            "residency did not retain exactly one clip");
+        ensure!(std::sync::Arc::ptr_eq(&retained.samples, &reused.samples),
+            "the second loop decoded again instead of reusing resident samples");
+        ensure!(retained.samples[..] == first.samples[..] && retained.rate == first.rate,
+            "resident loop samples differ from the control decode");
+
+        // Prefetch: a zero limit keeps the control path; the real limit adds the
+        // level's code cues and Hatter animation cues, bounded, without changing
+        // any decoded sample.
+        let mut none = BTreeMap::new();
+        let mut none_samples = 0usize;
+        ensure!(prefetch_level_clips(&mut assets, "hatter2", &map, &mut none, &mut none_samples, 0)
+            == (0, 0), "an empty limit prefetched clips");
+        let mut cache = BTreeMap::new();
+        let mut cache_samples = 0usize;
+        let (clips, bytes) = prefetch_level_clips(
+            &mut assets, "hatter2", &map, &mut cache, &mut cache_samples, PREFETCH_BYTES);
+        ensure!(clips > 0 && bytes <= PREFETCH_BYTES, "prefetch exceeded its byte budget");
+        ensure!(cache_samples * 4 == bytes, "prefetch accounting differs from its byte sum");
+        for path in ["sound/ambience/special/clock_gong_2.wav",
+                     "sound/character/mad_hatter/attack_bitchslap.wav",
+                     "sound/character/mad_hatter/walk_cane.wav",
+                     "sound/character/alice/pain1.wav"] {
+            let resident = cache.get(path).and_then(Clone::clone).expect(path);
+            let decoded = decode_clip(assets.read(path)?)?;
+            ensure!(resident.samples[..] == decoded.samples[..] && resident.rate == decoded.rate,
+                "prefetched samples differ from a fresh decode: {path}");
+        }
         Ok(())
     }
     #[test]
