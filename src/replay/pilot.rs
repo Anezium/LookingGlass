@@ -351,7 +351,17 @@ impl Pilot {
         self.next_sample = self.seconds + 1.;
         let mut rows: Vec<(String, f32)> = Vec::new();
         match map {
-            "hatter2" | "grounds1" | "jlair2" => boss_health(s.level.as_ref(), &mut rows),
+            "hatter2" | "grounds1" => boss_health(s.level.as_ref(), &mut rows),
+            "jlair2" => {
+                // The lair boss is invulnerable by design; damage lands on the Jabberspawn waves.
+                if let Some(waves) = s.level.as_ref().and_then(|v| v["waves"].as_array()) {
+                    for (i, w) in waves.iter().enumerate() {
+                        if let Some(hp) = w["actor"]["health"].as_f64() {
+                            rows.push((format!("wave{i}"), hp as f32));
+                        }
+                    }
+                }
+            }
             "centipede1" => {
                 if let Some(ants) = s.level.as_ref().and_then(|v| v["ants"].as_array()) {
                     for ant in ants {

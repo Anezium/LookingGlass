@@ -59,7 +59,7 @@ def main():
   attacks+=int(bool(keys & (1<<header['keys'].index(0xffe3))))
  assert end and end['reason']=='menu' and end['steps']==frames,'unclean/truncated tape'
  health=[float(v) for v in re.findall(r'boss_health=([0-9.]+)',recording)]
- dealt=sum(max(0,x-y) for x,y in zip(health,health[1:])) if a.map in ('hatter2','grounds1','jlair2') else sum(map(float,re.findall(r'health_loss=([0-9.]+)',recording)))
+ dealt=sum(max(0,x-y) for x,y in zip(health,health[1:])) if a.map in ('hatter2','grounds1') else sum(map(float,re.findall(r'health_loss=([0-9.]+)',recording)))
  damage_rows=[tuple(map(float,v)) for v in re.findall(r'damage_taken=([0-9.]+) seconds=([0-9.]+)',recording)]
  contacts=re.findall(r'weapon_contact id=(\d+) damage=([0-9.]+)',recording)
  displacement=max(math.dist(positions[0],v) for v in positions)
