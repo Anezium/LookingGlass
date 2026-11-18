@@ -71,8 +71,8 @@ class PinnedSourceTests(unittest.TestCase):
         self.assertTrue(c.audit_data("src/texture.tga", b"\0" * 16))
         self.assertTrue(c.audit_data("src/binary.rs", b"\0binary"))
 
-    def test_rc15_release_play_config_requires_and_then_accepts_an_exact_pin(self):
-        path = "configs/PL-rc15-release-play.json"
+    def test_unpinned_play_config_requires_and_then_accepts_an_exact_pin(self):
+        path = "configs/PL-rc99-example-play.json"
         data = b'{\n  "log_frame_time_every": 0\n}\n'
         self.assertFalse(c.allowed(path))
         errors = c.audit_data(path, data)

@@ -25,10 +25,10 @@ LIVEAREA_ART = {}
 class PinTests(unittest.TestCase):
     def test_adds_a_config_before_the_tools_group(self):
         digest = "a" * 64
-        text, action = add_pin(SAMPLE, "configs/PL-rc15-release-play.json", digest)
+        text, action = add_pin(SAMPLE, "configs/PL-rc99-example-play.json", digest)
         self.assertEqual(action, "added")
-        self.assertIn(pin_line("configs/PL-rc15-release-play.json", digest), text)
-        self.assertLess(text.index("PL-rc15"), text.index("# Tooling"))
+        self.assertIn(pin_line("configs/PL-rc99-example-play.json", digest), text)
+        self.assertLess(text.index("PL-rc99"), text.index("# Tooling"))
 
     def test_updates_existing_and_reports_unchanged(self):
         digest = "b" * 64
@@ -65,16 +65,16 @@ class PinTests(unittest.TestCase):
             (root / "tools").mkdir()
             for name in ["check_source.py", "pin_source_file.py"]:
                 shutil.copyfile(ROOT / "tools" / name, root / "tools" / name)
-            fixture = root / "configs/PL-rc15-release-play.json"
+            fixture = root / "configs/PL-rc99-example-play.json"
             fixture.parent.mkdir()
             fixture.write_text('{\n  "log_frame_time_every": 0\n}\n', encoding="utf-8")
             audit = [sys.executable, "tools/check_source.py", "--worktree"]
             before = subprocess.run(audit, cwd=root, capture_output=True, text=True)
             self.assertEqual(before.returncode, 1, before.stdout + before.stderr)
-            self.assertIn("Not an approved source path: configs/PL-rc15-release-play.json",
+            self.assertIn("Not an approved source path: configs/PL-rc99-example-play.json",
                           before.stdout)
             pin = subprocess.run(
-                [sys.executable, "tools/pin_source_file.py", "configs/PL-rc15-release-play.json"],
+                [sys.executable, "tools/pin_source_file.py", "configs/PL-rc99-example-play.json"],
                 cwd=root, capture_output=True, text=True,
             )
             self.assertEqual(pin.returncode, 0, pin.stdout + pin.stderr)
