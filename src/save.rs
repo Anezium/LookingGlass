@@ -9,10 +9,11 @@ use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -225,6 +226,9 @@ pub struct Store {
     fingerprint: String,
     /// A replay builds every save as usual but never writes it: the player's saves stay as they were.
     discard_writes: bool,
+    /// The low-priority writer `finale_checkpoint_background` installs. `None` (the default,
+    /// and every config without the key) keeps every write on the calling thread, exactly RC19.
+    writer: Option<Arc<Background>>,
 }
 impl Store {
     pub fn new(directory: PathBuf, fingerprint: String) -> Self {
@@ -232,11 +236,28 @@ impl Store {
             directory,
             fingerprint,
             discard_writes: false,
+            writer: None,
         }
     }
     pub fn discarding_writes(mut self) -> Self {
         self.discard_writes = true;
         self
+    }
+    /// Install the background writer. The caller decides from `finale_checkpoint_background`;
+    /// the store itself never reads the configuration.
+    pub fn with_background(mut self) -> Self {
+        self.writer = Some(Arc::new(Background::default()));
+        self
+    }
+    /// A job's store: same directory, fingerprint and discard policy, never carrying the
+    /// writer, so the worker thread cannot re-enter the queue it drains.
+    fn detached(&self, directory: PathBuf) -> Self {
+        Self {
+            directory,
+            fingerprint: self.fingerprint.clone(),
+            discard_writes: self.discard_writes,
+            writer: None,
+        }
     }
     fn path(&self, slot: Slot, backup: bool) -> PathBuf {
         self.directory.join(format!(
@@ -246,6 +267,7 @@ impl Store {
         ))
     }
     pub fn exists(&self, slot: Slot) -> bool {
+        self.wait_for_destination(slot);
         self.path(slot, false).is_file() || self.path(slot, true).is_file()
     }
     pub fn write(&self, slot: Slot, game: &Game) -> Result<()> {
@@ -256,6 +278,18 @@ impl Store {
         slot: Slot,
         game: &Game,
         preview: Option<&crate::save_preview::Preview>,
+    ) -> Result<()> {
+        // A pending background job for this file goes first: a later save request for
+        // the same store waits for it, so the writes and their backup rotation stay in order.
+        self.wait_for_destination(slot);
+        self.write_with_preview_saved_at(slot, game, preview, SavedAt::Now)
+    }
+    fn write_with_preview_saved_at(
+        &self,
+        slot: Slot,
+        game: &Game,
+        preview: Option<&crate::save_preview::Preview>,
+        saved_at: SavedAt,
     ) -> Result<()> {
         #[cfg(feature="native_timing")]
         crate::native_timing::operations::attempt();
@@ -297,7 +331,7 @@ impl Store {
             format: "looking-glass-save".into(),
             version: VERSION,
             game_data: self.fingerprint.clone(),
-            saved_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
+            saved_at: saved_at.read()?,
             checksum: format!("{:x}", Sha256::digest(&data)),
             payload,
             preview: preview
@@ -438,9 +472,12 @@ impl Store {
     // The simulation bench must use the exact reference save, never its backup.
     #[cfg(any(target_os = "vita", test))]
     pub fn read_bench_auto(&self) -> Result<Loaded> {
+        self.wait_for_destination(Slot::Auto);
         read_limited(&self.path(Slot::Auto, false)).and_then(|b| self.decode(&b))
     }
     pub fn read(&self, slot: Slot) -> Result<Loaded> {
+        // The file a just-requested checkpoint will write is the file this load must see.
+        self.wait_for_destination(slot);
         match read_limited(&self.path(slot, false)).and_then(|b| self.decode(&b)) {
             Ok(s) => Ok(s),
             Err(primary) => {
@@ -455,6 +492,8 @@ impl Store {
         }
     }
     pub fn latest(&self) -> Option<(Slot, Loaded)> {
+        // The newest save this menu can offer includes one still on the writer.
+        self.wait_all();
         let latest = Slot::ALL
             .into_iter()
             .filter_map(|slot| self.read(slot).ok().map(|s| (slot, s)))
@@ -474,17 +513,92 @@ impl Store {
         latest
     }
     fn finale_store(&self) -> Self {
-        Self {
-            discard_writes: self.discard_writes,
-            ..Self::new(self.directory.join("finale-checkpoint"), self.fingerprint.clone())
-        }
+        let mut store = self.detached(self.finale_directory());
+        store.writer = self.writer.clone();
+        store
+    }
+    fn finale_directory(&self) -> PathBuf {
+        self.directory.join("finale-checkpoint")
     }
     pub fn write_finale_checkpoint(&self, game: &Game) -> Result<()> {
         self.write_finale_checkpoint_with_preview(game, None)
     }
     pub fn write_finale_checkpoint_with_preview(&self, game: &Game, preview: Option<&crate::save_preview::Preview>) -> Result<()> {
-        self.finale_store().write_with_preview(Slot::Auto, game, preview)?;
-        self.write_with_preview(Slot::Auto, game, preview)
+        if self.writer.is_some() {
+            self.submit_finale_checkpoint(game, preview)
+        } else {
+            // RC19's exact path: two full writes on the calling thread.
+            self.finale_store().write_with_preview(Slot::Auto, game, preview)?;
+            self.write_with_preview(Slot::Auto, game, preview)
+        }
+    }
+    /// The background path: read every envelope input here, at the frame boundary the two
+    /// writes run today (the game snapshot and preview arrive as arguments; the two wall
+    /// clocks below mirror the two reads the writes make today), then let one low-priority
+    /// worker serialize and write. Today's two envelopes are not byte-identical (their
+    /// `saved_at` reads straddle a whole serialization), so each is built as today, off
+    /// the frame, with its own captured timestamp.
+    fn submit_finale_checkpoint(&self, game: &Game, preview: Option<&crate::save_preview::Preview>) -> Result<()> {
+        let at_finale = saved_at_now()?;
+        let at_auto = saved_at_now()?;
+        let stores = [
+            self.detached(self.finale_directory()),
+            self.detached(self.directory.clone()),
+        ];
+        let writer = self.writer.as_ref().expect("the caller checked for a writer");
+        for (store, at) in stores.into_iter().zip([at_finale, at_auto]) {
+            let job = Job {
+                store,
+                slot: Slot::Auto,
+                game: game.clone(),
+                preview: preview.cloned(),
+                saved_at: at,
+            };
+            match writer.submit(job) {
+                // A worker could not be spawned or has closed: never lose the save. The
+                // bytes are the same; only the work stays on the frame, as today's write.
+                Err(job) => job.store.write_with_preview_saved_at(
+                    job.slot,
+                    &job.game,
+                    job.preview.as_ref(),
+                    SavedAt::At(job.saved_at),
+                )?,
+                Ok(()) => (),
+            }
+        }
+        Ok(())
+    }
+    /// Wait until no queued or running job writes this store's `slot`. A no-op without
+    /// the background writer.
+    fn wait_for_destination(&self, slot: Slot) {
+        let Some(writer) = &self.writer else { return };
+        let mut state = writer.inner.state.lock().unwrap();
+        while state.queue.iter().any(|job| job.destination() == (&self.directory, slot))
+            || state
+                .running
+                .as_ref()
+                .is_some_and(|(directory, running)| *running == slot && directory == &self.directory)
+        {
+            state = writer.inner.advanced.wait(state).unwrap();
+        }
+    }
+    /// Wait until the writer is idle: every pending job has run. The game's exit path
+    /// calls this before it saves and quits.
+    pub fn flush_background(&self) {
+        self.wait_all();
+    }
+    fn wait_all(&self) {
+        let Some(writer) = &self.writer else { return };
+        let mut state = writer.inner.state.lock().unwrap();
+        while !state.queue.is_empty() || state.running.is_some() {
+            state = writer.inner.advanced.wait(state).unwrap();
+        }
+    }
+    /// Background jobs that failed after their frame; the caller reports each. Empty
+    /// (and cheap) whenever no writer is installed.
+    pub fn take_background_failures(&self) -> Vec<String> {
+        let Some(writer) = &self.writer else { return Vec::new() };
+        std::mem::take(&mut *writer.inner.failures.lock().unwrap())
     }
     pub fn mark_complete(&self) -> Result<()> {
         if self.discard_writes {
@@ -497,6 +611,207 @@ impl Store {
             &self.directory.join("campaign-complete.json"),
             &serde_json::to_vec(&at)?,
         )
+    }
+}
+
+/// Where the envelope's `saved_at` comes from: the wall clock read where the write runs
+/// (RC19, and every store without the background writer), or a value captured at the
+/// frame boundary that requested the save, so the bytes cannot depend on when the
+/// writer gets to them.
+#[derive(Clone, Copy)]
+enum SavedAt {
+    Now,
+    At(u64),
+}
+impl SavedAt {
+    fn read(self) -> Result<u64> {
+        match self {
+            Self::Now => saved_at_now(),
+            Self::At(at) => Ok(at),
+        }
+    }
+}
+/// The envelope timestamp. A test may pin this clock so a byte-for-byte comparison
+/// of the foreground and background paths does not depend on the wall.
+fn saved_at_now() -> Result<u64> {
+    #[cfg(test)]
+    if let Some(at) = TEST_SAVED_AT.with(std::cell::Cell::get) {
+        return Ok(at);
+    }
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64)
+}
+#[cfg(test)]
+thread_local! {
+    static TEST_SAVED_AT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// One queued background write. Everything the envelope needs is already in here.
+struct Job {
+    store: Store,
+    slot: Slot,
+    game: Game,
+    preview: Option<crate::save_preview::Preview>,
+    saved_at: u64,
+}
+impl Job {
+    /// The file this job writes; the ordering key for superseding and waiting.
+    fn destination(&self) -> (&Path, Slot) {
+        (&self.store.directory, self.slot)
+    }
+}
+
+/// One low-priority writer thread for the whole game, the audio producer's pattern
+/// (`native_timing/audio_producer.rs`, `audio/block.rs`): jobs are submitted at a frame
+/// boundary and executed in order off it. Only `finale_checkpoint_background` installs it;
+/// with the key off no thread exists.
+struct Background {
+    inner: Arc<Inner>,
+    thread: OnceLock<Option<std::thread::JoinHandle<()>>>,
+}
+impl Default for Background {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                state: Mutex::new(State::default()),
+                wake: Condvar::new(),
+                advanced: Condvar::new(),
+                failures: Mutex::new(Vec::new()),
+                #[cfg(test)]
+                hold: std::sync::atomic::AtomicBool::new(false),
+            }),
+            thread: OnceLock::new(),
+        }
+    }
+}
+#[derive(Default)]
+struct State {
+    queue: VecDeque<Job>,
+    running: Option<(PathBuf, Slot)>,
+    closed: bool,
+    executed: u64,
+}
+struct Inner {
+    state: Mutex<State>,
+    /// The worker waits here for a job or for close.
+    wake: Condvar,
+    /// Submitters and readers wait here until the running job finishes.
+    advanced: Condvar,
+    /// Jobs that failed after their frame, reported by the caller's frame loop.
+    failures: Mutex<Vec<String>>,
+    /// Test gate: hold the worker before it takes its first job.
+    #[cfg(test)]
+    hold: std::sync::atomic::AtomicBool,
+}
+impl Background {
+    /// Enqueue a job, superseding a queued job for the same file in its place. `Err(job)`
+    /// returns it when no worker can take it (spawning failed or the writer closed), so
+    /// the caller runs it on the frame and never loses the save.
+    fn submit(&self, job: Job) -> Result<(), Job> {
+        if !self.ensure_thread() {
+            return Err(job);
+        }
+        let mut state = self.inner.state.lock().unwrap();
+        if state.closed {
+            return Err(job);
+        }
+        if let Some(queued) = state
+            .queue
+            .iter_mut()
+            .find(|queued| queued.destination() == job.destination())
+        {
+            *queued = job;
+        } else {
+            state.queue.push_back(job);
+        }
+        drop(state);
+        self.inner.wake.notify_one();
+        Ok(())
+    }
+    /// Lazily spawn the one worker; a spawn failure is cached and later jobs run inline.
+    fn ensure_thread(&self) -> bool {
+        matches!(
+            self.thread.get_or_init(|| {
+                let inner = self.inner.clone();
+                std::thread::Builder::new()
+                    .name("save-writer".into())
+                    .stack_size(1024 * 1024)
+                    .spawn(move || Inner::run(inner))
+                    .ok()
+            }),
+            Some(_)
+        )
+    }
+}
+impl Drop for Background {
+    fn drop(&mut self) {
+        // The exit flush: close, wake the worker and join it. The queue drains first, so a
+        // pending write always completes before the game quits. The writer thread itself
+        // never holds a `Background`, so this join cannot come from the worker.
+        {
+            let mut state = self.inner.state.lock().unwrap();
+            state.closed = true;
+        }
+        self.inner.wake.notify_all();
+        if let Some(handle) = self.thread.get_mut().and_then(Option::take) {
+            let _ = handle.join();
+        }
+    }
+}
+impl Inner {
+    fn run(inner: Arc<Inner>) {
+        // Lowest application priority on any core: the writer may run late, never early
+        // (the audio reporter's policy). A late write only delays its own toast.
+        let _policy = crate::audio::thread_policy(191, 0);
+        loop {
+            let job = {
+                let mut state = inner.state.lock().unwrap();
+                loop {
+                    #[cfg(test)]
+                    while !state.closed && inner.held() {
+                        state = inner.wake.wait(state).unwrap();
+                    }
+                    if let Some(job) = state.queue.pop_front() {
+                        state.running = Some((job.store.directory.clone(), job.slot));
+                        state.executed += 1;
+                        break job;
+                    }
+                    if state.closed {
+                        return;
+                    }
+                    state = inner.wake.wait(state).unwrap();
+                }
+            };
+            // The serialization, the atomic write and the backup rotation run here, off the
+            // frame; the same code path the foreground write takes, with the captured clock.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                job.store.write_with_preview_saved_at(
+                    job.slot,
+                    &job.game,
+                    job.preview.as_ref(),
+                    SavedAt::At(job.saved_at),
+                )
+            }));
+            match result {
+                Ok(Ok(())) => (),
+                Ok(Err(e)) => inner.failures.lock().unwrap().push(format!("{e:#}")),
+                Err(panic) => inner.failures.lock().unwrap().push(format!(
+                    "the save writer failed unexpectedly: {panic:?}"
+                )),
+            }
+            let mut state = inner.state.lock().unwrap();
+            state.running = None;
+            drop(state);
+            inner.advanced.notify_all();
+        }
+    }
+    #[cfg(test)]
+    fn held(&self) -> bool {
+        self.hold.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    fn set_hold(&self, on: bool) {
+        self.hold.store(on, std::sync::atomic::Ordering::SeqCst);
+        self.wake.notify_all();
     }
 }
 /// What the viewer does with the map after a bench validation.
@@ -913,6 +1228,26 @@ mod format12;
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Pin the envelope clock on this thread so byte-for-byte comparisons of the frame
+    /// path and the background path do not depend on the wall. The suite runs one thread.
+    struct Pinned(u64);
+    impl Pinned {
+        fn new(at: u64) -> Self {
+            TEST_SAVED_AT.with(|c| c.set(Some(at)));
+            Self(at)
+        }
+    }
+    impl Drop for Pinned {
+        fn drop(&mut self) {
+            TEST_SAVED_AT.with(|c| c.set(None));
+        }
+    }
+    fn jlair2_game() -> Game {
+        format12::game(vec![format12::level("jlair2", None, serde_json::Value::Null)])
+    }
+    fn finale_file(root: &std::path::Path) -> PathBuf {
+        root.join("finale-checkpoint").join("auto.json")
+    }
     #[test]
     fn integrity_checked_decode_rejects_a_missing_current_level() {
         let scratch = format12::Scratch::new("missing-current-load");
@@ -1026,6 +1361,161 @@ mod tests {
             assert_ne!(visit_key(map, None), visit_key(map, Some(returning)));
         }
         assert_ne!(visit_key("skool1", None), visit_key("skool2", None));
+    }
+    // Key on vs off: the same store call at the same frame boundary, with the envelope
+    // clock pinned, writes byte-identical files to both stores. Unpinned, the only
+    // difference any two runs can show is the wall-clock `saved_at` itself, exactly as
+    // between two RC19 runs; the host oracle proves that at the tape level.
+    #[test]
+    fn finale_checkpoint_background_writes_identical_bytes_to_the_frame_path() {
+        let _pin = Pinned::new(1_795_031_414_000);
+        let scratch = format12::Scratch::new("checkpoint-background");
+        let game = jlair2_game();
+        let preview =
+            crate::save_preview::Preview::fixture(macroquad::prelude::Color::new(1., 0., 0., 1.));
+        scratch
+            .store()
+            .write_finale_checkpoint_with_preview(&game, Some(&preview))
+            .unwrap();
+        let frame_finale = fs::read(finale_file(&scratch.0)).unwrap();
+        let frame_auto = fs::read(scratch.file(Slot::Auto)).unwrap();
+        let background = scratch.store().with_background();
+        background
+            .write_finale_checkpoint_with_preview(&game, Some(&preview))
+            .unwrap();
+        let failures = background.take_background_failures();
+        assert!(failures.is_empty(), "a passing background write reports nothing: {failures:?}");
+        drop(background);
+        assert_eq!(fs::read(finale_file(&scratch.0)).unwrap(), frame_finale,
+            "the finale store's file is byte for byte the frame path's");
+        assert_eq!(fs::read(scratch.file(Slot::Auto)).unwrap(), frame_auto,
+            "the auto store's file is byte for byte the frame path's");
+    }
+    // An ordinary auto save never uses the writer; with it installed the bytes are unchanged.
+    #[test]
+    fn an_ordinary_auto_save_is_unchanged_with_the_background_writer_installed() {
+        let _pin = Pinned::new(1_795_031_415_000);
+        let plain = format12::Scratch::new("checkpoint-ordinary-plain");
+        let background = format12::Scratch::new("checkpoint-ordinary-background");
+        let game = jlair2_game();
+        plain.store().write_with_preview(Slot::Auto, &game, None).unwrap();
+        background
+            .store()
+            .with_background()
+            .write_with_preview(Slot::Auto, &game, None)
+            .unwrap();
+        assert_eq!(
+            fs::read(background.file(Slot::Auto)).unwrap(),
+            fs::read(plain.file(Slot::Auto)).unwrap(),
+            "the writer must not disturb an ordinary save"
+        );
+    }
+    // Two quick requests with the worker held: the later one supersedes the queued jobs
+    // for both stores in place, and the executed count proves the first never wrote.
+    #[test]
+    fn two_quick_checkpoint_requests_supersede_a_queued_one_and_keep_order() {
+        let _pin = Pinned::new(1_795_031_416_000);
+        let scratch = format12::Scratch::new("checkpoint-order");
+        let reference = format12::Scratch::new("checkpoint-order-reference");
+        let one = jlair2_game();
+        let mut two = one.clone();
+        two.stats.damage(5.);
+        let store = scratch.store().with_background();
+        store.writer.as_ref().unwrap().inner.set_hold(true);
+        store.write_finale_checkpoint_with_preview(&one, None).unwrap();
+        store.write_finale_checkpoint_with_preview(&two, None).unwrap();
+        store.writer.as_ref().unwrap().inner.set_hold(false);
+        store.flush_background();
+        let executed = store.writer.as_ref().unwrap().inner.state.lock().unwrap().executed;
+        drop(store);
+        reference
+            .store()
+            .write_finale_checkpoint_with_preview(&two, None)
+            .unwrap();
+        assert_eq!(executed, 2, "the superseded request's jobs never ran");
+        assert_eq!(fs::read(finale_file(&scratch.0)).unwrap(), fs::read(finale_file(&reference.0)).unwrap(),
+            "the later request's game is the finale store's final state");
+        assert_eq!(fs::read(scratch.file(Slot::Auto)).unwrap(), fs::read(reference.file(Slot::Auto)).unwrap(),
+            "the later request's game is the auto store's final state");
+    }
+    // A later foreground save for the same store waits for the pending checkpoint: the
+    // job's file becomes the backup, the new save the primary, in that order.
+    #[test]
+    fn a_later_foreground_save_waits_for_the_pending_checkpoint_in_order() {
+        let _pin = Pinned::new(1_795_031_417_000);
+        let scratch = format12::Scratch::new("checkpoint-wait");
+        let reference = format12::Scratch::new("checkpoint-wait-reference");
+        let one = jlair2_game();
+        let mut two = one.clone();
+        two.stats.damage(5.);
+        let store = scratch.store().with_background();
+        store.writer.as_ref().unwrap().inner.set_hold(true);
+        store.write_finale_checkpoint_with_preview(&one, None).unwrap();
+        store.writer.as_ref().unwrap().inner.set_hold(false);
+        store.write_with_preview(Slot::Auto, &two, None).unwrap();
+        drop(store);
+        let reference_store = reference.store();
+        reference_store.write_with_preview(Slot::Auto, &one, None).unwrap();
+        reference_store.write_with_preview(Slot::Auto, &two, None).unwrap();
+        assert_eq!(fs::read(scratch.file(Slot::Auto)).unwrap(), fs::read(reference.file(Slot::Auto)).unwrap(),
+            "the foreground save is the primary file");
+        assert_eq!(
+            fs::read(scratch.0.join("auto.previous.json")).unwrap(),
+            fs::read(reference.0.join("auto.previous.json")).unwrap(),
+            "the checkpoint the writer wrote first is the backup, so it ran first"
+        );
+    }
+    // The exit path: dropping the store flushes a pending write before the game quits.
+    #[test]
+    fn dropping_the_store_flushes_a_pending_checkpoint_before_quitting() {
+        let _pin = Pinned::new(1_795_031_418_000);
+        let scratch = format12::Scratch::new("checkpoint-flush");
+        let store = scratch.store().with_background();
+        store
+            .write_finale_checkpoint_with_preview(&jlair2_game(), None)
+            .unwrap();
+        drop(store);
+        assert!(finale_file(&scratch.0).is_file(), "the finale write completed");
+        assert!(scratch.file(Slot::Auto).is_file(), "the auto write completed");
+    }
+    // A load must see the checkpoint it just missed, not the older file it replaces.
+    #[test]
+    fn reading_a_slot_waits_for_its_pending_checkpoint() {
+        let _pin = Pinned::new(1_795_031_419_000);
+        let scratch = format12::Scratch::new("checkpoint-read");
+        let one = jlair2_game();
+        let mut two = one.clone();
+        two.stats.damage(7.);
+        let store = scratch.store().with_background();
+        store.write_with_preview(Slot::Auto, &one, None).unwrap();
+        store.write_finale_checkpoint_with_preview(&two, None).unwrap();
+        let loaded = store.read(Slot::Auto).unwrap();
+        assert_eq!(loaded.game.stats.sanity(), two.stats.sanity(),
+            "the load saw the checkpoint's file, not the previous save");
+        drop(store);
+    }
+    // `discard_writes` keeps building and logging both envelopes on the writer and never
+    // writes a file; the identical `save not written` lines (count and byte count) are
+    // the frame arm's file lengths, proven byte for byte above and by the host oracle.
+    #[test]
+    fn the_discarding_store_still_writes_nothing_in_both_arms() {
+        let scratch = format12::Scratch::new("checkpoint-discard");
+        let game = jlair2_game();
+        scratch
+            .store()
+            .discarding_writes()
+            .write_finale_checkpoint_with_preview(&game, None)
+            .unwrap();
+        let background = scratch
+            .store()
+            .discarding_writes()
+            .with_background();
+        background
+            .write_finale_checkpoint_with_preview(&game, None)
+            .unwrap();
+        drop(background);
+        assert!(!scratch.file(Slot::Auto).exists());
+        assert!(!finale_file(&scratch.0).exists());
     }
 }
 

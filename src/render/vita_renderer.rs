@@ -145,6 +145,10 @@ pub struct Config {
     pub save_preview: String,
     /// auto/on correct Vita's two-readback orientation; off restores J10.
     pub preview_flip: String,
+    /// Serialize and write the finale checkpoint on one low-priority writer thread instead
+    /// of the requesting frame. Every envelope input is still read on that frame, so the
+    /// files are the same bytes. Default off.
+    pub finale_checkpoint_background: bool,
     /// Experimental exact submission levers; independently default off.
     pub world_material_sort: bool,
     pub world_static_merge: bool,
@@ -610,6 +614,7 @@ impl Default for Config {
             clocks: Clocks::Max,
             save_preview: "throttled".into(),
             preview_flip: "auto".into(),
+            finale_checkpoint_background: false,
             world_material_sort: false,
             world_static_merge: false,
             world_adjacent_batch: false,
@@ -4004,13 +4009,44 @@ mod tests {
     }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
+    // The finale checkpoint's background writer arrived after every shipped file, so each
+    // of those files stays valid unchanged and its omitted opt-in reads as an explicit off.
+    #[test]
+    fn finale_checkpoint_background_defaults_off_and_is_strict() {
+        assert!(!Config::default().finale_checkpoint_background);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().finale_checkpoint_background);
+        assert!(serde_json::from_str::<Config>(r#"{"finale_checkpoint_background":true}"#)
+            .unwrap()
+            .finale_checkpoint_background);
+        for invalid in [serde_json::json!(0), serde_json::json!("on"), serde_json::Value::Null] {
+            assert!(serde_json::from_value::<Config>(
+                serde_json::json!({"finale_checkpoint_background": invalid})).is_err());
+        }
+        let on: Config = serde_json::from_value(serde_json::json!({"finale_checkpoint_background": true})).unwrap();
+        on.validate().unwrap();
+        assert_eq!(serde_json::to_value(on).unwrap()["finale_checkpoint_background"], true);
+        for bytes in [&include_bytes!("../../configs/PL-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc19-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc18-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc17-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc16-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc15-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc13-release-play04.json")[..],
+                      &include_bytes!("../../configs/PL-rc1.json")[..]] {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            assert!(!c.finale_checkpoint_background, "a shipped config predates the key and reads it off");
+        }
+    }
+    // Historical console configs must stay usable by their original SELF. Their omitted
+    // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
     fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "fx_add_lean" | "fx_add_fog_free" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "finale_checkpoint_background") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

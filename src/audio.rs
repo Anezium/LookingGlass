@@ -7,6 +7,9 @@ mod static_cache;
 mod queue;
 pub mod sink;
 mod output;
+/// The producer pattern's Vita thread policy (priority, then affinity), shared with the
+/// save writer (`save.rs`), which applies it the same way at its worker's entry.
+pub(crate) use output::thread_policy;
 mod block;
 mod music;
 pub mod events;

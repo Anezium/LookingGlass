@@ -828,7 +828,23 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(feature="vita_renderer")]
     anyhow::ensure!(!(replay.is_some() && route_session.is_some()), "replay and route diagnostics are exclusive");
     let replay_resume = replay.as_mut().and_then(|r| r.take_resume());
-    let store = if replay.as_ref().is_some_and(|r| r.replaying()) { store.discarding_writes() } else { store };
+    // Host-only diagnostic (the LOOKING_GLASS_REPLAY_* family): replay the tape but let the
+    // store write for real, into the run's own --save-dir. The Vita never reads this flag,
+    // so every console qualification still discards writes exactly as before.
+    #[cfg(not(target_os = "vita"))]
+    let replay_writes = std::env::var_os("LOOKING_GLASS_REPLAY_WRITES").is_some();
+    #[cfg(target_os = "vita")]
+    let replay_writes = false;
+    let store = if replay.as_ref().is_some_and(|r| r.replaying()) && !replay_writes { store.discarding_writes() } else { store };
+    // `finale_checkpoint_background`: the boss-fight checkpoint's serialization and file
+    // writes move to one low-priority writer thread; every envelope input (the game
+    // snapshot, the preview and the two envelope clocks) is still read on the frame that
+    // requests the checkpoint. Off (the default, and RC19) keeps every write on the frame.
+    #[cfg(feature = "vita_renderer")]
+    let background_checkpoint = crate::render::vita_renderer::config().finale_checkpoint_background;
+    #[cfg(not(feature = "vita_renderer"))]
+    let background_checkpoint = false;
+    let store = if background_checkpoint { store.with_background() } else { store };
     let mut replay_end: Option<&'static str> = None;
     eprintln!("[lg/startup] save store ready elapsed_ms={:.3} store_construct_ms={:.3} viewer_elapsed_ms={:.3}",save_store_start.elapsed().as_secs_f64()*1000.,store_start.elapsed().as_secs_f64()*1000.,startup.elapsed().as_secs_f64()*1000.);
     #[cfg(feature="vita_renderer")]
@@ -4826,6 +4842,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 Err(e) => hud.announce(&format!("Checkpoint save failed: {e:#}")),
             }
         }
+        // A background checkpoint that failed after its frame is reported here, on the
+        // next frame's tail; a passing write never appears.
+        for failure in store.take_background_failures() {
+            hud.announce(&format!("Checkpoint save failed: {failure}"));
+        }
         if save_requested || autosave_requested {
             if !saves_writable {
                 if save_requested {
@@ -5027,6 +5048,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let saves_writable = saves_enabled;
     #[cfg(feature = "native_timing")]
     if let Err(error) = timing.export_after_viewer() { eprintln!("Native timing export failed: {error:#}"); }
+    // The exit path flushes a pending checkpoint write before the final autosave and the
+    // quit; the store's drop flushes again as the backstop.
+    store.flush_background();
+    for failure in store.take_background_failures() {
+        eprintln!("Checkpoint save failed: {failure}");
+    }
     if saves_writable && played && stats.alive() && options.frames.is_none() && !post_game {
         if let Err(e) =
             store.write_with_preview(Slot::Auto, &game_snapshot!(), save_frame.preview().as_ref())
