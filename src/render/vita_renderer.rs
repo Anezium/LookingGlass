@@ -1822,6 +1822,19 @@ impl Renderer {
                 format!("{:x}", h.finalize())
             }).collect());
         }
+        // Host diagnostic (wchess1-render): every non-opaque group's triangles, for the
+        // offline tiling certificate. Printed once per map load when the variable is set.
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var_os("LOOKING_GLASS_ALPHA_GEOMETRY").is_some() {
+            for (group, p) in pending.iter().enumerate().filter(|(_, p)| !p.recipe.opaque) {
+                let tris: Vec<[[u32; 3]; 3]> = p.geometry.indices.chunks(3).map(|t| {
+                    let f = |i: u16| { let v = p.geometry.vertices[i as usize].position; [v[0].to_bits(), v[1].to_bits(), v[2].to_bits()] };
+                    [f(t[0]), f(t[1]), f(t[2])]
+                }).collect();
+                println!("ALPHA_GEOMETRY {}", serde_json::json!({"group": group, "parameter": p.parameter,
+                    "liquid": p.liquid, "images": p.recipe.stage.images, "tris": tris}));
+            }
+        }
         let (packed, allocations) = world_list::pack(pending.iter_mut().map(|p| {
             let key = (c.world_static_merge && submit::static_opaque(&p.recipe)).then_some((p.parameter,p.recipe.rank));
             (key, &mut p.geometry.vertices, &mut p.geometry.indices)
@@ -2051,6 +2064,34 @@ impl Renderer {
     /// order, so drawing it at its first member's place submits exactly those primitives in order.
     fn plan_water_runs(&mut self, list: &[(f32, crate::render_fx::retained::Source)]) {
         use crate::render_fx::retained::Source;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var("LOOKING_GLASS_ALPHA_LIST_FRAME").ok().and_then(|v| v.parse::<u64>().ok())
+            == Some(crate::sim_maps::probe::frame() as u64) {
+            for (depth, source) in list {
+                match *source {
+                    Source::World(id) => {
+                        let p = &self.prepared[id];
+                        let g = &self.groups[p.group];
+                        let u = p.uniforms.as_ref().unwrap_or(&self.parameters[g.parameter].uniforms).values();
+                        let position_words: Vec<u32> = u[0..16].iter().chain(&u[96..108]).map(|f| f.to_bits()).collect();
+                        println!("ALPHA_LIST {}", serde_json::json!({"kind": "world", "id": id, "group": p.group,
+                            "position_words": position_words,
+                            "depth": depth, "liquid": g.liquid, "blend": g.recipe.blend, "cull": g.recipe.cull,
+                            "vertex": format!("{:?}", g.bindings.vertex_buffers[0]),
+                            "index": format!("{:?}", g.bindings.index_buffer),
+                            "atlas": format!("{:?}", g.bindings.images[1]), "texture": format!("{:?}", p.texture),
+                            "parameter": g.parameter, "own_uniforms": p.uniforms.is_some(),
+                            "base": g.base_element, "indices": g.indices,
+                            "lite": alpha_fill::lite_recipe(&g.recipe),
+                            "images": g.recipe.stage.images, "model": g.recipe.model.is_some(),
+                            "deform": g.recipe.deform.is_some(), "motion": g.recipe.motion.is_some(),
+                            "min": g.min.to_array(), "max": g.max.to_array()}));
+                    }
+                    Source::Actor(a) => println!("ALPHA_LIST {}", serde_json::json!({"kind": "actor", "id": a, "depth": depth})),
+                    Source::Puff(a) => println!("ALPHA_LIST {}", serde_json::json!({"kind": "puff", "id": a, "depth": depth})),
+                }
+            }
+        }
         let Some(state) = self.water_join.as_mut() else { return; };
         state.begin_frame(self.prepared.len());
         if !state.enabled { return; }
