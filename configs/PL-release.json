@@ -202,5 +202,6 @@
   "audio_stats_log": false,
   "fx_add_lean": true,
   "fx_add_fog_free": true,
-  "sky_live": true
+  "sky_live": true,
+  "actor_lean_shader": true
 }

@@ -118,6 +118,16 @@ not name. `PL-rc18-release-play.json` is this fallback plus only the two
 measurement keys; `PL-rc17-release-play.json` keeps the RC17 package bytes for
 comparison, and the unit tests pin RC18 as RC17 plus exactly those three keys.
 
+RC19 turns on `actor_lean_shader`, measured on the Vita on 2026-11-18. An actor
+packet with no dynamic light, no appearance effect and no factor blend draws with
+the actor program minus the lines its uniforms prove unreachable; its
+discard-free twin replaces only the existing discard-free program. The garden3
+entrance p95 goes from 68.4 to 47.0 ms and grounds1 from 53.8 to 32.0 ms; 24
+device capture pairs are byte-identical with and without it, and the host oracle
+is exact on 45 tapes. `PL-rc19-release-play.json` is this fallback plus only the
+two measurement keys; `PL-rc18-release-play.json` keeps the RC18 package bytes
+for comparison.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
