@@ -226,9 +226,10 @@ fn audio_memory(event: &str, cache_samples: usize) {
 }
 /// `audio_cue_prefetch`: sounds a level's own code can emit that no authored
 /// speaker list or actor animation names. Extend only when a measured window
-/// reads one of these on its first play. With `audio_level_cues_extra` on, the
-/// map's measured first-use clips are returned after the code cues.
-fn level_cues(name: &str, extra: bool) -> Vec<&'static str> {
+/// reads one of these on its first play. `audio_level_cues_extra` adds each
+/// map's measured first-use clips after this legacy pass; see
+/// `measured_level_cues` and `prefetch_level_clips`.
+fn level_cues(name: &str) -> Vec<&'static str> {
     let cues: &'static [&'static str] = match name {
         // The clock arena's fight gong and the Hatter's malfunction loop.
         "hatter2" => &[
@@ -237,57 +238,47 @@ fn level_cues(name: &str, extra: bool) -> Vec<&'static str> {
         ],
         _ => &[],
     };
-    if !extra {
-        return cues.to_vec();
-    }
-    [cues, measured_level_cues(name)].concat()
+    cues.to_vec()
 }
 /// `audio_level_cues_extra`: the measured first-use clips of each map, in measured first-use
 /// order, from the `runtime:` decodes of the RC18/RC19 qualification logs (2026-11-16/18).
-/// Each clip is listed only where the map's measured cue prefetch leaves `PREFETCH_BYTES`
-/// room for it; the jabberwock idle loop (12.3 MB decoded) and the clips that do not fit
-/// stay on the ordinary runtime read-and-decode path.
+/// A map keeps its clips only where that map's largest device-measured `cache_bytes`
+/// (the `[lg/audio-memory]` peaks of the rc18/rc19 logs) plus the extras stays at least
+/// 4 MiB under the 24 MiB cache cap, so no extra can take space a later runtime clip
+/// needs, and only clips whose measured first-use decode cost at least 10 ms; the
+/// jabberwock idle loop (12.3 MB decoded), every cheaper clip and every clip that does
+/// not fit the cue budget stays on the ordinary runtime read-and-decode path. The
+/// legacy cue pass always runs first, so these spend only the budget it actually left.
 fn measured_level_cues(name: &str) -> &'static [&'static str] {
     match name {
-        // a4-garden3-01 frames 668/809: marble bounce, first quake.
+        // peak 11,992,620 + 1,035,580; a4-garden3-01 frames 668/809: 34.48/180.38 ms.
         "garden3" => &[
             "sound/ambience/special/marble1.wav",
             "sound/ambience/special/quake1.wav",
         ],
-        // a4-gvillage-01 frames 185-625: roll bridge, knockdown, cat appear.
+        // peak 14,578,852 + 1,061,560; a4-gvillage-01 frames 185-625: 18.49-73.22 ms.
         "gvillage" => &[
             "sound/world/mover/roll_2.wav",
             "sound/character/alice/pain_knockdown.wav",
             "sound/world/mover/roll_1.wav",
             "sound/character/cheshire_cat/appear.wav",
         ],
-        // a4-tower1/2/3-01: the cat's appear and disappear, tower3's fork.
+        // peaks 11,276,304 / 7,845,600 + 602,300; a4-tower1/2-01: 67.31, 54.21 / 53.84 ms.
         "tower1" | "tower2" => &[
             "sound/character/cheshire_cat/appear.wav",
             "sound/character/cheshire_cat/disappear.wav",
         ],
+        // peak 12,081,600 + 691,140; a4-tower3-01 frames 23/160/204: 68.00/20.37/53.93 ms.
         "tower3" => &[
             "sound/character/cheshire_cat/appear.wav",
             "sound/ambience/special/fork_hit.wav",
             "sound/character/cheshire_cat/disappear.wav",
         ],
-        // a4-keep-01 frame 233: the lift's arrival cue.
+        // peak 14,742,456 + 73,696; a4-keep-01 frame 233: 17.93 ms.
         "keep" => &["sound/ambience/special/lift_end.wav"],
-        // Alice's idle knife click, the one fidget the entrance tapes always pay for.
-        "centipede1" | "hatter1" | "hatter2" | "potears1" =>
-            &["sound/character/alice/idle_knife_click1.wav"],
-        // a4-centipede2-01 frame 355 and a4-skool2-01 frames 1093/1117.
-        "centipede2" => &["sound/character/alice/pain4.wav"],
-        "skool2" => &[
-            "sound/character/alice/idle_knife_click1.wav",
-            "sound/character/alice/idle_knife_click2.wav",
-        ],
-        // rw-20261116-wchess1-01 frames 27/30/2928.
-        "wchess1" => &[
-            "sound/ui/quit_c.wav",
-            "sound/world/mover/spike.wav",
-            "sound/character/alice/idle_knife_click1.wav",
-        ],
+        // peak 16,182,576 + 175,496; rw-20261116-wchess1-01 frame 27: 36.59 ms; the
+        // spike (7.66 ms) and knife click (4.90 ms) stay runtime, under 10 ms.
+        "wchess1" => &["sound/ui/quit_c.wav"],
         _ => &[],
     }
 }
@@ -329,9 +320,13 @@ fn placed_actor_cues(assets: &mut Assets, map: &Bsp) -> Vec<String> {
 /// `audio_cue_prefetch`: decode the level's own cue clips on the load path, before
 /// their first request. `limit` bounds the added decoded bytes; a cue that does not
 /// fit is skipped and keeps the ordinary runtime read-and-decode path, so the
-/// playback samples and every parameter are unchanged. `extra` adds the map's
-/// measured first-use clips (`audio_level_cues_extra`) after the code cues, ahead
-/// of the same `limit`. Returns (clips, bytes).
+/// playback samples and every parameter are unchanged. The whole legacy candidate
+/// pass of `559b004` runs first — the level's own code cues, the placed enemy
+/// kinds' code tables and Alice's combat cries, then the placed actors' animation
+/// sounds — so the prefetched set and bytes are exactly the key-off ones, by
+/// construction. `extra` then spends only the budget and cache room that pass
+/// actually left on the map's measured first-use clips (`audio_level_cues_extra`),
+/// so an extra can never displace a legacy cue. Returns (clips, bytes).
 fn prefetch_level_clips(
     assets: &mut Assets,
     name: &str,
@@ -343,7 +338,7 @@ fn prefetch_level_clips(
 ) -> (usize, usize) {
     let mut candidates: Vec<String> = Vec::new();
     let mut seen = BTreeSet::new();
-    for path in level_cues(name, extra) {
+    for path in level_cues(name) {
         if seen.insert((*path).to_owned()) {
             candidates.push((*path).to_owned());
         }
@@ -361,24 +356,36 @@ fn prefetch_level_clips(
         }
     }
     let (mut clips, mut bytes) = (0usize, 0usize);
-    for path in candidates {
-        if cache.contains_key(&path) {
-            continue;
+    // One admission rule for both passes: a clip that does not fit the budget the
+    // clips before it left, or the cache cap, stays on the runtime path.
+    let mut admit = |path: &str| {
+        if cache.contains_key(path) {
+            return;
         }
-        let Ok(clip) = assets.read(&path).and_then(decode_clip) else {
-            continue;
+        let Ok(clip) = assets.read(path).and_then(decode_clip) else {
+            return;
         };
         let size = clip.samples.len() * std::mem::size_of::<f32>();
         if bytes + size > limit || *cache_samples + clip.samples.len() > CACHE_SAMPLES {
-            continue;
+            return;
         }
         bytes += size;
         clips += 1;
         *cache_samples += clip.samples.len();
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        proof::decode("prefetch", &path, &clip.samples);
-        cache.insert(path.clone(), Some(clip));
+        proof::decode("prefetch", path, &clip.samples);
+        cache.insert(path.to_owned(), Some(clip));
         audio_memory(&format!("prefetch:{path}"), *cache_samples);
+    };
+    for path in &candidates {
+        admit(path);
+    }
+    // `audio_level_cues_extra`: the measured first-use clips, in measured
+    // first-use order, spend only what the legacy pass actually left.
+    if extra {
+        for path in measured_level_cues(name) {
+            admit(*path);
+        }
     }
     (clips, bytes)
 }
@@ -1009,6 +1016,7 @@ pub struct Audio {
     missing: BTreeSet<String>,
     cache_samples: usize,
     limit_rejects: usize,
+    transient_decodes: usize,
     prefetch_clips: usize,
     prefetch_bytes: usize,
     retiring: Vec<FadingMusic>,
@@ -1149,6 +1157,7 @@ impl Audio {
             missing: BTreeSet::new(),
             cache_samples: 0,
             limit_rejects: 0,
+            transient_decodes: 0,
             prefetch_clips: 0,
             prefetch_bytes: 0,
             retiring: Vec::new(),
@@ -1213,6 +1222,7 @@ impl Audio {
         self.missing.clear();
         self.cache_samples = 0;
         self.limit_rejects = 0;
+        self.transient_decodes = 0;
         self.prefetch_clips = 0;
         self.prefetch_bytes = 0;
         self.last_sanity = None;
@@ -1597,6 +1607,10 @@ impl Audio {
                 match decoded {
                     Ok(clip) => {
                         if self.cache_samples + clip.samples.len() > CACHE_SAMPLES {
+                            // Over the cap the clip still plays, from a transient
+                            // allocation owned by its sink; count the attempt,
+                            // it can never become resident.
+                            self.transient_decodes += 1;
                             self.resolved += u64::from(self.play_clip(clip, &request));
                             continue;
                         }
@@ -2709,17 +2723,16 @@ mod tests {
         assert_eq!(crate::ant::sounds(true)[6], "sound/character/army_ant_corp/grenade.wav");
         assert!(!block::settings().combat_preload, "off by default");
     }
-    // `audio_level_cues_extra` leaves the RC19 cue list untouched when off and only
-    // appends each map's measured first-use clips when on; every list stays sorted
-    // by first use, duplicate-free and inside the cue budget's per-map headroom.
+    // `audio_level_cues_extra` leaves the RC19 cue list untouched; the measured list
+    // names only the kept maps' first-use clips, in measured order, and every other
+    // recorded map (sub-10 ms first-use cost, or no cache headroom) stays runtime.
     #[test]
-    fn level_cues_extra_keeps_the_rc19_cues_and_appends_the_measured_sets() {
+    fn level_cues_stay_rc19_and_measured_cues_list_only_the_kept_maps() {
         const MAPS: &[&str] = &["garden3", "gvillage", "tower1", "tower2", "tower3", "keep",
                                 "centipede1", "centipede2", "hatter1", "hatter2", "potears1",
                                 "skool2", "wchess1"];
-        // Off: the RC19 cue list, byte for byte — only hatter2 names code cues.
+        // The RC19 cue list, byte for byte — only hatter2 names code cues.
         for map in MAPS {
-            let off = level_cues(map, false);
             let rc19 = match *map {
                 "hatter2" => vec![
                     "sound/ambience/special/clock_gong_2.wav",
@@ -2727,65 +2740,107 @@ mod tests {
                 ],
                 _ => Vec::new(),
             };
-            assert_eq!(off, rc19, "{map} changed its RC19 cue list with the key off");
+            assert_eq!(level_cues(map), rc19, "{map} changed its RC19 cue list");
         }
-        assert_eq!(level_cues("hatter2", false), [
-            "sound/ambience/special/clock_gong_2.wav",
-            "sound/character/mad_hatter/death_malfunction.wav",
-        ]);
-        assert!(level_cues("centipede1", true) != level_cues("centipede1", false),
-            "centipede1 gained no clip with the key on");
-        for map in MAPS {
-            let cues = level_cues(map, true);
-            assert!(!cues.is_empty(), "{map} lost its measured clips");
-            for path in &cues {
-                assert!(path.starts_with("sound/") && path.ends_with(".wav")
-                    && path.chars().all(|c| !c.is_ascii_uppercase()), "{path}");
-            }
-            let mut sorted = cues.clone();
-            sorted.sort();
-            sorted.dedup();
-            assert_eq!(cues.len(), sorted.len(), "{map} lists a clip twice");
-            // The measured clips come after the code cues, never before them.
-            assert_eq!(&cues[..level_cues(map, false).len()], &level_cues(map, false)[..]);
-        }
-        assert_eq!(level_cues("hatter2", true), [
-            "sound/ambience/special/clock_gong_2.wav",
-            "sound/character/mad_hatter/death_malfunction.wav",
-            "sound/character/alice/idle_knife_click1.wav",
-        ]);
-        assert_eq!(level_cues("garden3", true), [
+        // The kept maps: every clip cost at least 10 ms on its measured first use
+        // and the map's device-measured cache peak plus the extras stays 4 MiB
+        // under the 24 MiB cap. The lists fix the measured first-use order.
+        assert_eq!(measured_level_cues("garden3"), [
             "sound/ambience/special/marble1.wav",
             "sound/ambience/special/quake1.wav",
         ]);
-        assert_eq!(level_cues("wchess1", true), [
-            "sound/ui/quit_c.wav",
-            "sound/world/mover/spike.wav",
-            "sound/character/alice/idle_knife_click1.wav",
+        assert_eq!(measured_level_cues("gvillage"), [
+            "sound/world/mover/roll_2.wav",
+            "sound/character/alice/pain_knockdown.wav",
+            "sound/world/mover/roll_1.wav",
+            "sound/character/cheshire_cat/appear.wav",
         ]);
-        assert!(level_cues("hedge3", true).is_empty() && level_cues("jlair2", true).is_empty()
-            && level_cues("funhouse", true).is_empty(),
+        assert_eq!(measured_level_cues("tower1"), [
+            "sound/character/cheshire_cat/appear.wav",
+            "sound/character/cheshire_cat/disappear.wav",
+        ]);
+        assert_eq!(measured_level_cues("tower2"), [
+            "sound/character/cheshire_cat/appear.wav",
+            "sound/character/cheshire_cat/disappear.wav",
+        ]);
+        assert_eq!(measured_level_cues("tower3"), [
+            "sound/character/cheshire_cat/appear.wav",
+            "sound/ambience/special/fork_hit.wav",
+            "sound/character/cheshire_cat/disappear.wav",
+        ]);
+        assert_eq!(measured_level_cues("keep"),
+            ["sound/ambience/special/lift_end.wav"]);
+        // wchess1 keeps only quit_c (36.59 ms); its spike (7.66 ms) and knife
+        // click (4.90 ms) stay on the runtime path.
+        assert_eq!(measured_level_cues("wchess1"), ["sound/ui/quit_c.wav"]);
+        for map in ["garden3", "gvillage", "tower1", "tower2", "tower3", "keep", "wchess1"] {
+            let cues = measured_level_cues(map);
+            assert!(!cues.is_empty(), "{map} lost its measured clips");
+            for path in cues {
+                assert!(path.starts_with("sound/") && path.ends_with(".wav")
+                    && path.chars().all(|c| !c.is_ascii_uppercase()), "{path}");
+            }
+            assert!(cues.iter().collect::<BTreeSet<_>>().len() == cues.len(),
+                "{map} lists a clip twice");
+        }
+        // The dropped maps: every recorded first-use clip cost under 10 ms
+        // (hatter1 also has no cache headroom: peak 22,267,252 + 4,352).
+        for map in ["skool2", "centipede1", "centipede2", "hatter1", "hatter2", "potears1"] {
+            assert!(measured_level_cues(map).is_empty(), "{map} kept a sub-10 ms clip");
+        }
+        assert!(measured_level_cues("hedge3").is_empty() && measured_level_cues("jlair2").is_empty()
+            && measured_level_cues("funhouse").is_empty(),
             "a map without budget headroom or the jabberwock loop gained clips");
         assert!(!block::settings().level_cues_extra, "off by default");
     }
-    /// The measured clips actually fit each map's remaining cue budget, prefetched
-    /// samples are byte-identical to a fresh decode, and no prefetched clip is
-    /// displaced. The control run reproduces each map's device-measured RC19 cue
-    /// prefetch byte for byte before the extras are added on top. Run with
-    /// LOOKING_GLASS_TEST_DATA; it decodes the real maps.
+    // RC19 device cue-prefetch bytes per map ([lg/audio-prefetch], rc18/allmaps logs).
+    const DEVICE_PREFETCH_BYTES: &[(&str, usize)] = &[
+        ("garden3", 1586420), ("gvillage", 4071236), ("tower1", 1897560),
+        ("tower2", 1500120), ("tower3", 374788), ("keep", 6110604),
+        ("centipede1", 6275996), ("centipede2", 5627784), ("hatter1", 6286548),
+        ("hatter2", 6265468), ("potears1", 6273740), ("skool2", 6147624),
+        ("wchess1", 6070940),
+    ];
+    // The recorded first-use clips of the RC18/RC19 device logs, kept and dropped
+    // ones alike (map, clips in measured first-use order): the workload every
+    // recorded map pays for when the prefetch key is off.
+    const RECORDED_FIRST_USE_CLIPS: &[(&str, &[&str])] = &[
+        ("garden3", &["sound/ambience/special/marble1.wav",
+                      "sound/ambience/special/quake1.wav"]),
+        ("gvillage", &["sound/world/mover/roll_2.wav",
+                       "sound/character/alice/pain_knockdown.wav",
+                       "sound/world/mover/roll_1.wav",
+                       "sound/character/cheshire_cat/appear.wav"]),
+        ("tower1", &["sound/character/cheshire_cat/appear.wav",
+                     "sound/character/cheshire_cat/disappear.wav"]),
+        ("tower2", &["sound/character/cheshire_cat/appear.wav",
+                     "sound/character/cheshire_cat/disappear.wav"]),
+        ("tower3", &["sound/character/cheshire_cat/appear.wav",
+                     "sound/ambience/special/fork_hit.wav",
+                     "sound/character/cheshire_cat/disappear.wav"]),
+        ("keep", &["sound/ambience/special/lift_end.wav"]),
+        ("wchess1", &["sound/ui/quit_c.wav",
+                      "sound/world/mover/spike.wav",
+                      "sound/character/alice/idle_knife_click1.wav"]),
+        ("skool2", &["sound/character/alice/idle_knife_click1.wav",
+                     "sound/character/alice/idle_knife_click2.wav"]),
+        ("centipede1", &["sound/character/alice/idle_knife_click1.wav"]),
+        ("centipede2", &["sound/character/alice/pain4.wav"]),
+        ("hatter1", &["sound/character/alice/idle_knife_click1.wav"]),
+        ("hatter2", &["sound/character/alice/idle_knife_click1.wav"]),
+        ("potears1", &["sound/character/alice/idle_knife_click1.wav"]),
+    ];
+    /// On the real maps: the control prefetch reproduces each map's device-measured
+    /// RC19 cue bytes, the key-on run adds exactly the kept measured clips on top of
+    /// an unchanged legacy prefetched path set with byte-identical samples, and under
+    /// a deliberately tight cue budget or cache cap the extras yield first — the
+    /// legacy prefetched path set never changes. Run with LOOKING_GLASS_TEST_DATA;
+    /// it decodes the real maps.
     #[test]
     #[ignore = "requires LOOKING_GLASS_TEST_DATA"]
-    fn level_cues_extra_prefetch_stays_within_each_maps_budget() -> Result<()> {
+    fn level_cues_extra_yields_under_tight_budget_and_cache_cap() -> Result<()> {
         let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
         let mut assets = Assets::open(&root)?;
-        // RC19 device cue-prefetch bytes per map ([lg/audio-prefetch], rc18/allmaps logs).
-        const DEVICE_PREFETCH_BYTES: &[(&str, usize)] = &[
-            ("garden3", 1586420), ("gvillage", 4071236), ("tower1", 1897560),
-            ("tower2", 1500120), ("tower3", 374788), ("keep", 6110604),
-            ("centipede1", 6275996), ("centipede2", 5627784), ("hatter1", 6286548),
-            ("hatter2", 6265468), ("potears1", 6273740), ("skool2", 6147624),
-            ("wchess1", 6070940),
-        ];
         // The authored preload of `load_inner`, so the cue prefetch starts from the
         // same resident clips as on the load path and skips them without byte cost.
         let preloaded = |assets: &mut Assets, name: &str, map: &Bsp| -> Result<(BTreeMap<String, Option<Clip>>, usize)> {
@@ -2815,48 +2870,287 @@ mod tests {
             }
             Ok((cache, cache_samples))
         };
-        for (map, clips) in [
-            ("garden3", measured_level_cues("garden3")),
-            ("gvillage", measured_level_cues("gvillage")),
-            ("tower1", measured_level_cues("tower1")),
-            ("tower2", measured_level_cues("tower2")),
-            ("tower3", measured_level_cues("tower3")),
-            ("keep", measured_level_cues("keep")),
-            ("centipede1", measured_level_cues("centipede1")),
-            ("centipede2", measured_level_cues("centipede2")),
-            ("hatter1", measured_level_cues("hatter1")),
-            ("hatter2", measured_level_cues("hatter2")),
-            ("potears1", measured_level_cues("potears1")),
-            ("skool2", measured_level_cues("skool2")),
-            ("wchess1", measured_level_cues("wchess1")),
-        ] {
+        for map in RECORDED_FIRST_USE_CLIPS.iter().map(|(map, _)| *map) {
             let bsp = Bsp::parse(&assets.read(&format!("maps/{map}.bsp"))?)?;
-            let (mut off, mut off_samples) = preloaded(&mut assets, map, &bsp)?;
+            let kept = measured_level_cues(map);
+            let (base, base_samples) = preloaded(&mut assets, map, &bsp)?;
+            // Control: the key-off prefetch equals the device-measured RC19 bytes.
+            let (mut off, mut off_samples) = (base.clone(), base_samples);
             let (off_clips, off_bytes) = prefetch_level_clips(
                 &mut assets, map, &bsp, &mut off, &mut off_samples, PREFETCH_BYTES, false);
             ensure!(off_bytes == DEVICE_PREFETCH_BYTES.iter().find(|(m, _)| *m == map)
                     .map(|(_, bytes)| *bytes).unwrap_or_default(),
                 "{map}: control prefetch {off_bytes} differs from the device measurement");
-            let (mut on, mut on_samples) = preloaded(&mut assets, map, &bsp)?;
+            let off_set: BTreeSet<&str> = off.keys().map(String::as_str).collect();
+            // Key on at the real budget: exactly the kept clips are added, the
+            // legacy set is unchanged and every prefetched sample is a fresh decode.
+            let (mut on, mut on_samples) = (base.clone(), base_samples);
             let (on_clips, on_bytes) = prefetch_level_clips(
                 &mut assets, map, &bsp, &mut on, &mut on_samples, PREFETCH_BYTES, true);
-            ensure!(on_bytes <= PREFETCH_BYTES, "{map}: prefetch exceeded the cue budget");
-            ensure!(on_clips == off_clips + clips.len() && on_bytes > off_bytes,
-                "{map}: the measured clips were not all prefetched \
-                 (on {on_clips}/{on_bytes} vs off {off_clips}/{off_bytes} + {} clips)",
-                clips.len());
-            let mut measured_bytes = 0usize;
-            for path in clips {
+            let mut kept_bytes = 0usize;
+            for path in kept {
                 let resident = on.get(*path).and_then(Clone::clone).expect(*path);
                 ensure!(off.get(*path).is_none(), "{map}: {path} was prefetched with the key off");
                 let decoded = decode_clip(assets.read(path)?)?;
                 ensure!(resident.samples[..] == decoded.samples[..]
                     && resident.rate == decoded.rate,
                     "{map}: prefetched samples differ from a fresh decode: {path}");
-                measured_bytes += decoded.samples.len() * std::mem::size_of::<f32>();
+                kept_bytes += decoded.samples.len() * std::mem::size_of::<f32>();
             }
-            ensure!(on_bytes == off_bytes + measured_bytes,
-                "{map}: key-on prefetch displaced cue clips ({on_bytes} vs {off_bytes}+{measured_bytes})");
+            let on_set: BTreeSet<&str> = on.keys().map(String::as_str).collect();
+            let kept_set: BTreeSet<&str> = kept.iter().copied().collect();
+            let gained: BTreeSet<&str> = on_set.difference(&off_set).copied().collect();
+            ensure!(on_clips == off_clips + kept.len() && on_bytes == off_bytes + kept_bytes,
+                "{map}: the kept clips were not all prefetched on top of the control \
+                 (on {on_clips}/{on_bytes} vs off {off_clips}/{off_bytes} + {kept_bytes})");
+            ensure!(gained == kept_set && off_set.difference(&on_set).next().is_none(),
+                "{map}: the key-on prefetched path set is not the control set plus the kept clips");
+            // Tight cue budget, exactly the control bytes: nothing is left for the
+            // extras, so the prefetched set stays the key-off one.
+            let (mut tight, mut tight_samples) = (base.clone(), base_samples);
+            let (tight_clips, tight_bytes) = prefetch_level_clips(
+                &mut assets, map, &bsp, &mut tight, &mut tight_samples, off_bytes, true);
+            let tight_set: BTreeSet<&str> = tight.keys().map(String::as_str).collect();
+            ensure!(tight_clips == off_clips && tight_bytes == off_bytes && tight_set == off_set,
+                "{map}: a tight budget changed the legacy prefetched set ({tight_bytes} vs {off_bytes})");
+            // A deliberately tight cache cap: the legacy pass exactly fills the
+            // remaining cache, so every extra yields and the prefetched set stays
+            // the key-off one; one clip's worth of room admits only the first kept
+            // clip, in measured order.
+            let legacy_samples = off_samples - base_samples;
+            let (mut cap, mut cap_samples) = (base.clone(), CACHE_SAMPLES - legacy_samples);
+            let (cap_clips, cap_bytes) = prefetch_level_clips(
+                &mut assets, map, &bsp, &mut cap, &mut cap_samples, PREFETCH_BYTES, true);
+            let cap_set: BTreeSet<&str> = cap.keys().map(String::as_str).collect();
+            ensure!(cap_clips == off_clips && cap_bytes == off_bytes && cap_set == off_set
+                && cap_samples == CACHE_SAMPLES,
+                "{map}: a saturated cache changed the legacy prefetched set");
+            if let Some(first) = kept.first() {
+                let first_samples = decode_clip(assets.read(first)?)?.samples.len();
+                let (mut one, mut one_samples) =
+                    (base, CACHE_SAMPLES - legacy_samples - first_samples);
+                let (one_clips, one_bytes) = prefetch_level_clips(
+                    &mut assets, map, &bsp, &mut one, &mut one_samples, PREFETCH_BYTES, true);
+                let one_set: BTreeSet<&str> = one.keys().map(String::as_str).collect();
+                let expected: BTreeSet<&str> =
+                    off_set.union(&BTreeSet::from([*first])).copied().collect();
+                ensure!(one_clips == off_clips + 1
+                    && one_bytes == off_bytes + first_samples * std::mem::size_of::<f32>()
+                    && one_set == expected,
+                    "{map}: one clip of cache room admitted more than the first kept clip");
+            }
+        }
+        Ok(())
+    }
+    /// Through the configured load path — LOOKING_GLASS_TEST_AUDIO_CONFIG names the
+    /// config file, `block::settings` reads it inside `Audio::load` — with the real
+    /// game data: the key-off and key-on legacy prefetched path sets are equal on
+    /// every recorded map (the key-on set is the key-off one plus exactly the kept
+    /// measured clips, inside the budget the legacy pass left), the recorded
+    /// first-use workload produces the same transient (non-resident) decode count
+    /// in both arms, and a saturated cache counts one transient decode. The parent
+    /// runs two children of this same test, one config each, and compares their
+    /// rows. Run with LOOKING_GLASS_TEST_DATA.
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA"]
+    fn level_cues_extra_load_path_keeps_the_legacy_prefetch_set() -> Result<()> {
+        // Child arm: the parent hands the config over exactly as the device does.
+        if std::env::var_os("LOOKING_GLASS_TEST_AUDIO_ARM").is_some() {
+            #[cfg(feature = "native_timing")]
+            let _music_serial = output::native_music_test_guard();
+            let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+            let mut assets = Assets::open(&root)?;
+            for (map, recorded) in RECORDED_FIRST_USE_CLIPS.iter().copied() {
+                let bsp = match assets.read(&format!("maps/{map}.bsp"))
+                    .and_then(|bytes| Bsp::parse(&bytes)) {
+                    Ok(bsp) => bsp,
+                    Err(error) => {
+                        println!("AUDIO_ARM_SKIP map={map} error=\"{error:#}\"");
+                        continue;
+                    }
+                };
+                let mut audio = Audio::new(true, None);
+                let (mixer, _source) = output::mixer();
+                audio.playback = Some(Playback { _stream: None, mixer, _worker: None });
+                audio.load(&mut assets, map, &bsp);
+                println!("AUDIO_ARM_PREFETCH map={map} clips={} bytes={} cache_bytes={} transient={}",
+                    audio.prefetch_clips, audio.prefetch_bytes,
+                    audio.cache_samples * std::mem::size_of::<f32>(), audio.transient_decodes);
+                for path in audio.world_clips.keys() {
+                    println!("AUDIO_ARM_RESIDENT phase=load map={map} path={path}");
+                }
+                for path in measured_level_cues(map) {
+                    let bytes = decode_clip(assets.read(*path)?)?.samples.len()
+                        * std::mem::size_of::<f32>();
+                    println!("AUDIO_ARM_EXTRA map={map} path={path} bytes={bytes}");
+                }
+                // The recorded first-use workload: every clip the device logs show
+                // this map reading on first use, kept and dropped ones alike.
+                for path in recorded {
+                    audio.queue(path, Some(Vec3::ZERO), 1.);
+                }
+                audio.prepare(&mut assets, &World::fixture(&[]), Vec3::ZERO, false, 0.016);
+                println!("AUDIO_ARM_WORKLOAD map={map} transient={} cache_bytes={}",
+                    audio.transient_decodes, audio.cache_samples * std::mem::size_of::<f32>());
+                for path in audio.world_clips.keys() {
+                    println!("AUDIO_ARM_RESIDENT phase=played map={map} path={path}");
+                }
+                // Counter sanity at a saturated cache: one non-resident request is
+                // exactly one more transient decode and never becomes resident.
+                let forced = RECORDED_FIRST_USE_CLIPS.iter()
+                    .flat_map(|(_, clips)| clips.iter()).copied()
+                    .find(|path| !audio.world_clips.contains_key(*path))
+                    .unwrap_or_else(|| panic!("{map}: every recorded clip is resident"));
+                audio.cache_samples = CACHE_SAMPLES;
+                audio.queue(forced, Some(Vec3::ZERO), 1.);
+                audio.prepare(&mut assets, &World::fixture(&[]), Vec3::ZERO, false, 0.016);
+                ensure!(audio.transient_decodes >= 1 && !audio.world_clips.contains_key(forced),
+                    "{map}: a saturated cache did not count the transient decode of {forced}");
+                println!("AUDIO_ARM_FORCED map={map} path={forced} transient={}",
+                    audio.transient_decodes);
+            }
+            return Ok(());
+        }
+        // Parent: the shipped release-play config reaches the load path verbatim in
+        // the off arm; the on arm adds exactly the new key to the same config.
+        let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("configs/PL-rc19-release-play.json");
+        let base: serde_json::Value = serde_json::from_slice(&std::fs::read(&shipped)?)?;
+        ensure!(base.get("audio_cue_prefetch") == Some(&serde_json::json!(true))
+            && base.get("audio_level_cues_extra").is_none(),
+            "the shipped release-play config changed its audio prefetch keys");
+        let mut extra = base.clone();
+        extra["audio_level_cues_extra"] = serde_json::json!(true);
+        let work = std::env::temp_dir().join("looking-glass-audio-arm-configs");
+        std::fs::create_dir_all(&work)?;
+        let configs = [
+            (work.join("pl-rc19-play-off.json"), base),
+            (work.join("pl-rc19-play-extra.json"), extra),
+        ];
+        for (path, config) in &configs {
+            std::fs::write(path, serde_json::to_vec(config)?)?;
+        }
+        let arm = |config: &std::path::Path| -> Result<Vec<String>> {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command.args(["--exact",
+                "audio::tests::level_cues_extra_load_path_keeps_the_legacy_prefetch_set",
+                "--ignored", "--nocapture", "--test-threads=1"]);
+            command.env_clear();
+            for key in ["HOME", "USER", "TMPDIR"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            command.envs([
+                ("PATH", std::ffi::OsStr::new("/usr/bin:/bin")),
+                ("LANG", std::ffi::OsStr::new("C")),
+                ("LOOKING_GLASS_TEST_DATA", root.as_os_str()),
+                ("LOOKING_GLASS_TEST_AUDIO_CONFIG", config.as_os_str()),
+                ("LOOKING_GLASS_TEST_AUDIO_ARM", std::ffi::OsStr::new("load-path")),
+            ]);
+            let output = command.output()?;
+            ensure!(output.status.success(), "the load-path child under {:?} failed:\n{}",
+                config, String::from_utf8_lossy(&output.stderr));
+            Ok(String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).collect())
+        };
+        let arms = [arm(&configs[0].0)?, arm(&configs[1].0)?];
+        #[derive(Default)]
+        struct Arm {
+            prefetch: BTreeMap<String, [usize; 4]>,
+            extras: BTreeMap<String, Vec<(String, usize)>>,
+            resident: BTreeMap<(&'static str, String), BTreeSet<String>>,
+            workload: BTreeMap<String, [usize; 2]>,
+            forced: BTreeMap<String, (String, usize)>,
+        }
+        fn arm_rows(rows: &[String]) -> Result<Arm> {
+            let mut arm = Arm::default();
+            for row in rows {
+                let Some((kind, rest)) = row.split_once(' ') else { continue };
+                let fields: BTreeMap<&str, &str> = rest.split_whitespace()
+                    .filter_map(|token| token.split_once('=')).collect();
+                let Some(map) = fields.get("map").copied() else { continue };
+                let map = map.to_owned();
+                match kind {
+                    "AUDIO_ARM_PREFETCH" => {
+                        arm.prefetch.insert(map, [
+                            fields["clips"].parse()?, fields["bytes"].parse()?,
+                            fields["cache_bytes"].parse()?, fields["transient"].parse()?]);
+                    }
+                    "AUDIO_ARM_EXTRA" => {
+                        arm.extras.entry(map).or_default()
+                            .push((fields["path"].to_owned(), fields["bytes"].parse()?));
+                    }
+                    "AUDIO_ARM_RESIDENT" => {
+                        arm.resident.entry((
+                            if fields["phase"] == "load" { "load" } else { "played" }, map))
+                            .or_default().insert(fields["path"].to_owned());
+                    }
+                    "AUDIO_ARM_WORKLOAD" => {
+                        arm.workload.insert(map, [
+                            fields["transient"].parse()?, fields["cache_bytes"].parse()?]);
+                    }
+                    "AUDIO_ARM_FORCED" => {
+                        arm.forced.insert(map,
+                            (fields["path"].to_owned(), fields["transient"].parse()?));
+                    }
+                    _ => continue,
+                };
+            }
+            Ok(arm)
+        }
+        let [off, on] = [&arm_rows(&arms[0])?, &arm_rows(&arms[1])?];
+        for (map, _) in RECORDED_FIRST_USE_CLIPS.iter().copied() {
+            let kept = measured_level_cues(map);
+            let (off_prefetch, on_prefetch) = (off.prefetch.get(map), on.prefetch.get(map));
+            ensure!(off_prefetch.is_some() && on_prefetch.is_some(), "{map}: a child skipped the map");
+            let [off_clips, off_bytes, off_cache, _] = *off_prefetch.unwrap();
+            let [on_clips, on_bytes, on_cache, _] = *on_prefetch.unwrap();
+            // The key-off arm reproduces the device measurement through the load path.
+            ensure!(off_bytes == DEVICE_PREFETCH_BYTES.iter().find(|(m, _)| *m == map)
+                    .map(|(_, bytes)| *bytes).unwrap_or_default(),
+                "{map}: key-off prefetch {off_bytes} differs from the device measurement");
+            // The key-on prefetch is the key-off one plus exactly the kept clips.
+            let extras = on.extras.get(map).map(std::clone::Clone::clone).unwrap_or_default();
+            ensure!(extras.iter().map(|(path, _)| path.as_str()).eq(kept.iter().copied()),
+                "{map}: the kept clip list differs between the code and the rows");
+            let extra_bytes: usize = extras.iter().map(|(_, bytes)| *bytes).sum();
+            ensure!(on_clips == off_clips + kept.len() && on_bytes == off_bytes + extra_bytes,
+                "{map}: the key-on prefetch is not the key-off one plus the kept clips \
+                 (on {on_clips}/{on_bytes} vs off {off_clips}/{off_bytes} + {extra_bytes})");
+            ensure!(on_cache == off_cache + extra_bytes,
+                "{map}: the load-time cache grew by more than the kept clips");
+            // The resident path set at load: no clip lost, exactly the kept gained.
+            let empty = BTreeSet::new();
+            let off_load = off.resident.get(&("load", map.to_string())).unwrap_or(&empty);
+            let on_load = on.resident.get(&("load", map.to_string())).unwrap_or(&empty);
+            ensure!(off_load.iter().all(|path| on_load.contains(path)),
+                "{map}: the key-on load lost a resident clip");
+            ensure!(on_load.iter().filter(|path| !off_load.contains(*path))
+                    .all(|path| kept.contains(&path.as_str()))
+                && on_load.len() == off_load.len() + kept.len(),
+                "{map}: the key-on load gained more than the kept clips");
+            // The recorded workload: the same transient decode count and the same
+            // final cache in both arms; the key only moved where the kept clips
+            // were decoded (load-time prefetch instead of first-use runtime).
+            let [off_transient, off_workload_cache] = *off.workload.get(map).unwrap();
+            let [on_transient, on_workload_cache] = *on.workload.get(map).unwrap();
+            ensure!(on_transient == off_transient,
+                "{map}: the key changed the transient decode count ({on_transient} vs {off_transient})");
+            ensure!(on_workload_cache == off_workload_cache,
+                "{map}: the key changed the recorded workload's final cache \
+                 ({on_workload_cache} vs {off_workload_cache})");
+            if !kept.is_empty() {
+                ensure!(on_workload_cache <= CACHE_SAMPLES * 4 - 4 * 1024 * 1024,
+                    "{map}: the key-on workload cache leaves under 4 MiB of the cap");
+            }
+            // The forced row proves the counter counts transient decodes.
+            ensure!(off.forced.get(map).is_some() && on.forced.get(map).is_some(),
+                "{map}: a child missed the forced row");
+            let (_, off_forced) = off.forced.get(map).unwrap();
+            let (_, on_forced) = on.forced.get(map).unwrap();
+            ensure!(*off_forced == off_transient + 1 && *on_forced == on_transient + 1,
+                "{map}: a saturated cache did not count one transient decode");
         }
         Ok(())
     }
