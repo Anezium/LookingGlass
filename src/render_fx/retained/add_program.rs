@@ -104,7 +104,11 @@ fn hull_misses(eye: Vec3, corners: [Vec3; 3], lo: Vec3, hi: Vec3) -> bool {
 }
 
 /// `fogged` returns its argument for every fragment of this packet under payload `u`.
-pub(super) fn fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool {
+pub(super) fn fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool { clear(p, u, "vita_fx_add_fog_volume_scans") }
+/// `fog_free` for an actor packet (`actor_fog_free`). Retained packets are drawn with an
+/// identity `Model`, so the mesh positions are the `worldPosition` the fog reads, as for effects.
+pub(super) fn actor_fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool { clear(p, u, "vita_actor_fog_volume_scans") }
+fn clear(p: &Pass, u: &[f32; UNIFORM_FLOATS], scans: &'static str) -> bool {
     // `if(X.w>0.0)` guards each fog term; NaN fails the guard as it fails this test.
     if u[DISTANCE_W] > 0. || u[LIQUID_W] > 0. { return false; }
     let eye = Vec3::from_slice(&u[EYE..EYE + 3]);
@@ -123,7 +127,7 @@ pub(super) fn fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool {
             if !(a.is_finite() && b.is_finite() && c.is_finite()) || !hull_misses(eye, [a, b, c], lo, hi) { return false; }
         }
     }
-    if scanned { count("vita_fx_add_fog_volume_scans", 1); }
+    if scanned { count(scans, 1); }
     true
 }
 

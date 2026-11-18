@@ -22,9 +22,20 @@
 //! The second program also drops the two cutout lines. It serves only packets that
 //! `actor_discard_free_shader` or `actor_cutout_discard_free` already send to the discard-free
 //! program, so it never widens the set of packets drawn without `discard`.
+//!
+//! `actor_fog_free` (needs `actor_lean_shader`, default off) adds a twin of each lean program
+//! without the fog call and the fog block, for a lean packet whose `fogged` returns its
+//! argument on every fragment: distance and liquid fog are off and each fog volume is off or
+//! separated from every eye-to-triangle hull by an axis plane (`add_program::actor_fog_free`,
+//! the `fx_add_fog_free` test). Then `fogLength` is zero, every `mix` has weight zero and
+//! `fogged(rgb, m)` is `rgb`. The `worldPosition` declaration stays, so the interpolants are the
+//! vertex program's.
 use super::*;
 
-pub(super) const NAMES: [&str; 2] = ["retained-actor-lean", "retained-actor-lean-opaque"];
+pub(super) const NAMES: [&str; 4] = ["retained-actor-lean", "retained-actor-lean-opaque",
+    "retained-actor-lean-fog-free", "retained-actor-lean-opaque-fog-free"];
+/// The fog call of the lean programs, the only line that reads the fog block.
+const FOG_CALL: &str = " if(FogMode>=0.0)rgb=fogged(rgb,FogMode);";
 
 // Offsets into the retained uniform block (`UNIFORM_FIELDS`).
 const GAIN: usize = 39;
@@ -58,17 +69,32 @@ pub(super) fn fragment(discard_free: bool) -> String {
             .replace(" uniform vec4 FxAppearance;", ""))
         .collect::<Vec<_>>().join("\n")
 }
-/// The two program sources, `[lean, lean without discard]`. A host probe build can read
-/// replacements from an absolute folder (`lean.frag`, `lean-opaque.frag`) while a pixel
+/// A lean source without the fog call and the fog block. The `// FOG` marker, where
+/// `environment::fragment` inserts the block, becomes the one declaration the block shared
+/// with the vertex program; `FogMode` loses its last reader.
+pub(super) fn fog_free(lean: &str) -> String {
+    assert_eq!(lean.matches(FOG_CALL).count(), 1, "fog call");
+    assert_eq!(lean.lines().filter(|l| *l == "// FOG").count(), 1, "fog marker");
+    assert_eq!(lean.matches(" uniform float FogMode;").count(), 1, "fog mode uniform");
+    lean.lines().filter(|line| *line != FOG_CALL)
+        .map(|line| if line == "// FOG" { "varying highp vec3 worldPosition;".to_owned() }
+            else { line.replace(" uniform float FogMode;", "") })
+        .collect::<Vec<_>>().join("\n")
+}
+/// The four program sources in `NAMES` order: `[lean, lean without discard]` and the same two
+/// without fog. A host probe build can read replacements from an absolute folder (`lean.frag`,
+/// `lean-opaque.frag`, `lean-fog-free.frag`, `lean-opaque-fog-free.frag`) while a pixel
 /// difference is being attributed; a missing file stops the run. Never compiled for the console.
-pub(super) fn sources() -> [String; 2] {
+pub(super) fn sources() -> [String; 4] {
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     if let Some(folder) = std::env::var_os("LOOKING_GLASS_ACTOR_LEAN_SOURCES") {
         let read = |name: &str| std::fs::read_to_string(std::path::Path::new(&folder).join(name))
             .unwrap_or_else(|e| panic!("LOOKING_GLASS_ACTOR_LEAN_SOURCES {name}: {e}"));
-        return [read("lean.frag"), read("lean-opaque.frag")];
+        return [read("lean.frag"), read("lean-opaque.frag"), read("lean-fog-free.frag"), read("lean-opaque-fog-free.frag")];
     }
-    [fragment(false), fragment(true)]
+    let [lean, opaque] = [fragment(false), fragment(true)];
+    let [lean_free, opaque_free] = [fog_free(&lean), fog_free(&opaque)];
+    [lean, opaque, lean_free, opaque_free]
 }
 /// Every line the lean source leaves out is a no-op under payload `u`. Each test is the
 /// negation of the shader's own guard, so NaN fails the guard here as it does there.
@@ -185,7 +211,7 @@ mod tests {
     fn the_lean_sources_are_the_full_program_minus_the_unreachable_lines() {
         let full = crate::render::FRAGMENT;
         let [lean, opaque] = [fragment(false), fragment(true)];
-        assert_eq!(sources(), [lean.clone(), opaque.clone()]);
+        assert_eq!(sources(), [lean.clone(), opaque.clone(), fog_free(&lean), fog_free(&opaque)]);
         // Every lean line is a full-program line, in the full program's order, except the two
         // uniform declarations that lose unused names and the fog call that loses its `else`.
         let fog_call = " if(FogMode>=0.0)rgb=fogged(rgb,FogMode);";
@@ -243,6 +269,47 @@ mod tests {
         let expected = varyings(&crate::environment::fragment(full));
         assert_eq!(expected, ["uv", "lm", "color", "worldPosition"]);
         for source in [&lean, &opaque] { assert_eq!(varyings(&crate::environment::fragment(source)), expected); }
+    }
+    #[test]
+    fn the_fog_free_sources_are_the_lean_sources_minus_the_fog_call_and_block() {
+        let [lean, opaque, lean_free, opaque_free] = sources();
+        for (with_fog, free) in [(&lean, &lean_free), (&opaque, &opaque_free)] {
+            // Line for line the lean source, minus the fog call, with the marker replaced and
+            // the fog mode uniform gone from its declaration line.
+            let expected: Vec<String> = with_fog.lines().filter(|l| *l != FOG_CALL)
+                .map(|l| if l == "// FOG" { "varying highp vec3 worldPosition;".into() } else { l.replace(" uniform float FogMode;", "") })
+                .collect();
+            assert_eq!(free.lines().collect::<Vec<_>>(), expected);
+            assert_eq!(with_fog.lines().count(), free.lines().count() + 1);
+            let changed: Vec<(&str, &str)> = with_fog.lines().filter(|l| *l != FOG_CALL).zip(free.lines())
+                .filter(|(a, b)| a != b).collect();
+            assert_eq!(changed.len(), 2, "{changed:#?}");
+            for absent in ["fogged", "FogMode", "FogEye", "DistanceFog", "LiquidFog", "FogA", "FogB", "// FOG"] {
+                assert!(!crate::environment::fragment(free).contains(absent), "{absent}");
+            }
+            // Texture read, alpha product, cutout tests, lighting, gain and output stay.
+            for kept in [" float alpha=diffuse.a*Gain.a*color.a;", " gl_FragColor=vec4(rgb,alpha);",
+                " vec3 rgb=diffuse.rgb*mix(vec3(1.0),lighting,Lit*(1.0-Fullbright))*Gain.rgb;"] {
+                assert_eq!(free.lines().filter(|l| *l == kept).count(), 1, "{kept}");
+            }
+            assert_eq!(free.matches("discard").count(), with_fog.matches("discard").count());
+        }
+        assert_eq!(lean_free.matches("discard").count(), 2);
+        assert!(!opaque_free.contains("discard"));
+        // The interpolants still match the vertex program's, in order.
+        let varyings = |source: &str| source.split(';').map(str::trim).filter(|d| d.contains("varying "))
+            .map(|d| d.rsplit(' ').next().unwrap().to_owned()).collect::<Vec<_>>();
+        for free in [&lean_free, &opaque_free] {
+            assert_eq!(varyings(&crate::environment::fragment(free)), ["uv", "lm", "color", "worldPosition"]);
+        }
+        assert_eq!(NAMES.len(), 4);
+    }
+    #[test]
+    fn the_fog_free_key_is_off_by_default_and_strict() {
+        let c = crate::render::vita_renderer::Config::default();
+        assert!(!c.actor_fog_free);
+        assert!(serde_json::from_value::<crate::render::vita_renderer::Config>(serde_json::json!({"actor_fog_free": 1})).is_err());
+        assert!(serde_json::from_value::<crate::render::vita_renderer::Config>(serde_json::json!({"actor_fog_free": true})).unwrap().actor_fog_free);
     }
     #[test]
     fn the_key_is_off_by_default_and_strict() {

@@ -35,3 +35,19 @@ prewarm those pipelines), or when a lean program failed to compile.
 
 Host proof lives outside Git, in the task evidence folder. Console speed, heap and picture are
 measured by the device slot only.
+
+## Fog-free twins: `actor_fog_free` (2026-11-18)
+
+`actor_fog_free` (default off, needs `actor_lean_shader`) compiles two more programs,
+`retained-actor-lean-fog-free` and `retained-actor-lean-opaque-fog-free`: each lean program
+without the fog call and the fog block. A lean packet moves to its twin when `fogged` returns
+its argument on every fragment: distance and liquid fog are off, and each fog volume is off or
+separated from every eye-to-triangle hull by an axis plane. That is the `fx_add_fog_free` test
+(`add_program::actor_fog_free`), valid for actors because every retained packet is drawn with an
+identity `Model`, so the mesh positions are the `worldPosition` the fog reads. Then `fogLength`
+is zero, every fog `mix` has weight zero and the call is a no-op. Nothing else changes: the
+cutout tests, lighting, gain, blend, depth state, geometry and order are the lean program's.
+
+Why: in the jlair2 fight every actor draw already runs a lean program, and the device class
+ablation still puts the frame's GPU time in the actor class. The map has one fog volume that
+no actor touches, yet each actor fragment evaluates the whole fog block.

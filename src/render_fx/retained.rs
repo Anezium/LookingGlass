@@ -381,6 +381,10 @@ pub(crate) enum Route {
     ActorLean,
     /// `actor_lean_shader`: the lean actor program for packets already drawn without `discard`.
     ActorLeanOpaque,
+    /// `actor_fog_free`: `ActorLean` without the fog call.
+    ActorFogFree,
+    /// `actor_fog_free`: `ActorLeanOpaque` without the fog call.
+    ActorFogFreeOpaque,
 }
 /// `actor_lean_shader`: the lean program that replaces the full program (`programs[0]`) or the
 /// discard-free program (`programs[1]`) for one admitted packet. Effect routes are untouched,
@@ -389,6 +393,16 @@ fn actor_lean_route(base: Route, programs: [bool; 2], admitted: impl Fn() -> boo
     match base {
         Route::Full if programs[0] && admitted() => Route::ActorLean,
         Route::CorpseOpaque if programs[1] && admitted() => Route::ActorLeanOpaque,
+        other => other,
+    }
+}
+/// `actor_fog_free`: a lean actor packet moves to its twin without the fog call when that twin
+/// has a pipeline for its key and `fogged` returns its argument for every fragment of the
+/// packet. `clear` runs only when asked; every other route is untouched.
+fn actor_fog_free_route(base: Route, programs: [bool; 2], clear: impl Fn() -> bool) -> Route {
+    match base {
+        Route::ActorLean if programs[0] && clear() => Route::ActorFogFree,
+        Route::ActorLeanOpaque if programs[1] && clear() => Route::ActorFogFreeOpaque,
         other => other,
     }
 }
@@ -419,6 +433,8 @@ fn submit_key(key: (usize, bool), route: Route, depth_write: bool) -> (usize, bo
         Route::AddFogFree => 4 * crate::render::BLEND_COUNT,
         Route::ActorLean => 5 * crate::render::BLEND_COUNT,
         Route::ActorLeanOpaque => 6 * crate::render::BLEND_COUNT,
+        Route::ActorFogFree => 7 * crate::render::BLEND_COUNT,
+        Route::ActorFogFreeOpaque => 8 * crate::render::BLEND_COUNT,
     };
     (key.0 + offset, key.1, depth_write)
 }
@@ -431,8 +447,9 @@ pub(crate) struct Gpu {
     corpse_opaque: Option<Lite>,
     /// `fx_add_lean` and `fx_add_fog_free`: the two additive effect programs.
     fx_add: [Option<Lite>; 2],
-    /// `actor_lean_shader`: the lean actor program and its discard-free twin.
-    actor_lean: [Option<Lite>; 2],
+    /// `actor_lean_shader`: the lean actor program and its discard-free twin; `actor_fog_free`:
+    /// the same two without the fog call (`actor_lean::NAMES` order).
+    actor_lean: [Option<Lite>; 4],
     buffers: Vec<Buffers>,
     white: Texture2D,
     ring_frame: usize,
@@ -454,9 +471,9 @@ pub(crate) struct Gpu {
     bounds: packet_cull::Bounds,
 }
 /// The specialized program bank of a route: 0 lean/unlit-exact, 1 corpse, 2 and 3 additive,
-/// 4 and 5 lean actor. It borrows only the bank fields, so the full program's caches stay usable.
+/// 4 and 5 lean actor, 6 and 7 fog-free lean actor. It borrows only the bank fields, so the full program's caches stay usable.
 fn program_bank<'a>(lite: &'a mut Option<Lite>, corpse: &'a mut Option<Lite>, fx_add: &'a mut [Option<Lite>; 2],
-    actor_lean: &'a mut [Option<Lite>; 2], bank: Option<usize>) -> Option<&'a mut Lite> {
+    actor_lean: &'a mut [Option<Lite>; 4], bank: Option<usize>) -> Option<&'a mut Lite> {
     match bank? {
         0 => lite.as_mut(),
         1 => corpse.as_mut(),
@@ -535,7 +552,9 @@ impl Gpu {
                 .map_err(|e| eprintln!("[lg/vita-renderer] warning {} program failed, key off: {e:?}", add_program::NAMES[i])).ok()
         }).flatten().map(|shader| Lite { uniforms: UniformCache::default(), shader, pipelines: BTreeMap::new(), fields: crate::render::uniform_fields::Cache::new(meta()) }));
         let sources = actor_lean::sources();
-        let actor_lean = [0, 1].map(|i| c.actor_lean_shader.then(|| {
+        let wanted = [c.actor_lean_shader, c.actor_lean_shader, c.actor_lean_shader && c.actor_fog_free,
+            c.actor_lean_shader && c.actor_fog_free];
+        let actor_lean = [0, 1, 2, 3].map(|i| wanted[i].then(|| {
             crate::frame_profile::shader_creation();
             let _shader_name = crate::shader_cache::Name::new(actor_lean::NAMES[i]);
             ctx.new_shader(ShaderSource::Glsl { vertex: crate::render::VERTEX,
@@ -754,6 +773,9 @@ impl Gpu {
         let program = actor_lean_route(program,
             [0, 1].map(|i| self.actor_lean[i].as_ref().is_some_and(|l| l.pipelines.contains_key(&key))),
             || actor_lean::admitted(p, u));
+        let program = actor_fog_free_route(program,
+            [2, 3].map(|i| self.actor_lean[i].as_ref().is_some_and(|l| l.pipelines.contains_key(&key))),
+            || add_program::actor_fog_free(p, u));
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         actor_lean::census(p, u, depth_write, program);
         let lite = program == Route::Lite;
@@ -765,6 +787,8 @@ impl Gpu {
             Route::AddFogFree => count("vita_fx_add_fog_free_draws", 1),
             Route::ActorLean => count("vita_actor_lean_draws", 1),
             Route::ActorLeanOpaque => count("vita_actor_lean_opaque_draws", 1),
+            Route::ActorFogFree => count("vita_actor_fog_free_draws", 1),
+            Route::ActorFogFreeOpaque => count("vita_actor_fog_free_opaque_draws", 1),
             _ => {}
         }
         // The specialized bank this draw uses; `None` is the full program.
@@ -776,6 +800,8 @@ impl Gpu {
             Route::AddFogFree => Some(3),
             Route::ActorLean => Some(4),
             Route::ActorLeanOpaque => Some(5),
+            Route::ActorFogFree => Some(6),
+            Route::ActorFogFreeOpaque => Some(7),
         };
         let pipeline = *match bank {
             None => self.pipelines.get(&key),
@@ -1844,9 +1870,31 @@ mod tests {
         assert_eq!(actor_lean_route(Route::Full, [false, true], || true), Route::Full);
     }
     #[test]
+    fn the_fog_free_route_only_follows_a_lean_actor_route() {
+        let calls = std::cell::Cell::new(0);
+        let yes = || { calls.set(calls.get() + 1); true };
+        assert_eq!(actor_fog_free_route(Route::ActorLean, [true, true], yes), Route::ActorFogFree);
+        assert_eq!(actor_fog_free_route(Route::ActorLeanOpaque, [true, true], yes), Route::ActorFogFreeOpaque);
+        assert_eq!(calls.get(), 2);
+        // Full-program, discard-free and effect packets never take a fog-free actor program.
+        for other in [Route::Full, Route::Lite, Route::CorpseOpaque, Route::AddLean, Route::AddFogFree] {
+            assert_eq!(actor_fog_free_route(other, [true, true], yes), other);
+        }
+        assert_eq!(calls.get(), 2, "other routes never scan");
+        // A missing program or pipeline keeps the lean route, before any scan.
+        assert_eq!(actor_fog_free_route(Route::ActorLean, [false, true], yes), Route::ActorLean);
+        assert_eq!(actor_fog_free_route(Route::ActorLeanOpaque, [true, false], yes), Route::ActorLeanOpaque);
+        assert_eq!(calls.get(), 2);
+        // A packet the fog can reach keeps the fog call.
+        assert_eq!(actor_fog_free_route(Route::ActorLean, [true, true], || false), Route::ActorLean);
+        assert_eq!(actor_fog_free_route(Route::ActorLeanOpaque, [true, true], || false), Route::ActorLeanOpaque);
+        // The discard-free fog-free twin never serves a packet drawn with the cutout tests.
+        assert_eq!(actor_fog_free_route(Route::ActorLean, [false, true], || true), Route::ActorLean);
+    }
+    #[test]
     fn every_program_owns_its_submit_cache_slots_and_the_lean_blends_are_the_named_ones() {
         let routes = [Route::Full, Route::Lite, Route::CorpseOpaque, Route::AddLean, Route::AddFogFree,
-            Route::ActorLean, Route::ActorLeanOpaque];
+            Route::ActorLean, Route::ActorLeanOpaque, Route::ActorFogFree, Route::ActorFogFreeOpaque];
         let mut keys = std::collections::BTreeSet::new();
         for route in routes {
             for blend in [0, 1, crate::render::BLEND_COUNT - 1] {
@@ -2582,7 +2630,8 @@ mod tests {
         sequence.push(harmless);
         let counts = sequence.iter().fold([0u64; 3], |mut counts, p| {
             counts[match route(p, false, true) { Route::Full => 0, Route::Lite => 1, Route::CorpseOpaque => 2,
-                Route::AddLean | Route::AddFogFree | Route::ActorLean | Route::ActorLeanOpaque =>
+                Route::AddLean | Route::AddFogFree | Route::ActorLean | Route::ActorLeanOpaque
+                    | Route::ActorFogFree | Route::ActorFogFreeOpaque =>
                     unreachable!("route never returns an additive or a lean actor program") }] += 1;
             counts
         });
