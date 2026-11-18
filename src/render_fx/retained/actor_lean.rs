@@ -84,13 +84,21 @@ pub(super) fn fog_free(lean: &str) -> String {
 /// The four program sources in `NAMES` order: `[lean, lean without discard]` and the same two
 /// without fog. A host probe build can read replacements from an absolute folder (`lean.frag`,
 /// `lean-opaque.frag`, `lean-fog-free.frag`, `lean-opaque-fog-free.frag`) while a pixel
-/// difference is being attributed; a missing file stops the run. Never compiled for the console.
+/// difference is being attributed; a missing lean file stops the run, a missing twin is derived from
+/// its lean file. Never compiled for the console.
 pub(super) fn sources() -> [String; 4] {
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     if let Some(folder) = std::env::var_os("LOOKING_GLASS_ACTOR_LEAN_SOURCES") {
         let read = |name: &str| std::fs::read_to_string(std::path::Path::new(&folder).join(name))
             .unwrap_or_else(|e| panic!("LOOKING_GLASS_ACTOR_LEAN_SOURCES {name}: {e}"));
-        return [read("lean.frag"), read("lean-opaque.frag"), read("lean-fog-free.frag"), read("lean-opaque-fog-free.frag")];
+        let [lean, opaque] = [read("lean.frag"), read("lean-opaque.frag")];
+        // An RC19 folder holds only the two lean files: derive the twins from them.
+        let twin = |name: &str, base: &str| {
+            let path = std::path::Path::new(&folder).join(name);
+            if path.exists() { read(name) } else { fog_free(base) }
+        };
+        let [lean_free, opaque_free] = [twin("lean-fog-free.frag", &lean), twin("lean-opaque-fog-free.frag", &opaque)];
+        return [lean, opaque, lean_free, opaque_free];
     }
     let [lean, opaque] = [fragment(false), fragment(true)];
     let [lean_free, opaque_free] = [fog_free(&lean), fog_free(&opaque)];

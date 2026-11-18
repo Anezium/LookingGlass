@@ -118,6 +118,10 @@ fn clear(p: &Pass, u: &[f32; UNIFORM_FLOATS], scans: &'static str) -> bool {
         if !(u[w] > 0.) { continue; }
         let (lo, hi) = (Vec3::from_slice(&u[lo..lo + 3]), Vec3::from_slice(&u[hi..hi + 3]));
         if !lo.is_finite() || !hi.is_finite() { return false; }
+        // The loader keeps any finite axial bounds; the shader's slab sorts its two
+        // intersections, so an inverted axis can fog the whole ray while the endpoint test
+        // above would call it a miss. Keep the fogged program for such a volume.
+        if (0..3).any(|axis| lo[axis] > hi[axis]) { return false; }
         let mesh = p.geometry();
         if mesh.indices.len() > MAX_SCAN_INDICES { return false; }
         scanned = true;
@@ -160,6 +164,19 @@ mod tests {
         u[l..l + 3].copy_from_slice(&lo.to_array());
         u[h..h + 3].copy_from_slice(&hi.to_array());
         u[at] = w;
+    }
+    #[test]
+    fn an_inverted_volume_axis_keeps_the_fogged_program() {
+        // Eye at x=0, the quad at x 0..10: with x bounds 100..-100 the shader's sorted slab
+        // spans the whole ray, so the packet can be fogged and must not be called fog-free.
+        let mut u = payload(Vec3::new(0., 5., -50.));
+        volume(&mut u, 0, Vec3::new(100., -1000., -1000.), Vec3::new(-100., 1000., 1000.), 2000.);
+        assert!(!fog_free(&pass(), &u));
+        assert!(!actor_fog_free(&pass(), &u));
+        // The same volume with ordered bounds that the quad and the eye lie beside is a miss.
+        let mut ordered = payload(Vec3::new(0., 5., -50.));
+        volume(&mut ordered, 0, Vec3::new(100., -1000., -1000.), Vec3::new(300., 1000., 1000.), 2000.);
+        assert!(fog_free(&pass(), &ordered));
     }
     #[test]
     fn offsets_name_the_fog_fields_of_the_retained_block() {
