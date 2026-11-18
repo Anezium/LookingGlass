@@ -451,6 +451,9 @@ pub struct Config {
     /// Decode a bounded set of the level's own cue clips during load, before their first
     /// request, so no fight frame pays a first-use read and decode. Sample-exact, off by default.
     pub audio_cue_prefetch: bool,
+    /// With `audio_cue_prefetch`, also decode the map's measured first-use clips on the
+    /// load path, inside the same 6 MiB cue budget. Sample-exact, off by default.
+    pub audio_level_cues_extra: bool,
     pub audio_block_mix: bool,
     pub audio_preresample: bool,
     pub audio_block_parameters: bool,
@@ -695,6 +698,7 @@ impl Default for Config {
             audio_static_cache: true,
             audio_loop_resident: false,
             audio_cue_prefetch: false,
+            audio_level_cues_extra: false,
             audio_block_mix: false,
             audio_preresample: false,
             audio_block_parameters: false,
@@ -4002,6 +4006,33 @@ mod tests {
             assert!(c.audio_loop_resident && c.audio_cue_prefetch);
         }
     }
+    // `audio_level_cues_extra` extends the cue prefetch with each map's measured first-use
+    // clips. It arrived after every frozen era file, so those stay valid unchanged and an
+    // omitted opt-in reads as an explicit off.
+    #[test]
+    fn audio_level_cues_extra_default_off_and_is_strict() {
+        assert!(!Config::default().audio_level_cues_extra);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().audio_level_cues_extra);
+        for invalid in [serde_json::json!(0), serde_json::json!("on"), serde_json::Value::Null] {
+            assert!(serde_json::from_value::<Config>(
+                serde_json::json!({"audio_level_cues_extra": invalid})).is_err());
+        }
+        let on: Config = serde_json::from_value(
+            serde_json::json!({"audio_level_cues_extra": true})).unwrap();
+        on.validate().unwrap();
+        assert_eq!(serde_json::to_value(on).unwrap()["audio_level_cues_extra"], true);
+        // Every shipped input predates the key and reads it off.
+        for bytes in [&include_bytes!("../../configs/PL-rc1.json")[..],
+                      &include_bytes!("../../configs/PL-rc15-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc16-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc18-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc19-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-release.json")[..]] {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            assert!(!c.audio_level_cues_extra, "a shipped input enables the extra cues");
+        }
+    }
     // Historical console configs must stay usable by their original SELF. Their omitted
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
@@ -4010,7 +4041,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

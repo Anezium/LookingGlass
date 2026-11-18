@@ -226,13 +226,67 @@ fn audio_memory(event: &str, cache_samples: usize) {
 }
 /// `audio_cue_prefetch`: sounds a level's own code can emit that no authored
 /// speaker list or actor animation names. Extend only when a measured window
-/// reads one of these on its first play.
-fn level_cues(name: &str) -> &'static [&'static str] {
-    match name {
+/// reads one of these on its first play. With `audio_level_cues_extra` on, the
+/// map's measured first-use clips are returned after the code cues.
+fn level_cues(name: &str, extra: bool) -> Vec<&'static str> {
+    let cues: &'static [&'static str] = match name {
         // The clock arena's fight gong and the Hatter's malfunction loop.
         "hatter2" => &[
             "sound/ambience/special/clock_gong_2.wav",
             "sound/character/mad_hatter/death_malfunction.wav",
+        ],
+        _ => &[],
+    };
+    if !extra {
+        return cues.to_vec();
+    }
+    [cues, measured_level_cues(name)].concat()
+}
+/// `audio_level_cues_extra`: the measured first-use clips of each map, in measured first-use
+/// order, from the `runtime:` decodes of the RC18/RC19 qualification logs (2026-11-16/18).
+/// Each clip is listed only where the map's measured cue prefetch leaves `PREFETCH_BYTES`
+/// room for it; the jabberwock idle loop (12.3 MB decoded) and the clips that do not fit
+/// stay on the ordinary runtime read-and-decode path.
+fn measured_level_cues(name: &str) -> &'static [&'static str] {
+    match name {
+        // a4-garden3-01 frames 668/809: marble bounce, first quake.
+        "garden3" => &[
+            "sound/ambience/special/marble1.wav",
+            "sound/ambience/special/quake1.wav",
+        ],
+        // a4-gvillage-01 frames 185-625: roll bridge, knockdown, cat appear.
+        "gvillage" => &[
+            "sound/world/mover/roll_2.wav",
+            "sound/character/alice/pain_knockdown.wav",
+            "sound/world/mover/roll_1.wav",
+            "sound/character/cheshire_cat/appear.wav",
+        ],
+        // a4-tower1/2/3-01: the cat's appear and disappear, tower3's fork.
+        "tower1" | "tower2" => &[
+            "sound/character/cheshire_cat/appear.wav",
+            "sound/character/cheshire_cat/disappear.wav",
+        ],
+        "tower3" => &[
+            "sound/character/cheshire_cat/appear.wav",
+            "sound/ambience/special/fork_hit.wav",
+            "sound/character/cheshire_cat/disappear.wav",
+        ],
+        // a4-keep-01 frame 233: the lift's arrival cue.
+        "keep" => &["sound/ambience/special/lift_end.wav"],
+        // Alice's idle knife click, the one fidget the entrance tapes always pay for.
+        "centipede1" | "hatter1" | "hatter2" | "potears1" =>
+            &["sound/character/alice/idle_knife_click1.wav"],
+        // a4-centipede2-01 frame 355 and a4-skool2-01 frames 1093/1117.
+        "centipede2" => &["sound/character/alice/pain4.wav"],
+        "skool2" => &[
+            "sound/character/alice/idle_knife_click1.wav",
+            "sound/character/alice/idle_knife_click2.wav",
+        ],
+        // rw-20261116-wchess1-01 frames 27/30/2928.
+        "wchess1" => &[
+            "sound/ui/quit_c.wav",
+            "sound/world/mover/spike.wav",
+            "sound/character/alice/idle_knife_click1.wav",
         ],
         _ => &[],
     }
@@ -275,7 +329,9 @@ fn placed_actor_cues(assets: &mut Assets, map: &Bsp) -> Vec<String> {
 /// `audio_cue_prefetch`: decode the level's own cue clips on the load path, before
 /// their first request. `limit` bounds the added decoded bytes; a cue that does not
 /// fit is skipped and keeps the ordinary runtime read-and-decode path, so the
-/// playback samples and every parameter are unchanged. Returns (clips, bytes).
+/// playback samples and every parameter are unchanged. `extra` adds the map's
+/// measured first-use clips (`audio_level_cues_extra`) after the code cues, ahead
+/// of the same `limit`. Returns (clips, bytes).
 fn prefetch_level_clips(
     assets: &mut Assets,
     name: &str,
@@ -283,10 +339,11 @@ fn prefetch_level_clips(
     cache: &mut BTreeMap<String, Option<Clip>>,
     cache_samples: &mut usize,
     limit: usize,
+    extra: bool,
 ) -> (usize, usize) {
     let mut candidates: Vec<String> = Vec::new();
     let mut seen = BTreeSet::new();
-    for path in level_cues(name) {
+    for path in level_cues(name, extra) {
         if seen.insert((*path).to_owned()) {
             candidates.push((*path).to_owned());
         }
@@ -1231,6 +1288,7 @@ impl Audio {
         if block::settings().cue_prefetch {
             let (clips, bytes) = prefetch_level_clips(
                 assets, name, map, &mut cache, &mut cache_samples, PREFETCH_BYTES,
+                block::settings().level_cues_extra,
             );
             self.prefetch_clips = clips;
             self.prefetch_bytes = bytes;
@@ -2601,15 +2659,15 @@ mod tests {
 
         // Prefetch: a zero limit keeps the control path; the real limit adds the
         // level's code cues and Hatter animation cues, bounded, without changing
-        // any decoded sample.
+        // any decoded sample. The extra cues stay off, so this is the RC19 set.
         let mut none = BTreeMap::new();
         let mut none_samples = 0usize;
-        ensure!(prefetch_level_clips(&mut assets, "hatter2", &map, &mut none, &mut none_samples, 0)
+        ensure!(prefetch_level_clips(&mut assets, "hatter2", &map, &mut none, &mut none_samples, 0, false)
             == (0, 0), "an empty limit prefetched clips");
         let mut cache = BTreeMap::new();
         let mut cache_samples = 0usize;
         let (clips, bytes) = prefetch_level_clips(
-            &mut assets, "hatter2", &map, &mut cache, &mut cache_samples, PREFETCH_BYTES);
+            &mut assets, "hatter2", &map, &mut cache, &mut cache_samples, PREFETCH_BYTES, false);
         ensure!(clips > 0 && bytes <= PREFETCH_BYTES, "prefetch exceeded its byte budget");
         ensure!(cache_samples * 4 == bytes, "prefetch accounting differs from its byte sum");
         for path in ["sound/ambience/special/clock_gong_2.wav",
@@ -2650,6 +2708,157 @@ mod tests {
         assert_eq!(crate::ant::sounds(false)[5], "sound/character/army_ant/death3.wav");
         assert_eq!(crate::ant::sounds(true)[6], "sound/character/army_ant_corp/grenade.wav");
         assert!(!block::settings().combat_preload, "off by default");
+    }
+    // `audio_level_cues_extra` leaves the RC19 cue list untouched when off and only
+    // appends each map's measured first-use clips when on; every list stays sorted
+    // by first use, duplicate-free and inside the cue budget's per-map headroom.
+    #[test]
+    fn level_cues_extra_keeps_the_rc19_cues_and_appends_the_measured_sets() {
+        const MAPS: &[&str] = &["garden3", "gvillage", "tower1", "tower2", "tower3", "keep",
+                                "centipede1", "centipede2", "hatter1", "hatter2", "potears1",
+                                "skool2", "wchess1"];
+        // Off: the RC19 cue list, byte for byte — only hatter2 names code cues.
+        for map in MAPS {
+            let off = level_cues(map, false);
+            let rc19 = match *map {
+                "hatter2" => vec![
+                    "sound/ambience/special/clock_gong_2.wav",
+                    "sound/character/mad_hatter/death_malfunction.wav",
+                ],
+                _ => Vec::new(),
+            };
+            assert_eq!(off, rc19, "{map} changed its RC19 cue list with the key off");
+        }
+        assert_eq!(level_cues("hatter2", false), [
+            "sound/ambience/special/clock_gong_2.wav",
+            "sound/character/mad_hatter/death_malfunction.wav",
+        ]);
+        assert!(level_cues("centipede1", true) != level_cues("centipede1", false),
+            "centipede1 gained no clip with the key on");
+        for map in MAPS {
+            let cues = level_cues(map, true);
+            assert!(!cues.is_empty(), "{map} lost its measured clips");
+            for path in &cues {
+                assert!(path.starts_with("sound/") && path.ends_with(".wav")
+                    && path.chars().all(|c| !c.is_ascii_uppercase()), "{path}");
+            }
+            let mut sorted = cues.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(cues.len(), sorted.len(), "{map} lists a clip twice");
+            // The measured clips come after the code cues, never before them.
+            assert_eq!(&cues[..level_cues(map, false).len()], &level_cues(map, false)[..]);
+        }
+        assert_eq!(level_cues("hatter2", true), [
+            "sound/ambience/special/clock_gong_2.wav",
+            "sound/character/mad_hatter/death_malfunction.wav",
+            "sound/character/alice/idle_knife_click1.wav",
+        ]);
+        assert_eq!(level_cues("garden3", true), [
+            "sound/ambience/special/marble1.wav",
+            "sound/ambience/special/quake1.wav",
+        ]);
+        assert_eq!(level_cues("wchess1", true), [
+            "sound/ui/quit_c.wav",
+            "sound/world/mover/spike.wav",
+            "sound/character/alice/idle_knife_click1.wav",
+        ]);
+        assert!(level_cues("hedge3", true).is_empty() && level_cues("jlair2", true).is_empty()
+            && level_cues("funhouse", true).is_empty(),
+            "a map without budget headroom or the jabberwock loop gained clips");
+        assert!(!block::settings().level_cues_extra, "off by default");
+    }
+    /// The measured clips actually fit each map's remaining cue budget, prefetched
+    /// samples are byte-identical to a fresh decode, and no prefetched clip is
+    /// displaced. The control run reproduces each map's device-measured RC19 cue
+    /// prefetch byte for byte before the extras are added on top. Run with
+    /// LOOKING_GLASS_TEST_DATA; it decodes the real maps.
+    #[test]
+    #[ignore = "requires LOOKING_GLASS_TEST_DATA"]
+    fn level_cues_extra_prefetch_stays_within_each_maps_budget() -> Result<()> {
+        let root = PathBuf::from(std::env::var("LOOKING_GLASS_TEST_DATA")?);
+        let mut assets = Assets::open(&root)?;
+        // RC19 device cue-prefetch bytes per map ([lg/audio-prefetch], rc18/allmaps logs).
+        const DEVICE_PREFETCH_BYTES: &[(&str, usize)] = &[
+            ("garden3", 1586420), ("gvillage", 4071236), ("tower1", 1897560),
+            ("tower2", 1500120), ("tower3", 374788), ("keep", 6110604),
+            ("centipede1", 6275996), ("centipede2", 5627784), ("hatter1", 6286548),
+            ("hatter2", 6265468), ("potears1", 6273740), ("skool2", 6147624),
+            ("wchess1", 6070940),
+        ];
+        // The authored preload of `load_inner`, so the cue prefetch starts from the
+        // same resident clips as on the load path and skips them without byte cost.
+        let preloaded = |assets: &mut Assets, name: &str, map: &Bsp| -> Result<(BTreeMap<String, Option<Clip>>, usize)> {
+            let spec = level_spec(assets, name, map)?;
+            let mut cache: BTreeMap<String, Option<Clip>> = BTreeMap::new();
+            let mut cache_samples = 0usize;
+            let mut alice_sounds = events::Model::load(assets, "models/alice.tik")?;
+            alice_sounds.retain(&crate::character::CLIPS.map(crate::character::sound_alias));
+            let combat = if block::settings().combat_preload { combat_preload(map) } else { Vec::new() };
+            for path in PICKUP_EFFECTS.iter().copied()
+                .chain(spec.speakers.iter().map(|s| s.path.as_str()))
+                .chain(EFFECTS)
+                .chain(alice_sounds.paths())
+                .chain(map.entities.iter().filter_map(|e| e.get("sound_move").map(String::as_str)))
+                .chain(combat.iter().copied())
+            {
+                if cache.contains_key(path) {
+                    continue;
+                }
+                let result = assets.read(path).and_then(decode_clip).and_then(|clip| {
+                    ensure!(cache_samples + clip.samples.len() <= CACHE_SAMPLES,
+                        "Level audio cache limit reached");
+                    cache_samples += clip.samples.len();
+                    Ok(clip)
+                });
+                cache.insert(path.into(), result.ok());
+            }
+            Ok((cache, cache_samples))
+        };
+        for (map, clips) in [
+            ("garden3", measured_level_cues("garden3")),
+            ("gvillage", measured_level_cues("gvillage")),
+            ("tower1", measured_level_cues("tower1")),
+            ("tower2", measured_level_cues("tower2")),
+            ("tower3", measured_level_cues("tower3")),
+            ("keep", measured_level_cues("keep")),
+            ("centipede1", measured_level_cues("centipede1")),
+            ("centipede2", measured_level_cues("centipede2")),
+            ("hatter1", measured_level_cues("hatter1")),
+            ("hatter2", measured_level_cues("hatter2")),
+            ("potears1", measured_level_cues("potears1")),
+            ("skool2", measured_level_cues("skool2")),
+            ("wchess1", measured_level_cues("wchess1")),
+        ] {
+            let bsp = Bsp::parse(&assets.read(&format!("maps/{map}.bsp"))?)?;
+            let (mut off, mut off_samples) = preloaded(&mut assets, map, &bsp)?;
+            let (off_clips, off_bytes) = prefetch_level_clips(
+                &mut assets, map, &bsp, &mut off, &mut off_samples, PREFETCH_BYTES, false);
+            ensure!(off_bytes == DEVICE_PREFETCH_BYTES.iter().find(|(m, _)| *m == map)
+                    .map(|(_, bytes)| *bytes).unwrap_or_default(),
+                "{map}: control prefetch {off_bytes} differs from the device measurement");
+            let (mut on, mut on_samples) = preloaded(&mut assets, map, &bsp)?;
+            let (on_clips, on_bytes) = prefetch_level_clips(
+                &mut assets, map, &bsp, &mut on, &mut on_samples, PREFETCH_BYTES, true);
+            ensure!(on_bytes <= PREFETCH_BYTES, "{map}: prefetch exceeded the cue budget");
+            ensure!(on_clips == off_clips + clips.len() && on_bytes > off_bytes,
+                "{map}: the measured clips were not all prefetched \
+                 (on {on_clips}/{on_bytes} vs off {off_clips}/{off_bytes} + {} clips)",
+                clips.len());
+            let mut measured_bytes = 0usize;
+            for path in clips {
+                let resident = on.get(*path).and_then(Clone::clone).expect(*path);
+                ensure!(off.get(*path).is_none(), "{map}: {path} was prefetched with the key off");
+                let decoded = decode_clip(assets.read(path)?)?;
+                ensure!(resident.samples[..] == decoded.samples[..]
+                    && resident.rate == decoded.rate,
+                    "{map}: prefetched samples differ from a fresh decode: {path}");
+                measured_bytes += decoded.samples.len() * std::mem::size_of::<f32>();
+            }
+            ensure!(on_bytes == off_bytes + measured_bytes,
+                "{map}: key-on prefetch displaced cue clips ({on_bytes} vs {off_bytes}+{measured_bytes})");
+        }
+        Ok(())
     }
     #[test]
     fn speaker_speech_is_never_ranked_as_ambience() {
