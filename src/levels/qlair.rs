@@ -328,6 +328,12 @@ impl Queen {
         )]
     }
 }
+impl Queen {
+    fn acknowledge_checkpoint(saved: &mut Saved) {
+        saved.checkpoint_saved = true;
+    }
+}
+
 impl LevelController for Queen {
     fn id(&self) -> &'static str {
         "qlair"
@@ -549,7 +555,12 @@ impl LevelController for Queen {
         self.saved.checkpoint && !self.saved.checkpoint_saved
     }
     fn checkpoint_written(&mut self) {
-        self.saved.checkpoint_saved = true;
+        Self::acknowledge_checkpoint(&mut self.saved);
+    }
+    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
+        let mut saved = self.saved.clone();
+        Self::acknowledge_checkpoint(&mut saved);
+        state::save(&saved)
     }
     fn ending_ready(&self) -> bool {
         self.saved.phase == Phase::Done

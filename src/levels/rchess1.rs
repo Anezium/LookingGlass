@@ -234,6 +234,12 @@ impl Encounter {
         self.data.points[&format!("get_me{}", self.saved.essence + 1)].translation + Vec3::Z * 16.
     }
 }
+impl Encounter {
+    fn acknowledge_checkpoint(saved: &mut Saved) {
+        saved.checkpoint = false;
+    }
+}
+
 impl LevelController for Encounter {
     fn id(&self) -> &'static str {
         "rchess1"
@@ -473,7 +479,12 @@ impl LevelController for Encounter {
         self.saved.checkpoint
     }
     fn checkpoint_written(&mut self) {
-        self.saved.checkpoint = false;
+        Self::acknowledge_checkpoint(&mut self.saved);
+    }
+    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
+        let mut saved = self.saved.clone();
+        Self::acknowledge_checkpoint(&mut saved);
+        state::save(&saved)
     }
     fn music_mood(&self) -> Option<&'static str> {
         Some(if self.saved.phase == Phase::Fight {

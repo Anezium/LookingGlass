@@ -173,6 +173,8 @@ use std::path::PathBuf;
 pub struct Options {
     pub difficulty: powerups::Difficulty,
     pub save_dir: PathBuf,
+    #[cfg(not(target_os = "vita"))]
+    pub save_dir_explicit: bool,
     pub load: Option<save::Slot>,
     pub new_game: bool,
     pub data: PathBuf,
@@ -312,6 +314,8 @@ fn run() -> Result<()> {
     let mut o = Options {
         difficulty: Default::default(),
         save_dir: default_save_dir(),
+        #[cfg(not(target_os = "vita"))]
+        save_dir_explicit: false,
         load: None,
         new_game: false,
         data: default_data_dir(),
@@ -355,7 +359,9 @@ fn run() -> Result<()> {
                 )?
             }
             "--save-dir" => {
-                o.save_dir = args.next().context("--save-dir requires a folder")?.into()
+                o.save_dir = args.next().context("--save-dir requires a folder")?.into();
+                #[cfg(not(target_os = "vita"))]
+                { o.save_dir_explicit = true; }
             }
             "--load" => {
                 o.load = Some(save::Slot::parse(

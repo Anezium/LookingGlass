@@ -765,6 +765,22 @@ fn starting_stats(options: &Options, map: &str, entry: Option<&str>) -> Stats {
 
 mod start;
 
+fn start_checkpoint_writer(
+    enabled: bool,
+    start: impl FnOnce() -> std::io::Result<save::CheckpointWriter>,
+) -> Option<save::CheckpointWriter> {
+    if !enabled {
+        return None;
+    }
+    match start() {
+        Ok(writer) => Some(writer),
+        Err(error) => {
+            eprintln!("Could not start the checkpoint writer; saving on the frame: {error}");
+            None
+        }
+    }
+}
+
 pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os="vita")]
     let mut r13_survey = crate::r13_survey::Survey::open(&mut options)?;
@@ -828,23 +844,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(feature="vita_renderer")]
     anyhow::ensure!(!(replay.is_some() && route_session.is_some()), "replay and route diagnostics are exclusive");
     let replay_resume = replay.as_mut().and_then(|r| r.take_resume());
-    // Host-only diagnostic (the LOOKING_GLASS_REPLAY_* family): replay the tape but let the
-    // store write for real, into the run's own --save-dir. The Vita never reads this flag,
-    // so every console qualification still discards writes exactly as before.
-    #[cfg(not(target_os = "vita"))]
-    let replay_writes = std::env::var_os("LOOKING_GLASS_REPLAY_WRITES").is_some();
-    #[cfg(target_os = "vita")]
-    let replay_writes = false;
-    let store = if replay.as_ref().is_some_and(|r| r.replaying()) && !replay_writes { store.discarding_writes() } else { store };
-    // `finale_checkpoint_background`: the boss-fight checkpoint's serialization and file
-    // writes move to one low-priority writer thread; every envelope input (the game
-    // snapshot, the preview and the two envelope clocks) is still read on the frame that
-    // requests the checkpoint. Off (the default, and RC19) keeps every write on the frame.
+    let store = if replay.as_ref().is_some_and(|r| r.replaying()) { store.for_replay(&options) } else { store };
     #[cfg(feature = "vita_renderer")]
     let background_checkpoint = crate::render::vita_renderer::config().finale_checkpoint_background;
     #[cfg(not(feature = "vita_renderer"))]
     let background_checkpoint = false;
-    let store = if background_checkpoint { store.with_background() } else { store };
+    let checkpoint_writer = start_checkpoint_writer(background_checkpoint, || {
+        save::CheckpointWriter::start(&store)
+    });
+    let mut pending_checkpoint = None;
     let mut replay_end: Option<&'static str> = None;
     eprintln!("[lg/startup] save store ready elapsed_ms={:.3} store_construct_ms={:.3} viewer_elapsed_ms={:.3}",save_store_start.elapsed().as_secs_f64()*1000.,store_start.elapsed().as_secs_f64()*1000.,startup.elapsed().as_secs_f64()*1000.);
     #[cfg(feature="vita_renderer")]
@@ -1298,11 +1306,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os = "vita")]
     let mut bench_camera: Option<(Vec3, Vec3, bool)> = None;
     macro_rules! level_snapshot {
-        () => {
+        () => { level_snapshot!(interactions.snapshot()) };
+        ($interactions:expr) => {
             Level {
                 map: maps[current].clone(),
                 entry: entry_spawn.clone(),
-                interactions: interactions.snapshot(),
+                interactions: $interactions,
                 npcs: npcs.snapshot(),
                 story: story.snapshot(),
                 hints: hints.snapshot(),
@@ -1312,8 +1321,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         };
     }
     macro_rules! game_snapshot {
-        () => {{
-            let level = level_snapshot!();
+        () => { game_snapshot!(interactions.snapshot()) };
+        ($interactions:expr) => {{
+            let level = level_snapshot!($interactions);
             let key = level.key();
             let mut saved_campaign = campaign.clone();
             saved_campaign.levels.insert(key.clone(), level);
@@ -1335,6 +1345,30 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 character: alice.snapshot(),
             }
         }};
+    }
+    macro_rules! finish_checkpoint {
+        ($wait:expr) => {
+            if let Some(result) = save::PendingCheckpoint::finish(
+                &mut pending_checkpoint, $wait, &mut interactions.levels, &mut retry,
+            ) {
+                match result {
+                    Ok(()) => hud.announce("Checkpoint saved"),
+                    Err(error) => {
+                        let message = format!("Checkpoint save failed: {error:#}");
+                        eprintln!("{message}");
+                        hud.announce(message);
+                    }
+                }
+            }
+        };
+    }
+    macro_rules! submit_checkpoint {
+        ($writer:expr, $game:expr, $preview:expr) => {
+            match $writer.submit($game, $preview, game_snapshot!(interactions.snapshot_for_checkpoint(true))) {
+                Ok(job) => pending_checkpoint = Some(job),
+                Err(error) => hud.announce(format!("Checkpoint save failed: {error:#}")),
+            }
+        };
     }
     if resume.is_none()
         && saves_enabled
@@ -1484,6 +1518,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }};
     }
     loop {
+        finish_checkpoint!(false);
         #[cfg(feature = "native_timing")]
         { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1500,8 +1535,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(route)=&mut route_session {
             let village=interactions.village.as_ref().context("route requires village cinema")?;
             route.begin_frame(crate::route_replay::Status{map:maps[current].clone(),entry_done:village.cinema.state.done.contains("entry"),knife_done:village.cinema.state.done.contains("knife_cat"),blade_copies:stats.copies(0) as u32,alive:stats.alive(),flying,feet:player.feet.to_array()})?;
-            if route.entry_checkpoint_due(){store.write(save::Slot::parse("slot1")?,&game_snapshot!())?;println!("[lg/route] recorded entry checkpoint");}
+            if route.entry_checkpoint_due() {
+                finish_checkpoint!(true);
+                store.write(save::Slot::parse("slot1")?, &game_snapshot!())?;
+                println!("[lg/route] recorded entry checkpoint");
+            }
             if route.should_finish() {
+                finish_checkpoint!(true);
                 route.finish(&store,&game_snapshot!(),yaw,pitch)?;
                 crate::frame_profile::report(&maps[current])?;
                 break;
@@ -1625,6 +1665,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             if let Ok(path) = std::env::var("LOOKING_GLASS_TRANSITION_SNAPSHOT") {
                 std::fs::write(path, serde_json::to_vec(&game_snapshot!())?)?;
+                finish_checkpoint!(true);
                 store.write(Slot::Quick, &game_snapshot!())?;
             }
         }
@@ -1692,6 +1733,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             drop(census_block);
             next_frame().await;
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
+            finish_checkpoint!(true);
             let action = if host_transition == "native-load" { crate::menu::Action::Load(Slot::Auto) }
                 else if host_transition.starts_with("new-game") { crate::menu::Action::NewGame(options.difficulty) } else {
                 escape_menu.run(&mut preferences, &mut audio, &store, pos, yaw, &mut input).await
@@ -1861,6 +1903,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         } else { false };
         let mut new_campaign_memory = None;
         if let Some(difficulty) = new_game_requested.take() {
+            finish_checkpoint!(true);
             // The opening movie belongs to this operation too. Keep its bounded
             // decode/upload allocations inside the same before/peak/after bracket.
             new_campaign_memory = Some(crate::transition_memory::Transition::begin(
@@ -2131,6 +2174,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             if saves_enabled {
+                finish_checkpoint!(true);
                 let result = match store.read(slot) {
                     Ok(loaded) => {
                         let backup = loaded.backup;
@@ -2434,6 +2478,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && saves_enabled && !stats.alive() && (recover || restart || console_restart) {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
+            finish_checkpoint!(true);
             let result = match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref())) {
                 Ok(game) => restore_transition!(game, "death-retry", false, retry),
                 Err(error) => Err(error),
@@ -2588,6 +2633,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             {
                 #[cfg(feature = "vita_renderer")]
                 { load_probe = Some(crate::restore_diagnostic::Probe::new("chapter-or-console")); }
+                finish_checkpoint!(true);
                 #[cfg(feature = "native_timing")]
                 timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
                 let checkpoint = game_snapshot!();
@@ -3210,26 +3256,35 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             pos = player.eye();
         }
-        if story_active && saves_writable && interactions.levels.iter().any(|s| s.ctl.checkpoint_requested()) {
+        if story_active && saves_writable && pending_checkpoint.is_none()
+            && interactions.levels.iter().any(|s| s.ctl.checkpoint_requested())
+        {
             if throttle_normal {
                 // Keep the original checkpoint snapshot; only its thumbnail
                 // capture and disk write wait for the clean render boundary.
                 finale_checkpoint_requested = Some(game_snapshot!());
+            } else if let Some(writer) = &checkpoint_writer {
+                submit_checkpoint!(writer, game_snapshot!(), None);
             } else {
-            match store.write_finale_checkpoint(&game_snapshot!()) {
-                Ok(()) => {
-                    for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
-                    retry.remember(game_snapshot!());
-                    hud.announce("Checkpoint saved");
+                match store.write_finale_checkpoint(&game_snapshot!()) {
+                    Ok(()) => {
+                        for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
+                        retry.remember(game_snapshot!());
+                        hud.announce("Checkpoint saved");
+                    }
+                    Err(e) => hud.announce(format!("Checkpoint save failed: {e:#}")),
                 }
-                Err(e) => { hud.announce(&format!("Checkpoint save failed: {e:#}")); }
-            }
             }
         }
         if story_active && interactions.levels.iter().any(|s| s.ctl.ending_ready()) && !post_game {
+            finish_checkpoint!(true);
             post_game = true;
             campaign.completed.insert(save::visit_key(&maps[current], entry_spawn.as_deref()));
-            if saves_writable { if let Err(e) = store.mark_complete() { eprintln!("Completion marker failed: {e:#}"); } }
+            if saves_writable && (!background_checkpoint
+                || !interactions.levels.iter().any(|s| s.ctl.checkpoint_requested()))
+            {
+                if let Err(e) = store.mark_complete() { eprintln!("Completion marker failed: {e:#}"); }
+            }
             mouse_look.release();
             input.suppress();
             #[cfg(feature = "native_timing")]
@@ -3266,6 +3321,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             pending_transition = Some((crate::transition_memory::host_destination(), None));
         }
         if let Some(exit) = pending_transition {
+            finish_checkpoint!(true);
             options.difficulty = stats.difficulty;
             let (name, target_spawn) = exit.clone();
             let leaving = level_snapshot!();
@@ -4814,12 +4870,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         drop(hud_timer);
         if let Some(slot) = pending_menu_save.take() {
+            finish_checkpoint!(true);
             escape_menu.message = match store.write_with_preview(slot, &game_snapshot!(), save_frame.preview().as_ref()) {
                 Ok(()) => { retry.remember(game_snapshot!()); played = true; format!("Game saved in {}", slot.title()) }
                 Err(e) => format!("Save failed: {e:#}"),
             };
         }
         if let Some(difficulty) = pending_menu_newgame.take() {
+            finish_checkpoint!(true);
             let saved = if saves_writable && stats.alive() && !post_game {
                 store.write_with_preview(Slot::Auto, &game_snapshot!(), save_frame.preview().as_ref())
             } else { Ok(()) };
@@ -4834,18 +4892,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         if let Some(game) = finale_checkpoint_requested {
-            match store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()) {
-                Ok(()) => {
-                    for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
-                    retry.remember(game_snapshot!()); hud.announce("Checkpoint saved");
+            if let Some(writer) = &checkpoint_writer {
+                submit_checkpoint!(writer, game, save_frame.preview());
+            } else {
+                match store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()) {
+                    Ok(()) => {
+                        for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
+                        retry.remember(game_snapshot!()); hud.announce("Checkpoint saved");
+                    }
+                    Err(e) => hud.announce(format!("Checkpoint save failed: {e:#}")),
                 }
-                Err(e) => hud.announce(&format!("Checkpoint save failed: {e:#}")),
             }
-        }
-        // A background checkpoint that failed after its frame is reported here, on the
-        // next frame's tail; a passing write never appears.
-        for failure in store.take_background_failures() {
-            hud.announce(&format!("Checkpoint save failed: {failure}"));
         }
         if save_requested || autosave_requested {
             if !saves_writable {
@@ -4857,6 +4914,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     hud.announce("Retry or load a game before saving");
                 }
             } else {
+                finish_checkpoint!(true);
                 let slot = if save_requested {
                     Slot::Quick
                 } else {
@@ -5030,6 +5088,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
     }
+    finish_checkpoint!(true);
     crate::spike_log::end_play();
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
     // Host-only, sim_maps_probe-only: the allocator ledger's continuous peak since the
@@ -5048,12 +5107,6 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let saves_writable = saves_enabled;
     #[cfg(feature = "native_timing")]
     if let Err(error) = timing.export_after_viewer() { eprintln!("Native timing export failed: {error:#}"); }
-    // The exit path flushes a pending checkpoint write before the final autosave and the
-    // quit; the store's drop flushes again as the backstop.
-    store.flush_background();
-    for failure in store.take_background_failures() {
-        eprintln!("Checkpoint save failed: {failure}");
-    }
     if saves_writable && played && stats.alive() && options.frames.is_none() && !post_game {
         if let Err(e) =
             store.write_with_preview(Slot::Auto, &game_snapshot!(), save_frame.preview().as_ref())
@@ -5416,6 +5469,19 @@ fn inventory_cycle(opened: bool, previous: bool, next: bool) -> (bool, bool) {
 #[cfg(test)]
 mod reference_input_tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_writer_disabled_or_spawn_failure_selects_the_foreground_path() {
+        assert!(start_checkpoint_writer(false, || panic!("the default path must not spawn")).is_none());
+        let attempted = std::cell::Cell::new(false);
+        let writer = start_checkpoint_writer(true, || {
+            attempted.set(true);
+            Err(std::io::Error::other("injected spawn failure"))
+        });
+        assert!(attempted.get());
+        assert!(writer.is_none());
+    }
+
     #[test]
     fn inventory_down_opens_without_cycling_then_navigates() {
         let mut inventory = false;

@@ -213,6 +213,10 @@ pub trait LevelController: Any {
         false
     }
     fn checkpoint_written(&mut self) {}
+    /// The retry snapshot produced by a successful checkpoint, without acknowledging it live.
+    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
+        self.snapshot()
+    }
     /// Finale completion is separate from a map exit.
     fn ending_ready(&self) -> bool {
         false

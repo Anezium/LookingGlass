@@ -9,11 +9,12 @@ use macroquad::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex, OnceLock},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -226,9 +227,6 @@ pub struct Store {
     fingerprint: String,
     /// A replay builds every save as usual but never writes it: the player's saves stay as they were.
     discard_writes: bool,
-    /// The low-priority writer `finale_checkpoint_background` installs. `None` (the default,
-    /// and every config without the key) keeps every write on the calling thread, exactly RC19.
-    writer: Option<Arc<Background>>,
 }
 impl Store {
     pub fn new(directory: PathBuf, fingerprint: String) -> Self {
@@ -236,28 +234,24 @@ impl Store {
             directory,
             fingerprint,
             discard_writes: false,
-            writer: None,
         }
     }
     pub fn discarding_writes(mut self) -> Self {
         self.discard_writes = true;
         self
     }
-    /// Install the background writer. The caller decides from `finale_checkpoint_background`;
-    /// the store itself never reads the configuration.
-    pub fn with_background(mut self) -> Self {
-        self.writer = Some(Arc::new(Background::default()));
-        self
-    }
-    /// A job's store: same directory, fingerprint and discard policy, never carrying the
-    /// writer, so the worker thread cannot re-enter the queue it drains.
-    fn detached(&self, directory: PathBuf) -> Self {
-        Self {
-            directory,
-            fingerprint: self.fingerprint.clone(),
-            discard_writes: self.discard_writes,
-            writer: None,
+    pub fn for_replay(self, options: &crate::Options) -> Self {
+        #[cfg(not(target_os = "vita"))]
+        if let Some(directory) = isolated_replay_directory(
+            std::env::var_os("LOOKING_GLASS_REPLAY_WRITES").as_deref(),
+            options.save_dir_explicit.then_some(self.directory.as_path()),
+            &crate::default_save_dir(),
+        ) {
+            return Self { directory, ..self };
         }
+        #[cfg(target_os = "vita")]
+        let _ = options;
+        self.discarding_writes()
     }
     fn path(&self, slot: Slot, backup: bool) -> PathBuf {
         self.directory.join(format!(
@@ -267,7 +261,6 @@ impl Store {
         ))
     }
     pub fn exists(&self, slot: Slot) -> bool {
-        self.wait_for_destination(slot);
         self.path(slot, false).is_file() || self.path(slot, true).is_file()
     }
     pub fn write(&self, slot: Slot, game: &Game) -> Result<()> {
@@ -279,9 +272,6 @@ impl Store {
         game: &Game,
         preview: Option<&crate::save_preview::Preview>,
     ) -> Result<()> {
-        // A pending background job for this file goes first: a later save request for
-        // the same store waits for it, so the writes and their backup rotation stay in order.
-        self.wait_for_destination(slot);
         self.write_with_preview_saved_at(slot, game, preview, SavedAt::Now)
     }
     fn write_with_preview_saved_at(
@@ -472,12 +462,9 @@ impl Store {
     // The simulation bench must use the exact reference save, never its backup.
     #[cfg(any(target_os = "vita", test))]
     pub fn read_bench_auto(&self) -> Result<Loaded> {
-        self.wait_for_destination(Slot::Auto);
         read_limited(&self.path(Slot::Auto, false)).and_then(|b| self.decode(&b))
     }
     pub fn read(&self, slot: Slot) -> Result<Loaded> {
-        // The file a just-requested checkpoint will write is the file this load must see.
-        self.wait_for_destination(slot);
         match read_limited(&self.path(slot, false)).and_then(|b| self.decode(&b)) {
             Ok(s) => Ok(s),
             Err(primary) => {
@@ -492,8 +479,6 @@ impl Store {
         }
     }
     pub fn latest(&self) -> Option<(Slot, Loaded)> {
-        // The newest save this menu can offer includes one still on the writer.
-        self.wait_all();
         let latest = Slot::ALL
             .into_iter()
             .filter_map(|slot| self.read(slot).ok().map(|s| (slot, s)))
@@ -513,92 +498,25 @@ impl Store {
         latest
     }
     fn finale_store(&self) -> Self {
-        let mut store = self.detached(self.finale_directory());
-        store.writer = self.writer.clone();
-        store
-    }
-    fn finale_directory(&self) -> PathBuf {
-        self.directory.join("finale-checkpoint")
+        Self {
+            directory: self.directory.join("finale-checkpoint"),
+            fingerprint: self.fingerprint.clone(),
+            discard_writes: self.discard_writes,
+        }
     }
     pub fn write_finale_checkpoint(&self, game: &Game) -> Result<()> {
         self.write_finale_checkpoint_with_preview(game, None)
     }
-    pub fn write_finale_checkpoint_with_preview(&self, game: &Game, preview: Option<&crate::save_preview::Preview>) -> Result<()> {
-        if self.writer.is_some() {
-            self.submit_finale_checkpoint(game, preview)
-        } else {
-            // RC19's exact path: two full writes on the calling thread.
-            self.finale_store().write_with_preview(Slot::Auto, game, preview)?;
-            self.write_with_preview(Slot::Auto, game, preview)
-        }
+    pub fn write_finale_checkpoint_with_preview(
+        &self,
+        game: &Game,
+        preview: Option<&crate::save_preview::Preview>,
+    ) -> Result<()> {
+        self.write_checkpoint_pair(|store, _| store.write_with_preview(Slot::Auto, game, preview))
     }
-    /// The background path: read every envelope input here, at the frame boundary the two
-    /// writes run today (the game snapshot and preview arrive as arguments; the two wall
-    /// clocks below mirror the two reads the writes make today), then let one low-priority
-    /// worker serialize and write. Today's two envelopes are not byte-identical (their
-    /// `saved_at` reads straddle a whole serialization), so each is built as today, off
-    /// the frame, with its own captured timestamp.
-    fn submit_finale_checkpoint(&self, game: &Game, preview: Option<&crate::save_preview::Preview>) -> Result<()> {
-        let at_finale = saved_at_now()?;
-        let at_auto = saved_at_now()?;
-        let stores = [
-            self.detached(self.finale_directory()),
-            self.detached(self.directory.clone()),
-        ];
-        let writer = self.writer.as_ref().expect("the caller checked for a writer");
-        for (store, at) in stores.into_iter().zip([at_finale, at_auto]) {
-            let job = Job {
-                store,
-                slot: Slot::Auto,
-                game: game.clone(),
-                preview: preview.cloned(),
-                saved_at: at,
-            };
-            match writer.submit(job) {
-                // A worker could not be spawned or has closed: never lose the save. The
-                // bytes are the same; only the work stays on the frame, as today's write.
-                Err(job) => job.store.write_with_preview_saved_at(
-                    job.slot,
-                    &job.game,
-                    job.preview.as_ref(),
-                    SavedAt::At(job.saved_at),
-                )?,
-                Ok(()) => (),
-            }
-        }
-        Ok(())
-    }
-    /// Wait until no queued or running job writes this store's `slot`. A no-op without
-    /// the background writer.
-    fn wait_for_destination(&self, slot: Slot) {
-        let Some(writer) = &self.writer else { return };
-        let mut state = writer.inner.state.lock().unwrap();
-        while state.queue.iter().any(|job| job.destination() == (&self.directory, slot))
-            || state
-                .running
-                .as_ref()
-                .is_some_and(|(directory, running)| *running == slot && directory == &self.directory)
-        {
-            state = writer.inner.advanced.wait(state).unwrap();
-        }
-    }
-    /// Wait until the writer is idle: every pending job has run. The game's exit path
-    /// calls this before it saves and quits.
-    pub fn flush_background(&self) {
-        self.wait_all();
-    }
-    fn wait_all(&self) {
-        let Some(writer) = &self.writer else { return };
-        let mut state = writer.inner.state.lock().unwrap();
-        while !state.queue.is_empty() || state.running.is_some() {
-            state = writer.inner.advanced.wait(state).unwrap();
-        }
-    }
-    /// Background jobs that failed after their frame; the caller reports each. Empty
-    /// (and cheap) whenever no writer is installed.
-    pub fn take_background_failures(&self) -> Vec<String> {
-        let Some(writer) = &self.writer else { return Vec::new() };
-        std::mem::take(&mut *writer.inner.failures.lock().unwrap())
+    fn write_checkpoint_pair(&self, mut write: impl FnMut(&Self, usize) -> Result<()>) -> Result<()> {
+        write(&self.finale_store(), 0)?;
+        write(self, 1)
     }
     pub fn mark_complete(&self) -> Result<()> {
         if self.discard_writes {
@@ -612,6 +530,33 @@ impl Store {
             &serde_json::to_vec(&at)?,
         )
     }
+}
+
+/// Reserve a fresh directory exclusively for this diagnostic run.
+#[cfg(not(target_os = "vita"))]
+fn isolated_replay_directory(
+    enabled: Option<&std::ffi::OsStr>,
+    explicit: Option<&Path>,
+    player: &Path,
+) -> Option<PathBuf> {
+    fn canonical_destination(path: &Path) -> Option<PathBuf> {
+        let parent = path.parent()?;
+        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+        let parent = parent.canonicalize().ok()?;
+        Some(parent.join(path.file_name()?))
+    }
+    if enabled != Some(std::ffi::OsStr::new("1")) {
+        return None;
+    }
+    let directory = canonical_destination(explicit?)?;
+    if canonical_destination(player).is_some_and(|player| {
+        player.parent() == directory.parent()
+            && player.file_name().unwrap().eq_ignore_ascii_case(directory.file_name().unwrap())
+    }) {
+        return None;
+    }
+    fs::create_dir(&directory).ok()?;
+    Some(directory)
 }
 
 /// Where the envelope's `saved_at` comes from: the wall clock read where the write runs
@@ -645,173 +590,122 @@ thread_local! {
     static TEST_SAVED_AT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
-/// One queued background write. Everything the envelope needs is already in here.
-struct Job {
-    store: Store,
-    slot: Slot,
-    game: Game,
+/// The frame captures both envelope timestamps before handing the checkpoint to the writer.
+struct CheckpointJob {
+    game: Box<Game>,
     preview: Option<crate::save_preview::Preview>,
-    saved_at: u64,
+    saved_at: [u64; 2],
+    completed: SyncSender<Result<()>>,
 }
-impl Job {
-    /// The file this job writes; the ordering key for superseding and waiting.
-    fn destination(&self) -> (&Path, Slot) {
-        (&self.store.directory, self.slot)
+
+pub struct PendingCheckpoint {
+    completed: Receiver<Result<()>>,
+    retry_snapshot: Box<Game>,
+}
+impl PendingCheckpoint {
+    /// Apply the same controller and retry updates the foreground path makes on success.
+    /// A pending or failed job leaves both the live request and the old retry point intact.
+    pub fn finish(
+        pending: &mut Option<Self>,
+        wait: bool,
+        levels: &mut [crate::level::Slot],
+        retry: &mut crate::recovery::RetryPoint,
+    ) -> Option<Result<()>> {
+        let job = pending.as_ref()?;
+        let result = if wait {
+            job.completed.recv().context("The save writer stopped")
+        } else {
+            match job.completed.try_recv() {
+                Err(TryRecvError::Empty) => return None,
+                result => result.context("The save writer stopped"),
+            }
+        }
+        .and_then(|result| result);
+        let job = pending.take().unwrap();
+        if result.is_ok() {
+            for slot in levels {
+                slot.ctl.checkpoint_written();
+            }
+            retry.remember(*job.retry_snapshot);
+        }
+        Some(result)
     }
 }
 
-/// One low-priority writer thread for the whole game, the audio producer's pattern
-/// (`native_timing/audio_producer.rs`, `audio/block.rs`): jobs are submitted at a frame
-/// boundary and executed in order off it. Only `finale_checkpoint_background` installs it;
-/// with the key off no thread exists.
-struct Background {
-    inner: Arc<Inner>,
-    thread: OnceLock<Option<std::thread::JoinHandle<()>>>,
+/// One writer and one permit. A second submission waits for the first pair to finish,
+/// and each submitter keeps its own result even if it waits to collect it.
+pub struct CheckpointWriter {
+    submit: Option<SyncSender<CheckpointJob>>,
+    idle: Receiver<()>,
+    thread: Option<JoinHandle<()>>,
 }
-impl Default for Background {
-    fn default() -> Self {
-        Self {
-            inner: Arc::new(Inner {
-                state: Mutex::new(State::default()),
-                wake: Condvar::new(),
-                advanced: Condvar::new(),
-                failures: Mutex::new(Vec::new()),
-                #[cfg(test)]
-                hold: std::sync::atomic::AtomicBool::new(false),
-            }),
-            thread: OnceLock::new(),
-        }
-    }
-}
-#[derive(Default)]
-struct State {
-    queue: VecDeque<Job>,
-    running: Option<(PathBuf, Slot)>,
-    closed: bool,
-    executed: u64,
-}
-struct Inner {
-    state: Mutex<State>,
-    /// The worker waits here for a job or for close.
-    wake: Condvar,
-    /// Submitters and readers wait here until the running job finishes.
-    advanced: Condvar,
-    /// Jobs that failed after their frame, reported by the caller's frame loop.
-    failures: Mutex<Vec<String>>,
-    /// Test gate: hold the worker before it takes its first job.
-    #[cfg(test)]
-    hold: std::sync::atomic::AtomicBool,
-}
-impl Background {
-    /// Enqueue a job, superseding a queued job for the same file in its place. `Err(job)`
-    /// returns it when no worker can take it (spawning failed or the writer closed), so
-    /// the caller runs it on the frame and never loses the save.
-    fn submit(&self, job: Job) -> Result<(), Job> {
-        if !self.ensure_thread() {
-            return Err(job);
-        }
-        let mut state = self.inner.state.lock().unwrap();
-        if state.closed {
-            return Err(job);
-        }
-        if let Some(queued) = state
-            .queue
-            .iter_mut()
-            .find(|queued| queued.destination() == job.destination())
-        {
-            *queued = job;
-        } else {
-            state.queue.push_back(job);
-        }
-        drop(state);
-        self.inner.wake.notify_one();
-        Ok(())
-    }
-    /// Lazily spawn the one worker; a spawn failure is cached and later jobs run inline.
-    fn ensure_thread(&self) -> bool {
-        matches!(
-            self.thread.get_or_init(|| {
-                let inner = self.inner.clone();
-                std::thread::Builder::new()
-                    .name("save-writer".into())
-                    .stack_size(1024 * 1024)
-                    .spawn(move || Inner::run(inner))
-                    .ok()
-            }),
-            Some(_)
-        )
-    }
-}
-impl Drop for Background {
-    fn drop(&mut self) {
-        // The exit flush: close, wake the worker and join it. The queue drains first, so a
-        // pending write always completes before the game quits. The writer thread itself
-        // never holds a `Background`, so this join cannot come from the worker.
-        {
-            let mut state = self.inner.state.lock().unwrap();
-            state.closed = true;
-        }
-        self.inner.wake.notify_all();
-        if let Some(handle) = self.thread.get_mut().and_then(Option::take) {
-            let _ = handle.join();
-        }
-    }
-}
-impl Inner {
-    fn run(inner: Arc<Inner>) {
-        // Lowest application priority on any core: the writer may run late, never early
-        // (the audio reporter's policy). A late write only delays its own toast.
-        let _policy = crate::audio::thread_policy(191, 0);
-        loop {
-            let job = {
-                let mut state = inner.state.lock().unwrap();
-                loop {
-                    #[cfg(test)]
-                    while !state.closed && inner.held() {
-                        state = inner.wake.wait(state).unwrap();
-                    }
-                    if let Some(job) = state.queue.pop_front() {
-                        state.running = Some((job.store.directory.clone(), job.slot));
-                        state.executed += 1;
-                        break job;
-                    }
-                    if state.closed {
-                        return;
-                    }
-                    state = inner.wake.wait(state).unwrap();
-                }
-            };
-            // The serialization, the atomic write and the backup rotation run here, off the
-            // frame; the same code path the foreground write takes, with the captured clock.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                job.store.write_with_preview_saved_at(
-                    job.slot,
-                    &job.game,
-                    job.preview.as_ref(),
-                    SavedAt::At(job.saved_at),
+impl CheckpointWriter {
+    pub fn start(store: &Store) -> std::io::Result<Self> {
+        let store = Store {
+            directory: store.directory.clone(),
+            fingerprint: store.fingerprint.clone(),
+            discard_writes: store.discard_writes,
+        };
+        Self::spawn(move |job| {
+            store.write_checkpoint_pair(|destination, index| {
+                destination.write_with_preview_saved_at(
+                    Slot::Auto, &job.game, job.preview.as_ref(), SavedAt::At(job.saved_at[index]),
                 )
-            }));
-            match result {
-                Ok(Ok(())) => (),
-                Ok(Err(e)) => inner.failures.lock().unwrap().push(format!("{e:#}")),
-                Err(panic) => inner.failures.lock().unwrap().push(format!(
-                    "the save writer failed unexpectedly: {panic:?}"
-                )),
-            }
-            let mut state = inner.state.lock().unwrap();
-            state.running = None;
-            drop(state);
-            inner.advanced.notify_all();
+            })
+        })
+    }
+
+    fn spawn(write: impl Fn(&CheckpointJob) -> Result<()> + Send + 'static) -> std::io::Result<Self> {
+        let (submit, jobs) = mpsc::sync_channel::<CheckpointJob>(1);
+        let (ready, idle) = mpsc::sync_channel(1);
+        ready.send(()).unwrap();
+        let thread = thread::Builder::new()
+            .name("save-writer".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                #[cfg(target_os = "vita")]
+                {
+                    let policy = crate::audio::thread_policy(191, 0);
+                    eprintln!("[lg/worker-probe] role=save-writer {}", policy.describe());
+                }
+                for job in jobs {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&job)))
+                        .unwrap_or_else(|panic| Err(anyhow::anyhow!("The save writer failed unexpectedly: {panic:?}")));
+                    let _ = job.completed.send(result);
+                    if ready.send(()).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self { submit: Some(submit), idle, thread: Some(thread) })
+    }
+
+    pub fn submit(
+        &self,
+        game: Game,
+        preview: Option<crate::save_preview::Preview>,
+        retry_snapshot: Game,
+    ) -> Result<PendingCheckpoint> {
+        let saved_at = [saved_at_now()?, saved_at_now()?];
+        let (completed, result) = mpsc::sync_channel(1);
+        self.idle.recv().context("The save writer stopped")?;
+        self.submit.as_ref().unwrap().send(CheckpointJob {
+            game: Box::new(game),
+            preview,
+            saved_at,
+            completed,
+        })
+        .map_err(|_| anyhow::anyhow!("The save writer stopped"))?;
+        Ok(PendingCheckpoint { completed: result, retry_snapshot: Box::new(retry_snapshot) })
+    }
+}
+impl Drop for CheckpointWriter {
+    fn drop(&mut self) {
+        // Close submissions, then drain and join even on an early return from the viewer.
+        drop(self.submit.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
-    }
-    #[cfg(test)]
-    fn held(&self) -> bool {
-        self.hold.load(std::sync::atomic::Ordering::SeqCst)
-    }
-    #[cfg(test)]
-    fn set_hold(&self, on: bool) {
-        self.hold.store(on, std::sync::atomic::Ordering::SeqCst);
-        self.wake.notify_all();
     }
 }
 /// What the viewer does with the map after a bench validation.
@@ -1362,160 +1256,299 @@ mod tests {
         }
         assert_ne!(visit_key("skool1", None), visit_key("skool2", None));
     }
-    // Key on vs off: the same store call at the same frame boundary, with the envelope
-    // clock pinned, writes byte-identical files to both stores. Unpinned, the only
-    // difference any two runs can show is the wall-clock `saved_at` itself, exactly as
-    // between two RC19 runs; the host oracle proves that at the tape level.
+    fn finish(pending: &mut Option<PendingCheckpoint>) -> Result<()> {
+        PendingCheckpoint::finish(pending, true, &mut [], &mut Default::default()).unwrap()
+    }
+
+    // Pause an active pair immediately before auto, after the finale write committed.
+    fn gated_writer(store: Store) -> (CheckpointWriter, Receiver<()>, SyncSender<()>) {
+        use std::time::Duration;
+        let (entered, active) = mpsc::sync_channel(1);
+        let (release, proceed) = mpsc::sync_channel(1);
+        let writer = CheckpointWriter::spawn(move |job| {
+            store.write_checkpoint_pair(|destination, index| {
+                if index == 1 {
+                    entered.send(())?;
+                    proceed.recv_timeout(Duration::from_secs(5))?;
+                }
+                destination.write_with_preview_saved_at(
+                    Slot::Auto, &job.game, job.preview.as_ref(), SavedAt::At(job.saved_at[index]),
+                )
+            })
+        }).unwrap();
+        (writer, active, release)
+    }
+
+    struct Request(bool);
+    impl crate::level::LevelController for Request {
+        fn id(&self) -> &'static str { "checkpoint-fixture" }
+        fn checkpoint_requested(&self) -> bool { self.0 }
+        fn checkpoint_written(&mut self) { self.0 = false; }
+        fn snapshot(&self) -> serde_json::Value { serde_json::json!({ "checkpoint": self.0 }) }
+        fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
+            Request(false).snapshot()
+        }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    }
+
+    fn requesting_interactions() -> Interactions {
+        let mut interactions = Interactions::empty();
+        interactions.levels.push(crate::level::Slot {
+            reg: crate::levels::LEVELS[0],
+            ctl: Box::new(Request(true)),
+        });
+        interactions
+    }
+
     #[test]
     fn finale_checkpoint_background_writes_identical_bytes_to_the_frame_path() {
         let _pin = Pinned::new(1_795_031_414_000);
-        let scratch = format12::Scratch::new("checkpoint-background");
+        let plain = format12::Scratch::new("checkpoint-frame");
+        let background = format12::Scratch::new("checkpoint-background");
         let game = jlair2_game();
-        let preview =
-            crate::save_preview::Preview::fixture(macroquad::prelude::Color::new(1., 0., 0., 1.));
-        scratch
-            .store()
-            .write_finale_checkpoint_with_preview(&game, Some(&preview))
-            .unwrap();
-        let frame_finale = fs::read(finale_file(&scratch.0)).unwrap();
-        let frame_auto = fs::read(scratch.file(Slot::Auto)).unwrap();
-        let background = scratch.store().with_background();
-        background
-            .write_finale_checkpoint_with_preview(&game, Some(&preview))
-            .unwrap();
-        let failures = background.take_background_failures();
-        assert!(failures.is_empty(), "a passing background write reports nothing: {failures:?}");
-        drop(background);
-        assert_eq!(fs::read(finale_file(&scratch.0)).unwrap(), frame_finale,
-            "the finale store's file is byte for byte the frame path's");
-        assert_eq!(fs::read(scratch.file(Slot::Auto)).unwrap(), frame_auto,
-            "the auto store's file is byte for byte the frame path's");
+        let preview = crate::save_preview::Preview::fixture(RED);
+        plain.store().write_finale_checkpoint_with_preview(&game, Some(&preview)).unwrap();
+        let writer = CheckpointWriter::start(&background.store()).unwrap();
+        let mut pending = Some(writer.submit(game.clone(), Some(preview), game).unwrap());
+        finish(&mut pending).unwrap();
+        assert_eq!(fs::read(finale_file(&plain.0)).unwrap(), fs::read(finale_file(&background.0)).unwrap());
+        assert_eq!(fs::read(plain.file(Slot::Auto)).unwrap(), fs::read(background.file(Slot::Auto)).unwrap());
+        assert!(background.store().read(Slot::Auto).unwrap().preview.is_some());
     }
-    // An ordinary auto save never uses the writer; with it installed the bytes are unchanged.
+
     #[test]
     fn an_ordinary_auto_save_is_unchanged_with_the_background_writer_installed() {
         let _pin = Pinned::new(1_795_031_415_000);
         let plain = format12::Scratch::new("checkpoint-ordinary-plain");
         let background = format12::Scratch::new("checkpoint-ordinary-background");
         let game = jlair2_game();
-        plain.store().write_with_preview(Slot::Auto, &game, None).unwrap();
-        background
-            .store()
-            .with_background()
-            .write_with_preview(Slot::Auto, &game, None)
-            .unwrap();
-        assert_eq!(
-            fs::read(background.file(Slot::Auto)).unwrap(),
-            fs::read(plain.file(Slot::Auto)).unwrap(),
-            "the writer must not disturb an ordinary save"
-        );
+        let store = background.store();
+        let _writer = CheckpointWriter::start(&store).unwrap();
+        plain.store().write(Slot::Auto, &game).unwrap();
+        store.write(Slot::Auto, &game).unwrap();
+        assert_eq!(fs::read(plain.file(Slot::Auto)).unwrap(), fs::read(background.file(Slot::Auto)).unwrap());
     }
-    // Two quick requests with the worker held: the later one supersedes the queued jobs
-    // for both stores in place, and the executed count proves the first never wrote.
+
     #[test]
-    fn two_quick_checkpoint_requests_supersede_a_queued_one_and_keep_order() {
-        let _pin = Pinned::new(1_795_031_416_000);
+    fn pending_checkpoint_acknowledges_both_commits_and_restores_the_request_frame_on_retry() {
+        use std::time::Duration;
+        let scratch = format12::Scratch::new("checkpoint-ack");
+        let mut interactions = requesting_interactions();
+        let game = jlair2_game();
+        let mut request_frame = game.clone();
+        request_frame.view.yaw = 1.25;
+        request_frame.campaign.levels.get_mut(&game.current).unwrap().interactions =
+            interactions.snapshot_for_checkpoint(true);
+        assert!(interactions.levels[0].ctl.checkpoint_requested());
+        let mut foreground = requesting_interactions();
+        foreground.levels[0].ctl.checkpoint_written();
+        assert_eq!(
+            serde_json::to_value(&request_frame.level().unwrap().interactions).unwrap(),
+            serde_json::to_value(foreground.snapshot()).unwrap(),
+        );
+
+        let (writer, active, release) = gated_writer(scratch.store());
+        let mut retry = crate::recovery::RetryPoint::default();
+        retry.remember(game.clone());
+        let mut pending = Some(writer.submit(game.clone(), None, request_frame).unwrap());
+        active.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(finale_file(&scratch.0).is_file());
+        assert!(!scratch.file(Slot::Auto).exists());
+        assert!(PendingCheckpoint::finish(&mut pending, false, &mut interactions.levels, &mut retry).is_none());
+        assert!(interactions.levels[0].ctl.checkpoint_requested());
+        assert_eq!(retry.game_for(&game.current).unwrap().view.yaw, 0.);
+
+        thread::scope(|scope| {
+            let (returned, early_return) = mpsc::sync_channel(1);
+            scope.spawn(move || {
+                assert!(matches!(
+                    early_return.recv_timeout(Duration::from_millis(30)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ));
+                release.send(()).unwrap();
+            });
+            PendingCheckpoint::finish(&mut pending, true, &mut interactions.levels, &mut retry)
+                .unwrap().unwrap();
+            returned.send(()).ok();
+        });
+        let restored = retry.game_for(&game.current).unwrap();
+        assert_eq!(restored.view.yaw, 1.25);
+        assert_eq!(
+            serde_json::to_value(&restored.level().unwrap().interactions).unwrap(),
+            serde_json::to_value(foreground.snapshot()).unwrap(),
+        );
+        assert!(scratch.file(Slot::Auto).is_file());
+        assert!(!interactions.levels[0].ctl.checkpoint_requested());
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn finale_failure_keeps_auto_and_its_backup_untouched_and_the_request_set() {
+        let scratch = format12::Scratch::new("checkpoint-failure");
+        let store = scratch.store();
+        let game = jlair2_game();
+        store.write(Slot::Auto, &game).unwrap();
+        let primary = fs::read(scratch.file(Slot::Auto)).unwrap();
+        let backup = scratch.0.join("auto.previous.json");
+        fs::write(&backup, b"previous").unwrap();
+        fs::write(store.finale_store().directory, b"blocks creation of the directory").unwrap();
+        let writer = CheckpointWriter::start(&store).unwrap();
+        let mut retry = crate::recovery::RetryPoint::default();
+        retry.remember(game.clone());
+        let mut next = game.clone();
+        next.view.yaw = 1.;
+        let mut pending = Some(writer.submit(next.clone(), None, next).unwrap());
+        let mut interactions = requesting_interactions();
+        let error = PendingCheckpoint::finish(&mut pending, true, &mut interactions.levels, &mut retry)
+            .unwrap().unwrap_err();
+        assert!(format!("{error:#}").contains("Cannot create save folder"));
+        assert!(interactions.levels[0].ctl.checkpoint_requested());
+        assert_eq!(retry.game_for(&game.current).unwrap().view.yaw, 0.);
+        assert_eq!(fs::read(scratch.file(Slot::Auto)).unwrap(), primary);
+        assert_eq!(fs::read(backup).unwrap(), b"previous");
+    }
+
+    #[test]
+    fn second_request_waits_and_preserves_both_stores_backup_order() {
+        use std::time::Duration;
         let scratch = format12::Scratch::new("checkpoint-order");
-        let reference = format12::Scratch::new("checkpoint-order-reference");
+        let store = scratch.store();
+        let (writer, active, release) = gated_writer(scratch.store());
         let one = jlair2_game();
         let mut two = one.clone();
         two.stats.damage(5.);
-        let store = scratch.store().with_background();
-        store.writer.as_ref().unwrap().inner.set_hold(true);
-        store.write_finale_checkpoint_with_preview(&one, None).unwrap();
-        store.write_finale_checkpoint_with_preview(&two, None).unwrap();
-        store.writer.as_ref().unwrap().inner.set_hold(false);
-        store.flush_background();
-        let executed = store.writer.as_ref().unwrap().inner.state.lock().unwrap().executed;
-        drop(store);
-        reference
-            .store()
-            .write_finale_checkpoint_with_preview(&two, None)
-            .unwrap();
-        assert_eq!(executed, 2, "the superseded request's jobs never ran");
-        assert_eq!(fs::read(finale_file(&scratch.0)).unwrap(), fs::read(finale_file(&reference.0)).unwrap(),
-            "the later request's game is the finale store's final state");
-        assert_eq!(fs::read(scratch.file(Slot::Auto)).unwrap(), fs::read(reference.file(Slot::Auto)).unwrap(),
-            "the later request's game is the auto store's final state");
+        let mut first = Some(writer.submit(one.clone(), None, one.clone()).unwrap());
+        active.recv_timeout(Duration::from_secs(5)).unwrap();
+        thread::scope(|scope| {
+            let (starting, started) = mpsc::sync_channel(1);
+            let (submitted, pending) = mpsc::sync_channel(1);
+            let expected = two.stats.sanity();
+            scope.spawn(move || {
+                starting.send(()).unwrap();
+                let second = writer.submit(two.clone(), None, two).unwrap();
+                submitted.send(second).ok();
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(pending.recv_timeout(Duration::from_millis(30)).is_err());
+            release.send(()).unwrap();
+            let mut second = Some(pending.recv_timeout(Duration::from_secs(5)).unwrap());
+            active.recv_timeout(Duration::from_secs(5)).unwrap();
+            finish(&mut first).unwrap();
+            assert_eq!(store.read(Slot::Auto).unwrap().game.stats.sanity(), one.stats.sanity());
+            release.send(()).unwrap();
+            finish(&mut second).unwrap();
+            for destination in [&store, &store.finale_store()] {
+                assert_eq!(destination.read(Slot::Auto).unwrap().game.stats.sanity(), expected);
+                let backup = fs::read(destination.path(Slot::Auto, true)).unwrap();
+                assert_eq!(destination.decode(&backup).unwrap().game.stats.sanity(), one.stats.sanity());
+            }
+        });
     }
-    // A later foreground save for the same store waits for the pending checkpoint: the
-    // job's file becomes the backup, the new save the primary, in that order.
+
     #[test]
-    fn a_later_foreground_save_waits_for_the_pending_checkpoint_in_order() {
-        let _pin = Pinned::new(1_795_031_417_000);
-        let scratch = format12::Scratch::new("checkpoint-wait");
-        let reference = format12::Scratch::new("checkpoint-wait-reference");
-        let one = jlair2_game();
-        let mut two = one.clone();
-        two.stats.damage(5.);
-        let store = scratch.store().with_background();
-        store.writer.as_ref().unwrap().inner.set_hold(true);
-        store.write_finale_checkpoint_with_preview(&one, None).unwrap();
-        store.writer.as_ref().unwrap().inner.set_hold(false);
-        store.write_with_preview(Slot::Auto, &two, None).unwrap();
-        drop(store);
-        let reference_store = reference.store();
-        reference_store.write_with_preview(Slot::Auto, &one, None).unwrap();
-        reference_store.write_with_preview(Slot::Auto, &two, None).unwrap();
-        assert_eq!(fs::read(scratch.file(Slot::Auto)).unwrap(), fs::read(reference.file(Slot::Auto)).unwrap(),
-            "the foreground save is the primary file");
-        assert_eq!(
-            fs::read(scratch.0.join("auto.previous.json")).unwrap(),
-            fs::read(reference.0.join("auto.previous.json")).unwrap(),
-            "the checkpoint the writer wrote first is the backup, so it ran first"
-        );
+    fn load_and_manual_save_follow_the_checkpoint_flush() {
+        use std::time::Duration;
+        let scratch = format12::Scratch::new("checkpoint-load-and-save");
+        let store = scratch.store();
+        let initial = jlair2_game();
+        store.write(Slot::Auto, &initial).unwrap();
+        let mut checkpoint = initial.clone();
+        checkpoint.stats.damage(5.);
+        let mut saved = checkpoint.clone();
+        saved.stats.damage(5.);
+        let (writer, active, release) = gated_writer(scratch.store());
+        let mut pending = Some(writer.submit(checkpoint.clone(), None, checkpoint.clone()).unwrap());
+        active.recv_timeout(Duration::from_secs(5)).unwrap();
+        thread::scope(|scope| {
+            let (starting, started) = mpsc::sync_channel(1);
+            let (result, completed) = mpsc::sync_channel(1);
+            let (pending, store, saved) = (&mut pending, &store, &saved);
+            scope.spawn(move || {
+                starting.send(()).unwrap();
+                finish(pending).unwrap();
+                let loaded = store.read(Slot::Auto).unwrap();
+                store.write(Slot::Auto, saved).unwrap();
+                result.send(loaded.game.stats.sanity()).unwrap();
+            });
+            started.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(completed.recv_timeout(Duration::from_millis(30)).is_err());
+            release.send(()).unwrap();
+            assert_eq!(completed.recv_timeout(Duration::from_secs(5)).unwrap(), checkpoint.stats.sanity());
+        });
+        assert_eq!(store.read(Slot::Auto).unwrap().game.stats.sanity(), saved.stats.sanity());
+        let backup = fs::read(store.path(Slot::Auto, true)).unwrap();
+        assert_eq!(store.decode(&backup).unwrap().game.stats.sanity(), checkpoint.stats.sanity());
     }
-    // The exit path: dropping the store flushes a pending write before the game quits.
+
     #[test]
-    fn dropping_the_store_flushes_a_pending_checkpoint_before_quitting() {
-        let _pin = Pinned::new(1_795_031_418_000);
+    fn exit_flushes_an_active_checkpoint_before_quitting() {
+        use std::time::Duration;
         let scratch = format12::Scratch::new("checkpoint-flush");
-        let store = scratch.store().with_background();
-        store
-            .write_finale_checkpoint_with_preview(&jlair2_game(), None)
-            .unwrap();
-        drop(store);
-        assert!(finale_file(&scratch.0).is_file(), "the finale write completed");
-        assert!(scratch.file(Slot::Auto).is_file(), "the auto write completed");
+        let (writer, active, release) = gated_writer(scratch.store());
+        let game = jlair2_game();
+        let mut pending = Some(writer.submit(game.clone(), None, game).unwrap());
+        active.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (starting, started) = mpsc::sync_channel(1);
+        let (result, exited) = mpsc::sync_channel(1);
+        let exit = thread::spawn(move || {
+            starting.send(()).unwrap();
+            let completion = finish(&mut pending);
+            drop(writer);
+            result.send(completion).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(exited.recv_timeout(Duration::from_millis(30)).is_err());
+        release.send(()).unwrap();
+        exited.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        exit.join().unwrap();
+        assert!(finale_file(&scratch.0).is_file());
+        assert!(scratch.file(Slot::Auto).is_file());
     }
-    // A load must see the checkpoint it just missed, not the older file it replaces.
-    #[test]
-    fn reading_a_slot_waits_for_its_pending_checkpoint() {
-        let _pin = Pinned::new(1_795_031_419_000);
-        let scratch = format12::Scratch::new("checkpoint-read");
-        let one = jlair2_game();
-        let mut two = one.clone();
-        two.stats.damage(7.);
-        let store = scratch.store().with_background();
-        store.write_with_preview(Slot::Auto, &one, None).unwrap();
-        store.write_finale_checkpoint_with_preview(&two, None).unwrap();
-        let loaded = store.read(Slot::Auto).unwrap();
-        assert_eq!(loaded.game.stats.sanity(), two.stats.sanity(),
-            "the load saw the checkpoint's file, not the previous save");
-        drop(store);
-    }
-    // `discard_writes` keeps building and logging both envelopes on the writer and never
-    // writes a file; the identical `save not written` lines (count and byte count) are
-    // the frame arm's file lengths, proven byte for byte above and by the host oracle.
+
     #[test]
     fn the_discarding_store_still_writes_nothing_in_both_arms() {
         let scratch = format12::Scratch::new("checkpoint-discard");
         let game = jlair2_game();
-        scratch
-            .store()
-            .discarding_writes()
-            .write_finale_checkpoint_with_preview(&game, None)
-            .unwrap();
-        let background = scratch
-            .store()
-            .discarding_writes()
-            .with_background();
-        background
-            .write_finale_checkpoint_with_preview(&game, None)
-            .unwrap();
-        drop(background);
+        let store = scratch.store().discarding_writes();
+        store.write_finale_checkpoint_with_preview(&game, None).unwrap();
+        let writer = CheckpointWriter::start(&store).unwrap();
+        let mut pending = Some(writer.submit(game.clone(), None, game).unwrap());
+        finish(&mut pending).unwrap();
         assert!(!scratch.file(Slot::Auto).exists());
         assert!(!finale_file(&scratch.0).exists());
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    #[test]
+    fn replay_write_opt_in_requires_one_and_a_fresh_explicit_directory() {
+        use std::ffi::OsStr;
+        let scratch = format12::Scratch::new("checkpoint-replay-writes");
+        let player = scratch.0.join("default-saves");
+        let isolated = scratch.0.join("isolated");
+        for value in [None, Some(OsStr::new("0")), Some(OsStr::new("true")), Some(OsStr::new(""))] {
+            assert!(isolated_replay_directory(value, Some(&isolated), &player).is_none());
+        }
+        let enabled = Some(OsStr::new("1"));
+        assert!(isolated_replay_directory(enabled, None, &player).is_none());
+        assert!(isolated_replay_directory(enabled, Some(&player), &player).is_none());
+        let case_alias = scratch.0.join("DEFAULT-SAVES");
+        assert!(isolated_replay_directory(enabled, Some(&case_alias), &player).is_none());
+        assert!(!player.exists());
+        #[cfg(unix)]
+        {
+            let alias = scratch.0.join("alias");
+            std::os::unix::fs::symlink(&scratch.0, &alias).unwrap();
+            assert!(isolated_replay_directory(enabled, Some(&alias.join("default-saves")), &player).is_none());
+            let link = scratch.0.join("link");
+            std::os::unix::fs::symlink(&player, &link).unwrap();
+            assert!(isolated_replay_directory(enabled, Some(&link), &player).is_none());
+        }
+        assert_eq!(
+            isolated_replay_directory(enabled, Some(&isolated), &player),
+            Some(scratch.0.canonicalize().unwrap().join("isolated")),
+        );
+        assert!(isolated_replay_directory(enabled, Some(&isolated), &player).is_none());
     }
 }
 

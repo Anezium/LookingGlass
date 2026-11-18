@@ -369,6 +369,12 @@ impl Encounter {
         }
     }
 }
+impl Encounter {
+    fn acknowledge_checkpoint(saved: &mut Saved) {
+        saved.checkpoint = false;
+    }
+}
+
 impl LevelController for Encounter {
     fn id(&self) -> &'static str {
         "hatter2"
@@ -503,7 +509,12 @@ impl LevelController for Encounter {
         self.saved.checkpoint && self.saved.phase == Phase::Fight
     }
     fn checkpoint_written(&mut self) {
-        self.saved.checkpoint = false;
+        Self::acknowledge_checkpoint(&mut self.saved);
+    }
+    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
+        let mut saved = self.saved.clone();
+        Self::acknowledge_checkpoint(&mut saved);
+        state::save(&saved)
     }
     fn advance(
         &mut self,

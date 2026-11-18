@@ -382,6 +382,12 @@ impl Encounter {
         self.saved.wave_count += 1;
     }
 }
+impl Encounter {
+    fn acknowledge_checkpoint(saved: &mut Saved) {
+        saved.checkpoint = false;
+    }
+}
+
 impl LevelController for Encounter {
     fn particles(&self, steam: &mut crate::particles::Steam) {
         // The reward scene draws this altar itself. Its placed copy must never
@@ -569,7 +575,12 @@ impl LevelController for Encounter {
         self.saved.checkpoint && self.saved.phase == Phase::Fight
     }
     fn checkpoint_written(&mut self) {
-        self.saved.checkpoint = false;
+        Self::acknowledge_checkpoint(&mut self.saved);
+    }
+    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
+        let mut saved = self.saved.clone();
+        Self::acknowledge_checkpoint(&mut saved);
+        state::save(&saved)
     }
     fn advance(
         &mut self,

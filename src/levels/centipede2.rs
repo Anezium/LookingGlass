@@ -148,6 +148,12 @@ impl Centipede {
         self.data.points[["get_me1", "get_me2", "get_me3"][self.saved.essence]].translation
     }
 }
+impl Centipede {
+    fn acknowledge_checkpoint(saved: &mut Saved) {
+        saved.checkpoint = false;
+    }
+}
+
 impl LevelController for Centipede {
     fn id(&self) -> &'static str {
         "centipede2"
@@ -397,7 +403,12 @@ impl LevelController for Centipede {
         self.saved.checkpoint && self.saved.phase == Phase::Fight
     }
     fn checkpoint_written(&mut self) {
-        self.saved.checkpoint = false;
+        Self::acknowledge_checkpoint(&mut self.saved);
+    }
+    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
+        let mut saved = self.saved.clone();
+        Self::acknowledge_checkpoint(&mut saved);
+        state::save(&saved)
     }
     fn snapshot(&self) -> serde_json::Value {
         state::save(&self.saved)

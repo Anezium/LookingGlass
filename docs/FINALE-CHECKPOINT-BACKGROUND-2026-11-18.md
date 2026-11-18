@@ -20,20 +20,23 @@ What the key does, with it on:
 - Today the two envelopes are not byte-identical (their `saved_at` reads straddle a whole
   serialization), so each is serialized separately as today, on the worker, with its own
   captured timestamp.
-- Serialization and the file writes run on one low-priority writer thread (the audio
-  producer's pattern: `std::thread::Builder`, a fixed stack, `thread_policy(191, 0)` at
-  entry — lowest application priority on any core, so it may run late, never early). The
-  atomic write, the backup rotation and every save validation are the same code, unchanged.
-- A later save request for the same store waits for a pending job, or supersedes it in place
-  while it is still queued; the exit path flushes pending writes before the final autosave
-  and quit, and the store's drop flushes again as the backstop.
-- `discard_writes` still logs both `save not written` lines, with the same slot, map and byte
-  count; the lines come from the same code, off the frame.
+- One worker writes the finale slot first and the auto slot second. An error in the
+  first write ends the job. Each slot uses the existing validation, atomic write and
+  backup rotation.
+- The viewer holds the request pending until both writes succeed. On success it
+  acknowledges the controllers, restores the requesting frame's post-save snapshot
+  as the death retry point, and shows “Checkpoint saved”. On failure the request
+  stays set and the viewer reports the save error.
+- The writer runs at requested Vita priority 191 with inherited affinity and logs the
+  kernel readback once at startup. The viewer uses the foreground path if the thread
+  fails to spawn. Vita timing and audio contention require device measurements.
+- Death retry, load, menu save listing, foreground saves, New Game, and exit wait for
+  the pending job and apply its completion first. The writer also drains and joins
+  on drop, including early exits.
+- Replay discard mode still builds both envelopes and logs their slot, map and byte
+  count. A host diagnostic can enable writes with `LOOKING_GLASS_REPLAY_WRITES=1`
+  and an explicit, fresh `--save-dir` distinct from the default save directory. The
+  directory's parent must exist so the replay can reserve the destination exclusively.
 
-What the key does not change: with it off (the default, and every shipped config) no writer
-thread exists and every write stays on the calling frame, byte for byte RC19. Ordinary saves,
-quick saves and the exit autosave never use the writer; a background job's failure is
-reported on a later frame's tail instead of the requesting frame.
-
-Host proof lives outside Git, in the task evidence folder. Console speed is measured by the
-device slot only.
+With the key off, the viewer writes on the calling frame. Every shipped config defaults
+to this path. Host proof lives in the task evidence folder outside Git.
