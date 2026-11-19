@@ -315,7 +315,8 @@ mod tests {
             if a.bindings { out.push(format!("bind {pipeline} {binding:?}")); }
             if a.uniforms {
                 applications += 1;
-                        let new = bits[parameter as usize];
+                let program = usize::from(low);
+                let new = bits[parameter as usize];
                 for field in 0..143 {
                     if storage[program].is_none_or(|old| old[field] != new[field]) {
                         out.push(format!("uniform {program} {field} {}", new[field]));
@@ -373,6 +374,9 @@ mod tests {
         // The low program's storage has never seen class 5, and pipeline A/B/A forces bindings.
         let a = p.observe(2, 1, 1, 5);
         assert!(a.uniforms && a.pipeline && a.bindings && !a.depth);
+        // The alternate low program has its own storage too.
+        assert!(p.observe(3, low_fog::FOG_FREE_PROGRAM, 1, 5).uniforms);
+        assert!(!p.observe(2, 1, 1, 5).uniforms);
         // Back on the first program its storage still holds 5.
         let a = p.observe(1, 0, 1, 5);
         assert!(!a.uniforms && a.pipeline && a.bindings);
