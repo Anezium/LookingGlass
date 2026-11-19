@@ -1903,6 +1903,8 @@ pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[cr
     retained::gpu_skin::census::note(verdict.as_ref().err().copied().unwrap_or(retained::gpu_skin::Reason::Gpu),mesh.vertices.len());
     let Ok((surface,payload))=verdict else {return false;};
     let (time,appearance)=FRAME.with(|f|{let f=f.borrow();(f.time,f.appearance)});
+    // Layers over the cap are charged as the CPU layer paths charge them.
+    if surface.layers.len()>actor_max_layers(c) {retained::count("vita_fx_dropped_layers",(surface.layers.len()-actor_max_layers(c)) as u64);}
     let mut passes=Vec::with_capacity(actor_max_layers(c).min(surface.layers.len()));
     for layer in surface.layers.iter().take(actor_max_layers(c)) {
         let frame=if layer.stage.images.is_empty() {0} else {layer.stage.frame(time)};
