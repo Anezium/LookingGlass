@@ -148,8 +148,8 @@ PINNED_FILES = {
     "configs/PL-rc8-spike-play04.json": "05ea8f24e724f7af285cdaf71bb6d2911093ea229e26384c4915e681f0d074c6",
     "configs/PL-rc9-release-play04.json": "1526df21bc66e8d4651006c2df5871f889b145c0295dcf5c3e3cc863cc0d694e",
     "configs/PL-rc9-release.json": "9dbf482cf40ff440dd74ecc5c6be45aaf5c3cb0b06da3bfc0fe47a4b76466cac",
-    "configs/PL-release.json": "eb0c10e18e97335e9baaa26b4c69473d65b1747a9c86f483620607b563e4f556",
-    "configs/RELEASE.md": "b9494790fce7574b432e5035c3902eb5ccaa4c87eb007d149e57080a72e9d56e",
+    "configs/PL-release.json": "216f8e8b34b24de7dab871dd16fb204e67a08d1cc1b9e0ea16ce86552a10d850",
+    "configs/RELEASE.md": "579c72a75b408f1e345c1ed089c5fea6ad4a4e711df9da7291b86cfb1c9a96fa",
     "configs/vita-sim/vita-sim-release.json": "fa64b0c5b79c52d8e028f7fc9d0d3dd2eec57b7641dfc8f76b34212bdcb3334b",
     "configs/PL-rc15-release-play.json": "580f73ba3e3bd166fe2362e2e2a9ab229ad2080d0de8f1036b24d80975585c70",
     "configs/PL-rc16-release-play.json": "00b79a6797366e4aca9871883eef74a3aea64d6963f18bac8010c73d6d689677",
@@ -157,6 +157,7 @@ PINNED_FILES = {
     "configs/PL-rc18-release-play.json": "61ad98e302e6c9ddd0ed9994df5c6b230242cf7315b640840f63ddf84c242189",
     "configs/PL-rc19-release-play.json": "40f824124d6d2a916eb59b800b469125b3a015324ececbc282917bf971d8e0e2",
     "configs/PL-rc20-release-play.json": "5a80f4d5636f55953909db87ba1452ded9f3cc74ffb2bcbd6e4389c9027022d0",
+    "configs/PL-rc22-release-play.json": "5934d29d042279f066de5745d4e3d7d58c86ad3a02ad439b363fa2130992b5ee",
     # Tooling, licence texts and test fixtures.
     "tools/config_record/fixtures/host-bad.json": "0baa0c4b95907662865e70a9946f546c486fca6e3808dc64bab650a16b2b5912",
     "tools/config_record/fixtures/host-bad.txt": "9744a970a2ce54da3cfc3de774339a1989d6b1e4207fafe0b5686329089d0da5",
