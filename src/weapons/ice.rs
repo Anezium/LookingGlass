@@ -546,3 +546,37 @@ impl State {
         sounds
     }
 }
+
+/// Owned per-effect render values, without simulation owner or graphics resources.
+#[derive(Default)]
+pub(super) struct RenderInput {
+    pub(super) walls: Vec<Wall>,
+    pub(super) shell: Option<Shell>,
+    pub(super) clock: f64,
+    pub(super) trail: super::trail::Trail,
+    pub(super) pulses: Vec<(f64, f64, bool)>,
+}
+pub(super) struct RenderView<'a> {
+    pub(super) walls: &'a [Wall],
+    pub(super) shell: &'a Option<Shell>,
+    pub(super) clock: f64,
+    pub(super) trail: &'a super::trail::Trail,
+    pub(super) pulses: &'a [(f64, f64, bool)],
+}
+impl RenderView<'_> { pub(super) fn flowing(&self, at:f32, alternate:bool)->bool { self.pulses.iter().any(|&(a,b,alt)|alt==alternate && at as f64+1e-6>=a && (at as f64)<b) } }
+impl RenderInput {
+    pub(super) fn records(&self)->usize { self.walls.len()+self.pulses.len() }
+    pub(super) fn heap_bytes(&self)->usize { self.walls.len()*std::mem::size_of::<Wall>() + self.pulses.len()*std::mem::size_of::<(f64,f64,bool)>() + self.trail.bytes() }
+    pub(super) fn view(&self) -> RenderView<'_> { RenderView {walls: &self.walls,shell: &self.shell,clock: self.clock,trail: &self.trail,pulses: &self.pulses} }
+}
+impl State {
+    pub(super) fn render_records(&self)->usize { self.walls.len()+self.pulses.len() }
+    pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {walls: &self.walls,shell: &self.shell,clock: self.clock,trail: &self.trail,pulses: &self.pulses} }
+    pub(super) fn extract_render(&self, out:&mut RenderInput) {
+        out.walls.clone_from(&self.walls);
+        out.shell.clone_from(&self.shell);
+        out.clock=self.clock;
+        out.trail.clone_from(&self.trail);
+        out.pulses.clone_from(&self.pulses);
+    }
+}

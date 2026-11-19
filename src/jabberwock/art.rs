@@ -128,6 +128,7 @@ impl LevelArt for Art {
                 .draw_frame(o.data.points["eye_altar"], 1., bright, s.clock, true);
         }
     }
+    fn snapshot_effects_empty(&self)->bool {false}
     fn effects(
         &mut self,
         l: &dyn LevelController,
@@ -192,6 +193,23 @@ impl LevelArt for Art {
             self.eye_beam.draw(start, end, b.time, camera);
         }
     }
+    fn hud_input(&self, l: &dyn LevelController, out: &mut Vec<crate::render_snapshot::HudCommand>) {
+        let mut paint = crate::render_snapshot::Painter::new(&self.ui, out);
+        let o = l.downcast_ref::<Encounter>().unwrap();
+        if o.saved.phase != Phase::Fight {
+            return;
+        }
+        if o.saved.kind == Kind::Lair {
+            // The invulnerable first encounter is won by surviving 90 seconds.
+            let remaining = 10800_u32.saturating_sub(o.saved.ticks) as f32 / 120.;
+            paint.boss(
+                &format!("JABBERWOCK / SURVIVE {:.0}s", remaining.ceil()),
+                remaining / 90.,
+            );
+        } else if o.saved.boss.health > 0. {
+            paint.boss( "JABBERWOCK", o.saved.boss.health / 2000.);
+        }
+        }
     fn hud(&mut self, l: &dyn LevelController) {
         let o = l.downcast_ref::<Encounter>().unwrap();
         if o.saved.phase != Phase::Fight {

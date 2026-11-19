@@ -74,15 +74,26 @@ impl Art {
         fullbright: bool,
         body: &crate::character::SkinMaterial,
     ) {
+        self.draw_input((simulation.0.render_view(), simulation.1), balls, blasts, camera, fullbright, body);
+    }
+    pub(crate) fn draw_input(
+        &mut self,
+        simulation: (bomb::RenderView<'_>, &bomb::Data),
+        balls: &[super::Projectile],
+        blasts: &[blast::Blast],
+        camera: Vec3,
+        fullbright: bool,
+        body: &crate::character::SkinMaterial,
+    ) {
         let (state, data) = simulation;
         let mut active = BTreeSet::new();
         let atmosphere = self.atmosphere.borrow();
         body.bind();
-        for b in &state.bombs {
+        for b in state.bombs.iter() {
             let (stage, time, looping) = data.stage(b);
             self.props[stage].draw_frame(b.pose(), 1., fullbright, time, looping);
         }
-        for b in &state.bombs {
+        for b in state.bombs.iter() {
             let kind = usize::from(b.alternate);
             let key = (kind, b.id);
             active.insert(key);
@@ -107,7 +118,7 @@ impl Art {
                 &atmosphere,
             );
         }
-        for f in &state.flames {
+        for f in state.flames.iter() {
             let key = (2, f.id);
             active.insert(key);
             self.emitters

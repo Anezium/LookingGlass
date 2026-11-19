@@ -1,6 +1,8 @@
 //! Persistent math workers: fixed application masks, explicit stacks, no renderer imports.
 pub(crate) const STACK_BYTES: usize = 512 * 1024;
 pub(crate) fn mask(worker: usize) -> i32 {
+    #[cfg(feature="vita_renderer")]
+    if crate::render::vita_renderer::config().diag_overlap { return 0x40000; }
     [0x20000, 0x40000][worker]
 }
 
@@ -455,4 +457,29 @@ mod persistent_tests {
         drop(worker);
         assert!(flag.load(Ordering::Acquire));
     }
+}
+
+/// Dedicated diagnostic core; workers are remapped to CPU2 only in diag_overlap mode.
+pub(crate) fn pin_overlap_burn() {
+    #[cfg(target_os="vita")]
+    unsafe {
+        let rc = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000);
+        assert!(rc >= 0, "overlap burn affinity failed: {rc}");
+        inventory("overlap-burn", Some(0x20000));
+    }
+}
+
+/// CPAL pins its consumer to CPU1 before starting the stream. Move it only from
+/// its own callback, after that startup readback, to reserve the diagnostic core.
+#[cfg(target_os="vita")]
+pub(crate) fn overlap_audio_callback() {
+    if !crate::spike_log::overlap_enabled() { return; }
+    thread_local! { static APPLIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    APPLIED.with(|applied| if !applied.replace(true) {
+        unsafe {
+            let rc=sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(),0x40000);
+            assert!(rc >= 0, "overlap audio callback affinity failed: {rc}");
+            inventory("overlap-audio-callback",Some(0x40000));
+        }
+    });
 }

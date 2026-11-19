@@ -163,6 +163,12 @@ pub struct Config {
     /// Diagnostic per-draw clocks; normal play keeps only phase/tail timings.
     pub render_draw_timing: bool,
     pub worker_probe: bool,
+    /// Overlap kill-test instrumentation and dedicated CPU1 reservation. Default off.
+    pub diag_overlap: bool,
+    /// Serial owned HUD input extraction experiment; no scheduling changes.
+    pub diag_snapshot: bool,
+    /// Memory-touching CPU1 load per render frame; zero disables the burn thread.
+    pub diag_overlap_burn_ms: u32,
     pub skin_workers: usize,
     /// Gather final poses before world submission and collect before characters.
     pub skin_overlap: bool,
@@ -625,7 +631,7 @@ impl Default for Config {
             world_parameter_time_split: true,
             uniform_field_cache: true,
             render_draw_timing: false,
-            worker_probe: false, skin_workers: 2, skin_overlap: true,
+            worker_probe: false, diag_snapshot: false, diag_overlap: false, diag_overlap_burn_ms: 0, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             actor_publication_occurrences: true,
             actor_deferred_layers: true,
@@ -789,6 +795,10 @@ impl Config {
         ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
             "actor_single_prepare requires renderer=vita, skin_overlap=true, skin_workers>0, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
+        ensure!(self.diag_overlap_burn_ms <= 20, "diag_overlap_burn_ms must be 0..20");
+        ensure!(self.diag_overlap || self.diag_overlap_burn_ms == 0, "burn requires diag_overlap");
+        ensure!(!self.diag_overlap || (self.skin_workers == 1 && self.skin_overlap && self.audio_pcm_worker && self.audio_producer_affinity == 0x40000),
+            "diag_overlap reserves CPU1: requires one skin worker, buffered audio and audio on CPU2");
         ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
         ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
@@ -3745,7 +3755,7 @@ mod tests {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
             if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
-                || key == "fx_add_lean" || key == "fx_add_fog_free" || key == "actor_cutout_discard_free" || key == "actor_frontface_cull" || key == "actor_discard_free_shader" || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" {
+                || key == "fx_add_lean" || key == "fx_add_fog_free" || key == "actor_cutout_discard_free" || key == "actor_frontface_cull" || key == "actor_discard_free_shader" || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull" || key == "diag_overlap" || key == "diag_snapshot" {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -4060,7 +4070,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "fx_add_lean" | "fx_add_fog_free" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { k.starts_with("diag_skip_") || matches!(k, "diag_snapshot" | "diag_overlap" | "diag_overlap_burn_ms" | "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "fx_add_lean" | "fx_add_fog_free" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
@@ -6178,5 +6188,25 @@ mod tests {
         s.alpha_test = 2;
         s.depth_write = false;
         assert!(!opaque_stage(&s));
+    }
+}
+
+#[cfg(test)]
+mod overlap_probe_tests {
+    use super::Config;
+    #[test]
+    fn overlap_reservation_and_burn_are_explicit() {
+        let default=Config::default();
+        assert!(!default.diag_overlap && default.diag_overlap_burn_ms==0);
+        for value in [serde_json::json!({"diag_overlap_burn_ms":12}),
+            serde_json::json!({"diag_overlap":true}),
+            serde_json::json!({"diag_overlap":true,"skin_workers":1,"diag_overlap_burn_ms":21}),
+            serde_json::json!({"diag_overlap":true,"skin_workers":1,"audio_producer_affinity":0x20000})] {
+            assert!(serde_json::from_value::<Config>(value).unwrap().validate().is_err());
+        }
+        for ms in [0,6,12] {
+            let c:Config=serde_json::from_value(serde_json::json!({"diag_overlap":true,"skin_workers":1,"audio_pcm_worker":true,"diag_overlap_burn_ms":ms})).unwrap();
+            c.validate().unwrap();
+        }
     }
 }

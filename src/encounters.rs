@@ -380,6 +380,12 @@ impl Encounters {
         }
         out
     }
+    pub(crate) fn extract_waves(&self,out:&mut Vec<crate::render_snapshot::WaveInput>) {
+        for a in self.actors.iter().filter(|a|a.active && a.enabled) {
+            if let Enemy::Boojum(b)=&a.enemy {b.extract_waves(out);}
+            if let Enemy::Ladybug(b)=&a.enemy {crate::ladybug::Art::extract_effects(b,out);}
+        }
+    }
     pub fn draw_waves(&self) {
         for a in self.actors.iter().filter(|a| a.active && a.enabled) {
             if let Enemy::Boojum(b) = &a.enemy {
@@ -398,6 +404,16 @@ pub struct Snapshot {
     actors: Vec<Actor>,
     activated: BTreeSet<String>,
 }
+/// Owned encounter draw batch. Only complete Ladybug-only batches are accepted;
+/// any other species or shape rejects the whole frame to the serial live path.
+struct RenderInput {
+    visit: u64,
+    actors: Vec<crate::ladybug::RenderInput>,
+    rejected: bool,
+}
+const MAX_ACTORS: usize = 1024;
+const MAX_BONES: usize = 65536;
+const MAX_ACORNS: usize = 16384;
 pub struct Art {
     club: crate::npc::Puppet,
     diamond: crate::npc::Puppet,
@@ -405,12 +421,16 @@ pub struct Art {
     bolt: crate::weapons::Prop,
     material: crate::character::SkinMaterial,
     ladybug: crate::ladybug::Art,
+    visit: crate::render_snapshot::RenderVisit,
+    input: Option<RenderInput>,
     pub school_staging: bool,
 }
 impl Art {
     pub fn load(assets: &mut Assets) -> Result<Self> {
         let specs = crate::texture::read_materials(assets)?;
         Ok(Self {
+            visit: Default::default(),
+            input: None,
             school_staging: false,
             ladybug: crate::ladybug::Art::load(assets, &specs)?,
             club: crate::npc::Puppet::load(assets, "cardguard_club", &[], &specs)?,
@@ -435,6 +455,75 @@ impl Art {
             bolt: crate::weapons::Prop::load_animation(assets, "prj_diamond", "idle", &specs)?,
             material: crate::character::skin_material()?,
         })
+    }
+    pub(crate) fn clear_snapshot(&mut self) { self.input = None; }
+    pub(crate) fn snapshot_ready(&self) -> bool {
+        self.input.as_ref().is_some_and(|i| !i.rejected && i.visit == self.visit.id()
+            && i.actors.len() <= MAX_ACTORS
+            && i.actors.iter().all(|a| self.ladybug.valid_input(a)))
+    }
+    pub(crate) fn snapshot_bytes(&self) -> usize {
+        self.input.as_ref().map_or(0, |i| std::mem::size_of::<RenderInput>()
+            + i.actors.iter().map(|a| a.bytes()).sum::<usize>())
+    }
+    pub(crate) fn extract_snapshot(&mut self, s: &Encounters) {
+        let mut input = RenderInput { visit: self.visit.id(), actors: Vec::new(), rejected: true };
+        // Reject every unsupported shape/species and bound the whole batch before
+        // any pose allocation or iteration over a malformed list.
+        if s.actors.len() > MAX_ACTORS { self.input = Some(input); return; }
+        let Some(timing) = s.ladybug else { self.input = Some(input); return; };
+        let mut acorns = 0usize;
+        for a in &s.actors {
+            let Enemy::Ladybug(b) = &a.enemy else { self.input = Some(input); return; };
+            if b.acorns.len() > MAX_ACORNS.saturating_sub(acorns) {
+                self.input = Some(input); return;
+            }
+            if !(b.feet.is_finite() && b.yaw.is_finite()
+                && b.scale.is_finite() && (0.01..=10.).contains(&b.scale)
+                && b.time.is_finite() && (0. ..=1e8).contains(&b.time)
+                && b.health.is_finite() && (0. ..=crate::ladybug::HEALTH).contains(&b.health)
+                && b.electric.is_finite() && (0. ..=crate::electric::LIFE).contains(&b.electric)
+                && b.acorns.iter().all(|p| p.position.is_finite()
+                    && p.age.is_finite() && (0. ..=3.).contains(&p.age)))
+            {
+                self.input = Some(input); return;
+            }
+            acorns += b.acorns.len();
+        }
+        // Every selected Ladybug shares one skeleton; bound the whole batch.
+        if s.actors.len().saturating_mul(self.ladybug.snapshot_bones()) > MAX_BONES {
+            self.input = Some(input); return;
+        }
+        input.actors = s.actors.iter()
+            .filter(|a| a.active && a.enabled)
+            .filter(|a| !matches!(&a.enemy, Enemy::Ladybug(b)
+                if b.health > 0. && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors)))
+            .map(|a| {
+                let Enemy::Ladybug(b) = &a.enemy else { unreachable!("ladybug-only batch") };
+                self.ladybug.extract_input(b, timing)
+            })
+            .collect();
+        input.rejected = false;
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        if std::env::var_os("LOOKING_GLASS_SNAPSHOT_REJECT_ENCOUNTERS").is_some() {
+            input.visit = 0;
+        }
+        self.input = Some(input);
+    }
+    pub(crate) fn draw_snapshot(
+        &mut self,
+        fullbright: bool,
+        atmosphere: &crate::environment::Atmosphere,
+        camera: Vec3,
+    ) -> bool {
+        if !self.snapshot_ready() { return false; }
+        self.material.atmosphere(atmosphere, camera);
+        self.material.bind();
+        for a in &self.input.as_ref().unwrap().actors {
+            self.ladybug.draw_input(a, fullbright);
+        }
+        gl_use_default_material();
+        true
     }
     pub fn draw(
         &mut self,
@@ -517,3 +606,7 @@ impl Art {
         gl_use_default_material();
     }
 }
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+mod snapshot_check;
+#[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+pub(crate) use snapshot_check::check as snapshot_render_check;

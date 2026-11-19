@@ -2,9 +2,10 @@
 use crate::skeletal::Transform;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub(super) struct Trail(Vec<(f32, Transform)>);
 impl Trail {
+    pub(super) fn bytes(&self)->usize { self.0.len()*std::mem::size_of::<(f32,Transform)>() }
     pub fn record(&mut self, age: f32, pose: Transform) {
         if self.0.last().is_some_and(|p| age <= p.0) {
             return;
@@ -45,3 +46,5 @@ impl Trail {
             && self.0.windows(2).all(|s| s[0].0 < s[1].0)
     }
 }
+
+impl Clone for Trail { fn clone(&self)->Self {Self(self.0.clone())} fn clone_from(&mut self,other:&Self){self.0.clone_from(&other.0);} }

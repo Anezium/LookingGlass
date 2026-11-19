@@ -303,6 +303,25 @@ impl Acting {
     pub fn hide_weapon(&self) -> bool {
         self.visual().hide_weapon
     }
+    pub(crate) fn render_attachments(&self, out: &mut Vec<(usize, usize, f32, f32)>, skeleton: &Skeleton) {
+        out.clear();
+        if self.state.current.is_none() { return; }
+        for (tag, attachment) in self.visual().attachments {
+            let bone = skeleton.bones.iter().position(|b| b.name == tag).unwrap();
+            let slot = self.props.keys().position(|name| name == &attachment.model).unwrap();
+            out.push((slot, bone, attachment.scale, attachment.age));
+        }
+    }
+    pub(crate) fn valid_attachments(&self,input:&[(usize,usize,f32,f32)])->bool {
+        input.iter().all(|&(slot,_,_,_)|slot<self.props.len())
+    }
+    pub(crate) fn draw_attachments(&mut self, input: &[(usize, usize, f32, f32)], pose: &[Transform], transform: Transform, scale: f32, bright: bool) {
+        for &(slot, bone, size, age) in input {
+            self.props.values_mut().nth(slot).unwrap().draw_frame(
+                Transform { translation: transform.point(pose[bone].translation * scale), rotation: transform.rotation * pose[bone].rotation },
+                scale * size, bright, age, true);
+        }
+    }
     pub fn draw(
         &mut self,
         skeleton: &Skeleton,

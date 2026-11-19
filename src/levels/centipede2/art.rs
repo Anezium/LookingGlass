@@ -269,6 +269,17 @@ impl LevelArt for Art {
             }
         }
     }
+    fn hud_input(&self, l: &dyn LevelController, out: &mut Vec<crate::render_snapshot::HudCommand>) {
+        let mut paint = crate::render_snapshot::Painter::new(&self.ui, out);
+        let o = l.downcast_ref::<Centipede>().unwrap();
+        if o.saved.phase == Phase::Fight && o.saved.battle.hits < 6 {
+            // Each of the six accepted weak-point reactions advances the fight.
+            paint.boss(
+                "CENTIPEDE",
+                (6 - o.saved.battle.hits) as f32 / 6.,
+            );
+        }
+        }
     fn hud(&mut self, l: &dyn LevelController) {
         let o = l.downcast_ref::<Centipede>().unwrap();
         if o.saved.phase == Phase::Fight && o.saved.battle.hits < 6 {

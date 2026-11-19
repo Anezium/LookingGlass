@@ -188,6 +188,21 @@ impl Default for Stats {
     }
 }
 impl Stats {
+    /// HUD-only owned value; avoid copying the campaign's collected/loot trees.
+    /// Those trees are used by pickup rendering, never by draw/draw_inventory.
+    pub(crate) fn hud_input(&self) -> Self {
+        Self {
+            minimum_sanity: self.minimum_sanity, difficulty: self.difficulty,
+            powers: self.powers.clone(), loot: Default::default(),
+            turtle_air: self.turtle_air, staff_component: self.staff_component,
+            scripted_immunity: self.scripted_immunity, god: self.god,
+            notarget: self.notarget, invisible: self.invisible,
+            sanity: self.sanity, will: self.will, owned: self.owned,
+            selected: self.selected, regen_delay: self.regen_delay,
+            collected: Default::default(), school_items: self.school_items.clone(),
+        }
+    }
+
     pub fn validate_save(&self) -> Result<()> {
         ensure!((0. ..=2.).contains(&self.scripted_immunity), "Invalid scripted protection");
         self.powers.validate(self.invisible)?;

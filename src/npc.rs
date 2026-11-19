@@ -1,6 +1,8 @@
 //! Placed, animated characters with bounded local reactions. No original AI/scripts run.
 use crate::mesh::Mesh;
 mod ambient;
+#[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+pub(crate) mod snapshot_check;
 pub(crate) mod profile;
 mod visual_lod;
 pub(crate) mod attack_fx;
@@ -747,7 +749,71 @@ pub struct Puppet(
     Option<crate::cinematic::ActorPose>,
     crate::facial::Watch,
 );
+/// Complete input for the ordinary cinematic Puppet path. Resource identity is
+/// supplied by the enclosing visit registry, never by a pointer in this record.
+pub(crate) struct PuppetInput {
+    pose: Vec<Transform>,
+    scales: Vec<f32>,
+    handoff: Option<crate::cinematic::ActorPose>,
+    visual: crate::animation_events::VisualState,
+    time: f32,
+    alive: bool,
+    transform: Transform,
+    scale: f32,
+    attachments: bool,
+    frozen: bool,
+}
+impl PuppetInput {
+    pub(crate) fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.pose.len()*std::mem::size_of::<Transform>()
+            + self.scales.len()*std::mem::size_of::<f32>() + self.visual.payload_bytes()
+            + self.handoff.as_ref().map_or(0, |p| p.local.len()*std::mem::size_of::<Transform>())
+    }
+    pub(crate) fn bones(&self) -> usize { self.pose.len() }
+    pub(crate) fn with_attachments(mut self, value: bool) -> Self {
+        self.attachments = value;
+        self
+    }
+}
 impl Puppet {
+    pub(crate) fn snapshot_bones(&self) -> usize { self.0.data.skeleton.bones.len() }
+    pub(crate) fn extract_draw(&self, clip: &str, time: f32, looping: bool,
+        transform: Transform, scale: f32) -> PuppetInput {
+        let d = &self.0.data;
+        let animation = d.clips.get(clip).unwrap_or(&d.clips[&d.idle]);
+        let mut local = animation.sample(time, looping);
+        self.5.apply(&d.skeleton, &mut local);
+        let handoff = self.4.as_ref().map(|_| crate::cinematic::ActorPose {
+            rendered: None, local: local.clone(), transform, scale });
+        let mut pose = self.0.face.pose(&d.skeleton, &local, self.2);
+        let scales = if self.0.bone_scales.is_empty() { Vec::new() } else {
+            crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.0.bone_scales)
+        };
+        PuppetInput { pose, scales, handoff,
+            visual: d.events.visual(clip, time, animation.duration(), animation.frame_time, looping),
+            time, alive: !clip.starts_with("death"), transform, scale,
+            attachments: self.1, frozen: clip == "death_frozen" }
+    }
+    pub(crate) fn valid_input(&self, input: &PuppetInput) -> bool {
+        input.pose.len() == self.0.data.skeleton.bones.len()
+            && (input.scales.is_empty() || input.scales.len() == input.pose.len())
+            && input.handoff.as_ref().is_none_or(|p| p.local.len() == input.pose.len())
+    }
+    pub(crate) fn draw_input(&mut self, input: &PuppetInput, fullbright: bool) {
+        self.draw_input_dissolving(input, fullbright, 0.);
+    }
+    pub(crate) fn draw_input_dissolving(&mut self, input: &PuppetInput, fullbright: bool, dissolve: f32) {
+        if let (Some(dst), Some(src)) = (&mut self.4, &input.handoff) {
+            dst.clone_from(src); dst.rendered = crate::render_snapshot::handoff_render_stamp();
+        }
+        let _consumer = crate::character::skinning::CullGuard::publication_reason(
+            input.frozen, crate::phase_census::FROZEN);
+        let material = self.3.clone();
+        material.draw_dissolving(dissolve, || self.0.draw_resolved_pose(
+            &input.pose, &input.scales, 0., input.time, input.alive, input.transform,
+            input.scale, fullbright, input.attachments, &input.visual, None));
+        if input.frozen { self.0.draw_frozen(); }
+    }
     /// Afterimages inherit the last normal draw's normals, including across frames.
     /// Declare this at construction, before any normal draw can enter a worker bank.
     pub(crate) fn with_afterimages(mut self) -> Self {
@@ -792,6 +858,7 @@ impl Puppet {
             0.,
             crate::character::skin_material()?,
             (name == "alice").then(|| crate::cinematic::ActorPose {
+                rendered: None,
                 local: Vec::new(),
                 transform: Transform {
                     translation: Vec3::ZERO,
@@ -982,6 +1049,7 @@ impl Puppet {
             pose.local.clone_from(&local);
             pose.transform = transform;
             pose.scale = scale;
+            pose.rendered = crate::render_snapshot::handoff_render_stamp();
         }
         let visual = d.events.visual(
             clip,
@@ -1024,6 +1092,7 @@ impl Puppet {
             pose.local.clone_from(&local);
             pose.transform = transform;
             pose.scale = scale;
+            pose.rendered = crate::render_snapshot::handoff_render_stamp();
         }
         let animation = &d.clips[&clip];
         let visual = d.events.visual(
@@ -1208,8 +1277,38 @@ impl Model {
                 (pose, scales)
             },
         );
-        let pose = &prepared.pose;
-        let scales = &prepared.scales;
+        self.publish_resolved_pose(&prepared.pose, &prepared.scales, time, alive,
+            transform, scale, fullbright, attachments, visual, piece);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn draw_resolved_pose(
+        &mut self, pose: &[Transform], scales: &[f32], _mouth: f32,
+        time: f32, alive: bool, transform: Transform, scale: f32,
+        fullbright: bool, attachments: bool, visual: &crate::animation_events::VisualState,
+        piece: Option<(&str, &str, bool)>,
+    ) {
+        let _identity = self.skin_identity.scope_unless_set();
+        self.visible.fill(false);
+        self.electric_attachments.clear();
+        self.electric_props.clear();
+        if scale <= 0. {
+            return;
+        }
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        let _actor_timing=crate::character::skinning::census::actor(
+            self.skin_identity, &self.data.def.path, &self.data.def.model,
+            self.data.skeleton.bones.len(), &self.data.meta.attachments, transform, scale,
+            self.late_skin_overlays, self.afterimage_normals);
+        self.publish_resolved_pose(pose, scales, time, alive, transform, scale,
+            fullbright, attachments, visual, piece);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn publish_resolved_pose(
+        &mut self, pose: &[Transform], scales: &[f32], time: f32, alive: bool,
+        transform: Transform, scale: f32, fullbright: bool, attachments: bool,
+        visual: &crate::animation_events::VisualState, piece: Option<(&str, &str, bool)>,
+    ) {
+        let d = &self.data;
         self.face.blink(&mut self.meshes, time, alive);
         let mut removed = Vec::new();
         for (i, surface) in d.skeleton.surfaces.iter().enumerate() {
@@ -1984,7 +2083,151 @@ fn near_cull_skips_only_close_dead_bodies_and_is_off_at_zero() {
     assert!(!near_cull(80., true, || 80.));
     assert!(!near_cull(80., false, || 1.));
 }
+/// Renderer-owned slots. Recreated on every visit/restore, never saved or sent.
+#[derive(Default)]
+struct SnapshotRegistry {
+    generation: u64,
+    slots: Vec<(crate::character::skinning::identity::ActorId, usize)>,
+    // Required owned commands; omissions may never silently read live actors.
+    owned_slots: Vec<usize>,
+}
+impl SnapshotRegistry {
+    fn retire(&mut self) {
+        self.generation = crate::character::skinning::identity::next_instance();
+        self.slots.clear(); self.owned_slots.clear();
+    }
+}
+struct AntBodyInput {
+    pose: Vec<Transform>,
+    scales: Vec<f32>,
+    visual: crate::animation_events::VisualState,
+    transform: Transform,
+    scale: f32,
+    time: f32,
+    alive: bool,
+    frozen: bool,
+    electric: f32,
+}
+struct AntInput {
+    slot: usize,
+    visible: bool,
+    preserve: bool,
+    corpse: bool,
+    body: Option<AntBodyInput>,
+    shots: Vec<crate::ant::Bullet>,
+    blasts: Vec<crate::ant::Blast>,
+}
+struct AmbientInput {
+    slot: usize,
+    visible: bool,
+    preserve: bool,
+    body: Option<AntBodyInput>,
+    clip: usize,
+    sample_time: f32,
+    looping: bool,
+    lod_safe: bool,
+    distance_squared: f32,
+    radius: f32,
+}
+impl Actor {
+    fn snapshot_ambient(&self) -> bool {
+        self.ant.is_none() && self.resident.is_none() && self.clock.is_none()
+            && self.imp.is_none() && self.chess.is_none() && self.guard.is_none() && self.guide.is_none()
+    }
+}
+// Only resolved numeric/owned visual input crosses the simulation boundary.
+struct ResidentInput {
+    slot: usize,
+    visible: bool,
+    preserve: bool,
+    attached: bool,
+    body: Option<AntBodyInput>,
+    effects: ResidentEffects,
+}
+enum ResidentEffects {
+    BiteOnly,
+    Wildlife { active: bool, input: wildlife_art::Input },
+    Ladybug { active: bool, acorns: Vec<(Vec3, f32)>, bursts: Vec<(Vec3, f32)> },
+    Plant { kind: crate::plants::Kind, shots: Vec<crate::plants::Shot> },
+}
+impl ResidentEffects {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::BiteOnly => 0,
+            Self::Wildlife { .. } => std::mem::size_of::<wildlife_art::Input>(),
+            Self::Ladybug { acorns, bursts, .. } => (acorns.len()+bursts.len())*std::mem::size_of::<(Vec3,f32)>(),
+            Self::Plant { shots, .. } => shots.len()*std::mem::size_of::<crate::plants::Shot>(),
+        }
+    }
+}
+impl Actor {
+    fn snapshot_resident(&self) -> bool {
+        self.resident.as_ref().is_some_and(|p| matches!(&p.body, resident::Body::Ladybug(_) | resident::Body::Plant(_))
+            || matches!(&p.body, resident::Body::Snark(b) if b.kind == crate::snark::Kind::BiteOnly)
+            || matches!(&p.body, resident::Body::Wildlife(b) if b.kind.rock()))
+    }
+}
+#[derive(Default)]
+struct ActorInputs {
+    generation: u64,
+    ants: Vec<AntInput>,
+    ambient: Vec<AmbientInput>,
+    residents: Vec<ResidentInput>,
+    overflow: bool,
+}
+impl ActorInputs {
+    fn valid_for(&self, registry: &SnapshotRegistry) -> bool {
+        !self.overflow && self.generation != 0 && self.generation == registry.generation
+            && self.ants.len()+self.ambient.len()+self.residents.len() == registry.owned_slots.len()
+            && registry.owned_slots.iter().all(|slot|
+                self.ants.iter().any(|a| a.slot == *slot) || self.ambient.iter().any(|a| a.slot == *slot)
+                    || self.residents.iter().any(|a| a.slot == *slot))
+            && self.ants.iter().all(|a| a.slot < registry.slots.len())
+            && self.ants.windows(2).all(|a| a[0].slot < a[1].slot)
+            && self.ambient.iter().all(|a| a.slot < registry.slots.len()
+                && !self.ants.iter().any(|b| b.slot == a.slot))
+            && self.ambient.windows(2).all(|a| a[0].slot < a[1].slot)
+            && self.residents.windows(2).all(|a| a[0].slot < a[1].slot)
+            && self.residents.iter().all(|a| a.slot < registry.slots.len()
+                && !self.ants.iter().any(|b| a.slot == b.slot)
+                && !self.ambient.iter().any(|b| a.slot == b.slot))
+    }
+    fn valid_resources(&self, registry: &SnapshotRegistry, models: &[Model]) -> bool {
+        self.valid_for(registry) && registry.slots.iter().all(|(_, slot)| *slot < models.len())
+            && self.residents.iter().all(|a| {
+                let d = &models[registry.slots[a.slot].1].data;
+                a.body.as_ref().is_none_or(|b| b.pose.len() == d.skeleton.bones.len()
+                    && (b.scales.is_empty() || b.scales.len() == b.pose.len()))
+            })
+            && self.ambient.iter().all(|a| {
+                let d = &models[registry.slots[a.slot].1].data;
+                a.clip < d.clips.len() && a.visible == a.body.is_some()
+                    && a.body.as_ref().is_none_or(|b| b.pose.len() == d.skeleton.bones.len()
+                        && (b.scales.is_empty() || b.scales.len() == b.pose.len()))
+            })
+    }
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.residents.len()*std::mem::size_of::<ResidentInput>()
+            + self.residents.iter().map(|r| r.effects.bytes() + r.body.as_ref().map_or(0, |b|
+                b.pose.len()*std::mem::size_of::<Transform>() + b.scales.len()*std::mem::size_of::<f32>()
+                    + b.visual.payload_bytes())).sum::<usize>()
+            + self.ambient.len()*std::mem::size_of::<AmbientInput>()
+            + self.ambient.iter().filter_map(|a| a.body.as_ref()).map(|b|
+                b.pose.len()*std::mem::size_of::<Transform>() + b.scales.len()*std::mem::size_of::<f32>()
+                + b.visual.payload_bytes()).sum::<usize>()
+            + self.ants.len()*std::mem::size_of::<AntInput>()
+            + self.ants.iter().map(|a| a.shots.len()*std::mem::size_of::<crate::ant::Bullet>()
+                + a.blasts.len()*std::mem::size_of::<crate::ant::Blast>()
+                + a.body.as_ref().map_or(0, |b| b.pose.len()*std::mem::size_of::<Transform>()
+                    + b.scales.len()*std::mem::size_of::<f32>()
+                    // Owned visual strings/trees are counted separately below.
+                    + b.visual.payload_bytes())).sum::<usize>()
+    }
+}
 pub struct Npcs {
+    snapshot_registry: SnapshotRegistry,
+    actor_inputs: Option<ActorInputs>,
     // GPU-only state, discarded on restore/level change and never serialized.
     visual_lod: BTreeMap<usize, visual_lod::Cache>,
     attack_fx: std::rc::Rc<attack_fx::Art>,
@@ -2032,6 +2275,209 @@ pub struct Npcs {
     pub greetings: u64,
 }
 impl Npcs {
+    /// Host-only census of incomplete schemas, including dispatch visibility reads.
+    /// Presence is intentional: a hidden actor still consults live state before returning.
+    pub(crate) fn snapshot_fence_census(&self) -> std::collections::BTreeMap<String, usize> {
+        let mut counts = std::collections::BTreeMap::new();
+        for actor in &self.actors {
+            if (actor.ant.is_some() || actor.snapshot_ambient() || actor.snapshot_resident()) && self.actor_inputs.as_ref()
+                .is_some_and(|i| i.valid_resources(&self.snapshot_registry, &self.models)) { continue; }
+            let family = if actor.ant.is_some() { "ant" } else if let Some(p) = &actor.resident {
+                match &p.body {
+                    resident::Body::Boojum(_) => "boojum",
+                    resident::Body::Ladybug(_) => "ladybug",
+                    resident::Body::Diamond(_) => "diamond",
+                    resident::Body::Plant(_) => "plant",
+                    resident::Body::Card(_) => "card",
+                    resident::Body::Snark(_) => "snark",
+                    resident::Body::Insect(_) => "insect",
+                    resident::Body::Magma(_) => "magma",
+                    resident::Body::Wildlife(_) => "wildlife",
+                }
+            } else if actor.clock.is_some() { "clockwork" }
+            else if actor.imp.is_some() { "fire_imp" }
+            else if actor.chess.is_some() { "chess" }
+            else if actor.guard.is_some() { "guard" }
+            else if actor.guide.is_some() { "companion" }
+            else { "ambient" };
+            *counts.entry(format!("npc.{family}.{}", actor.spawn.model)).or_insert(0) += 1;
+        }
+        counts
+    }
+    /// Extract bounded owned NPC inputs. Unconverted families retain their
+    /// explicit serial fence and legacy consumer.
+    pub(crate) fn extract_ants(&mut self, camera: Vec3, direction: Vec3) -> (usize, usize, bool) {
+        const MAX_ACTORS: usize = 1024;
+        const MAX_BONES: usize = 65536;
+        const MAX_EFFECTS: usize = 16384;
+        // Reject before walking a malformed/unbounded cast or allocating poses.
+        if self.actors.len() > MAX_ACTORS || self.actors.iter().any(|a| a.model >= self.models.len()) {
+            self.actor_inputs = Some(ActorInputs { overflow: true, ..Default::default() });
+            return (std::mem::size_of::<ActorInputs>(), 0, true);
+        }
+        let changed = self.snapshot_registry.slots.len() != self.actors.len()
+            || self.snapshot_registry.slots.iter().zip(&self.actors)
+                .any(|((id, model), a)| *id != a.skin_identity || *model != a.model);
+        if changed || self.snapshot_registry.generation == 0 {
+            self.snapshot_registry.retire();
+            self.snapshot_registry.slots.extend(self.actors.iter().map(|a| (a.skin_identity,a.model)));
+            self.snapshot_registry.owned_slots.extend(self.actors.iter().enumerate()
+                .filter(|(_,a)| a.ant.is_some() || a.snapshot_ambient() || a.snapshot_resident()).map(|(slot,_)|slot));
+        }
+        let mut inputs = ActorInputs { generation: self.snapshot_registry.generation, ..Default::default() };
+        let mut bones = 0;
+        let mut effects = 0;
+        for (slot, actor) in self.actors.iter().enumerate() {
+            let Some(ant) = &actor.ant else { continue };
+            let corpse = ant.health <= 0.;
+            let mut visible = ant.enabled && !self.scene_hidden.contains(&actor.spawn.name)
+                && !self.registry_owns(actor) && !self.legacy_owns(actor)
+                && (!(actor.spawn.hidden || (self.owns_pandemonium
+                    && matches!(actor.spawn.name.as_str(), "rope_cat" | "cards_cat")))
+                    || actor.story_visible)
+                && !((corpse && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::AntCorpses))
+                    || (!corpse && crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors)));
+            #[cfg(feature="vita_renderer")]
+            { visible &= !actor.near_culled(camera, crate::render::vita_renderer::config().actor_near_cull); }
+            visible &= !actor.guide.as_ref().is_some_and(|g| !g.visible());
+            let offset = actor.target()-camera;
+            let body_visible = visible && !(offset.length_squared()>3500.*3500.
+                || (offset.length_squared()>200.*200. && offset.normalize().dot(direction)< -0.3));
+            let model = &self.models[actor.model];
+            let scale = ant.visual_scale(&model.data);
+            let body = if body_visible && scale>0. {
+                let clip = &model.data.clips[ant.clip()];
+                let time = if ant.frozen { ant.time.min(clip.frame_time*5.) } else { ant.time };
+                bones += model.data.skeleton.bones.len();
+                if bones > MAX_BONES { inputs.overflow = true; break; }
+                let local = clip.sample(time, ant.loops());
+                let mut pose = model.face.pose(&model.data.skeleton, &local, 0.);
+                let scales = if model.bone_scales.is_empty() { Vec::new() }
+                    else { crate::skeletal::scale_pose(&model.data.skeleton, &mut pose, &model.bone_scales) };
+                Some(AntBodyInput { pose, scales,
+                    visual: model.data.events.visual(ant.clip(),time,clip.duration(),clip.frame_time,ant.loops()),
+                    transform: Transform { translation: ant.feet, rotation: Quat::from_rotation_z(ant.yaw) },
+                    scale, time: ant.time, alive: !corpse, frozen: ant.frozen, electric: ant.electric })
+            } else { None };
+            effects += ant.shots.len()+ant.blasts.len();
+            if effects>MAX_EFFECTS || inputs.ants.len()>=MAX_ACTORS { inputs.overflow=true; break; }
+            inputs.ants.push(AntInput { slot, visible, corpse, preserve: actor.electric>0., body,
+                shots: if visible { ant.shots.clone() } else { Vec::new() },
+                blasts: if visible { ant.blasts.clone() } else { Vec::new() } });
+        }
+        for (slot, actor) in self.actors.iter().enumerate().filter(|(_,a)| a.snapshot_ambient()) {
+            if inputs.overflow { break; }
+            let mut visible = !crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors)
+                && !self.scene_hidden.contains(&actor.spawn.name) && !self.registry_owns(actor)
+                && !self.legacy_owns(actor) && (!(actor.spawn.hidden || (self.owns_pandemonium
+                    && matches!(actor.spawn.name.as_str(), "rope_cat"|"cards_cat"))) || actor.story_visible);
+            #[cfg(feature="vita_renderer")]
+            { visible &= !actor.near_culled(camera, crate::render::vita_renderer::config().actor_near_cull); }
+            let offset = actor.target()-camera;
+            visible &= !(offset.length_squared()>3500.*3500.
+                || (offset.length_squared()>200.*200. && offset.normalize().dot(direction)< -0.3));
+            let model = &self.models[actor.model]; let d = &model.data;
+            let mut clip_slot = 0; let mut sample_time = 0.; let mut looping = false;
+            let body = if visible {
+                if d.skeleton.bones.len() > MAX_BONES.saturating_sub(bones) {
+                    inputs.overflow = true; break;
+                }
+                let idle = actor.spawn.animation.as_ref().filter(|n| d.clips.contains_key(*n)).unwrap_or(&d.idle);
+                let idle = if actor.walk.is_some() { "walk" } else { idle };
+                let (mut local, clip, at, loops) = d.performance(idle, actor.greeting>0. || actor.speaking,
+                    actor.ending_talk, actor.time);
+                actor.watch.apply(&d.skeleton, &mut local);
+                let animation = &d.clips[&clip];
+                clip_slot = d.clips.keys().position(|k| *k == clip).expect("resident ambient clip");
+                sample_time = at; looping = loops;
+                bones += d.skeleton.bones.len();
+                if bones>MAX_BONES { inputs.overflow=true; break; }
+                let mut pose = model.face.pose(&d.skeleton, &local, actor.mouth);
+                let scales = if model.bone_scales.is_empty() { Vec::new() } else {
+                    crate::skeletal::scale_pose(&d.skeleton, &mut pose, &model.bone_scales) };
+                Some(AntBodyInput { pose, scales,
+                    visual: d.events.visual(&clip, at, animation.duration(), animation.frame_time, loops),
+                    transform: Transform { translation: actor.position(), rotation: Quat::from_rotation_z(actor.yaw) },
+                    scale: actor.spawn.scale, time: actor.time, alive: true, frozen: false, electric: actor.electric })
+            } else { None };
+            if inputs.ambient.len()+inputs.ants.len()>=MAX_ACTORS { inputs.overflow=true; break; }
+            inputs.ambient.push(AmbientInput { slot, visible, preserve: actor.electric>0., body,
+                clip: clip_slot, sample_time, looping, lod_safe: visual_lod::safe(actor,model),
+                distance_squared: offset.length_squared(), radius: d.visual_radius*d.def.scale*actor.spawn.scale });
+        }
+        for (slot, actor) in self.actors.iter().enumerate().filter(|(_,a)| a.snapshot_resident()) {
+            if inputs.overflow { break; }
+            let p = actor.resident.as_ref().expect("selected resident");
+            // Reject malformed bite-only state before animation lookup or any copying.
+            if let resident::Body::Snark(b) = &p.body {
+                if b.validate().is_err() || b.kind.model()!=actor.spawn.model || !self.models[actor.model].data.clips.contains_key(b.clip()) { inputs.overflow=true; break; }
+            }
+            if let resident::Body::Wildlife(b) = &p.body {
+                if b.validate().is_err() || b.kind.model()!=actor.spawn.model || !self.models[actor.model].data.clips.contains_key(b.clip()) { inputs.overflow=true; break; }
+            }
+            let dead = p.health() <= 0.;
+            let mut visible = (dead || !crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors))
+                && !self.scene_hidden.contains(&actor.spawn.name) && !self.registry_owns(actor)
+                && !self.legacy_owns(actor) && (!(actor.spawn.hidden || (self.owns_pandemonium
+                    && matches!(actor.spawn.name.as_str(), "rope_cat" | "cards_cat"))) || actor.story_visible);
+            #[cfg(feature="vita_renderer")]
+            { visible &= !actor.near_culled(camera, crate::render::vita_renderer::config().actor_near_cull); }
+            let model = &self.models[actor.model]; let d = &model.data;
+            let offset = actor.target() - camera;
+            let body_visible = visible && p.active && !(offset.length_squared() > 3500.*3500.
+                || (offset.length_squared() > 200.*200. && offset.normalize().dot(direction) < -0.3));
+            let (clip, time, looping, scale, attached, frozen, electric) = match &p.body {
+                resident::Body::Ladybug(b) => {
+                    let (clip,time,loops) = b.clip(d.ladybug_timing.expect("resident Ladybug timing"));
+                    (clip,time,loops,b.visual_scale(),b.carrying,b.frozen,b.electric)
+                }
+                resident::Body::Plant(b) => (b.clip(),b.sample_time(d),b.loops(),b.visual_scale(d),true,b.frozen,0.),
+                resident::Body::Snark(b) => (b.clip(),b.sample_time(),b.loops(),b.visual_scale(d),true,b.frozen,0.),
+                resident::Body::Wildlife(b) => (b.clip(),b.sample_time(d),b.loops(),b.visual_scale(d),true,b.frozen,0.),
+                _ => unreachable!("selected resolved resident"),
+            };
+            let body = if body_visible && scale > 0. {
+                if d.skeleton.bones.len() > MAX_BONES.saturating_sub(bones) { inputs.overflow=true; break; }
+                bones += d.skeleton.bones.len();
+                let Some(animation)=d.clips.get(clip) else {inputs.overflow=true;break;}; let local = animation.sample(time, looping);
+                let mut pose = model.face.pose(&d.skeleton, &local, 0.);
+                let scales = if model.bone_scales.is_empty() { Vec::new() }
+                    else { crate::skeletal::scale_pose(&d.skeleton, &mut pose, &model.bone_scales) };
+                Some(AntBodyInput { pose, scales, visual: d.events.visual(clip,time,animation.duration(),animation.frame_time,looping),
+                    transform: Transform { translation:p.position(), rotation:Quat::from_rotation_z(p.yaw()) },
+                    scale, time, alive: p.health() > 0., frozen, electric })
+            } else { None };
+            // Bound every effect vector before copying. Ladybug effects require
+            // active residency; Plant projectiles precede that gate in the legacy path.
+            let effect_input = match &p.body {
+                // BiteOnly has no projectiles, tongue, or smoke. Validation above
+                // excludes ranged states; other Snark kinds retain the live fence.
+                resident::Body::Snark(_) => ResidentEffects::BiteOnly,
+                resident::Body::Wildlife(b) => ResidentEffects::Wildlife { active:p.active, input:wildlife_art::Input::capture(b,model) },
+                resident::Body::Ladybug(b) => {
+                    let count = if visible && p.active { b.acorns.len().saturating_add(b.bursts.len()) } else { 0 };
+                    if count > MAX_EFFECTS.saturating_sub(effects) { inputs.overflow=true; break; }
+                    effects += count;
+                    ResidentEffects::Ladybug { active: p.active,
+                        acorns: if visible && p.active { b.acorns.iter().map(|a|(a.position,a.age)).collect() } else { Vec::new() },
+                        bursts: if visible && p.active { b.bursts.iter().map(|b|(b.position,b.age)).collect() } else { Vec::new() },
+                    }
+                }
+                resident::Body::Plant(b) => {
+                    let count = if visible { b.shots.len() } else { 0 };
+                    if count > MAX_EFFECTS.saturating_sub(effects) { inputs.overflow=true; break; }
+                    effects += count;
+                    ResidentEffects::Plant { kind:b.kind, shots:if visible { b.shots.clone() } else { Vec::new() } }
+                }
+                _ => unreachable!("selected resolved resident"),
+            };
+            inputs.residents.push(ResidentInput { slot, visible, preserve:actor.electric>0., attached, body, effects:effect_input });
+        }
+        let result = (inputs.bytes(), inputs.ants.len(), inputs.overflow);
+        self.actor_inputs = Some(inputs);
+        result
+    }
+    pub(crate) fn clear_actor_inputs(&mut self) { self.actor_inputs = None; }
     pub(crate) fn check_school2_ownership(&self) -> Result<()> {
         let diamonds = self
             .actors
@@ -2066,6 +2512,25 @@ impl Npcs {
                 .iter()
                 .any(|r| (r.owns_npc)(&actor.spawn.name, &actor.spawn.model))
     }
+    fn legacy_owns(&self, actor: &Actor) -> bool {
+        (self.owns_duchess
+                && matches!(
+                    actor.spawn.name.as_str(),
+                    "billthelizard" | "mockturtle" | "walkyrocks"
+                ))
+                || (self.owns_ladybugs && actor.spawn.model == "c_ladybug")
+                || (self.owns_pandemonium
+                    && (actor.spawn.model.starts_with("cardguard_")
+                        || matches!(
+                            actor.spawn.name.as_str(),
+                            "airship_gnome"
+                                | "elder_gnome1"
+                                | "leave_gnome"
+                                | "minecart_torchgnome1"
+                                | "minecart_torchgnome2"
+                                | "minecart_torchgnome3"
+                        )))
+    }
     pub fn scene_hidden(&mut self, names: &[&str]) {
         self.scene_hidden = names.iter().map(|n| n.to_string()).collect();
     }
@@ -2091,6 +2556,8 @@ impl Npcs {
         }
     }
     pub fn restore(&mut self, s: &Snapshot) -> Result<()> {
+        self.snapshot_registry.retire();
+        self.actor_inputs = None;
         self.visual_lod.clear();
         if let Some(g) = &self.garden { g.validate(s.garden.as_ref())?; }
         self.card_art.clear();
@@ -2568,6 +3035,8 @@ impl Npcs {
         );
         let garden = garden::Logic::load(map,name,&mut actors)?;
         Ok(Self {
+            snapshot_registry: SnapshotRegistry::default(),
+            actor_inputs: None,
             visual_lod: BTreeMap::new(),
             attack_fx: attack_fx::Art::load(assets, &specs)?,
             garden,
@@ -3328,7 +3797,134 @@ impl Npcs {
         let mut lod_counts = [0u64; 5];
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
-        for (id, actor) in self.actors.iter().enumerate() {
+        let inputs = self.actor_inputs.as_ref().filter(|i| i.valid_resources(&self.snapshot_registry, &self.models));
+        let draw_count = inputs.map_or_else(|| self.actors.len(), |_| self.snapshot_registry.slots.len());
+        for id in 0..draw_count {
+            if let Some(input) = inputs.and_then(|i| i.ants.iter().find(|a| a.slot == id)) {
+                if !input.visible { continue; }
+                let (identity, model_slot) = self.snapshot_registry.slots[input.slot];
+                let _identity = identity.scope();
+                let _preserve = crate::character::skinning::CullGuard::preserve(input.preserve);
+                if !crate::character::skinning::overlap::gather_only() {
+                    if let Some(props) = &mut self.ant_shots {
+                        for shot in &input.shots { crate::ant::draw_shot(props, shot, fullbright); }
+                        crate::ant::draw_blast_inputs(&input.blasts);
+                        self.material.bind();
+                    }
+                }
+                if let Some(body) = &input.body {
+                    #[cfg(feature="vita_renderer")]
+                    let _corpse = crate::render_fx::corpse_triangles::scope(input.corpse);
+                    let _consumer = crate::character::skinning::CullGuard::publication_reason(body.frozen,crate::phase_census::FROZEN);
+                    let _electric = crate::character::skinning::CullGuard::reason(body.electric>0.,crate::phase_census::ELECTRIC);
+                    self.material.bind();
+                    let model = &mut self.models[model_slot];
+                    model.draw_resolved_pose(&body.pose, &body.scales, 0.,body.time,body.alive,
+                        body.transform,body.scale,fullbright,true,&body.visual,None);
+                    if body.frozen { model.draw_frozen(); }
+                    model.draw_electric(body.electric);
+                }
+                continue;
+            }
+            if let Some(input) = inputs.and_then(|i| i.ambient.iter().find(|a| a.slot == id)) {
+                if !input.visible { continue; }
+                let Some(body) = &input.body else { continue; };
+                let (identity, model_slot) = self.snapshot_registry.slots[input.slot];
+                let _identity = identity.scope();
+                let _preserve = crate::character::skinning::CullGuard::preserve(input.preserve);
+                let decision = if crate::character::skinning::overlap::ready() {
+                    self.visual_lod.get(&id).map_or(visual_lod::Decision::Exact, |lod| lod.prepared)
+                } else if lod_enabled {
+                    let outside = config.anim_cull && input.lod_safe && crate::render::outside_bounds(
+                        body.transform.translation-Vec3::splat(input.radius), body.transform.translation+Vec3::splat(input.radius));
+                    #[cfg(target_os="vita")] { lod_counts[4] += u64::from(!input.lod_safe); }
+                    self.visual_lod.entry(id).or_default().decide(config,input.lod_safe,outside,
+                        input.distance_squared,body.transform,body.scale,fullbright)
+                } else { visual_lod::Decision::Exact };
+                if crate::character::skinning::overlap::gather_only() {
+                    self.visual_lod.entry(id).or_default().prepared=decision;
+                }
+                #[cfg(target_os="vita")] { lod_counts[match decision {
+                    visual_lod::Decision::Exact=>0,visual_lod::Decision::Hidden=>1,
+                    visual_lod::Decision::Refresh=>2,visual_lod::Decision::Reuse=>3 }] += 1; }
+                match decision {
+                    visual_lod::Decision::Hidden => continue,
+                    visual_lod::Decision::Reuse => {
+                        for mesh in &self.visual_lod[&id].meshes { crate::render_fx::skin(mesh); } continue;
+                    }
+                    _ => {}
+                }
+                let model = &mut self.models[model_slot];
+                let _consumer = crate::character::skinning::CullGuard::reason(
+                    crate::character::skinning::overlap::single_preparing() && decision==visual_lod::Decision::Refresh,
+                    crate::phase_census::AMBIENT);
+                model.draw_resolved_pose(&body.pose,&body.scales,0.,body.time,true,body.transform,
+                    body.scale,fullbright,true,&body.visual,None);
+                if decision==visual_lod::Decision::Refresh && !crate::character::skinning::overlap::gather_only() {
+                    self.visual_lod.get_mut(&id).expect("ambient cache").capture(model);
+                }
+                let clip = model.data.clips.keys().nth(input.clip).expect("validated ambient clip").clone();
+                model.draw_effects(&clip,input.sample_time,input.looping,body.transform,body.scale,camera,atmosphere);
+                model.draw_electric(body.electric); self.material.bind();
+                continue;
+            }
+            if let Some(input) = inputs.and_then(|i| i.residents.iter().find(|a| a.slot == id)) {
+                if !input.visible { continue; }
+                let (identity, model_slot) = self.snapshot_registry.slots[input.slot];
+                let _identity = identity.scope();
+                let _preserve = crate::character::skinning::CullGuard::preserve(input.preserve);
+                if !crate::character::skinning::overlap::gather_only() {
+                    match &input.effects {
+                        ResidentEffects::BiteOnly => {},
+                        ResidentEffects::Wildlife { active, input } => {
+                            if !*active { self.material.bind(); continue; }
+                            let model=&self.models[model_slot];
+                            self.wildlife_art.entry(id).or_insert_with(||wildlife_art::Art::new(model))
+                                .draw_input(input,model,camera,atmosphere,&self.attack_fx);
+                        },
+                        ResidentEffects::Ladybug { active, acorns, bursts } => {
+                            if !*active { self.material.bind(); continue; }
+                            if let Some(prop) = &mut self.acorn {
+                                for (position,age) in acorns {
+                                    prop.draw_frame(Transform { translation:*position, rotation:Quat::from_euler(
+                                        EulerRot::XYZ,*age*1.75,*age*3.5,*age*5.25) },1.,fullbright,*age,true);
+                                }
+                            }
+                            gl_use_default_material();
+                            for (position,age) in bursts { crate::render_snapshot::WaveInput::Ladybug(*position,*age).draw(); }
+                        }
+                        ResidentEffects::Plant { kind, shots } => {
+                            self.spores.retain(|(owner,serial),_| *owner!=id || shots.iter().any(|s|s.serial==*serial));
+                            for shot in shots {
+                                let transform = Transform { translation:shot.position,
+                                    rotation:Quat::from_rotation_arc(Vec3::X,shot.direction) };
+                                if *kind==crate::plants::Kind::Rose {
+                                    if let Some(prop)=&mut self.thorn { self.material.bind(); prop.draw_frame(transform,1.,fullbright,shot.age,true); }
+                                } else if let Some(template)=&self.spore {
+                                    let effect=self.spores.entry((id,shot.serial)).or_insert_with(||template.fork());
+                                    effect.draw(shot.age,1.,|at,_|Transform {
+                                        translation:shot.position-shot.direction*600.*(shot.age-at),..transform },
+                                        |_,_,default|default,camera,atmosphere);
+                                }
+                            }
+                        }
+                    }
+                    self.material.bind();
+                }
+                if let Some(body)=&input.body {
+                    let _frozen=crate::character::skinning::CullGuard::publication_reason(body.frozen,crate::phase_census::FROZEN);
+                    let _electric=crate::character::skinning::CullGuard::preserve(body.electric>0.);
+                    self.material.bind();
+                    let model=&mut self.models[model_slot];
+                    crate::render_fx::with_skin_opacity(1., || model.draw_resolved_pose(
+                        &body.pose,&body.scales,0.,body.time,body.alive,
+                        body.transform,body.scale,fullbright,input.attached,&body.visual,None));
+                    if body.frozen { model.draw_frozen(); }
+                    model.draw_electric(body.electric); self.material.bind();
+                }
+                continue;
+            }
+            let actor = &self.actors[id];
             let corpse = actor.ant.as_ref().is_some_and(|a| a.health <= 0.);
             let dead = corpse || actor.resident.as_ref().is_some_and(|p|p.health()<=0.)
                 || actor.clock.as_ref().is_some_and(|p|p.health<=0.) || actor.imp.as_ref().is_some_and(|p|p.health<=0.)
@@ -3361,26 +3957,7 @@ impl Npcs {
             if self.registry_owns(actor) {
                 continue;
             }
-            if (self.owns_duchess
-                && matches!(
-                    actor.spawn.name.as_str(),
-                    "billthelizard" | "mockturtle" | "walkyrocks"
-                ))
-                || (self.owns_ladybugs && actor.spawn.model == "c_ladybug")
-                || (self.owns_pandemonium
-                    && (actor.spawn.model.starts_with("cardguard_")
-                        || matches!(
-                            actor.spawn.name.as_str(),
-                            "airship_gnome"
-                                | "elder_gnome1"
-                                | "leave_gnome"
-                                | "minecart_torchgnome1"
-                                | "minecart_torchgnome2"
-                                | "minecart_torchgnome3"
-                        )))
-            {
-                continue;
-            }
+            if self.legacy_owns(actor) { continue; }
             if (actor.spawn.hidden
                 || (self.owns_pandemonium
                     && matches!(actor.spawn.name.as_str(), "rope_cat" | "cards_cat")))
@@ -4359,6 +4936,38 @@ impl crate::cards::Rig for Data {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actor_snapshot_rejects_stale_overflow_and_malformed_batches() {
+        fn assert_send<T: Send>() {} assert_send::<ActorInputs>();
+        let mut registry = SnapshotRegistry::default();
+        registry.retire();
+        registry.slots.push((Default::default(), 0)); registry.owned_slots.push(0);
+        let ant = || AntInput { slot: 0, visible: true, preserve: false, corpse: false,
+            body: None, shots: Vec::new(), blasts: Vec::new() };
+        let mut input = ActorInputs { generation: registry.generation, ants: vec![ant()], ambient: Vec::new(), residents: Vec::new(), overflow: false };
+        assert!(input.valid_for(&registry));
+        let required = registry.owned_slots.pop().unwrap(); assert!(!input.valid_for(&registry));
+        registry.owned_slots.push(required);
+        let missing = input.ants.pop().unwrap(); assert!(!input.valid_for(&registry)); input.ants.push(missing);
+        input.overflow = true;
+        assert!(!input.valid_for(&registry));
+        input.overflow = false;
+        input.ants[0].slot = 1;
+        assert!(!input.valid_for(&registry));
+        input.ants[0].slot = 0;
+        input.ants.push(ant());
+        assert!(!input.valid_for(&registry));
+        input.ants.pop();
+        let previous = registry.generation;
+        registry.retire();
+        registry.slots.push((Default::default(),0));
+        assert_ne!(previous, registry.generation);
+        assert!(!input.valid_for(&registry));
+        // A failed restore retires first too: stale inputs cannot become valid
+        // merely because the replacement visit has the same slot count/model.
+        registry.retire();
+        assert!(!input.valid_for(&registry));
+    }
     #[test]
     fn maze_precache_upgrade_accepts_only_the_reviewed_hidden_flag() {
         let mut current = actor().spawn;

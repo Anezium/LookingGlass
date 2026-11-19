@@ -451,6 +451,9 @@ impl Hud {
             );
         }
     }
+    pub(crate) fn draw_pickup_markers(&self, input:&[(usize,Vec3)], clock:f32) {
+        for &(slot,origin) in input { self.pickup_models.borrow_mut()[slot].draw_pickup(origin,clock*0.6); }
+    }
     pub fn draw_pickups(&self, items: &[Pickup], stats: &Stats, camera: Vec3, clock: f32) {
         for item in items {
             if stats.collected.contains(&item.id)

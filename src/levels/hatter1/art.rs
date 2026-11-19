@@ -55,6 +55,7 @@ impl Art {
     }
 }
 impl LevelArt for Art {
+    fn snapshot_effects_empty(&self)->bool {true}
     fn story_pose(&mut self, s: &Story) {
         self.alice.mouth(s.mouth(&["alice", "fakeplayer"]));
         self.hare.mouth(s.mouth(&["hare_actor1"]));

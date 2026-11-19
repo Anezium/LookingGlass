@@ -235,6 +235,17 @@ impl Face {
         self.rig.apply(&mut local, mouth);
         skeleton.global_pose(&local)
     }
+    pub(crate) fn pose_into(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32, scratch: &mut Vec<Transform>, world: &mut Vec<Transform>) {
+        scratch.clear(); scratch.extend_from_slice(local);
+        self.rig.apply(scratch, mouth);
+        world.clear();
+        for (bone, &pose) in skeleton.bones.iter().zip(scratch.iter()) {
+            world.push(match bone.parent {
+                Some(p) => Transform { rotation: (world[p].rotation * pose.rotation).normalize(), translation: world[p].point(pose.translation) },
+                None => pose,
+            });
+        }
+    }
     pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
         if let Some(b) = &self.blink {
             if let Some(mesh) = &mut meshes[b.surface] {
@@ -570,5 +581,22 @@ mod tests {
         assert_eq!(pose[0].rotation, before[0].rotation);
         assert_eq!(pose[1].translation, before[1].translation);
         assert!(sk.global_pose(&pose)[2].translation.z < -0.49);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_pose_tests {
+    use super::*;
+    #[test]
+    fn reused_facial_arena_matches_original_hierarchy_bits_after_changes() {
+        let skeleton=Skeleton{bones:vec![crate::skeletal::Bone{parent:None,name:"root".into()},crate::skeletal::Bone{parent:Some(0),name:"jaw".into()}],surfaces:Vec::new(),skin_bounds:Vec::new()};
+        let face=Face{rig:Rig{mouth:Some(1),angle:0.2},blink:None};
+        let mut local=vec![Transform{translation:Vec3::X,rotation:Quat::from_rotation_z(0.37)},Transform{translation:Vec3::Y,rotation:Quat::from_rotation_x(0.2)}];
+        let mut scratch=Vec::new();let mut out=Vec::new();
+        for mouth in [0.,0.25,1.,f32::NAN,0.] {
+            let expected=face.pose(&skeleton,&local,mouth);face.pose_into(&skeleton,&local,mouth,&mut scratch,&mut out);
+            for (a,b) in expected.iter().zip(&out){assert_eq!(a.translation.to_array().map(f32::to_bits),b.translation.to_array().map(f32::to_bits));assert_eq!(a.rotation.to_array().map(f32::to_bits),b.rotation.to_array().map(f32::to_bits));}
+            local[0].translation+=Vec3::Z;
+        }
     }
 }

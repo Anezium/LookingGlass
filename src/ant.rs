@@ -633,12 +633,16 @@ pub fn draw_shot(props: &mut [crate::weapons::Prop; 2], shot: &Bullet, fullbrigh
 /// A bounded, depth-tested flash marks grenade damage while the original nested
 /// explosion emitters await shared projectile-event support.
 pub fn draw_blasts(ant: &Ant) {
-    if ant.blasts.is_empty() {
+    draw_blast_inputs(&ant.blasts);
+}
+
+pub(crate) fn draw_blast_inputs(blasts: &[Blast]) {
+    if blasts.is_empty() {
         return;
     }
     crate::render::depth_read_only(|| {
         gl_use_default_material();
-        for b in &ant.blasts {
+        for b in blasts {
             let f = b.time / 0.6;
             crate::render_fx::legacy_sphere(
                 b.at,

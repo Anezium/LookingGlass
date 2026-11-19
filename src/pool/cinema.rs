@@ -830,6 +830,24 @@ impl Pool {
         }
     }
 }
+pub(crate) enum Command {
+    Puppet(usize, crate::npc::PuppetInput),
+    Leaf(Transform, f32, Option<crate::npc::PuppetInput>),
+    BeginRocks,
+    Rock(Transform, f32, f32),
+    EndRocks,
+    Bullet(Vec3),
+}
+pub(crate) struct Input { pub commands: Vec<Command>, pub overflow: bool }
+impl Input {
+    pub(crate) fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.commands.len()*std::mem::size_of::<Command>()
+            + self.commands.iter().map(|c| match c {
+                Command::Puppet(_, p) => p.bytes()-std::mem::size_of::<crate::npc::PuppetInput>(),
+                Command::Leaf(_, _, Some(p)) => p.bytes()-std::mem::size_of::<crate::npc::PuppetInput>(), _ => 0,
+            }).sum::<usize>()
+    }
+}
 pub struct Art {
     pub alice: Puppet,
     turtle: Puppet,
@@ -869,6 +887,153 @@ impl Art {
                 rotation: at.rotation,
             };
             self.turtle.draw("idle", age, true, at, 1., bright);
+        }
+    }
+    fn puppet(&self, slot: usize) -> &Puppet {
+        match slot { 0 => &self.alice, 1 => &self.turtle, 2 => &self.rabbit, 3 => &self.ant, _ => unreachable!() }
+    }
+    fn extract_leaf(&self, commands: &mut Vec<Command>, at: Transform, turtle: bool, age: f32) {
+        let turtle = turtle.then(|| self.turtle.extract_draw("idle", age, true,
+            Transform { translation: self.leaf.point(at, "tag_turtle", 1.3), rotation: at.rotation }, 1.));
+        commands.push(Command::Leaf(at, age, turtle));
+    }
+    pub(crate) fn extract(&self, pool: &Pool) -> Input {
+        let mut commands = Vec::new();
+        for name in [
+            "alice",
+            "rabbit_actor1",
+            "turtle_talk",
+            "turtle1",
+            "turtle2",
+            "ant_pusher1",
+            "ant_pusher2",
+        ] {
+            if let Some((clip, time, at)) = pool.actor(name) {
+                let slot = match name { "alice" => 0, "rabbit_actor1" => 2,
+                    "ant_pusher1" | "ant_pusher2" => 3, _ => 1 };
+                let p = self.puppet(slot);
+                commands.push(Command::Puppet(slot, p.extract_draw(
+                    clip,
+                    if clip == "death_frozen" {
+                        time.min(pool.cinema.frame_time("c_armyant", clip) * 5.)
+                    } else {
+                        time
+                    },
+                    !matches!(clip, "push" | "jump")
+                        && !clip.starts_with("death")
+                        && !clip.starts_with("attack")
+                        && !clip.starts_with("pain"),
+                    at,
+                    if matches!(name, "ant_pusher1" | "ant_pusher2") {
+                        pool.state
+                            .boulders
+                            .as_ref()
+                            .map(|b| {
+                                b.ants[usize::from(name == "ant_pusher2")]
+                                    .visual_scale(&pool.cinema)
+                            })
+                            .unwrap_or(1.)
+                    } else {
+                        1.
+                    },
+                )));
+            }
+        }
+        let s = &pool.state;
+        let c = &s.cinema;
+        if !c.done[3] {
+            self.extract_leaf(&mut commands,
+                pool.talk_leaf(),
+                c.beat == Some(Beat::Depart) && c.time >= pool.depart_ride() - 0.5,
+                s.age,
+            );
+        }
+        if let Some(start) = s.turtle[0] {
+            let dt = (s.age - start - 0.5).max(0.);
+            if dt < pool.turtle_path.nodes[pool.turtle_path.nodes.len() - 2].time {
+                let (p, r) = pool.turtle_path.pose(dt);
+                self.extract_leaf(&mut commands,
+                    Transform {
+                        translation: p,
+                        rotation: r,
+                    },
+                    true,
+                    s.age,
+                );
+            }
+        }
+        let attach = pool.walk_time(
+            "c_mockturtle",
+            "turtle2_startjump",
+            "turtle_lastpos1",
+            "walk",
+        ) + 1.;
+        let time = s.turtle[2].map(|start| s.age - start);
+        let (p, r) = pool
+            .cinema
+            .last_leaf
+            .pose(time.map_or(0., |t| (t - attach - 0.5).max(0.)));
+        self.extract_leaf(&mut commands,
+            Transform {
+                translation: p,
+                rotation: r,
+            },
+            time.is_some_and(|t| t >= attach),
+            s.age,
+        );
+        commands.push(Command::BeginRocks);
+        for (index, rock) in pool.cinema.rocks.iter().enumerate() {
+            let Some((at, _)) = pool.rock_pose(index) else {
+                continue;
+            };
+            commands.push(Command::Rock(at, rock.scale, s.age));
+        }
+        commands.push(Command::EndRocks);
+        if let Some(b) = &pool.state.boulders {
+            for ant in &b.ants {
+                for bullet in &ant.shots {
+                    commands.push(Command::Bullet(bullet.at));
+                }
+            }
+        }
+        let bones: usize = commands.iter().map(|c| match c {
+            Command::Puppet(_, p) | Command::Leaf(_, _, Some(p)) => p.bones(), _ => 0,
+        }).sum();
+        let overflow = commands.len() > 16384 || bones > 65536;
+        if overflow { commands.clear(); }
+        Input { commands, overflow }
+    }
+
+    pub(crate) fn valid_input(&self, input: &Input) -> bool {
+        !input.overflow && input.commands.len() <= 16384 && input.commands.iter().all(|command| match command {
+            Command::Puppet(slot, p) => *slot < 4 && self.puppet(*slot).valid_input(p),
+            Command::Leaf(_, _, Some(p)) => self.turtle.valid_input(p),
+            _ => true,
+        })
+    }
+    pub(crate) fn draw_input(&mut self, input: &Input,
+        atmosphere: &crate::environment::Atmosphere, camera: Vec3, bright: bool) {
+        for p in [&mut self.alice, &mut self.turtle, &mut self.rabbit, &mut self.ant] {
+            p.atmosphere(atmosphere, camera);
+        }
+        self.material.atmosphere(atmosphere, camera);
+        for command in &input.commands {
+            match command {
+                Command::Puppet(slot, input) => {
+                    let p = match slot { 0 => &mut self.alice, 1 => &mut self.turtle,
+                        2 => &mut self.rabbit, 3 => &mut self.ant, _ => unreachable!() };
+                    p.draw_input(input, bright);
+                }
+                Command::Leaf(at, age, turtle) => {
+                    self.material.bind(); self.leaf.draw_frame(*at, 1.3, bright, *age, true);
+                    gl_use_default_material();
+                    if let Some(input) = turtle { self.turtle.draw_input(input, bright); }
+                }
+                Command::BeginRocks => self.material.bind(),
+                Command::Rock(at, scale, age) => self.rock.draw_frame(*at, *scale, bright, *age, true),
+                Command::EndRocks => gl_use_default_material(),
+                Command::Bullet(at) => crate::render_fx::legacy_line(*at, *at-Vec3::Z*1.5, Color::new(0.6,0.45,0.2,1.)),
+            }
         }
     }
     pub fn draw(

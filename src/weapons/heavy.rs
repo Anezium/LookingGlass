@@ -24,7 +24,7 @@ pub(super) enum Kind {
     Comet,
     Cannon,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct Shot {
     pub id: u32,
     pub kind: Kind,
@@ -73,7 +73,7 @@ impl Shot {
         }
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct Charge {
     pub id: u32,
     pub alternate: bool,
@@ -93,7 +93,7 @@ pub(super) struct Volley {
     pub next: u32,
     pub previous: Option<usize>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub(super) struct Impact {
     pub id: u32,
     pub kind: Kind,
@@ -748,4 +748,52 @@ mod tests {
             0
         );
     }
+}
+
+/// Owned per-effect render values, without simulation owner or graphics resources.
+#[derive(Default)]
+pub(super) struct RenderInput {
+    pub(super) charge: Option<Charge>,
+    pub(super) volleys: Vec<Volley>,
+    pub(super) shots: Vec<Shot>,
+    pub(super) impacts: Vec<Impact>,
+    pub(super) ignition: Option<(f64, Transform)>,
+}
+pub(super) struct RenderView<'a> {
+    pub(super) charge: &'a Option<Charge>,
+    pub(super) volleys: &'a [Volley],
+    pub(super) shots: &'a [Shot],
+    pub(super) impacts: &'a [Impact],
+    pub(super) ignition: Option<(f64, Transform)>,
+}
+impl RenderInput {
+    pub(super) fn records(&self)->usize { self.volleys.len()+self.shots.len()+self.impacts.len() }
+    pub(super) fn heap_bytes(&self)->usize { self.volleys.len()*std::mem::size_of::<Volley>() + self.shots.len()*std::mem::size_of::<Shot>() + self.impacts.len()*std::mem::size_of::<Impact>() + self.charge.as_ref().map_or(0,|c|c.trail.bytes()) + self.shots.iter().map(|s|s.trail.bytes()).sum::<usize>() + self.impacts.iter().filter_map(|i|i.source.as_ref()).map(|s|s.trail.bytes()).sum::<usize>() }
+    pub(super) fn view(&self) -> RenderView<'_> { RenderView {charge: &self.charge,volleys: &self.volleys,shots: &self.shots,impacts: &self.impacts,ignition: self.ignition} }
+}
+impl State {
+    pub(super) fn render_records(&self)->usize { self.volleys.len()+self.shots.len()+self.impacts.len() }
+    pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {charge: &self.charge,volleys: &self.volleys,shots: &self.shots,impacts: &self.impacts,ignition: self.ignition} }
+    pub(super) fn extract_render(&self, out:&mut RenderInput) {
+        out.charge.clone_from(&self.charge);
+        out.volleys.clone_from(&self.volleys);
+        out.shots.clone_from(&self.shots);
+        out.impacts.clone_from(&self.impacts);
+        out.ignition=self.ignition;
+    }
+}
+
+impl Clone for Shot {
+    fn clone(&self)->Self { Self {id:self.id.clone(),kind:self.kind.clone(),position:self.position.clone(),velocity:self.velocity.clone(),age:self.age.clone(),trail:self.trail.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.id.clone_from(&other.id);self.kind.clone_from(&other.kind);self.position.clone_from(&other.position);self.velocity.clone_from(&other.velocity);self.age.clone_from(&other.age);self.trail.clone_from(&other.trail);}
+}
+
+impl Clone for Charge {
+    fn clone(&self)->Self { Self {id:self.id.clone(),alternate:self.alternate.clone(),age:self.age.clone(),tick:self.tick.clone(),pose:self.pose.clone(),end:self.end.clone(),trail:self.trail.clone(),ground:self.ground.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.id.clone_from(&other.id);self.alternate.clone_from(&other.alternate);self.age.clone_from(&other.age);self.tick.clone_from(&other.tick);self.pose.clone_from(&other.pose);self.end.clone_from(&other.end);self.trail.clone_from(&other.trail);self.ground.clone_from(&other.ground);}
+}
+
+impl Clone for Impact {
+    fn clone(&self)->Self { Self {id:self.id.clone(),kind:self.kind.clone(),origin:self.origin.clone(),normal:self.normal.clone(),actor:self.actor.clone(),age:self.age.clone(),source:self.source.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.id.clone_from(&other.id);self.kind.clone_from(&other.kind);self.origin.clone_from(&other.origin);self.normal.clone_from(&other.normal);self.actor.clone_from(&other.actor);self.age.clone_from(&other.age);self.source.clone_from(&other.source);}
 }

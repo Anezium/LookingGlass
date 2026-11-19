@@ -16,7 +16,7 @@ pub(super) enum Kind {
     Ball,
     Burst,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Jack {
     pub id: u32,
     pub kind: Kind,
@@ -515,4 +515,30 @@ impl State {
         }
         self.pieces.retain(|p| p.age + 1e-8 < p.remove_at);
     }
+}
+
+/// Owned per-effect render values, without simulation owner or graphics resources.
+#[derive(Default)]
+pub(super) struct RenderInput {
+    pub(super) pieces: Vec<Jack>,
+}
+pub(super) struct RenderView<'a> {
+    pub(super) pieces: &'a [Jack],
+}
+impl RenderInput {
+    pub(super) fn records(&self)->usize { self.pieces.len() }
+    pub(super) fn heap_bytes(&self)->usize { self.pieces.len()*std::mem::size_of::<Jack>() + self.pieces.iter().map(|p|p.trail.bytes()).sum::<usize>() }
+    pub(super) fn view(&self) -> RenderView<'_> { RenderView {pieces: &self.pieces} }
+}
+impl State {
+    pub(super) fn render_records(&self)->usize { self.pieces.len() }
+    pub(super) fn render_view(&self) -> RenderView<'_> { RenderView {pieces: &self.pieces} }
+    pub(super) fn extract_render(&self, out:&mut RenderInput) {
+        out.pieces.clone_from(&self.pieces);
+    }
+}
+
+impl Clone for Jack {
+    fn clone(&self)->Self { Self {id:self.id.clone(),kind:self.kind.clone(),position:self.position.clone(),velocity:self.velocity.clone(),age:self.age.clone(),trail:self.trail.clone(),silent:self.silent.clone(),returning:self.returning.clone(),target:self.target.clone(),parent:self.parent.clone(),next_seek:self.next_seek.clone(),last_contact:self.last_contact.clone(),trace:self.trace.clone(),split:self.split.clone(),remove_at:self.remove_at.clone(),seed:self.seed.clone(),previous:self.previous.clone(),bounce_seek:self.bounce_seek.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.id.clone_from(&other.id);self.kind.clone_from(&other.kind);self.position.clone_from(&other.position);self.velocity.clone_from(&other.velocity);self.age.clone_from(&other.age);self.trail.clone_from(&other.trail);self.silent.clone_from(&other.silent);self.returning.clone_from(&other.returning);self.target.clone_from(&other.target);self.parent.clone_from(&other.parent);self.next_seek.clone_from(&other.next_seek);self.last_contact.clone_from(&other.last_contact);self.trace.clone_from(&other.trace);self.split.clone_from(&other.split);self.remove_at.clone_from(&other.remove_at);self.seed.clone_from(&other.seed);self.previous.clone_from(&other.previous);self.bounce_seek.clone_from(&other.bounce_seek);}
 }

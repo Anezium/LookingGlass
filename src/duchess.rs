@@ -1582,6 +1582,32 @@ impl Art {
         }
         gl_use_default_material();
     }
+    pub(crate) fn hud_input(&self, d: &Duchess, out: &mut Vec<crate::render_snapshot::HudCommand>) {
+        let mut paint = crate::render_snapshot::Painter::new(&self.ui, out);
+        if d.state.stage == Stage::Fighting {
+            let w = 240.;
+            let x = (screen_width() - w) * 0.5;
+            paint.dialog(Rect::new(x - 22., 12., w + 44., 48.));
+            paint.rectangle(
+                x,
+                39.,
+                w * d.state.health / 600.,
+                7.,
+                Color::new(0.65, 0.16, 0.21, 0.9),
+            );
+            paint.label(
+                if d.state.action == Action::Phase {
+                    "DUCHESS / PHASING"
+                } else {
+                    "DUCHESS"
+                },
+                x,
+                30.,
+                18.,
+                WHITE,
+            );
+        }
+        }
     pub fn hud(&self, d: &Duchess) {
         if d.state.stage == Stage::Fighting {
             let w = 240.;

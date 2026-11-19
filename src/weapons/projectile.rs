@@ -19,7 +19,7 @@ pub(super) enum Kind {
     Ball,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Projectile {
     #[serde(default)]
     pub(super) trail: super::trail::Trail,
@@ -911,4 +911,9 @@ mod tests {
             );
         }
     }
+}
+
+impl Clone for Projectile {
+    fn clone(&self)->Self { Self {trail:self.trail.clone(),model:self.model.clone(),position:self.position.clone(),velocity:self.velocity.clone(),age:self.age.clone(),bounces:self.bounces.clone(),audio_id:self.audio_id.clone(),kind:self.kind.clone(),target:self.target.clone(),angles:self.angles.clone(),spin:self.spin.clone(),seek_at:self.seek_at.clone(),drift_at:self.drift_at.clone(),split:self.split.clone(),seed:self.seed.clone()} }
+    fn clone_from(&mut self,other:&Self) {self.trail.clone_from(&other.trail);self.model.clone_from(&other.model);self.position.clone_from(&other.position);self.velocity.clone_from(&other.velocity);self.age.clone_from(&other.age);self.bounces.clone_from(&other.bounces);self.audio_id.clone_from(&other.audio_id);self.kind.clone_from(&other.kind);self.target.clone_from(&other.target);self.angles.clone_from(&other.angles);self.spin.clone_from(&other.spin);self.seek_at.clone_from(&other.seek_at);self.drift_at.clone_from(&other.drift_at);self.split.clone_from(&other.split);self.seed.clone_from(&other.seed);}
 }

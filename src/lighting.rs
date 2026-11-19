@@ -19,7 +19,28 @@ thread_local! {
     static FLARE: RefCell<Option<Texture2D>> = const {RefCell::new(None)};
     static CROQUET: RefCell<Vec<Light>> = const {RefCell::new(Vec::new())};
 }
+/// Owned collision-resolved input. Publication owns the renderer TLS; extraction
+/// never installs lights or retains World. This serial boundary is not Send proof.
+pub(crate) struct Selection {
+    lights: Vec<Light>,
+    candidates: usize,
+    sweeps: usize,
+    reused: usize,
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    elapsed_ms: f64,
+}
+impl Selection {
+    pub(crate) fn bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.lights.len() * std::mem::size_of::<Light>()
+    }
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.lights.capacity() * std::mem::size_of::<Light>()
+    }
+}
 pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
+    publish(resolve(lights, eye, world));
+}
+pub(crate) fn resolve(lights: Vec<Light>, eye: Vec3, world: &World) -> Selection {
     let _census = crate::phase_census::span(crate::phase_census::Region::Lights);
     #[cfg(target_os = "vita")]
     let limit = 2;
@@ -45,6 +66,18 @@ pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
         } else { world.sweep(eye, l.position, Vec3::ZERO).fraction >= 0.995 }
     });
     let sweeps = sweeps - reused;
+    Selection { lights, candidates, sweeps, reused,
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        elapsed_ms: started.elapsed().as_secs_f64() * 1000.,
+    }
+}
+/// Called at the original selection site, after portal rendering has restored
+/// its own light state. No collision or simulation access is possible here.
+pub(crate) fn publish(selection: Selection) {
+    let Selection { lights, candidates, sweeps, reused,
+        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+        elapsed_ms,
+    } = selection;
     #[cfg(not(feature="vita_renderer"))]
     crate::sim_maps::count("lights_candidates", candidates as u64);
     #[cfg(not(feature="vita_renderer"))]
@@ -53,7 +86,7 @@ pub fn select(lights: Vec<Light>, eye: Vec3, world: &World) {
     #[cfg(not(feature="vita_renderer"))]
     crate::sim_maps::count("lights_selected", lights.len() as u64);
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-    crate::sim_maps::probe::span("lights_select", started.elapsed().as_secs_f64() * 1000.);
+    crate::sim_maps::probe::span("lights_select", elapsed_ms);
     #[cfg(target_os="vita")]
     crate::frame_profile::counts(&[("lights_candidates", candidates as u64),
         ("lights_sweeps", sweeps as u64), ("lights_selected", lights.len() as u64)]);
@@ -196,6 +229,43 @@ pub fn croquet(position: Vec3) -> Vec<Light> {
             })
             .collect()
     })
+}
+/// Fixed-size collision results; texture and generated vertices remain renderer-owned.
+#[derive(Clone,Copy)]
+pub(crate) struct ShadowInput {center:Vec3,tangent:Vec3,bitangent:Vec3,radius:f32,alpha:[u8;26]}
+impl ShadowInput {
+    fn position(&self,index:usize)->(Vec3,Vec2) {
+        if index==0 {return (self.center,Vec2::splat(0.5));}
+        let a=(index-1) as f32*std::f32::consts::TAU/24.;
+        (self.center+(self.tangent*a.cos()+self.bitangent*a.sin())*self.radius,vec2(a.cos(),a.sin())*0.5+Vec2::splat(0.5))
+    }
+}
+fn shadow_geometry(world:&World,feet:Vec3,radius:f32)->(Option<ShadowInput>,u32) {
+    let hit=world.sweep(feet+Vec3::Z*4.,feet-Vec3::Z*160.,Vec3::ZERO);
+    if hit.fraction>=1. || hit.normal.z<0.4 {return (None,1);}
+    let center=(feet+Vec3::Z*4.).lerp(feet-Vec3::Z*160.,hit.fraction)+hit.normal*0.3;
+    let strength=(0.55*(1.-feet.distance(center)/160.)).clamp(0.,0.55);
+    let tangent=hit.normal.cross(Vec3::X).normalize_or_zero();let bitangent=hit.normal.cross(tangent);
+    let mut input=ShadowInput{center,tangent,bitangent,radius,alpha:[0;26]};
+    for i in 0..26 {
+        let position=input.position(i).0;
+        let h=world.sweep(position+hit.normal*2.,position-hit.normal*5.,Vec3::ZERO);
+        input.alpha[i]=if h.fraction<1. {(strength*255.) as u8}else{0};
+    }
+    (Some(input),27)
+}
+pub(crate) fn resolve_shadow(world:&World,feet:Vec3,radius:f32)->(Option<ShadowInput>,u32) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) {return (None,0);}
+    shadow_geometry(world,feet,radius)
+}
+pub(crate) fn draw_shadow_input(input:&Option<ShadowInput>) {
+    if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) {return;}
+    let Some(input)=input else{return;};
+    let Some(texture)=SHADOW.with(|s|s.borrow().clone()) else{return;};
+    let mut vertices=Vec::new();let mut indices=Vec::new();
+    for i in 0..26 {let (position,uv)=input.position(i);vertices.push(Vertex{position,uv,normal:Vec4::ZERO,color:[0,0,0,input.alpha[i]]});}
+    for i in 1..=24 {indices.extend([0,i,i+1]);}
+    crate::render_fx::effect(&Mesh{upload_identity:None,surface:None,vertices,indices,texture:Some(texture)},crate::materials::Blend::Alpha);
 }
 pub fn shadow(world: &World, feet: Vec3, radius: f32) {
     if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::Decals) { return; }
@@ -390,6 +460,24 @@ mod tests {
         });
     }
     #[test]
+    fn resolved_selection_survives_world_mutation_until_publication() {
+        let mut world = World::fixture(&[]);
+        let light = Light { position: Vec3::X * 10., color: Vec3::ONE,
+            radius: 100., only_models: false, flare: true };
+        let input = resolve(vec![light], Vec3::ZERO, &world);
+        world.set_dynamic(vec![crate::collision::Collider::fixture(
+            vec3(4., -1., -1.), vec3(6., 1., 1.))]);
+        select(vec![light], Vec3::ZERO, &world);
+        assert_eq!(count(), 0);
+        publish(input);
+        LIGHTS.with(|lights| {
+            let lights = lights.borrow();
+            assert_eq!(lights.len(), 1);
+            assert_eq!(lights[0].position, light.position);
+            assert!(lights[0].flare);
+        });
+    }
+    #[test]
     fn opaque_wall_rejects_light_and_flare() {
         let world = World::fixture(&[(vec3(5., -20., -20.), vec3(6., 20., 20.))]);
         select(
@@ -415,4 +503,20 @@ pub(crate) fn selected_bits() -> Vec<Vec<u32>> {
         bits.extend([l.radius.to_bits(), u32::from(l.only_models), u32::from(l.flare)]);
         bits
     }).collect())
+}
+
+#[cfg(test)]
+mod snapshot_shadow_tests {
+    use super::*;
+    #[test]
+    fn shadow_collision_input_is_owned_clips_pit_rims_and_handles_no_support() {
+        fn send<T:Send>(){}send::<ShadowInput>();
+        let mut world=World::fixture(&[(vec3(-4.,-4.,-20.),vec3(4.,4.,-10.))]);
+        let (input,queries)=shadow_geometry(&world,Vec3::ZERO,22.);let input=input.unwrap();assert_eq!(queries,27);
+        assert!(input.alpha[0]>0);assert!(input.alpha[1..].iter().all(|a|*a==0));
+        let original=input.position(0).0.to_array().map(f32::to_bits);
+        world=World::fixture(&[]);assert!(shadow_geometry(&world,Vec3::ZERO,22.).0.is_none());
+        assert_eq!(input.position(0).0.to_array().map(f32::to_bits),original);
+        assert!((0..26).all(|i|input.position(i).0.is_finite()));
+    }
 }

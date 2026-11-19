@@ -997,6 +997,21 @@ impl Frame {
         });
         super::prepared::assert_consumed();
     }
+    /// Read only while the gather owns the input arena, before dispatch.
+    pub(crate) fn snapshot_census(&self) -> (usize, usize, usize, usize) {
+        assert!(gathering());
+        STORE.with(|s| {
+            let s = s.borrow();
+            let s = s.as_ref().unwrap();
+            let i = unsafe { &*s.input.get() };
+            let bytes = i.draws.len() * std::mem::size_of::<Draw>()
+                + i.surfaces.len() * std::mem::size_of::<Surface>()
+                + i.pose.len() * std::mem::size_of::<Transform>()
+                + i.scales.len() * std::mem::size_of::<f32>()
+                + i.palette.len() * std::mem::size_of::<(Mat3, Vec3)>();
+            (bytes, i.draws.len(), i.pose.len(), i.surfaces.len())
+        })
+    }
     pub(crate) fn dispatch(&mut self) {
         assert!(gathering());
         #[cfg(feature="vita_renderer")]

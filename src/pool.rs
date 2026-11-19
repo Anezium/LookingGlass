@@ -704,7 +704,12 @@ impl Pool {
     }
 }
 
+struct PropInput { slot: usize, transform: Transform, scale: f32, age: f32 }
+struct ArtInput { generation: u64, props: Vec<PropInput>, cinema: cinema::Input }
 pub struct Art {
+    snapshot_visit: crate::render_snapshot::RenderVisit,
+    snapshot_props: Vec<String>,
+    snapshot_input: Option<ArtInput>,
     pub cinema: cinema::Art,
     props: BTreeMap<String, crate::weapons::Prop>,
     material: crate::character::SkinMaterial,
@@ -722,10 +727,43 @@ impl Art {
             }
         }
         Ok(Self {
+            snapshot_visit: Default::default(),
+            snapshot_props: props.keys().cloned().collect(),
+            snapshot_input: None,
             cinema: cinema::Art::load(assets)?,
             props,
             material: crate::character::skin_material()?,
         })
+    }
+    pub(crate) fn extract(&mut self, pool: &Pool) -> (usize, bool) {
+        let mut props = Vec::new();
+        for p in &pool.props {
+            if !pool.active(&p.owner) { continue; }
+            let (pos, r) = pool.pose(&p.owner, p.owner_base);
+            let slot = self.snapshot_props.binary_search(&p.model).expect("resident pool prop");
+            props.push(PropInput { slot, transform: Transform {
+                translation: pos+r*(p.base-p.owner_base), rotation: r }, scale: p.scale, age: pool.state.age });
+        }
+        let cinema = self.cinema.extract(pool);
+        let overflow = props.len()>16384 || cinema.overflow;
+        let bytes = std::mem::size_of::<ArtInput>() + props.len()*std::mem::size_of::<PropInput>() + cinema.bytes();
+        self.snapshot_input = (!overflow).then_some(ArtInput { generation: self.snapshot_visit.id(), props, cinema });
+        (bytes, overflow)
+    }
+    pub(crate) fn clear_input(&mut self) { self.snapshot_input = None; }
+    pub(crate) fn publish_input(&mut self, fullbright: bool, atmosphere: &crate::environment::Atmosphere, camera: Vec3) -> bool {
+        let Some(input) = &self.snapshot_input else { return false; };
+        if input.generation != self.snapshot_visit.id()
+            || input.props.iter().any(|p| p.slot>=self.snapshot_props.len()) || !self.cinema.valid_input(&input.cinema) { return false; }
+        self.material.atmosphere(atmosphere, camera);
+        self.material.bind();
+        for p in &input.props {
+            self.props.get_mut(&self.snapshot_props[p.slot]).unwrap().draw_frame(
+                p.transform, p.scale, fullbright, p.age, true);
+        }
+        gl_use_default_material();
+        self.cinema.draw_input(&input.cinema, atmosphere, camera, fullbright);
+        true
     }
     pub fn draw(
         &mut self,
@@ -734,6 +772,7 @@ impl Art {
         atmosphere: &crate::environment::Atmosphere,
         camera: Vec3,
     ) {
+        if self.publish_input(fullbright, atmosphere, camera) { return; }
         self.material.atmosphere(atmosphere, camera);
         self.material.bind();
         for p in &pool.props {

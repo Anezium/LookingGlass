@@ -363,6 +363,8 @@ impl Iterator for Callback {
 }
 impl Callback {
     fn next_with(&mut self, mut dequeued: impl FnMut()) -> Option<f32> {
+        #[cfg(target_os="vita")]
+        if self.at == SAMPLES { crate::skin_worker::overlap_audio_callback(); }
         let epoch = self.metrics.epoch.load(Ordering::Acquire);
         let flushed = self.at % 2 == 0 && self.epoch != epoch;
         if flushed {
@@ -483,6 +485,8 @@ impl ThreadPolicy {
 }
 /// Applies priority and, when given, CPU affinity to the calling thread.
 pub fn thread_policy(priority: i32, affinity: i32) -> ThreadPolicy {
+    #[cfg(all(target_os="vita",feature="vita_renderer"))]
+    let affinity = if crate::spike_log::overlap_enabled() { 0x40000 } else { affinity };
     #[cfg(target_os = "vita")]
     unsafe {
         #[repr(C)]

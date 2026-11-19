@@ -53,7 +53,9 @@ pub struct Sight {
     /// None suppresses the marker for menus, performances and unavailable weapons.
     pub weapon: Option<usize>,
 }
+pub(crate) struct Input { generation:u64, scene_visit:u64, point:Option<(usize,Rule,Vec3)> }
 pub struct Pointer {
+    visit:crate::render_snapshot::RenderVisit,
     effect: Attached,
     rules: Vec<Rule>,
     age: f32,
@@ -74,6 +76,7 @@ impl Pointer {
         // saturated flare. Keep the local artwork as a subdued aiming point.
         effect.attenuate(0.1);
         Ok(Self {
+            visit:Default::default(),
             effect,
             rules,
             age: 0.,
@@ -88,6 +91,10 @@ impl Pointer {
         camera: Vec3,
         atmosphere: &Atmosphere,
     ) {
+        let input=self.resolve(ctx,sight,self.visit.id());
+        self.draw_input(&input,self.visit.id(),dt,camera,atmosphere);
+    }
+    pub(crate) fn resolve(&self,ctx:&combat::Context<'_>,sight:Sight,scene_visit:u64)->Input {
         let point = sight.weapon.and_then(|weapon| {
             let rule = *self.rules.get(weapon)?;
             Some((
@@ -96,6 +103,14 @@ impl Pointer {
                 endpoint(ctx, sight.eye, sight.direction, rule)?,
             ))
         });
+        Input{generation:self.visit.id(),scene_visit,point}
+    }
+    pub(crate) fn valid_input(&self,input:&Input,scene_visit:u64)->bool {
+        input.generation==self.visit.id() && input.scene_visit==scene_visit && input.point.as_ref().is_none_or(|(slot,_,_)|*slot<self.rules.len())
+    }
+    pub(crate) fn draw_input(&mut self,input:&Input,scene_visit:u64,dt:f32,camera:Vec3,atmosphere:&Atmosphere) {
+        assert!(self.valid_input(input,scene_visit));
+        let point=input.point;
         let Some((weapon, rule, position)) = point else {
             self.previous = None;
             self.age = 0.;

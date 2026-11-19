@@ -1324,12 +1324,14 @@ fn launch_from_eye(
         (target - origin).try_normalize().unwrap_or(direction),
     )
 }
+#[derive(Clone)]
 struct Spark {
     position: Vec3,
     velocity: Vec3,
     life: f32,
     color: Color,
 }
+#[derive(Clone)]
 struct Trail {
     a: Vec3,
     b: Vec3,
@@ -1383,6 +1385,34 @@ fn projectile_impact_sound(model: usize, flesh: bool) -> &'static str {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct HeldInput {
+    commands: Vec<(usize, Transform, f32, f32, bool)>,
+    cannon: Option<(Transform, f32, f32)>,
+    wand: Option<(Transform, f32, f32)>,
+    mist: Option<(Transform, f32, f32)>,
+    returning: Option<(Transform, f32)>,
+    eye: Vec3,
+    view_scale: f32,
+}
+impl HeldInput {
+    pub(crate) fn bytes(&self) -> usize { std::mem::size_of::<Self>() + self.commands.len() * std::mem::size_of::<(usize, Transform, f32, f32, bool)>() }
+}
+#[derive(Default)]
+pub(crate) struct EffectsInput {
+    heavy: heavy::RenderInput, ice: ice::RenderInput, jacks: jacks::RenderInput,
+    bombs: bomb::RenderInput, dice: crate::dice::RenderInput,
+    projectiles: Vec<Projectile>, blasts: Vec<blast::Blast>, sparks: Vec<Spark>,
+    trail: Vec<Trail>, flight_trails: Vec<Trail>, first_person: bool, view_muzzle: Option<Vec3>,
+}
+impl EffectsInput {
+    pub(crate) fn bytes(&self)->usize {
+        std::mem::size_of::<Self>() + self.heavy.heap_bytes()+self.ice.heap_bytes()+self.jacks.heap_bytes()+self.bombs.heap_bytes()+self.dice.heap_bytes()
+            + self.projectiles.len()*std::mem::size_of::<Projectile>() + self.projectiles.iter().map(|p|p.trail.bytes()).sum::<usize>()
+            + self.blasts.len()*std::mem::size_of::<blast::Blast>() + self.sparks.len()*std::mem::size_of::<Spark>()
+            + (self.trail.len()+self.flight_trails.len())*std::mem::size_of::<Trail>()
+    }
+}
 pub struct Visuals {
     heavy: heavy::State,
     heavy_art: heavy_art::Art,
@@ -1528,6 +1558,9 @@ impl Visuals {
     }
     pub fn stop_ice(&mut self) {
         self.ice.stop();
+    }
+    pub(crate) fn frozen_body_input(&self, meshes: &[Option<Mesh>], frozen: bool) {
+        if frozen { self.ice_art.frozen_body(meshes); }
     }
     pub fn frozen_body(&self, meshes: &[Option<Mesh>]) {
         if self.ice.locked() {
@@ -2323,6 +2356,34 @@ impl Visuals {
             self.blasts.drain(..self.blasts.len() - 64);
         }
     }
+    pub(crate) fn extract_held(&self, actions: &Actions, anchors: &[Transform; 3], out: &mut HeldInput) {
+        out.commands.clear(); out.cannon=None; out.wand=None; out.mist=None; out.returning=None;
+        out.eye=self.eye; out.view_scale=self.view_scale;
+        let (index, scale) = actions.equipment();
+        if index == UNARMED { return; }
+        let size=scale*self.view_scale;
+        if index == 8 && actions.playing.as_ref().is_some_and(|p| p.clip==19 && p.time>=0.05 && p.time<1.10) {
+            out.cannon=Some((anchors[0],size,actions.playing.as_ref().unwrap().time-0.05));
+        } else if index==4 && actions.playing.as_ref().is_some_and(|p|p.clip==12) {
+            out.wand=Some((anchors[0],size,self.ice.clock as f32));
+        } else {
+            let time=if index==9 { actions.playing.as_ref().filter(|p|p.clip==11).map_or(0.,|p|p.time) } else { 0. };
+            out.commands.push((index,anchors[0],size,time,false));
+        }
+        if let Some(p)=&actions.playing {
+            if p.clip==9 && (3.0..13.0).contains(&p.frame()) { out.commands.push((11,anchors[if p.frame()<7. {1}else{2}],1.,0.,false)); }
+            if p.clip==6 && (3.0..7.0).contains(&p.frame()) { out.commands.push((10,anchors[1],1.,0.,false)); }
+        }
+        if [0,3,5].contains(&index) { out.returning=actions.return_age().map(|age|(anchors[0],age)); }
+        if index==4 { out.mist=Some((anchors[0],size,self.ice.clock as f32)); }
+    }
+    pub(crate) fn draw_held_input(&mut self, input: &HeldInput, fullbright: bool) {
+        if let Some((at,size,time))=input.cannon { self.heavy_art.cannon(at,size,time,fullbright); }
+        if let Some((at,size,time))=input.wand { self.ice_art.wand(at,size,time,fullbright); }
+        for &(slot,at,size,time,looping) in &input.commands { self.props[slot].draw_frame(at,size,fullbright,time,looping); }
+        if let Some((at,age))=input.returning { crate::render::depth_read_only(||self.draw_return_input(at,age,input.eye,input.view_scale)); }
+        if let Some((at,size,time))=input.mist { self.ice_art.held_mist(at,size,time,input.eye); }
+    }
     pub fn draw_held(&mut self, actions: &Actions, anchors: &[Transform; 3], fullbright: bool) {
         let (index, scale) = actions.equipment();
         if index == UNARMED {
@@ -2373,7 +2434,7 @@ impl Visuals {
         }
         if [0, 3, 5].contains(&index) {
             if let Some(age) = actions.return_age() {
-                crate::render::depth_read_only(|| self.draw_return(anchors[0], age));
+                crate::render::depth_read_only(|| self.draw_return_input(anchors[0], age, self.eye, self.view_scale));
             }
         }
         if index == 4 {
@@ -2385,8 +2446,8 @@ impl Visuals {
             );
         }
     }
-    fn draw_return(&self, anchor: Transform, age: f32) {
-        let forward = (self.eye - anchor.translation)
+    fn draw_return_input(&self, anchor: Transform, age: f32, eye: Vec3, view_scale: f32) {
+        let forward = (eye - anchor.translation)
             .try_normalize()
             .unwrap_or(Vec3::X);
         let right = forward.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::Y);
@@ -2409,14 +2470,14 @@ impl Visuals {
                     continue;
                 }
                 let center =
-                    anchor.point((direction * (radius - speed * t) + offset) * self.view_scale);
+                    anchor.point((direction * (radius - speed * t) + offset) * view_scale);
                 let alpha = (t / 0.2).min(1.) * (1. - t / 0.6);
                 let color = Color::new(1., 1., 1., alpha).into();
                 let corners = [-right - up, right - up, right + up, -right + up];
                 let uv = [vec2(0., 1.), vec2(1., 1.), vec2(1., 0.), vec2(0., 0.)];
                 for i in [0, 1, 2, 0, 2, 3] {
                     vertices.push(Vertex {
-                        position: center + corners[i] * 2. * self.view_scale,
+                        position: center + corners[i] * 2. * view_scale,
                         uv: uv[i],
                         color,
                         normal: Vec4::ZERO,
@@ -2436,11 +2497,12 @@ impl Visuals {
         }
     }
     /// Only the local swing ribbon belongs in the weapon pass. World effects stay depth-tested.
-    fn draw_electric_trail(&self) {
+    fn draw_electric_trail(&self) { self.draw_electric_trail_input(&self.trail); }
+    fn draw_electric_trail_input(&self, trail: &[Trail]) {
         let mut vertices = Vec::new();
-        append_swing(&mut vertices, &self.trail, true);
+        append_swing(&mut vertices, trail, true);
         if !vertices.is_empty() {
-            let age = self.trail.first().map_or(0., |t| 0.2 - t.life);
+            let age = trail.first().map_or(0., |t| 0.2 - t.life);
             crate::render_fx::skin_effect(
                 &Mesh { upload_identity: None, surface: Some(self._swipe_surface.clone()),
                     indices: (0..vertices.len() as u16).collect(),
@@ -2466,6 +2528,42 @@ impl Visuals {
             });
         }
         gl_use_default_material();
+    }
+    pub(crate) fn draw_view_trail_input(&self,input:&EffectsInput) {
+        self.draw_electric_trail_input(&input.trail);
+        gl_use_material(&self.effect_material);
+        let mut vertices = Vec::new();
+        append_swing(&mut vertices, &input.trail, false);
+        if !vertices.is_empty() {
+            crate::sim_maps::count("imm_weapon_mesh", 1);
+            draw_mesh(&Mesh { upload_identity: None, surface: None,
+                indices: (0..vertices.len() as u16).collect(),
+                vertices,
+                texture: Some(self.spark_texture.clone()),
+            });
+        }
+        gl_use_default_material();
+    }
+    pub(crate) fn render_effects_overflow(&self)->bool {
+        self.heavy.render_records()+self.ice.render_records()+self.jacks.render_records()+self.bombs.render_records()+self.dice.render_records()
+            +self.projectiles.len()+self.blasts.len()+self.sparks.len()+self.trail.len()+self.flight_trails.len()>16384
+    }
+    pub(crate) fn valid_held_input(&self,input:&HeldInput)->bool {
+        input.commands.len()<=3 && input.commands.iter().all(|&(slot,_,_,_,_)|slot<self.props.len())
+    }
+    pub(crate) fn valid_effects_input(&self,input:&EffectsInput)->bool {
+        input.heavy.records()+input.ice.records()+input.jacks.records()+input.bombs.records()+input.dice.records()
+            +input.projectiles.len()+input.blasts.len()+input.sparks.len()+input.trail.len()+input.flight_trails.len()<=16384
+            && input.projectiles.iter().all(|p|p.prop()<self.props.len()) && self.dice_art.valid_render_input(&input.dice)
+    }
+    pub(crate) fn extract_effects(&self, out:&mut EffectsInput) {
+        self.heavy.extract_render(&mut out.heavy); self.ice.extract_render(&mut out.ice);
+        self.jacks.extract_render(&mut out.jacks); self.bombs.extract_render(&mut out.bombs);
+        self.dice.extract_render(&mut out.dice);
+        self.dice_art.extract_render_pose(&mut out.dice);
+        out.projectiles.clone_from(&self.projectiles); out.blasts.clone_from(&self.blasts);
+        out.sparks.clone_from(&self.sparks); out.trail.clone_from(&self.trail); out.flight_trails.clone_from(&self.flight_trails);
+        out.first_person=self.first_person; out.view_muzzle=self.heavy_art.view_muzzle;
     }
     pub fn draw_effects(
         &mut self,
@@ -2578,6 +2676,124 @@ impl Visuals {
             (&self.bombs, &self.bomb_data),
             &self.projectiles,
             &self.blasts,
+            camera,
+            fullbright,
+            body_material,
+        );
+        gl_use_default_material();
+    }
+    pub(crate) fn draw_effects_input(
+        &mut self,
+        input: &EffectsInput,
+        body_material: &crate::character::SkinMaterial,
+        camera: Vec3,
+        fullbright: bool,
+        show_trail: bool,
+    ) {
+        body_material.bind();
+        self.dice_art.draw_owned(&input.dice, fullbright);
+        self.dice_art.effects_input(input.dice.view(), camera);
+        body_material.bind();
+        for d in &input.dice.dice {
+            self.props[12].draw(
+                Transform {
+                    translation: d.position,
+                    rotation: Quat::from_rotation_x(d.age * 7.)
+                        * Quat::from_rotation_y(d.age * 11.),
+                },
+                1.,
+                fullbright,
+            );
+        }
+        for p in &input.projectiles {
+            self.props[p.prop()].draw_frame(p.pose(), 1., fullbright, p.age as f32, true);
+        }
+        gl_use_material(&self.effect_material);
+        let mut vertices = Vec::new();
+        let mut triangle = |points: [Vec3; 3], color: Color| {
+            for position in points {
+                vertices.push(Vertex {
+                    position,
+                    uv: Vec2::splat(0.5),
+                    color: color.into(),
+                    normal: Vec4::ZERO,
+                });
+            }
+        };
+        for beam in &input.dice.beams {
+            let side = (camera - beam.b).cross(beam.b - beam.a).normalize_or_zero()
+                * if beam.kind == 1 { 4. } else { 1.8 };
+            let color = if beam.kind == 1 {
+                Color::new(1., 0.3, 0.06, 0.8)
+            } else {
+                Color::new(0.55, 0.75, 1., 0.9)
+            };
+            triangle([beam.a - side, beam.b - side, beam.b + side], color);
+            triangle([beam.a - side, beam.b + side, beam.a + side], color);
+        }
+        for t in &input.flight_trails {
+            let right = (camera - t.b).cross(t.b - t.a).normalize_or_zero() * 0.8;
+            let c = Color::new(t.color.r, t.color.g, t.color.b, t.life / 0.18 * 0.6);
+            triangle([t.a - right, t.b - right, t.b + right], c);
+            triangle([t.a - right, t.b + right, t.a + right], c);
+        }
+        if show_trail {
+            self.draw_electric_trail_input(&input.trail);
+            append_swing(&mut vertices, &input.trail, false);
+        }
+        for s in &input.sparks {
+            let right = (camera - s.position).cross(Vec3::Z).normalize_or_zero() * 2.5;
+            let up = Vec3::Z * 2.5;
+            let proximity = ((camera.distance(s.position) - 8.) / 32.).clamp(0., 1.);
+            let c = Color::new(
+                s.color.r,
+                s.color.g,
+                s.color.b,
+                (s.life * 3.).min(1.) * proximity,
+            );
+            let corners = [
+                s.position - right - up,
+                s.position + right - up,
+                s.position + right + up,
+                s.position - right + up,
+            ];
+            let uv = [vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)];
+            for i in [0, 1, 2, 0, 2, 3] {
+                vertices.push(Vertex {
+                    position: corners[i],
+                    uv: uv[i],
+                    color: c.into(),
+                    normal: Vec4::ZERO,
+                });
+            }
+        }
+        if !vertices.is_empty() {
+            crate::sim_maps::count("imm_weapon_mesh", 1);
+            draw_mesh(&Mesh { upload_identity: None, surface: None,
+                indices: (0..vertices.len() as u16).collect(),
+                vertices,
+                texture: Some(self.spark_texture.clone()),
+            });
+        }
+        self.heavy_art.draw_input(
+            input.heavy.view(), input.view_muzzle,
+            camera,
+            fullbright,
+            input.first_person,
+            body_material,
+        );
+        self.ice_art.draw_input(
+            input.ice.view(),
+            &self.ice_data,
+            input.jacks.view(),
+            camera,
+            fullbright,
+            body_material,
+        );
+        self.bomb_art.draw_input(
+            (input.bombs.view(), &self.bomb_data),
+            &input.projectiles,
+            &input.blasts,
             camera,
             fullbright,
             body_material,

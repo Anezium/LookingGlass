@@ -66,6 +66,7 @@ mod fortress_route;
 mod frozen;
 mod gym;
 mod hud;
+mod render_snapshot;
 mod input;
 mod interaction;
 mod inventory;
@@ -136,6 +137,7 @@ mod loading_screen;
 mod frame_profile;
 mod frame_phases;
 mod spike_log;
+mod overlap_probe;
 mod phase_census;
 mod game_thread;
 mod skin_worker;
@@ -564,6 +566,26 @@ fn run() -> Result<()> {
             "--potears1-skip-route-check" => mode = "potears1-skip-route",
             "--potears1-render-check" => mode = "potears1-render",
             "--pool-render-check" => mode = "pool-render",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-npc-ambient-check" => mode = "snapshot-npc-ambient",
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            "--snapshot-npc-ladybug-check" => mode = "snapshot-npc-ladybug",
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            "--snapshot-npc-plant-check" => mode = "snapshot-npc-plant",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-npc-snark-check" => mode = "snapshot-npc-snark",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-npc-wildlife-check" => mode = "snapshot-npc-wildlife",
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            "--snapshot-hud-resource-check" => mode = "snapshot-hud-resource",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-potears2-render-check" => mode = "snapshot-potears2-render",
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            "--snapshot-encounters-render-check" => mode = "snapshot-encounters",
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            "--snapshot-cheshire-render-check" => mode = "snapshot-cheshire-render",
+            "--snapshot-alice-render-check" => mode = "snapshot-alice-render",
+            "--snapshot-handoff-render-check" => mode = "snapshot-handoff-render",
             "--beyond-render-check" => mode = "beyond-render",
             "--village-route-check" => mode = "village-route",
             "--village-cinematic-check" => mode = "village-cinematic",
@@ -1267,6 +1289,53 @@ fn run() -> Result<()> {
         macroquad::Window::from_config(viewer::config(), async move {
             if let Err(e) = beyond_render::check(&mut assets).await {
                 eprintln!("Beyond render failed: {e:#}");
+                std::process::exit(1);
+            }
+        });
+        return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    if mode == "snapshot-encounters" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e)=encounters::snapshot_render_check(&mut assets).await {
+                eprintln!("Snapshot encounters failed: {e:#}"); std::process::exit(1);
+            }
+        }); return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    if let Some(family)=mode.strip_prefix("snapshot-npc-") {
+        let family=family.to_owned();
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e)=npc::snapshot_check::check(&mut assets,&family).await {eprintln!("Snapshot NPC failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    if mode == "snapshot-hud-resource" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = render_snapshot::hud_resource_check(&mut assets).await { eprintln!("Snapshot HUD failed: {e:#}"); std::process::exit(1); }
+        }); return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+    if mode == "snapshot-potears2-render" {
+        macroquad::Window::from_config(viewer::config(),async move {
+            if let Err(e)=levels::potears2::snapshot_render_check(&mut assets).await {eprintln!("Snapshot potears2 failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
+    }
+    #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+    if mode == "snapshot-cheshire-render" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = cheshire::snapshot_render_check(&mut assets).await { eprintln!("Snapshot Cheshire failed: {e:#}"); std::process::exit(1); }
+        }); return Ok(());
+    }
+    if mode == "snapshot-alice-render" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e)=character::snapshot_render_check(&mut assets).await {eprintln!("Snapshot Alice check failed: {e:#}");std::process::exit(1);}
+        });return Ok(());
+    }
+    if mode == "snapshot-handoff-render" {
+        macroquad::Window::from_config(viewer::config(), async move {
+            if let Err(e) = pool::cinema_check::snapshot_handoff_check(&mut assets).await {
+                eprintln!("Snapshot handoff check failed: {e:#}");
                 std::process::exit(1);
             }
         });

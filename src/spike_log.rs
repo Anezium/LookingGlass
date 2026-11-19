@@ -55,6 +55,12 @@ struct Frame {
     begin: Option<Instant>,
     render: Option<Instant>,
     hud: Option<Instant>,
+    world_last: Option<Instant>,
+    world_free: bool,
+    snapshot_frame: Option<u64>,
+    burn_ms: f64,
+    burn_render_ms: f64,
+    burn_bytes: u64,
     cpu_end: Option<Instant>,
     calls: [u32; 7],
     ms: [f64; 7],
@@ -121,6 +127,17 @@ fn gxm_now() -> Option<[u32; 3]> {
     { None }
 }
 impl Frame {
+    #[cfg(all(feature="vita_renderer",feature="sim_maps_probe",not(target_os="vita")))]
+    fn host_share(&self, render: Instant, hud: Instant) {
+        if !crate::render::vita_renderer::config().diag_snapshot
+            || std::env::var_os("LOOKING_GLASS_SNAPSHOT_RENDER_SHARE").is_none() {return;}
+        let split=self.world_last.unwrap_or(hud).max(render).min(hud);
+        let ms=|a:Instant,b:Instant|b.saturating_duration_since(a).as_secs_f64()*1000.;
+        let render_ms=ms(render,hud);let free_ms=ms(split,hud);
+        println!("SNAPSHOT_RENDER_SHARE {{\"frame\":{},\"world_free\":{},\"render_ms\":{:.9},\"world_ms\":{:.9},\"free_ms\":{:.9},\"free_fraction\":{:.9}}}",
+            self.snapshot_frame.unwrap_or(self.number.saturating_sub(1)),self.world_free,render_ms,ms(render,split),free_ms,
+            if render_ms>0. {free_ms/render_ms}else{0.});
+    }
     /// Charges the GXM time since the last mark to the open region and opens `next`.
     fn gxm_switch(&mut self, next: usize) {
         let now = gxm_now();
@@ -147,6 +164,13 @@ impl Frame {
         let ms = |a: Instant, b: Instant| b.saturating_duration_since(a).as_secs_f64() * 1000.;
         let _ = write!(out, "[lg/spike] frame={} ms={:.2} sim={:.2} render={:.2} hud={:.2} present={:.2}",
             self.number, ms(begin, now), ms(begin, render), ms(render, hud), ms(hud, cpu_end), ms(cpu_end, now));
+        if split_enabled() {
+            // Clamp to render: a last simulation read in HUD/tail leaves zero
+            // render-only work that could overlap without extracting more state.
+            let split = self.world_last.unwrap_or(hud).max(render).min(hud);
+            let _ = write!(out, " render_world={:.3} render_free={:.3} burn_ms={:.3} burn_render_ms={:.3} burn_bytes={}",
+                ms(render, split), ms(split, hud), self.burn_ms, self.burn_render_ms, self.burn_bytes);
+        }
         if self.log_ms > 0. { let _ = write!(out, " log={:.2}", self.log_ms); }
         let gxm = self.gxm_start.zip(self.gxm_mark);
         if let Some((start, end)) = gxm {
@@ -204,6 +228,8 @@ pub(crate) fn begin_frame() {
         // The new frame starts at `now`, so formatting the previous line is charged to it (`log=`).
         let mut log_ms = 0.;
         if let (Some(begin), Some(render), Some(hud), Some(cpu_end)) = (f.begin, f.render, f.hud, f.cpu_end) {
+            #[cfg(all(feature="vita_renderer",feature="sim_maps_probe",not(target_os="vita")))]
+            f.host_share(render,hud);
             let in_window = {
                 #[cfg(feature="vita_renderer")]
                 { let c=crate::render::vita_renderer::config(); f.number >= u64::from(c.spike_log_first_frame) && (c.spike_log_last_frame == 0 || f.number <= u64::from(c.spike_log_last_frame)) }
@@ -242,7 +268,10 @@ pub(crate) fn flush(at: &str) {
 /// The viewer loop ended: flush, and print later lines at once until the next `begin_frame`.
 pub(crate) fn end_play() {
     if !on() { return; }
-    FRAME.with(|f| { let mut f = f.borrow_mut(); let number = f.number; *f = Frame { number, ..Frame::default() }; });
+    FRAME.with(|f| { let mut f = f.borrow_mut();
+        #[cfg(all(feature="vita_renderer",feature="sim_maps_probe",not(target_os="vita")))]
+        if let (Some(render),Some(hud),Some(_))=(f.render,f.hud,f.cpu_end) {f.host_share(render,hud);}
+        let number = f.number; *f = Frame { number, ..Frame::default() }; });
     flush("viewer-end");
 }
 /// The simulation enters `block`.
@@ -386,4 +415,31 @@ mod tests {
         f.end_calls[PRESENT] = 1;
         assert!(f.line(t(40), [t(0), t(12), t(30), t(31)]).contains(" gxm_begin=0.07 gxm_end=45.00 sim_split=input:2.00,npcs:10.00 gxm_end_in=scene:44.50/1,present:0.50/1 npc="));
     }
+}
+
+#[inline]
+pub(crate) fn overlap_enabled() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { crate::render::vita_renderer::config().diag_overlap }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
+pub(crate) fn world_last_read() {
+    if on() && split_enabled() { FRAME.with(|f| f.borrow_mut().world_last = Some(Instant::now())); }
+}
+pub(crate) fn overlap_burn(ms: f64, render_ms: f64, bytes: u64) {
+    if on() { FRAME.with(|f| { let mut f=f.borrow_mut(); f.burn_ms=ms; f.burn_render_ms=render_ms; f.burn_bytes=bytes; }); }
+}
+
+/// Split observation alone never changes CPU reservation or starts the burn.
+fn split_enabled() -> bool {
+    #[cfg(feature="vita_renderer")]
+    { overlap_enabled() || crate::render::vita_renderer::config().diag_snapshot }
+    #[cfg(not(feature="vita_renderer"))]
+    { false }
+}
+
+/// Records the audited boundary decision; does not alter scheduling or reserve a core.
+pub(crate) fn world_free_decision(value: bool, frame: u64) {
+    if on() {FRAME.with(|f|{let mut f=f.borrow_mut();f.world_free=value;f.snapshot_frame=Some(frame);});}
 }

@@ -64,7 +64,7 @@ pub fn jabberwock_fire() -> bool {
     enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_JABBERWOCK_FIRE").is_some())
 }
 pub fn elapsed(actual: f32) -> f32 {
-    if !enabled() { return actual; }
+    if !enabled() || crate::replay::input::active() { return actual; }
     static DT: OnceLock<f32> = OnceLock::new();
     *DT.get_or_init(|| std::env::var("LOOKING_GLASS_SIM_MAPS_DT").unwrap_or_else(|_| "0.05".into()).parse::<f32>().ok().filter(|t| t.is_finite() && *t > 0. && *t < 1.).expect("finite probe timestep"))
 }

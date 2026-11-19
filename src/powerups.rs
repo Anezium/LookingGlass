@@ -258,7 +258,10 @@ fn check_watch_world(assets: &mut crate::assets::Assets) -> Result<()> {
 }
 
 /// Original item meshes share ordinary world depth and fog.
+mod snapshot;
+pub(crate) use snapshot::Input as PickupInput;
 pub struct Art {
+    snapshot_visit: crate::render_snapshot::RenderVisit,
     props: Vec<crate::weapons::Prop>,
     resources: Vec<crate::weapons::Prop>,
     material: crate::character::SkinMaterial,
@@ -279,6 +282,7 @@ impl Art {
             )?);
         }
         Ok(Self {
+            snapshot_visit:Default::default(),
             props,
             resources: ["p_h1", "p_h2", "p_m1", "p_m2"]
                 .iter()
@@ -310,6 +314,7 @@ impl Art {
         }
     }
     pub fn clear_effects(&mut self) {
+        self.snapshot_visit=Default::default();
         self.collected.clear();
         self.essence.clear_effects();
         for e in self.collection_fx.values() { e.clear(); }

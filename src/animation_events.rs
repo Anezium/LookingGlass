@@ -71,6 +71,14 @@ pub struct VisualState {
     pub emitters: BTreeMap<String, bool>,
     pub hide_weapon: bool,
 }
+impl VisualState {
+    pub(crate) fn payload_bytes(&self) -> usize {
+        self.surfaces.iter().map(|(s,_)| std::mem::size_of::<(String,bool)>()+s.len()).sum::<usize>()
+            + self.removed.iter().map(|s| std::mem::size_of::<String>()+s.len()).sum::<usize>()
+            + self.emitters.iter().map(|(s,_)| std::mem::size_of::<(String,bool)>()+s.len()).sum::<usize>()
+            + self.attachments.iter().map(|(s,a)| std::mem::size_of::<(String,Attachment)>()+s.len()+a.model.len()).sum::<usize>()
+    }
+}
 pub fn matches(pattern: &str, name: &str) -> bool {
     pattern == "all"
         || pattern

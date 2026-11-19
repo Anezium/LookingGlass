@@ -405,6 +405,9 @@ impl Scene {
     }
     /// Prepare visible, one-level portal views before beginning the main frame's
     /// transparency queue. No main-view sky, lights or camera state is inherited.
+    /// Portal lighting still queries collision World during its offscreen view.
+    /// Until those selections are captured, even an invisible portal is fenced.
+    pub(crate) fn snapshot_portals_fenced(&self) -> bool { !self.camera_portals.is_empty() }
     pub fn prepare_camera_portals(
         &mut self,
         camera: &Camera3D,
