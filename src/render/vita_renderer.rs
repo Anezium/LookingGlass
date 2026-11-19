@@ -11,6 +11,7 @@ mod state_cache;
 mod submit;
 mod world_list;
 mod gxm;
+mod low_fog;
 mod draw_cuts;
 mod alpha_fill;
 mod sky_surfaces;
@@ -277,6 +278,12 @@ pub struct Config {
     /// draw it. Off keeps the RC3 low program, which leaves opaque walls and floors unfogged.
     /// No effect in `quality: full`. Default off.
     pub low_fog: bool,
+    /// Keep the fog-free low shader for draws whose camera rays miss all active volumes.
+    pub low_fog_skip: bool,
+    /// Compile the opaque fog block for the map's authored volume count.
+    pub low_fog_cheaper: bool,
+    /// Interpolate fog factors from vertices. This changes the picture.
+    pub low_fog_per_vertex: bool,
     /// On a map with authored distance fog (`setfarplane`), draw the gradient sky flat in the fog
     /// colour, as the desktop renderer shows potears2 (its sky shader draws nothing over the fog
     /// colour clear). Off keeps the RC3 gradient from the fog colour up to 1.5 times it, which
@@ -660,6 +667,9 @@ impl Default for Config {
             collision_geometry_share: false,
             water_normals: false,
             low_fog: false,
+            low_fog_skip: false,
+            low_fog_cheaper: false,
+            low_fog_per_vertex: false,
             fog_sky: false,
             exact_blends: false,
             detail_layers: false,
@@ -827,6 +837,11 @@ impl Config {
         ensure!(self.render_scale==1. || self.msaa_samples==1,"scaled target requires msaa_samples=1");
         ensure!(matches!(self.scaled_target.as_str(),"resolve"|"direct"|"direct_flip"),"scaled_target must be resolve, direct or direct_flip");
         ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
+        ensure!(!(self.low_fog_skip || self.low_fog_cheaper || self.low_fog_per_vertex)
+            || (self.low_fog && self.quality == "low" && !self.simple_fog),
+            "low_fog options require low_fog, quality low and simple_fog off");
+        ensure!(!self.low_fog_per_vertex || !(self.low_fog_skip || self.low_fog_cheaper),
+            "low_fog_per_vertex is a separate picture-changing option");
         ensure!(matches!(self.opaque_order.as_str(),"material"|"front_to_back"),"invalid opaque_order");
         ensure!(!self.world_list_submit || (self.world_state_cache && self.world_view_reuse && self.world_parameter_reuse && self.uniform_field_cache && !self.world_static_merge && !self.world_binding_cache && !self.world_gl_state_cache),
             "world_list_submit requires world_state_cache, world_view_reuse, world_parameter_reuse and uniform_field_cache, and excludes world_static_merge, world_binding_cache and world_gl_state_cache");
@@ -1386,13 +1401,15 @@ pub struct Renderer {
     parameters: Vec<Parameter>,
     parameter_key: Option<[u32; 51]>,
     parameter_generation: u64,
-    field_uniforms: [super::uniform_fields::Cache; 2],
+    field_uniforms: [super::uniform_fields::Cache; 3],
     pvs: Pvs,
     water_join: Option<water_join::State>,
     pipelines: Vec<Pipeline>,
     shader: ShaderId,
     low_shader:Option<ShaderId>,
-    low_pipelines:Vec<Pipeline>,
+    low_pipelines: Vec<Pipeline>,
+    fog_free: Option<(ShaderId, Vec<Pipeline>)>,
+    fog_bounds: Vec<Option<Box<[low_fog::Bounds]>>>,
     sky_pipeline: Pipeline,
     sky_shader: ShaderId,
     sky_bindings: Bindings,
@@ -1755,22 +1772,38 @@ impl Renderer {
             }
         }
         resources.pipelines.extend(pipelines.iter().copied());
-        let mut low_pipelines=Vec::new();
-        let low_shader=if c.quality=="low" {
+        let volume_slots = scene.atmosphere.volumes.len();
+        let mut make_low = |name, vertex: &str, fragment: &str| -> Result<_> {
             crate::frame_profile::shader_creation();
             let shader_timing = crate::startup::WorkTimer::new(crate::startup::Work::ShaderCreation);
-            let _shader_name = crate::shader_cache::Name::new("retained-world-low");
-            let low=ctx.new_shader(ShaderSource::Glsl{vertex:&shader::vertex(c.water_normals),fragment:&shader::low_fragment(c.low_fog)},shader::meta())?;
+            let _shader_name = crate::shader_cache::Name::new(name);
+            let low = ctx.new_shader(ShaderSource::Glsl { vertex, fragment }, shader::meta())?;
             resources.shaders.push(low);
-            if c.low_fog { println!("[lg/vita-renderer] low_fog=on"); }
             drop(shader_timing);
-            for cull in [CullFace::Nothing,CullFace::Back,CullFace::Front] {
-                crate::frame_profile::pipeline_creation();
-                low_pipelines.push(ctx.new_pipeline(&[BufferLayout{stride:52,..Default::default()}],&attributes,low,PipelineParams{depth_test:Comparison::LessOrEqual,depth_write:true,cull_face:cull,front_face_order:FrontFaceOrder::Clockwise,..Default::default()}));
+            #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
+            if c.low_fog && crate::sim_maps::probe::enabled() {
+                println!("LOW_FOG_SOURCE name={name} vertex_bytes={} fragment_bytes={} volumes={volume_slots}",
+                    vertex.len(), fragment.len());
             }
-            Some(low)
-        }else{None};
-        resources.pipelines.extend(low_pipelines.iter().copied());
+            let pipelines = [CullFace::Nothing, CullFace::Back, CullFace::Front].into_iter().map(|cull| {
+                crate::frame_profile::pipeline_creation();
+                ctx.new_pipeline(&[BufferLayout { stride: 52, ..Default::default() }], &attributes, low,
+                    PipelineParams { depth_test: Comparison::LessOrEqual, depth_write: true,
+                        cull_face: cull, front_face_order: FrontFaceOrder::Clockwise, ..Default::default() })
+            }).collect::<Vec<_>>();
+            resources.pipelines.extend(pipelines.iter().copied());
+            Ok((low, pipelines))
+        };
+        let (low_shader, low_pipelines) = if c.quality == "low" {
+            let (vertex, fragment) = shader::low_fog_sources(c, volume_slots);
+            let (shader, pipelines) = make_low("retained-world-low", &vertex, &fragment)?;
+            if c.low_fog { println!("[lg/vita-renderer] low_fog=on"); }
+            (Some(shader), pipelines)
+        } else { (None, Vec::new()) };
+        let fog_free = if c.low_fog_skip {
+            Some(make_low("retained-world-low-fog-free",
+                &shader::vertex(c.water_normals), &shader::low_fragment(false))?)
+        } else { None };
         // A key whose program does not build is turned off with a warning; the frame stays whole.
         let mut alpha_fill = alpha_fill::State::off();
         let lite = c.world_alpha_lite.then(|| {
@@ -1826,6 +1859,9 @@ impl Renderer {
                 format!("{:x}", h.finalize())
             }).collect());
         }
+        let fog_bounds = if fog_free.is_some() && volume_slots > 0 {
+            pending.iter().map(|p| low_fog::bounds(&p.recipe, &p.geometry)).collect()
+        } else { Vec::new() };
         let (packed, allocations) = world_list::pack(pending.iter_mut().map(|p| {
             let key = (c.world_static_merge && submit::static_opaque(&p.recipe)).then_some((p.parameter,p.recipe.rank));
             (key, &mut p.geometry.vertices, &mut p.geometry.indices)
@@ -2042,7 +2078,7 @@ impl Renderer {
             pvs,
             water_join,
             pipelines,
-            shader,low_shader,low_pipelines,
+            shader, low_shader, low_pipelines, fog_free, fog_bounds,
             sky_pipeline,
             sky_shader,
             sky_bindings,
@@ -2459,7 +2495,7 @@ impl Renderer {
             count("vita_world_parameter_reuses", self.alpha_order.len() as u64 - builds);
         }
         water_probe::add(|f| &mut f.parameter_time, probe_parameters);
-        // Uniform values are program storage. These two programs are private to
+        // Uniform values are program storage. These programs are private to
         // this Renderer; sky, FX and HUD use other programs. Alpha uses this same
         // cache, including interleaved callbacks, so every write stays observed.
         if !config().world_uniform_persist {
@@ -2651,12 +2687,17 @@ impl Renderer {
             let gl = unsafe { get_internal_gl() };
             let ctx = gl.quad_context;
             let low=!alpha && g.recipe.stage.alpha_test==0 && !self.low_pipelines.is_empty();
-            let pipeline = if low {self.low_pipelines[g.recipe.cull]}else{self.pipelines[pi]};
+            let skip_fog = low && self.fog_free.is_some() && prepared.indices == g.indices
+                && low_fog::free(g, self.fog_bounds.get(prepared.group).and_then(Option::as_deref), u);
+            let (pipeline, program) = if skip_fog {
+                (self.fog_free.as_ref().unwrap().1[g.recipe.cull], low_fog::FOG_FREE_PROGRAM)
+            } else if low { (self.low_pipelines[g.recipe.cull], 1) }
+            else { (self.pipelines[pi], 0) };
             let plan = if cache_enabled {
                 // World groups have one immutable VBO, one IBO and two images.
                 debug_assert_eq!(g.bindings.vertex_buffers.len(), 1);
                 debug_assert_eq!(g.bindings.images.len(), 2);
-                cache.observe(pipeline, low, !alpha,
+                cache.observe(pipeline, program, !alpha,
                     (g.bindings.vertex_buffers[0], g.bindings.index_buffer,
                      g.bindings.images[0], g.bindings.images[1]),
                     prepared.uniforms.as_ref().map_or(self.parameters[g.parameter].bits, shader::Uniforms::bits))
@@ -2674,7 +2715,7 @@ impl Renderer {
             if plan.bindings { ctx.apply_bindings(&g.bindings); applications[2] += 1; }
             totals.lap(0, &mut start);
             if plan.uniforms {
-                let traffic = self.field_uniforms[usize::from(low)].apply(ctx, u.values(), config().uniform_field_cache);
+                let traffic = self.field_uniforms[program].apply(ctx, u.values(), config().uniform_field_cache);
                 applications[3] += 1;
                 uniform_traffic[0] += u64::from(traffic.calls > 0);
                 uniform_traffic[1] += traffic.bytes;
@@ -2688,7 +2729,7 @@ impl Renderer {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::draw_query::mark(
                 if alpha {"world_alpha"} else {"world_opaque"},
-                if low {"world_low"} else {"world_full"},
+                if skip_fog {"world_low_fog_free"} else if low {"world_low"} else {"world_full"},
                 g.recipe.blend, Some(prepared.group), g.recipe.stage.alpha_test,
                 g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -2794,9 +2835,8 @@ impl Renderer {
     /// as one trial of a proof frame.
     fn submit_list(&mut self, time: f32, pass: gxm::Pass, totals: &mut crate::frame_profile::Totals<3>, c: &mut world_list::Counts,
                    previous_end: &mut Option<std::time::Instant>, between_ns: &mut u64, between_calls: &mut u32) {
-        let Self { list, parameters, field_uniforms, groups, gxm: state, .. } = self;
+        let Self { list, parameters, field_uniforms, groups, fog_free, fog_bounds, gxm: state, .. } = self;
         let list = list.as_ref().unwrap();
-        let _ = &groups;
         // One lookup a pass. Nothing below changes what the context points at.
         let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
@@ -2805,7 +2845,7 @@ impl Renderer {
         let way = state.way(pass);
         let mut drawn = 0u64;
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let mut last_written = [None::<usize>; 2];
+        let mut last_written = [None::<usize>; 3];
         #[cfg(target_os = "vita")]
         let mut real = gxm::vita::Real::new();
         let batch = config().world_adjacent_batch;
@@ -2820,12 +2860,21 @@ impl Renderer {
             position = end;
             if end > first + 1 { count("vita_world_adjacent_draws_saved", (end - first - 1) as u64); }
             let low = draw.low;
+            let group = &groups[item.group as usize];
+            let skip_fog = low && fog_free.is_some() && list.items[first..end].iter().all(|part| {
+                let id = part.group as usize;
+                let u = &parameters[list.draws[id].parameter as usize].uniforms;
+                low_fog::free(&groups[id], fog_bounds.get(id).and_then(Option::as_deref), u)
+            });
+            let (pipeline, program) = if skip_fog {
+                (fog_free.as_ref().unwrap().1[group.recipe.cull], low_fog::FOG_FREE_PROGRAM)
+            } else { (draw.pipeline, usize::from(low)) };
             let binding = (draw.vertex, draw.index, item.texture, draw.atlas);
-            let mut plan = planner.observe(draw.pipeline, low, binding, item.uniforms);
+            let mut plan = planner.observe(pipeline, program, binding, item.uniforms);
             // The whole point of a class: a skipped write must be a write of equal bits.
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             {
-                let storage = &mut last_written[usize::from(low)];
+                let storage = &mut last_written[program];
                 if plan.uniforms { *storage = Some(draw.parameter as usize); }
                 else { assert_eq!(parameters[storage.expect("a skip before any write")].bits, parameters[draw.parameter as usize].bits, "a uniform class skipped a different payload"); }
             }
@@ -2841,19 +2890,20 @@ impl Renderer {
             let bits = &parameters[draw.parameter as usize].bits;
             let class = if low { crate::gpu_timing::MASK_WORLD_LOW } else { crate::gpu_timing::MASK_WORLD_FULL };
             #[cfg(target_os = "vita")]
-            let direct = way == gxm::Way::Direct && !plan.pipeline && !draw.animated && !crate::gpu_timing::masked(class)
+            let direct = way == gxm::Way::Direct && !skip_fog && !plan.pipeline && !draw.animated && !crate::gpu_timing::masked(class)
                 && state.direct_draw(&mut real, item.group as usize, indices as u32, item.uniforms, low, bits, pass, drawn - 1);
             #[cfg(not(target_os = "vita"))]
             let direct = false;
             if !direct {
-                // vitaGL holds what it last wrote, not what a direct draw left. Take every step through it.
+                // Reset vitaGL's view of the state when a raw draw could have preceded
+                // this one. Within a run of the alternate pipeline, every draw uses vitaGL.
                 #[cfg(target_os = "vita")]
-                if way == gxm::Way::Direct {
+                if way == gxm::Way::Direct && (!skip_fog || plan.pipeline) {
                     gxm::vita::uniforms_are_stale();
                     plan.bindings = true;
                     plan.uniforms = true;
                 }
-                if plan.pipeline { ctx.apply_pipeline(&draw.pipeline); c.applications[0] += 1; }
+                if plan.pipeline { ctx.apply_pipeline(&pipeline); c.applications[0] += 1; }
                 if plan.depth { unsafe{macroquad::miniquad::gl::glDepthMask(1);} c.applications[1] += 1; }
                 if plan.pipeline { scale::log_depth(true); }
                 if plan.bindings {
@@ -2869,7 +2919,7 @@ impl Renderer {
             totals.lap(0, &mut start);
             if !direct && plan.uniforms {
                 let values = parameters[draw.parameter as usize].uniforms.values();
-                let traffic = field_uniforms[usize::from(low)].apply(ctx, values, true);
+                let traffic = field_uniforms[program].apply(ctx, values, true);
                 c.applications[3] += 1;
                 c.uniform_traffic[0] += u64::from(traffic.calls > 0);
                 c.uniform_traffic[1] += traffic.bytes;
@@ -2878,11 +2928,11 @@ impl Renderer {
             totals.lap(1, &mut start);
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             {
-                let g = &groups[item.group as usize];
-                if g.recipe.stage.blend != Blend::Opaque { crate::sim_maps::probe::world_order(item.group as usize, false); }
-                crate::sim_maps::probe::draw_query::mark("world_opaque", if low {"world_low"} else {"world_full"},
-                    g.recipe.blend, Some(item.group as usize), g.recipe.stage.alpha_test,
-                    g.recipe.stage.images.get(g.recipe.stage.frame(time)).map(String::as_str));
+                if group.recipe.stage.blend != Blend::Opaque { crate::sim_maps::probe::world_order(item.group as usize, false); }
+                crate::sim_maps::probe::draw_query::mark("world_opaque",
+                    if skip_fog {"world_low_fog_free"} else if low {"world_low"} else {"world_full"},
+                    group.recipe.blend, Some(item.group as usize), group.recipe.stage.alpha_test,
+                    group.recipe.stage.images.get(group.recipe.stage.frame(time)).map(String::as_str));
             }
             let _ = (time, bits);
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -2903,8 +2953,11 @@ impl Renderer {
                 let dropped = world_list::negative("world-list-drop-draw") && drawn % 13 == 6;
                 #[cfg(not(all(feature="sim_maps_probe",not(target_os="vita"))))]
                 let dropped = false;
+                // The raw route retains one layout for low world. Keep the
+                // alternate program in vitaGL; switching back forces a normal
+                // pipeline apply and a fresh capture before direct draws resume.
                 #[cfg(target_os = "vita")]
-                if way != gxm::Way::Vitagl { gxm::vita::arm(); }
+                if !skip_fog && way != gxm::Way::Vitagl { gxm::vita::arm(); }
                 let ran = !dropped && !crate::gpu_timing::masked(class);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 let (actual_base, actual_indices) = if end > first + 1 {
@@ -2919,7 +2972,7 @@ impl Renderer {
                     ctx.draw(actual_base, actual_indices, 1);
                 }
                 #[cfg(target_os = "vita")]
-                if way != gxm::Way::Vitagl {
+                if !skip_fog && way != gxm::Way::Vitagl {
                     let capture = gxm::vita::take();
                     // A masked draw called nothing, so there is nothing to learn from it.
                     if ran { state.after_vitagl(&capture, item.group as usize, draw.animated, draw.pipeline_class, low, indices as u32, item.uniforms, bits, way); }
@@ -3091,7 +3144,7 @@ impl Renderer {
                 None => (&self.pipelines[g.recipe.blend * 3 + g.recipe.cull], &mut self.field_uniforms[0]),
             };
             let mut plan = if adjacent {
-                adjacent_state.observe(*pipeline, lite_draw, false,
+                adjacent_state.observe(*pipeline, usize::from(lite_draw), false,
                     (g.bindings.vertex_buffers[0], g.bindings.index_buffer, p.texture, g.bindings.images[1]), u.bits())
             } else { state_cache::Applications { pipeline: true, depth: true, bindings: true, uniforms: true } };
             // Conservatively treat every pipeline transition as a program transition, including
@@ -3221,6 +3274,10 @@ impl Drop for Renderer {
         ctx.delete_pipeline(self.sky_pipeline);
         for p in &self.low_pipelines {ctx.delete_pipeline(*p);}
         if let Some(shader)=self.low_shader {ctx.delete_shader(shader);}
+        if let Some((shader, pipelines)) = self.fog_free.take() {
+            for pipeline in pipelines { ctx.delete_pipeline(pipeline); }
+            ctx.delete_shader(shader);
+        }
         ctx.delete_shader(self.shader);
         ctx.delete_shader(self.sky_shader);
         self.alpha_fill.delete(ctx);

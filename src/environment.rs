@@ -153,6 +153,78 @@ pub fn fragment(source: &str) -> String {
     }
     source.replace("// FOG", FOG)
 }
+/// Opaque stages have Alpha.z = 0. Specialize their fog targets and compile
+/// out volume slots absent from this map. Keep the original arithmetic,
+/// precision qualifiers and order for every live factor and mix.
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn opaque_fog(source: &str, volume_slots: usize) -> String {
+    let mut block = FOG.replace(" vec3 neutral=additive>2.5?vec3(0.5):vec3(1.0);\n", "")
+        .replace("vec3 fogged(vec3 rgb,float additive)", "vec3 fogged(vec3 rgb)")
+        .replace("additive>1.5?neutral:", "")
+        .replace(".rgb*(1.0-additive)", ".rgb");
+    if volume_slots < 2 {
+        block = block.lines().filter(|line| {
+            (volume_slots > 0 || !line.contains("FogA")) && !line.contains("FogB")
+        }).collect::<Vec<_>>().join("\n");
+    }
+    if volume_slots == 0 {
+        let start = block.find("float slab(").unwrap();
+        let end = block.find("vec3 fogged(").unwrap();
+        block.replace_range(start..end, "");
+    }
+    if volume_slots > 0 {
+        // The volume calculation used a highp length independently of the
+        // mediump distance/liquid factor. Share the highp result and round
+        // dist at the original assignment for those two factors.
+        block = block.replace("vec3 lo,vec3 hi){\n highp vec3 d=worldPosition-FogEye;",
+                "vec3 lo,vec3 hi,highp vec3 d,highp float rayLength){\n")
+            .replace("*length(d)*valid", "*rayLength*valid")
+            .replace("float dist=length(worldPosition-FogEye);",
+                "highp vec3 d=worldPosition-FogEye;\n highp float rayLength=length(d);\n float dist=rayLength;")
+            .replace("fogLength(FogAMin,FogAMax)", "fogLength(FogAMin,FogAMax,d,rayLength)")
+            .replace("fogLength(FogBMin,FogBMax)", "fogLength(FogBMin,FogBMax,d,rayLength)");
+    }
+    source.replace("// FOG", &block).replace("fogged(rgb,Alpha.z)", "fogged(rgb)")
+}
+
+/// Same fog factors as the fragment path, evaluated at the submitted
+/// (possibly deformed) vertices and interpolated through clipping/rasterization.
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn vertex_fog(source: &str) -> String {
+    let helpers = FOG.split_once("vec3 fogged(").unwrap().0
+        .replace("varying highp vec3 worldPosition;\n", "");
+    let block = format!(r#"precision mediump float;
+varying mediump vec4 FogFactors;
+{helpers}
+vec4 fogFactors(){{
+ float dist=length(worldPosition-FogEye);
+ vec4 factors=vec4(0.0);
+ if(DistanceFog.w>0.0)factors.x=clamp((dist-DistanceFog.w*0.35)/(DistanceFog.w*0.65),0.0,1.0);
+ if(FogA.w>0.0)factors.y=clamp(fogLength(FogAMin,FogAMax)/FogA.w,0.0,1.0);
+ if(FogB.w>0.0)factors.z=clamp(fogLength(FogBMin,FogBMax)/FogB.w,0.0,1.0);
+ if(LiquidFog.w>0.0)factors.w=clamp(0.12+dist/LiquidFog.w,0.0,0.96);
+ return factors;
+}}
+precision highp float;
+void main(){{"#);
+    source.replace("void main(){", &block)
+        .replace(" worldPosition=world.xyz;", " worldPosition=world.xyz;\n FogFactors=fogFactors();")
+}
+
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn interpolated_fog(source: &str, volume_slots: usize) -> String {
+    let a = if volume_slots >= 1 { " rgb=mix(rgb,FogA.rgb,FogFactors.y);\n" } else { "" };
+    let b = if volume_slots >= 2 { " rgb=mix(rgb,FogB.rgb,FogFactors.z);\n" } else { "" };
+    let block = format!(r#"varying mediump vec4 FogFactors;
+uniform vec4 DistanceFog, FogA, FogB, LiquidFog;
+vec3 fogged(vec3 rgb){{
+ rgb=mix(rgb,DistanceFog.rgb,FogFactors.x);
+{a}{b} rgb=mix(rgb,LiquidFog.rgb,FogFactors.w);
+ return rgb;
+}}"#);
+    source.replace("// FOG", &block).replace("fogged(rgb,Alpha.z)", "fogged(rgb)")
+}
+
 const FOG: &str = r#"
 varying highp vec3 worldPosition;
 uniform highp vec3 FogEye;

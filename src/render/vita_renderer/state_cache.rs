@@ -16,16 +16,15 @@ pub(super) struct Cache<P, B, const N: usize> {
     bindings: Option<B>,
     // Cull/blend pipelines share a program. Uniforms belong to that program,
     // NOT to the pipeline; otherwise A/B/A can silently reuse stale values.
-    uniforms: [Option<[u32; N]>; 2],
+    uniforms: [Option<[u32; N]>; 3],
 }
 impl<P: Copy + Eq, B: Copy + Eq, const N: usize> Cache<P, B, N> {
     pub fn new() -> Self {
-        Self { pipeline: None, depth: None, bindings: None, uniforms: [None; 2] }
+        Self { pipeline: None, depth: None, bindings: None, uniforms: [None; 3] }
     }
-    pub fn observe(&mut self, pipeline: P, low_program: bool, depth: bool,
+    pub fn observe(&mut self, pipeline: P, program: usize, depth: bool,
                    bindings: B, uniforms: [u32; N]) -> Applications {
         let pipeline_changed = self.pipeline != Some(pipeline);
-        let program = usize::from(low_program);
         let result = Applications {
             pipeline: pipeline_changed,
             depth: self.depth != Some(depth),
@@ -51,25 +50,25 @@ mod tests {
         let u = [0_f32.to_bits(), f32::from_bits(0x7fc00001).to_bits()];
         let all = Applications { pipeline: true, depth: true, bindings: true, uniforms: true };
         let none = Applications { pipeline: false, depth: false, bindings: false, uniforms: false };
-        assert_eq!(c.observe(1, false, true, (10, 20, 30, 40), u), all);
-        assert_eq!(c.observe(1, false, true, (10, 20, 30, 40), u), none);
+        assert_eq!(c.observe(1, 0, true, (10, 20, 30, 40), u), all);
+        assert_eq!(c.observe(1, 0, true, (10, 20, 30, 40), u), none);
         // Same program on another actual pipeline: bindings must be re-applied.
-        let p = c.observe(2, false, true, (10, 20, 30, 40), u);
+        let p = c.observe(2, 0, true, (10, 20, 30, 40), u);
         assert!(p.pipeline && p.bindings && !p.depth && !p.uniforms);
         let changed = [(-0_f32).to_bits(), u[1]];
-        assert!(c.observe(2, false, true, (10, 20, 30, 40), changed).uniforms);
-        assert!(c.observe(1, false, true, (10, 20, 30, 40), u).uniforms);
+        assert!(c.observe(2, 0, true, (10, 20, 30, 40), changed).uniforms);
+        assert!(c.observe(1, 0, true, (10, 20, 30, 40), u).uniforms);
         // Different programs retain independent uniform storage.
-        assert!(c.observe(3, true, true, (10, 20, 30, 40), changed).uniforms);
-        assert!(!c.observe(1, false, true, (10, 20, 30, 40), u).uniforms);
+        assert!(c.observe(3, 1, true, (10, 20, 30, 40), changed).uniforms);
+        assert!(!c.observe(1, 0, true, (10, 20, 30, 40), u).uniforms);
         for bindings in [(11,20,30,40), (11,21,30,40), (11,21,31,40), (11,21,31,41)] {
-            assert!(c.observe(1, false, true, bindings, u).bindings);
+            assert!(c.observe(1, 0, true, bindings, u).bindings);
         }
-        assert!(c.observe(1, false, false, (11,21,31,41), u).depth);
-        assert!(c.observe(1, false, false, (11,21,31,41), [u[0],0x7fc00002]).uniforms);
+        assert!(c.observe(1, 0, false, (11,21,31,41), u).depth);
+        assert!(c.observe(1, 0, false, (11,21,31,41), [u[0],0x7fc00002]).uniforms);
         // All interruption sites end the cache's lifetime.
         for _ in ["sky", "world alpha", "actor", "target", "Macroquad", "frame"] {
-            assert_eq!(Cache::new().observe(1, false, true, (10,20,30,40), u), all);
+            assert_eq!(Cache::new().observe(1, 0, true, (10,20,30,40), u), all);
         }
     }
 
@@ -85,7 +84,7 @@ mod tests {
             (1,false,11,[0,1]), (3,true,11,[3,1]), (1,false,11,[0,1]),
             (3,true,12,[3,1]), (3,true,12,[4,1]),
         ] {
-            let plan = c.observe(p, low, true, b, u);
+            let plan = c.observe(p, usize::from(low), true, b, u);
             if plan.pipeline { pipeline = Some(p); applications[0] += 1; }
             if plan.depth { depth = Some(true); applications[1] += 1; }
             if plan.bindings { bindings = Some(b); applications[2] += 1; }

@@ -101,11 +101,29 @@ pub fn vertex(water_normals: bool) -> std::borrow::Cow<'static, str> {
 /// classified opaque with no alpha test. Foliage stays full. Without `fog` (the RC3 program)
 /// it also omits fragment fog, so opaque walls and floors ignore the map's fog; with `fog`
 /// (`low_fog`) it keeps the same fog code as the full program.
-pub fn low_fragment(fog: bool)->String {
-    let mut result=FRAGMENT.to_string();
-    let start=result.find(" float cut=Surface.z;").unwrap();
-    let end=result.find(" vec3 lighting=").unwrap();result.replace_range(start..end,"");
-    if fog { crate::environment::fragment(&result) } else { result.replace("fogged(rgb,Alpha.z)","rgb") }
+pub fn low_fragment(fog: bool) -> String {
+    let result = low_fragment_body();
+    if fog { crate::environment::fragment(&result) } else { result.replace("fogged(rgb,Alpha.z)", "rgb") }
+}
+
+fn low_fragment_body() -> String {
+    let mut result = FRAGMENT.to_string();
+    let start = result.find(" float cut=Surface.z;").unwrap();
+    let end = result.find(" vec3 lighting=").unwrap();
+    result.replace_range(start..end, "");
+    result
+}
+
+pub fn low_fog_sources(c: &super::Config, volume_slots: usize) -> (std::borrow::Cow<'static, str>, String) {
+    let vertex = vertex(c.water_normals);
+    if c.low_fog_per_vertex {
+        (crate::environment::vertex_fog(&vertex).into(),
+            crate::environment::interpolated_fog(&low_fragment_body(), volume_slots))
+    } else if c.low_fog_cheaper {
+        (vertex, crate::environment::opaque_fog(&low_fragment_body(), volume_slots))
+    } else {
+        (vertex, low_fragment(c.low_fog))
+    }
 }
 
 #[repr(C)]
@@ -238,3 +256,26 @@ void main(){height=position.y*0.5+0.5;gl_Position=vec4(position,0.999,1.0);}"#;
 pub const SKY_FRAGMENT: &str = r#"#version 100
 precision mediump float; varying lowp float height; uniform vec4 Bottom, Top;
 void main(){gl_FragColor=mix(Bottom,Top,clamp(height,0.0,1.0));}"#;
+
+#[cfg(test)]
+mod low_fog_tests {
+    use super::*;
+    use crate::render::vita_renderer::Config;
+
+    #[test]
+    fn exact_fog_specialization_keeps_live_volume_slots_and_shares_ray_length() {
+        let config = Config { low_fog: true, low_fog_cheaper: true, ..Config::default() };
+        let (_, no_volume) = low_fog_sources(&config, 0);
+        assert!(!no_volume.contains("fogLength") && !no_volume.contains("FogAMin"));
+        let (_, one_volume) = low_fog_sources(&config, 1);
+        assert!(one_volume.contains("fogLength(FogAMin,FogAMax,d,rayLength)"));
+        assert!(!one_volume.contains("FogBMin"));
+        let (_, two_volumes) = low_fog_sources(&config, 2);
+        assert!(two_volumes.contains("fogLength(FogBMin,FogBMax,d,rayLength)"));
+        assert_eq!(two_volumes.matches("length(d)").count(), 1);
+        for source in [&no_volume, &one_volume, &two_volumes] {
+            assert!(source.contains("DistanceFog.w>0.0") && source.contains("LiquidFog.w>0.0"));
+            assert!(!source.contains("additive"));
+        }
+    }
+}

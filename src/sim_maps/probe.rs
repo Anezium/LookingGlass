@@ -435,6 +435,26 @@ pub fn record_exact_frame(case: &str, frame: u64, png: bool) -> anyhow::Result<(
     anyhow::ensure!(viewport[2] > 0 && viewport[3] > 0, "empty GL viewport for {case} frame {frame}: {viewport:?}");
     let image = macroquad::prelude::get_screen_data();
     anyhow::ensure!(image.width > 0 && image.height > 0 && !image.bytes.is_empty(), "empty framebuffer for {case} frame {frame}");
+    // Stream the very same RGBA bytes that the strict oracle hashes. A local
+    // FIFO lets a reader compare two full replays without retaining every frame.
+    thread_local! {
+        static RGBA: RefCell<Option<std::fs::File>> = const { RefCell::new(None) };
+    }
+    static RGBA_PATH: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
+    if let Some(path) = RGBA_PATH.get_or_init(|| std::env::var_os("LOOKING_GLASS_PROBE_RGBA")) {
+        use std::io::Write;
+        RGBA.with(|slot| -> std::io::Result<()> {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(std::fs::OpenOptions::new().write(true).open(path)?);
+            }
+            let output = slot.as_mut().unwrap();
+            output.write_all(&frame.to_le_bytes())?;
+            output.write_all(&image.width.to_le_bytes())?;
+            output.write_all(&image.height.to_le_bytes())?;
+            output.write_all(&image.bytes)
+        })?;
+    }
     let png = if png {
         let path = std::path::PathBuf::from(format!("exact-frames/{case}-{frame:03}.png"));
         crate::viewer::save_capture(&path)?;

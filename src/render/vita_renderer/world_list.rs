@@ -191,13 +191,12 @@ pub(super) struct Planner<P, B> {
     pipeline: Option<P>,
     depth: bool,
     bindings: Option<B>,
-    uniforms: [Option<u32>; 2],
+    uniforms: [Option<u32>; 3],
 }
 impl<P: Copy + Eq, B: Copy + Eq> Planner<P, B> {
-    pub fn new() -> Self { Self { pipeline: None, depth: false, bindings: None, uniforms: [None; 2] } }
-    #[inline] pub fn observe(&mut self, pipeline: P, low: bool, bindings: B, uniforms: u32) -> state_cache::Applications {
+    pub fn new() -> Self { Self { pipeline: None, depth: false, bindings: None, uniforms: [None; 3] } }
+    #[inline] pub fn observe(&mut self, pipeline: P, program: usize, bindings: B, uniforms: u32) -> state_cache::Applications {
         let changed = self.pipeline != Some(pipeline);
-        let program = usize::from(low);
         let result = state_cache::Applications {
             pipeline: changed,
             depth: !self.depth,
@@ -316,8 +315,7 @@ mod tests {
             if a.bindings { out.push(format!("bind {pipeline} {binding:?}")); }
             if a.uniforms {
                 applications += 1;
-                let program = usize::from(low);
-                let new = bits[parameter as usize];
+                        let new = bits[parameter as usize];
                 for field in 0..143 {
                     if storage[program].is_none_or(|old| old[field] != new[field]) {
                         out.push(format!("uniform {program} {field} {}", new[field]));
@@ -354,10 +352,10 @@ mod tests {
             let mut classes = Classes::new(12);
             let class: Vec<u32> = bits.iter().enumerate().map(|(i, b)| classes.class(i as u32, b, |p| &bits[p as usize])).collect();
             let mut cache = state_cache::Cache::<u32, (u32, u32, u32, u32), 143>::new();
-            let (legacy, legacy_applications) = stream(&steps, &bits, &mut |p, low, b, q| cache.observe(p, low, true, b, bits[q as usize]));
+            let (legacy, legacy_applications) = stream(&steps, &bits, &mut |p, low, b, q| cache.observe(p, usize::from(low), true, b, bits[q as usize]));
             let mut planner = Planner::<u32, (u32, u32, u32, u32)>::new();
             let (list, list_applications) = stream(&steps, &bits, &mut |p, low, b, q| {
-                let a = planner.observe(p, low, b, class[q as usize]);
+                let a = planner.observe(p, usize::from(low), b, class[q as usize]);
                 skipped += u32::from(!a.uniforms);
                 a
             });
@@ -370,15 +368,15 @@ mod tests {
     #[test]
     fn planner_keeps_program_storage_separate() {
         let mut p = Planner::<u32, u32>::new();
-        assert!(p.observe(1, false, 1, 5).uniforms);
-        assert!(!p.observe(1, false, 1, 5).uniforms);
+        assert!(p.observe(1, 0, 1, 5).uniforms);
+        assert!(!p.observe(1, 0, 1, 5).uniforms);
         // The low program's storage has never seen class 5, and pipeline A/B/A forces bindings.
-        let a = p.observe(2, true, 1, 5);
+        let a = p.observe(2, 1, 1, 5);
         assert!(a.uniforms && a.pipeline && a.bindings && !a.depth);
         // Back on the first program its storage still holds 5.
-        let a = p.observe(1, false, 1, 5);
+        let a = p.observe(1, 0, 1, 5);
         assert!(!a.uniforms && a.pipeline && a.bindings);
-        assert!(p.observe(1, false, 2, 5).bindings);
+        assert!(p.observe(1, 0, 2, 5).bindings);
     }
     #[test]
     fn classes_name_payloads_exactly_inside_a_pass() {
