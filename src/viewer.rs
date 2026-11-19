@@ -830,6 +830,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut replay = crate::replay::Session::open(&mut options, &store, &mut preferences)?;
     #[cfg(feature="vita_renderer")]
     anyhow::ensure!(!(replay.is_some() && route_session.is_some()), "replay and route diagnostics are exclusive");
+    #[cfg(feature = "vita_renderer")]
+    let mut replay_census = crate::phase_census::replay_window::ReplayWindow::configured();
+    #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
+    anyhow::ensure!(replay_census.is_none() || r13_survey.is_none(),
+        "phase_census_window and r13 survey are exclusive");
     let replay_resume = replay.as_mut().and_then(|r| r.take_resume());
     let store = if replay.as_ref().is_some_and(|r| r.replaying()) { store.discarding_writes() } else { store };
     let mut replay_end: Option<&'static str> = None;
@@ -1471,10 +1476,19 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }};
     }
     loop {
+        #[cfg(feature = "vita_renderer")]
+        if replay_census.is_some() {
+            crate::phase_census::replay_window::ReplayWindow::export_if_due(
+                &mut replay_census, replay.as_ref().unwrap().current_step(),
+            );
+        }
         #[cfg(feature = "native_timing")]
         { timing.poll_schedule_review(); timing.with(|r| r.begin(timing_state!())); }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::phase_census::begin_configured();
+        // Declare the frame guard first so any open region is dropped before it, even on exit.
+        #[cfg(feature = "vita_renderer")]
+        let census_frame;
         let mut census_block = crate::phase_census::span(crate::phase_census::Region::Input);
         crate::frame_profile::begin_viewer_frame();
         crate::frame_phases::begin();
@@ -1563,6 +1577,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
             }
+        }
+        // The tape has installed this step. Replay checks/logs run before arming.
+        #[cfg(feature = "vita_renderer")]
+        {
+            census_frame = replay_census.as_mut().and_then(|window| {
+                window.start(replay.as_ref().unwrap().current_step(), &maps[current])
+            });
+        }
+        #[cfg(feature = "vita_renderer")]
+        if census_frame.is_some() {
+            drop(census_block);
+            census_block = crate::phase_census::span(crate::phase_census::Region::Input);
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         {crate::sim_maps::probe::set_frame(frame);crate::sim_maps::probe::begin();crate::sim_maps::probe::script_hits(frame,&mut npcs);}
@@ -1796,8 +1822,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             input.suppress();
             if pending_menu_save.is_none() && pending_menu_newgame.is_none() && !quit_after_frame {
                 drop(census_block);
-            next_frame().await;
-            census_block=crate::phase_census::span(crate::phase_census::Region::Other);
+                next_frame().await;
+                #[cfg(feature = "vita_renderer")]
+                crate::phase_census::replay_window::ReplayFrame::presented(census_frame);
                 continue;
             }
         }
@@ -2150,7 +2177,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             drop(census_block);
             next_frame().await;
-            census_block=crate::phase_census::span(crate::phase_census::Region::Other);
+            #[cfg(feature = "vita_renderer")]
+            crate::phase_census::replay_window::ReplayFrame::presented(census_frame);
             continue;
         }
         let pressed = |key| focused && !console_input && input.key(&preferences, key, true);
@@ -2443,7 +2471,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // attempt. Begin a fresh frame before advancing the restored one.
             drop(census_block);
             next_frame().await;
-            census_block=crate::phase_census::span(crate::phase_census::Region::Other);
+            #[cfg(feature = "vita_renderer")]
+            crate::phase_census::replay_window::ReplayFrame::presented(census_frame);
             continue;
         }
         if (recover || restart || console_restart) && in_transport {
@@ -4133,7 +4162,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             p.gate_particles(&mut steam);
         }
         interactions.place_level_particles(&mut steam);
-        drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
+        drop(census_block);
+        let census_render = crate::phase_census::span(crate::phase_census::Region::Render);
+        census_block = crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         crate::spike_log::render_begin();
         #[cfg(target_os = "vita")]
         let _lights_profile = crate::frame_profile::span("lights_build");
@@ -4222,7 +4253,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         drop(census_gather);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::span("actor_gather",host_gather.elapsed().as_secs_f64()*1000.);
-        scene.draw(camera, environment_clock, fullbright, false, &transforms);
+        {
+            let _world = crate::phase_census::span(crate::phase_census::Region::WorldFrame);
+            scene.draw(camera, environment_clock, fullbright, false, &transforms);
+        }
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &mut load_probe {
             p.world(scene.stats.batches, scene.stats.triangles, scene.retained_active());
@@ -4425,6 +4459,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
+        let census_capture = crate::phase_census::span(crate::phase_census::Region::RenderCapture);
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = &load_probe { p.gl("present-queued"); }
         if saves_writable {
@@ -4447,7 +4482,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if freeze_capture { paused = pause_before_capture; clock.pause(); }
         if opening_escape_menu || pending_menu_save.is_some() { escape_preview_ready = true; }
-        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Hud);
+        drop(census_capture);
+        drop(census_block);
+        drop(census_render);
+        census_block = crate::phase_census::span(crate::phase_census::Region::Hud);
         crate::spike_log::hud_begin();
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_hud"); }
@@ -5008,6 +5046,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         next_frame().await;
         #[cfg(feature = "vita_renderer")]
+        crate::phase_census::replay_window::ReplayFrame::presented(census_frame);
+        #[cfg(feature = "vita_renderer")]
         if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }
         audio.scene_presented();
         #[cfg(target_os="vita")]
@@ -5023,6 +5063,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
     }
     crate::spike_log::end_play();
+    #[cfg(feature = "vita_renderer")]
+    if let Some(window) = replay_census {
+        window.export(replay.as_ref().unwrap().current_step());
+    }
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
     // Host-only, sim_maps_probe-only: the allocator ledger's continuous peak since the
     // map load began (transition_begin resets it) against the 192 MiB newlib ceiling.
