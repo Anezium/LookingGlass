@@ -59,6 +59,10 @@ pub struct Surface {
 }
 /// Load-time CPU data, shared by owning handles; it contains no render resources.
 pub struct SkinSurface {
+    #[cfg(feature="vita_renderer")]
+    pub(crate) gpu_ant: bool,
+    #[cfg(feature="vita_renderer")]
+    pub(crate) stored_normals: Vec<Vec3>,
     pub vertices: Vec<SkinVertex>,
     pub indices: Vec<u16>,
     pub bind_vertices: Vec<Vertex>,
@@ -77,8 +81,12 @@ impl Surface {
             position: Vec3::ZERO, uv: v.uv, normal: Vec4::ZERO, color: [255; 4],
         }).collect();
         Self { name, cpu: std::sync::Arc::new(SkinSurface { vertices, indices, bind_vertices,
+            #[cfg(feature="vita_renderer")] gpu_ant: false,
+            #[cfg(feature="vita_renderer")] stored_normals: Vec::new(),
             #[cfg(feature = "vita_renderer")] used_bones }) }
     }
+    #[cfg(feature="vita_renderer")]
+    pub(crate) fn mark_gpu_ant(&mut self) { std::sync::Arc::get_mut(&mut self.cpu).expect("unshared load-time surface").gpu_ant=true; }
     pub(crate) fn cpu(&self) -> std::sync::Arc<SkinSurface> { self.cpu.clone() }
     pub(crate) fn shares_cpu(&self, cpu: &std::sync::Arc<SkinSurface>) -> bool {
         std::sync::Arc::ptr_eq(&self.cpu, cpu)
@@ -156,9 +164,15 @@ impl Skeleton {
                 indices.push(b.count(p + ot + j * 4, nv - 1)? as u16);
             }
             let mut vertices = Vec::with_capacity(nv);
+            #[cfg(feature="vita_renderer")]
+            let mut stored_normals = Vec::with_capacity(nv);
             let mut v = p + ov;
             for _ in 0..nv {
-                b.vec3(v)?; // Stored normals are not needed: animated normals are rebuilt.
+                let stored_normal = b.vec3(v)?;
+                #[cfg(feature="vita_renderer")]
+                stored_normals.push(stored_normal);
+                #[cfg(not(feature="vita_renderer"))]
+                let _ = stored_normal;
                 let uv = vec2(b.float(v + 12)?, b.float(v + 16)?);
                 let nw = b.count(v + 20, nb)?;
                 ensure!(
@@ -194,7 +208,10 @@ impl Skeleton {
                 vertices.push(SkinVertex { uv, weights });
             }
             ensure!(v == p + oc, "Unexpected vertex payload size");
-            surfaces.push(Surface::new(name, vertices, indices));
+            let surface = Surface::new(name, vertices, indices);
+            #[cfg(feature="vita_renderer")]
+            let surface = { let mut surface=surface; std::sync::Arc::get_mut(&mut surface.cpu).unwrap().stored_normals=stored_normals; surface };
+            surfaces.push(surface);
             p += end;
         }
         ensure!(p == data.len(), "Unexpected trailing skeleton data");

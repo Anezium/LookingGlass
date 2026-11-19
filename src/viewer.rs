@@ -769,7 +769,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os="vita")]
     let mut r13_survey = crate::r13_survey::Survey::open(&mut options)?;
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-    let physical_input = !crate::sim_maps::probe::enabled();
+    // With the opt-in tape-time step, a cross replay consumes the installed tape inputs
+    // while the strict probe observes it. Synthetic map probes still suppress physical inputs.
+    let physical_input = !crate::sim_maps::probe::enabled()
+        || (crate::sim_maps::probe::tape_time() && crate::replay::input::cross());
     #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
     let physical_input = true;
     // A survey keeps the pad off unless its config sets physical_input (human-played census).
@@ -4957,6 +4960,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let value = game_snapshot!();
             println!("TRANSITION_STATE {}", serde_json::json!({"frame":frame,"map":maps[current],
                 "state_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&value)?))}));
+        }
+        #[cfg(feature="vita_renderer")]
+        if crate::render::vita_renderer::config().gpu_skin_capture
+            && matches!(frame,1050|1200|1350|1470|1935|1942)
+        {
+            // Keep the CPU reference set separate so a CPU arm and a GPU arm can both run and
+            // the owner can pair the same frames without one set overwriting the other.
+            let dir=if crate::render::vita_renderer::config().gpu_skin_ants {"private/gpu-skin"}
+                else {"private/gpu-skin/cpu"};
+            save_capture(&std::path::PathBuf::from(format!("{dir}/frame-{frame:04}.png")))?;
         }
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {

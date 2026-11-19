@@ -98,7 +98,7 @@ pub(super) fn prepare(surface:&Rc<Surface>,mesh:&Mesh,time:f32,appearance:Appear
             Rc::new(prepared::Geometry::new(m))
         };
         if c.actor_layer_reuse {shared[variant]=Some(geometry.clone());}
-        passes.push(Pass {_game_thread: crate::game_thread::GameThread::default(),geometry:Some(geometry),effect:false,blend_index:p.blend,depth_equal:p.equal,
+        passes.push(Pass {#[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread: crate::game_thread::GameThread::default(),geometry:Some(geometry),effect:false,blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")]
             world_static:None,
             #[cfg(target_os="vita")]
@@ -153,7 +153,7 @@ pub(super) fn recipe(surface:&Rc<Surface>,time:f32,appearance:Appearance)->Optio
     let mut passes=pass_storage(limit);
     for l in layers {
         let p=state(&l.stage,time);
-        passes.push(Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,
+        passes.push(Pass {#[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,
             blend_index:p.blend,depth_equal:p.equal,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,

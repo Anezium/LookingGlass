@@ -1,3 +1,4 @@
+#![cfg_attr(target_arch="arm", feature(arm_target_feature))]
 // Both output streams reach the same Vita debug/file logging path. Keep each
 // formatted engine record, including its newline, in one serialized operation.
 #[macro_use]

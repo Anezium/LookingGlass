@@ -6,9 +6,21 @@ pub(crate) fn active()->bool {
             static FRAMES: std::sync::OnceLock<Option<Vec<u64>>> = std::sync::OnceLock::new();
             let frames=FRAMES.get_or_init(||std::env::var("LOOKING_GLASS_ACTOR_CENSUS_FRAMES").ok()
                 .map(|s|s.split(',').map(|n|n.parse().expect("census frame number")).collect()));
-            frames.as_ref().map_or_else(||(300..=360).contains(&crate::sim_maps::probe::frame()),
+            frames.as_ref().map_or_else(||window().contains(&crate::sim_maps::probe::frame()),
                 |f|f.contains(&crate::sim_maps::probe::frame()))
         }
+}
+/// Override the inventory window without changing the production renderer.
+fn window() -> std::ops::RangeInclusive<u64> {
+    static WINDOW: std::sync::OnceLock<(u64,u64)> = std::sync::OnceLock::new();
+    let &(first,last)=WINDOW.get_or_init(|| {
+        std::env::var("LOOKING_GLASS_ACTOR_CENSUS_WINDOW").ok()
+            .map(|v| {let (a,b)=v.split_once(':').expect("census window FIRST:LAST");
+                let a=a.parse().expect("census first frame");let b=b.parse().expect("census last frame");
+                assert!(a<=b,"ordered census window");(a,b)})
+            .unwrap_or((300,360))
+    });
+    first..=last
 }
 use std::cell::{Cell,RefCell};
 use std::collections::HashMap;
@@ -36,3 +48,18 @@ impl Drop for Actor {fn drop(&mut self) {if let Some((t,id,ordinal,previous))=se
     CURRENT.with(|c|c.set(previous));
     println!("[lg/pose-cpu] pose={ordinal} frame={} identity={id} cpu_ns={}",crate::sim_maps::probe::frame(),t.elapsed().as_nanos());
 }}}
+
+/// Host-only scoped CPU measurements. Overhead is included; never a Vita clock.
+pub(crate) struct Leaf(Option<(std::time::Instant, &'static str, String)>);
+pub(crate) fn leaf(name: &'static str, texture: Option<macroquad::miniquad::TextureId>) -> Leaf {
+    Leaf(active().then(|| {
+        let label=crate::sim_maps::probe::draw_query::actor_label(texture).1.unwrap_or_else(|| "unknown".into());
+        (std::time::Instant::now(),name,label)
+    }))
+}
+impl Drop for Leaf { fn drop(&mut self) {
+    if let Some((start,name,label))=&self.0 {
+        println!("[lg/actor-leaf] frame={} leaf={name} texture={label:?} cpu_ns={}",
+            crate::sim_maps::probe::frame(),start.elapsed().as_nanos());
+    }
+}}
