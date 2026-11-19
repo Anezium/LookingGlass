@@ -63,8 +63,16 @@ pub fn jabberwock_fire() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_JABBERWOCK_FIRE").is_some())
 }
+/// Opt-in tape-time replay step (`LOOKING_GLASS_SIM_MAPS_TAPE_TIME`); also lets a strict
+/// cross replay consume the installed tape inputs. Off by default, as in the RC oracles.
+pub fn tape_time() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_TAPE_TIME").is_some())
+}
 pub fn elapsed(actual: f32) -> f32 {
-    if !enabled() { return actual; }
+    // A tape supplies the exact elapsed time used by its recorded simulation. The RC
+    // host oracles are sealed with the fixed probe step, so tape time is opt-in.
+    if !enabled() || (tape_time() && crate::replay::input::active()) { return actual; }
     static DT: OnceLock<f32> = OnceLock::new();
     *DT.get_or_init(|| std::env::var("LOOKING_GLASS_SIM_MAPS_DT").unwrap_or_else(|_| "0.05".into()).parse::<f32>().ok().filter(|t| t.is_finite() && *t > 0. && *t < 1.).expect("finite probe timestep"))
 }
@@ -147,6 +155,8 @@ pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     if std::env::var_os("LOOKING_GLASS_SIM_MAPS_STATE").is_some() {
         std::fs::write(format!("state-{frame:05}.json"), bytes).unwrap();
     }
+    #[cfg(feature = "vita_renderer")]
+    crate::render_fx::retained::gpu_skin::census::flush(frame);
     #[cfg(feature = "vita_renderer")]
     if frame == 179 { crate::render_fx::actor_publication::emit_eligibility(map); }
 }
@@ -494,6 +504,13 @@ pub fn record_exact_frame(case: &str, frame: u64, png: bool) -> anyhow::Result<(
             output.write_all(&image.bytes)
         })?;
     }
+    if let Some(directory)=std::env::var_os("LOOKING_GLASS_PIXEL_SAVE") {
+        let directory=std::path::PathBuf::from(directory);std::fs::create_dir_all(&directory)?;
+        save_fast_png(&directory.join(format!("{frame:06}.png")),&image.bytes,image.width as u32,image.height as u32)?;
+    }
+    if let Some(directory)=std::env::var_os("LOOKING_GLASS_PIXEL_REFERENCE") {
+        pixel_diff(std::path::Path::new(&directory),frame,&image.bytes,image.width as u32,image.height as u32)?;
+    }
     let png = if png {
         let path = std::path::PathBuf::from(format!("exact-frames/{case}-{frame:03}.png"));
         crate::viewer::save_capture(&path)?;
@@ -840,4 +857,86 @@ pub fn gpu_geometry(vertex_count:usize,index_count:usize)->(Vec<macroquad::prelu
         glGetBufferSubData(0x8893,0,(indices.len()*2) as isize,indices.as_mut_ptr().cast());
     }
     (vertices,indices)
+}
+
+/// GPU geometry is explicitly excluded from the CPU-vertex equality oracle.
+/// Its picture is compared independently on every frame; all other packets stay strict.
+pub fn gpu_skin_occurrence(actor:Option<crate::character::skinning::identity::ActorId>,surface:usize) {
+    let slot=reserve_skin(actor,surface);
+    if slot!=usize::MAX {SKINS.with(|s|s.borrow_mut()[slot]["path"]="gpu".into());}
+}
+pub fn gpu_skin_packet(vertices:usize,indices:usize,uniforms:&[f32],policy:&[u32],texture:Option<&macroquad::prelude::Texture2D>) {
+    if !skin_proof() {return;}
+    let mut h=Sha256::new();for f in uniforms {h.update(f.to_bits().to_le_bytes());}
+    let uniform_hash=format!("{:x}",h.finalize());
+    let texture=texture.map(|t|TEXTURES.with(|cache| {let mut cache=cache.borrow_mut();
+        cache.entry(format!("{:?}",t.raw_miniquad_id())).or_insert_with(|| {
+            let image=t.get_texture_data();let mut h=Sha256::new();h.update(image.width.to_le_bytes());h.update(image.height.to_le_bytes());h.update(&image.bytes);format!("{:x}",h.finalize())
+        }).clone()
+    }));
+    PACKETS.with(|s|s.borrow_mut().push(serde_json::json!({"gpu_skin":true,"vertices":vertices,"indices":indices,"uniforms":uniform_hash,"policy":policy,"texture":texture})));
+}
+
+/// Host picture review: PNG with fast compression (GL row order, bottom row first).
+#[cfg(all(feature = "vita_renderer", feature = "sim_maps_probe", not(target_os = "vita")))]
+fn save_fast_png(path:&std::path::Path,rgba:&[u8],width:u32,height:u32)->anyhow::Result<()> {
+    use image::ImageEncoder;
+    let file=std::io::BufWriter::new(std::fs::File::create(path)?);
+    image::codecs::png::PngEncoder::new_with_quality(file,image::codecs::png::CompressionType::Fast,image::codecs::png::FilterType::Sub)
+        .write_image(rgba,width,height,image::ColorType::Rgba8)?;
+    Ok(())
+}
+/// `LOOKING_GLASS_PIXEL_REFERENCE`: compare this frame with the reference arm's saved
+/// frame and print `PIXEL_DIFF` (changed pixels, maximum channel delta, bounding box).
+/// `LOOKING_GLASS_PIXEL_KEEP` (frame list) and the running maxima also write an upright
+/// close-up: reference | candidate | heat (red = 4 x max channel delta, green = any change).
+#[cfg(all(feature = "vita_renderer", feature = "sim_maps_probe", not(target_os = "vita")))]
+fn pixel_diff(directory:&std::path::Path,frame:u64,rgba:&[u8],width:u32,height:u32)->anyhow::Result<()> {
+    thread_local! { static BEST: Cell<(u64,u8)> = const { Cell::new((0,0)) }; }
+    static KEEP: OnceLock<Vec<u64>> = OnceLock::new();
+    let keep=KEEP.get_or_init(||std::env::var("LOOKING_GLASS_PIXEL_KEEP").ok().map(|s|s.split(',').filter(|s|!s.is_empty()).map(|n|n.parse().expect("keep frame")).collect()).unwrap_or_default());
+    let reference=image::open(directory.join(format!("{frame:06}.png")))?.to_rgba8();
+    anyhow::ensure!(reference.width()==width && reference.height()==height,"reference size differs at frame {frame}");
+    let reference=reference.into_raw();
+    let (mut changed,mut max,mut sum)=(0u64,0u8,0u64);
+    let (mut x0,mut y0,mut x1,mut y1)=(u32::MAX,u32::MAX,0u32,0u32);
+    for (i,(a,b)) in reference.chunks_exact(4).zip(rgba.chunks_exact(4)).enumerate() {
+        let d=(0..4).map(|c|a[c].abs_diff(b[c])).max().unwrap();
+        if d>0 {
+            changed+=1;max=max.max(d);sum+=u64::from(d);
+            let (x,y)=(i as u32%width,height-1-i as u32/width);
+            x0=x0.min(x);y0=y0.min(y);x1=x1.max(x);y1=y1.max(y);
+        }
+    }
+    let bbox=(changed>0).then_some([x0,y0,x1,y1]);
+    println!("PIXEL_DIFF {}",serde_json::json!({"frame":frame,"changed":changed,"max_delta":max,"delta_sum":sum,"bbox":bbox}));
+    let (best_area,best_delta)=BEST.with(Cell::get);
+    let mut names=Vec::new();
+    if keep.contains(&frame) {names.push(format!("frame-{frame:06}"));}
+    if changed>best_area {names.push("max-area".into());}
+    if max>best_delta {names.push("max-delta".into());}
+    BEST.with(|b|b.set((best_area.max(changed),best_delta.max(max))));
+    if names.is_empty() {return Ok(());}
+    // Close-up around the changed pixels (whole frame when nothing changed), upright.
+    let [cx0,cy0,cx1,cy1]=bbox.map_or([0,0,width-1,height-1],|[a,b,c,d]| {
+        let pad=24;let (mut a,mut b,mut c,mut d)=(a.saturating_sub(pad),b.saturating_sub(pad),(c+pad).min(width-1),(d+pad).min(height-1));
+        while c-a<159 && (a>0 || c<width-1) {a=a.saturating_sub(1);c=(c+1).min(width-1);}
+        while d-b<159 && (b>0 || d<height-1) {b=b.saturating_sub(1);d=(d+1).min(height-1);}
+        [a,b,c,d]});
+    let (w,h)=(cx1-cx0+1,cy1-cy0+1);
+    let scale=if w.max(h)<320 {2} else {1};
+    let mut out=image::RgbaImage::new(w*3*scale+8,h*scale);
+    for y in 0..h { for x in 0..w {
+        let source=((height-1-(cy0+y))*width+cx0+x) as usize*4;
+        let a=&reference[source..source+4];let b=&rgba[source..source+4];
+        let d=(0..4).map(|c|a[c].abs_diff(b[c])).max().unwrap();
+        let heat=[d.saturating_mul(4),if d>0 {255} else {0},0,255];
+        for (panel,px) in [[a[0],a[1],a[2],255],[b[0],b[1],b[2],255],heat].into_iter().enumerate() {
+            for sy in 0..scale { for sx in 0..scale {
+                out.put_pixel(panel as u32*(w*scale+4)+x*scale+sx,y*scale+sy,image::Rgba(px));
+            }}
+        }
+    }}
+    for name in names { out.save(format!("pixel-review-{name}.png"))?; }
+    Ok(())
 }

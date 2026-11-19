@@ -109,6 +109,7 @@ mod tests {
     use super::*;
     fn pass() -> Pass {
         Pass {
+            gpu_skin: None,
             _game_thread: crate::game_thread::GameThread::default(), geometry: None, effect: false,
             blend_index: 0, depth_equal: false,
             #[cfg(target_os = "vita")] world_static: None,

@@ -98,6 +98,18 @@ pub(super) fn cull(bounds: &mut Bounds, groups: &mut [super::super::Group], puff
     let (mut outside, mut small_groups, mut probed, mut scanned) = (0u64, 0u64, 0u64, 0u64);
     for g in groups.iter_mut() {
         if g.passes.is_empty() { continue; }
+        if g.passes.iter().any(|p|p.gpu_skin.is_some()) {
+            // GPU-skinned packets carry placeholder vertices: test their conservative bone box.
+            // No size cut (`packet_min_pixels` keeps such surfaces on the CPU).
+            let outside_box = |p: &Pass| p.gpu_skin.as_ref().and_then(|s| s.occurrence.bounds())
+                .is_some_and(|(lo, hi)| crate::render::outside_matrix(m, lo, hi));
+            if !(cuts.frustum && g.passes.iter().all(outside_box)) { continue; }
+            outside += 1;
+            count("vita_gpu_skin_packets_cut_outside", 1);
+            if recycle { super::super::actor_cache::recycle(&mut g.passes); }
+            g.passes.clear();
+            continue;
+        }
         if cuts.frustum && g.passes.iter().all(|p| pass_outside(m, p, bounds, &mut probed, &mut scanned)) {
             outside += 1;
         } else if cuts.min_pixels > 0. {
@@ -157,7 +169,7 @@ mod tests {
         assert_eq!(off.cut(m, behind.0, behind.1), None);
     }
     fn pass_with(points: &[Vec3]) -> Pass {
-        Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
+        Pass {#[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
             mesh:Mesh { upload_identity: None, surface: None,vertices:points.iter().map(|p| Vertex::new(p.x,p.y,p.z,0.,0.,WHITE)).collect(),indices:Vec::new(),texture:None},
@@ -207,7 +219,7 @@ mod tests {
         let mut g = super::super::super::prepared::Geometry::new(quad(5.));
         let mut bounds = Bounds::default();
         let mut scanned = 0;
-        let mut pass = Pass {_game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
+        let mut pass = Pass {#[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread:crate::game_thread::GameThread::default(),geometry:None,effect:false,blend_index:0,depth_equal:false,
             #[cfg(target_os="vita")] world_static:None,
             #[cfg(target_os="vita")] world_geometry_counted:false,
             mesh:Mesh { upload_identity: None, surface: None,vertices:Vec::new(),indices:Vec::new(),texture:None},material:None,lit:false,clamp:false,cutout:0.,

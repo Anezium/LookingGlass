@@ -64,7 +64,7 @@ fn hud_path() {
 fn r15_four_map_paths_record_every_leaf_without_test_activation() {
     assert!(!crate::light_profile::full());
     let world=crate::collision::World::fixture(&[(Vec3::splat(-50.),Vec3::splat(50.))]);
-    let mut seen=[false;REGIONS];
+    let mut seen=[false;LEGACY_REGIONS];
     for (map,added) in [("centipede1",4),("utemple",10),("wchess2",7),("hatter1",6)] {
         let mut now=Instant::now();begin_survey(now);
         let allocations=crate::kernel_alloc::Scope::begin();
@@ -78,7 +78,7 @@ fn r15_four_map_paths_record_every_leaf_without_test_activation() {
         let document=test_survey_json().unwrap();
         for row in document["rows"].as_array().unwrap() {
             assert_eq!(row["added_brackets"],1522+added);assert_eq!(row["reused_brackets"],506);
-            for i in 52..REGIONS {if row["calls"][i].as_u64().unwrap()>0 {seen[i]=true;assert!(row["inclusive_ns"][i].as_u64().unwrap()>0);}}
+            for i in 52..LEGACY_REGIONS {if row["calls"][i].as_u64().unwrap()>0 {seen[i]=true;assert!(row["inclusive_ns"][i].as_u64().unwrap()>0);}}
             assert_eq!(row["exclusive_ns"].as_array().unwrap().iter().map(|v|v.as_u64().unwrap()).sum::<u64>()+row["unbracketed_residual_ns"].as_u64().unwrap(),row["frame_total_ns"].as_u64().unwrap());
         }
         if let Ok(dir)=std::env::var("ALICE_TIMING_TEST_OUTPUT") {

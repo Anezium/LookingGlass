@@ -1117,6 +1117,9 @@ impl Character {
     }
     fn draw_body(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
         let _identity = self.skin_identity.scope();
+        let _skin_kind = skinning::timing::kind("protagonist");
+        #[cfg(feature="vita_renderer")]
+        let _gpu_skin_family = crate::render_fx::retained::gpu_skin::census::family("protagonist");
         let feet = feet + Vec3::Z * self.animator.offset;
         let prepared = skinning::prepared::pose(
             (&self.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
@@ -2051,8 +2054,12 @@ fn draw_skin_deformed(
             drop(source);
             for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
         } else {
+            #[cfg(feature="vita_renderer")]
+            let mut share = crate::render_fx::GpuSkinShare::default();
             for (surface, mesh) in skeleton.surfaces.iter().zip(meshes.iter_mut()) {
                 let Some(mesh) = mesh else { continue; };
+                #[cfg(feature="vita_renderer")]
+                if crate::render_fx::gpu_skin_ant(surface, mesh, &mut share, pose, bone_scales, transform, scale, fullbright, alpha) { continue; }
                 let _skin = crate::frame_profile::span("skinning");
                 let positions = crate::frame_profile::characters_span("characters_skinning_positions");
                 skinning::positions(&mut skinning::Job { input: &surface.vertices,

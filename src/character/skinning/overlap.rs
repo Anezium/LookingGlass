@@ -196,6 +196,7 @@ struct Surface {
     oracle:usize,
 }
 struct Draw {
+    timing_kind: usize,
     instance: u64,
     actor: Option<super::identity::ActorId>,
     key: usize,
@@ -338,7 +339,10 @@ impl Task {
 unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[(Mat3, Vec3)], surfaces: *const Surface, task_output: usize, task_layers: usize, task_dirty: usize) {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             let census_time=std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").map(|_|std::time::Instant::now());
+            let vector=super::experiment::flags().0;
+            let world_rotation=rotation(draw.transform.rotation);
             for surface_id in draw.surfaces.clone() {
+                let timing=super::timing::start();
                 let surface = &*surfaces.add(surface_id);
                 // Each surface owns a disjoint range; tasks split at draw boundaries.
                 let output = std::slice::from_raw_parts_mut(
@@ -346,6 +350,10 @@ unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[
                     else { surface.output as *mut Vertex },
                     surface.vertices.len(),
                 );
+                if surface.output == 0 && (super::experiment::flags().1 || super::experiment::flags().2) {output.copy_from_slice(&surface.cpu.bind_vertices);}
+                let p=Params {pose,scales,palette,transform:draw.transform,scale:draw.scale,
+                    flat:draw.flat,fullbright:draw.fullbright,alpha:draw.alpha};
+                let hit=super::experiment::cached(&surface.cpu,draw.actor,output,p,|output| {
                 for ((src, bind), dst) in surface.cpu.vertices
                     .iter().zip(&surface.cpu.bind_vertices)
                     .zip(&mut *output)
@@ -353,7 +361,11 @@ unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[
                     let weights = &src.weights;
                     // Initialize untouched fields on the worker from load-time data.
                     if surface.output == 0 { *dst = *bind; }
-                    let position: Vec3 = if !palette.is_empty() {
+                    let position: Vec3 = if vector && !palette.is_empty() {
+                        super::experiment::vector_position(src,palette)
+                    } else if vector {
+                        super::experiment::vector_pose(src,pose,scales)
+                    } else if !palette.is_empty() {
                         weights
                             .iter()
                             .map(|w| {
@@ -373,7 +385,7 @@ unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[
                             .sum()
                     };
                     dst.position = if !palette.is_empty() {
-                        rotation(draw.transform.rotation) * (position * draw.scale)
+                        world_rotation * (position * draw.scale)
                             + draw.transform.translation
                     } else {
                         draw.transform.point(position * draw.scale)
@@ -387,6 +399,8 @@ unsafe fn skin_draw(draw: &Draw, pose: &[Transform], scales: &[f32], palette: &[
                     draw.fullbright,
                     draw.alpha,
                 );
+                });
+                super::timing::skin(timing,draw.timing_kind,pose.len(),output.len(),hit);
                 // Raw publications keep the kernel bytes; the game thread builds layers.
                 if surface.output != 0 && surface.mode != PublicationMode::Raw {
                     let vertex_alpha = surface.mode == PublicationMode::VertexAlpha;
@@ -546,6 +560,7 @@ impl Store {
             return;
         }
         let draw = Draw {
+            timing_kind: super::timing::current(),
             instance: 0,
             actor: None,
             key: skeleton as *const Skeleton as usize,
@@ -613,8 +628,14 @@ impl Store {
                 && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
         let instance=previous.map_or_else(super::identity::next_instance,|(_,d)|d.instance);
         let start = i.surfaces.len();
+        let mut share = crate::render_fx::GpuSkinShare::default();
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };
+            if crate::render_fx::gpu_skin_ant(surface,mesh,&mut share,p.pose,p.scales,p.transform,p.scale,p.fullbright,p.alpha) {
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                crate::sim_maps::probe::gpu_skin_occurrence(actor,mesh_id);
+                continue;
+            }
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::sim_maps::probe::negative_uv_edit(mesh);
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -671,7 +692,7 @@ impl Store {
             }
         }
         if i.surfaces.len() > start {
-            let d = Draw { instance, actor, key:skeleton as *const Skeleton as usize,
+            let d = Draw { timing_kind: super::timing::current(), instance, actor, key:skeleton as *const Skeleton as usize,
                 pose:i.pose.len()..i.pose.len()+p.pose.len(), scales:i.scales.len()..i.scales.len()+p.scales.len(),
                 palette:i.palette.len()..i.palette.len()+p.palette.len(), surfaces:start..i.surfaces.len(),
                 transform:p.transform,scale:p.scale,flat:p.flat,fullbright:p.fullbright,alpha:p.alpha,visible };
@@ -920,6 +941,7 @@ fn same_surface_inputs(surface:&SkinSurface, old:&Inputs, draw:&Draw, p:Params<'
 /// as well as owned publications; the preallocated worker arena stays warm.
 #[cfg(feature="vita_renderer")]
 pub(crate) fn reset_publications() {
+    super::experiment::reset();
     assert!(PHASE.with(|p|p.get()==Phase::Idle),"scene load before skin workers drained");
     STORE.with(|s| {if let Some(store)=s.borrow_mut().as_mut() {
         assert_eq!(store.pending,0);
@@ -970,6 +992,7 @@ pub(crate) struct Frame {
 }
 impl Frame {
     pub(crate) fn begin() -> Self {
+        super::experiment::begin();
         let gather_start = MetricInstant::now();
         #[cfg(feature="vita_renderer")]
         crate::render_fx::actor_publication::begin();
@@ -1009,7 +1032,10 @@ impl Frame {
     }
     pub(crate) fn collect(&mut self) {
         assert!(PHASE.with(|p| p.get() == Phase::Running));
-        let panic = STORE.with(|s| s.borrow_mut().as_mut().unwrap().drain());
+        let panic = {
+            let _census = crate::phase_census::span(crate::phase_census::Region::ActorWorkerDrain);
+            STORE.with(|s| s.borrow_mut().as_mut().unwrap().drain())
+        };
         PHASE.with(|p| p.set(Phase::Ready));
         STORE.with(|s| {
             let s = s.borrow();

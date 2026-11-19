@@ -170,6 +170,18 @@ unsafe extern "C" fn link(program:u32) {
             STATE.with(|s|s.borrow_mut().binaries.insert(p.key,b));
         } else {eprintln!("[lg/shader] export_unavailable hash={}",hex(&p.key));}
     }
+    if status!=0 && p.name.starts_with("retained-gpu-skin") {
+        if let Some(binary)=dump(program) {
+            if let Some(stages)=stages(&binary) {
+                for (label,stage) in ["vertex","fragment"].into_iter().zip(stages) {
+                    if let Some((gxp,_))=stage_gxp(stage) {
+                        let half=|i|u16::from_le_bytes(gxp[i..i+2].try_into().unwrap());
+                        eprintln!("[lg/gpu-skin-native] program={} stage={label} pa={} sa={} temporaries={} instructions={}",p.name,half(48),half(50),word(gxp,52).unwrap_or(0),word(gxp,60).unwrap_or(0));
+                    }
+                }
+            }
+        }
+    }
     #[cfg(all(target_os="vita",feature="vita_renderer"))]
     if status!=0 {crate::render_tail::register(program,p.name);}
     let (before,after,avoided)=STATE.with(|s| {let mut s=s.borrow_mut(); s.requests+=1; if p.hit=="compile" {s.compiled+=1;} else {s.avoided+=1;} (s.requests,s.compiled,s.avoided)});
