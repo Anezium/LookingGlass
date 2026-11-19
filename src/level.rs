@@ -138,7 +138,7 @@ pub struct ReflectionActor {
     pub pose: crate::skeletal::Transform, pub time: f32, pub alpha: f32,
 }
 
-pub trait LevelController: Any {
+pub trait LevelController: Any + Send {
     /// The Appendix F id (`garden1`, `wforest-return`). Rule keys are `<id>/...`, fact keys `<id>....`
     fn id(&self) -> &'static str;
 
@@ -417,6 +417,29 @@ impl dyn LevelController {
     }
 }
 
+/// Story values a capture reads, published as plain numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StoryPose {
+    /// Lip amplitudes of the capture's speakers, in the capture's own order.
+    pub mouths: [f32; 2],
+    /// Line index and elapsed time of the capture's dialogue; zero when it is not playing.
+    pub line: usize,
+    pub clock: f32,
+}
+
+/// The simulation half of a registered art's snapshot. It holds shared CPU data only, reads the
+/// controller and plain story numbers, and returns a plain value for `LevelArt::publish_snapshot`.
+pub trait LevelCapture: Send + Sync {
+    fn story(&self, story: &Story) -> StoryPose;
+    fn capture(&self, level: &dyn LevelController, story: &StoryPose) -> Box<dyn Any + Send>;
+}
+
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Slot>();
+    send::<Box<dyn LevelController>>();
+};
+
 /// The drawing half of a visit. It owns GPU resources, so it lives in the viewer's `LevelArt`
 /// group and is replaced on every level change. It downcasts its controller inside the module.
 pub trait LevelArt: Any {
@@ -431,6 +454,11 @@ pub trait LevelArt: Any {
     fn story_pose(&mut self, _story: &Story) {}
     /// Optional complete registered-art schema. Default families stay serial.
     fn extract_snapshot(&mut self, _level: &dyn LevelController, _story: &Story) -> (usize, bool) { (0, false) }
+    /// The simulation half of this art's snapshot, when the capture reads no art. Such an art
+    /// receives the captured value through `publish_snapshot` instead of `extract_snapshot`.
+    fn capture_source(&self) -> Option<std::sync::Arc<dyn LevelCapture>> { None }
+    /// Accept one value made by this art's `capture_source`. Returns bytes and overflow.
+    fn publish_snapshot(&mut self, _captured: Box<dyn Any + Send>) -> (usize, bool) { (0, true) }
     fn snapshot_ready(&self) -> bool { false }
     fn snapshot_bytes(&self) -> usize {0}
     fn clear_snapshot(&mut self) {}

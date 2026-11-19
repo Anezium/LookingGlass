@@ -469,9 +469,9 @@ mod tests {
         levels::{Entity, Registration},
     };
     use anyhow::Context;
-    use std::{any::Any, cell::RefCell, rc::Rc};
+    use std::{any::Any, sync::{Arc, Mutex}};
 
-    type Log = Rc<RefCell<Vec<String>>>;
+    type Log = Arc<Mutex<Vec<String>>>;
 
     /// A registered controller that records every hook it is asked about.
     struct Probe {
@@ -500,7 +500,7 @@ mod tests {
     }
     impl Probe {
         fn note(&self, what: impl Into<String>) {
-            self.log.borrow_mut().push(what.into());
+            self.log.lock().unwrap().push(what.into());
         }
     }
     impl LevelController for Probe {
@@ -853,13 +853,13 @@ mod tests {
         // No legacy controller: the registry decides.
         assert!(!i.legacy_owned());
         assert!(matches!(i.gate(&t), Condition::Flag(k) if k == "garden2.derived"));
-        assert_eq!(log.borrow().as_slice(), ["gate"]);
+        assert_eq!(log.lock().unwrap().as_slice(), ["gate"]);
         // A legacy controller (the gym) owns the visit: the registry is not even asked.
-        log.borrow_mut().clear();
+        log.lock().unwrap().clear();
         i.gym = Some(crate::gym::Gym::load(&map).unwrap());
         assert!(i.legacy_owned());
         assert!(matches!(i.gate(&t), Condition::Always));
-        assert!(log.borrow().is_empty());
+        assert!(log.lock().unwrap().is_empty());
     }
     #[test]
     fn a_registration_must_serve_exactly_one_controller_on_a_visit_without_a_legacy_owner() {
@@ -921,22 +921,22 @@ mod tests {
         let e = i.dispatch(Event::Signal("garden2.out".into()));
         assert_eq!(e.message.as_deref(), Some("out"));
         assert!(log
-            .borrow()
+            .lock().unwrap()
             .iter()
             .any(|l| l.starts_with("output Activate")));
         // Scene skipping: a legacy skip wins and the controller is never asked ...
-        log.borrow_mut().clear();
+        log.lock().unwrap().clear();
         let mut world = World::fixture(&[]);
         let mut player = Player::new(Vec3::ZERO);
         assert!(i
             .skip_after(true, &map, &mut world, &mut player, &mut story)
             .unwrap());
-        assert!(log.borrow().is_empty());
+        assert!(log.lock().unwrap().is_empty());
         // ... and with no legacy scene the controller's own skip runs.
         assert!(i
             .skip_after(false, &map, &mut world, &mut player, &mut story)
             .unwrap());
-        assert_eq!(log.borrow().as_slice(), ["skip"]);
+        assert_eq!(log.lock().unwrap().as_slice(), ["skip"]);
         // Nothing serves the visit any more: every hook reverts to the legacy answer.
         i.levels.clear();
         assert!(!i.scripted() && i.prepare_story(&mut story));
@@ -959,12 +959,12 @@ mod tests {
         assert_eq!(i.fade_after(Some((RED, 0.25))).unwrap().1, 0.25);
         assert_eq!(i.scene_id_after(Some("legacy_scene")), Some("legacy_scene"));
         // A legacy answer means the controller is not even asked.
-        assert!(log.borrow().is_empty());
+        assert!(log.lock().unwrap().is_empty());
         // With no legacy answer the registered scene supplies the camera, fade and skip id.
         assert_eq!(i.camera_after(None, &world).unwrap().eye, vec3(1., 2., 3.));
         assert_eq!(i.fade_after(None).unwrap().1, 0.5);
         assert_eq!(i.scene_id_after(None), Some("probe_scene"));
-        assert_eq!(log.borrow().as_slice(), ["camera", "fade", "scene_id"]);
+        assert_eq!(log.lock().unwrap().as_slice(), ["camera", "fade", "scene_id"]);
         // Help, ownership, transport and the recovery entrance come from the controller too.
         assert_eq!(i.levels_objective().as_deref(), Some("probe help"));
         assert!(!i.levels_controlled() && !i.levels_transport());
@@ -992,8 +992,8 @@ mod tests {
             knockback: Vec3::ZERO,
         };
         assert_eq!(i.hit_level(hit(7_300_005)), Some(Some("sound/probe.wav")));
-        assert_eq!(log.borrow().as_slice(), ["hit 7300005"]);
-        log.borrow_mut().clear();
+        assert_eq!(log.lock().unwrap().as_slice(), ["hit 7300005"]);
+        log.lock().unwrap().clear();
         for id in [
             crate::school2::ENEMY_BASE + 1,
             crate::interaction::SHOT_BASE + 1,
@@ -1006,7 +1006,7 @@ mod tests {
         ] {
             assert!(i.hit_level(hit(id)).is_none(), "id {id}");
         }
-        assert!(log.borrow().is_empty());
+        assert!(log.lock().unwrap().is_empty());
         // Only targets inside the registration's own range are published.
         assert_eq!(
             i.levels_targets().iter().map(|t| t.id).collect::<Vec<_>>(),
@@ -1014,7 +1014,7 @@ mod tests {
         );
         i.levels_provoke_summon(7_300_002);
         i.levels_provoke_summon(crate::encounters::BASE);
-        assert_eq!(log.borrow().as_slice(), ["provoke 7300002"]);
+        assert_eq!(log.lock().unwrap().as_slice(), ["provoke 7300002"]);
     }
     #[test]
     fn world_shape_from_controllers_reaches_the_collision_world() {
@@ -1059,7 +1059,7 @@ mod tests {
         let handled = served.triggers(0.1, outside, inside);
         assert_eq!(handled.message.as_deref(), Some("hit"));
         assert_eq!(served.touched, 1);
-        assert!(log.borrow().iter().any(|l| l == "event probe_thread"));
+        assert!(log.lock().unwrap().iter().any(|l| l == "event probe_thread"));
     }
 
     /// A controller whose script threads flip the derived fact that gates other triggers, so
@@ -1089,7 +1089,7 @@ mod tests {
             }
         }
         fn event(&mut self, thread: &str) -> Option<Events> {
-            self.log.borrow_mut().push(thread.to_owned());
+            self.log.lock().unwrap().push(thread.to_owned());
             match thread {
                 "open_thread" => self.opened = true,
                 "close_thread" => self.opened = false,
@@ -1210,7 +1210,7 @@ mod tests {
                 i.levels[0].ctl.downcast_mut::<Latch>().unwrap().scene = false;
             }
         }
-        let fired = log.borrow().clone();
+        let fired = log.lock().unwrap().clone();
         (seen, fired)
     }
     #[test]
@@ -1301,7 +1301,7 @@ mod tests {
             assert_eq!(crate::sim_maps::with_trigger_facts_reuse(on, crate::sim_maps::trigger_facts_reuse), on);
             let (mut i, log) = latch(&map);
             crate::sim_maps::with_trigger_facts_reuse(on, || i.triggers(0.1, enter[0].1, enter[0].2));
-            assert_eq!(*log.borrow(), ["open_thread", "scene_thread"]);
+            assert_eq!(*log.lock().unwrap(), ["open_thread", "scene_thread"]);
         }
     }
     /// Run in release too (`cargo test --release`), where the debug cross-check in the
@@ -1322,16 +1322,16 @@ mod tests {
         // Pass 1: facts say opened, so both gated triggers fire and the shut one is refused.
         let start = builds();
         i.triggers_with(0.1, out, inside, true);
-        assert_eq!(*log.borrow(), ["gated_thread", "gated_thread"]);
+        assert_eq!(*log.lock().unwrap(), ["gated_thread", "gated_thread"]);
         // Close the gate outside any dispatch, as a restore or a pre-loop output would.
         let ctl = i.levels[0].ctl.downcast_mut::<Latch>().unwrap();
         ctl.opened = false;
-        log.borrow_mut().clear();
+        log.lock().unwrap().clear();
         i.reset_contacts();
         // Pass 2 must rebuild: a cache kept from pass 1 would still say opened.
         let before = builds();
         i.triggers_with(0.1, out, inside, true);
-        assert_eq!(*log.borrow(), ["shut_thread"]);
+        assert_eq!(*log.lock().unwrap(), ["shut_thread"]);
         assert_eq!(i.levels[0].ctl.downcast_ref::<Latch>().unwrap().fires, 3);
         // Per pass: one build for `advance`, one cached build per span between fires, one per
         // `dispatch`. The debug cross-check adds one per eligible trigger.
