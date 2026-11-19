@@ -63,8 +63,15 @@ pub fn jabberwock_fire() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_JABBERWOCK_FIRE").is_some())
 }
+/// Host oracle fixture: a replay steps with the tape's recorded time instead of the fixed
+/// probe step. The release-line host oracles were sealed with the fixed step, so this is
+/// opt-in; the snapshot-track oracles set it on every compared arm.
+pub fn tape_time() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    enabled() && *ON.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_MAPS_TAPE_TIME").is_some())
+}
 pub fn elapsed(actual: f32) -> f32 {
-    if !enabled() || crate::replay::input::active() { return actual; }
+    if !enabled() || (tape_time() && crate::replay::input::active()) { return actual; }
     static DT: OnceLock<f32> = OnceLock::new();
     *DT.get_or_init(|| std::env::var("LOOKING_GLASS_SIM_MAPS_DT").unwrap_or_else(|_| "0.05".into()).parse::<f32>().ok().filter(|t| t.is_finite() && *t > 0. && *t < 1.).expect("finite probe timestep"))
 }
