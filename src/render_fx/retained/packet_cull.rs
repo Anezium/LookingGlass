@@ -97,7 +97,19 @@ pub(super) fn cull(bounds: &mut Bounds, groups: &mut [super::super::Group], puff
                    m: Mat4, cuts: Cuts, recycle: bool) {
     let (mut outside, mut small_groups, mut probed, mut scanned) = (0u64, 0u64, 0u64, 0u64);
     for g in groups.iter_mut() {
-        if g.passes.is_empty() || g.passes.iter().any(|p|p.gpu_skin.is_some()) { continue; }
+        if g.passes.is_empty() { continue; }
+        if g.passes.iter().any(|p|p.gpu_skin.is_some()) {
+            // GPU-skinned packets carry placeholder vertices: test their conservative bone box.
+            // No size cut (`packet_min_pixels` keeps such surfaces on the CPU).
+            let outside_box = |p: &Pass| p.gpu_skin.as_ref().and_then(|s| s.occurrence.bounds())
+                .is_some_and(|(lo, hi)| crate::render::outside_matrix(m, lo, hi));
+            if !(cuts.frustum && g.passes.iter().all(outside_box)) { continue; }
+            outside += 1;
+            count("vita_gpu_skin_packets_cut_outside", 1);
+            if recycle { super::super::actor_cache::recycle(&mut g.passes); }
+            g.passes.clear();
+            continue;
+        }
         if cuts.frustum && g.passes.iter().all(|p| pass_outside(m, p, bounds, &mut probed, &mut scanned)) {
             outside += 1;
         } else if cuts.min_pixels > 0. {

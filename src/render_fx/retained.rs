@@ -551,7 +551,16 @@ impl Gpu {
         let mut gpu = Self {
             _game_thread: crate::game_thread::GameThread::new(),
             shader,
-            skin: if crate::render::vita_renderer::config().gpu_skin_ants { gpu_skin::Gpu::new(&fragment).map_err(|e|eprintln!("[lg/gpu-skin] CPU fallback: {e:#}")).ok() } else { None },
+            skin: (c.gpu_skin_ants || c.gpu_skin_actors).then(|| {
+                // The same fragment sources as the four actor routes above.
+                let sources = actor_lean::sources();
+                gpu_skin::Gpu::new([
+                    Some(fragment.clone()),
+                    corpse_opaque.is_some().then(|| crate::lighting::fragment(&crate::environment::fragment(&super::corpse_opaque::fragment()))),
+                    actor_lean[0].is_some().then(|| crate::environment::fragment(&sources[0])),
+                    actor_lean[1].is_some().then(|| crate::environment::fragment(&sources[1])),
+                ]).map_err(|e|eprintln!("[lg/gpu-skin] CPU fallback: {e:#}")).ok()
+            }).flatten(),
             pipelines: BTreeMap::new(),
             lite,
             corpse_opaque,
@@ -590,7 +599,7 @@ impl Gpu {
     }
     fn upload(&mut self, slot: usize, p: &Pass, leaves: &mut crate::phase_census::FinishLeaves) -> Result<usize> {
         crate::game_thread::assert_current();
-        if let Some(skin)=&p.gpu_skin { self.skin.as_mut().context("GPU skin pipeline unavailable")?.upload(skin); return Ok(slot); }
+        if let Some(skin)=&p.gpu_skin { self.skin.as_mut().context("GPU skin pipeline unavailable")?.upload(&skin.occurrence); return Ok(slot); }
         let _skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("upload"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("upload",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
@@ -730,13 +739,6 @@ impl Gpu {
         }
     }
     fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool, ant_dead: Option<bool>) {
-        if let Some(skin)=&p.gpu_skin {
-            self.skin.as_mut().expect("accepted skin program").draw(p,skin,u,depth_write,&self.white);
-            self.submit_cache.interrupt();
-            self.uniform_cache.interrupt();
-            self.field_uniforms.interrupt();
-            return;
-        }
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
@@ -780,6 +782,24 @@ impl Gpu {
             Route::ActorLean => count("vita_actor_lean_draws", 1),
             Route::ActorLeanOpaque => count("vita_actor_lean_opaque_draws", 1),
             _ => {}
+        }
+        if let Some(skin)=&p.gpu_skin {
+            // Only the vertex program changes: keep the fragment route of the CPU twin.
+            let variant = match program { Route::CorpseOpaque => 1, Route::ActorLean => 2, Route::ActorLeanOpaque => 3, _ => 0 };
+            self.skin.as_mut().expect("accepted skin program").draw(p,skin,variant,u,depth_write,&self.white,c.actor_frontface_cull);
+            self.submit_cache.interrupt();
+            self.uniform_cache.interrupt();
+            self.field_uniforms.interrupt();
+            for lite in self.lite.iter_mut().chain(&mut self.corpse_opaque).chain(self.fx_add.iter_mut().flatten()).chain(self.actor_lean.iter_mut().flatten()) {
+                lite.uniforms.interrupt(); lite.fields.interrupt();
+            }
+            self.stats.draws += 1;
+            self.stats.triangles += p.geometry().indices.len() as u64 / 3;
+            let metrics = &mut self.stats.render[usize::from(p.effect)];
+            metrics.draws += 1; metrics.pipelines += 1; metrics.depth_states += 1; metrics.bindings += 1;
+            metrics.texture_bind_slots += 3; metrics.uniform_uploads += 1;
+            if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
+            return;
         }
         // The specialized bank this draw uses; `None` is the full program.
         let bank = match program {

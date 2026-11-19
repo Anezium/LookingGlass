@@ -1195,6 +1195,8 @@ impl Model {
     ) {
         let _identity = self.skin_identity.scope_unless_set();
         let _skin_kind = crate::character::skinning::timing::kind(&self.data.def.model);
+        #[cfg(feature="vita_renderer")]
+        let _gpu_skin_family = crate::render_fx::retained::gpu_skin::census::family(&self.data.def.path);
         self.visible.fill(false);
         self.electric_attachments.clear();
         self.electric_props.clear();

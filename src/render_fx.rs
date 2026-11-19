@@ -36,7 +36,7 @@ pub struct Appearance {
 }
 pub struct Pass {
     #[cfg(feature="vita_renderer")]
-    gpu_skin: Option<Rc<retained::gpu_skin::Occurrence>>,
+    gpu_skin: Option<retained::gpu_skin::Skin>,
     _game_thread: crate::game_thread::GameThread,
     #[cfg(feature="vita_renderer")]
     geometry:Option<Rc<prepared::Geometry>>,
@@ -1891,29 +1891,48 @@ mod material_identity_tests {
     }
 }
 
-/// Only simple opaque army-ant layers can leave the CPU mesh unpublished.
+/// Opaque skinned surfaces whose layers are plain textures or environment reflections
+/// can leave the CPU mesh unpublished: their vertices are skinned in the vertex program.
+/// `gpu_skin_ants` admits only the army-ant pair; `gpu_skin_actors` every skinned model.
 #[cfg(feature="vita_renderer")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)->bool {
     let c=crate::render::vita_renderer::config();
-    if !c.gpu_skin_ants || c.actor_opaque_shader || corpse_triangles::active()==Some(true)
-        || c.flat_actor_light || c.packet_min_pixels>0. || !source.gpu_ant || !retained_active() || !c.actor_fast_path
-        || !retained::gpu_skin::available() || alpha!=1. || !skin_fully_opaque()
-        || crate::character::skinning::mutable_required() || crate::character::skinning::overlap::ready()
-        || crate::character::skinning::overlap::gather_only() {return false;}
-    if source.vertices.len()!=mesh.vertices.len() || source.indices!=mesh.indices
-        || source.vertices.iter().zip(&mesh.vertices).any(|(a,b)|a.uv.to_array().map(f32::to_bits)!=b.uv.to_array().map(f32::to_bits)) {return false;}
-    let Some(surface)=&mesh.surface else {return false;};
-    if surface.transparent || surface.preserve_skin || surface.layers.iter().any(|l|!actor_cache::simple(&l.stage)) {return false;}
-    let Some(payload)=retained::gpu_skin::occurrence(source.cpu(),pose,scales,transform,scale,fullbright,alpha) else {return false;};
-    let (camera,time,appearance)=FRAME.with(|f|{let f=f.borrow();(f.camera,f.time,f.appearance)});
-    let _=camera;
+    if !(c.gpu_skin_actors || c.gpu_skin_ants && source.gpu_ant) {return false;}
+    let verdict=gpu_skin_payload(c,source,mesh,pose,scales,transform,scale,fullbright,alpha);
+    retained::gpu_skin::census::note(verdict.as_ref().err().copied().unwrap_or(retained::gpu_skin::Reason::Gpu),mesh.vertices.len());
+    let Ok((surface,payload))=verdict else {return false;};
+    let (time,appearance)=FRAME.with(|f|{let f=f.borrow();(f.time,f.appearance)});
     let mut passes=Vec::with_capacity(actor_max_layers(c).min(surface.layers.len()));
     for layer in surface.layers.iter().take(actor_max_layers(c)) {
         let frame=if layer.stage.images.is_empty() {0} else {layer.stage.frame(time)};
         let mesh=Mesh {upload_identity:layer.upload_identities.get(frame).copied().flatten(),surface:Some(surface.clone()),vertices:Vec::new(),indices:Vec::new(),texture:Some(layer.textures[frame].clone())};
         let Ok(mut pass)=pass_at(mesh,&layer.stage,true,!layer.stage.identity,appearance,time) else {return false;};
-        pass.geometry=Some(payload.placeholder());pass.gpu_skin=Some(payload.clone());passes.push(pass);
+        pass.geometry=Some(payload.placeholder());
+        pass.gpu_skin=Some(retained::gpu_skin::Skin {occurrence:payload.clone(),environment:layer.stage.environment});
+        passes.push(pass);
     }
     submit(passes,false);true
+}
+#[cfg(feature="vita_renderer")]
+#[allow(clippy::too_many_arguments)]
+fn gpu_skin_payload(c:&crate::render::vita_renderer::Config,source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)
+    ->Result<(Rc<Surface>,Rc<retained::gpu_skin::Occurrence>),retained::gpu_skin::Reason> {
+    use retained::gpu_skin::Reason;
+    if c.actor_opaque_shader || c.flat_actor_light || c.packet_min_pixels>0. || !retained_active() || !c.actor_fast_path
+        || !retained::gpu_skin::available() {return Err(Reason::Program);}
+    if corpse_triangles::active()==Some(true) {return Err(Reason::Corpse);}
+    if alpha!=1. || !skin_fully_opaque() {return Err(Reason::Translucent);}
+    if crate::character::skinning::mutable_required() {return Err(Reason::Mutable);}
+    if crate::character::skinning::overlap::ready() || crate::character::skinning::overlap::gather_only() {return Err(Reason::Phase);}
+    let Some(surface)=&mesh.surface else {return Err(Reason::Material);};
+    // Plain layers, or an environment reflection with no other coordinate or alpha source.
+    let layer_ok=|s:&Stage| actor_cache::simple(s) || s.environment && s.vector_uv.is_none() && s.dot_alpha.is_none() && s.mods.is_empty();
+    if surface.transparent || surface.layers.iter().take(actor_max_layers(c)).any(|l|!layer_ok(&l.stage)) {return Err(Reason::Material);}
+    let input=retained::gpu_skin::input(source.cpu())?;
+    if source.vertices.len()!=mesh.vertices.len() || source.indices!=mesh.indices
+        || source.vertices.iter().zip(&mesh.vertices).any(|(a,b)|a.uv.to_array().map(f32::to_bits)!=b.uv.to_array().map(f32::to_bits)) {return Err(Reason::Topology);}
+    let eye=FRAME.with(|f|f.borrow().camera);
+    let payload=retained::gpu_skin::occurrence(input,pose,scales,transform,scale,fullbright,alpha,eye)?;
+    Ok((surface.clone(),payload))
 }

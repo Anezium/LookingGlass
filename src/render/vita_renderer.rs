@@ -372,6 +372,10 @@ pub struct Config {
     pub bone_palette: bool,
     /// Experimental immutable army-ant streams; unsupported draws keep CPU skinning.
     pub gpu_skin_ants: bool,
+    /// Vertex-shader skinning for every skinned NPC and Alice surface that fits the
+    /// stream (<= 5 influences, <= 28 bones); everything else keeps CPU skinning.
+    /// Picture-changing (stored normals instead of rebuilt face normals): opt in only.
+    pub gpu_skin_actors: bool,
     /// Diagnostic PNGs at three replay frames; never enabled by the skin key alone.
     pub gpu_skin_capture: bool,
     /// Conservative skin bounds; late overlays and normal-driven layers opt out.
@@ -698,6 +702,7 @@ impl Default for Config {
             actor_layer_cache:true,actor_shared_geometry:true,actor_batching:true,actor_frustum_cull:true,
             bone_palette: false,
             gpu_skin_ants: false,
+            gpu_skin_actors: false,
             gpu_skin_capture: false,
             skin_frustum_cull: true,
             fast_frustum: true,
@@ -3762,7 +3767,7 @@ mod tests {
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
             if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
                 || key == "fx_add_lean" || key == "fx_add_fog_free" || key == "actor_cutout_discard_free" || key == "actor_frontface_cull" || key == "actor_discard_free_shader" || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull"
-                || matches!(key.as_str(), "gpu_skin_ants" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") {
+                || matches!(key.as_str(), "gpu_skin_ants" | "gpu_skin_actors" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -4077,14 +4082,15 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { matches!(k, "gpu_skin_ants" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") || k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "fx_add_lean" | "fx_add_fog_free" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { matches!(k, "gpu_skin_ants" | "gpu_skin_actors" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") || k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "fx_add_lean" | "fx_add_fog_free" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
     fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader") }
     #[test]
     fn gpu_skin_keys_are_explicitly_default_off_and_strict_booleans() {
-        let c=Config::default();assert!(!c.gpu_skin_ants && !c.gpu_skin_capture);
+        let c=Config::default();assert!(!c.gpu_skin_ants && !c.gpu_skin_actors && !c.gpu_skin_capture);
+        assert!(serde_json::from_str::<Config>(r#"{"gpu_skin_actors":1}"#).is_err());
         let on:Config=serde_json::from_str(r#"{"gpu_skin_ants":true}"#).unwrap();
         assert!(on.gpu_skin_ants && !on.gpu_skin_capture);
         assert!(serde_json::from_str::<Config>(r#"{"gpu_skin_ants":5}"#).is_err());
@@ -4093,6 +4099,7 @@ mod tests {
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("gpu_skin_ants").is_none_or(|on|on==false));
         assert!(v.get("gpu_skin_capture").is_none_or(|on|on==false));
+        assert!(v.get("gpu_skin_actors").is_none_or(|on|on==false));
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
