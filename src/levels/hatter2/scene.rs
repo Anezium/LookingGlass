@@ -217,6 +217,13 @@ impl Encounter {
     /// equals the pose recorded in its cache entry reuses that cached collider: the inputs
     /// are identical, so the rebuilt collider would be bit-identical. A brush excluded this
     /// frame keeps its stale entry; it can only be reused for that same recorded pose.
+    /// A cache hit needs the exact pose bits: float equality would equate +0.0 and -0.0 (and
+    /// never match NaN), while the collider is built from the bits.
+    fn same_pose(a: &(usize, Vec3, Quat), b: &(usize, Vec3, Quat)) -> bool {
+        a.0 == b.0
+            && a.1.to_array().map(f32::to_bits) == b.1.to_array().map(f32::to_bits)
+            && a.2.to_array().map(f32::to_bits) == b.2.to_array().map(f32::to_bits)
+    }
     pub(super) fn collect_shapes(
         map: &Bsp,
         brushes: &[data::Brush],
@@ -229,8 +236,16 @@ impl Encounter {
             if Self::excluded(b, *p) {
                 continue;
             }
-            if reuse && cache[i].as_ref().is_some_and(|c| c.0 == *row) {
+            if reuse && cache[i].as_ref().is_some_and(|c| Self::same_pose(&c.0, row)) {
                 crate::sim_maps::count("mover_shape_reuse_hits", 1);
+                // Probe builds rebuild on every hit and require the cached collider to be the
+                // fresh one, so any input the pose key misses shows up on the host.
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                {
+                    let fresh = Self::brush_collider(map, b, *p, *q)?;
+                    assert!(fresh.probe_contents_same(&cache[i].as_ref().unwrap().1),
+                            "mover_shape_reuse: cached collider differs from a fresh build for brush {i}");
+                }
                 shapes.push(cache[i].as_ref().unwrap().1.clone());
                 continue;
             }
@@ -528,6 +543,13 @@ mod tests {
         frames.push(f);
         frames.push(frames[4].clone()); // a repeated frame: every included brush reuses
         (brushes, frames)
+    }
+    #[test]
+    fn a_signed_zero_or_nan_pose_never_hits_the_cache() {
+        let pose = |z: f32, w: f32| (3usize, Vec3::new(-1., -1., z), Quat::from_xyzw(0., 0., 0., w));
+        assert!(Encounter::same_pose(&pose(0., 1.), &pose(0., 1.)));
+        assert!(!Encounter::same_pose(&pose(0., 1.), &pose(-0., 1.)), "+0.0 and -0.0 build different bits");
+        assert!(!Encounter::same_pose(&(4usize, pose(0., 1.).1, pose(0., 1.).2), &pose(0., 1.)), "model index");
     }
     #[test]
     fn mover_shape_reuse_reproduces_the_full_rebuild_bit_for_bit() {
