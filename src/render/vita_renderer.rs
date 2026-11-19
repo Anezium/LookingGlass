@@ -100,7 +100,10 @@ pub struct Config {
     /// the actor program minus the lines such a packet cannot run. Default off.
     pub actor_lean_shader: bool,
     /// With `actor_lean_shader`: the lean actor programs without the fog call, for packets no
-    /// fog term can reach (no distance or liquid fog, every fog volume clear). Default off.
+    /// fog term can reach (no distance or liquid fog, every fog volume clear). The proof is
+    /// the packet's cached vertex box first, then a per-triangle walk bounded to 2,048
+    /// triangle visits per frame; a packet over the budget keeps the fogged lean program.
+    /// Default off.
     pub actor_fog_free: bool,
     /// Picture-changing experiment: cull GL front-facing actor triangles. Owner approval required. Default off.
     pub actor_frontface_cull: bool,

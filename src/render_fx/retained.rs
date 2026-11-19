@@ -398,8 +398,10 @@ fn actor_lean_route(base: Route, programs: [bool; 2], admitted: impl Fn() -> boo
 }
 /// `actor_fog_free`: a lean actor packet moves to its twin without the fog call when that twin
 /// has a pipeline for its key and `fogged` returns its argument for every fragment of the
-/// packet. `clear` runs only when asked; every other route is untouched.
-fn actor_fog_free_route(base: Route, programs: [bool; 2], clear: impl Fn() -> bool) -> Route {
+/// packet (the box test first, then the walk inside the frame's budget). A packet whose walk
+/// cannot complete stays on its lean route. `clear` runs only when asked; every other route is
+/// untouched.
+fn actor_fog_free_route(base: Route, programs: [bool; 2], mut clear: impl FnMut() -> bool) -> Route {
     match base {
         Route::ActorLean if programs[0] && clear() => Route::ActorFogFree,
         Route::ActorLeanOpaque if programs[1] && clear() => Route::ActorFogFreeOpaque,
@@ -469,6 +471,9 @@ pub(crate) struct Gpu {
     merge_meshes: [BTreeMap<usize, super::prepared::Geometry>; 2],
     puff_batches: [world_puffs::Bank; 2],
     bounds: packet_cull::Bounds,
+    /// `actor_fog_free`: triangle visits left in this frame's fog-scan walk budget
+    /// (`add_program::ACTOR_WALK_BUDGET`, reset once per retained frame in `finish_world`).
+    fog_walk_budget: usize,
 }
 /// The specialized program bank of a route: 0 lean/unlit-exact, 1 corpse, 2 and 3 additive,
 /// 4 and 5 lean actor, 6 and 7 fog-free lean actor. It borrows only the bank fields, so the full program's caches stay usable.
@@ -587,6 +592,7 @@ impl Gpu {
             merge_meshes: Default::default(),
             puff_batches: Default::default(),
             bounds: Default::default(),
+            fog_walk_budget: add_program::ACTOR_WALK_BUDGET,
         };
         // Pipeline objects share the one compiled program. Prewarm every LG blend
         // and depth key so first use of the held Blade does not create one later.
@@ -775,7 +781,9 @@ impl Gpu {
             || actor_lean::admitted(p, u));
         let program = actor_fog_free_route(program,
             [2, 3].map(|i| self.actor_lean[i].as_ref().is_some_and(|l| l.pipelines.contains_key(&key))),
-            || add_program::actor_fog_free(p, u));
+            || add_program::actor_fog_free(p, u, add_program::ActorScan {
+                budget: &mut self.fog_walk_budget, bounds: &mut self.bounds,
+            }));
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         actor_lean::census(p, u, depth_write, program);
         let lite = program == Route::Lite;
@@ -1498,6 +1506,8 @@ pub(crate) fn finish_world(
         gpu.ring_phase = 1;
     }
     gpu.stats = Stats::default();
+    // One walk budget per retained frame; with the key off this never runs down.
+    gpu.fog_walk_budget = add_program::ACTOR_WALK_BUDGET;
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
     gpu.field_uniforms.interrupt();

@@ -30,6 +30,14 @@
 //! argument for every fragment of the packet: distance and liquid fog are off, and each fog
 //! volume is either off or separated from every eye-to-triangle hull by an axis plane, so
 //! `fogLength` is zero and `mix(rgb, x, 0)` is `rgb`.
+//!
+//! `actor_fog_free` proves the same thing for actor packets in a cheaper order, because the
+//! device pays for the per-triangle walk in main-thread time (up to ~6.5 ms per frame on
+//! skool1, more than the GPU saves there): the packet's cached vertex box first — an exact
+//! sufficient condition, since every triangle lies in the box — and then the walk, only
+//! within a frame-wide budget of triangle visits. A packet whose walk cannot complete keeps
+//! the fogged lean program, which is always exact. The additive path above is unchanged: no
+//! box test, no budget, the same walk as before.
 use super::*;
 
 pub(super) const LEAN: &str = r#"#version 100
@@ -90,6 +98,20 @@ const LIQUID_W: usize = 126;
 const VOLUMES: [(usize, usize, usize); 2] = [(127, 130, 136), (137, 140, 146)];
 /// Scanning more triangles than this costs more than it can save; the packet keeps `LEAN`.
 const MAX_SCAN_INDICES: usize = 6144;
+/// The per-triangle walk of the actor path (`actor_fog_free`) may visit at most this many
+/// triangles per retained frame, across every packet and every active volume. A named
+/// constant, a cost bound rather than a correctness rule: a packet whose walk cannot
+/// complete inside what is left of the budget keeps the fogged lean program, which draws the
+/// same picture as the fogged full program did.
+pub(super) const ACTOR_WALK_BUDGET: usize = 2048;
+
+/// The actor fog test's per-frame state: the walk budget left in this frame and the
+/// frustum cull's per-packet box cache, shared so one vertex fold serves both. Nothing here
+/// runs with the key off: `draw` asks only when a fog-free twin exists for the packet's key.
+pub(super) struct ActorScan<'a> {
+    pub(super) budget: &'a mut usize,
+    pub(super) bounds: &'a mut super::packet_cull::Bounds,
+}
 
 /// A triangle and the eye lie strictly on one side of an axis plane of the box, with `margin`.
 fn hull_misses(eye: Vec3, corners: [Vec3; 3], lo: Vec3, hi: Vec3) -> bool {
@@ -103,17 +125,61 @@ fn hull_misses(eye: Vec3, corners: [Vec3; 3], lo: Vec3, hi: Vec3) -> bool {
     })
 }
 
+/// The eye and a whole axis-aligned box lie strictly on one side of an axis plane of the
+/// volume, with `hull_misses`' margin rule read at the box's extremes: the box margin
+/// dominates every triangle corner's own (each corner lies between the extremes), so this
+/// proves `hull_misses` for every triangle in the box. An exact sufficient condition.
+fn box_misses(eye: Vec3, corner_lo: Vec3, corner_hi: Vec3, lo: Vec3, hi: Vec3) -> bool {
+    (0..3).any(|axis| {
+        let (e, l, h) = (eye[axis], lo[axis], hi[axis]);
+        let (a, b) = (corner_lo[axis], corner_hi[axis]);
+        let scale = e.abs().max(l.abs()).max(h.abs()).max(a.abs()).max(b.abs());
+        let margin = 4. + scale * 1e-3;
+        (e < l - margin && a < l - margin && b < l - margin)
+            || (e > h + margin && a > h + margin && b > h + margin)
+    })
+}
+
+/// Why the actor walk stopped.
+enum Walked { Clear, Fogged, Budget }
+
+/// The per-triangle hull walk of one active volume, inside the frame's remaining budget.
+/// Every visited triangle is charged to the budget, including the one that rejects the
+/// packet: the CPU cost was paid either way.
+fn walk_volume(mesh: &Mesh, eye: Vec3, lo: Vec3, hi: Vec3, budget: &mut usize) -> (Walked, u64) {
+    let mut visits = 0u64;
+    let position = |i: u16| mesh.vertices.get(i as usize).map(|v| v.position);
+    for t in mesh.indices.chunks_exact(3) {
+        if *budget == 0 { return (Walked::Budget, visits); }
+        *budget -= 1;
+        visits += 1;
+        let (Some(a), Some(b), Some(c)) = (position(t[0]), position(t[1]), position(t[2]))
+            else { return (Walked::Fogged, visits); };
+        if !(a.is_finite() && b.is_finite() && c.is_finite()) || !hull_misses(eye, [a, b, c], lo, hi) {
+            return (Walked::Fogged, visits);
+        }
+    }
+    (Walked::Clear, visits)
+}
+
 /// `fogged` returns its argument for every fragment of this packet under payload `u`.
-pub(super) fn fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool { clear(p, u, "vita_fx_add_fog_volume_scans") }
+/// The additive path: the full per-triangle walk, unchanged in its decisions.
+pub(super) fn fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool { clear(p, u, "vita_fx_add_fog_volume_scans", None) }
 /// `fog_free` for an actor packet (`actor_fog_free`). Retained packets are drawn with an
-/// identity `Model`, so the mesh positions are the `worldPosition` the fog reads, as for effects.
-pub(super) fn actor_fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool { clear(p, u, "vita_actor_fog_volume_scans") }
-fn clear(p: &Pass, u: &[f32; UNIFORM_FLOATS], scans: &'static str) -> bool {
+/// identity `Model`, so the mesh positions are the `worldPosition` the fog reads, as for
+/// effects. The cheap box test runs before any walk, and the walk only within the frame's
+/// budget; a packet whose walk cannot complete keeps the fogged lean program.
+pub(super) fn actor_fog_free(p: &Pass, u: &[f32; UNIFORM_FLOATS], mut scan: ActorScan<'_>) -> bool {
+    clear(p, u, "vita_actor_fog_volume_scans", Some(&mut scan))
+}
+fn clear(p: &Pass, u: &[f32; UNIFORM_FLOATS], scans: &'static str, mut actor: Option<&mut ActorScan>) -> bool {
     // `if(X.w>0.0)` guards each fog term; NaN fails the guard as it fails this test.
     if u[DISTANCE_W] > 0. || u[LIQUID_W] > 0. { return false; }
     let eye = Vec3::from_slice(&u[EYE..EYE + 3]);
     if !eye.is_finite() { return false; }
     let mut scanned = false;
+    // The packet's box, folded at most once per packet, at the first active volume.
+    let mut box_cache: Option<(Vec3, Vec3, bool)> = None;
     for (lo, hi, w) in VOLUMES {
         if !(u[w] > 0.) { continue; }
         let (lo, hi) = (Vec3::from_slice(&u[lo..lo + 3]), Vec3::from_slice(&u[hi..hi + 3]));
@@ -124,11 +190,39 @@ fn clear(p: &Pass, u: &[f32; UNIFORM_FLOATS], scans: &'static str) -> bool {
         if (0..3).any(|axis| lo[axis] > hi[axis]) { return false; }
         let mesh = p.geometry();
         if mesh.indices.len() > MAX_SCAN_INDICES { return false; }
-        scanned = true;
-        let position = |i: u16| mesh.vertices.get(i as usize).map(|v| v.position);
-        for t in mesh.indices.chunks_exact(3) {
-            let (Some(a), Some(b), Some(c)) = (position(t[0]), position(t[1]), position(t[2])) else { return false; };
-            if !(a.is_finite() && b.is_finite() && c.is_finite()) || !hull_misses(eye, [a, b, c], lo, hi) { return false; }
+        match actor {
+            // The additive path: the walk of `44c3c25`, line for line.
+            None => {
+                scanned = true;
+                let position = |i: u16| mesh.vertices.get(i as usize).map(|v| v.position);
+                for t in mesh.indices.chunks_exact(3) {
+                    let (Some(a), Some(b), Some(c)) = (position(t[0]), position(t[1]), position(t[2])) else { return false; };
+                    if !(a.is_finite() && b.is_finite() && c.is_finite()) || !hull_misses(eye, [a, b, c], lo, hi) { return false; }
+                }
+            }
+            // The actor path: the packet's box first, then the walk within the budget.
+            Some(ref mut scan) => {
+                if box_cache.is_none() {
+                    let mut folded = 0u64;
+                    let entry = scan.bounds.fog_box(p, &mut folded);
+                    count("vita_actor_fog_box_scanned_vertices", folded);
+                    box_cache = Some(entry);
+                }
+                let (box_lo, box_hi, finite) = box_cache.unwrap();
+                // A fold that skipped a non-finite vertex cannot prove anything; the walk
+                // below rejects such triangles itself.
+                if finite && box_misses(eye, box_lo, box_hi, lo, hi) {
+                    count("vita_actor_fog_box_clears", 1);
+                    continue;
+                }
+                let (walked, visits) = walk_volume(mesh, eye, lo, hi, scan.budget);
+                count("vita_actor_fog_triangle_visits", visits);
+                match walked {
+                    Walked::Clear => scanned = true,
+                    Walked::Fogged => return false,
+                    Walked::Budget => { count("vita_actor_fog_budget_misses", 1); return false; }
+                }
+            }
         }
     }
     if scanned { count(scans, 1); }
@@ -165,6 +259,25 @@ mod tests {
         u[h..h + 3].copy_from_slice(&hi.to_array());
         u[at] = w;
     }
+    /// `actor_fog_free` with a private budget and box cache, as a frame's only packet.
+    fn actor_clear(p: &Pass, u: &[f32; UNIFORM_FLOATS], budget: usize) -> bool {
+        let mut left = budget;
+        let mut bounds = packet_cull::Bounds::default();
+        actor_fog_free(p, u, ActorScan { budget: &mut left, bounds: &mut bounds })
+    }
+    /// Two triangles that clear the same volume on different axes: the walk accepts the
+    /// packet, but the union box spans the volume on every axis, so the box cannot prove it.
+    fn concave() -> (Pass, [f32; UNIFORM_FLOATS]) {
+        let mut p = pass();
+        p.mesh.vertices = vec![
+            Vertex::new(500., -600., -600., 0., 0., WHITE), Vertex::new(600., -500., -500., 0., 0., WHITE),
+            Vertex::new(550., -550., -550., 0., 0., WHITE), Vertex::new(-600., 500., -600., 0., 0., WHITE),
+            Vertex::new(-500., 600., -500., 0., 0., WHITE), Vertex::new(-550., 550., -550., 0., 0., WHITE)];
+        p.mesh.indices = vec![0, 1, 2, 3, 4, 5];
+        let mut u = payload(Vec3::ZERO);
+        volume(&mut u, 0, vec3(-100., -100., -100.), vec3(-90., -90., -90.), 50.);
+        (p, u)
+    }
     #[test]
     fn an_inverted_volume_axis_keeps_the_fogged_program() {
         // Eye at x=0, the quad at x 0..10: with x bounds 100..-100 the shader's sorted slab
@@ -172,11 +285,12 @@ mod tests {
         let mut u = payload(Vec3::new(0., 5., -50.));
         volume(&mut u, 0, Vec3::new(100., -1000., -1000.), Vec3::new(-100., 1000., 1000.), 2000.);
         assert!(!fog_free(&pass(), &u));
-        assert!(!actor_fog_free(&pass(), &u));
+        assert!(!actor_clear(&pass(), &u, ACTOR_WALK_BUDGET), "the inverted check precedes the box test");
         // The same volume with ordered bounds that the quad and the eye lie beside is a miss.
         let mut ordered = payload(Vec3::new(0., 5., -50.));
         volume(&mut ordered, 0, Vec3::new(100., -1000., -1000.), Vec3::new(300., 1000., 1000.), 2000.);
         assert!(fog_free(&pass(), &ordered));
+        assert!(actor_clear(&pass(), &ordered, ACTOR_WALK_BUDGET));
     }
     #[test]
     fn offsets_name_the_fog_fields_of_the_retained_block() {
@@ -302,6 +416,158 @@ mod tests {
         let mut u = payload(vec3(f32::NAN, 0., 0.));
         volume(&mut u, 0, vec3(-500., -500., -300.), vec3(500., 500., -100.), 800.);
         assert!(!fog_free(&p, &u));
+    }
+    #[test]
+    fn the_actor_path_agrees_with_the_walk_on_the_fog_fixtures() {
+        // The fixture cases of the test above, asserted for `actor_fog_free` too: the box
+        // test is a cheaper proof of the same thing, so it accepts exactly the packets the
+        // walk accepts on these fixtures, and never one the walk rejects.
+        let p = pass();
+        let eye = vec3(5., 5., 100.);
+        let below = (vec3(-500., -500., -300.), vec3(500., 500., -100.), 800.);
+        let both = |u: &[f32; UNIFORM_FLOATS], accepted: bool, why: &str| {
+            assert_eq!(fog_free(&p, u), accepted, "walk: {why}");
+            assert_eq!(actor_clear(&p, u, ACTOR_WALK_BUDGET), accepted, "actor: {why}");
+        };
+        both(&payload(eye), true, "no fog term is on");
+        let mut u = payload(eye);
+        u[DISTANCE_W] = 2500.;
+        both(&u, false, "distance fog reads every fragment");
+        let mut u = payload(eye);
+        u[LIQUID_W] = 400.;
+        both(&u, false, "liquid fog reads every fragment");
+        let mut u = payload(eye);
+        volume(&mut u, 0, below.0, below.1, below.2);
+        both(&u, true, "a volume well below the quad and the eye");
+        let mut b = payload(eye);
+        volume(&mut b, 1, below.0, below.1, below.2);
+        both(&b, true, "the same box as volume B");
+        volume(&mut u, 1, vec3(-500., -500., 20.), vec3(500., 500., 60.), 800.);
+        both(&u, false, "volume B lies between the eye and the quad");
+        let mut u = payload(eye);
+        volume(&mut u, 0, below.0, vec3(500., 500., -2.), 800.);
+        both(&u, false, "inside the margin is not a proof");
+        let mut u = payload(vec3(5., 5., -200.));
+        volume(&mut u, 0, below.0, below.1, below.2);
+        both(&u, false, "the eye inside the volume, the quad outside");
+        let mut u = payload(eye);
+        volume(&mut u, 0, vec3(-500., -500., -500.), vec3(500., 500., 500.), 0.);
+        both(&u, true, "a volume that is off is ignored whatever its box");
+        let mut q = pass();
+        q.mesh.vertices[2].position.z = -200.;
+        let mut u = payload(eye);
+        volume(&mut u, 0, below.0, below.1, below.2);
+        assert!(!fog_free(&q, &u), "walk: one triangle through the volume spoils the packet");
+        assert!(!actor_clear(&q, &u, ACTOR_WALK_BUDGET), "actor: the moved vertex is in the box");
+        let mut u = payload(vec3(f32::NAN, 0., 0.));
+        volume(&mut u, 0, below.0, below.1, below.2);
+        both(&u, false, "non-finite input is never a proof");
+    }
+    #[test]
+    fn the_actor_box_test_never_accepts_a_packet_the_walk_rejects() {
+        // A deterministic sweep of eyes and volumes over the fixture quad. The safety
+        // property is one-directional: wherever the unbounded walk keeps the fogged
+        // program, the box path must keep it too.
+        let p = pass();
+        let (mut accepted, mut checked) = (0, 0);
+        for x in [-300., -20., 0., 5., 40.] {
+            for y in [0., 5., 40.] {
+                for z in [-300., -20., 0., 50., 300.] {
+                    let eye = vec3(x, y, z);
+                    for (lo, hi) in [
+                        (vec3(-500., -500., -300.), vec3(500., 500., -100.)),
+                        (vec3(-500., -500., -300.), vec3(500., 500., -2.)),
+                        (vec3(-500., -500., 20.), vec3(500., 500., 60.)),
+                        (vec3(-500., -500., -500.), vec3(500., 500., 500.)),
+                        (vec3(-40., -40., -40.), vec3(40., 40., 40.)),
+                        (vec3(100., -1000., -1000.), vec3(300., 1000., 1000.)),
+                        (vec3(-1000., -1000., -1000.), vec3(-300., 1000., 1000.)),
+                        (vec3(-1000., 100., -1000.), vec3(1000., 200., 1000.)),
+                        (vec3(-1000., -1000., 300.), vec3(1000., 1000., 500.)),
+                    ] {
+                        let mut u = payload(eye);
+                        volume(&mut u, 0, lo, hi, 800.);
+                        volume(&mut u, 1, lo, hi, 800.);
+                        // With budget to spare the two paths must agree exactly: the box
+                        // accepts nothing the walk rejects, and whatever the walk proves
+                        // the actor path still proves.
+                        assert_eq!(actor_clear(&p, &u, ACTOR_WALK_BUDGET), fog_free(&p, &u),
+                            "eye {eye:?}, volume {lo:?}..{hi:?}");
+                        if actor_clear(&p, &u, ACTOR_WALK_BUDGET) { accepted += 1; }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked >= 600, "{checked} cases");
+        assert!(accepted > 0, "the sweep must reach cases the box proves");
+    }
+    #[test]
+    fn a_packet_the_box_cannot_prove_walks_only_inside_the_frame_budget() {
+        let (p, u) = concave();
+        assert!(fog_free(&p, &u), "every triangle's hull misses on its own axis");
+        let mut left = ACTOR_WALK_BUDGET;
+        let mut bounds = packet_cull::Bounds::default();
+        assert!(actor_fog_free(&p, &u, ActorScan { budget: &mut left, bounds: &mut bounds }));
+        assert_eq!(left, ACTOR_WALK_BUDGET - 2, "the walk charged one visit per triangle");
+        let mut one = 1;
+        assert!(!actor_fog_free(&p, &u, ActorScan { budget: &mut one, bounds: &mut bounds }),
+            "the budget ran out mid-walk");
+        assert_eq!(one, 0);
+        let mut none = 0;
+        assert!(!actor_fog_free(&p, &u, ActorScan { budget: &mut none, bounds: &mut bounds }),
+            "a spent budget keeps the fogged program");
+        assert_eq!(none, 0, "no visit was bought");
+    }
+    #[test]
+    fn the_frame_budget_is_shared_across_packets_and_box_clears_are_free() {
+        // The volume below the quad and the eye: the box proves it without a walk.
+        let mut far = payload(vec3(5., 5., 100.));
+        volume(&mut far, 0, vec3(-500., -500., -300.), vec3(500., 500., -100.), 800.);
+        let (p, u) = concave();
+        let mut left = 2;
+        let mut bounds = packet_cull::Bounds::default();
+        assert!(actor_fog_free(&pass(), &far, ActorScan { budget: &mut left, bounds: &mut bounds }));
+        assert_eq!(left, 2, "the box test spends no budget");
+        assert!(actor_fog_free(&p, &u, ActorScan { budget: &mut left, bounds: &mut bounds }));
+        assert_eq!(left, 0, "the first concave packet spent the frame's budget");
+        assert!(!actor_fog_free(&p, &u, ActorScan { budget: &mut left, bounds: &mut bounds }),
+            "the second identical packet keeps the fogged program");
+        left = ACTOR_WALK_BUDGET;
+        assert!(actor_fog_free(&p, &u, ActorScan { budget: &mut left, bounds: &mut bounds }),
+            "a new frame's budget serves the packet again");
+    }
+    #[test]
+    fn non_finite_vertices_never_reach_a_fog_free_program() {
+        // A referenced NaN vertex: the walk rejects the packet, and the box fold skipped
+        // the vertex, so the box refuses to prove anything either.
+        let mut p = pass();
+        p.mesh.vertices[1].position = vec3(f32::NAN, 0., 0.);
+        let mut u = payload(vec3(5., 5., 100.));
+        volume(&mut u, 0, vec3(-500., -500., -300.), vec3(500., 500., -100.), 800.);
+        assert!(!fog_free(&p, &u));
+        assert!(!actor_clear(&p, &u, ACTOR_WALK_BUDGET));
+        // An unreferenced NaN vertex does not touch the drawn triangles: the box still
+        // refuses to prove, and the walk, which reads only the referenced vertices,
+        // accepts exactly as it did before.
+        let mut q = pass();
+        q.mesh.vertices.push(Vertex::new(f32::NAN, 0., 0., 0., 0., WHITE));
+        q.mesh.indices = vec![0, 1, 2];
+        assert!(fog_free(&q, &u), "the walk never read the unreferenced vertex");
+        assert!(actor_clear(&q, &u, ACTOR_WALK_BUDGET), "the walk still proves the packet");
+        assert!(!actor_clear(&q, &u, 0), "without budget the unprovable packet keeps the fogged program");
+    }
+    #[test]
+    fn a_packet_over_the_scan_cap_keeps_the_fogged_program_whatever_the_box_would_prove() {
+        // The cap of `44c3c25` decides before any box fold: such a packet was never
+        // eligible, and its eligibility does not change.
+        let mut p = pass();
+        p.mesh.indices = vec![0u16, 1, 2].repeat(MAX_SCAN_INDICES / 3 + 1);
+        assert!(p.mesh.indices.len() > MAX_SCAN_INDICES);
+        let mut u = payload(vec3(5., 5., 100.));
+        volume(&mut u, 0, vec3(-500., -500., -300.), vec3(500., 500., -100.), 800.);
+        assert!(!fog_free(&p, &u));
+        assert!(!actor_clear(&p, &u, ACTOR_WALK_BUDGET));
     }
     #[test]
     fn both_keys_are_off_by_default_and_strict() {

@@ -51,30 +51,47 @@ const PROBE_VERTICES: usize = 16;
 
 /// Vertex bounds of a published geometry, kept while its vertex generation repeats. A geometry
 /// keeps its identity across updates and takes a new vertex generation whenever any vertex bit
-/// changes, so an entry is exact for as long as both match.
+/// changes, so an entry is exact for as long as both match. The flag is whether every vertex
+/// is finite: glam's `min`/`max` skip a NaN component, so a fold that skipped one is not the
+/// geometry's box. The frustum and size cuts ignore the flag; `actor_fog_free`'s box test
+/// refuses to prove anything from such a fold and leaves the packet to the walk.
 #[derive(Default)]
-pub(super) struct Bounds { known: HashMap<u64, (u64, Vec3, Vec3)> }
+pub(super) struct Bounds { known: HashMap<u64, (u64, Vec3, Vec3, bool)> }
 const BOUNDS_LIMIT: usize = 4096;
 impl Bounds {
-    fn of(&mut self, p: &Pass, scanned: &mut u64) -> (Vec3, Vec3) {
+    fn entry(&mut self, p: &Pass, scanned: &mut u64) -> (Vec3, Vec3, bool) {
         if let Some(g) = &p.geometry {
             let version = g.version;
-            if let Some(&(vertices, lo, hi)) = self.known.get(&version.identity) {
-                if vertices == version.vertices { return (lo, hi); }
+            if let Some(&(vertices, lo, hi, finite)) = self.known.get(&version.identity) {
+                if vertices == version.vertices { return (lo, hi, finite); }
             }
             *scanned += g.vertices.len() as u64;
-            let (lo, hi) = extent(&g.vertices);
+            let (lo, hi, finite) = extent(&g.vertices);
             if self.known.len() >= BOUNDS_LIMIT { self.known.clear(); }
-            self.known.insert(version.identity, (version.vertices, lo, hi));
-            return (lo, hi);
+            self.known.insert(version.identity, (version.vertices, lo, hi, finite));
+            return (lo, hi, finite);
         }
         *scanned += p.mesh.vertices.len() as u64;
         extent(&p.mesh.vertices)
     }
+    fn of(&mut self, p: &Pass, scanned: &mut u64) -> (Vec3, Vec3) {
+        let (lo, hi, _) = self.entry(p, scanned);
+        (lo, hi)
+    }
+    /// The same cached box for `actor_fog_free`'s cheap fog test, with the finiteness flag:
+    /// one fold per (identity, vertex generation), shared with the frustum cull.
+    pub(super) fn fog_box(&mut self, p: &Pass, scanned: &mut u64) -> (Vec3, Vec3, bool) {
+        self.entry(p, scanned)
+    }
 }
-fn extent(vertices: &[Vertex]) -> (Vec3, Vec3) {
-    vertices.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
-        |(lo, hi), v| (lo.min(v.position), hi.max(v.position)))
+fn extent(vertices: &[Vertex]) -> (Vec3, Vec3, bool) {
+    let mut finite = true;
+    let (lo, hi) = vertices.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+        |(lo, hi), v| {
+            if !v.position.is_finite() { finite = false; }
+            (lo.min(v.position), hi.max(v.position))
+        });
+    (lo, hi, finite)
 }
 /// True only when no vertex of the pass can be drawn. An empty pass is left alone.
 fn pass_outside(m: Mat4, p: &Pass, bounds: &mut Bounds, probed: &mut u64, scanned: &mut u64) -> bool {
@@ -122,7 +139,7 @@ pub(super) fn cull(bounds: &mut Bounds, groups: &mut [super::super::Group], puff
             puffs_outside += 1;
             return false;
         }
-        let (lo, hi) = extent(&p.vertices);
+        let (lo, hi, _) = extent(&p.vertices);
         if small(m, lo, hi, cuts.min_pixels) { puffs_small += 1; return false; }
         true
     });
@@ -222,5 +239,35 @@ mod tests {
         pass.geometry = Some(std::rc::Rc::new(super::super::super::prepared::Geometry { mesh: quad(-7.), version: g.version, valid: true }));
         assert_eq!(bounds.of(&pass, &mut scanned).0, vec3(-7., 0., 0.));
         assert_eq!(scanned, 6);
+    }
+    #[test]
+    fn the_fog_box_keeps_its_finiteness_with_the_vertex_generation() {
+        let quad = |z: f32| Mesh { upload_identity: None, surface: None, vertices: vec![
+            Vertex::new(0., 0., z, 0., 0., WHITE), Vertex::new(4., 2., z, 0., 0., WHITE),
+            Vertex::new(0., 2., z, 0., 0., WHITE)], indices: vec![0, 1, 2], texture: None };
+        let mut g = super::super::super::prepared::Geometry::new(quad(0.));
+        let mut bounds = Bounds::default();
+        let mut scanned = 0u64;
+        let mut pass = pass_with(&[]);
+        pass.geometry = Some(std::rc::Rc::new(super::super::super::prepared::Geometry {
+            mesh: quad(0.), version: g.version, valid: true }));
+        // One fold serves the frustum cull and the fog box alike.
+        assert_eq!(bounds.of(&pass, &mut scanned), (vec3(0., 0., 0.), vec3(4., 2., 0.)));
+        assert_eq!(bounds.fog_box(&pass, &mut scanned), (vec3(0., 0., 0.), vec3(4., 2., 0.), true));
+        assert_eq!(scanned, 3, "the second reader reuses the entry");
+        // A NaN vertex makes the fold skip it: the entry says so, and the cull's own
+        // view of the box is unchanged.
+        let mut nan = quad(0.);
+        nan.vertices[1].position.y = f32::NAN;
+        g.mesh = super::super::super::copy_mesh(&nan);
+        g.advance_owned(false);
+        pass.geometry = Some(std::rc::Rc::new(super::super::super::prepared::Geometry {
+            mesh: nan, version: g.version, valid: true }));
+        let (_, hi, finite) = bounds.fog_box(&pass, &mut scanned);
+        assert!(!finite, "a fold that skipped a vertex cannot prove a box");
+        assert_eq!(hi, vec3(4., 2., 0.), "glam's max skipped only the NaN component");
+        assert_eq!(scanned, 6, "the changed generation refolded once");
+        assert_eq!(bounds.fog_box(&pass, &mut scanned).2, false);
+        assert_eq!(scanned, 6, "the flag is cached with the box");
     }
 }

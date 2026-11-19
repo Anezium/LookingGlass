@@ -51,3 +51,18 @@ cutout tests, lighting, gain, blend, depth state, geometry and order are the lea
 Why: in the jlair2 fight every actor draw already runs a lean program, and the device class
 ablation still puts the frame's GPU time in the actor class. The map has one fog volume that
 no actor touches, yet each actor fragment evaluates the whole fog block.
+
+The proof costs main-thread time, so `actor_fog_free` proves it in a cheaper order (2026-11-19).
+First the packet's vertex box — `packet_cull::Bounds`, the frustum cull's per-packet bound,
+cached per geometry identity and vertex generation and folded over the same published positions
+the walk reads — against each active volume with `hull_misses`' margin rule: the eye and the
+whole box strictly beyond one side of an axis prove the same for every triangle in the box, so
+the volume is clear without a walk. A fold that skipped a non-finite vertex (glam's `min`/`max`
+skip NaN) proves nothing; the walk decides. If the box cannot prove the volume, the per-triangle
+walk runs only inside a frame-wide budget of 2,048 triangle visits
+(`add_program::ACTOR_WALK_BUDGET`, reset in `finish_world`); a packet whose walk cannot
+complete keeps the fogged lean program, which is always exact, so the picture cannot change
+and coverage can drop only where the budget ran out. Counters: `vita_actor_fog_box_clears`,
+`vita_actor_fog_box_scanned_vertices`, `vita_actor_fog_triangle_visits`,
+`vita_actor_fog_budget_misses`. The additive `fx_add_fog_free` path is unchanged: no box, no
+budget, the same walk as before.
