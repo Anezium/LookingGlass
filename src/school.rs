@@ -1690,7 +1690,7 @@ pub async fn check_render(assets: &mut Assets) -> Result<()> {
     if std::env::var_os("LOOKING_GLASS_SCHOOL_FLOOR_CHECK").is_some() { return Ok(()); }
     door_check::render(assets).await?;
     cinema_check::render(assets).await?;
-    let mut scene = crate::render::Scene::load(assets, "skool1")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "skool1")?;
     let specs = texture::read_materials(assets)?;
     let mut art = Art::load(assets, &specs)?;
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
@@ -1698,9 +1698,9 @@ pub async fn check_render(assets: &mut Assets) -> Result<()> {
     // The separate scene matrix above exercises cinematics. Stage these older
     // machinery-only views with their original instantaneous commitments.
     interactions.school.as_mut().unwrap().cinema_data = None;
-    interactions.sync(&mut scene.world);
+    interactions.sync(&mut world);
     let mut player =
-        Player::spawn(&scene.world, scene.map.spawn().0).context("School spawn blocked")?;
+        Player::spawn(&world, scene.map.spawn().0).context("School spawn blocked")?;
     for (stage, eye, target) in [
         (
             "waiting",
@@ -1732,10 +1732,10 @@ pub async fn check_render(assets: &mut Assets) -> Result<()> {
                 .event("book_cinematic");
         }
         for _ in 0..1250 {
-            interactions.advance_school(1. / 120., &scene.map, &mut scene.world, &mut player)?;
+            interactions.advance_school(1. / 120., &scene.map, &mut world, &mut player)?;
         }
         for frame in 0..90 {
-            interactions.advance_school(1. / 60., &scene.map, &mut scene.world, &mut player)?;
+            interactions.advance_school(1. / 60., &scene.map, &mut world, &mut player)?;
             clear_background(BLACK);
             set_camera(&Camera3D {
                 position: eye,

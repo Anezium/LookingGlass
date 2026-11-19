@@ -278,7 +278,7 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
 }
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut scene = crate::render::Scene::load(a, "garden1")?;
+        let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(a, "garden1")?;
         let mut art = art::Art::load(a)?;
         for case in [
             "garden1-arrival-launch",
@@ -360,7 +360,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             }
             let mut p = Player::new(Vec3::ZERO);
             for _ in 0..240 {
-                o.advance(1. / 120., &scene.map, &mut scene.world, &mut p, &[])?;
+                o.advance(1. / 120., &scene.map, &mut world, &mut p, &[])?;
             }
             for frame in 0..3 {
                 clear_background(BLACK);

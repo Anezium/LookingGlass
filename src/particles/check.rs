@@ -78,7 +78,7 @@ pub(crate) async fn ambient_render(assets: &mut Assets) -> Result<()> {
         ("gvillage", 56, vec3(80., -75., 35.)),
         ("potears2", 28, vec3(70., -100., 25.)),
     ] {
-        let mut scene = crate::render::Scene::load(assets, name)?;
+        let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, name)?;
         let mut steam = Steam::load(assets, &scene.map)?;
         let emitter = steam.emitters.iter().find(|e| e.id == id).unwrap();
         let target = emitter.origin
@@ -92,7 +92,7 @@ pub(crate) async fn ambient_render(assets: &mut Assets) -> Result<()> {
                 .into_iter()
                 .map(|axis| target + emitter.rotation * axis * 96. + Vec3::Z * 12.)
                 .find(|eye| {
-                    let sight = scene.world.sweep(target, *eye, Vec3::splat(1.));
+                    let sight = world.sweep(target, *eye, Vec3::splat(1.));
                     !sight.start_solid && sight.fraction == 1.
                 })
                 .ok_or_else(|| anyhow::anyhow!("No clear firefly inspection camera"))?
@@ -100,7 +100,7 @@ pub(crate) async fn ambient_render(assets: &mut Assets) -> Result<()> {
             target + offset
         };
         for _ in 0..100 {
-            steam.update(0.05, eye, &scene.world);
+            steam.update(0.05, eye, &world);
         }
         if name == "gvillage" {
             ensure!(
@@ -125,7 +125,7 @@ pub(crate) async fn ambient_render(assets: &mut Assets) -> Result<()> {
         let mut reference: Option<Vec<u8>> = None;
         for shot in ["live", "paused"] {
             steam.animate(5.);
-            steam.update(0., eye, &scene.world);
+            steam.update(0., eye, &world);
             clear_background(scene.atmosphere.background());
             set_camera(&Camera3D {
                 position: eye,
@@ -136,7 +136,7 @@ pub(crate) async fn ambient_render(assets: &mut Assets) -> Result<()> {
                 z_far: 10000.,
                 ..Default::default()
             });
-            crate::lighting::select(steam.lights(), eye, &scene.world);
+            crate::lighting::select(steam.lights(), eye, &world);
             let direction = (target - eye).normalize();
             crate::render_fx::begin(eye, direction, 5., &scene.atmosphere, false);
             scene.draw(eye, 5., false, false, &[]);

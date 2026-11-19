@@ -3,10 +3,10 @@ use crate::{assets::Assets, render::Scene};
 use anyhow::{ensure, Result};
 use macroquad::prelude::*;
 
-fn draw(scene: &mut Scene, camera: &Camera3D, time: f32, transforms: &[(usize, Vec3, Quat)]) {
+fn draw(scene: &mut Scene, world: &crate::collision::World, camera: &Camera3D, time: f32, transforms: &[(usize, Vec3, Quat)]) {
     clear_background(scene.atmosphere.background());
     set_camera(camera);
-    crate::lighting::select(vec![], camera.position, &scene.world);
+    crate::lighting::select(vec![], camera.position, world);
     crate::render_fx::begin_view(camera, time, &scene.atmosphere, false);
     scene.draw(camera.position, time, false, false, transforms);
     scene.draw(camera.position, time, false, true, transforms);
@@ -45,10 +45,10 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     let mut saved_triangles = 0;
     let mut detail_saved = 0;
     for name in ["skool1", "potears1", "hedge1", "hatter1"] {
-        let mut scene = Scene::load(assets, name)?;
+        let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, name)?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, name, None)?;
-        interactions.sync(&mut scene.world);
+        interactions.sync(&mut world);
         interactions.presentation.apply(&mut scene);
         let transforms = interactions.transforms();
         let (eye, yaw) = crate::interaction::spawn(&scene.map, None);
@@ -63,7 +63,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 let mut samples = Vec::new();
                 for frame in 0..10 {
                     let start = std::time::Instant::now();
-                    draw(&mut scene, &camera, 8., &transforms);
+                    draw(&mut scene, &world, &camera, 8., &transforms);
                     // Readback waits for submitted rendering; presentation pacing
                     // is outside this interval. Includes a fixed readback cost.
                     let image = get_screen_data();
@@ -113,16 +113,17 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         "private/sky-performance/profile.json",
         serde_json::to_vec_pretty(&report)?,
     )?;
-    Scene::load(assets, "potears1")?.check_detail().await?;
+    let crate::render::Loaded { mut scene, world: _world } = Scene::load(assets, "potears1")?;
+    scene.check_detail().await?;
     for name in [
         "hedge1", "hedge3", "garden2", "garden4", "hatter1", "hatter2",
     ] {
-        let mut scene = Scene::load(assets, name)?;
+        let crate::render::Loaded { mut scene, world } = Scene::load(assets, name)?;
         let mut c = crate::sky_sequence::Controller::load(assets, &scene.map, name)?;
         let (eye, yaw) = crate::interaction::spawn(&scene.map, None);
         let camera = camera(eye, vec3(yaw.cos(), yaw.sin(), 0.65));
         c.apply(&mut scene);
-        draw(&mut scene, &camera, 0., &[]);
+        draw(&mut scene, &world, &camera, 0., &[]);
         let first = capture(&format!("private/sky-performance/{name}-sequence-0.png"));
         next_frame().await;
         if name.starts_with("hedge") {
@@ -137,12 +138,12 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         c.update(0.5);
         let state = c.state.clone();
         c.apply(&mut scene);
-        draw(&mut scene, &camera, 8., &[]);
+        draw(&mut scene, &world, &camera, 8., &[]);
         let moved = capture(&format!("private/sky-performance/{name}-sequence-1.png"));
         next_frame().await;
         c.update(0.);
         c.apply(&mut scene);
-        draw(&mut scene, &camera, 8., &[]);
+        draw(&mut scene, &world, &camera, 8., &[]);
         ensure!(
             same_pixels(
                 &capture(&format!("private/sky-performance/{name}-paused.png")),
@@ -154,7 +155,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         c.update(4.);
         c.restore(&state)?;
         c.apply(&mut scene);
-        draw(&mut scene, &camera, 8., &[]);
+        draw(&mut scene, &world, &camera, 8., &[]);
         ensure!(
             same_pixels(
                 &capture(&format!("private/sky-performance/{name}-restored.png")),
@@ -166,7 +167,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         ensure!(first != moved, "Presentation did not change in {name}");
         println!("PASS {name} presentation, pause and restored pixels");
     }
-    let mut scene = Scene::load(assets, "skool1")?;
+    let crate::render::Loaded { mut scene, world } = Scene::load(assets, "skool1")?;
     let catalog = crate::inventory::Catalog::load(assets)?;
     let hud = crate::hud::Hud::load(assets)?;
     let items = crate::inventory::pickups(&scene.map, "skool1", &catalog);
@@ -177,7 +178,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     let camera = camera(item.origin + vec3(100., 0., 60.), vec3(-100., 0., -16.));
     let mut steam = crate::particles::Steam::load(assets, &scene.map)?;
     for _ in 0..120 {
-        steam.update(1. / 60., camera.position, &scene.world);
+        steam.update(1. / 60., camera.position, &world);
     }
     let mut stats = crate::inventory::Stats::for_level("skool1", None);
     let mut visibility = Vec::new();
@@ -186,7 +187,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         for model in [false, true] {
             clear_background(scene.atmosphere.background());
             set_camera(&camera);
-            crate::lighting::select(steam.lights(), camera.position, &scene.world);
+            crate::lighting::select(steam.lights(), camera.position, &world);
             crate::render_fx::begin_view(&camera, 2., &scene.atmosphere, false);
             scene.draw(camera.position, 2., false, false, &[]);
             if model {
@@ -235,7 +236,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         }
         clear_background(scene.atmosphere.background());
         set_camera(&camera);
-        crate::lighting::select(steam.lights(), camera.position, &scene.world);
+        crate::lighting::select(steam.lights(), camera.position, &world);
         crate::render_fx::begin_view(&camera, 2., &scene.atmosphere, false);
         scene.draw(camera.position, 2., false, false, &[]);
         hud.draw_pickups(&items, &stats, camera.position, 2.);

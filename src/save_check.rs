@@ -228,20 +228,20 @@ fn advance(r: &mut Restored, movement: bool) -> Result<()> {
         r.interactions.advance_school(
             world_dt,
             &r.scene.map,
-            &mut r.scene.world,
+            &mut r.world,
             &mut r.game.player,
         )?;
         r.interactions.update(
             world_dt,
             &r.scene.map,
-            &mut r.scene.world,
+            &mut r.world,
             &r.game.player,
             Vec3::X,
             false,
         )?;
         if movement {
             r.game.player.tick(
-                &r.scene.world,
+                &r.world,
                 crate::movement::Controls {
                     rise: if r.game.player.rope.is_some() { 1. } else { 0. },
                     ..Default::default()
@@ -257,7 +257,7 @@ fn advance(r: &mut Restored, movement: bool) -> Result<()> {
         if let Some(d) = &mut r.interactions.duchess {
             let f = d.update(
                 world_dt,
-                &r.scene.world,
+                &r.world,
                 &mut r.game.player,
                 &mut r.game.stats,
                 &mut r.story,
@@ -272,7 +272,7 @@ fn advance(r: &mut Restored, movement: bool) -> Result<()> {
             };
             let feedback = r.interactions.levels_step(&mut crate::level::Combat {
                 dt: combat_dt,
-                world: &r.scene.world,
+                world: &r.world,
                 player: &mut r.game.player,
                 stats: &mut r.game.stats,
                 story: &mut r.story,
@@ -283,7 +283,7 @@ fn advance(r: &mut Restored, movement: bool) -> Result<()> {
             r.game.stats.damage(feedback.damage);
             r.game.player.velocity += feedback.impulse;
         }
-        r.npcs.update(world_dt, &r.scene.world, r.game.player.eye());
+        r.npcs.update(world_dt, &r.world, r.game.player.eye());
         let events = r
             .interactions
             .triggers(FIXED_DT, r.game.player.feet, r.game.player.feet);
@@ -291,10 +291,10 @@ fn advance(r: &mut Restored, movement: bool) -> Result<()> {
             r.story.trigger(&event);
         }
         if let Some(e) = &mut r.interactions.encounters {
-            e.update(world_dt, &r.scene.world, r.game.player.eye());
+            e.update(world_dt, &r.world, r.game.player.eye());
         }
         if let Some(s) = &mut r.interactions.school2 {
-            s.update(world_dt, &r.scene.world, r.game.player.feet, false);
+            s.update(world_dt, &r.world, r.game.player.feet, false);
         }
         r.alice.power_appearance(&r.game.stats);
         r.alice.world_time(FIXED_DT, world_dt);
@@ -310,7 +310,7 @@ fn advance(r: &mut Restored, movement: bool) -> Result<()> {
                 first_person: !r.game.view.third_person,
             },
             &CombatContext {
-                world: &r.scene.world,
+                world: &r.world,
                 targets: &[],
             },
         );
@@ -334,7 +334,7 @@ fn advance(r: &mut Restored, movement: bool) -> Result<()> {
             &before,
             &r.interactions.loot_sources(),
             r.game.player.feet,
-            &r.scene.world,
+            &r.world,
         );
         r.game.stats.update(FIXED_DT);
     }
@@ -381,11 +381,11 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
             }
         }
         for (name, entry) in visits {
-            let mut scene = Scene::load(assets, name)?;
+            let crate::render::Loaded { scene, mut world } = Scene::load(assets, name)?;
             let mut i = Interactions::load(&scene.map)?;
             i.set_entry(assets, &scene.map, name, entry)?;
-            i.sync(&mut scene.world);
-            let mut p = Player::spawn(&scene.world, interaction::spawn(&scene.map, entry).0)
+            i.sync(&mut world);
+            let mut p = Player::spawn(&world, interaction::spawn(&scene.map, entry).0)
                 .context("Fixture entrance obstructed")?;
             let mut story = Story::load(assets, name);
             let mut hints = Hints::load(assets, &scene.map, name)?;
@@ -440,11 +440,11 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 ] {
                     s.event(event);
                 }
-                i.sync(&mut scene.world);
+                i.sync(&mut world);
                 i.school.as_mut().unwrap().collect_secret(
                     &mut stats,
                     vec3(624., 2581., -240.),
-                    &scene.world,
+                    &world,
                 );
                 stats.update(0.75);
                 // Take a real authored resource pickup; repeated contact must not refill it later.
@@ -454,7 +454,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                         &mut stats,
                         std::slice::from_ref(item),
                         item.origin,
-                        &scene.world,
+                        &world,
                     );
                     if !stats.collected.is_empty() {
                         break;
@@ -468,7 +468,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 i.gym.as_mut().unwrap().used = true;
                 let s = i.school2.as_mut().unwrap();
                 s.event("Old_Gnome_Mushroom");
-                s.skip_scene(&scene.world, &mut p, &mut story)?;
+                s.skip_scene(&world, &mut p, &mut story)?;
                 s.boojums[0].hit(1000.);
                 s.boojums[1].hit(19.);
                 s.guards[0].hurt(13.);
@@ -476,13 +476,13 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 i.completed_dialogue("Gnome3_Dialog");
                 i.activate_enemies();
                 hints
-                    .summon(&mut story, &scene.world, p.feet, 0., false)
+                    .summon(&mut story, &world, p.feet, 0., false)
                     .map_err(anyhow::Error::msg)?;
                 story.tick(FIXED_DT, false);
                 hints.update(0.2, true);
             }
             for _ in 0..48 {
-                i.advance_school(FIXED_DT, &scene.map, &mut scene.world, &mut p)?;
+                i.advance_school(FIXED_DT, &scene.map, &mut world, &mut p)?;
             }
             let mut npcs = Npcs::load(assets, &scene.map, name, entry, false, false)?;
             if let Some(t) = npcs.targets().first() {
@@ -493,7 +493,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     damage: 23.,
                 });
             }
-            npcs.update(0.12, &scene.world, p.eye());
+            npcs.update(0.12, &world, p.eye());
             let level = Level {
                 map: name.into(),
                 entry: entry.map(str::to_owned),
@@ -636,19 +636,19 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 l.interactions = i.snapshot();
             }
             let l = &c.levels[key];
-            let mut scene = Scene::load(assets, &l.map)?;
+            let crate::render::Loaded { scene, mut world } = Scene::load(assets, &l.map)?;
             let (mut i, _, _) = l.restore_logic(assets, &scene.map)?;
             if case.starts_with("movement-") {
                 crate::levels::garden1::stage_gameplay(&mut i);
             }
-            i.sync(&mut scene.world);
+            i.sync(&mut world);
             let mut player = Player::spawn(
-                &scene.world,
+                &world,
                 interaction::spawn(&scene.map, l.entry.as_deref()).0,
             )
             .unwrap();
             if case == "exit" {
-                player = Player::spawn(&scene.world, vec3(-64., -1150., 304.))
+                player = Player::spawn(&world, vec3(-64., -1150., 304.))
                     .context("Exit approach obstructed")?;
             }
             player.grounded = true;
@@ -675,7 +675,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     _ => 750,
                 };
                 for _ in 0..frames {
-                    guard.advance(FIXED_DT, &scene.world, player.eye(), timing);
+                    guard.advance(FIXED_DT, &world, player.eye(), timing);
                 }
                 ensure!(guard.cut, "Cut fixture failed");
                 if case.ends_with("-live") {
@@ -695,7 +695,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
             if let Some(eye) = ladybug_eye {
                 player = Player::new(eye - Vec3::Z * crate::movement::EYE_HEIGHT);
                 ensure!(
-                    scene.world.body_clear(player.feet),
+                    world.body_clear(player.feet),
                     "Ladybug fixture player obstructed"
                 );
             }
@@ -728,8 +728,8 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     }
                 }
                 cinema.state.time = if case == "village-fall" { 2. } else { 3. };
-                cinema.advance(FIXED_DT, &mut player, &scene.world)?;
-                i.sync(&mut scene.world);
+                cinema.advance(FIXED_DT, &mut player, &world)?;
+                i.sync(&mut world);
                 c.levels.get_mut(key).unwrap().story = story.snapshot();
                 c.levels.get_mut(key).unwrap().interactions = i.snapshot();
             }
@@ -741,7 +741,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                         _ => case,
                     },
                     &scene.map,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                 )?;
                 if case.starts_with("pand-skipped-") {
@@ -749,7 +749,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     if case.ends_with("warning") {
                         story.trigger(crate::pandemonium::cinema::WARNING);
                     }
-                    i.skip_cinematic(&scene.map, &mut scene.world, &mut player, &mut story)?;
+                    i.skip_cinematic(&scene.map, &mut world, &mut player, &mut story)?;
                     for id in story.take_completed() {
                         i.completed_dialogue(&id);
                     }
@@ -757,7 +757,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     i.activate_enemies();
                     c.levels.get_mut(key).unwrap().story = story.snapshot();
                 }
-                i.sync(&mut scene.world);
+                i.sync(&mut world);
                 c.levels.get_mut(key).unwrap().interactions = i.snapshot();
                 if matches!(case, "pand-flight" | "pand-warning" | "pand-board") {
                     let mut story = Story::load(assets, "pandemonium");
@@ -771,7 +771,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 }
             }
             let mut recovery = Recovery::default();
-            recovery.observe(&scene.world, &i, &player, 0.3);
+            recovery.observe(&world, &i, &player, 0.3);
             let mut alice = Character::load(assets)?;
             alice.reset(&player, 0.3);
             for _ in 0..90 {
@@ -787,7 +787,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                         first_person: true,
                     },
                     &CombatContext {
-                        world: &scene.world,
+                        world: &world,
                         targets: &[],
                     },
                 );
@@ -804,7 +804,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     first_person: true,
                 },
                 &CombatContext {
-                    world: &scene.world,
+                    world: &world,
                     targets: &[],
                 },
             );
@@ -814,34 +814,34 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 use crate::powerups::Kind;
                 match case {
                     c if c.starts_with("movement-ledge") => {
-                        let (feet, forward) = crate::ledge::probe(&scene.map, &scene.world)
+                        let (feet, forward) = crate::ledge::probe(&scene.map, &world)
                             .context("No saved ledge fixture")?;
                         player = Player::new(feet);
                         player.velocity = -Vec3::Z * 80.;
                         player.tick(
-                            &scene.world,
+                            &world,
                             crate::movement::Controls {
                                 wish: forward,
                                 ..Default::default()
                             },
                         );
                         ensure!(player.ledge.is_some(), "Save fixture failed to catch ledge");
-                        player.tick(&scene.world, crate::movement::Controls::default());
+                        player.tick(&world, crate::movement::Controls::default());
                         if c.ends_with("pullup") {
                             player.tick(
-                                &scene.world,
+                                &world,
                                 crate::movement::Controls {
                                     wish: forward,
                                     ..Default::default()
                                 },
                             );
                             for _ in 0..130 {
-                                player.tick(&scene.world, crate::movement::Controls::default());
+                                player.tick(&world, crate::movement::Controls::default());
                             }
                         } else if c.ends_with("shimmy") {
                             for _ in 0..30 {
                                 player.tick(
-                                    &scene.world,
+                                    &world,
                                     crate::movement::Controls {
                                         wish: vec2(-forward.y, forward.x),
                                         ..Default::default()
@@ -849,7 +849,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                                 );
                             }
                         }
-                        player.validate_world(&scene.world)?;
+                        player.validate_world(&world)?;
                     }
                     "item-rage" => {
                         game_stats.powerup(Kind::Rage);
@@ -885,7 +885,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                             &before,
                             &after,
                             player.feet,
-                            &scene.world,
+                            &world,
                         );
                         ensure!(
                             game_stats.loot[key].drops.len() == 1,
@@ -900,7 +900,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                                 &after,
                                 &after,
                                 drop,
-                                &scene.world,
+                                &world,
                             );
                         } else if case == "item-drop-expired" {
                             game_stats.loot.get_mut(key).unwrap().update(80.);
@@ -925,7 +925,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                                 ..Default::default()
                             },
                             &CombatContext {
-                                world: &scene.world,
+                                world: &world,
                                 targets: &[],
                             },
                         );
@@ -939,7 +939,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     "movement-rope" => {
                         player = Player::new(vec3(-2296., 1224., 488.));
                         player.tick(
-                            &scene.world,
+                            &world,
                             crate::movement::Controls {
                                 use_pressed: true,
                                 ..Default::default()
@@ -949,13 +949,13 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     }
                     "movement-breath" => {
                         player = Player::new(
-                            crate::traversal::water_probe(&scene.world, player.feet)
+                            crate::traversal::water_probe(&world, player.feet)
                                 .context("No quiet submerged fixture")?,
                         );
                         game_stats.turtle_air = true;
                         player.breath.shell = true;
                         for _ in 0..2376 {
-                            player.tick(&scene.world, crate::movement::Controls::default());
+                            player.tick(&world, crate::movement::Controls::default());
                         }
                         ensure!(
                             player.breath.remaining() < 0.3 && player.breath.remaining() > 0.,
@@ -965,10 +965,10 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     _ => player.knockback(vec3(0., 250., 80.)),
                 }
                 if case != "movement-breath" {
-                    player.tick(&scene.world, crate::movement::Controls::default());
+                    player.tick(&world, crate::movement::Controls::default());
                 }
                 ensure!(
-                    scene.world.body_clear(player.feet),
+                    world.body_clear(player.feet),
                     "Movement save fixture obstructed"
                 );
                 alice.reset(&player, 0.);
@@ -978,7 +978,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 i.duchess.as_mut().unwrap().fixture(
                     case,
                     &scene.map,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                     &mut game_stats,
                     &mut story,
@@ -992,11 +992,11 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 i.school.as_mut().unwrap().return_fixture(
                     case,
                     &scene.map,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                     &mut game_stats,
                 )?;
-                i.sync(&mut scene.world);
+                i.sync(&mut world);
                 c.levels.get_mut(key).unwrap().interactions = i.snapshot();
                 alice.reset(&player, 0.);
             }
@@ -1018,7 +1018,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                         false,
                         input(None),
                         &CombatContext {
-                            world: &scene.world,
+                            world: &world,
                             targets: &[],
                         },
                     );
@@ -1030,7 +1030,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     false,
                     input(Some(true)),
                     &CombatContext {
-                        world: &scene.world,
+                        world: &world,
                         targets: &[],
                     },
                 );
@@ -1046,7 +1046,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                         false,
                         input(None),
                         &CombatContext {
-                            world: &scene.world,
+                            world: &world,
                             targets: &[],
                         },
                     );
@@ -1086,7 +1086,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 } else {
                     Beat::Spice
                 };
-                let (mut next_i, mut world, mut p, mut story) =
+                let (mut next_i, mut next_world, mut p, mut story) =
                     crate::school2::cinema_check::setup(assets, &scene.map, beat)?;
                 let seconds = match case {
                     "school2-scene-mushroom-handout" => 17.,
@@ -1107,7 +1107,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     crate::school2::cinema_check::tick(
                         &mut next_i,
                         &scene.map,
-                        &mut world,
+                        &mut next_world,
                         &mut p,
                         &mut story,
                         FIXED_DT,
@@ -1115,7 +1115,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     )?;
                 }
                 if case.ends_with("skipped") || case.ends_with("potion-collected") {
-                    next_i.skip_cinematic(&scene.map, &mut world, &mut p, &mut story)?;
+                    next_i.skip_cinematic(&scene.map, &mut next_world, &mut p, &mut story)?;
                 }
                 if case.ends_with("potion-collected") {
                     ensure!(
@@ -1129,7 +1129,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     );
                 }
                 i = next_i;
-                scene.world = world;
+                world = next_world;
                 player = p;
                 let level = c.levels.get_mut(key).unwrap();
                 level.interactions = i.snapshot();
@@ -1146,8 +1146,8 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 if case == "school-walking-pupil" {
                     i = Interactions::load(&scene.map)?;
                     i.set_entry(assets, &scene.map, "skool1", None)?;
-                    i.sync(&mut scene.world);
-                    player = Player::spawn(&scene.world, scene.map.spawn().0)
+                    i.sync(&mut world);
+                    player = Player::spawn(&world, scene.map.spawn().0)
                         .context("Pupil fixture spawn")?;
                 } else {
                     let name = if case == "school-library-shelves" {
@@ -1161,7 +1161,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     } else {
                         crate::school::cinema::SHELF
                     };
-                    (i, scene.world, player, story) =
+                    (i, world, player, story) =
                         crate::school::cinema_check::setup(assets, &scene.map, name)?;
                     let seconds = match case {
                         "school-library-shelves" => 8.,
@@ -1182,7 +1182,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                         crate::school::cinema_check::tick(
                             &mut i,
                             &scene.map,
-                            &mut scene.world,
+                            &mut world,
                             &mut player,
                             &mut story,
                             FIXED_DT,
@@ -1190,11 +1190,11 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     }
                 }
                 if case == "school-theatre-skipped" || case == "school-library-book-skip" {
-                    i.skip_cinematic(&scene.map, &mut scene.world, &mut player, &mut story)?;
+                    i.skip_cinematic(&scene.map, &mut world, &mut player, &mut story)?;
                     crate::school::cinema_check::tick(
                         &mut i,
                         &scene.map,
-                        &mut scene.world,
+                        &mut world,
                         &mut player,
                         &mut story,
                         FIXED_DT,
@@ -1202,7 +1202,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 }
                 let mut npcs = Npcs::load(assets, &scene.map, "skool1", None, false, false)?;
                 for _ in 0..840 {
-                    npcs.update(FIXED_DT, &scene.world, player.eye());
+                    npcs.update(FIXED_DT, &world, player.eye());
                 }
                 let level = c.levels.get_mut(key).unwrap();
                 level.interactions = i.snapshot();
@@ -1218,14 +1218,14 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     "beyond-solved" => Beat::Solved,
                     _ => Beat::Arches,
                 };
-                (i, scene.world, player) =
+                (i, world, player) =
                     crate::beyond::cinema_check::setup(assets, &scene.map, beat)?;
                 for _ in 0..(beat.duration() * 60.) as usize {
-                    i.advance_school(FIXED_DT, &scene.map, &mut scene.world, &mut player)?;
+                    i.advance_school(FIXED_DT, &scene.map, &mut world, &mut player)?;
                     i.update(
                         FIXED_DT,
                         &scene.map,
-                        &mut scene.world,
+                        &mut world,
                         &player,
                         Vec3::X,
                         false,
@@ -1241,14 +1241,14 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     .find(|p| p.id == "fortress2:37")
                     .context("Missing Rage save item")?;
                 player =
-                    Player::spawn(&scene.world, item.origin).context("Rage save fixture spawn")?;
+                    Player::spawn(&world, item.origin).context("Rage save fixture spawn")?;
                 game_stats.powers.clear_effects();
                 game_stats.invisible = 0.;
                 inventory::collect(
                     &mut game_stats,
                     std::slice::from_ref(item),
                     player.feet,
-                    &scene.world,
+                    &world,
                 );
                 ensure!(
                     game_stats.collected.contains("fortress2:37"),
@@ -1267,11 +1267,11 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     _ => 90,
                 };
                 for _ in 0..frames {
-                    i.advance_school(FIXED_DT, &scene.map, &mut scene.world, &mut player)?;
+                    i.advance_school(FIXED_DT, &scene.map, &mut world, &mut player)?;
                     i.update(
                         FIXED_DT,
                         &scene.map,
-                        &mut scene.world,
+                        &mut world,
                         &player,
                         Vec3::X,
                         false,
@@ -1281,7 +1281,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     }
                 }
                 if case == "fortress-rage-skipped" {
-                    i.skip_cinematic(&scene.map, &mut scene.world, &mut player, &mut story)?;
+                    i.skip_cinematic(&scene.map, &mut world, &mut player, &mut story)?;
                 }
                 let level = c.levels.get_mut(key).unwrap();
                 level.interactions = i.snapshot();
@@ -1298,7 +1298,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     case,
                     assets,
                     &scene.map,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                 )?;
                 let level = c.levels.get_mut(key).unwrap();
@@ -1326,7 +1326,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     assets,
                     &scene.map,
                     &mut i,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                 )?;
                 let level = c.levels.get_mut(key).unwrap();
@@ -1339,16 +1339,16 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     false,
                 )?;
                 for _ in 0..60 {
-                    npcs.update(FIXED_DT, &scene.world, player.eye());
+                    npcs.update(FIXED_DT, &world, player.eye());
                 }
                 if !story.busy() {
                     let talk = i
-                        .conversation(&scene.world, player.eye(), aim, &npcs, &story)
+                        .conversation(&world, player.eye(), aim, &npcs, &story)
                         .context("Native friendly fixture has no actual Talk prompt")?;
                     if level.map == "gvillage" {
                         npcs.scene_hidden(&[talk.actor()]);
                         ensure!(
-                            i.conversation(&scene.world, player.eye(), aim, &npcs, &story)
+                            i.conversation(&world, player.eye(), aim, &npcs, &story)
                                 .is_none(),
                             "Hidden village actor retained Talk prompt"
                         );
@@ -1367,7 +1367,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     assets,
                     &scene.map,
                     &mut i,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                 )?;
                 let level = c.levels.get_mut(key).unwrap();
@@ -1397,7 +1397,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     assets,
                     &scene.map,
                     &mut i,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                 )?;
                 let level = c.levels.get_mut(key).unwrap();
@@ -1412,7 +1412,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     assets,
                     &scene.map,
                     &mut i,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                 )?;
                 let level = c.levels.get_mut(key).unwrap();
@@ -1436,7 +1436,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     assets,
                     &scene.map,
                     &mut i,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                     &mut game_stats,
                 )?;
@@ -1452,7 +1452,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     assets,
                     &scene.map,
                     &mut i,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                     &mut game_stats,
                 )?;
@@ -1463,7 +1463,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 alice.reset(&player, player.script_facing);
             }
             if case.starts_with("garden3-") {
-                let story = crate::levels::garden3::stage(case, assets, &scene.map, &mut i, &mut scene.world, &mut player, &mut game_stats)?;
+                let story = crate::levels::garden3::stage(case, assets, &scene.map, &mut i, &mut world, &mut player, &mut game_stats)?;
                 let level = c.levels.get_mut(key).unwrap();
                 level.interactions = i.snapshot();
                 level.story = story.snapshot();
@@ -1471,19 +1471,19 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 alice.reset(&player, player.script_facing);
             }
             if case.starts_with("wchess1-") {
-                let story = crate::levels::wchess1::stage(case, assets, &scene.map, &mut i, &mut scene.world, &mut player, &mut game_stats)?;
+                let story = crate::levels::wchess1::stage(case, assets, &scene.map, &mut i, &mut world, &mut player, &mut game_stats)?;
                 let level = c.levels.get_mut(key).unwrap();
                 level.interactions = i.snapshot();level.story = story.snapshot();
                 friendly_aim = Some(Vec3::X);alice.reset(&player, player.script_facing);
             }
             if case.starts_with("wchess2-") {
-                let story = crate::levels::wchess2::stage(case, assets, &scene.map, &mut i, &mut scene.world, &mut player, &mut game_stats)?;
+                let story = crate::levels::wchess2::stage(case, assets, &scene.map, &mut i, &mut world, &mut player, &mut game_stats)?;
                 let level = c.levels.get_mut(key).unwrap();
                 level.interactions = i.snapshot();level.story = story.snapshot();
                 friendly_aim = Some(Vec3::X);alice.reset(&player, player.script_facing);
             }
             if case.starts_with("facade-") {
-                let story = crate::levels::facade::stage_native(case, assets, &scene.map, &mut i, &mut scene.world, &mut player)?;
+                let story = crate::levels::facade::stage_native(case, assets, &scene.map, &mut i, &mut world, &mut player)?;
                 let level = c.levels.get_mut(key).unwrap();
                 level.interactions = i.snapshot();
                 level.story = story.snapshot();
@@ -1491,7 +1491,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                 alice.reset(&player, player.script_facing);
             }
             if case.starts_with("garden4-") {
-                let story = crate::levels::garden4::stage(case, assets, &scene.map, &mut i, &mut scene.world, &mut player, &mut game_stats)?;
+                let story = crate::levels::garden4::stage(case, assets, &scene.map, &mut i, &mut world, &mut player, &mut game_stats)?;
                 let level = c.levels.get_mut(key).unwrap();
                 level.interactions = i.snapshot();
                 level.story = story.snapshot();
@@ -1505,7 +1505,7 @@ pub async fn check(assets: &mut Assets, write: bool) -> Result<()> {
                     assets,
                     &scene.map,
                     &mut i,
-                    &mut scene.world,
+                    &mut world,
                     &mut player,
                 )?;
                 let level = c.levels.get_mut(key).unwrap();
@@ -1949,7 +1949,7 @@ fn legacy_saves(assets: &mut Assets, root: &Path, fingerprint: &str) -> Result<(
             // The leaf-transport upgrade deliberately starts pre-transport saves
             // at the playable entrance, retaining inventory and encounter history.
             let entrance = interaction::spawn(&restored.scene.map, old.level()?.entry.as_deref()).0;
-            let expected = Player::spawn(&restored.scene.world, entrance)
+            let expected = Player::spawn(&restored.world, entrance)
                 .context("Legacy Pool of Tears entrance obstructed")?;
             same(
                 &expected,
@@ -2029,7 +2029,7 @@ fn behavior(case: &str, r: &mut Restored, assets: &mut Assets) -> Result<()> {
         ensure!(
             r.interactions.skip_cinematic(
                 &r.scene.map,
-                &mut r.scene.world,
+                &mut r.world,
                 &mut r.game.player,
                 &mut r.story
             )?,
@@ -2052,7 +2052,7 @@ fn behavior(case: &str, r: &mut Restored, assets: &mut Assets) -> Result<()> {
                 && r.game.player.script_motion == 0
                 && r.game.player.velocity == Vec3::ZERO
                 && r.game.player.grounded
-                && r.scene.world.body_clear(r.game.player.feet),
+                && r.world.body_clear(r.game.player.feet),
             "Restored camera unsafe handoff"
         );
         return Ok(());
@@ -2096,7 +2096,7 @@ fn behavior(case: &str, r: &mut Restored, assets: &mut Assets) -> Result<()> {
                     &before,
                     &before,
                     r.game.player.feet,
-                    &r.scene.world,
+                    &r.world,
                 );
                 ensure!(
                     r.game.stats.loot[&r.game.current].drops.is_empty(),
@@ -2144,7 +2144,7 @@ fn behavior(case: &str, r: &mut Restored, assets: &mut Assets) -> Result<()> {
                 && r.game.stats.copies(6) == 2,
             "Return save altered weapon selection, copies or resources"
         );
-        let checkpoint = Player::spawn(&r.scene.world, vec3(692., 4100., 1072.));
+        let checkpoint = Player::spawn(&r.world, vec3(692., 4100., 1072.));
         ensure!(
             checkpoint.is_some(),
             "Observatory retry checkpoint obstructed"
@@ -2188,14 +2188,14 @@ fn behavior(case: &str, r: &mut Restored, assets: &mut Assets) -> Result<()> {
                     &mut r.game.stats,
                     std::slice::from_ref(&p),
                     p.origin,
-                    &r.scene.world
+                    &r.world
                 )
                 .is_empty(),
                 "Collected pickup reappeared"
             );
         }
         let s = r.interactions.school.as_mut().unwrap();
-        s.collect_secret(&mut r.game.stats, vec3(624., 2581., -240.), &r.scene.world);
+        s.collect_secret(&mut r.game.stats, vec3(624., 2581., -240.), &r.world);
         same(&before, &r.game.stats, "one-shot pickups and secret reward")?;
         ensure!(
             !s.trigger_enabled("", "", Some("skool2")),
@@ -2240,7 +2240,7 @@ fn behavior(case: &str, r: &mut Restored, assets: &mut Assets) -> Result<()> {
                 for b in &mut s.boojums[..3] {
                     b.hit(1000.);
                 }
-                s.update(FIXED_DT, &r.scene.world, r.game.player.feet, false);
+                s.update(FIXED_DT, &r.world, r.game.player.feet, false);
                 ensure!(
                     s.quest.stage == Stage::Laboratory,
                     "Restored battle cannot finish"

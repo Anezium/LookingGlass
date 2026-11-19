@@ -221,7 +221,7 @@ pub fn check(assets: &mut Assets, map: &Bsp) -> Result<()> {
 }
 
 pub async fn render(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "potears1")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(assets, "potears1")?;
     let pool = Pool::load(assets, &scene.map)?;
     let mut art = Art::load(assets, &pool)?;
     for (name, mut seconds) in [
@@ -311,7 +311,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
 pub async fn snapshot_handoff_check(assets: &mut Assets) -> Result<()> {
     use crate::render_snapshot::{RenderVisit, HandoffReturn, HandoffCompletion,
         handoff_render_begin, handoff_render_end};
-    let scene = crate::render::Scene::load(assets, "potears1")?;
+    let crate::render::Loaded { scene, world: _world } = crate::render::Scene::load(assets, "potears1")?;
     let mut control_character = crate::character::Character::load(assets)?;
     let mut extracted_character = crate::character::Character::load(assets)?;
     for skip_at in [None, Some(0usize), Some(120usize)] {

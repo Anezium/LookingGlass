@@ -420,7 +420,7 @@ fn walk_one(a: &mut Assets, skip: bool, difficulty: crate::powerups::Difficulty)
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
         std::fs::create_dir_all("private/centipede1-work/captures")?;
-        let mut scene = crate::render::Scene::load(a, "centipede1")?;
+        let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(a, "centipede1")?;
         let mut art = art::Art::load(a)?;
         let ui = crate::ui::Ui::load(a)?;
         let mut npcs = crate::npc::Npcs::load(a, &scene.map, "centipede1", None, false, false)?;
@@ -448,12 +448,12 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 let mut stats = Stats::for_level("centipede1", None);
                 let mut story = Story::load(a, "centipede1");
                 o.saved.phase = Phase::Reveal;
-                o.commit(&scene.world, &mut player);
+                o.commit(&world, &mut player);
                 for _ in 0..(time * 120.) as usize {
-                    o.advance(1. / 120., &scene.map, &mut scene.world, &mut player, &[])?;
+                    o.advance(1. / 120., &scene.map, &mut world, &mut player, &[])?;
                     o.combat(&mut Combat {
                         dt: 1. / 120.,
-                        world: &scene.world,
+                        world: &world,
                         player: &mut player,
                         stats: &mut stats,
                         story: &mut story,
@@ -481,7 +481,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                     vec3(1100., -700., -550.),
                 )
             } else {
-                o.camera(&scene.world).unwrap_or_else(|| {
+                o.camera(&world).unwrap_or_else(|| {
                     crate::cinematic::Camera::look(
                         vec3(-550., 5200., -420.),
                         vec3(-180., 5500., -620.),
@@ -490,9 +490,9 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             };
             let mut steam = crate::particles::Steam::load(a, &scene.map)?;
             for _ in 0..120 {
-                steam.update(1. / 120., camera.eye, &scene.world);
+                steam.update(1. / 120., camera.eye, &world);
                 if phase == Phase::Explore {
-                    npcs.update(1. / 120., &scene.world, camera.eye);
+                    npcs.update(1. / 120., &world, camera.eye);
                 }
             }
             for frame in 0..3 {
@@ -507,7 +507,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                     ..Default::default()
                 };
                 set_camera(&cam);
-                crate::lighting::select(steam.lights(), camera.eye, &scene.world);
+                crate::lighting::select(steam.lights(), camera.eye, &world);
                 crate::render_fx::begin_view(&cam, time as f32, &scene.atmosphere, false);
                 scene.draw(camera.eye, time as f32, false, false, &o.transforms());
                 art.draw(&o, &scene.atmosphere, camera.eye, false);

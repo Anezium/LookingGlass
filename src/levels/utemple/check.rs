@@ -266,7 +266,7 @@ pub fn stage(
     Ok(Story::load(a, "utemple"))
 }
 pub(super) async fn render(a: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(a, "utemple")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(a, "utemple")?;
     let mut i = Interactions::load(&scene.map)?;
     i.set_entry(a, &scene.map, "utemple", None)?;
     let mut art = art::Art::load(a, owner(&mut i)?)?;
@@ -284,18 +284,18 @@ pub(super) async fn render(a: &mut Assets) -> Result<()> {
             a,
             &scene.map,
             &mut i,
-            &mut scene.world,
+            &mut world,
             &mut p,
         )?;
         let t = owner(&mut i)?;
         let guide = t.turtle_pose(t.saved.clock).translation;
-        let camera = t.camera(&scene.world).unwrap_or(crate::cinematic::Camera {
+        let camera = t.camera(&world).unwrap_or(crate::cinematic::Camera {
             eye: guide + vec3(160., 180., 60.),
             target: guide,
             up: Vec3::Z,
         });
         scene.atmosphere.liquid =
-            crate::water::Liquid::from_contents(scene.world.liquid_at(camera.eye)).tint();
+            crate::water::Liquid::from_contents(world.liquid_at(camera.eye)).tint();
         for frame in 0..3 {
             clear_background(BLACK);
             set_camera(&Camera3D {

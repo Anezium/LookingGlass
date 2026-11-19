@@ -37,13 +37,13 @@ pub async fn check_cast(assets: &mut Assets) -> Result<()> {
         "key",
         "return",
     ] {
-        let mut scene = Scene::load(assets, "pandemonium")?;
+        let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, "pandemonium")?;
         let mut i = Interactions::load(&scene.map)?;
         i.set_entry(assets, &scene.map, "pandemonium", None)?;
-        i.sync(&mut scene.world);
+        i.sync(&mut world);
         let mut p = Player::new(vec3(-3498.4, 2082.8, -32.7));
         if phase.starts_with("rope") {
-            i.update(1. / 120., &scene.map, &mut scene.world, &p, Vec3::Y, true)?;
+            i.update(1. / 120., &scene.map, &mut world, &p, Vec3::Y, true)?;
             ensure!(
                 i.pandemonium.as_ref().unwrap().controlled(),
                 "Rope render fixture failed to grab"
@@ -61,7 +61,7 @@ pub async fn check_cast(assets: &mut Assets) -> Result<()> {
                     }
                 ),
                 &scene.map,
-                &mut scene.world,
+                &mut world,
                 &mut p,
             )?;
         }
@@ -95,12 +95,12 @@ pub async fn check_cast(assets: &mut Assets) -> Result<()> {
         let start_height = p.feet.z;
         let mut high = start_height;
         for frame in 0..frames {
-            i.advance_school(1. / 60., &scene.map, &mut scene.world, &mut p)?;
-            i.update(1. / 60., &scene.map, &mut scene.world, &p, Vec3::Y, false)?;
+            i.advance_school(1. / 60., &scene.map, &mut world, &mut p)?;
+            i.update(1. / 60., &scene.map, &mut world, &p, Vec3::Y, false)?;
             if phase.starts_with("rope") {
                 i.pandemonium.as_mut().unwrap().control(
                     1. / 60.,
-                    &scene.world,
+                    &world,
                     &mut p,
                     Controls {
                         wish: if phase == "rope-climb" {
@@ -136,14 +136,14 @@ pub async fn check_cast(assets: &mut Assets) -> Result<()> {
                     first_person: false,
                 },
                 &crate::combat::Context {
-                    world: &scene.world,
+                    world: &world,
                     targets: &[],
                 },
             );
             let cinematic_camera = i.pandemonium.as_ref().unwrap().camera().map(|camera| {
                 if i.pandemonium.as_ref().unwrap().rail_camera_active() {
                     rail_camera.rail(
-                        &scene.world,
+                        &world,
                         camera,
                         &i.pandemonium.as_ref().unwrap().rail_camera_ahead(),
                         1. / 60.,
@@ -159,7 +159,7 @@ pub async fn check_cast(assets: &mut Assets) -> Result<()> {
                 match phase {
                     "rope" | "rope-climb" => {
                         let (e, t, _) = crate::character::follow_camera(
-                            &scene.world,
+                            &world,
                             p.feet,
                             vec3(1., 0., -0.2).normalize(),
                         );
@@ -167,7 +167,7 @@ pub async fn check_cast(assets: &mut Assets) -> Result<()> {
                     }
                     "cart" => {
                         let (e, t, _) = crate::character::follow_camera(
-                            &scene.world,
+                            &world,
                             p.feet,
                             vec3(0., -1., -0.2).normalize(),
                         );
@@ -190,6 +190,7 @@ pub async fn check_cast(assets: &mut Assets) -> Result<()> {
             });
             let transforms = i.transforms();
             scene.update_ropes(
+                &world,
                 1. / 60.,
                 i.pandemonium.as_ref().and_then(|p| p.rope_hand()),
                 &transforms,
@@ -257,10 +258,10 @@ pub async fn check_machinery(assets: &mut Assets) -> Result<()> {
         ("legs", vec3(-3860., 2000., 210.), vec3(-4100., 2000., 135.)),
         ("cams", vec3(-4420., -200., 560.), vec3(-4504., -382., 560.)),
     ] {
-        let mut scene = Scene::load(assets, "pandemonium")?;
+        let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, "pandemonium")?;
         let mut i = Interactions::load(&scene.map)?;
         i.set_entry(assets, &scene.map, "pandemonium", None)?;
-        i.sync(&mut scene.world);
+        i.sync(&mut world);
         // The rail crosses in front of the cams. Find a clear inspection view
         // of the entire wheel, rather than capturing its arm behind that beam.
         let eye = if name == "cams" {
@@ -269,8 +270,7 @@ pub async fn check_machinery(assets: &mut Assets) -> Result<()> {
                 for y in (160..=400).step_by(40) {
                     for z in (-160..=160).step_by(40) {
                         let candidate = target + vec3(x as f32, y as f32, z as f32);
-                        if !scene
-                            .world
+                        if !world
                             .body_clear(candidate - crate::collision::PLAYER_CENTER)
                         {
                             continue;
@@ -285,8 +285,7 @@ pub async fn check_machinery(assets: &mut Assets) -> Result<()> {
                         .iter()
                         .all(|offset| {
                             let ray =
-                                scene
-                                    .world
+                                world
                                     .sweep(candidate, target + *offset, Vec3::splat(2.));
                             !ray.start_solid && ray.fraction >= 1.
                         });
@@ -304,18 +303,17 @@ pub async fn check_machinery(assets: &mut Assets) -> Result<()> {
             eye
         };
         ensure!(
-            scene
-                .world
+            world
                 .body_clear(eye - crate::collision::PLAYER_CENTER),
             "Machinery inspection camera {name} is inside geometry"
         );
         let mut player = Player::new(vec3(-3498.4, 2082.8, -32.7));
         let mut steam = crate::particles::Steam::load(assets, &scene.map)?;
         for frame in 0..420 {
-            i.advance_school(1. / 60., &scene.map, &mut scene.world, &mut player)?;
+            i.advance_school(1. / 60., &scene.map, &mut world, &mut player)?;
             steam.sync(&i.event_world);
             i.pandemonium.as_ref().unwrap().gate_particles(&mut steam);
-            steam.update(1. / 60., eye, &scene.world);
+            steam.update(1. / 60., eye, &world);
             clear_background(BLACK);
             set_camera(&Camera3D {
                 position: eye,

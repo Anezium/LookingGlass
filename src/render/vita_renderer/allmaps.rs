@@ -6,18 +6,19 @@ pub(crate) async fn entry(mut assets: crate::assets::Assets, options: crate::Opt
     macroquad::rand::srand(0x416c696365);
     let loaded = crate::campaign::load_visit(&mut assets, &options.map, options.entry.as_deref(), None, options.difficulty, false)?;
     let crate::campaign::Loaded { map, world, mut interactions, .. } = loaded;
-    let mut scene = Scene::from_parts(&mut assets, &options.map, map, world)?;
-    interactions.sync(&mut scene.world);
+    let crate::render::Loaded { mut scene, mut world } =
+        Scene::from_parts(&mut assets, &options.map, map, world)?;
+    interactions.sync(&mut world);
     let (spawn, yaw) = crate::interaction::spawn(&scene.map, options.entry.as_deref());
-    let player = crate::movement::Player::spawn(&scene.world, spawn);
+    let player = crate::movement::Player::spawn(&world, spawn);
     let direction = vec3(yaw.cos(), yaw.sin(), 0.);
     let (eye, target, _) = if let Some(player) = &player {
-        crate::camera::Follow::default().update(&scene.world, player.feet, direction, 132., 1. / 60.)
+        crate::camera::Follow::default().update(&world, player.feet, direction, 132., 1. / 60.)
     } else { (spawn, spawn + direction, false) };
     let camera = Camera3D { position: eye, target, up: Vec3::Z, fovy: 75_f32.to_radians(), z_near: 2., z_far: 30000., ..Default::default() };
     record_view(&camera);
     let mut transforms = interactions.transforms();
-    if let Some(player) = &player { transforms.extend(scene.world.traversal.transforms(player)); }
+    if let Some(player) = &player { transforms.extend(world.traversal.transforms(player)); }
     let specs = crate::texture::read_materials(&mut assets)?;
     let portal_surfaces = scene.map.surfaces.iter().filter(|s| specs.get(&scene.map.shaders[s.shader].name.to_ascii_lowercase()).is_some_and(|s| s.camera_portal)).count();
     let sky_surfaces = scene.map.surfaces.iter().filter(|s| specs.get(&scene.map.shaders[s.shader].name.to_ascii_lowercase()).is_some_and(|s| s.sky)).count();
@@ -29,7 +30,7 @@ pub(crate) async fn entry(mut assets: crate::assets::Assets, options: crate::Opt
         clear_background(scene.atmosphere.background());
         prepare_3d(scene.atmosphere.background());
         set_3d_camera(&camera);
-        scene.prepare_camera_portals(&camera, time, false, &transforms);
+        scene.prepare_camera_portals(&world, &camera, time, false, &transforms);
         set_3d_camera(&camera);
         scene.begin_fx_view(&camera, time, false, true);
         scene.draw(eye, time, false, false, &transforms);
@@ -45,7 +46,7 @@ pub(crate) async fn entry(mut assets: crate::assets::Assets, options: crate::Opt
             let result = serde_json::json!({"map":options.map,"entry":options.entry,"renderer":if scene.retained_active(){"vita"}else{"legacy"},
                 "seed":0x416c696365u64,"material_time":time,"frames":frames,"scope":"world + ambient props at initial chapter gameplay spawn; no cast/HUD/cinematic replay",
                 "spawn_eye":spawn.to_array(),"player_feet":player.as_ref().map(|p|p.feet.to_array()),"yaw":yaw,"transforms":transforms,
-                "portal_candidate_surfaces":portal_surfaces,"authored_sky_surfaces":sky_surfaces,"rope_strands":scene.world.traversal.ropes.len(),
+                "portal_candidate_surfaces":portal_surfaces,"authored_sky_surfaces":sky_surfaces,"rope_strands":world.traversal.ropes.len(),
                 "legacy_portals_loaded":scene.camera_portals.len(),"missing_images":scene.missing,"stats":scene.stats,"report":report()});
             std::fs::create_dir_all("private")?;
             std::fs::write("private/allmaps-entry.json", serde_json::to_vec_pretty(&result)?)?;

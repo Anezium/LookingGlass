@@ -738,7 +738,7 @@ pub fn check(assets: &mut Assets) -> Result<()> {
 }
 /// Explicitly staged snapshots; combat and trigger checks run separately.
 pub async fn render_check(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "potears1")?;
+    let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, "potears1")?;
     let mut logic = crate::interaction::Interactions::load(&scene.map)?;
     logic.set_entry(assets, &scene.map, "potears1", None)?;
     let timing = Timing::load(assets)?;
@@ -767,7 +767,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
         b.notarget = stage == "patrol";
         let mut reached = false;
         for step in 0..2400 {
-            b.advance(STEP, &scene.world, eye, timing);
+            b.advance(STEP, &world, eye, timing);
             reached = match stage {
                 "patrol" => step > 24,
                 "attack" => b.state == State::Attack && b.time > timing.release * 0.5,
@@ -790,8 +790,8 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
             .find_map(|n| {
                 let angle = n as f32 * std::f32::consts::TAU / 24.;
                 let p = center + vec3(angle.cos() * 280., angle.sin() * 280., 80.);
-                (!scene.world.sweep(p, p, Vec3::splat(4.)).start_solid
-                    && visible(&scene.world, p, center))
+                (!world.sweep(p, p, Vec3::splat(4.)).start_solid
+                    && visible(&world, p, center))
                 .then_some(p)
             })
             .context("Clear Ladybug fixture camera")?;

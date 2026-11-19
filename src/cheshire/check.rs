@@ -303,7 +303,7 @@ pub fn behavior(r: &mut crate::save::Restored) -> Result<()> {
     r.hints.sync(&r.interactions);
     for _ in 0..2 {
         r.hints
-            .summon(&mut r.story, &r.scene.world, r.game.player.feet, 0., true)
+            .summon(&mut r.story, &r.world, r.game.player.feet, 0., true)
             .map_err(anyhow::Error::msg)?;
         for _ in 0..1200 {
             step(&mut r.hints, &mut r.story, 1. / 60., true);
@@ -321,7 +321,7 @@ pub fn behavior(r: &mut crate::save::Restored) -> Result<()> {
 }
 
 pub async fn render(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "potears1")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "potears1")?;
     let mut i = Interactions::load(&scene.map)?;
     let mut player = Player::new(Vec3::ZERO);
     let mut art = Art::load(assets)?;
@@ -333,7 +333,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             assets,
             &scene.map,
             &mut i,
-            &mut scene.world,
+            &mut world,
             &mut player,
         )?;
         let camera = player.eye();

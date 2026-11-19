@@ -562,7 +562,8 @@ fn nav(r: &mut crate::route::Route, p: Vec3) -> Result<()> {
 }
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut renderer = crate::render::Scene::load(a, "keep")?;
+        let crate::render::Loaded { scene: mut renderer, world: scene_world } =
+            crate::render::Scene::load(a, "keep")?;
         let mut art = art::Art::load(a)?;
         for (name, kind, time, line) in [
             ("arrival", Kind::Arrival, 7., 0),
@@ -647,7 +648,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             renderer.set_reflection(extra, hide);
             for frame in 0..3 {
                 let transforms = k.transforms();
-                renderer.prepare_camera_portals(&camera, time, false, &transforms);
+                renderer.prepare_camera_portals(&scene_world, &camera, time, false, &transforms);
                 clear_background(BLACK);
                 set_camera(&camera);
                 crate::render_fx::begin_view(&camera, time, &renderer.atmosphere, false);
@@ -701,7 +702,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             );
             let transforms = k.transforms();
             for frame in 0..3 {
-                renderer.prepare_camera_portals(&camera, 0., false, &transforms);
+                renderer.prepare_camera_portals(&scene_world, &camera, 0., false, &transforms);
                 clear_background(BLACK);
                 set_camera(&camera);
                 crate::render_fx::begin_view(&camera, 0., &renderer.atmosphere, false);

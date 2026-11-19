@@ -379,7 +379,7 @@ pub fn stage(
 }
 
 pub async fn render(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "skool2")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "skool2")?;
     let mut npcs = crate::npc::Npcs::load(assets, &scene.map, "skool2", None, false, false)?;
     npcs.check_school2_ownership()?;
     let mut enemies = crate::encounters::Art::load(assets)?;
@@ -397,7 +397,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             &format!("school2-enemy-{case}"),
             assets,
             &scene.map,
-            &mut scene.world,
+            &mut world,
             &mut p,
         )?;
         if case.ends_with("dead") {
@@ -405,7 +405,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
                 i.encounters
                     .as_mut()
                     .unwrap()
-                    .update(1. / 120., &scene.world, p.eye());
+                    .update(1. / 120., &world, p.eye());
             }
         }
         let school = i.school2.as_ref().unwrap();

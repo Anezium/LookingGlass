@@ -144,7 +144,7 @@ pub async fn render(a: &mut Assets) -> Result<()> {
         .context("Set LOOKING_GLASS_MAZE_CAPTURE to an ordinary route checkpoint")?;
     let cp: crate::route::Checkpoint = serde_json::from_slice(&std::fs::read(path)?)?;
     let mut r = crate::route::Route::resume(a, &cp)?;
-    let mut scene = crate::render::Scene::load(a, "hedge1")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "hedge1")?;
     r.interactions.presentation.apply(&mut scene);
     let target = std::env::var("LOOKING_GLASS_MAZE_LOOK")
         .ok()
@@ -163,7 +163,7 @@ pub async fn render(a: &mut Assets) -> Result<()> {
         };
         set_camera(&view);
         let poses = r.interactions.transforms();
-        scene.prepare_camera_portals(&view, r.environment_clock, false, &poses);
+        scene.prepare_camera_portals(&r.world, &view, r.environment_clock, false, &poses);
         crate::render_fx::begin_view(&view, r.environment_clock, &scene.atmosphere, false);
         scene.draw(view.position, r.environment_clock, false, false, &poses);
         if let Some(n) = &mut r.native_cast {

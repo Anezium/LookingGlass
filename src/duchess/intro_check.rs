@@ -140,16 +140,16 @@ pub fn check(a: &mut Assets) -> Result<()> {
 }
 
 pub async fn render(a: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(a, "potears3")?;
-    let (mut d, mut p, mut stats, mut story) = begin(a, &scene.map, &mut scene.world)?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(a, "potears3")?;
+    let (mut d, mut p, mut stats, mut story) = begin(a, &scene.map, &mut world)?;
     let mut art = Art::load(a, &scene.map)?;
     let mut captures = std::collections::BTreeSet::new();
     let mut frames = 0;
     let mut updates = Vec::new();
     while d.cinematic() && frames < 9000 {
-        let c = d.camera(&scene.world).context("Missing intro shot")?;
+        let c = d.camera(&world).context("Missing intro shot")?;
         ensure!(
-            !scene.world.sweep(c.eye, c.eye, Vec3::splat(4.)).start_solid,
+            !world.sweep(c.eye, c.eye, Vec3::splat(4.)).start_solid,
             "Native intro camera inside a wall"
         );
         clear_background(BLACK);
@@ -163,7 +163,7 @@ pub async fn render(a: &mut Assets) -> Result<()> {
             ..Default::default()
         };
         set_camera(&camera);
-        crate::lighting::select(vec![], c.eye, &scene.world);
+        crate::lighting::select(vec![], c.eye, &world);
         crate::render_fx::begin_view(&camera, frames as f32 / 60., &scene.atmosphere, false);
         let transforms = d.transforms().collect::<Vec<_>>();
         scene.draw(c.eye, frames as f32 / 60., false, false, &transforms);
@@ -193,7 +193,7 @@ pub async fn render(a: &mut Assets) -> Result<()> {
         step(
             &mut d,
             &scene.map,
-            &mut scene.world,
+            &mut world,
             &mut p,
             &mut stats,
             &mut story,

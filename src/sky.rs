@@ -179,7 +179,8 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
         ),
         ("wforest", Vec3::ZERO, Vec3::ZERO),
     ] {
-        let mut scene = crate::render::Scene::load(assets, name)?;
+        let crate::render::Loaded { mut scene, world: mut scene_world } =
+            crate::render::Scene::load(assets, name)?;
         if name == "skool1" {
             crate::render::check_layers(&scene).await?;
         }
@@ -207,12 +208,11 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
                     vec3(0., -160., 80.),
                 ] {
                     let eye = target + offset;
-                    let sight = scene
-                        .world
+                    let sight = scene_world
                         .sweep(target + Vec3::Z * 8., eye, Vec3::splat(4.));
                     if !sight.start_solid
                         && sight.fraction == 1.
-                        && scene.world.body_clear(eye - Vec3::Z * 48.)
+                        && scene_world.body_clear(eye - Vec3::Z * 48.)
                     {
                         view = Some((eye, target));
                         break 'triangles;
@@ -230,13 +230,13 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
         let mut particles = crate::particles::Steam::load(assets, &scene.map)?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, name, None)?;
-        interactions.sync(&mut scene.world);
+        interactions.sync(&mut scene_world);
         if name == "garden1" {
-            particles.check_runtime(&scene.world, &mut interactions.event_world)?;
+            particles.check_runtime(&scene_world, &mut interactions.event_world)?;
         }
         println!(
             "Camera {name}: {eye:?}, body clear {}",
-            scene.world.body_clear(eye - Vec3::Z * 48.)
+            scene_world.body_clear(eye - Vec3::Z * 48.)
         );
         let transforms = interactions.transforms();
         for frame in 0..121 {
@@ -250,7 +250,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
                 z_far: 30000.,
                 ..Default::default()
             });
-            particles.update(1. / 60., eye, &scene.world);
+            particles.update(1. / 60., eye, &scene_world);
             scene.draw(eye, frame as f32 / 60., false, false, &transforms);
             crate::render::depth_read_only(|| {
                 scene.draw_with_particles(
@@ -285,7 +285,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
 /// Loading all maps catches late-campaign texture/model/parser regressions.
 /// Entrance screenshots are smoke tests, not proof of those maps' playability.
 pub async fn corpus_check(assets: &mut Assets) -> Result<()> {
-    fn resident_pixels(scene: &mut crate::render::Scene) -> Vec<u8> {
+    fn resident_pixels(scene: &mut crate::render::Scene, world: &crate::collision::World) -> Vec<u8> {
         let eye = vec3(208., 4200., 1450.);
         clear_background(scene.atmosphere.background());
         set_camera(&Camera3D {
@@ -297,7 +297,7 @@ pub async fn corpus_check(assets: &mut Assets) -> Result<()> {
             z_far: 30000.,
             ..Default::default()
         });
-        crate::lighting::select(vec![], eye, &scene.world);
+        crate::lighting::select(vec![], eye, world);
         crate::render_fx::begin(eye, vec3(0., 500., 250.), 1., &scene.atmosphere, false);
         scene.draw(eye, 1., false, false, &[]);
         scene.draw(eye, 1., false, true, &[]);
@@ -309,22 +309,24 @@ pub async fn corpus_check(assets: &mut Assets) -> Result<()> {
     }
     // Keep another scene alive, as normal map/save replacement does. Re-render it
     // after every new scene to check the shared pipeline's lightmap rebinding too.
-    let mut resident = crate::render::Scene::load(assets, "skool1")?;
-    let reference = resident_pixels(&mut resident);
+    let crate::render::Loaded { scene: mut resident, world: resident_world } =
+        crate::render::Scene::load(assets, "skool1")?;
+    let reference = resident_pixels(&mut resident, &resident_world);
     next_frame().await;
     let names = assets.maps();
     let mut fallbacks = Vec::new();
     for name in &names {
-        let mut scene = crate::render::Scene::load(assets, name)?;
+        let crate::render::Loaded { mut scene, world: mut scene_world } =
+            crate::render::Scene::load(assets, name)?;
         let mut particles = crate::particles::Steam::load(assets, &scene.map)?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, name, None)?;
-        interactions.sync(&mut scene.world);
+        interactions.sync(&mut scene_world);
         let transforms = interactions.transforms();
         let (eye, yaw) = crate::interaction::spawn(&scene.map, None);
         let direction = vec3(yaw.cos(), yaw.sin(), 0.2).normalize();
         particles.sync(&interactions.event_world);
-        particles.update(1. / 30., eye, &scene.world);
+        particles.update(1. / 30., eye, &scene_world);
         clear_background(scene.atmosphere.background());
         set_camera(&Camera3D {
             position: eye,
@@ -335,7 +337,7 @@ pub async fn corpus_check(assets: &mut Assets) -> Result<()> {
             z_far: 30000.,
             ..Default::default()
         });
-        crate::lighting::select(particles.lights(), eye, &scene.world);
+        crate::lighting::select(particles.lights(), eye, &scene_world);
         crate::render_fx::begin(eye, direction, 1., &scene.atmosphere, false);
         scene.draw(eye, 1., false, false, &transforms);
         scene.draw_with_particles(eye, direction, 1., false, &transforms, &particles);
@@ -345,7 +347,7 @@ pub async fn corpus_check(assets: &mut Assets) -> Result<()> {
         set_default_camera();
         next_frame().await;
         anyhow::ensure!(
-            resident_pixels(&mut resident) == reference,
+            resident_pixels(&mut resident, &resident_world) == reference,
             "Shared renderer changed the resident scene after drawing {name}"
         );
         next_frame().await;

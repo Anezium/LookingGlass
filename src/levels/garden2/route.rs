@@ -316,7 +316,7 @@ async fn capture(a: &mut Assets) -> Result<()> {
     let cp: crate::route::Checkpoint =
         serde_json::from_slice(&std::fs::read("private/garden2-work/last-checkpoint.json")?)?;
     let mut r = Route::resume(a, &cp)?;
-    let mut scene = crate::render::Scene::load(a, "garden2")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "garden2")?;
     let mut art = art::Art::load(a)?;
     let eye = r.player.eye();
     let target = std::env::var("LOOKING_GLASS_GARDEN2_LOOK")

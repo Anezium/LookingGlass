@@ -588,7 +588,8 @@ pub(super) fn stage_debris(i: &mut Interactions, map: &Bsp) -> Result<()> {
 }
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut renderer = crate::render::Scene::load(a, "wforest")?;
+        let crate::render::Loaded { scene: mut renderer, world: _world } =
+            crate::render::Scene::load(a, "wforest")?;
         let mut art = art::Art::load(a)?;
         for (name, returning, kind) in [
             ("altar", false, None),

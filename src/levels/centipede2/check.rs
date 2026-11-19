@@ -465,7 +465,7 @@ fn walk_goal(r: &mut crate::route::Route, goal: Vec3) -> Result<()> {
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
         std::fs::create_dir_all("private/centipede2-work/captures")?;
-        let mut scene = crate::render::Scene::load(a, "centipede2")?;
+        let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(a, "centipede2")?;
         let mut o = Centipede::load(a, &scene.map)?;
         let mut art = art::Art::load(a, &o)?;
         for (name, phase, action, t) in [
@@ -504,7 +504,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 for _ in 0..(t / FIXED_DT).round() as usize {
                     o.combat(&mut Combat {
                         dt: FIXED_DT,
-                        world: &scene.world,
+                        world: &world,
                         player: &mut player,
                         stats: &mut stats,
                         story: &mut story,
@@ -518,7 +518,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 }
             }
             o.rebuild(&scene.map)?;
-            let camera = o.camera(&scene.world).unwrap_or_else(|| {
+            let camera = o.camera(&world).unwrap_or_else(|| {
                 crate::cinematic::Camera::look(
                     o.saved.battle.pose.translation + vec3(-480., -480., 140.),
                     o.saved.battle.pose.translation + Vec3::Z * 150.,
@@ -536,7 +536,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                     ..Default::default()
                 };
                 set_camera(&cam);
-                crate::lighting::select(o.lights(), camera.eye, &scene.world);
+                crate::lighting::select(o.lights(), camera.eye, &world);
                 crate::render_fx::begin_view(&cam, t, &scene.atmosphere, false);
                 scene.draw(camera.eye, t, false, false, &o.transforms());
                 art.draw(&o, &scene.atmosphere, camera.eye, false);

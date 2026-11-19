@@ -396,7 +396,7 @@ pub(super) async fn render(a: &mut Assets) -> Result<()> {
         });
         t.rebuild();
     }
-    let mut scene = crate::render::Scene::load(a, "tower3")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "tower3")?;
     let mut art = scene::Art::load(a)?;
     r.interactions.presentation.apply(&mut scene);
     let eye = std::env::var("LOOKING_GLASS_TOWER3_EYE")

@@ -376,7 +376,7 @@ pub fn stage(
 }
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut scene = crate::render::Scene::load(a, "garden4")?;
+        let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "garden4")?;
         let mut art = art::Art::load(a)?;
         for case in REGISTRATION.save_cases {
             let (mut i, mut w, mut p, _) = setup(a, &scene.map)?;

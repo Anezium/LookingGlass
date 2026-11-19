@@ -108,12 +108,12 @@ fn step(npcs: &mut Npcs, world: &World, eye: Vec3, frames: usize) -> f32 {
 }
 pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     std::fs::create_dir_all("private/clock")?;
-    let mut scene = crate::render::Scene::load(assets, "funhouse")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "funhouse")?;
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
     interactions.set_entry(assets, &scene.map, "funhouse", None)?;
-    interactions.sync(&mut scene.world);
+    interactions.sync(&mut world);
     let mut npcs = Npcs::load(assets, &scene.map, "funhouse", None, false, false)?;
-    npcs.update(0., &scene.world, Vec3::splat(10000.));
+    npcs.update(0., &world, Vec3::splat(10000.));
     let initial = npcs.snapshot();
     let id = npcs
         .actors
@@ -136,12 +136,12 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         !npcs.targets().iter().any(|t| t.id == pending_id),
         "Dormant Automaton is targetable"
     );
-    npcs.update(0., &scene.world, trigger_eye);
+    npcs.update(0., &world, trigger_eye);
     ensure!(
         serde_json::to_value(&initial)? == serde_json::to_value(npcs.snapshot())?,
         "Paused Automaton trigger changed state"
     );
-    step(&mut npcs, &scene.world, trigger_eye, 1);
+    step(&mut npcs, &world, trigger_eye, 1);
     ensure!(
         npcs.actors[pending_id].clock.as_ref().unwrap().active,
         "Touch did not activate Automaton"
@@ -150,7 +150,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     npcs.restore(&initial)?;
     npcs.actors[pending_id].clock.as_mut().unwrap().spawn_delay = Some(2.);
     let delayed = npcs.snapshot();
-    step(&mut npcs, &scene.world, Vec3::splat(10000.), 180);
+    step(&mut npcs, &world, Vec3::splat(10000.), 180);
     ensure!(
         npcs.targets().iter().any(|t| t.id == pending_id),
         "Delayed Automaton failed to spawn away from trigger"
@@ -175,7 +175,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             target + vec3(angle.cos() * 250., angle.sin() * 250., 20.)
         })
         .find(|p| {
-            let t = scene.world.sweep(target, *p, Vec3::splat(2.));
+            let t = world.sweep(target, *p, Vec3::splat(2.));
             !t.start_solid && t.fraction >= 1.
         })
         .context("No clear Automaton camera")?;
@@ -192,8 +192,8 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             let mut loot = saved.loot;
             loot.validate()?;
             let before = npcs.loot_sources();
-            let damage = step(&mut npcs, &scene.world, saved.eye, 180);
-            loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+            let damage = step(&mut npcs, &world, saved.eye, 180);
+            loot.defeated(&before, &npcs.loot_sources(), &world);
             ensure!(
                 serde_json::to_value(npcs.snapshot())? == serde_json::to_value(saved.expected)?
                     && damage == saved.damage,
@@ -245,7 +245,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 } else {
                     8
                 };
-                step(&mut npcs, &scene.world, continuation_eye, frames);
+                step(&mut npcs, &world, continuation_eye, frames);
             }
         } else if case == "pain" {
             npcs.hit(Hit {
@@ -265,12 +265,12 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 },
                 knockback: Vec3::ZERO,
             });
-            loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+            loot.defeated(&before, &npcs.loot_sources(), &world);
             ensure!(
                 loot.drops.len() == 1 && loot.drops[0].grade == crate::loot::Grade::Large,
                 "Wrong Automaton reward"
             );
-            step(&mut npcs, &scene.world, continuation_eye, 12);
+            step(&mut npcs, &world, continuation_eye, 12);
         }
         let p = npcs.actors[id].clock.as_ref().unwrap();
         let state = serde_json::to_value(p)?;
@@ -290,7 +290,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             );
         }
         let cast = npcs.snapshot();
-        let damage = step(&mut npcs, &scene.world, continuation_eye, 180);
+        let damage = step(&mut npcs, &world, continuation_eye, 180);
         let expected = npcs.snapshot();
         if mode == "clock-save-write" {
             std::fs::write(
@@ -345,7 +345,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         p.variant = variant;
         p.health = if phase == Phase::Dead { 0. } else { 400. };
         p.yaw = (eye.y - p.feet.y).atan2(eye.x - p.feet.x);
-        hashes.insert(capture(&mut npcs, &mut scene, &interactions, eye, target, label).await?);
+        hashes.insert(capture(&mut npcs, &mut scene, &world, &interactions, eye, target, label).await?);
     }
     // Launch a real fist through the same original tag sampler used in play.
     let yaw = (eye.y - feet.y).atan2(eye.x - feet.x);
@@ -374,6 +374,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         capture(
             &mut npcs,
             &mut scene,
+            &world,
             &interactions,
             eye,
             target,
@@ -388,6 +389,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
 async fn capture(
     npcs: &mut Npcs,
     scene: &mut crate::render::Scene,
+    world: &World,
     interactions: &crate::interaction::Interactions,
     eye: Vec3,
     target: Vec3,
@@ -406,7 +408,7 @@ async fn capture(
             ..Default::default()
         };
         set_camera(&camera);
-        crate::lighting::select(npcs.lights(), eye, &scene.world);
+        crate::lighting::select(npcs.lights(), eye, world);
         crate::render_fx::begin_view(&camera, 0., &scene.atmosphere, false);
         let transforms = interactions.transforms();
         scene.draw(eye, 0., false, false, &transforms);

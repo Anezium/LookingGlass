@@ -150,6 +150,18 @@ struct Batch {
     center: Vec3,
     model: Option<usize>,
 }
+pub struct Loaded {
+    pub scene: Scene,
+    pub world: World,
+}
+
+#[cfg(feature = "vita_renderer")]
+impl Loaded {
+    fn into_map_world(self) -> (Arc<Bsp>, World) {
+        (self.scene.map, self.world)
+    }
+}
+
 pub struct Scene {
     #[cfg(feature = "vita_renderer")]
     retained: Option<vita_renderer::Renderer>,
@@ -163,7 +175,6 @@ pub struct Scene {
     pub optimize: bool,
     pub stats: DrawStats,
     pub map: Arc<Bsp>,
-    pub world: World,
     pub atmosphere: Atmosphere,
     batches: Vec<Batch>,
     face_mask_cache: FaceMaskCache,
@@ -1422,7 +1433,7 @@ impl Scene {
     }
     pub async fn fortress_check(assets: &mut Assets) -> Result<()> {
         camera_portal::check(assets).await?;
-        let mut scene = Self::load(assets, "fortress1")?;
+        let Loaded { mut scene, world } = Self::load(assets, "fortress1")?;
         check_layers(&scene).await?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, "fortress1", None)?;
@@ -1484,7 +1495,7 @@ impl Scene {
                         ..Default::default()
                     };
                     set_camera(&camera);
-                    crate::lighting::select(vec![], eye, &scene.world);
+                    crate::lighting::select(vec![], eye, &world);
                     crate::render_fx::begin_view(&camera, 1., &scene.atmosphere, false);
                     let poses = interactions.transforms();
                     scene.draw(eye, 1., false, false, &poses);
@@ -1665,14 +1676,14 @@ impl Scene {
         self.stats.triangles += context.stats.triangles;
         self.stats.detail_saved += context.stats.detail_saved;
     }
-    pub fn load(assets: &mut Assets, name: &str) -> Result<Self> {
+    pub fn load(assets: &mut Assets, name: &str) -> Result<Loaded> {
         Self::load_for(assets, name, Default::default())
     }
     pub fn load_for(
         assets: &mut Assets,
         name: &str,
         difficulty: crate::powerups::Difficulty,
-    ) -> Result<Self> {
+    ) -> Result<Loaded> {
         let mut timing = crate::startup::Phase::new("map_load");
         let _r13_memory = crate::allocation_census::Scope::new(0);
         eprintln!("[lg/startup] map_load map={name}");
@@ -1683,17 +1694,18 @@ impl Scene {
         drop(bytes);
         timing.mark("bsp_parse");
         map.difficulty = difficulty;
+        let map = Arc::new(map);
         let world = World::from_bsp(&map)?;
         timing.mark("collision_world");
-        Self::from_parts(assets, name, map, world)
+        Self::from_parts_selected(assets, name, map, world, true)
     }
     /// The window half of loading a scene, for a map and collision that `campaign::load_visit`
     /// already built (with the difficulty applied) so that the viewer and a headless route share
     /// one copy of them.
-    pub fn from_parts(assets: &mut Assets, name: &str, map: Bsp, world: World) -> Result<Self> {
+    pub fn from_parts(assets: &mut Assets, name: &str, map: Bsp, world: World) -> Result<Loaded> {
         Self::from_parts_selected(assets, name, Arc::new(map), world, true)
     }
-    fn from_parts_selected(assets: &mut Assets, name: &str, map: Arc<Bsp>, world: World, allow_retained: bool) -> Result<Self> {
+    fn from_parts_selected(assets: &mut Assets, name: &str, map: Arc<Bsp>, world: World, allow_retained: bool) -> Result<Loaded> {
         let _r13_memory = crate::allocation_census::Scope::new(1);
         #[cfg(not(feature = "vita_renderer"))]
         let _ = allow_retained;
@@ -2158,7 +2170,6 @@ impl Scene {
             optimize: true,
             stats: DrawStats::default(),
             map,
-            world,
             atmosphere,
             batches,
             decoration_start,
@@ -2186,7 +2197,7 @@ impl Scene {
                     vita_renderer::construction_failed(name, &error);
                     // Rebuild with portals enabled and their aperture surfaces excluded.
                     // Consuming the failed scene drops its old art before legacy rebuild.
-                    let (map, world) = scene.into_map_world();
+                    let (map, world) = Loaded { scene, world }.into_map_world();
                     return Self::from_parts_selected(assets, name, map, world, false);
                 }
             }
@@ -2230,11 +2241,7 @@ impl Scene {
             }
         }
         timing.mark("retained_renderer");
-        Ok(scene)
-    }
-    #[cfg(feature = "vita_renderer")]
-    fn into_map_world(self) -> (Arc<Bsp>, World) {
-        (self.map, self.world)
+        Ok(Loaded { scene, world })
     }
     /// Submit the existing legacy sky into the currently selected scaled camera.
     /// Miniature scenery first, clear only its depth, then authored aperture faces
@@ -2399,6 +2406,7 @@ impl Scene {
 
     pub fn update_ropes(
         &mut self,
+        world: &World,
         dt: f32,
         hand: Option<(usize, Vec3)>,
         transforms: &[(usize, Vec3, Quat)],
@@ -2409,7 +2417,7 @@ impl Scene {
             shape.update(
                 dt,
                 hand.filter(|h| h.0 == shape.model).map(|h| h.1),
-                &self.world,
+                world,
             );
             let Some((_, origin, rotation)) = transforms.iter().find(|t| t.0 == shape.model) else {
                 continue;
@@ -3007,7 +3015,7 @@ pub async fn check_decorations(assets: &mut Assets) -> Result<()> {
         ("hatter1", 661),
         ("fortress1", 142),
     ] {
-        let mut scene = Scene::load(assets, name)?;
+        let Loaded { mut scene, mut world } = Scene::load(assets, name)?;
         let catalog = crate::decorations::Catalog::load(assets, &scene.map, name)?;
         let prop = catalog
             .placements
@@ -3016,7 +3024,7 @@ pub async fn check_decorations(assets: &mut Assets) -> Result<()> {
             .context("Missing staged decoration")?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, name, None)?;
-        interactions.sync(&mut scene.world);
+        interactions.sync(&mut world);
         let poses = interactions.transforms();
         let parent = prop
             .parent
@@ -3046,7 +3054,7 @@ pub async fn check_decorations(assets: &mut Assets) -> Result<()> {
                 let eye = target + vec3(a.cos(), a.sin(), 0.22) * distance;
                 // Several missing furnishings already have authored clip brushes.
                 // Inspect from outside them; their centre need not be walkable.
-                let hit = scene.world.sweep(eye, target, Vec3::splat(2.));
+                let hit = world.sweep(eye, target, Vec3::splat(2.));
                 (!hit.start_solid && hit.fraction > 0.65).then_some(eye)
             })
             .with_context(|| format!("No clear decoration camera {name}/{entity}"))?;

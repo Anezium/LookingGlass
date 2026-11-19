@@ -361,7 +361,7 @@ fn machinery(a: &mut Assets, map: &Bsp) -> Result<()> {
 }
 
 pub(super) async fn render_check(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "tower2")?;
+    let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, "tower2")?;
     let mut t = Tower::load(assets, &scene.map)?;
     let water = t.objects.iter().find(|o| o.name == "water").unwrap().model;
     for stage in 0..=3 {
@@ -415,7 +415,7 @@ pub(super) async fn render_check(assets: &mut Assets) -> Result<()> {
     }
     let mut art = scene::Art::load(assets)?;
     t = Tower::load(assets, &scene.map)?;
-    let arrival = Player::spawn(&scene.world, interaction::spawn(&scene.map, None).0)
+    let arrival = Player::spawn(&world, interaction::spawn(&scene.map, None).0)
         .context("Render arrival lacks support")?;
     t.saved.scene.as_mut().unwrap().clock.home = Some(Transform {
         translation: arrival.feet,
@@ -423,7 +423,7 @@ pub(super) async fn render_check(assets: &mut Assets) -> Result<()> {
     });
     for time in [1., 3.5, 5.] {
         t.saved.scene.as_mut().unwrap().clock.time = time;
-        let cam = t.camera(&scene.world).unwrap();
+        let cam = t.camera(&world).unwrap();
         clear_background(BLACK);
         set_camera(&Camera3D {
             position: cam.eye,

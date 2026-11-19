@@ -35,18 +35,18 @@ pub async fn check(a: &mut Assets) -> Result<()> {
     use anyhow::ensure;
     let root = std::path::Path::new("private/turtle-shell");
     std::fs::create_dir_all(root)?;
-    let mut scene = crate::render::Scene::load(a, "garden1")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(a, "garden1")?;
     // The authored entrance current carries an idle player out of this pool.
     // Isolate breathing here, as --swim-check does; normal gameplay keeps it.
-    for current in &mut scene.world.traversal.pushes {
+    for current in &mut world.traversal.pushes {
         current.enabled = false;
     }
     let mut player =
-        Player::spawn(&scene.world, scene.map.spawn().0).context("Garden swimming spawn")?;
+        Player::spawn(&world, scene.map.spawn().0).context("Garden swimming spawn")?;
     let stats = crate::inventory::Stats::for_level("garden1", None);
     stats.prepare_player(&mut player);
     for _ in 0..120 * 6 {
-        player.tick(&scene.world, Controls::default());
+        player.tick(&world, Controls::default());
     }
     ensure!(
         player.immersion.level == 3 && player.breath.shell && player.breath.hits == 0,
@@ -65,7 +65,7 @@ pub async fn check(a: &mut Assets) -> Result<()> {
                 ..Default::default()
             },
             &crate::combat::Context {
-                world: &scene.world,
+                world: &world,
                 targets: &[],
             },
         );
@@ -121,7 +121,7 @@ pub async fn check(a: &mut Assets) -> Result<()> {
         actor.water_appearance(&player);
         clear_background(Color::new(0.12, 0.2, 0.27, 1.));
         set_camera(&camera);
-        crate::lighting::select(vec![], camera.position, &scene.world);
+        crate::lighting::select(vec![], camera.position, &world);
         let atmosphere = Atmosphere::default();
         crate::render_fx::begin_view(&camera, 2., &atmosphere, true);
         actor.atmosphere(&atmosphere, camera.position);
@@ -165,7 +165,7 @@ pub async fn check(a: &mut Assets) -> Result<()> {
     player = saved_player;
     alice.water_appearance(&player);
     let (eye, target, show) =
-        crate::camera::Follow::default().update(&scene.world, player.feet, Vec3::X, 128., 1. / 60.);
+        crate::camera::Follow::default().update(&world, player.feet, Vec3::X, 128., 1. / 60.);
     ensure!(show, "Garden swimming follow camera hides Alice");
     let view = Camera3D {
         position: eye,

@@ -7,7 +7,8 @@ pub(crate) async fn check(assets:&mut Assets,options:&crate::Options)->Result<()
     std::fs::create_dir_all("private/exact-frames")?;
     for (case,model) in [("frozen-card","cardguard_spade"),("cat-fade","c_cheshire"),
         ("funhouse-fade","c_tweedle_dee"),("jabberwock-fade","c_gryphon"),("shared-slots","c_torchgnome3")] {
-        let mut scene=crate::render::Scene::load_for(assets,"gvillage",options.difficulty)?;
+        let crate::render::Loaded { mut scene, world: _world } =
+            crate::render::Scene::load_for(assets, "gvillage", options.difficulty)?;
         let mut puppet=Puppet::load(assets,model,&[],&specs)?;
         if case.ends_with("fade") {puppet=puppet.with_afterimages();}
         let clip=puppet.idle_clip().to_owned();

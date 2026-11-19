@@ -2,6 +2,7 @@ use crate::{
     assets::Assets,
     audio::Audio,
     character::{self, Character},
+    collision::World,
     hud::Hud,
     interaction::{self, Interactions},
     inventory::{self, Catalog, Stats},
@@ -55,18 +56,19 @@ pub fn config() -> macroquad::conf::Conf {
     }
 }
 
-use crate::render::Scene;
+use crate::render::{Loaded, Scene};
 use crate::save::{self, Campaign, Game, Level, Slot, Store, View};
 fn load_scene(
     assets: &mut Assets,
     name: &str,
     difficulty: crate::powerups::Difficulty,
-) -> Result<Scene> {
+) -> Result<Loaded> {
     Scene::load_for(assets, name, difficulty)
 }
 struct Entered {
     art: LevelArt,
     scene: Scene,
+    world: World,
     interactions: Interactions,
     story: crate::story::Story,
     hints: crate::cheshire::Hints,
@@ -115,7 +117,7 @@ impl LevelDispatch {
     }
 }
 
-type RebuiltScene = (LevelArt, crate::npc::Npcs, crate::particles::Steam, Scene, Option<Character>);
+type RebuiltScene = (LevelArt, crate::npc::Npcs, crate::particles::Steam, Loaded, Option<Character>);
 
 /// Allocate recovery state only after a failed transition. Keeping these awaits
 /// inside `run` reserves their live checkpoint/temporaries in every viewer frame.
@@ -143,22 +145,22 @@ async fn rebuild_outgoing(
             (|| -> Result<_> {
                 crate::transition_memory::recovery_fault()?;
                 let level = checkpoint.level()?;
-                let mut world = Scene::load(assets, &level.map)?;
+                let Loaded { mut scene, mut world } = Scene::load(assets, &level.map)?;
                 // The recovered scene still owns the only map handle before cast loading.
-                world.map_mut().difficulty = difficulty;
-                interactions.sync(&mut world.world);
-                let mut cast = crate::npc::Npcs::load(assets, &world.map, &level.map,
+                scene.map_mut().difficulty = difficulty;
+                interactions.sync(&mut world);
+                let mut cast = crate::npc::Npcs::load(assets, &scene.map, &level.map,
                     level.entry.as_deref(), options.npc_preview, options.combat_preview)?;
                 cast.restore(&level.npcs)?;
-                let particles = crate::particles::Steam::load(assets, &world.map)?;
+                let particles = crate::particles::Steam::load(assets, &scene.map)?;
                 let mut art = LevelArt::default();
-                art.prepare(assets, &world, interactions, true)?;
+                art.prepare(assets, &scene, interactions, true)?;
                 let character = if reload_alice {
                     let mut character = Character::load(assets)?;
                     character.restore(&checkpoint.character)?;
                     Some(character)
                 } else { None };
-                Ok(Box::new((art, cast, particles, world, character)))
+                Ok(Box::new((art, cast, particles, Loaded { scene, world }, character)))
             })()
         };
         // A successful rebuild is a live map now; a failed one is freed before the
@@ -498,7 +500,7 @@ async fn finish_entered(
     // the load boundary.
     let _share = crate::texture::load_scope();
     let mut timing = crate::startup::Phase::new("entered_resources");
-    let scene = Scene::from_parts(assets, name, map, world)?;
+    let Loaded { scene, world } = Scene::from_parts(assets, name, map, world)?;
     timing.mark("scene");
     crate::loading_screen::between("scene").await;
     crate::transition_memory::fault("scene")?;
@@ -535,6 +537,7 @@ async fn finish_entered(
     Ok(Entered {
         art,
         scene,
+        world,
         interactions,
         story,
         hints,
@@ -703,13 +706,13 @@ pub async fn check_level_swaps(assets: &mut Assets, options: &Options) -> Result
             active = next;
             std::mem::swap(&mut alice, &mut next_alice);
             drop(next_alice);
-            let (eye, yaw) = interaction::spawn_with_static(&active.scene.map, entry, Some(active.scene.world.audio_geometry()));
-            let player = Player::spawn(&active.scene.world, eye)
+            let (eye, yaw) = interaction::spawn_with_static(&active.scene.map, entry, Some(active.world.audio_geometry()));
+            let player = Player::spawn(&active.world, eye)
                 .unwrap_or_else(|| Player::new(eye - Vec3::Z * EYE_HEIGHT));
             alice.reset(&player, yaw);
             let direction = vec3(yaw.cos(), yaw.sin(), 0.);
             let (camera, target, _) =
-                character::follow_camera(&active.scene.world, player.feet, direction);
+                character::follow_camera(&active.world, player.feet, direction);
             let transforms = active.interactions.transforms();
             clear_background(active.scene.atmosphere.background());
             set_camera(&Camera3D {
@@ -1061,6 +1064,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut pending_menu_save = None;
     let mut pending_menu_newgame = None;
     let mut scene: Scene;
+    let mut world: World;
     let mut level_art: LevelArt;
     let mut skip_scene: crate::cinematic::Skip;
     let mut power_art: crate::powerups::Art;
@@ -1101,10 +1105,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         (retry) => { crate::native_timing::Reason::Retry };
     }
     macro_rules! install_loaded_scene {
-        (initial, $next:expr, $from:expr, $to:expr) => { scene = $next; };
+        (initial, $next:expr, $from:expr, $to:expr) => { Loaded { scene, world } = $next; };
         (retry, $next:expr, $from:expr, $to:expr) => { install_loaded_scene!(replace, $next, $from, $to); };
         (replace, $next:expr, $from:expr, $to:expr) => {
-            scene = $next;
+            Loaded { scene, world } = $next;
         };
     }
     macro_rules! apply_loaded {
@@ -1126,7 +1130,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             retry.remember(r.game.clone());
             entry_spawn = level.entry;
             selected_entry = entry_spawn.clone();
-            install_loaded_scene!($install, r.scene, &maps[_previous_map], &maps[current]);
+            install_loaded_scene!($install, Loaded { scene: r.scene, world: r.world }, &maps[_previous_map], &maps[current]);
             interactions = r.interactions;
             story = r.story;
             hints = r.hints;
@@ -1248,7 +1252,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let _share = crate::texture::load_scope();
         let boot_loading = crate::loading_screen::begin("chapter-or-console", &maps[current]);
         crate::loading_screen::show().await;
-        scene = load_scene(&mut assets, &maps[current], options.difficulty)?;
+        Loaded { scene, world } = load_scene(&mut assets, &maps[current], options.difficulty)?;
         crate::loading_screen::between("scene").await;
         level_art = LevelArt::default();
         skip_scene = crate::cinematic::Skip::default();
@@ -1265,7 +1269,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if options.npc_preview || options.combat_preview || options.larva_preview {
             interactions.encounters = None;
         }
-        interactions.sync(&mut scene.world);
+        interactions.sync(&mut world);
         save::validate_entry(&scene.map, options.entry.as_deref())?;
         entry_spawn = options.entry.clone();
         npcs = crate::npc::Npcs::load(
@@ -1308,7 +1312,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         eprintln!("[lg/startup] entry owner=engine map={} opening_roq_requested={opening_requested}", maps[current]);
         if options.shelf_preview {
             anyhow::ensure!(maps[current] == "skool1", "--shelf-preview requires skool1");
-            let mut staging = Player::spawn(&scene.world, scene.map.spawn().0)
+            let mut staging = Player::spawn(&world, scene.map.spawn().0)
                 .context("School staging entrance blocked")?;
             let school = interactions
                 .school
@@ -1325,7 +1329,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 interactions.advance_school(
                     crate::movement::FIXED_DT,
                     &scene.map,
-                    &mut scene.world,
+                    &mut world,
                     &mut staging,
                 )?;
             }
@@ -1336,7 +1340,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         } else if options.start_at.is_none() && !options.fly && !options.shelf_preview {
             interactions.entry_story(&mut story);
         }
-        (pos, yaw) = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(scene.world.audio_geometry()));
+        (pos, yaw) = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(world.audio_geometry()));
         if let Some(feet) = options.start_at {
             pos = feet + Vec3::Z * EYE_HEIGHT;
         }
@@ -1351,7 +1355,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         if options.larva_preview && maps[current] == "centipede1" {
-            (pos, yaw) = npcs.larva_preview_start(&scene.world)?;
+            (pos, yaw) = npcs.larva_preview_start(&world)?;
             hud.announce("Larva encounter / WASD move, mouse attack / Home retry");
         }
         if options.shelf_preview {
@@ -1359,7 +1363,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             pos = vec3(220., 3300., 413.13885) + Vec3::Z * EYE_HEIGHT;
             yaw = std::f32::consts::FRAC_PI_4 * 3.;
         }
-        let spawn = Player::spawn(&scene.world, pos);
+        let spawn = Player::spawn(&world, pos);
         flying = options.fly || spawn.is_none();
         // Some map starts still expect a cinematic or scripted moving support.
         spawn_landing = true;
@@ -1487,7 +1491,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     macro_rules! unload_scene {
         () => {{
             crate::render_fx::release_scene();
-            let resources = (level_art, npcs, steam, scene);
+            let resources = (level_art, npcs, steam, Loaded { scene, world });
             if crate::transition_memory::legacy_overlap() { Some(resources) } else {
                 drop(resources);
                 audio.release_scene();
@@ -1497,8 +1501,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     macro_rules! rollback_resources {
         ($checkpoint:expr, $outgoing:expr, $particles:expr, $audio:expr, $reload_alice:expr) => {{
-            if let Some((art, cast, particles, world)) = $outgoing.take() {
-                level_art = art; npcs = cast; steam = particles; scene = world;
+            if let Some((art, cast, particles, level)) = $outgoing.take() {
+                level_art = art; npcs = cast; steam = particles;
+                Loaded { scene, world } = level;
                 None
             } else {
                 // This is a live resource checkpoint, not an external saved game.
@@ -1511,9 +1516,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     // Transition's drop guard closes this operation as failed.
                     return Ok(());
                 };
-                let (art, cast, mut particles, world, character) = *rebuilt;
+                let (art, cast, mut particles, level, character) = *rebuilt;
                 particles.restore_runtime($particles);
-                level_art = art; npcs = cast; steam = particles; scene = world;
+                level_art = art; npcs = cast; steam = particles;
+                Loaded { scene, world } = level;
                 audio.reload_failed_transition(&mut assets, &maps[current], &scene.map);
                 audio.restore_transition($audio);
                 character
@@ -1557,7 +1563,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         alice = if let Some(alice) = outgoing_alice { alice } else {
                             character.expect("successful outgoing rebuild includes Alice")
                         };
-                        scene.world.set_weapon_obstacles(alice.ice_targets());
+                        world.set_weapon_obstacles(alice.ice_targets());
                         Err(error)
                     }
                 };
@@ -1716,7 +1722,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if frame == 1 {
             if let Some(path) = std::env::var_os("LOOKING_GLASS_TRANSITION_PORTAL_CAPTURE") {
-                scene.show_transition_portal(std::path::Path::new(&path)).await?;
+                scene.show_transition_portal(&world, std::path::Path::new(&path)).await?;
             }
             if let Ok(path) = std::env::var("LOOKING_GLASS_TRANSITION_SNAPSHOT") {
                 std::fs::write(path, serde_json::to_vec(&game_snapshot!())?)?;
@@ -2498,7 +2504,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && !console_input && focused && !flying && stats.alive());
         if skip_requested {
             let speaking = skip_id.is_some_and(|id| story.progress(id).is_some());
-            if interactions.skip_cinematic(&scene.map, &mut scene.world, &mut player, &mut story)? {
+            if interactions.skip_cinematic(&scene.map, &mut world, &mut player, &mut story)? {
                 #[cfg(feature = "native_timing")]
                 timing.with(|r| r.discontinuity(crate::native_timing::Milestone::SkipComplete, crate::native_timing::SKIP));
                 skip_scene.event("engine_exit accepted=true");
@@ -2564,9 +2570,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if (recover || restart || console_restart) && !in_transport {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::Recovery, crate::native_timing::OPERATION));
-            let entry = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(scene.world.audio_geometry()));
+            let entry = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(world.audio_geometry()));
             let entry = if options.larva_preview && maps[current] == "centipede1" {
-                npcs.larva_preview_start(&scene.world)?
+                npcs.larva_preview_start(&world)?
             } else {
                 entry
             };
@@ -2593,7 +2599,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 recovery.clear();
             }
             if let Some((restored, angle, nearby)) =
-                recovery.restore(&scene.world, &interactions, player.feet, entry)
+                recovery.restore(&world, &interactions, player.feet, entry)
             {
                 if let Some(p) = &mut interactions.pandemonium {
                     p.release_rope();
@@ -2608,7 +2614,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 npcs.reset_combat();
                 if options.larva_preview && maps[current] == "centipede1" {
                     npcs = crate::npc::Npcs::larva_preview(&mut assets)?;
-                    npcs.update(0., &scene.world, player.eye());
+                    npcs.update(0., &world, player.eye());
                     stats.loot.remove(&loot_visit);
                     let prefix = format!("drop:{loot_visit}:");
                     stats.collected.retain(|key| !key.starts_with(&prefix));
@@ -2641,7 +2647,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if (console_fly || (pressed(KeyCode::F4) && !menu && !inventory_menu)) && stats.alive() {
             if flying {
                 let feet = pos - Vec3::Z * EYE_HEIGHT;
-                if scene.world.body_clear(feet) {
+                if world.body_clear(feet) {
                     player = Player::new(feet);
                     spawn_landing = false;
                     alice.reset(&player, yaw);
@@ -2707,6 +2713,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         #[cfg(feature = "native_timing")]
                         timing.with(|r| r.before_install());
                         scene = next.scene;
+                        world = next.world;
                         level_art = next.art;
                         skip_scene = crate::cinematic::Skip::default();
                         hints = next.hints;
@@ -2727,7 +2734,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             entry_spawn,
                             stats.weapon_summary()
                         );
-                        interactions.sync(&mut scene.world);
+                        interactions.sync(&mut world);
                         environment_clock = 0.;
                         audio.load(&mut assets, &maps[selected], &scene.map);
                         current = selected;
@@ -2741,8 +2748,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             entry_spawn.as_deref(),
                             &catalog,
                         );
-                        (pos, yaw) = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(scene.world.audio_geometry()));
-                        let spawn = Player::spawn(&scene.world, pos);
+                        (pos, yaw) = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(world.audio_geometry()));
+                        let spawn = Player::spawn(&world, pos);
                         flying = options.fly || spawn.is_none();
                         spawn_landing = true;
                         player = spawn.unwrap_or_else(|| Player::new(pos - Vec3::Z * EYE_HEIGHT));
@@ -2845,11 +2852,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     pitch.sin(),
                 );
                 use crate::interaction::friendly::{use_owner, UseOwner};
-                let shared_rope = player.rope_prompt(&scene.world).is_some();
+                let shared_rope = player.rope_prompt(&world).is_some();
                 let world_rope = interactions
                     .pandemonium
                     .as_ref()
-                    .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
+                    .is_some_and(|p| p.prompt(&world, player.eye()).is_some());
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 { drop(host_block); host_block = crate::frame_profile::span("frame_interaction_search"); }
                 crate::spike_log::sim(crate::spike_log::Sim::Search);
@@ -2860,7 +2867,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     crate::frame_profile::set_owner(crate::frame_profile::Owner::InteractionSearch);
                 }
                 let talk =
-                    interactions.conversation(&scene.world, player.eye(), aim, &npcs, &story);
+                    interactions.conversation(&world, player.eye(), aim, &npcs, &story);
                 let owner = use_owner(
                     story.busy(),
                     interactions.scripted(),
@@ -2868,7 +2875,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     world_rope,
                     talk.is_some(),
                     interactions
-                        .prompt(&scene.world, player.eye(), aim)
+                        .prompt(&world, player.eye(), aim)
                         .is_some(),
                 );
                 let use_pressed = pressed(KeyCode::E);
@@ -2895,7 +2902,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 events.merge(interactions.update(
                     world_dt,
                     &scene.map,
-                    &mut scene.world,
+                    &mut world,
                     &player,
                     aim,
                     use_pressed && owner == UseOwner::World,
@@ -2947,11 +2954,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
                 {
                     let _time = crate::sim_maps::timer("r26_movers_ns");
-                    interactions.advance_school(mover_dt, &scene.map, &mut scene.world, &mut player)?;
+                    interactions.advance_school(mover_dt, &scene.map, &mut world, &mut player)?;
                 }
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 if crate::sim_maps::probe::mover_replay_enabled() {
-                    crate::sim_maps::probe::record_movers(&interactions.transforms(), &scene.world, &player);
+                    crate::sim_maps::probe::record_movers(&interactions.transforms(), &world, &player);
                 }
                 drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::PlayerMovement);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -3022,7 +3029,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let controlled = interactions
                     .pandemonium
                     .as_mut()
-                    .is_some_and(|p| p.control(world_dt, &scene.world, &mut player, control));
+                    .is_some_and(|p| p.control(world_dt, &world, &mut player, control));
                 if !controlled
                     && !scripted_view
                     && !interactions.scripted()
@@ -3041,13 +3048,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         control = Controls::default();
                     }
                     drop(control_hooks.take());
-                    scene.world.set_weapon_obstacles(alice.ice_targets());
+                    world.set_weapon_obstacles(alice.ice_targets());
                     #[cfg(feature="vita_renderer")]
                     if let Some(route)=&mut route_session {
-                        clock.advance_route(elapsed as f64,&scene.world,&mut player,|p|route.control(&scene.world,p,&mut yaw,&mut pitch));
-                    } else {clock.advance(elapsed as f64,&scene.world,&mut player,control);}
+                        clock.advance_route(elapsed as f64,&world,&mut player,|p|route.control(&world,p,&mut yaw,&mut pitch));
+                    } else {clock.advance(elapsed as f64,&world,&mut player,control);}
                     #[cfg(not(feature="vita_renderer"))]
-                    clock.advance(elapsed as f64,&scene.world,&mut player,control);
+                    clock.advance(elapsed as f64,&world,&mut player,control);
                 }
                 drop(control_hooks);
                 pos = player.eye();
@@ -3111,7 +3118,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if stats.alive() {
                     pending_transition = events.transition.or(pending_transition);
                     if let Some((feet, angle)) = events.teleport {
-                        if scene.world.body_clear(feet) {
+                        if world.body_clear(feet) {
                             player = Player::new(feet);
                             yaw = angle;
                             pos = player.eye();
@@ -3127,7 +3134,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         }
                     }
                 }
-                if !in_transport && recovery::outside_world(&scene.world, player.feet) {
+                if !in_transport && recovery::outside_world(&world, player.feet) {
                     stats.damage(10000.);
                     pending_transition = None;
                     hud.announce("Lost beyond the level / Enter to retry");
@@ -3136,7 +3143,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     let dice_before = stats.copies(6);
                     let rage_before = stats.powers.rage;
                     if let Some(s) = &mut interactions.school {
-                        let e = s.collect_secret(&mut stats, player.feet, &scene.world);
+                        let e = s.collect_secret(&mut stats, player.feet, &world);
                         if let Some(m) = e.message {
                             hud.announce(m);
                         }
@@ -3148,7 +3155,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         &mut stats,
                         &pickups,
                         player.feet,
-                        &scene.world,
+                        &world,
                         |item| power_art.collected(item, pickup_clock),
                     ) {
                         hud.announce(message);
@@ -3160,7 +3167,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         audio.world_effect("sound/item/ragebox/ragebox_pickup.wav");
                     }
                     if player.script_motion == 0 {
-                        recovery.observe(&scene.world, &interactions, &player, yaw);
+                        recovery.observe(&world, &interactions, &player, yaw);
                     }
                 }
             }
@@ -3191,7 +3198,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let outcome = if !stats.alive() || flying {
                 Err("Return to walking and retry before summoning Cheshire.")
             } else {
-                hints.summon(&mut story, &scene.world, player.feet, yaw, player.swimming)
+                hints.summon(&mut story, &world, player.feet, yaw, player.swimming)
             };
             match outcome {
                 Ok(()) => {
@@ -3245,7 +3252,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             );
             let (events, feedback) = s.update(
                 if story_active { world_dt } else { 0. },
-                &scene.world,
+                &world,
                 player.feet,
                 story.busy(),
             );
@@ -3275,7 +3282,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(d) = &mut interactions.duchess {
             if story_active && stats.alive() {
                 if let Some(target) = d.target() {
-                    d.threatened(alice.threatens(&scene.world, target));
+                    d.threatened(alice.threatens(&world, target));
                 }
             }
             let before_stage = d.state.stage;
@@ -3283,7 +3290,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             d.state.opponents.summon = alice.ally_target();
             let f = d.update(
                 if story_active { world_dt } else { 0. },
-                &scene.world,
+                &world,
                 &mut player,
                 &mut stats,
                 &mut story,
@@ -3404,6 +3411,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     #[cfg(feature = "native_timing")]
                     timing.with(|r| r.before_install());
                     scene = next.scene;
+                    world = next.world;
                     stats = next_stats;
                     campaign = next_campaign;
                     hints = next.hints;
@@ -3426,7 +3434,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         stats.weapon_summary()
                     );
                     recovery.clear();
-                    interactions.sync(&mut scene.world);
+                    interactions.sync(&mut world);
                     pickups = inventory::pickups_for_visit(
                         &scene.map,
                         &name,
@@ -3516,7 +3524,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 p.gate_particles(&mut steam);
             }
             interactions.place_level_particles(&mut steam);
-            steam.update_clocks(dt, world_dt, pos, &scene.world);
+            steam.update_clocks(dt, world_dt, pos, &world);
         }
         } // simulation: particles
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::StoryWeapons);
@@ -3615,7 +3623,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 } else {
                     0.
                 },
-                &scene.world,
+                &world,
                 player.eye(),
             );
             for &hit in &f.summon_hits {
@@ -3639,10 +3647,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             } else {
                 0.
             };
-            let threatens = |t: &crate::combat::Target| alice.threatens(&scene.world, *t);
+            let threatens = |t: &crate::combat::Target| alice.threatens(&world, *t);
             let f = interactions.levels_step(&mut crate::level::Combat {
                 dt,
-                world: &scene.world,
+                world: &world,
                 player: &mut player,
                 stats: &mut stats,
                 story: &mut story,
@@ -3662,7 +3670,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         npcs.activate_levels(&interactions.levels);
         npcs.notarget(stats.ignores_alice());
         if active && !story.busy() && !interactions.scripted() && world_dt > 0. {
-            npcs.chess_threats(|t| alice.threatens(&scene.world, *t));
+            npcs.chess_threats(|t| alice.threatens(&world, *t));
         }
         npcs.level_patrols(&interactions.levels);
         let feedback = npcs.update(
@@ -3675,7 +3683,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             } else {
                 0.
             },
-            &scene.world,
+            &world,
             player.eye(),
         );
         crate::spike_log::sim(crate::spike_log::Sim::CombatRest);
@@ -3683,7 +3691,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         npcs.story_pose(
             &story,
             if active { world_dt } else { 0. },
-            &scene.world,
+            &world,
             player.eye(),
         );
         if let Some(v) = &interactions.village {
@@ -3767,7 +3775,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 aim: direction,
             },
             &crate::combat::Context {
-                world: &scene.world,
+                world: &world,
                 targets: &targets,
             },
             Some(&mut stats),
@@ -3846,7 +3854,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Some(sound) = e.sound {
                     audio.world_effect_at(&sound, hit_origin);
                 }
-                interactions.sync(&mut scene.world);
+                interactions.sync(&mut world);
                 continue;
             }
             if hit.id >= crate::school2::ENEMY_BASE {
@@ -3864,7 +3872,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 audio.world_effect_at(sound, hit_origin);
             }
         }
-        scene.world.set_weapon_obstacles(alice.ice_targets());
+        world.set_weapon_obstacles(alice.ice_targets());
         if active && loot_visit == save::visit_key(&maps[current], entry_spawn.as_deref()) {
             let mut after = interactions.loot_sources();
             after.extend(npcs.loot_sources());
@@ -3875,14 +3883,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 &loot_before,
                 &after,
                 player.feet,
-                &scene.world,
+                &world,
                 |item| power_art.collected(item, pickup_clock),
             ) {
                 hud.announce(message);
                 audio.world_effect("sound/item/essence/small/mtespu.wav");
             }
             if let Some(message) =
-                pickup_feedback.update(&stats, &pickups, &loot_visit, player.feet, &scene.world)
+                pickup_feedback.update(&stats, &pickups, &loot_visit, player.feet, &world)
             {
                 hud.announce(message);
             }
@@ -3946,7 +3954,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             interactions
                 .duchess
                 .as_ref()
-                .and_then(|d| d.camera(&scene.world))
+                .and_then(|d| d.camera(&world))
                 .or_else(|| interactions.pandemonium.as_ref().and_then(|p| p.camera()))
                 .or_else(|| interactions.pool.as_ref().and_then(|p| p.camera()))
                 .or_else(|| interactions.school.as_ref().and_then(|s| s.scene_camera()))
@@ -3955,7 +3963,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     interactions
                         .beyond
                         .as_ref()
-                        .and_then(|b| b.scene_camera_in(&scene.world))
+                        .and_then(|b| b.scene_camera_in(&world))
                 })
                 .or_else(|| {
                     interactions
@@ -3969,7 +3977,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         .as_ref()
                         .and_then(|v| v.cinema.camera())
                 }),
-            &scene.world,
+            &world,
         );
         if let Some(camera) = pand_camera.filter(|_| {
             interactions
@@ -3979,7 +3987,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }) {
             pand_camera = Some(
                 rail_camera.rail(
-                    &scene.world,
+                    &world,
                     camera,
                     &interactions
                         .pandemonium
@@ -4008,7 +4016,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             if third_person && !flying {
                 follow_camera.update(
-                    &scene.world,
+                    &world,
                     player.feet,
                     direction,
                     preferences.camera_distance,
@@ -4063,7 +4071,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 return crate::cinematic::Camera::look(eye, target);
             }
             camera_handoff.update(
-                &scene.world,
+                &world,
                 scripted_camera,
                 crate::cinematic::Camera::look(eye, aim),
                 fade,
@@ -4101,9 +4109,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         audio.prepare(
             &mut assets,
-            &scene.world,
+            &world,
             camera,
-            scene.world.liquid_at(camera) != 0,
+            world.liquid_at(camera) != 0,
             elapsed,
         );
         let listen_direction = target - camera;
@@ -4127,7 +4135,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPresentation);
         scene.atmosphere.liquid =
-            crate::water::Liquid::from_contents(scene.world.liquid_at(camera)).tint();
+            crate::water::Liquid::from_contents(world.liquid_at(camera)).tint();
         interactions.presentation.apply(&mut scene);
         if let Some(origin) = interactions.levels.iter().find_map(|s| s.ctl.sky_origin()) { scene.set_sky_origin(origin); }
         let (mut mirror_extra, mut mirror_hide) = (Vec::new(), Vec::new());
@@ -4194,7 +4202,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let world_only = false;
         drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraTransforms);
         let mut transforms = interactions.transforms();
-        transforms.extend(scene.world.traversal.transforms(&player));
+        transforms.extend(world.traversal.transforms(&player));
         let rope_hand = interactions
             .pandemonium
             .as_ref()
@@ -4203,10 +4211,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 player
                     .rope
                     .as_ref()
-                    .and_then(|g| scene.world.traversal.rope(g.id))
+                    .and_then(|g| world.traversal.rope(g.id))
                     .map(|r| (r.model, player.feet + Vec3::Z * 40.))
             });
-        scene.update_ropes(world_dt, rope_hand, &transforms);
+        scene.update_ropes(&world, world_dt, rope_hand, &transforms);
         drop(census_leaf);
         crate::spike_log::sim(crate::spike_log::Sim::Particles2);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Particles);
@@ -4247,26 +4255,26 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // them before submission; the control preserves the original HUD phase.
         macro_rules! resolve_prompt { () => {{
                 use crate::interaction::friendly::{use_owner, UseOwner};
-                let rope = player.rope_prompt(&scene.world);
+                let rope = player.rope_prompt(&world);
                 let world_rope = interactions
                     .pandemonium
                     .as_ref()
-                    .is_some_and(|p| p.prompt(&scene.world, player.eye()).is_some());
+                    .is_some_and(|p| p.prompt(&world, player.eye()).is_some());
                 let talk =
-                    interactions.conversation(&scene.world, player.eye(), direction, &npcs, &story);
-                let world = interactions.prompt(&scene.world, player.eye(), direction);
+                    interactions.conversation(&world, player.eye(), direction, &npcs, &story);
+                let world_prompt = interactions.prompt(&world, player.eye(), direction);
                 let owner = use_owner(
                     story.busy(),
                     interactions.scripted(),
                     rope.is_some(),
                     world_rope,
                     talk.is_some(),
-                    world.is_some(),
+                    world_prompt.is_some(),
                 );
                 let prompt = match owner {
                     UseOwner::Talk => talk.map(|c| c.prompt()),
                     UseOwner::SharedRope => rope.map(str::to_owned),
-                    UseOwner::World => world.map(str::to_owned),
+                    UseOwner::World => world_prompt.map(str::to_owned),
                     _ => None,
                 };
             prompt
@@ -4477,7 +4485,7 @@ interactions
             lights.extend(alice.lights());
             lights.extend(npcs.lights());
             for slot in &interactions.levels { lights.extend(slot.ctl.lights()); }
-            let selection = crate::lighting::resolve(lights, camera, &scene.world);
+            let selection = crate::lighting::resolve(lights, camera, &world);
             let us = start.elapsed().as_secs_f64() * 1_000_000.;
             let allocations = scope.finish();
             println!("[lg/snapshot-lights] frame={} bytes={} capacity_bytes={} extraction_us={:.3} allocations={}",
@@ -4598,7 +4606,7 @@ interactions
                 && player.script_motion == 0
                 && player.ledge.is_none()
                 && !player.climbing();
-            let input=aim_pointer.resolve(&crate::combat::Context{world:&scene.world,targets:&targets},crate::targeting::Sight{eye:player.eye(),direction,weapon:can_aim.then(||stats.equipped()).flatten()},level_art.snapshot_visit.id());
+            let input=aim_pointer.resolve(&crate::combat::Context{world:&world,targets:&targets},crate::targeting::Sight{eye:player.eye(),direction,weapon:can_aim.then(||stats.equipped()).flatten()},level_art.snapshot_visit.id());
             let allocations=scope.finish();
             println!("[lg/snapshot-aim] frame={} bytes={} extraction_us={:.3} allocations={} overflow=0",frame,std::mem::size_of_val(&input),start.elapsed().as_secs_f64()*1_000_000.,allocations);Some(input)
         } else {None};
@@ -4608,7 +4616,7 @@ interactions
             let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();
             let will_draw=!world_only && dynamic_input.alice_shadow;
             #[cfg(target_os="vita")] let will_draw=will_draw && !crate::frame_profile::mode().no_world();
-            let (input,queries)=if will_draw {crate::lighting::resolve_shadow(&scene.world,dynamic_input.alice_feet,22.)}else{(None,0)};
+            let (input,queries)=if will_draw {crate::lighting::resolve_shadow(&world,dynamic_input.alice_feet,22.)}else{(None,0)};
             let allocations=scope.finish();
             println!("[lg/snapshot-shadow] frame={} bytes={} extraction_us={:.3} allocations={} queries={} overflow=0",frame,std::mem::size_of_val(&input),start.elapsed().as_secs_f64()*1_000_000.,allocations,queries);
             Some(input)
@@ -4705,7 +4713,7 @@ interactions
         #[cfg(not(target_os = "vita"))]
         let draw_world = true;
         if draw_world {
-            scene.prepare_camera_portals(&world_camera, environment_clock, fullbright, &transforms);
+            scene.prepare_camera_portals(&world, &world_camera, environment_clock, fullbright, &transforms);
         }
         {
             #[cfg(target_os = "vita")]
@@ -4713,7 +4721,7 @@ interactions
             if let Some(selection) = extracted_lights {
                 crate::lighting::publish(selection);
             } else {
-                crate::lighting::select(live_lights.unwrap(), camera, &scene.world);
+                crate::lighting::select(live_lights.unwrap(), camera, &world);
             }
         }
         if !world_only || !scene.retained_active() {
@@ -4751,7 +4759,7 @@ interactions
             let mut frame = crate::character::skinning::overlap::Frame::begin();
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherAlice);
             if crate::character::skinning::overlap::single_frame() {
-                if draw_world && (if snapshot_enabled {dynamic_input.alice_shadow} else {show_alice && stats.invisible<=0.}) { if let Some(input)=&shadow_input {crate::lighting::draw_shadow_input(input);}else{crate::lighting::shadow(&scene.world,player.feet,22.);} }
+                if draw_world && (if snapshot_enabled {dynamic_input.alice_shadow} else {show_alice && stats.invisible<=0.}) { if let Some(input)=&shadow_input {crate::lighting::draw_shadow_input(input);}else{crate::lighting::shadow(&world,player.feet,22.);} }
                 alice.atmosphere(&scene.atmosphere, camera);
             }
             if (if snapshot_enabled {dynamic_input.alice_visible} else {show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic())}) {
@@ -4821,7 +4829,7 @@ interactions
         {
             let _characters_profile = crate::frame_profile::span("characters_setup");
             if draw_world && (if snapshot_enabled {dynamic_input.alice_shadow} else {show_alice && stats.invisible<=0.}) {
-                if let Some(input)=&shadow_input {crate::lighting::draw_shadow_input(input);}else{crate::lighting::shadow(&scene.world,player.feet,22.);}
+                if let Some(input)=&shadow_input {crate::lighting::draw_shadow_input(input);}else{crate::lighting::shadow(&world,player.feet,22.);}
             }
             alice.atmosphere(&scene.atmosphere, camera);
         }
@@ -4957,7 +4965,7 @@ interactions
                     && !player.climbing();
                 aim_pointer.draw(
                     &crate::combat::Context {
-                        world: &scene.world,
+                        world: &world,
                         targets: &targets,
                     },
                     crate::targeting::Sight {
@@ -5531,7 +5539,7 @@ interactions
                 crate::spike_log::world_last_read();
                 crate::allocation_census::snapshot("presented");
                 if crate::allocation_census::enabled() {
-                    crate::allocation_census::payload("live_collision",scene.world.census_payload());
+                    crate::allocation_census::payload("live_collision",world.census_payload());
                     crate::allocation_census::payload("live_audio",audio.census_payload());
                 }
             }
@@ -5574,7 +5582,7 @@ interactions
             "Shelf preview ended: feet={:?}, grounded={}, body_clear={}, jumps={}",
             player.feet,
             player.grounded,
-            scene.world.body_clear(player.feet),
+            world.body_clear(player.feet),
             player.jumps
         );
     }
@@ -5672,11 +5680,11 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
             for overlapped in [false,true] {
                 let mut active=enter_level(assets,name,None,None,options,true)?;
                 let mut alice=Character::load(assets)?;
-                let (eye,yaw)=interaction::spawn_with_static(&active.scene.map,None,Some(active.scene.world.audio_geometry()));
-                let player=Player::spawn(&active.scene.world,eye).unwrap_or_else(||Player::new(eye-Vec3::Z*EYE_HEIGHT));
+                let (eye,yaw)=interaction::spawn_with_static(&active.scene.map,None,Some(active.world.audio_geometry()));
+                let player=Player::spawn(&active.world,eye).unwrap_or_else(||Player::new(eye-Vec3::Z*EYE_HEIGHT));
                 alice.reset(&player,yaw);
                 let direction=vec3(yaw.cos(),yaw.sin(),0.);
-                let (camera,target,_)=character::follow_camera(&active.scene.world,player.feet,direction);
+                let (camera,target,_)=character::follow_camera(&active.world,player.feet,direction);
                 if overlapped { crate::character::skinning::overlap::startup(workers,false); }
                 for frame in 0..3 {
                     let time=frame as f32/60.;
@@ -5684,7 +5692,7 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
                     let view=Camera3D {position:camera,target,up:Vec3::Z,fovy:75_f32.to_radians(),z_near:2.,z_far:30000.,..Default::default()};
                     set_camera(&view);
                     let transforms=active.interactions.transforms();
-                    active.scene.prepare_camera_portals(&view,time,false,&transforms);
+                    active.scene.prepare_camera_portals(&active.world, &view,time,false,&transforms);
                     active.scene.begin_fx_view(&view,time,false,true);
                     active.art.story_pose(&active.story);
                     let mut skin_frame=if overlapped {
@@ -5790,12 +5798,12 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
     art.prepare(assets, &state.scene, &state.interactions, true)?;
     art.story_pose(&state.story);
     let direction = vec3(state.game.view.yaw.cos(), state.game.view.yaw.sin(), 0.);
-    let (camera, target, _) = character::follow_camera(&state.scene.world, state.game.player.feet, direction);
+    let (camera, target, _) = character::follow_camera(&state.world, state.game.player.feet, direction);
     // Rebuild the normal saved emitter population without changing gameplay.
     for _ in 0..600 {
         state.steam.animate(level.environment_clock);
         state.steam.sync(&state.interactions.event_world);
-        state.steam.update_clocks(1./60., 1./60., camera, &state.scene.world);
+        state.steam.update_clocks(1./60., 1./60., camera, &state.world);
     }
     crate::character::skinning::overlap::startup(2, false);
     let hud = Hud::load(assets)?;
@@ -5821,7 +5829,7 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         crate::render::vita_renderer::set_3d_camera(&view);
         let transforms = state.interactions.transforms();
         let started = std::time::Instant::now();
-        state.scene.prepare_camera_portals(&view, time, fullbright, &transforms);
+        state.scene.prepare_camera_portals(&state.world, &view, time, fullbright, &transforms);
         state.scene.begin_fx_view(&view, time, fullbright, true);
         let mut skin = crate::character::skinning::overlap::Frame::begin();
         state.alice.draw_ghost(state.game.player.feet, fullbright, false);

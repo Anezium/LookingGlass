@@ -3,10 +3,10 @@ use super::*;
 use anyhow::ensure;
 use crate::materials::Deform;
 
-fn pixels(scene: &mut Scene, camera: &Camera3D, time: f32) -> Image {
+fn pixels(scene: &mut Scene, world: &World, camera: &Camera3D, time: f32) -> Image {
     clear_background(scene.atmosphere.background());
     set_camera(camera);
-    crate::lighting::select(vec![], camera.position, &scene.world);
+    crate::lighting::select(vec![], camera.position, world);
     crate::render_fx::begin_view(camera, time, &scene.atmosphere, false);
     scene.draw(camera.position, time, false, false, &[]);
     depth_read_only(|| scene.draw(camera.position, time, false, true, &[]));
@@ -23,7 +23,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     }
     let root = std::path::Path::new("private/water-fix/captures");
     std::fs::create_dir_all(root)?;
-    let mut scene = Scene::load(assets, "potears2")?;
+    let Loaded { mut scene, world } = Scene::load(assets, "potears2")?;
     let original: Vec<_> = scene.batches.iter().map(|b| b.deforms.clone()).collect();
     let wave_batches = original.iter().filter(|ds| ds.iter().any(|d| matches!(d, Deform::WaveNormal(..)))).count();
     // Hollow's opaque pond must remain merged/cullable; ripple support must not
@@ -41,9 +41,9 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 batch.deforms = deforms.iter().filter(|d| waves || !matches!(d, Deform::WaveNormal(..))).cloned().collect();
             }
             // Warm the shared pipeline and render target before pixel comparison.
-            pixels(&mut scene, &camera, time);
+            pixels(&mut scene, &world, &camera, time);
             next_frame().await;
-            images.push(pixels(&mut scene, &camera, time));
+            images.push(pixels(&mut scene, &world, &camera, time));
             crate::viewer::save_capture(&root.join(format!("{name}-{label}.png")))?;
             next_frame().await;
         }
@@ -58,9 +58,9 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     scene.batches.retain(|b| b.deforms.iter().any(|d| matches!(d, Deform::WaveNormal(..))));
     let camera = Camera3D { position: vec3(-4600., 1800., 300.), target: vec3(-4250., 2400., 180.),
         up: Vec3::Z, fovy: 75_f32.to_radians(), z_near: 2., z_far: 30000., ..Default::default() };
-    let first = pixels(&mut scene, &camera, 0.);
+    let first = pixels(&mut scene, &world, &camera, 0.);
     next_frame().await;
-    let later = pixels(&mut scene, &camera, 1.);
+    let later = pixels(&mut scene, &world, &camera, 1.);
     let moving = first.bytes.chunks_exact(4).zip(later.bytes.chunks_exact(4))
         .filter(|(a,b)| a[..3].iter().zip(&b[..3]).any(|(x,y)| x.abs_diff(*y) >= 3)).count();
     ensure!(moving > 500, "Pond itself stays still: {moving} visibly changing pixels");

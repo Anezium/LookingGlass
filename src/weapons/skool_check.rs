@@ -5,7 +5,7 @@ use crate::{character::Character, inventory::Stats, movement::Player};
 pub(super) async fn render(assets: &mut Assets) -> Result<()> {
     let root = std::path::Path::new("private/qlair-audit/skool-weapons");
     std::fs::create_dir_all(root)?;
-    let mut scene = crate::render::Scene::load(assets, "skool1")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(assets, "skool1")?;
     let world = World::from_bsp(&scene.map)?;
     let mut alice = Character::load(assets)?;
     // First room from the live mouse reproduction, then the user's school corridor.

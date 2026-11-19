@@ -1303,7 +1303,7 @@ pub fn check(assets: &mut Assets) -> Result<()> {
 
 /// Explicitly staged art checks, separate from the live combat and traversal checks.
 pub async fn render_check(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "skool2")?;
+    let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, "skool2")?;
     let mut i = crate::interaction::Interactions::load(&scene.map)?;
     i.set_entry(assets, &scene.map, "skool2", None)?;
     let mut visuals = crate::weapons::Visuals::load(assets)?;
@@ -1312,7 +1312,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
     // Stage on the gym floor, below its rafters, with room for the largest summon.
     let start = vec3(2280., -2830., 100.);
     let end = start - Vec3::Z * 1100.;
-    let floor = scene.world.sweep(start, end, Vec3::splat(2.));
+    let floor = world.sweep(start, end, Vec3::splat(2.));
     ensure!(
         !floor.start_solid && floor.fraction < 1. && floor.normal.z > 0.7,
         "Demon visual fixture needs clear supported ground"
@@ -1320,8 +1320,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
     let feet = start.lerp(end, floor.fraction) - Vec3::Z * 1.9;
     let camera = vec3(2100., -3050., feet.z + 140.);
     ensure!(
-        !scene
-            .world
+        !world
             .sweep(camera, camera, Vec3::splat(2.))
             .start_solid,
         "Demon visual fixture camera is obstructed"
@@ -1386,7 +1385,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
             });
             let center = visuals.dice.demon.as_ref().unwrap().center();
             ensure!(
-                visible(&scene.world, camera, center),
+                visible(&world, camera, center),
                 "Demon visual fixture is occluded"
             );
             let target = Target {
@@ -1395,7 +1394,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
                 half: Vec3::splat(24.),
             };
             ensure!(
-                visible(&scene.world, center, target.center),
+                visible(&world, center, target.center),
                 "Demon visual attack is obstructed"
             );
             let time = if phase == Phase::Appear {
@@ -1421,7 +1420,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
                 visuals.dice.advance(
                     1. / 60.,
                     &Context {
-                        world: &scene.world,
+                        world: &world,
                         targets: &[target],
                     },
                     camera,

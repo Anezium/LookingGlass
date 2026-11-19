@@ -28,12 +28,12 @@ pub(crate) fn capture(r: &Restored) -> Game {
 }
 
 pub(crate) fn fixture(a: &mut Assets, name: &str, case: &str) -> Result<Restored> {
-    let mut scene = Scene::load(a, name)?;
+    let crate::render::Loaded { scene, mut world } = Scene::load(a, name)?;
     let mut interactions = Interactions::load(&scene.map)?;
     interactions.set_entry(a, &scene.map, name, None)?;
-    interactions.sync(&mut scene.world);
+    interactions.sync(&mut world);
     let (eye, yaw) = crate::interaction::spawn(&scene.map, None);
-    let mut player = Player::spawn(&scene.world, eye).context("Retry fixture entrance blocked")?;
+    let mut player = Player::spawn(&world, eye).context("Retry fixture entrance blocked")?;
     let mut story = Story::load(a, name);
     if case.starts_with("pool-") {
         story = crate::pool::boulder_check::stage(
@@ -41,7 +41,7 @@ pub(crate) fn fixture(a: &mut Assets, name: &str, case: &str) -> Result<Restored
             a,
             &scene.map,
             &mut interactions,
-            &mut scene.world,
+            &mut world,
             &mut player,
         )?;
     } else if case.starts_with("utemple-") {
@@ -50,7 +50,7 @@ pub(crate) fn fixture(a: &mut Assets, name: &str, case: &str) -> Result<Restored
             a,
             &scene.map,
             &mut interactions,
-            &mut scene.world,
+            &mut world,
             &mut player,
         )?;
     } else {
@@ -104,18 +104,18 @@ fn advance(r: &mut Restored, ticks: usize) -> Result<()> {
         r.interactions.advance_school(
             FIXED_DT,
             &r.scene.map,
-            &mut r.scene.world,
+            &mut r.world,
             &mut r.game.player,
         )?;
         r.interactions
             .prepare_player(&mut r.game.stats, &mut r.game.player);
         if !r.interactions.scripted() {
-            r.game.player.tick(&r.scene.world, Controls::default());
+            r.game.player.tick(&r.world, Controls::default());
         }
         let _ = r.interactions.update(
             FIXED_DT,
             &r.scene.map,
-            &mut r.scene.world,
+            &mut r.world,
             &mut r.game.player,
             Vec3::X,
             false,

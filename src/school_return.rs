@@ -312,20 +312,20 @@ pub async fn render_check(assets: &mut crate::assets::Assets) -> anyhow::Result<
         "return-potion",
         "return-shrink",
     ] {
-        let mut scene = crate::render::Scene::load(assets, "skool1")?;
+        let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "skool1")?;
         let mut i = crate::interaction::Interactions::load(&scene.map)?;
         i.set_entry(assets, &scene.map, "skool1", Some("skool1_start2"))?;
-        i.sync(&mut scene.world);
+        i.sync(&mut world);
         let mut p = crate::movement::Player::new(Vec3::ZERO);
         let mut stats = crate::inventory::Stats::for_level("skool1", Some("skool1_start2"));
         i.school.as_mut().unwrap().return_fixture(
             phase,
             &scene.map,
-            &mut scene.world,
+            &mut world,
             &mut p,
             &mut stats,
         )?;
-        i.sync(&mut scene.world);
+        i.sync(&mut world);
         let specs = crate::texture::read_materials(assets)?;
         let mut art = crate::school::Art::load(assets, &specs)?;
         let mut alice = crate::character::Character::load(assets)?;

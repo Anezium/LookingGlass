@@ -115,12 +115,12 @@ pub(super) fn check(
 }
 
 pub async fn render(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "gvillage")?;
+    let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, "gvillage")?;
     let village = super::super::Village::load(assets, &scene.map)?;
     let mut c = Cinema::load(assets, &scene.map)?;
     let mut art = Art::load(assets)?;
     let hints = crate::cheshire::Hints::load(assets, &scene.map, "gvillage")?;
-    check(assets, &scene.map, &scene.world, &hints)?;
+    check(assets, &scene.map, &world, &hints)?;
     std::fs::create_dir_all("private/village-gesture")?;
     for (line, times) in [
         (2, &[0.2, 4.5, 5.25, 5.85, 6.65, 7.1][..]),

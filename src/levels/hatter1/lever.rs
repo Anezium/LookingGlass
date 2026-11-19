@@ -255,14 +255,14 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
 
 pub(super) async fn render(
     a: &mut Assets,
-    world: &mut crate::render::Scene,
+    scene: &mut crate::render::Scene,
+    world: &mut World,
     art: &mut super::art::Art,
 ) -> Result<()> {
-    let mut o = Clockwork::load(a, &world.map)?;
-    world.world.set_dynamic(o.colliders());
+    let mut o = Clockwork::load(a, &scene.map)?;
+    world.set_dynamic(o.colliders());
     let at = o.levers[0];
     let feet = world
-        .world
         .actor_footing(
             at.point(vec3(-64., 0., 60.)),
             PLAYER_CENTER,
@@ -273,7 +273,7 @@ pub(super) async fn render(
     let mut p = Player::new(feet);
     p.grounded = true;
     o.update(
-        &mut world.world,
+        world,
         &p,
         (at.translation + Vec3::Z * 20. - p.eye()).normalize(),
         true,
@@ -286,11 +286,11 @@ pub(super) async fn render(
         ("lever-finish", 3.8),
     ] {
         while elapsed < time {
-            o.advance(1. / 120., &world.map, &mut world.world, &mut p, &[])?;
+            o.advance(1. / 120., &scene.map, world, &mut p, &[])?;
             elapsed += 1. / 120.;
         }
         let camera = o
-            .pull_camera(&world.world)
+            .pull_camera(world)
             .context("Lever camera missing")?;
         let eye = camera.eye;
         let cam = Camera3D {
@@ -305,11 +305,11 @@ pub(super) async fn render(
         for frame in 0..3 {
             clear_background(BLACK);
             set_camera(&cam);
-            crate::render_fx::begin_view(&cam, elapsed, &world.atmosphere, false);
-            world.draw(eye, elapsed, false, false, &o.transforms());
-            art.draw(&o, &world.atmosphere, eye, false);
+            crate::render_fx::begin_view(&cam, elapsed, &scene.atmosphere, false);
+            scene.draw(eye, elapsed, false, false, &o.transforms());
+            art.draw(&o, &scene.atmosphere, eye, false);
             crate::render::depth_read_only(|| {
-                world.draw(eye, elapsed, false, true, &o.transforms())
+                scene.draw(eye, elapsed, false, true, &o.transforms())
             });
             crate::render_fx::finish();
             set_default_camera();

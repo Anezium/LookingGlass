@@ -391,8 +391,8 @@ fn tests(a: &mut Assets, map: &Bsp) -> Result<()> {
 
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut world = crate::render::Scene::load(a, "wchess2")?;
-        let mut r = Castle::load(a, &world.map)?;
+        let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "wchess2")?;
+        let mut r = Castle::load(a, &scene.map)?;
         let mut art = art::Art::load(a, &r)?;
         let mut p = Player::new(r.data.point("alice_queen_dest1").translation);
         for (name, kind, t, phase, line) in [
@@ -427,12 +427,12 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             r.saved.queen = kind == scene::Kind::King;
             r.start_scene(&p);
             if kind == scene::Kind::Queen {
-                let mut w = World::from_bsp(&world.map)?;
+                let mut w = World::from_bsp(&scene.map)?;
                 for _ in 0..(t / crate::movement::FIXED_DT) as usize {
-                    r.advance(crate::movement::FIXED_DT, &world.map, &mut w, &mut p, &[])?;
+                    r.advance(crate::movement::FIXED_DT, &scene.map, &mut w, &mut p, &[])?;
                 }
                 let c = r.scene_camera().unwrap();
-                capture(&mut world, &mut art, &r, c, name).await?;
+                capture(&mut scene, &mut art, &r, c, name).await?;
                 continue;
             }
             let s = r.saved.scene.as_mut().unwrap();
@@ -445,15 +445,15 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             s.alice_camera = Some(24.);
             s.pawn_camera = Some(58.);
             s.shot = if line == 1 { 9 } else { 8 };
-            r.rebuild(&world.map)?;
+            r.rebuild(&scene.map)?;
             let c = r.scene_camera().context("Missing camera")?;
-            capture(&mut world, &mut art, &r, c, name).await?;
+            capture(&mut scene, &mut art, &r, c, name).await?;
         }
-        r.finish_scene(&world.map, &mut World::from_bsp(&world.map)?, &mut p, true)?;
+        r.finish_scene(&scene.map, &mut World::from_bsp(&scene.map)?, &mut p, true)?;
         r.saved.age += 4.;
-        r.rebuild(&world.map)?;
+        r.rebuild(&scene.map)?;
         capture(
-            &mut world,
+            &mut scene,
             &mut art,
             &r,
             crate::cinematic::Camera::look(vec3(-1024., -500., 650.), vec3(-1024., -64., 500.)),

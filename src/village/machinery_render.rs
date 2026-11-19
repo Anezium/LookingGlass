@@ -24,23 +24,22 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
             330,
         ),
     ] {
-        let mut scene = Scene::load(assets, "gvillage")?;
+        let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, "gvillage")?;
         let mut i = Interactions::load(&scene.map)?;
         i.set_entry(assets, &scene.map, "gvillage", None)?;
-        i.sync(&mut scene.world);
+        i.sync(&mut world);
         ensure!(
-            scene
-                .world
+            world
                 .body_clear(eye - crate::collision::PLAYER_CENTER),
             "Village inspection camera {name} is inside geometry"
         );
         let mut p = Player::new(vec3(-4168., 6160., 18.03125));
         let mut steam = crate::particles::Steam::load(assets, &scene.map)?;
         for frame in 0..frames {
-            i.advance_school(1. / 60., &scene.map, &mut scene.world, &mut p)?;
+            i.advance_school(1. / 60., &scene.map, &mut world, &mut p)?;
             steam.sync(&i.event_world);
             i.village.as_ref().unwrap().place_particles(&mut steam);
-            steam.update(1. / 60., eye, &scene.world);
+            steam.update(1. / 60., eye, &world);
             clear_background(BLACK);
             set_camera(&Camera3D {
                 position: eye,

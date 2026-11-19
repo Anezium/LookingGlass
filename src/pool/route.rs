@@ -327,7 +327,7 @@ pub async fn render(a: &mut Assets) -> Result<()> {
     if let Ok(path) = std::env::var("LOOKING_GLASS_POOL_CAPTURE") {
         let cp: crate::route::Checkpoint = serde_json::from_slice(&std::fs::read(path)?)?;
         let mut r = Route::resume(a, &cp)?;
-        let mut scene = crate::render::Scene::load(a, "potears1")?;
+        let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(a, "potears1")?;
         let mut art = super::Art::load(a, r.interactions.pool.as_ref().unwrap())?;
         let mut foes = crate::encounters::Art::load(a)?;
         let eye = r.player.eye();
@@ -348,12 +348,14 @@ pub async fn render(a: &mut Assets) -> Result<()> {
             };
             set_camera(&camera);
             scene.prepare_camera_portals(
+                &world,
                 &camera,
                 r.environment_clock,
                 false,
                 &r.interactions.transforms(),
             );
             scene.update_ropes(
+                &world,
                 0.,
                 r.player.rope.as_ref().and_then(|g| {
                     r.world

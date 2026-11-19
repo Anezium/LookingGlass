@@ -1288,7 +1288,7 @@ pub(crate) mod test_support {
 pub async fn check(assets: &mut Assets) -> Result<()> {
     use anyhow::ensure;
     std::fs::create_dir_all("private/render-fx")?;
-    let mut scene = crate::render::Scene::load(assets, "skool1")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "skool1")?;
     let white = crate::texture::upload_rgba8(1, 1, &[255; 4]);
     let quad = |z: f32, color: Color| Mesh { upload_identity: None, surface: None,
         vertices: [
@@ -1319,7 +1319,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         z_far: 50.,
         ..Default::default()
     };
-    crate::lighting::select(vec![], camera.position, &scene.world);
+    crate::lighting::select(vec![], camera.position, &world);
     for order in [[0, 1, 2], [2, 0, 1], [1, 2, 0]] {
         clear_background(BLACK);
         set_camera(&camera);
@@ -1602,7 +1602,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     println!("PASS supplied light declarations, models-only mask, projected shadow height and flare wall occlusion");
     let mut timings = Vec::new();
     for name in ["skool1", "potears1", "pandemonium"] {
-        scene = crate::render::Scene::load(assets, name)?;
+        crate::render::Loaded { scene, world } = crate::render::Scene::load(assets, name)?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, name, None)?;
         let mut steam = crate::particles::Steam::load(assets, &scene.map)?;
@@ -1610,7 +1610,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         steam.sync(&interactions.event_world);
         let eye = scene.map.spawn().0 + vec3(0., 0., 50.);
         for _ in 0..60 {
-            steam.update(1. / 60., eye, &scene.world);
+            steam.update(1. / 60., eye, &world);
         }
         let direction = Vec3::Y;
         for mode in ["legacy", "queue", "queue_and_light"] {
@@ -1635,7 +1635,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 // A named fixture adds an actual authored projectile light ahead of
                 // this fixed camera, so the on/off cost is measured even in unlit maps.
                 lights.extend(crate::lighting::croquet(eye + direction * 32.));
-                crate::lighting::select(if enabled { lights } else { vec![] }, eye, &scene.world);
+                crate::lighting::select(if enabled { lights } else { vec![] }, eye, &world);
                 visible_lights = crate::lighting::count();
                 if mode != "legacy" {
                     begin_view(&view, 1., &scene.atmosphere, false);

@@ -5,7 +5,7 @@ use super::*;
 use crate::character::{visibility_camera, visibility_image, visible_pixels, Character};
 
 pub async fn check(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "gvillage")?;
+    let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, "gvillage")?;
     let village = super::super::Village::load(assets, &scene.map)?;
     let hints = crate::cheshire::Hints::load(assets, &scene.map, "gvillage")?;
     let mut art = Art::load(assets)?;
@@ -16,7 +16,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         for skip_at in [None, Some(2.5), Some(12.)] {
             let mut c = Cinema::load(assets, &scene.map)?;
             let mut story = Story::load(assets, "gvillage");
-            let mut player = Player::spawn(&scene.world, spawn).context("Visibility test spawn")?;
+            let mut player = Player::spawn(&world, spawn).context("Visibility test spawn")?;
             if event == "entry" {
                 c.begin(&mut story);
             } else if event == "knife_cat" {
@@ -40,9 +40,9 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 }
                 let seconds = tick as f32 / 60.;
                 if c.active() && skip_at.is_some_and(|at| seconds >= at) {
-                    c.skip(&mut player, &scene.world, &mut story)?;
+                    c.skip(&mut player, &world, &mut story)?;
                 }
-                c.advance(1. / 60., &mut player, &scene.world)?;
+                c.advance(1. / 60., &mut player, &world)?;
                 if c.prepare_story(&mut story) {
                     story.tick(1. / 60., false);
                 }
@@ -55,7 +55,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                     let dialogue = story.snapshot();
                     c.restore(Some(&serde_json::from_slice(&saved)?))?;
                     story.restore(&dialogue, &hints)?;
-                    c.advance(0., &mut player, &scene.world)?;
+                    c.advance(0., &mut player, &world)?;
                     ensure!(
                         serde_json::to_vec(&c.state)? == saved,
                         "Paused/restored scene changed: {event}"
@@ -140,7 +140,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 "Scene did not return camera/control: {event}"
             );
             ensure!(
-                c.state.done.contains(event) && scene.world.body_clear(player.feet),
+                c.state.done.contains(event) && world.body_clear(player.feet),
                 "Invalid scene endpoint: {event}"
             );
             // Player body after the final shot, then after save/restore, using
@@ -165,6 +165,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
             if skip_at.is_none() {
                 return_frames(
                     &mut scene,
+                    &world,
                     &mut alice,
                     &player,
                     last_camera.context("No final shot")?,
@@ -194,6 +195,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
 /// viewer, using the actual endpoint produced by a watched scene.
 async fn return_frames(
     scene: &mut crate::render::Scene,
+    world: &crate::collision::World,
     alice: &mut Character,
     player: &Player,
     from: Camera,
@@ -203,11 +205,11 @@ async fn return_frames(
     let mut follow = crate::camera::Follow::default();
     let mut handoff = crate::camera::Handoff::default();
     let direction = vec3(player.script_facing.cos(), player.script_facing.sin(), 0.);
-    let (eye, target, _) = follow.update(&scene.world, player.feet, direction, 132., 0.);
+    let (eye, target, _) = follow.update(world, player.feet, direction, 132., 0.);
     let gameplay = Camera::look(eye, target);
-    handoff.update(&scene.world, Some(from), gameplay, fade, 0.);
+    handoff.update(world, Some(from), gameplay, fade, 0.);
     for frame in 0..36 {
-        let view = handoff.update(&scene.world, None, gameplay, fade, 1. / 60.);
+        let view = handoff.update(world, None, gameplay, fade, 1. / 60.);
         let cover = handoff.overlay();
         ensure!(
             view.eye.is_finite() && (view.target - view.eye).length() > 0.9,
@@ -215,8 +217,7 @@ async fn return_frames(
         );
         if cover.a < 0.1 {
             ensure!(
-                !scene
-                    .world
+                !world
                     .sweep(view.eye, view.eye, Vec3::splat(3.9))
                     .start_solid,
                 "Visible handoff camera inside geometry: {event}, frame {frame}"
@@ -234,7 +235,7 @@ async fn return_frames(
                 aim: direction,
             },
             &crate::combat::Context {
-                world: &scene.world,
+                world,
                 targets: &[],
             },
         );

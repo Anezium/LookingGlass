@@ -137,7 +137,7 @@ fn clockwork_departures(assets: &mut Assets) -> Result<()> {
 
 pub async fn native(assets: &mut Assets) -> Result<()> {
     attack_fx::render_check(assets).await?;
-    let mut scene = crate::render::Scene::load(assets, "hedge1")?;
+    let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, "hedge1")?;
     let template = placements(&scene.map, "hedge1", None, false)
         .into_iter()
         .find(|s| s.model == "c_jabberspawn" && s.origin.z > 1700.)
@@ -153,7 +153,7 @@ pub async fn native(assets: &mut Assets) -> Result<()> {
         spawn.name.clear();
         spawn.resident_spawn = None;
         let mut p = resident::Resident::new(&spawn, &scene.map, "hedge1")?.unwrap();
-        p.place(&scene.world);
+        p.place(&world);
         let b = p.target(0);
         let target = b.center;
         let eye = (0..64)
@@ -167,7 +167,7 @@ pub async fn native(assets: &mut Assets) -> Result<()> {
                     )
             })
             .find(|eye| {
-                let t = scene.world.sweep(target, *eye, Vec3::splat(2.));
+                let t = world.sweep(target, *eye, Vec3::splat(2.));
                 !t.start_solid && t.fraction >= 1.
             })
             .context("No creature camera")?;

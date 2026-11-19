@@ -234,7 +234,7 @@ pub(crate) fn render(a: &mut Assets, kind: Kind) -> crate::levels::BoxFuture<'_>
         if kind == Kind::Lair { altar_check::render(a).await?; }
         fire_check::render(a, kind).await?;
         std::fs::create_dir_all("private/jabberwock/captures")?;
-        let mut scene = crate::render::Scene::load(a, kind.map())?;
+        let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(a, kind.map())?;
         let mut o = Encounter::load(a, &scene.map, kind)?;
         let mut art = art::Art::load(a, &o)?;
         for (name, phase, t) in [
@@ -298,14 +298,14 @@ pub(crate) fn render(a: &mut Assets, kind: Kind) -> crate::levels::BoxFuture<'_>
                 b.set(battle::Action::Beam);
                 b.time = t;
                 b.aim = b.at + vec3(-450., 0., 80.);
-                b.step(kind, &scene.world, b.aim, false, &o.data, &mut Feedback::default());
+                b.step(kind, &world, b.aim, false, &o.data, &mut Feedback::default());
                 ensure!(b.beam.is_some(), "Eye-beam fixture did not emit");
             } else if phase == Phase::Fight {
                 let mut out = Feedback::default();
                 for _ in 0..100 {
                     o.saved.boss.step(
                         kind,
-                        &scene.world,
+                        &world,
                         o.saved.boss.at + vec3(-450., 0., 32.),
                         false,
                         &o.data,

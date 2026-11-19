@@ -221,7 +221,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             return saves::run(a, mode == "write").await;
         }
         std::fs::create_dir_all("private/hatter2/captures")?;
-        let mut scene = crate::render::Scene::load(a, "hatter2")?;
+        let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "hatter2")?;
         let mut o = Encounter::load(a, &scene.map)?;
         let mut art = art::Art::load(a, &o)?;
         for (name, phase, t, action) in [

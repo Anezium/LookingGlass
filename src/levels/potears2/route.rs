@@ -14,7 +14,7 @@ pub fn check(a: &mut Assets) -> Result<()> {
 pub async fn render(a: &mut Assets) -> Result<()> {
     if let Ok(path) = std::env::var("LOOKING_GLASS_HOLLOW_CAPTURE") {
         let r = Route::resume(a, &serde_json::from_slice(&std::fs::read(path)?)?)?;
-        let mut scene = crate::render::Scene::load(a, "potears2")?;
+        let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(a, "potears2")?;
         let mut art = scene::Art::load(a)?;
         let o = state(&r);
         let eye = r.player.eye();
@@ -40,6 +40,7 @@ pub async fn render(a: &mut Assets) -> Result<()> {
             };
             set_camera(&view);
             scene.prepare_camera_portals(
+                &world,
                 &view,
                 r.environment_clock,
                 false,

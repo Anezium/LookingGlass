@@ -462,7 +462,7 @@ pub(crate) fn stage_native(
 }
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut scene = crate::render::Scene::load(a, "facade")?;
+        let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "facade")?;
         let mut art = Art::load(a)?;
         for (name, t) in [
             ("gates-closed", -1_f32),

@@ -226,16 +226,16 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         if snarks_only && crate::snark::Kind::from_model(family).is_none() {
             continue;
         }
-        let mut scene = crate::render::Scene::load(assets, map_name)?;
+        let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, map_name)?;
         if family == "c_larva" {
             // The fresh scene still owns the only map handle before fixture setup.
             burrow_check::larva_fixture(scene.map_mut())?;
         }
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, map_name, None)?;
-        interactions.sync(&mut scene.world);
+        interactions.sync(&mut world);
         let mut npcs = Npcs::load(assets, &scene.map, map_name, None, false, false)?;
-        npcs.update(0., &scene.world, Vec3::splat(10000.));
+        npcs.update(0., &world, Vec3::splat(10000.));
         for a in &mut npcs.actors {
             if let Some(resident::Resident {
                 body: Body::Snark(p),
@@ -245,7 +245,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 p.notarget = true;
                 for _ in 0..360 {
                     p.step(
-                        &scene.world,
+                        &world,
                         Vec3::splat(10000.),
                         &npcs.models[a.model].data,
                         &mut combat::Feedback::default(),
@@ -259,10 +259,9 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                         let next = p.feet + Vec3::Z * 2.;
                         let body = p.target(0);
                         let trace =
-                            scene
-                                .world
+                            world
                                 .sweep(body.center, body.center + Vec3::Z * 2., body.half);
-                        if !p.kind.wet(&scene.world, next)
+                        if !p.kind.wet(&world, next)
                             || trace.start_solid
                             || trace.fraction < 1.
                         {
@@ -300,7 +299,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 target + vec3(a.cos() * radius, a.sin() * radius, 24.)
             })
             .find(|p| {
-                let t = scene.world.sweep(target, *p, Vec3::splat(2.));
+                let t = world.sweep(target, *p, Vec3::splat(2.));
                 !t.start_solid && t.fraction >= 1.
             })
             .context("No clear resident camera")?;
@@ -354,18 +353,18 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 !npcs.targets().iter().any(|t| t.id == pending),
                 "Dormant resident targetable"
             );
-            npcs.update(0., &scene.world, trigger_eye);
+            npcs.update(0., &world, trigger_eye);
             ensure!(
                 serde_json::to_value(npcs.snapshot())? == serde_json::to_value(&initial)?,
                 "Paused trigger changed state"
             );
-            step(&mut npcs, &scene.world, trigger_eye, 1);
+            step(&mut npcs, &world, trigger_eye, 1);
             let p = npcs.actors[pending].resident.as_ref().unwrap();
             ensure!(
                 p.active || p.delay.is_some(),
                 "Touch did not activate resident"
             );
-            step(&mut npcs, &scene.world, Vec3::splat(10000.), 1900);
+            step(&mut npcs, &world, Vec3::splat(10000.), 1900);
             ensure!(
                 npcs.actors[pending].resident.as_ref().unwrap().active,
                 "Pending resident did not activate"
@@ -432,8 +431,8 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 let mut loot = saved.loot;
                 loot.validate()?;
                 let before = npcs.loot_sources();
-                let damage = step(&mut npcs, &scene.world, saved.eye, 120);
-                loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+                let damage = step(&mut npcs, &world, saved.eye, 120);
+                loot.defeated(&before, &npcs.loot_sources(), &world);
                 ensure!(
                     serde_json::to_value(npcs.snapshot())? == serde_json::to_value(saved.expected)?
                         && damage == saved.damage,
@@ -486,7 +485,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                     };
                     for _ in 0..1800 {
                         g.step(
-                            &scene.world,
+                            &world,
                             eye,
                             &npcs.models[actor.model].data,
                             &mut combat::Feedback::default(),
@@ -599,14 +598,14 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                     knockback: Vec3::ZERO,
                 });
             }
-            loot.defeated(&before, &npcs.loot_sources(), &scene.world);
-            step(&mut npcs, &scene.world, eye, 8);
+            loot.defeated(&before, &npcs.loot_sources(), &world);
+            step(&mut npcs, &world, eye, 8);
             let cast = npcs.snapshot();
             let future_before = npcs.loot_sources();
-            let damage = step(&mut npcs, &scene.world, eye, 120);
+            let damage = step(&mut npcs, &world, eye, 120);
             let expected = npcs.snapshot();
             let mut future_loot = loot.clone();
-            future_loot.defeated(&future_before, &npcs.loot_sources(), &scene.world);
+            future_loot.defeated(&future_before, &npcs.loot_sources(), &world);
             if mode == "resident-save-write" {
                 std::fs::write(
                     path,
@@ -856,7 +855,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                         g.time = 0.;
                         let data = &npcs.models[npcs.actors[0].model].data;
                         for _ in 0..48 {
-                            g.step(&scene.world, eye, data, &mut combat::Feedback::default());
+                            g.step(&world, eye, data, &mut combat::Feedback::default());
                         }
                     }
                     if pose == "projectile" {

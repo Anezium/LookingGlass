@@ -156,10 +156,10 @@ struct AmbushSave {
     eye: Vec3,
 }
 pub async fn ambush_native(assets: &mut Assets, mode: &str) -> Result<()> {
-    let scene = crate::render::Scene::load(assets, "garden2")?;
+    let crate::render::Loaded { scene, world } = crate::render::Scene::load(assets, "garden2")?;
     let mut npcs = Npcs::load(assets, &scene.map, "garden2", None, false, false)?;
     npcs.notarget(true);
-    npcs.update(0., &scene.world, Vec3::splat(10000.));
+    npcs.update(0., &world, Vec3::splat(10000.));
     let initial = npcs.snapshot();
     let mut previous = initial.clone();
     previous
@@ -200,7 +200,7 @@ pub async fn ambush_native(assets: &mut Assets, mode: &str) -> Result<()> {
             saved.cast.matches_placements(&scene.map, "garden2", None)?;
             npcs.restore(&saved.cast)?;
             for _ in 0..120 {
-                npcs.update(1. / 60., &scene.world, saved.eye);
+                npcs.update(1. / 60., &world, saved.eye);
             }
             ensure!(
                 serde_json::to_value(npcs.snapshot())? == serde_json::to_value(saved.expected)?,
@@ -208,14 +208,14 @@ pub async fn ambush_native(assets: &mut Assets, mode: &str) -> Result<()> {
             );
         } else {
             npcs.restore(&initial)?;
-            npcs.update(0., &scene.world, eye);
+            npcs.update(0., &world, eye);
             ensure!(
                 serde_json::to_value(npcs.snapshot())? == serde_json::to_value(&initial)?,
                 "Paused Garden trigger changed state"
             );
             let cast = npcs.snapshot();
             for _ in 0..120 {
-                npcs.update(1. / 60., &scene.world, eye);
+                npcs.update(1. / 60., &world, eye);
             }
             ensure!(
                 npcs.actors.iter().any(|a| matches!(

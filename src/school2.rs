@@ -1659,7 +1659,7 @@ pub fn check(assets: &mut Assets) -> Result<()> {
 pub async fn check_render(assets: &mut Assets) -> Result<()> {
     crate::interaction::school2_check::render(assets).await?;
     cinema_check::render(assets).await?;
-    let mut scene = crate::render::Scene::load(assets, "skool2")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "skool2")?;
     let mut i = crate::interaction::Interactions::load(&scene.map)?;
     i.set_entry(assets, &scene.map, "skool2", None)?;
     let mut art = Art::load(assets, i.school2.as_ref().unwrap())?;
@@ -1726,10 +1726,10 @@ pub async fn check_render(assets: &mut Assets) -> Result<()> {
             s.completed_dialogue("Old_Gnome_SpiceDrops");
         }
         for frame in 0..360 {
-            i.advance_school(1. / 60., &scene.map, &mut scene.world, &mut player)?;
+            i.advance_school(1. / 60., &scene.map, &mut world, &mut player)?;
             let s = i.school2.as_mut().unwrap();
             if stage == Stage::Battle {
-                s.update(1. / 60., &scene.world, player.feet, false);
+                s.update(1. / 60., &world, player.feet, false);
             } else {
                 s.quest.time = frame as f32 / 60.;
                 s.age += 1. / 60.;

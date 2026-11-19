@@ -94,12 +94,12 @@ fn step(npcs: &mut Npcs, world: &World, eye: Vec3, frames: usize) -> f32 {
 }
 pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     std::fs::create_dir_all("private/imp")?;
-    let mut scene = crate::render::Scene::load(assets, "wforest")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "wforest")?;
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
     interactions.set_entry(assets, &scene.map, "wforest", None)?;
-    interactions.sync(&mut scene.world);
+    interactions.sync(&mut world);
     let mut npcs = Npcs::load(assets, &scene.map, "wforest", None, false, false)?;
-    npcs.update(0., &scene.world, Vec3::splat(10000.));
+    npcs.update(0., &world, Vec3::splat(10000.));
     let initial = npcs.snapshot();
     let id = npcs
         .actors
@@ -131,12 +131,12 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         !npcs.targets().iter().any(|t| t.id == pending_id),
         "Dormant Imp is targetable"
     );
-    npcs.update(0., &scene.world, trigger_eye);
+    npcs.update(0., &world, trigger_eye);
     ensure!(
         serde_json::to_value(&initial)? == serde_json::to_value(npcs.snapshot())?,
         "Paused Imp trigger changed state"
     );
-    step(&mut npcs, &scene.world, trigger_eye, 1);
+    step(&mut npcs, &world, trigger_eye, 1);
     ensure!(
         npcs.actors[pending_id]
             .imp
@@ -147,7 +147,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         "Relay failed to schedule Imp"
     );
     let delayed = npcs.snapshot();
-    step(&mut npcs, &scene.world, Vec3::splat(10000.), 180);
+    step(&mut npcs, &world, Vec3::splat(10000.), 180);
     ensure!(
         npcs.targets().iter().any(|t| t.id == pending_id),
         "Delayed Imp failed to spawn away from trigger"
@@ -172,7 +172,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             target + vec3(angle.cos() * 175., angle.sin() * 175., 25.)
         })
         .find(|p| {
-            let t = scene.world.sweep(target, *p, Vec3::splat(2.));
+            let t = world.sweep(target, *p, Vec3::splat(2.));
             !t.start_solid && t.fraction >= 1.
         })
         .context("No clear Imp camera")?;
@@ -185,8 +185,8 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             let mut loot = saved.loot;
             loot.validate()?;
             let before = npcs.loot_sources();
-            let damage = step(&mut npcs, &scene.world, saved.eye, 180);
-            loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+            let damage = step(&mut npcs, &world, saved.eye, 180);
+            loot.defeated(&before, &npcs.loot_sources(), &world);
             ensure!(
                 serde_json::to_value(npcs.snapshot())? == serde_json::to_value(saved.expected)?
                     && damage == saved.damage,
@@ -223,7 +223,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             p.phase = Phase::Attack;
             p.time = time;
             if case == "impact" {
-                step(&mut npcs, &scene.world, continuation_eye, 5);
+                step(&mut npcs, &world, continuation_eye, 5);
             }
         } else if case == "pain" {
             npcs.hit(Hit {
@@ -261,15 +261,15 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 },
                 knockback: Vec3::ZERO,
             });
-            loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+            loot.defeated(&before, &npcs.loot_sources(), &world);
             ensure!(
                 loot.drops.len() == 1 && loot.drops[0].grade == crate::loot::Grade::Small,
                 "Wrong Imp reward"
             );
-            step(&mut npcs, &scene.world, continuation_eye, 12);
+            step(&mut npcs, &world, continuation_eye, 12);
         }
         let cast = npcs.snapshot();
-        let damage = step(&mut npcs, &scene.world, continuation_eye, 180);
+        let damage = step(&mut npcs, &world, continuation_eye, 180);
         let expected = npcs.snapshot();
         if mode == "imp-save-write" {
             std::fs::write(
@@ -337,7 +337,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         kind: DamageKind::Other,
         knockback: Vec3::ZERO,
     });
-    step(&mut npcs, &scene.world, eye, 8);
+    step(&mut npcs, &world, eye, 8);
     hashes.insert(capture(&mut npcs, &mut scene, &interactions, eye, target, "gib").await?);
     ensure!(hashes.len() == 13, "Imp visual states identical");
     println!("PASS 13 Imp animation/fork/frozen/gib/cleanup captures; authored relay, pause and legacy migration");

@@ -139,7 +139,7 @@ async fn run(a: &mut Assets, write: bool) -> Result<()> {
         o.advance(
             0.,
             &restored.scene.map,
-            &mut restored.scene.world,
+            &mut restored.world,
             &mut restored.game.player,
             &[],
         )?;
@@ -183,7 +183,7 @@ async fn run(a: &mut Assets, write: bool) -> Result<()> {
             let (entry, _) =
                 crate::interaction::spawn(&migrated.scene.map, Some("centipede2_start1"));
             let player =
-                Player::spawn(&migrated.scene.world, entry).context("Legacy entrance blocked")?;
+                Player::spawn(&migrated.world, entry).context("Legacy entrance blocked")?;
             ensure!(
                 migrated.game.player.feet.distance(player.feet) < 0.1,
                 "Legacy save stranded Alice behind the closed arena"

@@ -3515,7 +3515,8 @@ pub(crate) async fn visualizer(
         options.map == "gvillage",
         "jalon 2 visualizer supports gvillage"
     );
-    let mut scene = Scene::load_for(&mut assets, &options.map, options.difficulty)?;
+    let super::Loaded { mut scene, world } =
+        Scene::load_for(&mut assets, &options.map, options.difficulty)?;
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
     interactions.set_entry(
         &mut assets,
@@ -3527,7 +3528,7 @@ pub(crate) async fn visualizer(
     let yaw = 4.692389_f32;
     let direction = vec3(yaw.cos(), yaw.sin(), 0.);
     let (eye, target, _) = crate::camera::Follow::default().update(
-        &scene.world,
+        &world,
         vec3(-4188., 6004., 32.03125),
         direction,
         132.,

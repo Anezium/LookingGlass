@@ -152,7 +152,7 @@ pub(super) fn check(data: &Data, kind: Kind) -> Result<()> {
 
 pub(super) async fn render(a: &mut Assets, kind: Kind) -> Result<()> {
     std::fs::create_dir_all("private/jabberwock/captures")?;
-    let mut scene = crate::render::Scene::load(a, kind.map())?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, kind.map())?;
     let mut o = Encounter::load(a, &scene.map, kind)?;
     let mut art = art::Art::load(a, &o)?;
     let base = o.saved.boss.pose();

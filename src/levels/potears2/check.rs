@@ -190,7 +190,8 @@ pub(super) fn dialogue_check(assets: &mut Assets) -> Result<()> {
 
 pub(super) fn render(assets: &mut Assets) -> crate::levels::BoxFuture<'_> {
     Box::pin(async move {
-        let mut scene = crate::render::Scene::load(assets, "potears2")?;
+        let crate::render::Loaded { mut scene, world: _world } =
+            crate::render::Scene::load(assets, "potears2")?;
         let mut art = Art::load(assets)?;
         for case in ["approach", "first", "middle", "last", "doors", "suction"] {
             let mut i = Interactions::load(&scene.map)?;

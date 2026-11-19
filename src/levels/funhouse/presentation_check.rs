@@ -105,33 +105,33 @@ pub fn check(a: &mut Assets) -> Result<()> {
 pub async fn render(a: &mut Assets) -> Result<()> {
     let dir = std::path::Path::new("private/mirror-image-captures");
     std::fs::create_dir_all(dir)?;
-    let mut world = crate::render::Scene::load(a, "funhouse")?;
-    let mut o = Funhouse::load(a, &world.map)?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(a, "funhouse")?;
+    let mut o = Funhouse::load(a, &scene.map)?;
     let mut p = Player::new(o.data.points["funhouse_start1"].translation);
-    sync(&o, &mut world.world);
+    sync(&o, &mut world);
     let mut handoff = crate::camera::Handoff::default();
     o.saved.scene.as_mut().unwrap().clock.time = 29.;
     let from = o.scene_camera().unwrap();
     handoff.update(
-        &world.world,
+        &world,
         Some(from),
         from,
         Color::new(0., 0., 0., 0.),
         0.,
     );
-    o.finish_scene(&world.map, &mut world.world, &mut p)?;
-    sync(&o, &mut world.world);
+    o.finish_scene(&scene.map, &mut world, &mut p)?;
+    sync(&o, &mut world);
     let mut follow = crate::camera::Follow::default();
     for frame in 0..36 {
-        let (eye, aim, _) = follow.update(&world.world, p.feet, Vec3::Y, 132., 1. / 60.);
+        let (eye, aim, _) = follow.update(&world, p.feet, Vec3::Y, 132., 1. / 60.);
         let view = handoff.update(
-            &world.world,
+            &world,
             None,
             crate::cinematic::Camera::look(eye, aim),
             Color::new(0., 0., 0., 0.),
             1. / 60.,
         );
-        draw(&mut world, &o, view, handoff.overlay());
+        draw(&mut scene, &world, &o, view, handoff.overlay());
         if [0, 8, 20, 35].contains(&frame) {
             crate::viewer::save_capture(&dir.join(format!("return-{frame}.png")))?;
         }
@@ -148,7 +148,8 @@ pub async fn render(a: &mut Assets) -> Result<()> {
     ] {
         for frame in 0..4 {
             draw(
-                &mut world,
+                &mut scene,
+                &world,
                 &o,
                 crate::cinematic::Camera::look(eye, aim),
                 Color::new(0., 0., 0., 0.),
@@ -163,7 +164,13 @@ pub async fn render(a: &mut Assets) -> Result<()> {
     Ok(())
 }
 
-fn draw(world: &mut crate::render::Scene, o: &Funhouse, c: crate::cinematic::Camera, cover: Color) {
+fn draw(
+    scene: &mut crate::render::Scene,
+    world: &World,
+    o: &Funhouse,
+    c: crate::cinematic::Camera,
+    cover: Color,
+) {
     let cam = Camera3D {
         position: c.eye,
         target: c.target,
@@ -174,11 +181,11 @@ fn draw(world: &mut crate::render::Scene, o: &Funhouse, c: crate::cinematic::Cam
         ..Default::default()
     };
     clear_background(BLACK);
-    world.prepare_camera_portals(&cam, 1., false, &o.transforms());
+    scene.prepare_camera_portals(world, &cam, 1., false, &o.transforms());
     set_camera(&cam);
-    crate::render_fx::begin_view(&cam, 1., &world.atmosphere, false);
-    world.draw(c.eye, 1., false, false, &o.transforms());
-    crate::render::depth_read_only(|| world.draw(c.eye, 1., false, true, &o.transforms()));
+    crate::render_fx::begin_view(&cam, 1., &scene.atmosphere, false);
+    scene.draw(c.eye, 1., false, false, &o.transforms());
+    crate::render::depth_read_only(|| scene.draw(c.eye, 1., false, true, &o.transforms()));
     crate::render_fx::finish();
     set_default_camera();
     draw_rectangle(0., 0., screen_width(), screen_height(), cover);

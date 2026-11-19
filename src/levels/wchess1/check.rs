@@ -558,7 +558,7 @@ pub(super) fn survey(a: &mut Assets) -> Result<()> {
 }
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut scene = crate::render::Scene::load(a, "wchess1")?;
+        let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "wchess1")?;
         let mut r = Realm::load(a, &scene.map)?;
         let mut art = art::Art::load(a, &r)?;
         for (i, time) in [0., 0.5, 1., 1.5, 2., 3., 4.].into_iter().enumerate() {

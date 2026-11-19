@@ -378,10 +378,10 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             return super::saves::run(a, mode == "write").await;
         }
         std::fs::create_dir_all("private/hatter1-work/captures")?;
-        let mut world = crate::render::Scene::load(a, "hatter1")?;
-        let mut o = Clockwork::load(a, &world.map)?;
+        let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(a, "hatter1")?;
+        let mut o = Clockwork::load(a, &scene.map)?;
         let mut art = art::Art::load(a)?;
-        super::lever::render(a, &mut world, &mut art).await?;
+        super::lever::render(a, &mut scene, &mut world, &mut art).await?;
         for (name, kind, t, eye, target) in [
             (
                 "gear",
@@ -424,7 +424,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 o.begin(k);
                 o.saved.scene.as_mut().unwrap().time = t;
             }
-            o.rebuild(&world.map)?;
+            o.rebuild(&scene.map)?;
             let camera = o.scene_camera().unwrap_or(Camera::look(eye, target));
             let cam = Camera3D {
                 position: camera.eye,
@@ -436,27 +436,27 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 ..Default::default()
             };
             let (extra, hide) = o.reflection();
-            world.set_reflection(extra, hide);
-            world.set_reflection_actor(o.reflection_actor());
+            scene.set_reflection(extra, hide);
+            scene.set_reflection_actor(o.reflection_actor());
             for frame in 0..4 {
                 clear_background(BLACK);
-                world.prepare_camera_portals(&cam, t, false, &o.transforms());
+                scene.prepare_camera_portals(&world, &cam, t, false, &o.transforms());
                 set_camera(&cam);
-                crate::render_fx::begin_view(&cam, t, &world.atmosphere, false);
-                world.draw(camera.eye, t, false, false, &o.transforms());
-                art.draw(&o, &world.atmosphere, camera.eye, false);
+                crate::render_fx::begin_view(&cam, t, &scene.atmosphere, false);
+                scene.draw(camera.eye, t, false, false, &o.transforms());
+                art.draw(&o, &scene.atmosphere, camera.eye, false);
                 crate::render::depth_read_only(|| {
-                    world.draw(camera.eye, t, false, true, &o.transforms());
-                    art.effects(&o, camera.eye, &world.atmosphere);
+                    scene.draw(camera.eye, t, false, true, &o.transforms());
+                    art.effects(&o, camera.eye, &scene.atmosphere);
                 });
                 crate::render_fx::finish();
                 set_default_camera();
                 if frame == 3 {
                     if matches!(name, "gear" | "hare") {
-                        world.check_reflection_culled()?;
+                        scene.check_reflection_culled()?;
                     }
                     if name.starts_with("mirror") {
-                        world.check_reflection_pixels()?;
+                        scene.check_reflection_pixels()?;
                     }
                     crate::viewer::save_capture(std::path::Path::new(&format!(
                         "private/hatter1-work/captures/{name}.png"

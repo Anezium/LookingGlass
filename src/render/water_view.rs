@@ -10,10 +10,10 @@ pub(crate) const VIEWS: [(&str, Vec3, Vec3); 2] = [
 ];
 pub(crate) const TIMES: [(&str, f32); 2] = [("t0.75", 0.75), ("t2.00", 2.)];
 
-fn draw(scene: &mut Scene, camera: &Camera3D, time: f32) {
+fn draw(scene: &mut Scene, world: &World, camera: &Camera3D, time: f32) {
     clear_background(scene.atmosphere.background());
     set_camera(camera);
-    crate::lighting::select(vec![], camera.position, &scene.world);
+    crate::lighting::select(vec![], camera.position, world);
     crate::render_fx::begin_view(camera, time, &scene.atmosphere, false);
     #[cfg(feature = "vita_renderer")]
     crate::render_fx::retained::host_reset();
@@ -28,7 +28,7 @@ fn draw(scene: &mut Scene, camera: &Camera3D, time: f32) {
 }
 
 pub async fn capture(assets: &mut Assets, out: &std::path::Path) -> Result<()> {
-    let mut scene = Scene::load(assets, "potears2")?;
+    let Loaded { mut scene, world } = Scene::load(assets, "potears2")?;
     println!("[lg/water-view] renderer={}", if scene.retained_active() { "vita" } else { "desktop" });
     for (name, eye, target) in VIEWS {
         let camera = Camera3D { position: eye, target, up: Vec3::Z,
@@ -36,9 +36,9 @@ pub async fn capture(assets: &mut Assets, out: &std::path::Path) -> Result<()> {
         let mut images = Vec::new();
         for (label, time) in TIMES {
             // Warm the pipeline and render target before the frame that is kept.
-            draw(&mut scene, &camera, time);
+            draw(&mut scene, &world, &camera, time);
             next_frame().await;
-            draw(&mut scene, &camera, time);
+            draw(&mut scene, &world, &camera, time);
             images.push(get_screen_data());
             crate::viewer::save_capture(&out.join(format!("{name}-{label}.png")))?;
             next_frame().await;

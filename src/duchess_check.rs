@@ -137,7 +137,7 @@ pub async fn render(assets: &mut crate::assets::Assets) -> Result<()> {
         return Ok(());
     }
     let mut player_art = crate::character::Character::load(assets)?;
-    let mut scene = crate::render::Scene::load(assets, "potears3")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "potears3")?;
     let mut i = crate::interaction::Interactions::load(&scene.map)?;
     i.set_entry(assets, &scene.map, "potears3", None)?;
     let mut art = crate::duchess::Art::load(assets, &scene.map)?;
@@ -172,7 +172,7 @@ pub async fn render(assets: &mut crate::assets::Assets) -> Result<()> {
                 case
             },
             &scene.map,
-            &mut scene.world,
+            &mut world,
             &mut p,
             &mut stats,
             &mut story,
@@ -200,7 +200,7 @@ pub async fn render(assets: &mut crate::assets::Assets) -> Result<()> {
                 d.state.feet = base + Vec3::X * time * 340.;
             }
             let c = d
-                .camera(&scene.world)
+                .camera(&world)
                 .unwrap_or(crate::cinematic::Camera::look(
                     d.state.feet + vec3(185., -260., 140.),
                     d.state.feet + Vec3::Z * 64.,
@@ -216,7 +216,7 @@ pub async fn render(assets: &mut crate::assets::Assets) -> Result<()> {
                 ..Default::default()
             };
             set_camera(&camera);
-            crate::lighting::select(vec![], c.eye, &scene.world);
+            crate::lighting::select(vec![], c.eye, &world);
             crate::render_fx::begin_view(&camera, 2., &scene.atmosphere, false);
             let transforms = d.transforms().collect::<Vec<_>>();
             scene.draw(c.eye, 2., false, false, &transforms);

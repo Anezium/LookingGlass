@@ -227,8 +227,8 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
         }
         cast_check(a)?;
         std::fs::create_dir_all("private/hedge2-work/captures")?;
-        let mut world = crate::render::Scene::load(a, "hedge2")?;
-        let mut o = Maze::load(a, &world.map)?;
+        let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(a, "hedge2")?;
+        let mut o = Maze::load(a, &scene.map)?;
         let mut art = art::Art::load(a)?;
         for (name, k, time) in [
             ("water-lever", 0, -1.),
@@ -261,8 +261,8 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 };
                 o.saved.motion[5] = o.saved.motion[4];
             }
-            o.rebuild(&world.map)?;
-            let camera = o.camera(&world.world).unwrap_or_else(|| {
+            o.rebuild(&scene.map)?;
+            let camera = o.camera(&world).unwrap_or_else(|| {
                 let p = o.levers[k];
                 Camera::look(
                     p.point(vec3(-100., -100., 90.)),
@@ -279,14 +279,14 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 ..Default::default()
             };
             for frame in 0..4 {
-                clear_background(world.atmosphere.background());
-                world.prepare_camera_portals(&cam, 0., false, &o.transforms());
+                clear_background(scene.atmosphere.background());
+                scene.prepare_camera_portals(&world, &cam, 0., false, &o.transforms());
                 set_camera(&cam);
-                crate::render_fx::begin_view(&cam, 0., &world.atmosphere, false);
-                world.draw(camera.eye, 0., false, false, &o.transforms());
-                art.draw(&o, &world.atmosphere, camera.eye, false);
+                crate::render_fx::begin_view(&cam, 0., &scene.atmosphere, false);
+                scene.draw(camera.eye, 0., false, false, &o.transforms());
+                art.draw(&o, &scene.atmosphere, camera.eye, false);
                 crate::render::depth_read_only(|| {
-                    world.draw(camera.eye, 0., false, true, &o.transforms())
+                    scene.draw(camera.eye, 0., false, true, &o.transforms())
                 });
                 crate::render_fx::finish();
                 set_default_camera();

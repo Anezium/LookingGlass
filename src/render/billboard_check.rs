@@ -99,7 +99,7 @@ fn pixel_at(frame: &Image, camera: &Camera3D, point: Vec3) -> Color {
 
 pub async fn check(assets: &mut Assets) -> Result<()> {
     let mut report = audit(assets)?;
-    let mut scene = Scene::load(assets, "skool1")?;
+    let Loaded { mut scene, world: _world } = Scene::load(assets, "skool1")?;
     let target = vec3(-2372., 2622., -435.);
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
     interactions.set_entry(assets, &scene.map, "skool1", None)?;

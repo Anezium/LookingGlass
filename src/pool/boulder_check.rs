@@ -76,7 +76,7 @@ pub fn behavior(r: &mut crate::save::Restored) -> Result<()> {
     if r.interactions.scripted() {
         r.interactions.skip_cinematic(
             &r.scene.map,
-            &mut r.scene.world,
+            &mut r.world,
             &mut r.game.player,
             &mut r.story,
         )?;
@@ -85,7 +85,7 @@ pub fn behavior(r: &mut crate::save::Restored) -> Result<()> {
         tick(
             &mut r.interactions,
             &r.scene.map,
-            &mut r.scene.world,
+            &mut r.world,
             &mut r.game.player,
             &mut r.story,
             1. / 60.,
@@ -97,7 +97,7 @@ pub fn behavior(r: &mut crate::save::Restored) -> Result<()> {
         "Ant resurrected after restoration"
     );
     ensure!(
-        !r.interactions.scripted() && r.scene.world.body_clear(r.game.player.feet),
+        !r.interactions.scripted() && r.world.body_clear(r.game.player.feet),
         "Unsafe boulder handoff"
     );
     Ok(())

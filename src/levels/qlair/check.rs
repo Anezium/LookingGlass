@@ -452,7 +452,7 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
 }
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut scene = crate::render::Scene::load(a, "qlair")?;
+        let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(a, "qlair")?;
         let mut q = Queen::load(a, &scene.map)?;
         let mut art = art::Art::load(a, &q)?;
         let base_state = q.saved.clone();
@@ -544,7 +544,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             }
             if name == "death-burst" {
                 q.final_burst();
-                q.advance_effects(0.25, &scene.world);
+                q.advance_effects(0.25, &world);
             }
             if name == "queen2-scream" {
                 q.saved.attack = battle::Attack::Scream;
@@ -596,7 +596,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                     q.saved.clock += FIXED_DT;
                     q.battle(&mut Combat {
                         dt: FIXED_DT,
-                        world: &scene.world,
+                        world: &world,
                         player: &mut player,
                         stats: &mut stats,
                         story: &mut story,
@@ -668,7 +668,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                     ..Default::default()
                 };
                 set_camera(&cam);
-                crate::lighting::select(q.lights(), camera.eye, &scene.world);
+                crate::lighting::select(q.lights(), camera.eye, &world);
                 crate::render_fx::begin_view(&cam, time, &scene.atmosphere, false);
                 scene.draw(camera.eye, time, false, false, &q.transforms());
                 art.draw(&q, &scene.atmosphere, camera.eye, false);

@@ -78,13 +78,13 @@ struct Saved {
 
 pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     std::fs::create_dir_all("private/chess")?;
-    let mut scene = crate::render::Scene::load(assets, "rchess1")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "rchess1")?;
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
     interactions.set_entry(assets, &scene.map, "rchess1", None)?;
-    interactions.sync(&mut scene.world);
+    interactions.sync(&mut world);
     for kind in Kind::ALL {
         let mut npcs = Npcs::load(assets, &scene.map, "rchess1", None, false, false)?;
-        npcs.update(0., &scene.world, Vec3::splat(10000.));
+        npcs.update(0., &world, Vec3::splat(10000.));
         let id = npcs
             .actors
             .iter()
@@ -105,13 +105,13 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             "Dormant chess is targetable"
         );
         let old = npcs.snapshot();
-        npcs.update(0., &scene.world, trigger_eye);
+        npcs.update(0., &world, trigger_eye);
         ensure!(
             serde_json::to_value(&old)? == serde_json::to_value(npcs.snapshot())?,
             "Paused trigger changed NPCs"
         );
         for _ in 0..60 {
-            npcs.update(1. / 60., &scene.world, trigger_eye);
+            npcs.update(1. / 60., &world, trigger_eye);
         }
         ensure!(
             npcs.targets().iter().any(|t| t.id == id),
@@ -125,7 +125,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 target + vec3(angle.cos() * 220., angle.sin() * 220., 25.)
             })
             .find(|p| {
-                let t = scene.world.sweep(target, *p, Vec3::splat(2.));
+                let t = world.sweep(target, *p, Vec3::splat(2.));
                 !t.start_solid && t.fraction >= 1.
             })
             .context("No clear chess camera")?;
@@ -138,9 +138,9 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             loot.validate()?;
             let before = npcs.loot_sources();
             for _ in 0..120 {
-                npcs.update(1. / 60., &scene.world, saved.eye);
+                npcs.update(1. / 60., &world, saved.eye);
             }
-            loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+            loot.defeated(&before, &npcs.loot_sources(), &world);
             ensure!(
                 serde_json::to_value(npcs.snapshot())? == serde_json::to_value(saved.expected)?,
                 "Chess continuation differs after process restart"
@@ -179,17 +179,17 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         })
         .context("Chess did not accept weapon damage")?;
         let mut loot = crate::loot::Loot::default();
-        loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+        loot.defeated(&before, &npcs.loot_sources(), &world);
         ensure!(
             loot.drops.len() == 1 && loot.drops[0].grade == kind.grade(),
             "Wrong chess reward"
         );
         for _ in 0..20 {
-            npcs.update(1. / 60., &scene.world, eye);
+            npcs.update(1. / 60., &world, eye);
         }
         let cast = npcs.snapshot();
         for _ in 0..120 {
-            npcs.update(1. / 60., &scene.world, eye);
+            npcs.update(1. / 60., &world, eye);
         }
         let expected = npcs.snapshot();
         if mode == "chess-save-write" {

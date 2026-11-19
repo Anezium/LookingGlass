@@ -163,17 +163,17 @@ pub fn check(assets: &mut Assets, map: &Bsp) -> Result<()> {
 }
 
 pub async fn render(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "skool1")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "skool1")?;
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
     interactions.set_entry(assets, &scene.map, "skool1", None)?;
-    interactions.sync(&mut scene.world);
+    interactions.sync(&mut world);
     let mut player = Player::new(scene.map.spawn().0);
     let eye = vec3(-1200., 2624., -163.);
     let target = vec3(-1424., 2624., -185.);
     let mut captures = Vec::new();
     for (name, seconds) in [("closed", 0.), ("swing", 0.2), ("opposed", 0.4)] {
         while interactions.school.as_ref().unwrap().clock + 0.00001 < seconds {
-            interactions.advance_school(1. / 120., &scene.map, &mut scene.world, &mut player)?;
+            interactions.advance_school(1. / 120., &scene.map, &mut world, &mut player)?;
         }
         for frame in 0..3 {
             clear_background(BLACK);

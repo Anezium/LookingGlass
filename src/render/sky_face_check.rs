@@ -3,7 +3,7 @@ use super::*;
 use anyhow::ensure;
 
 pub async fn check_school_floor(assets: &mut Assets) -> Result<()> {
-    let mut scene = Scene::load(assets, "skool1")?;
+    let Loaded { mut scene, world: _world } = Scene::load(assets, "skool1")?;
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
     interactions.set_entry(assets, &scene.map, "skool1", None)?;
     let poses = interactions.transforms();

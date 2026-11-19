@@ -88,12 +88,12 @@ pub async fn check(assets: &mut crate::assets::Assets) -> Result<()> {
         save::{Campaign, Game, Level, Slot, Store, View},
     };
     use std::{collections::BTreeMap, fs, path::Path};
-    let mut scene = crate::render::Scene::load(assets, "skool1")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "skool1")?;
     let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
     interactions.set_entry(assets, &scene.map, "skool1", None)?;
-    interactions.sync(&mut scene.world);
+    interactions.sync(&mut world);
     let (spawn, yaw) = crate::interaction::spawn(&scene.map, None);
-    let player = Player::spawn(&scene.world, spawn).context("Preview fixture spawn obstructed")?;
+    let player = Player::spawn(&world, spawn).context("Preview fixture spawn obstructed")?;
     let mut alice = crate::character::Character::load(assets)?;
     alice.reset(&player, yaw);
     let npcs = crate::npc::Npcs::load(assets, &scene.map, "skool1", None, false, false)?;

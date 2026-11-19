@@ -450,7 +450,7 @@ fn check_scenery(assets: &mut Assets, map: &Bsp) -> Result<()> {
     Ok(())
 }
 pub async fn render(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "skool1")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(assets, "skool1")?;
     let specs = texture::read_materials(assets)?;
     let mut art = Art::load(assets, &specs)?;
     let mut enemies = crate::encounters::Art::load(assets)?;

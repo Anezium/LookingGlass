@@ -150,7 +150,7 @@ async fn run(a: &mut Assets, write: bool) -> Result<()> {
         o.advance(
             0.,
             &restored.scene.map,
-            &mut restored.scene.world,
+            &mut restored.world,
             &mut restored.game.player,
             &[],
         )?;
@@ -196,7 +196,7 @@ async fn run(a: &mut Assets, write: bool) -> Result<()> {
                     .game
                     .player
                     .feet
-                    .distance(Player::spawn(&migrated.scene.world, entry).unwrap().feet)
+                    .distance(Player::spawn(&migrated.world, entry).unwrap().feet)
                     < 0.1,
                 "Legacy save stranded Alice"
             );

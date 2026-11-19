@@ -161,15 +161,15 @@ pub fn check(assets: &mut Assets) -> Result<()> {
 }
 pub async fn render(assets: &mut Assets) -> Result<()> {
     crate::pool::cinema_check::render(assets).await?;
-    let mut scene = crate::render::Scene::load(assets, "potears1")?;
+    let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, "potears1")?;
     let mut i = load(assets, &scene.map)?;
     let mut art = crate::pool::Art::load(assets, i.pool.as_ref().unwrap())?;
-    let mut p = Player::spawn(&scene.world, crate::interaction::spawn(&scene.map, None).0).unwrap();
+    let mut p = Player::spawn(&world, crate::interaction::spawn(&scene.map, None).0).unwrap();
     i.pool.as_mut().unwrap().event(crate::pool::TALK);
     i.completed_dialogue(crate::pool::TALK);
     i.pool.as_mut().unwrap().event("Turtle_Encounter1");
     i.pool.as_mut().unwrap().event("rideleaf4falldown");
-    settle(&mut i, &scene.map, &mut scene.world, &mut p, 33.)?;
+    settle(&mut i, &scene.map, &mut world, &mut p, 33.)?;
     for (name, eye, target) in [
         (
             "first-leaf",

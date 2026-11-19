@@ -353,7 +353,7 @@ fn extra_check(assets: &mut Assets, map: &Bsp) -> Result<()> {
 }
 
 pub async fn render(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "skool2")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(assets, "skool2")?;
     for (beat, seconds) in [
         (Beat::Dice, 3.),
         (Beat::Dice, 6.),

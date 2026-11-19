@@ -182,7 +182,7 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
         std::fs::create_dir_all("private/grounds2-work/captures")?;
-        let mut scene = crate::render::Scene::load(a, "grounds2")?;
+        let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(a, "grounds2")?;
         let mut o = Royale::load(a, &scene.map)?;
         let mut art = art::Art::load(a, &o)?;
         for (name, time) in [
@@ -193,7 +193,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
         ] {
             o.saved.time = time;
             o.rebuild(&scene.map)?;
-            let c = o.camera(&scene.world).unwrap();
+            let c = o.camera(&world).unwrap();
             let camera = Camera3D {
                 position: c.eye,
                 target: c.target,
@@ -205,7 +205,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             };
             for frame in 0..4 {
                 clear_background(scene.atmosphere.background());
-                scene.prepare_camera_portals(&camera, time, false, &o.transforms());
+                scene.prepare_camera_portals(&world, &camera, time, false, &o.transforms());
                 set_camera(&camera);
                 crate::render_fx::begin_view(&camera, time, &scene.atmosphere, false);
                 scene.draw(c.eye, time, false, false, &o.transforms());
@@ -226,12 +226,12 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
         let mut player = Player::new(o.data.path[0]);
         let mut stats = Stats::for_level("grounds2", None);
         let mut story = Story::load(a, "grounds2");
-        o.finish(&scene.map, &mut scene.world, &mut player)?;
+        o.finish(&scene.map, &mut world, &mut player)?;
         o.event("Spawner01");
         for _ in 0..42 {
             o.combat(&mut crate::level::Combat {
                 dt: 1. / 120.,
-                world: &scene.world,
+                world: &world,
                 player: &mut player,
                 stats: &mut stats,
                 story: &mut story,
@@ -262,7 +262,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
         ] {
             if name == "magma" {
                 for _ in 0..60 {
-                    cast.update(1. / 120., &scene.world, vec3(-1688., 1996., -550.));
+                    cast.update(1. / 120., &world, vec3(-1688., 1996., -550.));
                 }
             }
             let camera = Camera3D {
@@ -276,7 +276,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             };
             for frame in 0..4 {
                 clear_background(scene.atmosphere.background());
-                scene.prepare_camera_portals(&camera, 22., false, &o.transforms());
+                scene.prepare_camera_portals(&world, &camera, 22., false, &o.transforms());
                 set_camera(&camera);
                 crate::render_fx::begin_view(&camera, 22., &scene.atmosphere, false);
                 scene.draw(c.eye, 22., false, false, &o.transforms());

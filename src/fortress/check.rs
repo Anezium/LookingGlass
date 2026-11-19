@@ -266,7 +266,7 @@ fn camera_coverage(r: &Route) -> Result<()> {
 
 pub async fn render_check(assets: &mut Assets) -> Result<()> {
     let mut player_art = crate::character::Character::load(assets)?;
-    let mut scene = crate::render::Scene::load(assets, "fortress1")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(assets, "fortress1")?;
     let mut f = Fortress::load(assets, &scene.map, false)?;
     let mut art = super::cinema::Art::load(assets)?;
     let mut enemies = crate::encounters::Encounters::load(

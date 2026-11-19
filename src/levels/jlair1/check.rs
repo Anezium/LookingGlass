@@ -186,8 +186,8 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
             return saves::run(a, mode == "write").await;
         }
         std::fs::create_dir_all("private/jlair1-work/captures")?;
-        let mut world = crate::render::Scene::load(a, "jlair1")?;
-        let mut o = Curiosity::load(a, &world.map)?;
+        let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(a, "jlair1")?;
+        let mut o = Curiosity::load(a, &scene.map)?;
         let mut art = art::Art::load(a)?;
         for (name, kind, t, line) in [
             ("ride", Some(Kind::Arrival), 3., 0),
@@ -214,8 +214,8 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 }
             }
             o.saved.sink = if name == "sunk" { 100. } else { 0. };
-            o.rebuild(&world.map)?;
-            world.atmosphere.distance = o.scene_fog().unwrap();
+            o.rebuild(&scene.map)?;
+            scene.atmosphere.distance = o.scene_fog().unwrap();
             let camera = o.scene_camera().unwrap_or(Camera::look(
                 vec3(-6750., 400., 1820.),
                 vec3(-6968., 698., 1570.),
@@ -241,15 +241,15 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 ..Default::default()
             };
             for frame in 0..4 {
-                clear_background(world.atmosphere.background());
-                world.prepare_camera_portals(&cam, t, false, &o.transforms());
+                clear_background(scene.atmosphere.background());
+                scene.prepare_camera_portals(&world, &cam, t, false, &o.transforms());
                 set_camera(&cam);
-                crate::render_fx::begin_view(&cam, t, &world.atmosphere, false);
-                world.draw(camera.eye, t, false, false, &o.transforms());
-                art.draw(&o, &world.atmosphere, camera.eye, false);
+                crate::render_fx::begin_view(&cam, t, &scene.atmosphere, false);
+                scene.draw(camera.eye, t, false, false, &o.transforms());
+                art.draw(&o, &scene.atmosphere, camera.eye, false);
                 crate::render::depth_read_only(|| {
-                    world.draw(camera.eye, t, false, true, &o.transforms());
-                    art.effects(&o, camera.eye, &world.atmosphere);
+                    scene.draw(camera.eye, t, false, true, &o.transforms());
+                    art.effects(&o, camera.eye, &scene.atmosphere);
                 });
                 crate::render_fx::finish();
                 set_default_camera();

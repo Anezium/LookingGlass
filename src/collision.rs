@@ -843,6 +843,11 @@ impl Drop for StaticGeometry {fn drop(&mut self){
         R13_GEOMETRIES.fetch_sub(1,Relaxed);
     }
 }}
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<World>();
+};
+
 impl World {
     pub(crate) fn census_payload(&self)->serde_json::Value {
         fn tree(n:&Node)->usize {match n {

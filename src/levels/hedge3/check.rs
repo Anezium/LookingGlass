@@ -225,7 +225,7 @@ fn tooth_rider(map: &Bsp) -> Result<()> {
     Ok(())
 }
 pub(super) async fn render(a: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(a, "hedge3")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "hedge3")?;
     let map = Bsp::parse(&a.read("maps/hedge3.bsp")?)?;
     let mut m = Labyrinth::load(&map)?;
     let mut sky = crate::sky_sequence::Controller::load(a, &map, "hedge3")?;

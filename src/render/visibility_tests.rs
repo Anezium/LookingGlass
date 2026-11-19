@@ -641,7 +641,6 @@ fn map_mut_panics_when_shared() {
     use macroquad::miniquad::{RawId, TextureId};
 
     let map = crate::interaction::tests::fixture();
-    let world = World::from_bsp(&map).unwrap();
     let mut scene = Scene {
         #[cfg(feature = "vita_renderer")]
         retained: None,
@@ -655,7 +654,6 @@ fn map_mut_panics_when_shared() {
         optimize: true,
         stats: DrawStats::default(),
         map: Arc::new(map),
-        world,
         atmosphere: Atmosphere::default(),
         batches: Vec::new(),
         face_mask_cache: FaceMaskCache::default(),

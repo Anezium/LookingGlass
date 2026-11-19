@@ -344,7 +344,7 @@ impl Portal {
 
 impl Scene {
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-    pub(crate) async fn show_transition_portal(&mut self, capture: &std::path::Path) -> Result<()> {
+    pub(crate) async fn show_transition_portal(&mut self, world: &World, capture: &std::path::Path) -> Result<()> {
         let portal = self.camera_portals.iter().find(|p| p.model == 0)
             .or_else(|| self.camera_portals.first()).context("Host transition fixture needs a portal")?;
         let transforms: Vec<_> = self.map.models.iter().enumerate().skip(1).map(|(model,_)| {
@@ -362,7 +362,7 @@ impl Scene {
         };
         set_camera(&camera);
         clear_background(BLACK);
-        self.prepare_camera_portals(&camera, 0., true, &transforms);
+        self.prepare_camera_portals(world, &camera, 0., true, &transforms);
         let ready = self.camera_portals.iter().filter(|p| p.ready && p.target.is_some()).count();
         ensure!(ready > 0, "Host portal was not rendered");
         crate::render_fx::begin_view(&camera, 0., &self.atmosphere, true);
@@ -410,6 +410,7 @@ impl Scene {
     pub(crate) fn snapshot_portals_fenced(&self) -> bool { !self.camera_portals.is_empty() }
     pub fn prepare_camera_portals(
         &mut self,
+        world: &World,
         camera: &Camera3D,
         time: f32,
         fullbright: bool,
@@ -471,7 +472,7 @@ impl Scene {
             set_camera(&view);
             clear_background(BLACK);
             let atmosphere = Atmosphere::default();
-            crate::lighting::select(Vec::new(), eye, &self.world);
+            crate::lighting::select(Vec::new(), eye, world);
             crate::render_fx::begin(eye, direction, time, &atmosphere, fullbright);
             crate::render_fx::set_projection(view.matrix);
             self.bind_atlas();
@@ -542,7 +543,7 @@ void main() { gl_FragColor=vec4(texture2D(Texture,screenPosition.xy/screenPositi
 "#;
 
 pub async fn check(assets: &mut Assets) -> Result<()> {
-    let mut scene = Scene::load(assets, "fortress1")?;
+    let Loaded { mut scene, mut world } = Scene::load(assets, "fortress1")?;
     ensure!(
         scene
             .camera_portals
@@ -590,7 +591,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         for mode in 0..5 {
             if mode == 4 {
                 let state = serde_json::to_vec(&fortress.snapshot())?;
-                scene = Scene::load(assets, "fortress1")?;
+                Loaded { scene, world } = Scene::load(assets, "fortress1")?;
                 fortress.restore(&serde_json::from_slice(&state)?, &scene.map)?;
             }
             let pupils: Vec<_> = if mode == 1 {
@@ -605,7 +606,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
             set_camera(&camera);
             clear_background(BLACK);
             if mode > 0 {
-                scene.prepare_camera_portals(&camera, time, false, &transforms);
+                scene.prepare_camera_portals(&world, &camera, time, false, &transforms);
             } else {
                 for p in &mut scene.camera_portals {
                     p.ready = false;
@@ -681,7 +682,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
             set_camera(&camera);
             clear_background(BLACK);
             // Keep the separate lower-route portal identical in both images.
-            scene.prepare_camera_portals(&camera, 0., false, &transforms);
+            scene.prepare_camera_portals(&world, &camera, 0., false, &transforms);
             for p in &mut scene.camera_portals {
                 if p.model == 10 {
                     ensure!(returning || !p.ready, "School portal active on first visit");

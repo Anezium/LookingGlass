@@ -18,10 +18,10 @@ pub(crate) const VIEWS: [(&str, &str, Vec3, &[f32]); 6] = [
     ("utemple", "start", vec3(-64., -5592., 1480.), &[270., 90.]),
 ];
 
-fn draw(scene: &mut Scene, camera: &Camera3D) {
+fn draw(scene: &mut Scene, world: &World, camera: &Camera3D) {
     clear_background(scene.atmosphere.background());
     set_camera(camera);
-    crate::lighting::select(vec![], camera.position, &scene.world);
+    crate::lighting::select(vec![], camera.position, world);
     crate::render_fx::begin_view(camera, 1., &scene.atmosphere, false);
     #[cfg(feature = "vita_renderer")]
     crate::render_fx::retained::host_reset();
@@ -37,11 +37,12 @@ fn draw(scene: &mut Scene, camera: &Camera3D) {
 
 pub async fn capture(assets: &mut Assets, out: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(out)?;
-    let mut loaded: Option<(&str, Scene)> = None;
+    let mut loaded: Option<(&str, Loaded)> = None;
     for (map, name, player, yaws) in VIEWS {
         if loaded.as_ref().map(|(m, _)| *m) != Some(map) {
             loaded = None;
-            let scene = Scene::load(assets, map)?;
+            let level = Scene::load(assets, map)?;
+            let scene = &level.scene;
             let a = &scene.atmosphere;
             #[cfg(feature = "vita_renderer")]
             let quality = crate::render::vita_renderer::config().quality.as_str();
@@ -49,25 +50,25 @@ pub async fn capture(assets: &mut Assets, out: &std::path::Path) -> Result<()> {
             let quality = "none";
             println!("[lg/fog-view] map={map} renderer={} distance_fog={:?} volumes={} quality={quality}",
                 if scene.retained_active() { "vita" } else { "desktop" }, a.distance.to_array(), a.volumes.len());
-            loaded = Some((map, scene));
+            loaded = Some((map, level));
         }
-        let scene = &mut loaded.as_mut().unwrap().1;
+        let Loaded { scene, world } = &mut loaded.as_mut().unwrap().1;
         let eye = player + vec3(0., 0., EYE_HEIGHT);
         for &yaw in yaws {
             let r = yaw.to_radians();
             let camera = Camera3D { position: eye, target: eye + vec3(r.cos(), r.sin(), 0.) * 1000., up: Vec3::Z,
                 fovy: 75_f32.to_radians(), z_near: 2., z_far: 30000., ..Default::default() };
             // Warm the pipeline and render target before the frame that is kept.
-            draw(scene, &camera);
+            draw(scene, world, &camera);
             next_frame().await;
-            draw(scene, &camera);
+            draw(scene, world, &camera);
             crate::viewer::save_capture(&out.join(format!("{map}-{name}-y{yaw:03}.png")))?;
             next_frame().await;
             // Host wall time of the whole view with the GPU drained, as a rough A/B between configs.
             // A desktop GPU is not the Vita's; the console figure needs `gpu_timing` on the Vita.
             let mut samples: Vec<f64> = (0..TIMED_DRAWS).map(|_| {
                 let start = std::time::Instant::now();
-                draw(scene, &camera);
+                draw(scene, world, &camera);
                 unsafe { macroquad::miniquad::gl::glFinish() };
                 start.elapsed().as_secs_f64() * 1000.
             }).collect();

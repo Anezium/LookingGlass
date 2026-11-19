@@ -129,13 +129,13 @@ pub(super) fn run(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 o.advance(
                     1. / 120.,
                     &restored.scene.map,
-                    &mut restored.scene.world,
+                    &mut restored.world,
                     &mut restored.game.player,
                     &[],
                 )?;
                 o.combat(&mut crate::level::Combat {
                     dt: 1. / 120.,
-                    world: &restored.scene.world,
+                    world: &restored.world,
                     player: &mut restored.game.player,
                     stats: &mut restored.game.stats,
                     story: &mut restored.story,
@@ -145,7 +145,7 @@ pub(super) fn run(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 });
                 restored
                     .npcs
-                    .update(1. / 120., &restored.scene.world, restored.game.player.eye());
+                    .update(1. / 120., &restored.world, restored.game.player.eye());
             }
             let future =
                 serde_json::json!({"controller":o.snapshot(),"cast":restored.npcs.snapshot()});

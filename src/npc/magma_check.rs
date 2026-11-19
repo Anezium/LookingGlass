@@ -189,10 +189,9 @@ struct AmbushSave {
 }
 pub(super) async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     for name in ["wforest", "jlair1", "grounds2"] {
-        let scene = crate::render::Scene::load(assets, name)?;
+        let crate::render::Loaded { scene, mut world } = crate::render::Scene::load(assets, name)?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, name, None)?;
-        let mut world = scene.world;
         interactions.sync(&mut world);
         let mut npcs = Npcs::load(assets, &scene.map, name, None, false, false)?;
         npcs.notarget(true);

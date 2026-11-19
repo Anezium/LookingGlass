@@ -344,7 +344,7 @@ pub fn stage(
 }
 pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
     Box::pin(async move {
-        let mut scene = crate::render::Scene::load(a, "garden3")?;
+        let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(a, "garden3")?;
         let mut art = art::Art::load(a)?;
         mushroom_render(a, &mut scene, &mut art).await?;
         for case in REGISTRATION.save_cases {

@@ -64,14 +64,14 @@ pub fn behavior(r: &mut crate::save::Restored) -> Result<()> {
         ensure!(
             r.interactions.skip_cinematic(
                 &r.scene.map,
-                &mut r.scene.world,
+                &mut r.world,
                 &mut r.game.player,
                 &mut r.story
             )?,
             "Restored arrival skip rejected"
         );
     }
-    committed(&r.interactions, &r.scene.world, &r.game.player)?;
+    committed(&r.interactions, &r.world, &r.game.player)?;
     r.interactions.entry_story(&mut r.story);
     ensure!(
         !r.interactions.scripted(),

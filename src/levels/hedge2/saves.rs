@@ -112,7 +112,7 @@ pub(super) async fn run(a: &mut Assets, write: bool) -> Result<()> {
             o.advance(
                 1. / 120.,
                 &restored.scene.map,
-                &mut restored.scene.world,
+                &mut restored.world,
                 &mut restored.game.player,
                 &[],
             )?;

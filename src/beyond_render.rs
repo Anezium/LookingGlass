@@ -3,10 +3,10 @@ use crate::{assets::Assets, interaction::Interactions, render::Scene};
 use anyhow::Result;
 use macroquad::prelude::*;
 pub async fn check(assets: &mut Assets) -> Result<()> {
-    let mut scene = Scene::load(assets, "fortress2")?;
+    let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, "fortress2")?;
     let mut i = Interactions::load(&scene.map)?;
     i.set_entry(assets, &scene.map, "fortress2", None)?;
-    i.sync(&mut scene.world);
+    i.sync(&mut world);
     let catalog = crate::inventory::Catalog::load(assets)?;
     let pickups: Vec<_> = crate::inventory::pickups(&scene.map, "fortress2", &catalog)
         .into_iter()
@@ -20,7 +20,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         .find_map(|n| {
             let angle = n as f32 * std::f32::consts::TAU / 16.;
             let eye = target + vec3(angle.cos() * 160., angle.sin() * 160., 55.);
-            let hit = scene.world.sweep(target, eye, Vec3::splat(2.));
+            let hit = world.sweep(target, eye, Vec3::splat(2.));
             (!hit.start_solid && hit.fraction >= 1.).then_some(eye)
         })
         .ok_or_else(|| anyhow::anyhow!("Rage camera obstructed"))?;
@@ -70,7 +70,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         "Rage pickup invisible: {pixels} changed pixels"
     );
     println!("PASS Rage Box present before collection and absent afterward: {pixels} pixels");
-    rage_scene(assets, &mut scene, &catalog).await?;
+    rage_scene(assets, &mut scene, &mut world, &catalog).await?;
     let mut art = crate::beyond::Art::load(assets)?;
     for (name, eye, target) in [
         (
@@ -131,17 +131,17 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
     }
     use crate::beyond::cinema::Beat;
     for beat in [Beat::Demonstration, Beat::Reset, Beat::Solved, Beat::Arches] {
-        let (mut i, world, mut player) =
+        let (mut i, next_world, mut player) =
             crate::beyond::cinema_check::setup(assets, &scene.map, beat)?;
-        scene.world = world;
+        world = next_world;
         let mut time = 0.;
         for at in [0.75, beat.duration() * 0.45, beat.duration() - 0.65] {
             while time < at {
-                i.advance_school(1. / 120., &scene.map, &mut scene.world, &mut player)?;
+                i.advance_school(1. / 120., &scene.map, &mut world, &mut player)?;
                 i.update(
                     1. / 120.,
                     &scene.map,
-                    &mut scene.world,
+                    &mut world,
                     &player,
                     Vec3::X,
                     false,
@@ -191,11 +191,12 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
 async fn rage_scene(
     assets: &mut Assets,
     scene: &mut Scene,
+    world: &mut crate::collision::World,
     catalog: &crate::inventory::Catalog,
 ) -> Result<()> {
-    let (mut i, world, mut player) =
+    let (mut i, next_world, mut player) =
         crate::beyond::cinema_check::setup(assets, &scene.map, crate::beyond::cinema::Beat::Rage)?;
-    scene.world = world;
+    *world = next_world;
     let mut alice = crate::character::Character::load(assets)?;
     let mut machinery = crate::beyond::Art::load(assets)?;
     alice.reset(&player, 0.);
@@ -207,11 +208,11 @@ async fn rage_scene(
     let mut elapsed = 0.;
     for at in [0.75, 2.05, 2.65, 3.4, 5.8, 7.9, 10.5, 12.8] {
         while elapsed < at {
-            i.advance_school(1. / 120., &scene.map, &mut scene.world, &mut player)?;
+            i.advance_school(1. / 120., &scene.map, world, &mut player)?;
             i.update(
                 1. / 120.,
                 &scene.map,
-                &mut scene.world,
+                world,
                 &player,
                 Vec3::X,
                 false,
@@ -222,7 +223,7 @@ async fn rage_scene(
         let (time, finished) = b.rage_scene().unwrap();
         alice.power_appearance(&stats);
         alice.rage_scene(time, finished, &player);
-        let camera = b.scene_camera_in(&scene.world).unwrap_or_else(|| {
+        let camera = b.scene_camera_in(world).unwrap_or_else(|| {
             crate::cinematic::Camera::look(player.feet + vec3(90., -100., 90.), player.eye())
         });
         let saved = serde_json::to_vec(&alice.snapshot())?;

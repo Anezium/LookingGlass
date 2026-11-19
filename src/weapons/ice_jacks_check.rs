@@ -462,7 +462,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
 }
 
 async fn finale_walls(assets: &mut Assets) -> Result<()> {
-    let mut scene = crate::render::Scene::load(assets, "qlair")?;
+    let crate::render::Loaded { mut scene, world: _world } = crate::render::Scene::load(assets, "qlair")?;
     let mut world = World::from_bsp(&scene.map)?;
     let spawn = scene
         .map

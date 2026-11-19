@@ -4602,12 +4602,12 @@ pub async fn render_placement(assets: &mut Assets) -> Result<()> {
         ("centipede2", "ant_guard2"),
         ("skool1", "return_insane2"),
     ] {
-        let mut scene = crate::render::Scene::load(assets, map)?;
+        let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, map)?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, map, None)?;
-        interactions.sync(&mut scene.world);
+        interactions.sync(&mut world);
         let mut npcs = Npcs::load(assets, &scene.map, map, None, false, false)?;
-        npcs.update(0., &scene.world, Vec3::splat(100000.));
+        npcs.update(0., &world, Vec3::splat(100000.));
         ensure!(
             npcs.actors.iter().any(|a| a.spawn.name == name),
             "Missing placement fixture actor"
@@ -4620,14 +4620,14 @@ pub async fn render_placement(assets: &mut Assets) -> Result<()> {
         let mut candidates = (0..16).filter_map(|i| {
             let angle = i as f32 * std::f32::consts::TAU / 16.;
             let eye = target + vec3(angle.cos() * 155., angle.sin() * 155., 24.);
-            let t = scene.world.sweep(target, eye, Vec3::splat(2.));
+            let t = world.sweep(target, eye, Vec3::splat(2.));
             (!t.start_solid && t.fraction >= 1.).then_some(eye)
         });
         let eye = candidates.next().context("No clear actor fixture camera")?;
         let target_yaw = (eye.y - target.y).atan2(eye.x - target.x);
         npcs.actors[index].yaw = target_yaw + std::f32::consts::PI;
         for _ in 0..240 {
-            npcs.update(1. / 60., &scene.world, eye);
+            npcs.update(1. / 60., &world, eye);
         }
         let a = &npcs.actors[index];
         ensure!(

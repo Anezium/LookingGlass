@@ -593,6 +593,7 @@ pub(crate) fn validate_json(value: &serde_json::Value) -> Result<()> {
 /// Construct a replacement scene first. A failed load cannot partially mutate live play.
 pub struct Restored {
     pub scene: Scene,
+    pub world: World,
     pub interactions: Interactions,
     pub story: Story,
     pub hints: Hints,
@@ -853,7 +854,7 @@ impl Restored {
         let (level, migrate) = prepare(assets, &mut game, true)?;
         timing.mark("prepare_migrate");
         crate::transition_memory::fault("prepare")?;
-        let mut scene = Scene::load(assets, &level.map)?;
+        let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, &level.map)?;
         timing.mark("scene_ready");
         crate::loading_screen::between("scene_ready").await;
         crate::transition_memory::fault("scene")?;
@@ -868,7 +869,7 @@ impl Restored {
             &mut game,
             &level,
             &scene.map,
-            &mut scene.world,
+            &mut world,
             migrate,
         )?;
         timing.mark("logic_story_hints");
@@ -888,7 +889,7 @@ impl Restored {
         crate::transition_memory::fault("npcs")?;
         let mut alice = Character::load(assets)?;
         alice.restore(&game.character)?;
-        scene.world.set_weapon_obstacles(alice.ice_targets());
+        world.set_weapon_obstacles(alice.ice_targets());
         alice.power_appearance(&game.stats);
         timing.mark("alice_models_restore");
         crate::loading_screen::between("alice_models_restore").await;
@@ -898,6 +899,7 @@ impl Restored {
         crate::transition_memory::fault("steam")?;
         Ok(Self {
             scene,
+            world,
             interactions,
             story,
             hints,

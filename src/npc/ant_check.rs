@@ -93,12 +93,12 @@ struct Saved {
 pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     std::fs::create_dir_all("private/ants")?;
     for (map, corporal) in [("potears1", false), ("potears2", true)] {
-        let mut scene = crate::render::Scene::load(assets, map)?;
+        let crate::render::Loaded { mut scene, mut world } = crate::render::Scene::load(assets, map)?;
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, map, None)?;
-        interactions.sync(&mut scene.world);
+        interactions.sync(&mut world);
         let mut npcs = Npcs::load(assets, &scene.map, map, None, false, false)?;
-        npcs.update(0., &scene.world, Vec3::splat(10000.));
+        npcs.update(0., &world, Vec3::splat(10000.));
         ensure!(
             npcs.actors
                 .iter()
@@ -118,7 +118,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             .filter_map(|i| {
                 let angle = i as f32 * std::f32::consts::TAU / 32.;
                 let p = target + vec3(angle.cos() * 230., angle.sin() * 230., 32.);
-                let trace = scene.world.sweep(target, p, Vec3::splat(2.));
+                let trace = world.sweep(target, p, Vec3::splat(2.));
                 (!trace.start_solid && trace.fraction >= 1.).then_some(p)
             })
             .next()
@@ -132,9 +132,9 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             loot.validate()?;
             let before = npcs.loot_sources();
             for _ in 0..120 {
-                npcs.update(1. / 60., &scene.world, saved.eye);
+                npcs.update(1. / 60., &world, saved.eye);
             }
-            loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+            loot.defeated(&before, &npcs.loot_sources(), &world);
             ensure!(
                 serde_json::to_value(npcs.snapshot())? == serde_json::to_value(saved.expected)?,
                 "Fresh-process Ant continuation differs"
@@ -169,7 +169,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         })
         .context("Ant did not accept weapon hit")?;
         let mut loot = crate::loot::Loot::default();
-        loot.defeated(&before, &npcs.loot_sources(), &scene.world);
+        loot.defeated(&before, &npcs.loot_sources(), &world);
         ensure!(
             loot.drops.len() == 1
                 && loot.drops[0].grade
@@ -181,11 +181,11 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             "Wrong Ant death reward"
         );
         for _ in 0..20 {
-            npcs.update(1. / 60., &scene.world, eye);
+            npcs.update(1. / 60., &world, eye);
         }
         let cast = npcs.snapshot();
         for _ in 0..120 {
-            npcs.update(1. / 60., &scene.world, eye);
+            npcs.update(1. / 60., &world, eye);
         }
         let expected = npcs.snapshot();
         if mode == "ant-save-write" {

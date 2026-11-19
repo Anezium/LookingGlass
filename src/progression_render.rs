@@ -3,7 +3,7 @@ use crate::{assets::Assets, interaction::Interactions, movement::Player, render:
 use anyhow::Result;
 use macroquad::prelude::*;
 pub async fn check(assets: &mut Assets) -> Result<()> {
-    let mut scene = Scene::load(assets, "gvillage")?;
+    let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, "gvillage")?;
     let mut i = Interactions::load(&scene.map)?;
     i.set_entry(assets, &scene.map, "gvillage", None)?;
     let mut p = Player::new(vec3(-4168., 6160., 18.03125));
@@ -25,7 +25,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         ),
     ] {
         for frame in 0..180 {
-            i.advance_school(1. / 60., &scene.map, &mut scene.world, &mut p)?;
+            i.advance_school(1. / 60., &scene.map, &mut world, &mut p)?;
             clear_background(BLACK);
             set_camera(&Camera3D {
                 position: eye,
@@ -51,7 +51,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
             next_frame().await;
         }
     }
-    let mut scene = Scene::load(assets, "skool1")?;
+    let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, "skool1")?;
     let mut i = Interactions::load(&scene.map)?;
     i.set_entry(assets, &scene.map, "skool1", None)?;
     let specs = crate::texture::read_materials(assets)?;
@@ -90,11 +90,11 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         i.completed_dialogue("Theatre_Cinematic");
         i.activate_enemies();
         for frame in 0..120 {
-            i.advance_school(1. / 60., &scene.map, &mut scene.world, &mut p)?;
+            i.advance_school(1. / 60., &scene.map, &mut world, &mut p)?;
             i.encounters
                 .as_mut()
                 .unwrap()
-                .update(1. / 60., &scene.world, eye);
+                .update(1. / 60., &world, eye);
             clear_background(BLACK);
             set_camera(&Camera3D {
                 position: eye,
@@ -143,7 +143,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                     first_person: false,
                 },
                 &crate::combat::Context {
-                    world: &scene.world,
+                    world: &world,
                     targets: &[],
                 },
             );

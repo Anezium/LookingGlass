@@ -410,7 +410,7 @@ pub async fn render_check(assets: &mut crate::assets::Assets) -> Result<()> {
         render::Scene,
     };
     for name in ["fortress1", "potears1"] {
-        let mut scene = Scene::load(assets, name)?;
+        let crate::render::Loaded { mut scene, mut world } = Scene::load(assets, name)?;
         let mut i = Interactions::load(&scene.map)?;
         i.set_entry(
             assets,
@@ -422,11 +422,11 @@ pub async fn render_check(assets: &mut crate::assets::Assets) -> Result<()> {
                 None
             },
         )?;
-        i.sync(&mut scene.world);
+        i.sync(&mut world);
         let (feet, forward) = if name == "potears1" {
             (vec3(-2248.2, 3040., 1544.0905), Vec2::X)
         } else {
-            probe(&scene.map, &scene.world).ok_or_else(|| anyhow::anyhow!("No render ledge"))?
+            probe(&scene.map, &world).ok_or_else(|| anyhow::anyhow!("No render ledge"))?
         };
         let mut p = Player::new(feet);
         p.velocity = -Vec3::Z * 80.;
@@ -442,7 +442,7 @@ pub async fn render_check(assets: &mut crate::assets::Assets) -> Result<()> {
             } else {
                 Controls::default()
             };
-            p.tick(&scene.world, input);
+            p.tick(&world, input);
             alice.update(
                 FIXED_DT,
                 &p,
@@ -455,7 +455,7 @@ pub async fn render_check(assets: &mut crate::assets::Assets) -> Result<()> {
                     first_person: false,
                 },
                 &crate::combat::Context {
-                    world: &scene.world,
+                    world: &world,
                     targets: &[],
                 },
             );
