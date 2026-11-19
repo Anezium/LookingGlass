@@ -293,6 +293,38 @@ mod tests {
         assert_eq!(input(surface(6)).err(),Some(Reason::Influences));
         let mut many=surface(1);Arc::get_mut(&mut many).unwrap().used_bones=(0..BONES+1).collect();assert_eq!(input(many).err(),Some(Reason::Bones));
     }
+    /// The vertex program's position arithmetic, in Rust, for the CPU comparison below.
+    fn emulate(v:&Vertex,palette:&[f32;EXTRA])->Vec3 {
+        let turn=|q:Vec4,v:Vec3| {let t=2.*q.truncate().cross(v);v+q.w*t+q.truncate().cross(t)};
+        let mut p=Vec3::ZERO;
+        for lane in 0..5 {
+            let o=Vec4::from_array(v.offsets[lane]);
+            if o.w>0. {
+                let b=(if lane<4 {v.indices[lane]} else {v.fifth}) as usize*8;
+                let q=Vec4::from_slice(&palette[b..b+4]);let ts=Vec4::from_slice(&palette[b+4..b+8]);
+                p+=(turn(q,o.truncate()*ts.w)+ts.truncate())*o.w;
+            }
+        }
+        p+Vec3::from_slice(&palette[ORIGIN..ORIGIN+3])
+    }
+    #[test]
+    fn vertex_program_positions_match_cpu_skinning() {
+        let weights=||vec![Weight {bone:1,amount:0.5,offset:vec3(3.,-2.,7.)},Weight {bone:4,amount:0.3,offset:vec3(-1.,5.,0.5)},
+            Weight {bone:6,amount:0.2,offset:vec3(0.,0.,-9.)}];
+        let source=Arc::new(SkinSurface {gpu_ant:false,stored_normals:vec![Vec3::Z],vertices:vec![SkinVertex {uv:Vec2::ZERO,weights:weights()}],
+            indices:vec![0,0,0],bind_vertices:vec![macroquad::prelude::Vertex::new(0.,0.,0.,0.,0.,WHITE)],used_bones:vec![1,4,6]});
+        let pose:Vec<Transform>=(0..8).map(|i| Transform {rotation:Quat::from_euler(glam::EulerRot::XYZ,0.3*i as f32,-0.2*i as f32,0.7),
+            translation:vec3(i as f32,2.*i as f32,-(i as f32))}).collect();
+        let scales:Vec<f32>=(0..8).map(|i|1.+0.1*i as f32).collect();
+        let model=Transform {rotation:Quat::from_rotation_z(1.1),translation:vec3(100.,-50.,20.)};
+        let input=input(source).ok().unwrap();
+        let o=occurrence(input.clone(),&pose,&scales,model,1.25,false,1.,Vec3::ZERO).ok().unwrap();
+        let cpu=model.point(weights().iter().map(|w|pose[w.bone].point(w.offset*scales[w.bone])*w.amount).sum::<Vec3>()*1.25);
+        let gpu=emulate(&input.vertices[0],&o.palette);
+        assert!((cpu-gpu).length()<=1e-4*cpu.length().max(1.),"cpu {cpu} gpu {gpu}");
+        let (lo,hi)=o.bounds().unwrap();
+        assert!(cpu.cmpge(lo).all() && cpu.cmple(hi).all(),"vertex inside the cull box");
+    }
     #[test]
     fn declaration_and_uniform_budget_fit_native_contract() {
         assert_eq!(std::mem::size_of::<Vertex>(),120);

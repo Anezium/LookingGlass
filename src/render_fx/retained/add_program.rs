@@ -133,6 +133,7 @@ mod tests {
     // Built field by field: `render_fx::pass` asks for a world material outside a retained frame.
     fn pass() -> Pass {
         Pass {
+            gpu_skin: None,
             _game_thread: crate::game_thread::GameThread::default(), geometry: None, effect: true,
             blend_index: crate::render::blend_index(crate::materials::Blend::AlphaAdd), depth_equal: false,
             #[cfg(target_os = "vita")] world_static: None,
