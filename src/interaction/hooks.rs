@@ -331,14 +331,16 @@ impl Interactions {
     }
     /// Every controller's saved state, keyed by its id. A stateless controller saves `Null`,
     /// so the key still records that it served the visit.
-    pub(super) fn level_snapshots(&self, acknowledged: bool) -> BTreeMap<String, serde_json::Value> {
+    pub(super) fn level_snapshots(&self) -> BTreeMap<String, serde_json::Value> {
         self.levels
             .iter()
-            .map(|s| {
-                let saved = if acknowledged { s.ctl.checkpoint_retry_snapshot() } else { s.ctl.snapshot() };
-                (s.reg.id.to_owned(), saved)
-            })
+            .map(|s| (s.reg.id.to_owned(), s.ctl.snapshot()))
             .collect()
+    }
+    pub fn checkpoint_written(&mut self) {
+        for slot in &mut self.levels {
+            slot.ctl.checkpoint_written();
+        }
     }
     pub(super) fn restore_levels(
         &mut self,

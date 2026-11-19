@@ -1984,9 +1984,6 @@ struct TriggerSave {
 }
 impl Interactions {
     pub fn snapshot(&self) -> Snapshot {
-        self.snapshot_for_checkpoint(false)
-    }
-    pub fn snapshot_for_checkpoint(&self, acknowledged: bool) -> Snapshot {
         Snapshot {
             presentation: Some(self.presentation.state.clone()),
             traversal_version: 1,
@@ -2031,7 +2028,7 @@ impl Interactions {
             activations: self.activations.clone(),
             used: self.used,
             touched: self.touched,
-            levels: self.level_snapshots(acknowledged),
+            levels: self.level_snapshots(),
         }
     }
     pub fn restore(&mut self, s: &Snapshot, map: &Bsp) -> Result<()> {

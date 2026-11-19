@@ -76,7 +76,7 @@ pub(super) fn game(levels: Vec<Level>) -> Game {
     }
 }
 /// A private scratch folder, removed when dropped.
-pub(super) struct Scratch(pub PathBuf);
+pub(crate) struct Scratch(pub PathBuf);
 impl Scratch {
     pub fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("looking-glass-{name}-{}", std::process::id()));

@@ -208,15 +208,14 @@ pub trait LevelController: Any {
     fn quake_offset(&self) -> Vec3 { Vec3::ZERO }
     /// A visit may hold a shared door locked; its collider still belongs to the door system.
     fn door_locked(&self, _id: Id) -> Option<bool> { None }
-    /// A durable, map-authored checkpoint; acknowledge only after a successful write.
+    /// A durable, map-authored checkpoint request.
     fn checkpoint_requested(&self) -> bool {
         false
     }
+    /// Clear the request after a synchronous write or successful background submission.
     fn checkpoint_written(&mut self) {}
-    /// The retry snapshot produced by a successful checkpoint, without acknowledging it live.
-    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
-        self.snapshot()
-    }
+    /// Restore the request if its background write failed.
+    fn checkpoint_failed(&mut self) {}
     /// Finale completion is separate from a map exit.
     fn ending_ready(&self) -> bool {
         false

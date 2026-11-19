@@ -329,9 +329,6 @@ impl Queen {
     }
 }
 impl Queen {
-    fn acknowledge_checkpoint(saved: &mut Saved) {
-        saved.checkpoint_saved = true;
-    }
 }
 
 impl LevelController for Queen {
@@ -555,12 +552,10 @@ impl LevelController for Queen {
         self.saved.checkpoint && !self.saved.checkpoint_saved
     }
     fn checkpoint_written(&mut self) {
-        Self::acknowledge_checkpoint(&mut self.saved);
+        self.saved.checkpoint_saved = true;
     }
-    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
-        let mut saved = self.saved.clone();
-        Self::acknowledge_checkpoint(&mut saved);
-        state::save(&saved)
+    fn checkpoint_failed(&mut self) {
+        self.saved.checkpoint_saved = false;
     }
     fn ending_ready(&self) -> bool {
         self.saved.phase == Phase::Done

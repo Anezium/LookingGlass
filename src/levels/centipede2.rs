@@ -149,9 +149,6 @@ impl Centipede {
     }
 }
 impl Centipede {
-    fn acknowledge_checkpoint(saved: &mut Saved) {
-        saved.checkpoint = false;
-    }
 }
 
 impl LevelController for Centipede {
@@ -403,12 +400,10 @@ impl LevelController for Centipede {
         self.saved.checkpoint && self.saved.phase == Phase::Fight
     }
     fn checkpoint_written(&mut self) {
-        Self::acknowledge_checkpoint(&mut self.saved);
+        self.saved.checkpoint = false;
     }
-    fn checkpoint_retry_snapshot(&self) -> serde_json::Value {
-        let mut saved = self.saved.clone();
-        Self::acknowledge_checkpoint(&mut saved);
-        state::save(&saved)
+    fn checkpoint_failed(&mut self) {
+        self.saved.checkpoint = true;
     }
     fn snapshot(&self) -> serde_json::Value {
         state::save(&self.saved)
