@@ -53,9 +53,10 @@ ablation still puts the frame's GPU time in the actor class. The map has one fog
 no actor touches, yet each actor fragment evaluates the whole fog block.
 
 The proof costs main-thread time, so `actor_fog_free` proves it in a cheaper order (2026-11-19).
-First the packet's vertex box — `packet_cull::Bounds`, the frustum cull's per-packet bound,
-cached per geometry identity and vertex generation and folded over the same published positions
-the walk reads — against each active volume with `hull_misses`' margin rule: the eye and the
+First the packet's vertex box — `packet_cull::Bounds`, the frustum cull's per-packet bound
+structure (cached per geometry identity and vertex generation, folded over the same published
+positions the walk reads; the fog test owns its own instance, so the cull's measured folds stay
+its own) — against each active volume with `hull_misses`' margin rule: the eye and the
 whole box strictly beyond one side of an axis prove the same for every triangle in the box, so
 the volume is clear without a walk. A fold that skipped a non-finite vertex (glam's `min`/`max`
 skip NaN) proves nothing; the walk decides. If the box cannot prove the volume, the per-triangle

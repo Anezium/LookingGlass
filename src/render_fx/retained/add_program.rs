@@ -105,9 +105,11 @@ const MAX_SCAN_INDICES: usize = 6144;
 /// same picture as the fogged full program did.
 pub(super) const ACTOR_WALK_BUDGET: usize = 2048;
 
-/// The actor fog test's per-frame state: the walk budget left in this frame and the
-/// frustum cull's per-packet box cache, shared so one vertex fold serves both. Nothing here
-/// runs with the key off: `draw` asks only when a fog-free twin exists for the packet's key.
+/// The actor fog test's per-frame state: the walk budget left in this frame and the fog
+/// box cache, the same per-generation structure the frustum cull's `Bounds` uses, as the
+/// fog test's own instance: the cull's measured fold counter is untouched, and neither
+/// feature ever folds for the other. Nothing here runs with the key off: `draw` asks only
+/// when a fog-free twin exists for the packet's key.
 pub(super) struct ActorScan<'a> {
     pub(super) budget: &'a mut usize,
     pub(super) bounds: &'a mut super::packet_cull::Bounds,

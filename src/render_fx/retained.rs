@@ -471,6 +471,10 @@ pub(crate) struct Gpu {
     merge_meshes: [BTreeMap<usize, super::prepared::Geometry>; 2],
     puff_batches: [world_puffs::Bank; 2],
     bounds: packet_cull::Bounds,
+    /// `actor_fog_free`: the fog box cache, the same per-generation structure as the
+    /// cull's but its own instance, so the cull's measured fold counter is untouched and
+    /// the two features never fold for each other.
+    fog_bounds: packet_cull::Bounds,
     /// `actor_fog_free`: triangle visits left in this frame's fog-scan walk budget
     /// (`add_program::ACTOR_WALK_BUDGET`, reset once per retained frame in `finish_world`).
     fog_walk_budget: usize,
@@ -592,6 +596,7 @@ impl Gpu {
             merge_meshes: Default::default(),
             puff_batches: Default::default(),
             bounds: Default::default(),
+            fog_bounds: Default::default(),
             fog_walk_budget: add_program::ACTOR_WALK_BUDGET,
         };
         // Pipeline objects share the one compiled program. Prewarm every LG blend
@@ -782,7 +787,7 @@ impl Gpu {
         let program = actor_fog_free_route(program,
             [2, 3].map(|i| self.actor_lean[i].as_ref().is_some_and(|l| l.pipelines.contains_key(&key))),
             || add_program::actor_fog_free(p, u, add_program::ActorScan {
-                budget: &mut self.fog_walk_budget, bounds: &mut self.bounds,
+                budget: &mut self.fog_walk_budget, bounds: &mut self.fog_bounds,
             }));
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         actor_lean::census(p, u, depth_write, program);

@@ -79,7 +79,8 @@ impl Bounds {
         (lo, hi)
     }
     /// The same cached box for `actor_fog_free`'s cheap fog test, with the finiteness flag:
-    /// one fold per (identity, vertex generation), shared with the frustum cull.
+    /// one fold per (identity, vertex generation) in the caller's instance. The cull's own
+    /// cache is a separate instance, so each feature's measured folds stay its own.
     pub(super) fn fog_box(&mut self, p: &Pass, scanned: &mut u64) -> (Vec3, Vec3, bool) {
         self.entry(p, scanned)
     }
@@ -246,28 +247,30 @@ mod tests {
             Vertex::new(0., 0., z, 0., 0., WHITE), Vertex::new(4., 2., z, 0., 0., WHITE),
             Vertex::new(0., 2., z, 0., 0., WHITE)], indices: vec![0, 1, 2], texture: None };
         let mut g = super::super::super::prepared::Geometry::new(quad(0.));
-        let mut bounds = Bounds::default();
+        // The cull and the fog test own separate caches of the same structure.
+        let (mut bounds, mut fog_bounds) = (Bounds::default(), Bounds::default());
         let mut scanned = 0u64;
         let mut pass = pass_with(&[]);
         pass.geometry = Some(std::rc::Rc::new(super::super::super::prepared::Geometry {
             mesh: quad(0.), version: g.version, valid: true }));
-        // One fold serves the frustum cull and the fog box alike.
         assert_eq!(bounds.of(&pass, &mut scanned), (vec3(0., 0., 0.), vec3(4., 2., 0.)));
-        assert_eq!(bounds.fog_box(&pass, &mut scanned), (vec3(0., 0., 0.), vec3(4., 2., 0.), true));
-        assert_eq!(scanned, 3, "the second reader reuses the entry");
-        // A NaN vertex makes the fold skip it: the entry says so, and the cull's own
-        // view of the box is unchanged.
+        assert_eq!(fog_bounds.fog_box(&pass, &mut scanned), (vec3(0., 0., 0.), vec3(4., 2., 0.), true));
+        assert_eq!(scanned, 6, "each cache folded once");
+        assert_eq!(fog_bounds.fog_box(&pass, &mut scanned), (vec3(0., 0., 0.), vec3(4., 2., 0.), true));
+        assert_eq!(scanned, 6, "the fog entry is cached with its generation");
+        // A NaN vertex makes the fold skip it: the flag says so, and the cull's own
+        // view of its box is unchanged.
         let mut nan = quad(0.);
         nan.vertices[1].position.y = f32::NAN;
         g.mesh = super::super::super::copy_mesh(&nan);
         g.advance_owned(false);
         pass.geometry = Some(std::rc::Rc::new(super::super::super::prepared::Geometry {
             mesh: nan, version: g.version, valid: true }));
-        let (_, hi, finite) = bounds.fog_box(&pass, &mut scanned);
+        let (_, hi, finite) = fog_bounds.fog_box(&pass, &mut scanned);
         assert!(!finite, "a fold that skipped a vertex cannot prove a box");
         assert_eq!(hi, vec3(4., 2., 0.), "glam's max skipped only the NaN component");
-        assert_eq!(scanned, 6, "the changed generation refolded once");
-        assert_eq!(bounds.fog_box(&pass, &mut scanned).2, false);
-        assert_eq!(scanned, 6, "the flag is cached with the box");
+        assert_eq!(scanned, 9, "the changed generation refolded once");
+        assert_eq!(fog_bounds.fog_box(&pass, &mut scanned).2, false);
+        assert_eq!(scanned, 9, "the flag is cached with the box");
     }
 }
