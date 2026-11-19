@@ -197,6 +197,10 @@ pub struct Config {
     /// School two publishes the other movers' colliders only when a rider's body trace will read
     /// them, and builds a mover's collider only when something can read it. Default off.
     pub mover_advance_reuse: bool,
+    /// A mover brush whose pose did not move reuses its cached collider instead of rebuilding it,
+    /// so one moving brush no longer rebuilds every unchanged brush in the same list (About
+    /// Face). Exact reuse, invalidated by any pose change. Default off.
+    pub mover_shape_reuse: bool,
     /// Two clock reads per world pass inside the survey window, one printed line after it. Diagnostic.
     pub world_pass_clock: bool,
     /// Opaque world pass from dense records. Same GL calls in the same order. Default off.
@@ -634,6 +638,7 @@ impl Default for Config {
             fx_observe_move: true,
             fx_attached_persist: false,
             mover_advance_reuse: false,
+            mover_shape_reuse: false,
             world_pass_clock: false,
             world_list_submit: false,
             world_shared_buffers: false,
@@ -4064,7 +4069,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "mover_shape_reuse") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
@@ -4136,6 +4141,29 @@ mod tests {
         assert_eq!(crate::render_fx::retained::specialized_program(true, true),
             Some(crate::render_fx::retained::Specialized::UnlitExact),
             "fx_unlit_exact takes precedence over fx_lite");
+    }
+    #[test]
+    fn mover_shape_reuse_is_strict_default_off_and_printed() {
+        assert_eq!(serde_json::to_value(Config::default()).unwrap()["mover_shape_reuse"], false);
+        assert!(!serde_json::from_str::<Config>("{}").unwrap().mover_shape_reuse);
+        let on: Config = serde_json::from_str(r#"{"mover_shape_reuse":true}"#).unwrap();
+        on.validate().unwrap();
+        assert_eq!(serde_json::to_value(&on).unwrap()["mover_shape_reuse"], true);
+        for bad in [serde_json::json!(1), serde_json::json!("on"), serde_json::Value::Null] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({"mover_shape_reuse": bad})).is_err());
+        }
+        for c in [&on, &Config::default()] {
+            assert!(config_log_lines(c)[0].contains("\"mover_shape_reuse\":"), "key missing from the printed record");
+        }
+        // The key arrived after every frozen era file: those stay valid unchanged
+        // and their omitted opt-in reads as an explicit off.
+        for bytes in [&include_bytes!("../../configs/PL-rc20-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc17-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-release.json")[..]] {
+            let (c, rejected) = parse_runtime_config(bytes).unwrap();
+            assert!(rejected.is_none());
+            assert!(!c.mover_shape_reuse, "a shipped config enables mover_shape_reuse");
+        }
     }
     #[test]
     fn alpha_model_pvs_is_default_off_and_stays_off_in_the_release_after_the_hatter2_finding() {

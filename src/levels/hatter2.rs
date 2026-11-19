@@ -217,6 +217,9 @@ struct Encounter {
     saved: Saved,
     poses: Vec<(usize, Vec3, Quat)>,
     shapes: Vec<Collider>,
+    /// `mover_shape_reuse`: the last shape built for each brush with the pose it was built
+    /// from. An entry is reused only for that exact pose; anything else rebuilds.
+    shape_cache: Vec<Option<((usize, Vec3, Quat), Collider)>>,
     alive: bool,
     stopped: bool,
     easy: bool,
@@ -225,6 +228,7 @@ impl Encounter {
     fn load(a: &mut Assets, map: &Bsp) -> Result<Self> {
         let data = Data::load(a, map)?;
         let boss = battle::Boss::new(data.points["tower_up"]);
+        let brushes = data.brushes.len();
         let mut o = Self {
             data,
             saved: Saved {
@@ -259,6 +263,7 @@ impl Encounter {
             },
             poses: vec![],
             shapes: vec![],
+            shape_cache: vec![None; brushes],
             alive: true,
             stopped: false,
             easy: false,
@@ -521,6 +526,8 @@ impl LevelController for Encounter {
         if self.stopped && !self.scripted() {
             return Ok(());
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_advance = crate::sim_maps::timer("movers_hatter2_advance_ns");
         let old_bridge = self.saved.bridge;
         let old_lifts = self.saved.lifts;
         let old_door = self.saved.door;
@@ -564,6 +571,8 @@ impl LevelController for Encounter {
         self.rebuild(map)?;
         // Carry a standing rider with the same pose used for drawing. Roll back blocked machinery.
         if !self.scripted() {
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_rider = crate::sim_maps::timer("movers_hatter2_rider_ns");
             let mut feet = p.feet;
             for (i, b) in self.data.brushes.iter().enumerate() {
                 if !matches!(b.name.as_str(), "end_plat1" | "end_plat2" | "drawbridge") {
@@ -574,7 +583,7 @@ impl LevelController for Encounter {
                 if old == next {
                     continue;
                 }
-                let hull = self.brush_collider(map, b, old.1, old.2)?;
+                let hull = Self::brush_collider(map, b, old.1, old.2)?;
                 let tr = hull.trace(
                     p.feet + crate::collision::PLAYER_CENTER,
                     p.feet + crate::collision::PLAYER_CENTER - Vec3::Z * 3.,
@@ -597,7 +606,11 @@ impl LevelController for Encounter {
                 p.feet = feet;
             }
         }
-        w.set_dynamic(fixed.iter().cloned().chain(self.shapes.clone()).collect());
+        {
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_publish = crate::sim_maps::timer("movers_hatter2_publish_ns");
+            w.set_dynamic(fixed.iter().cloned().chain(self.shapes.clone()).collect());
+        }
         Ok(())
     }
     fn update(&mut self, _: &mut World, _: &Player, _: Vec3, _: bool) -> Events {

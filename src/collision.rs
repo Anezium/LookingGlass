@@ -262,6 +262,34 @@ impl Collider {
     pub(crate) fn from_test_hulls() -> Self { Self::from_hulls(Vec::new()) }
     #[cfg(test)]
     pub(crate) fn bounds_for_review(&self) -> Option<(Vec3, Vec3)> { self.bounds.map(|b| (b.min, b.max)) }
+    /// Probe builds only: whether two colliders hold identical bounds, hulls and
+    /// lazy placement. Arc-equal hulls or placements skip the deep comparison.
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    pub(crate) fn probe_contents_same(&self, other: &Self) -> bool {
+        fn vec3_same(a: Vec3, b: Vec3) -> bool {
+            a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits() && a.z.to_bits() == b.z.to_bits()
+        }
+        let bounds_same = match (self.bounds, other.bounds) {
+            (Some(a), Some(b)) => vec3_same(a.min, b.min) && vec3_same(a.max, b.max),
+            (None, None) => true,
+            _ => false,
+        };
+        let hulls_same = std::sync::Arc::ptr_eq(&self.hulls, &other.hulls) || (
+            self.hulls.len() == other.hulls.len()
+            && self.hulls.iter().zip(other.hulls.iter()).all(|(a, b)| {
+                vec3_same(a.bounds.min, b.bounds.min) && vec3_same(a.bounds.max, b.bounds.max)
+                    && a.planes.len() == b.planes.len()
+                    && a.planes.iter().zip(b.planes.iter()).all(|(p, q)| {
+                        vec3_same(p.normal, q.normal) && p.distance.to_bits() == q.distance.to_bits()
+                    })
+            }));
+        let lazy_same = match (&self.lazy, &other.lazy) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        bounds_same && hulls_same && lazy_same
+    }
     /// The bounds' furthest corner from `point`. Nothing for a collider with no bounds.
     pub(crate) fn far_reach_from(&self, point: Vec3) -> Option<f32> {
         self.bounds.map(|b| (b.min - point).abs().max((b.max - point).abs()).length())
@@ -287,6 +315,12 @@ impl Collider {
             }
         }
         bits
+    }
+    /// The hulls allocation's address. Two colliders with one address share one build, so a
+    /// test can prove a shape was reused rather than rebuilt. Never read in production.
+    #[cfg(any(test, all(feature="sim_maps_probe",not(target_os="vita"))))]
+    pub(crate) fn hulls_location(&self) -> usize {
+        std::ptr::from_ref(self.hulls.as_ref()) as usize
     }
     fn hulls(&self) -> &[Hull] {
         self.lazy.as_ref().map_or(self.hulls.as_slice(), |p|p.hulls())
@@ -1640,6 +1674,17 @@ impl World {
         (geometry, sweeps)
     }
     pub fn set_dynamic(&mut self, colliders: Vec<Collider>) {
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        {
+            let identical = colliders.len() == self.dynamic.len()
+                && colliders.iter().zip(self.dynamic.iter()).all(|(new, old)| new.probe_contents_same(old));
+            crate::sim_maps::count("mover_publish_calls", 1);
+            crate::sim_maps::count("mover_publish_colliders", colliders.len() as u64);
+            if identical {
+                crate::sim_maps::count("mover_publish_identical", 1);
+                crate::sim_maps::count("mover_publish_identical_colliders", colliders.len() as u64);
+            }
+        }
         self.invalidate_npc_sight();
         self.dynamic_buckets = if crate::sim_maps::dynamic_buckets() {
             crate::sim_maps::count("dynamic_bucket_builds", 1);

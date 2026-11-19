@@ -1074,11 +1074,15 @@ impl Interactions {
         if let Some(d) = &mut self.duchess {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_duchess");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_duchess_ns");
             d.advance(dt, map, world, player)?;
         }
         if let Some(p) = &mut self.pandemonium {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_pandemonium");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_pandemonium_ns");
             let fixed = self
                 .doors
                 .iter()
@@ -1090,6 +1094,8 @@ impl Interactions {
         if let Some(p) = &mut self.pool {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_pool");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_pool_ns");
             let fixed = self
                 .doors
                 .iter()
@@ -1101,6 +1107,8 @@ impl Interactions {
         if let Some(f) = &mut self.beyond {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_beyond");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_beyond_ns");
             let fixed = self
                 .doors
                 .iter()
@@ -1120,6 +1128,8 @@ impl Interactions {
         if let Some(f) = &mut self.fortress {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_fortress");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_fortress_ns");
             let fixed = self
                 .doors
                 .iter()
@@ -1145,6 +1155,8 @@ impl Interactions {
         if let Some(village) = &mut self.village {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_village");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_village_ns");
             #[cfg(target_os = "vita")]
             let _fixed_profile = crate::frame_profile::span("village_fixed");
             let fixed = self
@@ -1165,6 +1177,8 @@ impl Interactions {
         if let Some(school) = &mut self.school {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_school");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_school_ns");
             let fixed = self
                 .doors
                 .iter()
@@ -1177,6 +1191,8 @@ impl Interactions {
         if let Some(gym) = &mut self.gym {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_gym");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_gym_ns");
             let fixed = self
                 .doors
                 .iter()
@@ -1190,6 +1206,8 @@ impl Interactions {
         if let Some(s) = &mut self.school2 {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_school2");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_school2_ns");
             let fixed = self
                 .doors
                 .iter()
@@ -1202,6 +1220,8 @@ impl Interactions {
         {
             #[cfg(target_os = "vita")]
             let _hotspot = crate::frame_profile::span("movers_levels");
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_stage = crate::sim_maps::timer("movers_levels_ns");
             self.level_advance(dt, map, world, player)?;
         }
         if dt > 0. {

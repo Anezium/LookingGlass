@@ -254,12 +254,15 @@ impl Interactions {
         if self.levels.is_empty() {
             return Ok(());
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_fixed = crate::sim_maps::timer("movers_level_fixed_ns");
         let fixed = self
             .doors
             .iter()
             .filter(|d| d.enabled && self.event_world.enabled(d.id))
             .map(|d| d.collider.clone())
             .collect::<Vec<Collider>>();
+        crate::sim_maps::count("mover_level_fixed_doors", fixed.len() as u64);
         for s in &mut self.levels {
             s.ctl.advance(dt, map, world, player, &fixed)?;
         }
@@ -276,6 +279,7 @@ impl Interactions {
                 .iter()
                 .find_map(|s| s.ctl.trigger_pose(&t.name, base))
             {
+                crate::sim_maps::count("mover_trigger_volume_builds", 1);
                 t.volume = Collider::model(map, index, p, r, false)?;
             }
         }
