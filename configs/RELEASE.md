@@ -151,6 +151,12 @@ references. `PL-rc22-release-play.json` is this fallback plus only the two
 measurement keys; `PL-rc20-release-play.json` keeps the RC20 package bytes for
 comparison.
 
+RC23 enables `low_fog` and `low_fog_per_vertex`. The low-quality world
+shader computes fog at each vertex and interpolates it across opaque world
+surfaces. The owner accepted the resulting picture on 2026-11-19.
+`PL-rc23-release-play.json` is the RC23 fallback plus the two measurement
+keys. `PL-rc22-release-play.json` preserves the RC22 package for comparison.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
