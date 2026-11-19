@@ -99,6 +99,12 @@ pub struct Config {
     /// Lean fragment programs for actor packets with no dynamic light and no appearance effect:
     /// the actor program minus the lines such a packet cannot run. Default off.
     pub actor_lean_shader: bool,
+    /// With `actor_lean_shader`: draw an additive actor packet (`Add`, `AlphaAdd`) whose payload
+    /// `Cutout` word is at most 0.5 with the discard-free lean program instead of the lean
+    /// program. Both cutout lines test `Cutout > 0.5` or more, so neither can run for such a
+    /// packet; the only difference is the absence of `discard` in the compiled program. No new
+    /// program. Default off.
+    pub actor_add_discard_free: bool,
     /// Picture-changing experiment: cull GL front-facing actor triangles. Owner approval required. Default off.
     pub actor_frontface_cull: bool,
     /// Cull script-owned bodies when single preparation has no mutable consumer.
@@ -575,6 +581,7 @@ impl Default for Config {
             actor_discard_free_shader: false,
             actor_cutout_discard_free: false,
             actor_lean_shader: false,
+            actor_add_discard_free: false,
             actor_frontface_cull: false,
             actor_consumer_frustum_cull: false,
             diag_skip_fx: false,
@@ -4010,7 +4017,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "actor_add_discard_free") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

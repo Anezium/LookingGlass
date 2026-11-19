@@ -392,6 +392,15 @@ fn actor_lean_route(base: Route, programs: [bool; 2], admitted: impl Fn() -> boo
         other => other,
     }
 }
+/// `actor_add_discard_free`: a packet on the lean actor program moves to its discard-free twin
+/// when that twin has a pipeline for the key and `eligible` (no cutout line can run) holds.
+/// Every other route, including the full program, is untouched.
+fn actor_add_discard_free_route(base: Route, opaque_program: bool, eligible: impl FnOnce() -> bool) -> Route {
+    match base {
+        Route::ActorLean if opaque_program && eligible() => Route::ActorLeanOpaque,
+        other => other,
+    }
+}
 /// `fx_add_lean` / `fx_add_fog_free`: the additive program for one effect packet, when its
 /// key is on, its program compiled and the packet admitted. `fog_free` runs only when asked.
 fn add_route(p: &Pass, programs: [bool; 2], fog_free: impl FnOnce() -> bool) -> Option<Route> {
@@ -754,6 +763,13 @@ impl Gpu {
         let program = actor_lean_route(program,
             [0, 1].map(|i| self.actor_lean[i].as_ref().is_some_and(|l| l.pipelines.contains_key(&key))),
             || actor_lean::admitted(p, u));
+        let program = if c.actor_add_discard_free {
+            let moved = actor_add_discard_free_route(program,
+                self.actor_lean[1].as_ref().is_some_and(|l| l.pipelines.contains_key(&key)),
+                || actor_lean::add_discard_free(p, u));
+            if moved != program { count("vita_actor_add_discard_free_draws", 1); }
+            moved
+        } else { program };
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         actor_lean::census(p, u, depth_write, program);
         let lite = program == Route::Lite;
@@ -1842,6 +1858,18 @@ mod tests {
         assert_eq!(actor_lean_route(Route::CorpseOpaque, [true, true], || false), Route::CorpseOpaque);
         // The discard-free twin never serves a packet the full program was drawing.
         assert_eq!(actor_lean_route(Route::Full, [false, true], || true), Route::Full);
+    }
+    #[test]
+    fn the_add_discard_free_route_moves_only_lean_actor_packets() {
+        let calls = std::cell::Cell::new(0);
+        let yes = || { calls.set(calls.get() + 1); true };
+        assert_eq!(actor_add_discard_free_route(Route::ActorLean, true, yes), Route::ActorLeanOpaque);
+        assert_eq!(calls.get(), 1);
+        for other in [Route::Full, Route::Lite, Route::CorpseOpaque, Route::AddLean, Route::AddFogFree, Route::ActorLeanOpaque] {
+            assert_eq!(actor_add_discard_free_route(other, true, || true), other, "{other:?}");
+        }
+        assert_eq!(actor_add_discard_free_route(Route::ActorLean, false, || true), Route::ActorLean, "no twin pipeline");
+        assert_eq!(actor_add_discard_free_route(Route::ActorLean, true, || false), Route::ActorLean);
     }
     #[test]
     fn every_program_owns_its_submit_cache_slots_and_the_lean_blends_are_the_named_ones() {

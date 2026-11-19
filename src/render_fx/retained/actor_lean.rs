@@ -27,6 +27,7 @@ use super::*;
 pub(super) const NAMES: [&str; 2] = ["retained-actor-lean", "retained-actor-lean-opaque"];
 
 // Offsets into the retained uniform block (`UNIFORM_FIELDS`).
+const CUTOUT: usize = 37;
 const GAIN: usize = 39;
 const FOG_MODE: usize = 43;
 const SKY_FADE: usize = 46;
@@ -82,6 +83,17 @@ pub(super) fn admitted(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool {
         && (0..8).all(|light| !(u[LIGHTS + light * 8 + 7] > 0.5))
         && u[GAIN..GAIN + 3].iter().all(|gain| gain.is_finite())
 }
+/// `actor_add_discard_free`: an additive actor packet (`Blend::Add`, `Blend::AlphaAdd`) whose
+/// cutout lines cannot run. Every clause of the first line tests `Cutout > 0.5` and every clause
+/// of the second `Cutout > 4.5`, so a payload `Cutout` word at most 0.5 (NaN fails this test)
+/// makes both lines no-ops, and the lean program and its discard-free twin compute the same
+/// colour, alpha and depth for every fragment. The selector reads the word the program would
+/// test. Only the blend narrows the set: the jlair2 body glow (`skin01g`, `Add`, `Cutout = 0`)
+/// is the target, and the earlier broad `Cutout = 0` route was rejected on host pixels for
+/// opaque packets (`actor_discard_free_shader`).
+pub(super) fn add_discard_free(p: &Pass, u: &[f32; UNIFORM_FLOATS]) -> bool {
+    !p.effect && add_program::additive(p.blend_index) && u[CUTOUT] <= 0.5
+}
 /// Host census line for one actor draw: the payload facts the selector reads and the route.
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
 pub(super) fn census(p: &Pass, u: &[f32; UNIFORM_FLOATS], depth_write: bool, route: Route) {
@@ -131,6 +143,7 @@ mod tests {
     #[test]
     fn offsets_name_the_fields_of_the_retained_block() {
         let end = |name: &str| UNIFORM_FIELDS.iter().find(|f| f.0 == name).unwrap().1;
+        assert_eq!(end("Cutout"), CUTOUT + 1);
         assert_eq!(end("Gain"), GAIN + 4);
         assert_eq!(end("FogMode"), FOG_MODE + 1);
         assert_eq!(end("SkyFade"), SKY_FADE + 1);
@@ -243,6 +256,60 @@ mod tests {
         let expected = varyings(&crate::environment::fragment(full));
         assert_eq!(expected, ["uv", "lm", "color", "worldPosition"]);
         for source in [&lean, &opaque] { assert_eq!(varyings(&crate::environment::fragment(source)), expected); }
+    }
+    #[test]
+    fn only_uncut_additive_actor_packets_drop_the_cutout_lines() {
+        use crate::materials::Blend;
+        let glow = || { let mut p = pass(); p.blend_index = crate::render::blend_index(Blend::Add); p.cutout = 0.; p };
+        let p = glow();
+        assert!(add_discard_free(&p, &payload(&p)));
+        let mut alpha_add = glow();
+        alpha_add.blend_index = crate::render::blend_index(Blend::AlphaAdd);
+        assert!(add_discard_free(&alpha_add, &payload(&alpha_add)));
+        // Every non-zero cutout mode can reach a discard; none is admitted, whatever the blend.
+        for mode in 1..=8 {
+            let mut p = glow();
+            p.cutout = mode as f32;
+            assert!(!add_discard_free(&p, &payload(&p)), "cutout {mode}");
+        }
+        let mut u = payload(&p);
+        u[CUTOUT] = f32::NAN;
+        assert!(!add_discard_free(&p, &u), "NaN is never a proof");
+        u[CUTOUT] = 0.6;
+        assert!(!add_discard_free(&p, &u), "the first cutout clause starts above 0.5");
+        // The selector reads the payload word, not the pass field.
+        let mut u = payload(&p);
+        u[CUTOUT] = 1.;
+        assert!(!add_discard_free(&p, &u));
+        for (name, blend) in [("opaque", Blend::Opaque), ("alpha", Blend::Alpha), ("filter", Blend::Filter),
+            ("double filter", Blend::DoubleFilter), ("colour add", Blend::ColorAdd), ("alpha colour", Blend::AlphaColor)] {
+            let mut p = glow();
+            p.blend_index = crate::render::blend_index(blend);
+            assert!(!add_discard_free(&p, &payload(&p)), "{name}");
+        }
+        let mut effect = glow();
+        effect.effect = true;
+        assert!(!add_discard_free(&effect, &payload(&effect)), "effect packets have their own programs");
+        // The two programs differ by exactly the two cutout lines, and each of them needs
+        // `Cutout > 0.5` in every clause before it can discard.
+        let [lean, opaque] = [fragment(false), fragment(true)];
+        let gone: Vec<&str> = lean.lines().filter(|l| !opaque.lines().any(|o| o == *l)).collect();
+        assert_eq!(gone.len(), 2);
+        for line in gone {
+            let condition = line.trim().strip_prefix("if(").and_then(|l| l.strip_suffix(")discard;")).unwrap();
+            for clause in condition.split("||") {
+                assert!(clause.contains("Cutout>0.5") || clause.contains("Cutout>1.5") || clause.contains("Cutout>2.5")
+                    || clause.contains("Cutout>3.5") || clause.contains("Cutout>4.5") || clause.contains("Cutout>5.5")
+                    || clause.contains("Cutout>6.5") || clause.contains("Cutout>7.5"), "{clause}");
+            }
+        }
+    }
+    #[test]
+    fn the_add_key_is_off_by_default_and_strict() {
+        let c = crate::render::vita_renderer::Config::default();
+        assert!(!c.actor_add_discard_free);
+        assert!(serde_json::from_value::<crate::render::vita_renderer::Config>(serde_json::json!({"actor_add_discard_free": 1})).is_err());
+        assert!(serde_json::from_value::<crate::render::vita_renderer::Config>(serde_json::json!({"actor_add_discard_free": true})).unwrap().actor_add_discard_free);
     }
     #[test]
     fn the_key_is_off_by_default_and_strict() {
