@@ -3910,7 +3910,7 @@ mod prop_occurrence_tests {
         let meshes = model.surfaces.iter().map(|s| Mesh { upload_identity: None, surface: None,
             vertices: s.uv.iter().map(|&uv| Vertex { position: Vec3::ZERO, uv, color: [255; 4], normal: Vec4::ZERO }).collect(),
             indices: s.indices.clone(), texture: Some(base.clone()) }).collect();
-        (Prop { _material_layers: Vec::new(), bounds: model_bounds(&model), culled: false, model, meshes, scale: 1.25, occurrences: PropOccurrences::default() }, vec![keep, swapped])
+        (Prop { _material_layers: Vec::new(), bounds: model_bounds(&model), culled: false, geometry: Arc::new(PropGeometry { model, scale: 1.25 }), meshes, occurrences: PropOccurrences::default() }, vec![keep, swapped])
     }
     fn at(x: f32) -> Transform { Transform { translation: vec3(x, 2., 3.), rotation: Quat::from_rotation_z(x * 0.1) } }
     #[test]
@@ -3922,7 +3922,7 @@ mod prop_occurrence_tests {
             let attachment = Transform { translation: vec3(i as f32 * 37. - 50., 9., -4.),
                 rotation: Quat::from_euler(EulerRot::XYZ, 0.3 * i as f32, -0.7, 1.1 * i as f32) };
             for (scale, looping) in [(1., true), (0.4, false), (2.5, true)] {
-                let (lo, hi) = placed_box(p.bounds, p.scale * scale, attachment);
+                let (lo, hi) = placed_box(p.bounds, p.geometry.scale * scale, attachment);
                 let meshes = p.meshes_at(attachment, scale, true, time, looping);
                 for v in meshes.iter().flat_map(|m| &m.vertices) {
                     let slack = 1e-4 * (1. + v.position.abs().max_element());
@@ -4005,10 +4005,10 @@ mod prop_occurrence_tests {
         assert!(!p.occurrences.entries[0].meshes.is_empty(), "the clamped frame repeated");
         // A single-frame model ignores the clock even while it loops: q - p is zero.
         let (single, _keep) = prop(1, 7500);
-        let [a, b] = [0.13_f32, 0.77].map(|time| surface_frame(&single.model.surfaces[0], 0.1, time, true));
+        let [a, b] = [0.13_f32, 0.77].map(|time| surface_frame(&single.geometry.model.surfaces[0], 0.1, time, true));
         assert_eq!((a.1, a.2), (b.1, b.2));
         assert_ne!(a.0.fract().to_bits(), b.0.fract().to_bits());
-        let lerp = |f: f32| single.model.surfaces[0].frames[0][3].lerp(single.model.surfaces[0].frames[0][3], f).to_array().map(f32::to_bits);
+        let lerp = |f: f32| single.geometry.model.surfaces[0].frames[0][3].lerp(single.geometry.model.surfaces[0].frames[0][3], f).to_array().map(f32::to_bits);
         assert_eq!(lerp(a.0.fract()), lerp(b.0.fract()));
     }
     #[test]

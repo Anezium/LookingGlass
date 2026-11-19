@@ -265,7 +265,7 @@ impl Art {
                 },
                 |name, birth, _| {
                     let (index, t) = shell_frame(birth);
-                    let frame = (t / self.shell[index].model.frame_time) as usize;
+                    let frame = (t / self.shell[index].geometry.model.frame_time) as usize;
                     let large = name
                         .strip_prefix("smoke")
                         .and_then(|s| s.parse::<u8>().ok())
