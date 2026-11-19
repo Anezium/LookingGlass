@@ -97,7 +97,7 @@ impl Art {
         }
         material.bind();
     }
-    pub fn charge(&mut self, g: &Guard, data: &Data, camera: Vec3, atmosphere: &Atmosphere) {
+    pub fn charge(&mut self, g: &Guard, data: &ModelData, camera: Vec3, atmosphere: &Atmosphere) {
         let Some(effect) = &mut self.charge else {
             return;
         };
@@ -141,17 +141,18 @@ impl Art {
         );
     }
 }
-impl Model {
+impl ModelArt {
     pub(super) fn draw_card(
         &mut self,
         g: &Guard,
         fullbright: bool,
         material: &crate::character::SkinMaterial,
+        overrides: &PoseOverrides,
     ) {
         let _frozen_consumer = crate::character::skinning::CullGuard::publication_reason(
             g.frozen, crate::phase_census::FROZEN);
-        let time = g.sample_time(&self.data);
-        let fade = g.fade(&self.data);
+        let time = g.sample_time(self.data.as_ref());
+        let fade = g.fade(self.data.as_ref());
         let clip = &self.data.clips[g.clip()];
         let local = clip.sample(time, g.loops());
         let visual =
@@ -167,7 +168,7 @@ impl Model {
                 g.scale
             };
             material.bind();
-            self.draw_pose(
+            self.draw_pose_with_overrides(
                 &local,
                 0.,
                 time,
@@ -181,6 +182,7 @@ impl Model {
                 !g.dismember.severed,
                 &visual,
                 g.dismember.severed.then_some(("top*", "cap_body", false)),
+                overrides,
             );
             if g.frozen {
                 self.draw_frozen();
@@ -197,7 +199,7 @@ impl Model {
                 false,
             );
             material.draw_dissolving(g.dismember.fade(), || {
-                self.draw_pose(
+                self.draw_pose_with_overrides(
                     &local,
                     0.,
                     g.dismember.age,
@@ -208,6 +210,7 @@ impl Model {
                     false,
                     &visual,
                     Some(("top*", "cap_body", true)),
+                    overrides,
                 )
             });
         }

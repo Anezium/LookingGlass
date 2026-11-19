@@ -286,6 +286,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                     (c.target - c.eye).normalize(),
                     &scene.atmosphere,
                     false,
+                    false,
                 );
                 crate::render::depth_read_only(|| {
                     scene.draw(c.eye, 22., false, true, &o.transforms())

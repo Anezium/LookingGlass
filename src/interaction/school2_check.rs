@@ -438,7 +438,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             let transforms = i.transforms();
             scene.draw(eye, 0., false, false, &transforms);
             art.draw(school, false, &scene.atmosphere, eye);
-            npcs.draw(eye, (target - eye).normalize(), &scene.atmosphere, false);
+            npcs.draw(eye, (target - eye).normalize(), &scene.atmosphere, false, false);
             enemies.draw(
                 i.encounters.as_ref().unwrap(),
                 false,

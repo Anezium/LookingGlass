@@ -158,6 +158,9 @@ impl Rig {
         }
     }
     pub fn apply(&self, pose: &mut [Transform], amount: f32) {
+        self.apply_with_angle(pose, amount, None);
+    }
+    fn apply_with_angle(&self, pose: &mut [Transform], amount: f32, angle: Option<f32>) {
         if let Some(bone) = self.mouth.and_then(|i| pose.get_mut(i)) {
             let amount = if amount.is_finite() {
                 amount.clamp(0., 1.)
@@ -167,8 +170,13 @@ impl Rig {
             // Observed mouth tags use local X as the transverse jaw hinge.
             // Compose after the authored local rotation, preserving head acting.
             bone.rotation =
-                (bone.rotation * Quat::from_rotation_x(self.angle * amount)).normalize();
+                (bone.rotation * Quat::from_rotation_x(angle.unwrap_or(self.angle) * amount)).normalize();
         }
+    }
+    pub(crate) fn pose(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32, angle: Option<f32>) -> Vec<Transform> {
+        let mut local = local.to_vec();
+        self.apply_with_angle(&mut local, mouth, angle);
+        skeleton.global_pose(&local)
     }
 }
 
@@ -225,15 +233,11 @@ impl Face {
         };
         Ok(Self { rig, blink })
     }
-    pub fn mouth_angle(&mut self, degrees: f32) {
-        if degrees.is_finite() && (0. ..=90.).contains(&degrees) {
-            self.rig.angle = degrees.to_radians();
-        }
+    pub(crate) fn into_parts(self) -> (Rig, BlinkArt) {
+        (self.rig, BlinkArt(self.blink))
     }
     pub fn pose(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32) -> Vec<Transform> {
-        let mut local = local.to_vec();
-        self.rig.apply(&mut local, mouth);
-        skeleton.global_pose(&local)
+        self.rig.pose(skeleton, local, mouth, None)
     }
     pub(crate) fn pose_into(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32, scratch: &mut Vec<Transform>, world: &mut Vec<Transform>) {
         scratch.clear(); scratch.extend_from_slice(local);
@@ -247,7 +251,18 @@ impl Face {
         }
     }
     pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
-        if let Some(b) = &self.blink {
+        Blink::apply(self.blink.as_ref(), meshes, time, alive);
+    }
+}
+pub(crate) struct BlinkArt(Option<Blink>);
+impl BlinkArt {
+    pub(crate) fn apply(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
+        Blink::apply(self.0.as_ref(), meshes, time, alive);
+    }
+}
+impl Blink {
+    fn apply(blink: Option<&Self>, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
+        if let Some(b) = blink {
             if let Some(mesh) = &mut meshes[b.surface] {
                 mesh.upload_identity = if alive && blinking(time, b.period) { Some(b.closed_upload_identity) } else { b.open_upload_identity };
                 mesh.surface = if alive && blinking(time, b.period) { None } else { b.open_surface.clone() };

@@ -6,7 +6,7 @@ use crate::{
 };
 
 pub fn check(assets: &mut Assets) -> Result<()> {
-    let data = Data::load(assets, MODEL, &[])?;
+    let data = ModelData::load(assets, MODEL, &[])?;
     for clip in crate::clockwork::CLIPS {
         ensure!(
             data.clips.contains_key(*clip),
@@ -116,18 +116,18 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     npcs.update(0., &world, Vec3::splat(10000.));
     let initial = npcs.snapshot();
     let id = npcs
-        .actors
+        .sim.actors
         .iter()
         .position(|a| a.clock.is_some() && a.spawn.clock_spawn.is_none())
         .context("Missing placed Automaton")?;
     let (pending_id, entity) = npcs
-        .actors
+        .sim.actors
         .iter()
         .enumerate()
         .find_map(|(id, a)| a.spawn.clock_spawn.map(|e| (id, e)))
         .context("Missing dormant Automaton")?;
     let ambush = npcs
-        .clock_ambushes
+        .sim.clock_ambushes
         .iter()
         .find(|a| a.receivers.iter().any(|(i, _)| *i == entity))
         .unwrap();
@@ -143,12 +143,12 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     );
     step(&mut npcs, &world, trigger_eye, 1);
     ensure!(
-        npcs.actors[pending_id].clock.as_ref().unwrap().active,
+        npcs.sim.actors[pending_id].clock.as_ref().unwrap().active,
         "Touch did not activate Automaton"
     );
     // A pending timer is saved even when this map's reviewed trigger has no delay.
     npcs.restore(&initial)?;
-    npcs.actors[pending_id].clock.as_mut().unwrap().spawn_delay = Some(2.);
+    npcs.sim.actors[pending_id].clock.as_mut().unwrap().spawn_delay = Some(2.);
     let delayed = npcs.snapshot();
     step(&mut npcs, &world, Vec3::splat(10000.), 180);
     ensure!(
@@ -164,10 +164,10 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     legacy.matches_placements(&scene.map, "funhouse", None)?;
     npcs.restore(&legacy)?;
     ensure!(
-        !npcs.actors[pending_id].clock.as_ref().unwrap().active,
+        !npcs.sim.actors[pending_id].clock.as_ref().unwrap().active,
         "Old load retained a live new ambush"
     );
-    let feet = npcs.actors[id].position();
+    let feet = npcs.sim.actors[id].position();
     let target = feet + Vec3::Z * 48.;
     let eye = (0..32)
         .map(|i| {
@@ -229,7 +229,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             feet + (eye - target).truncate().normalize().extend(0.) * 65. + Vec3::Z * 48.
         };
         if matches!(case, "punch" | "contact" | "fists" | "steam") {
-            let p = npcs.actors[id].clock.as_mut().unwrap();
+            let p = npcs.sim.actors[id].clock.as_mut().unwrap();
             p.phase = match case {
                 "fists" => Phase::FistFire,
                 "steam" => Phase::SteamFire,
@@ -239,7 +239,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             p.yaw = (continuation_eye.y - feet.y).atan2(continuation_eye.x - feet.x);
             if matches!(case, "contact" | "fists" | "steam") {
                 let frame =
-                    npcs.models[npcs.actors[id].model].data.clips["attack_punch"].frame_time;
+                    npcs.art.resources.models[npcs.sim.actors[id].model].data.clips["attack_punch"].frame_time;
                 let frames = if case == "contact" {
                     (frame * 9. * 60.).ceil() as usize + 1
                 } else {
@@ -272,7 +272,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             );
             step(&mut npcs, &world, continuation_eye, 12);
         }
-        let p = npcs.actors[id].clock.as_ref().unwrap();
+        let p = npcs.sim.actors[id].clock.as_ref().unwrap();
         let state = serde_json::to_value(p)?;
         if case == "fists" {
             ensure!(!p.fists.is_empty(), "Restart fixture lacks live fist");
@@ -312,7 +312,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         return Ok(());
     }
     npcs.restore(&initial)?;
-    npcs.actors = vec![npcs.actors[id].clone()];
+    npcs.sim.actors = vec![npcs.sim.actors[id].clone()];
     let stages = [
         ("idle", Phase::Idle, 0.2, false, 0),
         ("twitch", Phase::Twitch, 0.4, false, 0),
@@ -338,7 +338,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
     ];
     let mut hashes = BTreeSet::new();
     for (label, phase, time, frozen, variant) in stages {
-        let p = npcs.actors[0].clock.as_mut().unwrap();
+        let p = npcs.sim.actors[0].clock.as_mut().unwrap();
         p.phase = phase;
         p.time = time;
         p.frozen = frozen;
@@ -356,7 +356,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         feet + vec3(2000., 2000., -0.1),
     )]);
     let aim = feet + vec3(yaw.cos() * 500., yaw.sin() * 500., 48.);
-    let data = &npcs.models[npcs.actors[0].model].data;
+    let data = npcs.sim.models[npcs.sim.actors[0].model].as_ref();
     let mut out = Feedback::default();
     for _ in 0..14 {
         p.update(1. / 60., &floor, aim, data, &mut out);
@@ -365,9 +365,9 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         !p.fists.is_empty(),
         "Original hand tags failed to launch a fist"
     );
-    npcs.actors[0].clock = Some(p);
+    npcs.sim.actors[0].clock = Some(p);
     ensure!(
-        npcs.lights().len() == npcs.actors[0].clock.as_ref().unwrap().fists.len(),
+        npcs.lights().len() == npcs.sim.actors[0].clock.as_ref().unwrap().fists.len(),
         "Missing fist light"
     );
     hashes.insert(
@@ -412,7 +412,7 @@ async fn capture(
         crate::render_fx::begin_view(&camera, 0., &scene.atmosphere, false);
         let transforms = interactions.transforms();
         scene.draw(eye, 0., false, false, &transforms);
-        npcs.draw(eye, (target - eye).normalize(), &scene.atmosphere, false);
+        npcs.draw(eye, (target - eye).normalize(), &scene.atmosphere, false, false);
         crate::render::depth_read_only(|| scene.draw(eye, 0., false, true, &transforms));
         let (_, dropped) = crate::render_fx::finish();
         ensure!(dropped == 0, "Automaton render queue dropped geometry");

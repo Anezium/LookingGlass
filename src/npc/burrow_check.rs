@@ -24,7 +24,7 @@ pub fn larva_fixture(map: &mut Bsp) -> Result<()> {
 }
 pub fn check(assets: &mut Assets) -> Result<()> {
     for kind in Kind::ALL {
-        let data = Data::load(assets, kind.model(), &[])?;
+        let data = ModelData::load(assets, kind.model(), &[])?;
         let source = crate::bsp::tokens(&String::from_utf8_lossy(
             &assets.read(&format!("models/{}.tik", kind.model()))?,
         ))?;
@@ -123,13 +123,13 @@ impl Npcs {
         let mut map = Bsp::parse(&assets.read("maps/centipede1.bsp")?)?;
         larva_fixture(&mut map)?;
         let mut npcs = Self::load(assets, &map, "centipede1", None, false, false)?;
-        npcs.actors.retain(|a| a.spawn.model == "c_larva");
-        npcs.resident_ambushes.clear();
+        npcs.sim.actors.retain(|a| a.spawn.model == "c_larva");
+        npcs.sim.resident_ambushes.clear();
         Ok(npcs)
     }
     pub fn larva_preview_start(&self, world: &World) -> Result<(Vec3, f32)> {
         let actor = self
-            .actors
+            .sim.actors
             .iter()
             .find(|a| a.spawn.model == "c_larva")
             .context("Larva preview actor missing")?;
@@ -167,7 +167,7 @@ pub async fn ambush_native(assets: &mut Assets, mode: &str) -> Result<()> {
         .retain(|a| Kind::from_model(&a.spawn.model).is_none());
     previous.matches_placements(&scene.map, "garden2", None)?;
     npcs.restore(&previous)?;
-    for (i, a) in npcs.actors.iter().enumerate() {
+    for (i, a) in npcs.sim.actors.iter().enumerate() {
         if Kind::from_model(&a.spawn.model).is_some() {
             ensure!(
                 !a.resident.as_ref().unwrap().active,
@@ -181,7 +181,7 @@ pub async fn ambush_native(assets: &mut Assets, mode: &str) -> Result<()> {
         );
     }
     let eyes: Vec<_> = npcs
-        .resident_ambushes
+        .sim.resident_ambushes
         .iter()
         .filter(|t| {
             t.receivers.iter().any(|(id, _)| {
@@ -218,7 +218,7 @@ pub async fn ambush_native(assets: &mut Assets, mode: &str) -> Result<()> {
                 npcs.update(1. / 60., &world, eye);
             }
             ensure!(
-                npcs.actors.iter().any(|a| matches!(
+                npcs.sim.actors.iter().any(|a| matches!(
                     &a.resident,
                     Some(resident::Resident {
                         body: resident::Body::Insect(_),

@@ -82,21 +82,21 @@ pub(super) async fn render_check(assets: &mut Assets) -> Result<()> {
     let mut endings = Vec::new();
     for hz in [30, 60, 144] {
         let mut npcs = Npcs::load(assets, &scene.map, "skool1", None, false, false)?;
-        npcs.actors.retain(|a| a.spawn.name == "return_insane2");
-        ensure!(npcs.actors.len() == 1, "Pupil missing");
+        npcs.sim.actors.retain(|a| a.spawn.name == "return_insane2");
+        ensure!(npcs.sim.actors.len() == 1, "Pupil missing");
         let eye = vec3(-2100., 1810., -410.);
         npcs.update(0., &world, eye);
-        let start = npcs.actors[0].position();
+        let start = npcs.sim.actors[0].position();
         let mut far = 0_f32;
         for frame in 0..hz * 32 {
             npcs.update(1. / hz as f32, &world, eye);
-            far = far.max(npcs.actors[0].position().distance(start));
+            far = far.max(npcs.sim.actors[0].position().distance(start));
             if frame == hz * 7 {
                 let saved = npcs.snapshot();
                 npcs.restore(&serde_json::from_value(serde_json::to_value(saved)?)?)?;
             }
             if hz == 60 && [120, 420, 840, 1560].contains(&frame) {
-                let target = npcs.actors[0].target();
+                let target = npcs.sim.actors[0].target();
                 let eye = (0..32)
                     .find_map(|n| {
                         let a = n as f32 * std::f32::consts::TAU / 32.;
@@ -124,7 +124,7 @@ pub(super) async fn render_check(assets: &mut Assets) -> Result<()> {
                 );
                 let transforms = i.transforms();
                 scene.draw(eye, frame as f32 / 60., false, false, &transforms);
-                npcs.draw(eye, (target - eye).normalize(), &scene.atmosphere, false);
+                npcs.draw(eye, (target - eye).normalize(), &scene.atmosphere, false, false);
                 scene.draw(eye, frame as f32 / 60., false, true, &transforms);
                 crate::render_fx::finish();
                 set_default_camera();
@@ -154,12 +154,12 @@ pub(super) async fn render_check(assets: &mut Assets) -> Result<()> {
             expected == serde_json::to_value(npcs.snapshot())?,
             "Pupil continuation differs"
         );
-        endings.push(npcs.actors[0].position());
+        endings.push(npcs.sim.actors[0].position());
         repeated.actors[0].walk = None;
         npcs.restore(&repeated)?;
         npcs.update(1. / 60., &world, eye);
         ensure!(
-            npcs.actors[0].spawn == repeated.actors[0].spawn,
+            npcs.sim.actors[0].spawn == repeated.actors[0].spawn,
             "Legacy pupil identity changed"
         );
         println!("PASS pupil circuit {hz} Hz: two loops, {far:.1} displacement, pause, mid-walk save and legacy identity");

@@ -17,7 +17,7 @@ impl Art {
             time: 0.,
         }
     }
-    pub fn draw(&mut self, g: &Insect, data: &Data, camera: Vec3, atmosphere: &Atmosphere) {
+    pub fn draw(&mut self, g: &Insect, data: &ModelData, camera: Vec3, atmosphere: &Atmosphere) {
         let Some(effect) = &mut self.dust else {
             return;
         };

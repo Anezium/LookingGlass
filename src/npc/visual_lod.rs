@@ -44,7 +44,7 @@ impl Cache {
         self.ticks = 0;
         self.meshes.clear();
     }
-    pub fn capture(&mut self, model: &mut Model) {
+    pub fn capture(&mut self, model: &mut ModelArt) {
         model.require_live_skin();
         if !model.visible.iter().any(|v| *v) {
             self.invalidate();
@@ -58,15 +58,11 @@ impl Cache {
     }
 }
 
-pub(super) fn safe(actor: &Actor, model: &Model) -> bool {
+pub(super) fn safe(actor: &Actor, data: &ModelData) -> bool {
     actor.visual_lod_safe()
-        && model.data.combat.is_none()
-        && model.data.meta.attachments.is_empty()
-        && model.attachments.is_empty()
-        && model.props.is_empty()
-        && model.effects.is_empty()
-        && model.own_effect.is_none()
-        && model.bone_scales.is_empty()
+        && data.combat.is_none()
+        && data.meta.attachments.is_empty()
+        && data.ambient_art_free
 }
 impl Actor {
     fn visual_lod_safe(&self) -> bool {

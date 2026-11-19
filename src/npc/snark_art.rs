@@ -95,7 +95,7 @@ impl Art {
             }
         }
     }
-    pub fn tongue(&self, g: &Snark, data: &Data) {
+    pub fn tongue(&self, g: &Snark, data: &ModelData) {
         if let Some(end) = g.tongue {
             gl_use_default_material();
             let start = g.mouth(data, g.time);
@@ -108,7 +108,7 @@ impl Art {
             }
         }
     }
-    pub fn smoke(&mut self, g: &Snark, data: &Data, camera: Vec3, atmosphere: &Atmosphere) {
+    pub fn smoke(&mut self, g: &Snark, data: &ModelData, camera: Vec3, atmosphere: &Atmosphere) {
         let Some(effect) = &mut self.smoke else {
             return;
         };

@@ -37,7 +37,7 @@ pub(super) fn check(assets: &mut Assets) -> Result<()> {
         let text = String::from_utf8_lossy(&assets.read(&format!("models/{}.tik", kind.model()))?)
             .into_owned();
         let tokens = crate::bsp::tokens(&text)?;
-        let data = Data::load(assets, kind.model(), &[])?;
+        let data = ModelData::load(assets, kind.model(), &[])?;
         let facts: &[(&str, &[(&str, &str)])] = if kind == Kind::Heart {
             &[
                 ("attack1", &[("8", "15")]),

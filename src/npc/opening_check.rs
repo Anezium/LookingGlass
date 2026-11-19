@@ -88,7 +88,7 @@ pub fn dialogue(assets: &mut Assets) -> Result<()> {
 }
 
 async fn actor_pixels(npcs: &mut Npcs, name: &str, label: &str) -> Result<usize> {
-    let all = npcs.actors.clone();
+    let all = npcs.sim.actors.clone();
     let a = all
         .iter()
         .find(|a| a.spawn.name == name)
@@ -96,7 +96,7 @@ async fn actor_pixels(npcs: &mut Npcs, name: &str, label: &str) -> Result<usize>
         .clone();
     let target = a.target();
     let eye = target + vec3(145., -180., 70.);
-    npcs.actors = vec![a];
+    npcs.sim.actors = vec![a];
     clear_background(BLACK);
     set_camera(&Camera3D {
         position: eye,
@@ -113,11 +113,12 @@ async fn actor_pixels(npcs: &mut Npcs, name: &str, label: &str) -> Result<usize>
         (target - eye).normalize(),
         &Atmosphere::default(),
         true,
+        false,
     );
     let after = crate::character::visibility_image();
     let pixels = crate::character::visible_pixels(&before, &after);
     after.export_png(&format!("private/opening-audit/{label}.png"));
-    npcs.actors = all;
+    npcs.sim.actors = all;
     next_frame().await;
     Ok(pixels)
 }
@@ -139,12 +140,12 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
             "Offstage {name} visible"
         );
         // Demonstrate that this probe sees the reported defect when ownership is absent.
-        npcs.owns_village = false;
+        npcs.sim.owns_village = false;
         ensure!(
             actor_pixels(&mut npcs, name, &format!("before-{name}")).await? > 100,
             "Probe cannot see old offstage placement"
         );
-        npcs.owns_village = true;
+        npcs.sim.owns_village = true;
     }
     let mut story = Story::load(assets, "gvillage");
     story.trigger("Torchgnome3_Dialog_part2");
@@ -156,12 +157,12 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         actor_pixels(&mut npcs, "cat_shrink1", "gnome3-no-early-cat").await? == 0,
         "Third Gnome's Cat appeared before its shot"
     );
-    npcs.owns_village = false;
+    npcs.sim.owns_village = false;
     ensure!(
         actor_pixels(&mut npcs, "cat_shrink1", "before-early-cat").await? > 100,
         "Early-Cat probe cannot detect old cast-wide visibility"
     );
-    npcs.owns_village = true;
+    npcs.sim.owns_village = true;
     println!("PASS village offstage actors: measured zero pixels; old ownership reproduces all three unwanted Cats");
 
     for (event, actor, point) in [
@@ -178,16 +179,16 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         story.tick(0.01, false);
         npcs.story_pose(&story, 0.01, &world, player.eye());
         let index = npcs
-            .actors
+            .sim.actors
             .iter()
             .position(|a| a.spawn.name == actor)
             .unwrap();
         ensure!(
-            npcs.actors[index].position() == marker(&map, point),
+            npcs.sim.actors[index].position() == marker(&map, point),
             "Hint at storage location"
         );
         ensure!(
-            npcs.actors[index].spawn == old.actors[index].spawn,
+            npcs.sim.actors[index].spawn == old.actors[index].spawn,
             "Changed saved hint identity"
         );
         ensure!(
@@ -197,7 +198,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         npcs.restore(&old)?; // An older save retains the old runtime footing.
         cinema.apply_npcs(&mut npcs);
         ensure!(
-            npcs.actors[index].position() == marker(&map, point),
+            npcs.sim.actors[index].position() == marker(&map, point),
             "Old save retained wrong hint position"
         );
         story.finish_sequence(event);
@@ -244,11 +245,11 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
             }
             ensure!(cinema.state.done.contains(event), "Scene did not finish");
             let index = npcs
-                .actors
+                .sim.actors
                 .iter()
                 .position(|a| a.spawn.name == actor)
                 .unwrap();
-            let feet = npcs.actors[index].position();
+            let feet = npcs.sim.actors[index].position();
             let node = marker(&map, point);
             // Authored path markers sit above the floor. The scene
             // correctly settles feet onto support instead of keeping that offset.
@@ -267,7 +268,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 "Gnome handoff lacks floor support: {actor}"
             );
             // Use the actual drawn target and reachable close exception, independent of camera.
-            let target = npcs.actors[index].target();
+            let target = npcs.sim.actors[index].target();
             ensure!(
                 npcs.talk_target(actor, &world, target, Vec3::X).is_none(),
                 "An immediate extra E can replay {event}"
@@ -278,8 +279,8 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
             cinema.restore(Some(&cinema.state.clone()))?;
             cinema.apply_npcs(&mut npcs);
             ensure!(
-                npcs.actors[index].spawn == old.actors[index].spawn
-                    && npcs.actors[index].cooldown > 0.,
+                npcs.sim.actors[index].spawn == old.actors[index].spawn
+                    && npcs.sim.actors[index].cooldown > 0.,
                 "Save lost replay cooldown or actor identity"
             );
             for _ in 0..90 {
@@ -290,11 +291,11 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
                 npcs.talk_target(actor, &world, target, Vec3::X).is_some(),
                 "Deliberate talk unavailable: {actor}"
             );
-            npcs.actors[index].yaw += 0.4;
-            let facing = npcs.actors[index].yaw;
+            npcs.sim.actors[index].yaw += 0.4;
+            let facing = npcs.sim.actors[index].yaw;
             cinema.apply_npcs(&mut npcs);
             ensure!(
-                npcs.actors[index].yaw == facing,
+                npcs.sim.actors[index].yaw == facing,
                 "Handoff reset later Gnome facing"
             );
             ensure!(

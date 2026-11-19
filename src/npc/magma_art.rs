@@ -11,7 +11,7 @@ pub(super) struct Skins {
 impl Skins {
     pub fn load(
         assets: &mut Assets,
-        data: &Data,
+        data: &ModelData,
         specs: &BTreeMap<String, texture::MaterialSpec>,
     ) -> Result<Self> {
         let mut textures = vec![];
@@ -59,7 +59,7 @@ impl Skins {
         })
     }
 }
-impl Model {
+impl ModelArt {
     pub(super) fn draw_magma(
         &mut self,
         g: &Magma,
@@ -67,12 +67,12 @@ impl Model {
         material: &crate::character::SkinMaterial,
     ) {
         self.visible.fill(false);
-        let scale = g.visual_scale(&self.data);
+        let scale = g.visual_scale(self.data.as_ref());
         if scale <= 0. {
             return;
         }
         let _identity = self.skin_identity.scope_unless_set();
-        let time = g.sample_time(&self.data);
+        let time = g.sample_time(self.data.as_ref());
         let pose = self.data.clips[g.clip()].sample(time, g.loops());
         let skins = self.magma_skins.as_ref().unwrap();
         let mut original = Vec::new();
@@ -153,7 +153,7 @@ impl Art {
     pub fn draw(
         &mut self,
         g: &Magma,
-        data: &Data,
+        data: &ModelData,
         fire: Option<&crate::particles::Attached>,
         camera: Vec3,
         atmosphere: &Atmosphere,

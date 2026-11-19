@@ -6,7 +6,7 @@ use crate::{
 };
 pub fn check(assets: &mut Assets) -> Result<()> {
     for kind in Kind::ALL {
-        let data = Data::load(assets, kind.model(), &[])?;
+        let data = ModelData::load(assets, kind.model(), &[])?;
         let source = crate::bsp::tokens(&String::from_utf8_lossy(
             &assets.read(&format!("models/{}.tik", kind.model()))?,
         ))?;
@@ -117,7 +117,7 @@ pub fn check(assets: &mut Assets) -> Result<()> {
             .filter(|s| Kind::from_model(&s.model).is_some() && s.resident_spawn.is_none())
         {
             let kind = Kind::from_model(&spawn.model).unwrap();
-            let data = Data::load(assets, &spawn.model, &[])?;
+            let data = ModelData::load(assets, &spawn.model, &[])?;
             let mut p = Snark::new(kind, spawn.origin, spawn.yaw, spawn.scale, 1);
             p.notarget = true;
             for _ in 0..360 {

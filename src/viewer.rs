@@ -732,6 +732,7 @@ pub async fn check_level_swaps(assets: &mut Assets, options: &Options) -> Result
                 (target - camera).normalize_or_zero(),
                 &active.scene.atmosphere,
                 false,
+                false,
             );
             active.art.draw(
                 &active.interactions,
@@ -4749,7 +4750,7 @@ interactions
                 alice.draw_ghost(if snapshot_enabled {dynamic_input.alice_feet}else{player.feet}, fullbright, if snapshot_enabled {dynamic_input.alice_ghost}else{stats.invisible>0.});
             }
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherNpcs);
-            npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright);
+            npcs.draw(camera, (target-camera).normalize_or_zero(), &scene.atmosphere, fullbright, snapshot_world_free);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherLevelArt);
             level_art.draw_dispatch(&interactions, level_dispatch.as_ref(), &hints, &scene.atmosphere, camera, fullbright);
             drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::GatherDispatch);
@@ -4829,6 +4830,7 @@ interactions
                 (target - camera).normalize_or_zero(),
                 &scene.atmosphere,
                 fullbright,
+                snapshot_world_free,
             );
         }
         {
@@ -5559,7 +5561,7 @@ interactions
         interactions.used, interactions.touched
     );
     mouse_look.release();
-    println!("NPC greetings: {}", npcs.greetings);
+    println!("NPC greetings: {}", npcs.greetings());
     if options.shelf_preview {
         println!(
             "Shelf preview ended: feet={:?}, grounded={}, body_clear={}, jumps={}",
@@ -5681,7 +5683,7 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
                     let mut skin_frame=if overlapped {
                         let mut f=crate::character::skinning::overlap::Frame::begin();
                         alice.draw_ghost(player.feet,false,frame==2);
-                        active.npcs.draw(camera,(target-camera).normalize_or_zero(),&active.scene.atmosphere,false);
+                        active.npcs.draw(camera,(target-camera).normalize_or_zero(),&active.scene.atmosphere,false, false);
                         active.art.draw(&active.interactions,&active.hints,&active.scene.atmosphere,camera,false);
                         f.dispatch();Some(f)
                     } else {None};
@@ -5690,7 +5692,7 @@ pub(crate) async fn check_skin_overlap(assets: &mut Assets, options: &Options) -
                     if !crate::character::skinning::overlap::single_frame() {
                     alice.atmosphere(&active.scene.atmosphere,camera);
                     alice.draw_ghost(player.feet,false,frame==2);
-                    active.npcs.draw(camera,(target-camera).normalize_or_zero(),&active.scene.atmosphere,false);
+                    active.npcs.draw(camera,(target-camera).normalize_or_zero(),&active.scene.atmosphere,false, false);
                     active.art.draw(&active.interactions,&active.hints,&active.scene.atmosphere,camera,false);
                     }
                     if let Some(f)=&skin_frame {f.assert_consumed();}
@@ -5816,7 +5818,7 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         state.scene.begin_fx_view(&view, time, fullbright, true);
         let mut skin = crate::character::skinning::overlap::Frame::begin();
         state.alice.draw_ghost(state.game.player.feet, fullbright, false);
-        state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright);
+        state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright, false);
         art.draw(&state.interactions, &state.hints, &state.scene.atmosphere, view.position, fullbright);
         skin.dispatch();
         let allocation_scope = crate::kernel_alloc::Scope::begin();
@@ -5828,7 +5830,7 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
             if !crate::character::skinning::overlap::single_frame() {
             state.alice.atmosphere(&state.scene.atmosphere, view.position);
             state.alice.draw_ghost(state.game.player.feet, fullbright, false);
-            state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright);
+            state.npcs.draw(view.position, (view.target-view.position).normalize_or_zero(), &state.scene.atmosphere, fullbright, false);
             art.draw(&state.interactions, &state.hints, &state.scene.atmosphere, view.position, fullbright);
             }
             skin.assert_consumed();

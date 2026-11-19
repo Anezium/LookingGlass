@@ -549,6 +549,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
                 (c.target - c.eye).normalize_or_zero(),
                 &scene.atmosphere,
                 false,
+                false,
             );
             art.draw(i.school.as_ref().unwrap(), false, &scene.atmosphere, c.eye);
             enemies.school_staging = i.school.as_ref().unwrap().scene_id() == Some(cinema::THEATRE);

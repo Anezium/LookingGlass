@@ -9,7 +9,7 @@ pub fn check(assets: &mut Assets) -> Result<()> {
     attack_fx::check(assets)?;
     let floor = World::fixture(&[(vec3(-2000., -2000., -20.), vec3(2000., 2000., 0.))]);
     for kind in Kind::ALL {
-        let data = Data::load(assets, kind.model(), &[])?;
+        let data = ModelData::load(assets, kind.model(), &[])?;
         for clip in kind.clips() {
             ensure!(data.clips.contains_key(*clip), "Missing {kind:?}/{clip}");
         }
@@ -86,15 +86,15 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         let mut npcs = Npcs::load(assets, &scene.map, "rchess1", None, false, false)?;
         npcs.update(0., &world, Vec3::splat(10000.));
         let id = npcs
-            .actors
+            .sim.actors
             .iter()
             .position(|a| {
                 a.chess.as_ref().is_some_and(|p| p.kind == kind) && a.spawn.chess_spawn.is_some()
             })
             .context("Missing spawned chess type")?;
-        let entity = npcs.actors[id].spawn.chess_spawn.unwrap();
+        let entity = npcs.sim.actors[id].spawn.chess_spawn.unwrap();
         let trigger_eye = npcs
-            .chess_ambushes
+            .sim.chess_ambushes
             .iter()
             .find(|a| a.entities.contains(&entity))
             .unwrap()
@@ -118,7 +118,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             "Authored ambush failed to activate"
         );
         let initial = npcs.snapshot();
-        let target = npcs.actors[id].chess.as_ref().unwrap().target(id).center;
+        let target = npcs.sim.actors[id].chess.as_ref().unwrap().target(id).center;
         let eye = (0..16)
             .map(|i| {
                 let angle = i as f32 * std::f32::consts::TAU / 16.;
@@ -166,7 +166,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         let mut migrated = Npcs::load(assets, &scene.map, "rchess1", None, false, false)?;
         migrated.restore(&legacy)?;
         ensure!(
-            !migrated.actors[id].chess.as_ref().unwrap().active,
+            !migrated.sim.actors[id].chess.as_ref().unwrap().active,
             "Old cast wakes dormant ambushes"
         );
         npcs.restore(&initial)?;
@@ -207,7 +207,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
             continue;
         }
         npcs.restore(&initial)?;
-        npcs.actors = vec![npcs.actors[id].clone()];
+        npcs.sim.actors = vec![npcs.sim.actors[id].clone()];
         let mut stages = vec![
             ("idle", Phase::Idle, 0.2, false, 0),
             ("walk", Phase::Chase, 0.3, false, 0),
@@ -230,7 +230,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         let count = stages.len();
         let mut hashes = BTreeSet::new();
         for (label, phase, time, frozen, variant) in stages {
-            let p = npcs.actors[0].chess.as_mut().unwrap();
+            let p = npcs.sim.actors[0].chess.as_mut().unwrap();
             p.phase = phase;
             p.health = if phase == Phase::Dead { 0. } else { 50. };
             p.time = time;
@@ -258,7 +258,7 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
                 crate::render_fx::begin_view(&camera, 0., &scene.atmosphere, false);
                 let transforms = interactions.transforms();
                 scene.draw(eye, 0., false, false, &transforms);
-                npcs.draw(eye, (target - eye).normalize(), &scene.atmosphere, false);
+                npcs.draw(eye, (target - eye).normalize(), &scene.atmosphere, false, false);
                 crate::render::depth_read_only(|| scene.draw(eye, 0., false, true, &transforms));
                 let (_, dropped) = crate::render_fx::finish();
                 ensure!(dropped == 0, "Chess render queue dropped geometry");

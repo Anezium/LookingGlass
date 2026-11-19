@@ -422,7 +422,7 @@ impl Resident {
         dt: f32,
         world: &World,
         eye: Vec3,
-        data: &Data,
+        data: &ModelData,
         out: &mut combat::Feedback,
     ) {
         if !dt.is_finite() || dt <= 0. {
@@ -436,7 +436,7 @@ impl Resident {
             crate::sim_maps::probe::npc_decision("resident_substep", &(self as &Self, &*out));
         }
     }
-    fn step(&mut self, world: &World, eye: Vec3, data: &Data, out: &mut combat::Feedback) {
+    fn step(&mut self, world: &World, eye: Vec3, data: &ModelData, out: &mut combat::Feedback) {
         const DT: f32 = 1. / 120.;
         match &self.body {
             Body::Card(_) => {
@@ -557,7 +557,7 @@ impl Resident {
     }
     pub fn draw(
         &self,
-        model: &mut Model,
+        model: &mut ModelArt,
         fullbright: bool,
         material: &crate::character::SkinMaterial,
     ) {
@@ -569,24 +569,24 @@ impl Resident {
             return;
         }
         if let Body::Card(g) = &self.body {
-            model.draw_card(g, fullbright, material);
+            model.draw_card(g, fullbright, material, &PoseOverrides::default());
             return;
         }
         let (clip, time, looping, scale, attached, frozen) = match &self.body {
             Body::Card(_) | Body::Magma(_) => unreachable!(),
             Body::Wildlife(b) => (
                 b.clip(),
-                b.sample_time(&model.data),
+                b.sample_time(model.data.as_ref()),
                 b.loops(),
-                b.visual_scale(&model.data),
+                b.visual_scale(model.data.as_ref()),
                 true,
                 b.frozen,
             ),
             Body::Insect(b) => (
                 b.clip(),
-                b.sample_time(&model.data),
+                b.sample_time(model.data.as_ref()),
                 b.loops(),
-                b.visual_scale(&model.data),
+                b.visual_scale(model.data.as_ref()),
                 true,
                 b.frozen,
             ),
@@ -594,15 +594,15 @@ impl Resident {
                 b.clip(),
                 b.sample_time(),
                 b.loops(),
-                b.visual_scale(&model.data),
+                b.visual_scale(model.data.as_ref()),
                 true,
                 b.frozen,
             ),
             Body::Plant(b) => (
                 b.clip(),
-                b.sample_time(&model.data),
+                b.sample_time(model.data.as_ref()),
                 b.loops(),
-                b.visual_scale(&model.data),
+                b.visual_scale(model.data.as_ref()),
                 true,
                 b.frozen,
             ),
@@ -625,7 +625,7 @@ impl Resident {
             }
 
             Body::Boojum(b) => {
-                let timing = boo_timing(&model.data);
+                let timing = boo_timing(model.data.as_ref());
                 let (clip, time, looping) = b.clip(timing);
                 let scale = if b.frozen {
                     (2.5 - b.time).clamp(0., 1.)
@@ -665,7 +665,7 @@ impl Resident {
                     .surfaces
                     .extend([("material3".into(), !shown), ("material4".into(), !shown)]);
             }
-            g.alpha(&model.data)
+            g.alpha(model.data.as_ref())
         } else {
             1.
         };
@@ -762,7 +762,7 @@ impl Resident {
         }
     }
 }
-fn boo_timing(data: &Data) -> boojum::Timing {
+fn boo_timing(data: &ModelData) -> boojum::Timing {
     boojum::Timing {
         frame: data.clips["attack_scream"].frame_time,
         attack: data.clips["attack_scream"].duration(),
@@ -771,7 +771,7 @@ fn boo_timing(data: &Data) -> boojum::Timing {
     }
 }
 
-fn diamond_timing(data: &Data) -> combat::Timing {
+fn diamond_timing(data: &ModelData) -> combat::Timing {
     combat::Timing {
         sever: None,
         alert: data.clips["alert1"].duration(),

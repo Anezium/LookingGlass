@@ -201,7 +201,7 @@ impl Logic {
         world: &World,
         eye: Vec3,
         actors: &mut [Actor],
-        models: &[Model],
+        models: &[Arc<ModelData>],
     ) {
         if dt <= 0. {
             return;
@@ -295,7 +295,7 @@ impl Logic {
             if ant.phase == crate::ant::Phase::Pain {
                 continue;
             }
-            let d = &models[a.model].data;
+            let d = models[a.model].as_ref();
             let clip = &d.clips["walk_medium"];
             ant.phase = crate::ant::Phase::Chase;
             ant.yaw = delta.y.atan2(delta.x);
@@ -340,7 +340,7 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
         let mut n = Npcs::load(a, &map, "garden1", None, false, false)?;
         let s = n.snapshot();
         n.restore(&s)?;
-        let count = |name: &str| n.actors.iter().filter(|a| a.spawn.name == name).count();
+        let count = |name: &str| n.sim.actors.iter().filter(|a| a.spawn.name == name).count();
         ensure!(
             count("ant_run2") == usize::from(difficulty != crate::powerups::Difficulty::Easy),
             "Wrong Ant difficulty gate"
@@ -354,7 +354,7 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
         ];
         for id in ids {
             let Some(contact) = n
-                .garden
+                .sim.garden
                 .as_ref()
                 .unwrap()
                 .contacts
@@ -387,18 +387,18 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
             serde_json::to_value(n.snapshot())? == serde_json::to_value(other.snapshot())?,
             "Garden cast saved future diverged"
         );
-        for a in &n.actors {
+        for a in &n.sim.actors {
             if run_spec(&a.spawn.name).is_some() {
                 let ant = a.ant.as_ref().context("Garden Ant lacks combat")?;
                 println!(
                     "Garden {difficulty:?} run {} done={:?} feet={:?}",
                     a.spawn.name,
-                    n.garden.as_ref().unwrap().saved.runs.get(&a.spawn.name),
+                    n.sim.garden.as_ref().unwrap().saved.runs.get(&a.spawn.name),
                     ant.feet
                 );
                 ensure!(
                     ant.enabled
-                        && n.garden
+                        && n.sim.garden
                             .as_ref()
                             .unwrap()
                             .saved
@@ -412,16 +412,16 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
         // The new activations remain ordinary damageable actors, including after death/load.
         for name in ["ant_run_deadtree1", "lady3", "lady5"] {
             let id = n
-                .actors
+                .sim.actors
                 .iter()
                 .position(|a| a.spawn.name == name)
                 .context("Missing garden damage fixture")?;
             let health = |n: &Npcs| {
-                n.actors[id]
+                n.sim.actors[id]
                     .ant
                     .as_ref()
                     .map(|a| a.health)
-                    .or_else(|| n.actors[id].resident.as_ref().map(|p| p.health()))
+                    .or_else(|| n.sim.actors[id].resident.as_ref().map(|p| p.health()))
                     .unwrap()
             };
             let before = health(&n);
@@ -459,7 +459,7 @@ pub(super) fn check(a: &mut Assets) -> Result<()> {
         legacy.garden = None;
         n.restore(&legacy)?;
         ensure!(
-            n.actors
+            n.sim.actors
                 .iter()
                 .zip(&saved.actors)
                 .all(|(a, b)| a.ant.as_ref().map(|a| a.health) == b.ant.as_ref().map(|a| a.health)),

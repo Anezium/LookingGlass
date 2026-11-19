@@ -172,6 +172,7 @@ pub async fn render(a: &mut Assets) -> Result<()> {
                 (target - view.position).normalize_or_zero(),
                 &scene.atmosphere,
                 false,
+                false,
             );
         }
         crate::render::depth_read_only(|| {

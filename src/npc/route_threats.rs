@@ -3,7 +3,7 @@ use super::*;
 
 impl Npcs {
     pub fn route_engaged(&self, id: usize, eye: Vec3) -> bool {
-        let Some(actor) = self.actors.get(id) else {
+        let Some(actor) = self.sim.actors.get(id) else {
             return false;
         };
         if let Some(resident) = &actor.resident {

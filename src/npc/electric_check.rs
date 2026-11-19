@@ -41,16 +41,16 @@ async fn capture(name: &str) -> Result<Image> {
 /// Real script rigs without death_frozen: reject the body box at the near plane
 /// while a deformed shock vertex remains inside the perspective frustum.
 async fn late_shell_near_plane(p: &mut Puppet, name: &str, clip: &str) -> Result<()> {
-    ensure!(p.0.frozen.is_none(), "{name}: fixture must not use the frozen fallback");
-    let d = &p.0.data;
+    ensure!(p.model.frozen.is_none(), "{name}: fixture must not use the frozen fallback");
+    let d = &p.model.data;
     let pose = d.skeleton.global_pose(&d.clips[clip].sample(0.2, true));
     let (lo, hi) = crate::character::skinning::world_bounds_from_pose(&d.skeleton.skin_bounds,
         &pose, &[], Mat3::IDENTITY, Vec3::ZERO, d.def.scale).context("Fixture skin bounds")?;
-    let art = p.0.electric.as_ref().context("Fixture electrical shell")?;
+    let art = p.model.electric.as_ref().context("Fixture electrical shell")?;
     let mut candidate = None;
     'search: for step in 0..100 {
         let age = step as f32 * 0.005;
-        for v in p.0.meshes.iter().flatten().flat_map(|m| &m.vertices) {
+        for v in p.model.meshes.iter().flatten().flat_map(|m| &m.vertices) {
             let normal = -v.normal.truncate().normalize_or_zero();
             let mut shell = v.position + normal * 0.2;
             for deform in art.deformations() { shell = deform.position(shell, normal, v.uv, age); }
@@ -80,8 +80,8 @@ async fn late_shell_near_plane(p: &mut Puppet, name: &str, clip: &str) -> Result
     p.atmosphere(&Atmosphere::default(), eye);
     let electric_consumer=p.electric_consumer(crate::electric::LIFE-age);
     p.draw(clip, 0.2, true, Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY }, 1., true);
-    ensure!(p.0.visible.iter().any(|v| *v), "{name}: near-plane skin was lost");
-    ensure!(p.0.meshes.iter().flatten().flat_map(|m| &m.vertices)
+    ensure!(p.model.visible.iter().any(|v| *v), "{name}: near-plane skin was lost");
+    ensure!(p.model.meshes.iter().flatten().flat_map(|m| &m.vertices)
         .any(|v| v.normal.truncate().length_squared() > 0.), "{name}: near-plane normals collapsed");
     drop(electric_consumer);
     p.draw_electric(crate::electric::LIFE - age);
@@ -130,8 +130,8 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             );
             drop(electric_consumer);
             p.draw_electric(remaining);
-            ensure!(p.0.visible.iter().any(|v| *v), "{name}: late shell lost its base skin");
-            ensure!(p.0.meshes.iter().flatten().flat_map(|m| &m.vertices)
+            ensure!(p.model.visible.iter().any(|v| *v), "{name}: late shell lost its base skin");
+            ensure!(p.model.meshes.iter().flatten().flat_map(|m| &m.vertices)
                 .any(|v| v.normal.truncate().length_squared() > 0.),
                 "{name}: lean lighting removed shell normals");
             frames.push(capture(&format!("{name}-{label}")).await?);
@@ -179,8 +179,8 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
                 1.,
                 true,
             );
-            ensure!(!p.0.electric_attachments.is_empty(), "Guard staff missing");
-            p.0.electric_attachments.clear();
+            ensure!(!p.model.electric_attachments.is_empty(), "Guard staff missing");
+            p.model.electric_attachments.clear();
             drop(electric_consumer);
             p.draw_electric(0.4);
             let body_only = capture("club-without-staff-electric").await?;
@@ -203,7 +203,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
                 true,
             );
             ensure!(
-                p.0.electric_attachments.is_empty(),
+                p.model.electric_attachments.is_empty(),
                 "Hidden staff retained shock geometry"
             );
             drop(electric_consumer);
@@ -216,12 +216,12 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
     let world = World::fixture(&[(vec3(-5000., -5000., -20.), vec3(5000., 5000., 0.))]);
     let mut npcs = Npcs::load(assets, &map, "skool1", None, false, false)?;
     let pupil = npcs
-        .actors
+        .sim.actors
         .iter()
         .position(|a| a.spawn.model == "c_insanechild_muzzle" && !a.spawn.hidden)
         .context("Missing original Skool pupil")?;
-    npcs.actors = vec![npcs.actors[pupil].clone()];
-    npcs.pupil_path.clear();
+    npcs.sim.actors = vec![npcs.sim.actors[pupil].clone()];
+    npcs.sim.pupil_path.clear();
     let mut alice = Character::load(assets)?;
     let mut player = Player::new(Vec3::Z * 0.04);
     player.grounded = true;
@@ -229,7 +229,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
     let initial = alice.snapshot();
     for alternate in [false, true] {
         let x = if alternate { 220. } else { 55. };
-        let a = &mut npcs.actors[0];
+        let a = &mut npcs.sim.actors[0];
         a.footing = Some(vec3(x, 0., 0.04));
         a.electric = 0.;
         a.time = 0.;
@@ -283,7 +283,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             npcs.update(1. / 60., &world, Vec3::splat(10000.));
         }
         ensure!(
-            hits == 1 && npcs.actors[0].electric > 0. && npcs.targets().is_empty(),
+            hits == 1 && npcs.sim.actors[0].electric > 0. && npcs.targets().is_empty(),
             "Pupil direct contact failed"
         );
         ensure!(
@@ -299,9 +299,9 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
         );
         npcs.restore(&serde_json::from_slice(&encoded)?)?;
         // Move the camera fixture to its origin after testing the actual swept hit.
-        npcs.actors[0].footing = Some(Vec3::Z * 0.04);
+        npcs.sim.actors[0].footing = Some(Vec3::Z * 0.04);
         start(123.);
-        npcs.draw(view().position, -Vec3::X, &Atmosphere::default(), true);
+        npcs.draw(view().position, -Vec3::X, &Atmosphere::default(), true, false);
         capture(if alternate {
             "pupil-ball-hit"
         } else {
@@ -318,7 +318,7 @@ pub async fn render(assets: &mut Assets) -> Result<()> {
             npcs.update(1. / 60., &world, Vec3::splat(10000.));
         }
         ensure!(
-            npcs.actors[0].electric == 0. && future == serde_json::to_vec(&npcs.snapshot())?,
+            npcs.sim.actors[0].electric == 0. && future == serde_json::to_vec(&npcs.snapshot())?,
             "Pupil saved continuation differs"
         );
         println!("PASS protected pupil alternate={alternate}: actual Mallet contact, aura, pause, restored future and cleanup");

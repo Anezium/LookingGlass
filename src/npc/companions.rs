@@ -440,7 +440,7 @@ pub(super) fn check(assets: &mut Assets) -> Result<()> {
             if State::new(name, &s).is_some() {
                 let mut a = fixture(s, name);
                 a.model = data.len();
-                data.push(Data::load(
+                data.push(ModelData::load(
                     assets,
                     &a.spawn.model,
                     &[

@@ -388,6 +388,7 @@ pub async fn render(a: &mut Assets) -> Result<()> {
                     (target - eye).normalize_or_zero(),
                     &scene.atmosphere,
                     false,
+                    false,
                 );
             }
             crate::render::depth_read_only(|| {

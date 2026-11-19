@@ -11,8 +11,7 @@ pub(super) struct Input {
     web: Option<(Vec3, Vec3)>, beam: Option<(Vec3, Vec3, bool)>,
 }
 impl Input {
-    pub fn capture(g: &Creature, model: &Model) -> Self {
-        let data = &model.data;
+    pub fn capture(g: &Creature, data: &ModelData) -> Self {
         let transform = Transform { translation:g.feet, rotation:Quat::from_rotation_z(g.yaw) };
         Self { phase:g.phase,time:g.time,frozen:g.frozen,visual_scale:g.visual_scale(data),
             transform,scale:g.scale,clip:g.clip(),looping:g.loops(),
@@ -33,7 +32,7 @@ pub(super) struct Art {
     time: f32,
 }
 impl Art {
-    pub fn new(model: &Model) -> Self {
+    pub fn new(model: &ModelArt) -> Self {
         Self {
             effect: model.own_effect.as_ref().map(|t| t.fork()),
             templates: model
@@ -46,11 +45,11 @@ impl Art {
             time: 0.,
         }
     }
-    pub fn draw(&mut self, g: &Creature, model: &Model, camera: Vec3, atmosphere: &Atmosphere, beams: &attack_fx::Art) {
-        self.draw_input(&Input::capture(g,model),model,camera,atmosphere,beams);
+    pub fn draw(&mut self, g: &Creature, model: &ModelArt, camera: Vec3, atmosphere: &Atmosphere, beams: &attack_fx::Art) {
+        self.draw_input(&Input::capture(g,&model.data),model,camera,atmosphere,beams);
     }
-    pub fn draw_input(&mut self, g: &Input, model: &Model, camera: Vec3, atmosphere: &Atmosphere, beams: &attack_fx::Art) {
-        let data=&model.data;
+    pub fn draw_input(&mut self, g: &Input, model: &ModelArt, camera: Vec3, atmosphere: &Atmosphere, beams: &attack_fx::Art) {
+        let data=model.data.as_ref();
         if let Some((start,end))=g.web {
             gl_use_default_material();
             crate::render_fx::legacy_line(start,end,Color::new(0.8,0.8,0.8,0.6));

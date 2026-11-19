@@ -77,7 +77,7 @@ impl Art {
         }
         material.bind();
     }
-    pub fn steam(&mut self, p: &Automaton, data: &Data, camera: Vec3, atmosphere: &Atmosphere) {
+    pub fn steam(&mut self, p: &Automaton, data: &ModelData, camera: Vec3, atmosphere: &Atmosphere) {
         let Some(effect) = &mut self.steam else {
             return;
         };
