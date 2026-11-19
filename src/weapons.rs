@@ -33,6 +33,7 @@ use macroquad::{
     prelude::*,
 };
 pub(crate) use projectile::Projectile;
+use std::sync::Arc;
 
 /// The Vorpal Blade's melee volume (40 units, native +-15 X/Y and 0..24 Z) for
 /// headless route drivers, which use the same contact rules as the live weapon.
@@ -815,14 +816,22 @@ fn action_duration(weapon: usize, stage: crate::weapon_rules::Stage, clip: f32, 
 
 pub(crate) struct Prop {
     _material_layers: Vec<std::rc::Rc<crate::render_fx::Surface>>,
-    model: tan::Model,
+    geometry: Arc<PropGeometry>,
     meshes: Vec<Mesh>,
-    scale: f32,
     occurrences: PropOccurrences,
     /// Model-space box of every vertex of every frame, for `prop_frustum_cull`.
     bounds: (Vec3, Vec3),
     /// The last draw_frame was cut by `prop_frustum_cull`: no mesh holds this frame's vertices.
     culled: bool,
+}
+struct PropGeometry {
+    model: tan::Model,
+    scale: f32,
+}
+impl PropGeometry {
+    fn point(&self, attachment: Transform, tag: &str, scale: f32) -> Vec3 {
+        attachment.point(self.model.tags.get(tag).map_or(Vec3::ZERO, |v| v[0]) * self.scale * scale)
+    }
 }
 /// The world box of every vertex `animate_meshes` can write for this placement: the model box's
 /// eight corners through the same linear map, `attachment.point(p * scale)`.
@@ -958,13 +967,13 @@ impl Prop {
     fn outside_view(&self, attachment: Transform, scale: f32) -> bool {
         if !crate::render::vita_renderer::config().prop_frustum_cull || !crate::render_fx::retained_active() { return false; }
         if !self.bounds.0.cmple(self.bounds.1).all() { return false; }
-        let (a, b) = placed_box(self.bounds, self.scale * scale, attachment);
+        let (a, b) = placed_box(self.bounds, self.geometry.scale * scale, attachment);
         crate::render::outside_bounds(a, b)
     }
     /// Centre world pickup art independently of the first-person hand anchor.
     pub(crate) fn draw_pickup(&mut self, center: Vec3, angle: f32) {
         let (lo, hi) = self
-            .model
+            .geometry.model
             .surfaces
             .iter()
             .flat_map(|s| s.frames[0].iter())
@@ -978,7 +987,7 @@ impl Prop {
             translation: center - rotation * ((lo + hi) * 0.5 * size),
             rotation,
         };
-        self.draw(attachment, size / self.scale, true);
+        self.draw(attachment, size / self.geometry.scale, true);
     }
     pub(crate) fn load(
         assets: &mut Assets,
@@ -1053,23 +1062,22 @@ impl Prop {
         Ok(Self {
             bounds: model_bounds(&model),
             culled: false,
-            model,
+            geometry: Arc::new(PropGeometry { model, scale: def.scale }),
             _material_layers: material_layers,
             meshes,
-            scale: def.scale,
             occurrences: PropOccurrences::default(),
         })
     }
     pub(crate) fn point(&self, attachment: Transform, tag: &str, scale: f32) -> Vec3 {
-        attachment.point(self.model.tags.get(tag).map_or(Vec3::ZERO, |v| v[0]) * self.scale * scale)
+        self.geometry.point(attachment, tag, scale)
     }
     fn point_at(&self, attachment: Transform, tag: &str, time: f32) -> Vec3 {
-        let position = self.model.tags.get(tag).map_or(Vec3::ZERO, |v| {
-            let f = (time.max(0.) / self.model.frame_time).min((v.len() - 1) as f32);
+        let position = self.geometry.model.tags.get(tag).map_or(Vec3::ZERO, |v| {
+            let f = (time.max(0.) / self.geometry.model.frame_time).min((v.len() - 1) as f32);
             let a = f as usize;
             v[a].lerp(v[(a + 1).min(v.len() - 1)], f.fract())
         });
-        attachment.point(position * self.scale)
+        attachment.point(position * self.geometry.scale)
     }
     pub(crate) fn draw(&mut self, attachment: Transform, scale: f32, fullbright: bool) {
         self.draw_frame(attachment, scale, fullbright, 0., false);
@@ -1125,11 +1133,11 @@ impl Prop {
         let [tx, ty, tz] = attachment.translation.to_array().map(f32::to_bits);
         let [rx, ry, rz, rw] = attachment.rotation.to_array().map(f32::to_bits);
         let pose = [tx, ty, tz, rx, ry, rz, rw, scale.to_bits(), u32::from(fullbright)];
-        let mut repeated = entry.inputs_known && entry.pose == pose && entry.frames.len() == self.model.surfaces.len();
+        let mut repeated = entry.inputs_known && entry.pose == pose && entry.frames.len() == self.geometry.model.surfaces.len();
         entry.pose = pose;
-        entry.frames.resize(self.model.surfaces.len(), [0; 3]);
-        for (slot, s) in entry.frames.iter_mut().zip(&self.model.surfaces) {
-            let (frame, a, b) = surface_frame(s, self.model.frame_time, time, looping);
+        entry.frames.resize(self.geometry.model.surfaces.len(), [0; 3]);
+        for (slot, s) in entry.frames.iter_mut().zip(&self.geometry.model.surfaces) {
+            let (frame, a, b) = surface_frame(s, self.geometry.model.frame_time, time, looping);
             if !frame.is_finite() {
                 entry.inputs_known = false;
                 return false;
@@ -1158,7 +1166,7 @@ impl Prop {
                 vertices: m.vertices.clone(), indices: m.indices.clone(), texture: m.texture.clone() }).collect();
             crate::sim_maps::count("prop_occurrence_copied_vertices", entry.meshes.iter().map(|m| m.vertices.len() as u64).sum());
         }
-        animate_meshes(&self.model, &mut entry.meshes, self.scale, attachment, scale, fullbright, time, looping);
+        animate_meshes(&self.geometry.model, &mut entry.meshes, self.geometry.scale, attachment, scale, fullbright, time, looping);
         memo.last = Some(index);
         for mesh in &entry.meshes {
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1193,7 +1201,7 @@ impl Prop {
             return &mut self.meshes[..0];
         }
         self.culled = false;
-        animate_meshes(&self.model, &mut self.meshes, self.scale, attachment, scale, fullbright, time, looping);
+        animate_meshes(&self.geometry.model, &mut self.meshes, self.geometry.scale, attachment, scale, fullbright, time, looping);
         self.occurrences.last = None;
         &mut self.meshes
     }
@@ -1415,17 +1423,14 @@ impl EffectsInput {
 }
 pub struct Visuals {
     heavy: heavy::State,
-    heavy_art: heavy_art::Art,
     ice: ice::State,
-    ice_data: ice::Data,
+    ice_data: Arc<ice::Data>,
     jacks: jacks::State,
-    ice_art: ice_jacks_art::Art,
     pub ice_refund: f32,
     pub ice_drain: bool,
     pub owner_immersed: bool,
     bombs: bomb::State,
-    bomb_data: bomb::Data,
-    bomb_art: bomb_art::Art,
+    bomb_data: Arc<bomb::Data>,
     blasts: Vec<blast::Blast>,
     pub owner_velocity: Vec3,
     pub spatial_sounds: Vec<(&'static str, Vec3)>,
@@ -1433,18 +1438,11 @@ pub struct Visuals {
     pub world_ratio: Option<f32>,
     pub dice: crate::dice::State,
     dice_data: crate::dice::Data,
-    dice_art: crate::dice::Art,
     pub dice_count: u8,
-    props: Vec<Prop>,
     projectiles: Vec<Projectile>,
     sparks: Vec<Spark>,
     trail: Vec<Trail>,
     flight_trails: Vec<Trail>,
-    effect_material: Material,
-    spark_texture: Texture2D,
-    swipe_texture: Texture2D,
-    _swipe_surface: std::rc::Rc<crate::render_fx::Surface>,
-    return_texture: Texture2D,
     eye: Vec3,
     first_person: bool,
     view_scale: f32,
@@ -1453,7 +1451,27 @@ pub struct Visuals {
     pub shots: u64,
     pub impacts: u64,
     pub hits: Vec<Hit>,
+    prop_geometry: Vec<Arc<PropGeometry>>,
+    view_muzzle: Option<Vec3>,
 }
+pub(crate) struct VisualArt {
+    heavy_art: heavy_art::Art,
+    ice_art: ice_jacks_art::Art,
+    bomb_art: bomb_art::Art,
+    dice_art: crate::dice::Art,
+    props: Vec<Prop>,
+    effect_material: Material,
+    spark_texture: Texture2D,
+    swipe_texture: Texture2D,
+    _swipe_surface: std::rc::Rc<crate::render_fx::Surface>,
+    return_texture: Texture2D,
+    ice_data: Arc<ice::Data>,
+    bomb_data: Arc<bomb::Data>,
+}
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Visuals>();
+};
 impl Visuals {
     pub fn croquet_in_flight(&self) -> bool {
         self.projectiles.iter().any(|p| p.model == 11)
@@ -1559,14 +1577,6 @@ impl Visuals {
     pub fn stop_ice(&mut self) {
         self.ice.stop();
     }
-    pub(crate) fn frozen_body_input(&self, meshes: &[Option<Mesh>], frozen: bool) {
-        if frozen { self.ice_art.frozen_body(meshes); }
-    }
-    pub fn frozen_body(&self, meshes: &[Option<Mesh>]) {
-        if self.ice.locked() {
-            self.ice_art.frozen_body(meshes);
-        }
-    }
     pub fn ice_targets(&self) -> Vec<combat::Target> {
         self.ice.targets()
     }
@@ -1613,7 +1623,7 @@ impl Visuals {
         self.impacts = s.impacts;
         Ok(())
     }
-    pub fn load(assets: &mut Assets) -> Result<Self> {
+    pub(crate) fn load(assets: &mut Assets) -> Result<(Self, VisualArt)> {
         let mut props = Vec::new();
         let specs = texture::read_materials(assets)?;
         for name in WEAPONS
@@ -1660,37 +1670,35 @@ impl Visuals {
         swipe_texture.set_filter(FilterMode::Linear);
         let swipe_surface =
             crate::render_fx::register(assets, &swipe_texture, &[swipe_name.into()], &specs)?;
-        Ok(Self {
-            swipe_texture,
-            _swipe_surface: swipe_surface,
+        let heavy_art = heavy_art::Art::load(assets, &specs)?;
+        let ice_data = Arc::new(ice::Data::load(assets)?);
+        let ice_art = ice_jacks_art::Art::load(assets, &specs)?;
+        let bomb_data = Arc::new(bomb::Data::load(assets)?);
+        let bomb_art = bomb_art::Art::load(assets, &specs)?;
+        let dice_data = crate::dice::Data::load(assets)?;
+        let dice_art = crate::dice::Art::load(assets, &specs)?;
+        let prop_geometry = props.iter().map(|p| Arc::clone(&p.geometry)).collect();
+        let sim = Self {
             time_stopped: false,
             world_ratio: None,
             heavy: Default::default(),
-            heavy_art: heavy_art::Art::load(assets, &specs)?,
             ice: Default::default(),
-            ice_data: ice::Data::load(assets)?,
+            ice_data: Arc::clone(&ice_data),
             jacks: Default::default(),
-            ice_art: ice_jacks_art::Art::load(assets, &specs)?,
             ice_refund: 0.,
             ice_drain: false,
             owner_immersed: false,
             bombs: bomb::State::default(),
-            bomb_data: bomb::Data::load(assets)?,
-            bomb_art: bomb_art::Art::load(assets, &specs)?,
+            bomb_data: Arc::clone(&bomb_data),
             blasts: Vec::new(),
             owner_velocity: Vec3::ZERO,
             dice: crate::dice::State::default(),
-            dice_data: crate::dice::Data::load(assets)?,
-            dice_art: crate::dice::Art::load(assets, &specs)?,
+            dice_data,
             dice_count: 1,
-            props,
             projectiles: Vec::new(),
             sparks: Vec::new(),
             trail: Vec::new(),
             flight_trails: Vec::new(),
-            effect_material,
-            spark_texture,
-            return_texture,
             eye: Vec3::ZERO,
             first_person: false,
             view_scale: 1.,
@@ -1703,14 +1711,24 @@ impl Visuals {
             impacts: 0,
             spatial_sounds: Vec::new(),
             hits: Vec::new(),
-        })
-    }
-    pub fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, camera: Vec3) {
-        *self.bomb_art.atmosphere.borrow_mut() = atmosphere.clone();
-        *self.ice_art.atmosphere.borrow_mut() = atmosphere.clone();
-        *self.heavy_art.atmosphere.borrow_mut() = atmosphere.clone();
-        *self.dice_art.atmosphere.borrow_mut() = atmosphere.clone();
-        atmosphere.apply(&self.effect_material, camera);
+            prop_geometry,
+            view_muzzle: None,
+        };
+        let art = VisualArt {
+            swipe_texture,
+            _swipe_surface: swipe_surface,
+            heavy_art,
+            ice_art,
+            bomb_art,
+            dice_art,
+            props,
+            effect_material,
+            spark_texture,
+            return_texture,
+            ice_data,
+            bomb_data,
+        };
+        Ok((sim, art))
     }
     pub fn lights(&self) -> Vec<crate::lighting::Light> {
         self.jacks
@@ -1814,13 +1832,10 @@ impl Visuals {
     }
     pub fn clear(&mut self) {
         self.heavy = Default::default();
-        self.heavy_art.clear();
         self.ice = Default::default();
         self.jacks = Default::default();
-        self.ice_art.clear();
         self.ice_refund = 0.;
         self.ice_drain = false;
-        self.bomb_art.clear();
         self.bombs = bomb::State::default();
         self.blasts.clear();
         self.spatial_sounds.clear();
@@ -1870,8 +1885,8 @@ impl Visuals {
         self.eye = eye;
         // Draw the Staff from the visible first-person muzzle while retaining
         // the body-space collision ray and its resolved hit point.
-        self.heavy_art.view_muzzle = self.first_person.then(|| {
-            self.props[7].point(anchors[0], "tag_barrel", self.view_scale)
+        self.view_muzzle = self.first_person.then(|| {
+            self.prop_geometry[7].point(anchors[0], "tag_barrel", self.view_scale)
         });
         let mut sounds = Vec::new();
         if events.blade_return {
@@ -1930,7 +1945,7 @@ impl Visuals {
                 _ => false,
             };
             if swipe {
-                let prop = &self.props[weapon];
+                let prop = &self.prop_geometry[weapon];
                 self.trail.push(Trail {
                     a: prop.point(
                         anchors[0],
@@ -1974,7 +1989,7 @@ impl Visuals {
         if sound && weapon == 4 && p.alternate() {
             self.ice.pulse(
                 Transform {
-                    translation: self.props[4].point(combat_anchors[0], "tag_barrel", 1.),
+                    translation: self.prop_geometry[4].point(combat_anchors[0], "tag_barrel", 1.),
                     rotation: Quat::from_rotation_arc(Vec3::X, p.aim.normalize_or_zero()),
                 },
                 true,
@@ -2017,7 +2032,7 @@ impl Visuals {
             self.shots += 1;
             let direction = p.aim.normalize_or_zero();
             if weapon == 7 || weapon == 8 {
-                let raw = self.props[weapon].point(combat_anchors[0], "tag_barrel", 1.);
+                let raw = self.prop_geometry[weapon].point(combat_anchors[0], "tag_barrel", 1.);
                 let (origin, aimed) = launch_from_eye(
                     world,
                     eye,
@@ -2040,7 +2055,7 @@ impl Visuals {
                 return;
             }
             if weapon == 4 {
-                let raw = self.props[4].point(combat_anchors[0], "tag_barrel", 1.);
+                let raw = self.prop_geometry[4].point(combat_anchors[0], "tag_barrel", 1.);
                 let (origin, aimed) =
                     launch_from_eye(world, eye, raw, direction, self.first_person, 1.);
                 if self.owner_immersed {
@@ -2112,7 +2127,7 @@ impl Visuals {
                 return;
             }
             if weapon == 1 || p.alternate() {
-                let raw = { self.props[weapon].point(combat_anchors[0], "tag_barrel", 1.) };
+                let raw = { self.prop_geometry[weapon].point(combat_anchors[0], "tag_barrel", 1.) };
                 // Attachments can reach through a wall; trace from Alice before spawning a visual.
                 let (origin, aimed) =
                     launch_from_eye(world, eye, raw, direction, self.first_person, 8.);
@@ -2226,7 +2241,7 @@ impl Visuals {
             center: self.eye - Vec3::Z * 20.,
             half: vec3(15., 15., 28.),
         };
-        let raw = self.props[7].point(self.combat_anchors[0], "tag_barrel", 1.);
+        let raw = self.prop_geometry[7].point(self.combat_anchors[0], "tag_barrel", 1.);
         let (origin, aim) = launch_from_eye(
             context.world,
             self.eye,
@@ -2377,6 +2392,37 @@ impl Visuals {
         if [0,3,5].contains(&index) { out.returning=actions.return_age().map(|age|(anchors[0],age)); }
         if index==4 { out.mist=Some((anchors[0],size,self.ice.clock as f32)); }
     }
+    pub(crate) fn render_effects_overflow(&self)->bool {
+        self.heavy.render_records()+self.ice.render_records()+self.jacks.render_records()+self.bombs.render_records()+self.dice.render_records()
+            +self.projectiles.len()+self.blasts.len()+self.sparks.len()+self.trail.len()+self.flight_trails.len()>16384
+    }
+    pub(crate) fn extract_effects(&self, out: &mut EffectsInput, art: &VisualArt) {
+        self.heavy.extract_render(&mut out.heavy); self.ice.extract_render(&mut out.ice);
+        self.jacks.extract_render(&mut out.jacks); self.bombs.extract_render(&mut out.bombs);
+        self.dice.extract_render(&mut out.dice);
+        // overlap: summon extraction still reads art (step 2 provides a CPU PuppetInput producer)
+        art.dice_art.extract_render_pose(&mut out.dice);
+        out.projectiles.clone_from(&self.projectiles); out.blasts.clone_from(&self.blasts);
+        out.sparks.clone_from(&self.sparks); out.trail.clone_from(&self.trail); out.flight_trails.clone_from(&self.flight_trails);
+        out.first_person=self.first_person; out.view_muzzle=self.view_muzzle;
+    }
+}
+impl VisualArt {
+    pub(crate) fn frozen_body_input(&self, meshes: &[Option<Mesh>], frozen: bool) {
+        if frozen { self.ice_art.frozen_body(meshes); }
+    }
+    pub fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, camera: Vec3) {
+        *self.bomb_art.atmosphere.borrow_mut() = atmosphere.clone();
+        *self.ice_art.atmosphere.borrow_mut() = atmosphere.clone();
+        *self.heavy_art.atmosphere.borrow_mut() = atmosphere.clone();
+        *self.dice_art.atmosphere.borrow_mut() = atmosphere.clone();
+        atmosphere.apply(&self.effect_material, camera);
+    }
+    pub(crate) fn clear(&mut self) {
+        self.heavy_art.clear();
+        self.ice_art.clear();
+        self.bomb_art.clear();
+    }
     pub(crate) fn draw_held_input(&mut self, input: &HeldInput, fullbright: bool) {
         if let Some((at,size,time))=input.cannon { self.heavy_art.cannon(at,size,time,fullbright); }
         if let Some((at,size,time))=input.wand { self.ice_art.wand(at,size,time,fullbright); }
@@ -2384,7 +2430,7 @@ impl Visuals {
         if let Some((at,age))=input.returning { crate::render::depth_read_only(||self.draw_return_input(at,age,input.eye,input.view_scale)); }
         if let Some((at,size,time))=input.mist { self.ice_art.held_mist(at,size,time,input.eye); }
     }
-    pub fn draw_held(&mut self, actions: &Actions, anchors: &[Transform; 3], fullbright: bool) {
+    pub fn draw_held(&mut self, sim: &Visuals, actions: &Actions, anchors: &[Transform; 3], fullbright: bool) {
         let (index, scale) = actions.equipment();
         if index == UNARMED {
             return;
@@ -2397,15 +2443,15 @@ impl Visuals {
         {
             self.heavy_art.cannon(
                 anchors[0],
-                scale * self.view_scale,
+                scale * sim.view_scale,
                 actions.playing.as_ref().unwrap().time - 0.05,
                 fullbright,
             );
         } else if index == 4 && actions.playing.as_ref().is_some_and(|p| p.clip == 12) {
             self.ice_art.wand(
                 anchors[0],
-                scale * self.view_scale,
-                self.ice.clock as f32,
+                scale * sim.view_scale,
+                sim.ice.clock as f32,
                 fullbright,
             );
         } else if index == 9 {
@@ -2416,13 +2462,13 @@ impl Visuals {
                 .map_or(0., |p| p.time);
             self.props[index].draw_frame(
                 anchors[0],
-                scale * self.view_scale,
+                scale * sim.view_scale,
                 fullbright,
                 time,
                 false,
             );
         } else {
-            self.props[index].draw(anchors[0], scale * self.view_scale, fullbright);
+            self.props[index].draw(anchors[0], scale * sim.view_scale, fullbright);
         }
         if let Some(p) = &actions.playing {
             if p.clip == 9 && (3.0..13.0).contains(&p.frame()) {
@@ -2434,15 +2480,15 @@ impl Visuals {
         }
         if [0, 3, 5].contains(&index) {
             if let Some(age) = actions.return_age() {
-                crate::render::depth_read_only(|| self.draw_return_input(anchors[0], age, self.eye, self.view_scale));
+                crate::render::depth_read_only(|| self.draw_return_input(anchors[0], age, sim.eye, sim.view_scale));
             }
         }
         if index == 4 {
             self.ice_art.held_mist(
                 anchors[0],
-                scale * self.view_scale,
-                self.ice.clock as f32,
-                self.eye,
+                scale * sim.view_scale,
+                sim.ice.clock as f32,
+                sim.eye,
             );
         }
     }
@@ -2497,7 +2543,7 @@ impl Visuals {
         }
     }
     /// Only the local swing ribbon belongs in the weapon pass. World effects stay depth-tested.
-    fn draw_electric_trail(&self) { self.draw_electric_trail_input(&self.trail); }
+    fn draw_electric_trail(&self, sim: &Visuals) { self.draw_electric_trail_input(&sim.trail); }
     fn draw_electric_trail_input(&self, trail: &[Trail]) {
         let mut vertices = Vec::new();
         append_swing(&mut vertices, trail, true);
@@ -2514,11 +2560,11 @@ impl Visuals {
             );
         }
     }
-    pub fn draw_view_trail(&self) {
-        self.draw_electric_trail();
+    pub fn draw_view_trail(&self, sim: &Visuals) {
+        self.draw_electric_trail(sim);
         gl_use_material(&self.effect_material);
         let mut vertices = Vec::new();
-        append_swing(&mut vertices, &self.trail, false);
+        append_swing(&mut vertices, &sim.trail, false);
         if !vertices.is_empty() {
             crate::sim_maps::count("imm_weapon_mesh", 1);
             draw_mesh(&Mesh { upload_identity: None, surface: None,
@@ -2544,10 +2590,6 @@ impl Visuals {
         }
         gl_use_default_material();
     }
-    pub(crate) fn render_effects_overflow(&self)->bool {
-        self.heavy.render_records()+self.ice.render_records()+self.jacks.render_records()+self.bombs.render_records()+self.dice.render_records()
-            +self.projectiles.len()+self.blasts.len()+self.sparks.len()+self.trail.len()+self.flight_trails.len()>16384
-    }
     pub(crate) fn valid_held_input(&self,input:&HeldInput)->bool {
         input.commands.len()<=3 && input.commands.iter().all(|&(slot,_,_,_,_)|slot<self.props.len())
     }
@@ -2556,27 +2598,19 @@ impl Visuals {
             +input.projectiles.len()+input.blasts.len()+input.sparks.len()+input.trail.len()+input.flight_trails.len()<=16384
             && input.projectiles.iter().all(|p|p.prop()<self.props.len()) && self.dice_art.valid_render_input(&input.dice)
     }
-    pub(crate) fn extract_effects(&self, out:&mut EffectsInput) {
-        self.heavy.extract_render(&mut out.heavy); self.ice.extract_render(&mut out.ice);
-        self.jacks.extract_render(&mut out.jacks); self.bombs.extract_render(&mut out.bombs);
-        self.dice.extract_render(&mut out.dice);
-        self.dice_art.extract_render_pose(&mut out.dice);
-        out.projectiles.clone_from(&self.projectiles); out.blasts.clone_from(&self.blasts);
-        out.sparks.clone_from(&self.sparks); out.trail.clone_from(&self.trail); out.flight_trails.clone_from(&self.flight_trails);
-        out.first_person=self.first_person; out.view_muzzle=self.heavy_art.view_muzzle;
-    }
     pub fn draw_effects(
         &mut self,
+        sim: &Visuals,
         body_material: &crate::character::SkinMaterial,
         camera: Vec3,
         fullbright: bool,
         show_trail: bool,
     ) {
         body_material.bind();
-        self.dice_art.draw(&self.dice, fullbright);
-        self.dice_art.effects(&self.dice, camera);
+        self.dice_art.draw(&sim.dice, fullbright);
+        self.dice_art.effects(&sim.dice, camera);
         body_material.bind();
-        for d in &self.dice.dice {
+        for d in &sim.dice.dice {
             self.props[12].draw(
                 Transform {
                     translation: d.position,
@@ -2587,7 +2621,7 @@ impl Visuals {
                 fullbright,
             );
         }
-        for p in &self.projectiles {
+        for p in &sim.projectiles {
             self.props[p.prop()].draw_frame(p.pose(), 1., fullbright, p.age as f32, true);
         }
         gl_use_material(&self.effect_material);
@@ -2602,7 +2636,7 @@ impl Visuals {
                 });
             }
         };
-        for beam in &self.dice.beams {
+        for beam in &sim.dice.beams {
             let side = (camera - beam.b).cross(beam.b - beam.a).normalize_or_zero()
                 * if beam.kind == 1 { 4. } else { 1.8 };
             let color = if beam.kind == 1 {
@@ -2613,17 +2647,17 @@ impl Visuals {
             triangle([beam.a - side, beam.b - side, beam.b + side], color);
             triangle([beam.a - side, beam.b + side, beam.a + side], color);
         }
-        for t in &self.flight_trails {
+        for t in &sim.flight_trails {
             let right = (camera - t.b).cross(t.b - t.a).normalize_or_zero() * 0.8;
             let c = Color::new(t.color.r, t.color.g, t.color.b, t.life / 0.18 * 0.6);
             triangle([t.a - right, t.b - right, t.b + right], c);
             triangle([t.a - right, t.b + right, t.a + right], c);
         }
         if show_trail {
-            self.draw_electric_trail();
-            append_swing(&mut vertices, &self.trail, false);
+            self.draw_electric_trail(sim);
+            append_swing(&mut vertices, &sim.trail, false);
         }
-        for s in &self.sparks {
+        for s in &sim.sparks {
             let right = (camera - s.position).cross(Vec3::Z).normalize_or_zero() * 2.5;
             let up = Vec3::Z * 2.5;
             let proximity = ((camera.distance(s.position) - 8.) / 32.).clamp(0., 1.);
@@ -2657,25 +2691,26 @@ impl Visuals {
                 texture: Some(self.spark_texture.clone()),
             });
         }
-        self.heavy_art.draw(
-            &self.heavy,
+        self.heavy_art.draw_input(
+            sim.heavy.render_view(),
+            sim.view_muzzle,
             camera,
             fullbright,
-            self.first_person,
+            sim.first_person,
             body_material,
         );
         self.ice_art.draw(
-            &self.ice,
+            &sim.ice,
             &self.ice_data,
-            &self.jacks,
+            &sim.jacks,
             camera,
             fullbright,
             body_material,
         );
         self.bomb_art.draw(
-            (&self.bombs, &self.bomb_data),
-            &self.projectiles,
-            &self.blasts,
+            (&sim.bombs, &self.bomb_data),
+            &sim.projectiles,
+            &sim.blasts,
             camera,
             fullbright,
             body_material,

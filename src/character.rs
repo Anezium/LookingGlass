@@ -7,7 +7,7 @@ use crate::{
     movement::Player,
     skeletal::{Animation, Definition, Skeleton, Transform},
     texture,
-    weapons::{Action, Actions, Visuals},
+    weapons::{Action, Actions, VisualArt, Visuals},
 };
 use anyhow::{Context, Result};
 use macroquad::{
@@ -586,6 +586,7 @@ pub struct Character {
     facing: f32,
     actions: Actions,
     visuals: Visuals,
+    visual_art: VisualArt,
     upper: Vec<bool>,
     tags: [usize; 3],
     anchors: [Transform; 3],
@@ -614,6 +615,7 @@ impl Character {
         self.actions.restore(&s.actions)?;
         self.acting.restore(&s.acting)?;
         self.visuals.restore(&s.projectiles)?;
+        self.visual_art.clear();
         self.animator.restore(&s.animator);
         self.face_time = s.face_time;
         self.mouth = 0.;
@@ -637,6 +639,7 @@ impl Character {
             self.actions.reset(&self.animator.pose);
             self.visuals.cancel_staff();
             self.visuals.clear();
+            self.visual_art.clear();
         }
     }
     pub fn load(assets: &mut Assets) -> Result<Self> {
@@ -736,7 +739,7 @@ impl Character {
         animator.scale = def.scale;
         let foot_rig = crate::footing::Rig::new(&skeleton, &animator.pose, def.scale);
         let actions = Actions::load(assets, skeleton.bones.len(), &animator.pose)?;
-        let visuals = Visuals::load(assets)?;
+        let (visuals, visual_art) = Visuals::load(assets)?;
         Ok(Self {
             snapshot_visit: Default::default(), body_input: None, body_arena: Default::default(), body_scratch: Vec::new(),
             skin_identity: Default::default(),
@@ -760,6 +763,7 @@ impl Character {
             facing: 0.,
             actions,
             visuals,
+            visual_art,
             upper,
             tags,
             anchors: [Transform {
@@ -782,6 +786,7 @@ impl Character {
         self.animator.reset(player);
         self.actions.reset(&self.animator.pose);
         self.visuals.clear();
+        self.visual_art.clear();
         self.viewmodel.reset();
     }
     pub fn notarget(&mut self, value: bool) {
@@ -1121,7 +1126,7 @@ impl Character {
     pub fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, camera: Vec3) {
         self.water_art.atmosphere(atmosphere, camera);
         self.material.atmosphere(atmosphere, camera);
-        self.visuals.atmosphere(atmosphere, camera);
+        self.visual_art.atmosphere(atmosphere, camera);
         self.power_art.atmosphere(camera);
     }
     pub fn world_time(&mut self, dt: f32, world_dt: f32) {
@@ -1179,8 +1184,8 @@ impl Character {
         input.show_held=!matches!(self.animator.motion,Motion::Death|Motion::Rope|Motion::Cart|Motion::Airship)
             && !self.acting.hide_weapon() && !input.power.performing;
         self.visuals.extract_held(&self.actions,&self.anchors,&mut input.held);
-        self.visuals.extract_effects(&mut input.effects);
-        let overflow=!input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) || !self.visuals.valid_effects_input(&input.effects) || !self.visuals.valid_held_input(&input.held) || !self.acting.valid_attachments(&input.attachments);
+        self.visuals.extract_effects(&mut input.effects, &self.visual_art);
+        let overflow=!input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) || !self.visual_art.valid_effects_input(&input.effects) || !self.visual_art.valid_held_input(&input.held) || !self.acting.valid_attachments(&input.attachments);
         let bytes=input.bytes();
         if !overflow { self.body_input=Some(std::mem::take(input)); }
         (bytes,overflow)
@@ -1232,7 +1237,7 @@ impl Character {
             return;
         }
         if skin_visible {
-            self.visuals.frozen_body(&self.meshes);
+            self.visual_art.frozen_body_input(&self.meshes, self.visuals.ice_locked());
             self.power_art.surface_effects(&self.meshes, &self.power_pose.state);
         }
         for (i, mesh) in hidden {
@@ -1281,8 +1286,8 @@ impl Character {
         ) && !self.acting.hide_weapon()
             && !self.power_pose.state.performing
         {
-            self.visuals
-                .draw_held(&self.actions, &self.anchors, fullbright);
+            self.visual_art
+                .draw_held(&self.visuals, &self.actions, &self.anchors, fullbright);
         }
         gl_use_default_material();
     }
@@ -1325,7 +1330,7 @@ impl Character {
             return;
         }
         if skin_visible {
-            self.visuals.frozen_body_input(&self.meshes, input.frozen);
+            self.visual_art.frozen_body_input(&self.meshes, input.frozen);
             self.power_art.surface_effects(&self.meshes, &input.power);
         }
         for (i, mesh) in hidden {
@@ -1359,7 +1364,7 @@ impl Character {
             );
             self.material.bind_appearance(Appearance { ghost, ..Default::default() });
         }
-        if input.show_held { self.visuals.draw_held_input(&input.held, fullbright); }
+        if input.show_held { self.visual_art.draw_held_input(&input.held, fullbright); }
         gl_use_default_material();
     }
     pub fn draw_ghost(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
@@ -1372,7 +1377,7 @@ impl Character {
             },
             || {
                 if let Some(input) = self.body_input.take() {
-                    if input.valid(self.snapshot_visit.id(), self.skeleton.bones.len()) && self.visuals.valid_effects_input(&input.effects) && self.visuals.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
+                    if input.valid(self.snapshot_visit.id(), self.skeleton.bones.len()) && self.visual_art.valid_effects_input(&input.effects) && self.visual_art.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
                         self.publish_body(&input, fullbright, ghost);
                     } else { self.draw_body(feet, fullbright, ghost); }
                     self.body_input = Some(input);
@@ -1383,26 +1388,26 @@ impl Character {
     }
     pub fn draw_effects(&mut self, camera: Vec3, fullbright: bool, show_alice: bool) {
         if let Some(input)=self.body_input.take() {
-            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) && self.visuals.valid_effects_input(&input.effects) && self.visuals.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
-                self.visuals.draw_effects_input(&input.effects,&self.material,camera,fullbright,show_alice);
-            } else { self.visuals.draw_effects(&self.material,camera,fullbright,show_alice); }
+            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) && self.visual_art.valid_effects_input(&input.effects) && self.visual_art.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
+                self.visual_art.draw_effects_input(&input.effects,&self.material,camera,fullbright,show_alice);
+            } else { self.visual_art.draw_effects(&self.visuals, &self.material,camera,fullbright,show_alice); }
             self.body_input=Some(input);
-        } else { self.visuals.draw_effects(&self.material,camera,fullbright,show_alice); }
+        } else { self.visual_art.draw_effects(&self.visuals, &self.material,camera,fullbright,show_alice); }
     }
     pub fn draw_first_person(&mut self, fullbright: bool) {
         if let Some(input)=self.body_input.take() {
-            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) && self.visuals.valid_effects_input(&input.effects) && self.visuals.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
-                self.material.bind();self.visuals.draw_held_input(&input.held,fullbright);
-                crate::render::depth_read_only(||self.visuals.draw_view_trail_input(&input.effects));gl_use_default_material();
+            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) && self.visual_art.valid_effects_input(&input.effects) && self.visual_art.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
+                self.material.bind();self.visual_art.draw_held_input(&input.held,fullbright);
+                crate::render::depth_read_only(||self.visual_art.draw_view_trail_input(&input.effects));gl_use_default_material();
             } else {self.draw_first_person_live(fullbright);}
             self.body_input=Some(input);
         } else {self.draw_first_person_live(fullbright);}
     }
     fn draw_first_person_live(&mut self, fullbright: bool) {
         self.material.bind();
-        self.visuals
-            .draw_held(&self.actions, &self.anchors, fullbright);
-        crate::render::depth_read_only(|| self.visuals.draw_view_trail());
+        self.visual_art
+            .draw_held(&self.visuals, &self.actions, &self.anchors, fullbright);
+        crate::render::depth_read_only(|| self.visual_art.draw_view_trail(&self.visuals));
         gl_use_default_material();
     }
     pub fn visual_counts(&self) -> (u64, u64) {
@@ -3424,6 +3429,7 @@ pub(crate) async fn snapshot_render_check(assets:&mut Assets)->Result<()> {
                 alice.actions.pose.clear();alice.actions.selected=crate::weapons::UNARMED;alice.scale=0.;alice.facing=2.;
                 alice.animator.motion=Motion::Death;alice.power_pose.state=Default::default();alice.power_remaining=0.;alice.acting.reset();
                 alice.visuals.clear();
+                alice.visual_art.clear();
             }
             let view=Camera3D{position:vec3(150.,-190.,85.),target:Vec3::Z*38.,up:Vec3::Z,fovy:65_f32.to_radians(),z_near:2.,z_far:30000.,..Default::default()};
             clear_background(BLACK);set_camera(&view);crate::render_fx::begin_view(&view,2.5,&atmosphere,false);
