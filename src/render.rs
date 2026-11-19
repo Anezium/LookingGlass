@@ -1691,9 +1691,9 @@ impl Scene {
     /// already built (with the difficulty applied) so that the viewer and a headless route share
     /// one copy of them.
     pub fn from_parts(assets: &mut Assets, name: &str, map: Bsp, world: World) -> Result<Self> {
-        Self::from_parts_selected(assets, name, map, world, true)
+        Self::from_parts_selected(assets, name, Arc::new(map), world, true)
     }
-    fn from_parts_selected(assets: &mut Assets, name: &str, map: Bsp, world: World, allow_retained: bool) -> Result<Self> {
+    fn from_parts_selected(assets: &mut Assets, name: &str, map: Arc<Bsp>, world: World, allow_retained: bool) -> Result<Self> {
         let _r13_memory = crate::allocation_census::Scope::new(1);
         #[cfg(not(feature = "vita_renderer"))]
         let _ = allow_retained;
@@ -2157,7 +2157,7 @@ impl Scene {
             rope_shapes,
             optimize: true,
             stats: DrawStats::default(),
-            map: Arc::new(map),
+            map,
             world,
             atmosphere,
             batches,
@@ -2233,7 +2233,7 @@ impl Scene {
         Ok(scene)
     }
     #[cfg(feature = "vita_renderer")]
-    fn into_map_world(self) -> (Bsp, World) {
+    fn into_map_world(self) -> (Arc<Bsp>, World) {
         (self.map, self.world)
     }
     /// Submit the existing legacy sky into the currently selected scaled camera.
