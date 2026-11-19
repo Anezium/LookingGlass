@@ -857,7 +857,8 @@ impl Restored {
         timing.mark("scene_ready");
         crate::loading_screen::between("scene_ready").await;
         crate::transition_memory::fault("scene")?;
-        scene.map.difficulty = game.stats.difficulty;
+        // The fresh scene still owns the only map handle during restore.
+        scene.map_mut().difficulty = game.stats.difficulty;
         let Logic {
             interactions,
             story,

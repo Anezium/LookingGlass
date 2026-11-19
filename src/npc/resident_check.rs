@@ -228,7 +228,8 @@ pub async fn native(assets: &mut Assets, mode: &str) -> Result<()> {
         }
         let mut scene = crate::render::Scene::load(assets, map_name)?;
         if family == "c_larva" {
-            burrow_check::larva_fixture(&mut scene.map)?;
+            // The fresh scene still owns the only map handle before fixture setup.
+            burrow_check::larva_fixture(scene.map_mut())?;
         }
         let mut interactions = crate::interaction::Interactions::load(&scene.map)?;
         interactions.set_entry(assets, &scene.map, map_name, None)?;

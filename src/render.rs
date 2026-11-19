@@ -23,6 +23,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     rc::{Rc, Weak},
+    sync::Arc,
 };
 
 mod billboard_check;
@@ -161,7 +162,7 @@ pub struct Scene {
     rope_shapes: Vec<crate::rope::Strand>,
     pub optimize: bool,
     pub stats: DrawStats,
-    pub map: Bsp,
+    pub map: Arc<Bsp>,
     pub world: World,
     pub atmosphere: Atmosphere,
     batches: Vec<Batch>,
@@ -1312,6 +1313,10 @@ fn draw_batch(
 }
 
 impl Scene {
+    pub(crate) fn map_mut(&mut self) -> &mut Bsp {
+        Arc::get_mut(&mut self.map).expect("map is not shared while the level loads")
+    }
+
     pub(crate) fn retained_active(&self) -> bool {
         #[cfg(feature = "vita_renderer")]
         { self.retained.is_some() }
@@ -2152,7 +2157,7 @@ impl Scene {
             rope_shapes,
             optimize: true,
             stats: DrawStats::default(),
-            map,
+            map: Arc::new(map),
             world,
             atmosphere,
             batches,

@@ -634,3 +634,46 @@ fn rebuilding_parts_or_source_indices_invalidates_membership_and_full_detection(
         Some(IndexSelection::Filtered)
     );
 }
+
+#[test]
+#[should_panic(expected = "map is not shared while the level loads")]
+fn map_mut_panics_when_shared() {
+    use macroquad::miniquad::{RawId, TextureId};
+
+    let map = crate::interaction::tests::fixture();
+    let world = World::from_bsp(&map).unwrap();
+    let mut scene = Scene {
+        #[cfg(feature = "vita_renderer")]
+        retained: None,
+        #[cfg(feature = "vita_renderer")]
+        authored_sky: false,
+        #[cfg(feature = "vita_renderer")]
+        sky_cube: None,
+        world_material_keepalive: Default::default(),
+        camera_portals: Vec::new(),
+        rope_shapes: Vec::new(),
+        optimize: true,
+        stats: DrawStats::default(),
+        map: Arc::new(map),
+        world,
+        atmosphere: Atmosphere::default(),
+        batches: Vec::new(),
+        face_mask_cache: FaceMaskCache::default(),
+        decoration_start: 0,
+        materials: Vec::new(),
+        bound_materials: Vec::new(),
+        atlas: Texture2D::from_miniquad_texture(TextureId::from_raw_id(RawId::OpenGl(0))),
+        atlas_grid: Vec2::ONE,
+        missing: Vec::new(),
+        triangles: 0,
+        sky_origin: None,
+        #[cfg(feature = "vita_renderer")]
+        sky_candidates: Vec::new(),
+        sky_rotation: Quat::IDENTITY,
+        sky_motion: None,
+        sky_props: Vec::new(),
+        sky_backdrop: None,
+    };
+    let _other_owner = Arc::clone(&scene.map);
+    scene.map_mut();
+}

@@ -144,7 +144,8 @@ async fn rebuild_outgoing(
                 crate::transition_memory::recovery_fault()?;
                 let level = checkpoint.level()?;
                 let mut world = Scene::load(assets, &level.map)?;
-                world.map.difficulty = difficulty;
+                // The recovered scene still owns the only map handle before cast loading.
+                world.map_mut().difficulty = difficulty;
                 interactions.sync(&mut world.world);
                 let mut cast = crate::npc::Npcs::load(assets, &world.map, &level.map,
                     level.entry.as_deref(), options.npc_preview, options.combat_preview)?;

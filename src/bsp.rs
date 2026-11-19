@@ -71,6 +71,11 @@ pub struct Bsp {
     pub world_max: Vec3,
 }
 
+const _: fn() = || {
+    fn check<T: Send + Sync>() {}
+    check::<Bsp>();
+};
+
 fn i32_at(b: &[u8], o: usize) -> Result<i32> {
     let end = o.checked_add(4).context("Offset overflow")?;
     Ok(i32::from_le_bytes(
