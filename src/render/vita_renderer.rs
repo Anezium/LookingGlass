@@ -4150,7 +4150,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "low_fog_skip" | "low_fog_cheaper" | "low_fog_per_vertex") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
@@ -5640,6 +5640,25 @@ mod tests {
             want(BlendFactor::Value(BlendValue::DestinationColor), BlendFactor::OneMinusValue(BlendValue::SourceAlpha)));
         assert_eq!((exact_fog_mode(Blend::ColorAdd), exact_fog_mode(Blend::AlphaColor), exact_fog_mode(Blend::Factors(1, 2))), (1., 1., 0.));
     }
+    #[test]
+    fn low_fog_variants_are_opt_in_and_vertex_is_exclusive() {
+        let defaults = serde_json::to_value(Config::default()).unwrap();
+        let shipped: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../../configs/PL-release.json")).unwrap();
+        for key in ["low_fog_skip", "low_fog_cheaper", "low_fog_per_vertex"] {
+            assert_eq!(defaults[key], false);
+            assert!(shipped.get(key).is_none());
+            let configured = serde_json::from_value::<Config>(serde_json::json!({key: true})).unwrap();
+            assert!(configured.validate().is_err());
+            let configured = Config { low_fog: true, quality: "low".into(), ..configured };
+            configured.validate().unwrap();
+            assert!(serde_json::from_value::<Config>(serde_json::json!({key: 1})).is_err());
+        }
+        let mixed = Config { low_fog: true, low_fog_skip: true, low_fog_per_vertex: true,
+            quality: "low".into(), ..Config::default() };
+        assert!(mixed.validate().is_err());
+    }
+
     #[test]
     fn low_fog_off_keeps_the_rc3_low_program_and_on_keeps_the_full_fog() {
         assert!(!Config::default().low_fog, "low_fog defaults off");
