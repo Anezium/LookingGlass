@@ -3681,6 +3681,8 @@ mod tests {
             let expected = match key.as_str() {
                 "log_frame_time_every" => serde_json::json!(0),
                 "load_texture_share" => serde_json::json!(true),
+                // RC21 turns on the played RC3 input's water normals with the other fidelity keys.
+                "water_normals" => serde_json::json!(true),
                 _ => value.clone(),
             };
             assert_eq!(raw[key], expected, "{key}");
@@ -3697,17 +3699,18 @@ mod tests {
                     "sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match",
                     "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader",
                     "actor_cutout_discard_free", "fx_add_lean", "fx_add_fog_free",
-                    "sky_live", "actor_lean_shader", "audio_level_cues_extra"] { played[key] = true.into(); }
+                    "sky_live", "actor_lean_shader", "audio_level_cues_extra",
+                    "low_fog", "fog_sky", "exact_blends", "water_normals", "sky_depth"] { played[key] = true.into(); }
         played["audio_stats_log"] = false.into();
         // Compare typed values on both sides: to_value widens f32 (e.g. the
         // played audio gain 0.001), unlike its original JSON decimal spelling.
-        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown, the seven measured defaults, the four RC15 release keys, the RC17 ant key, the three RC18 keys, the RC19 actor key and the RC20 audio key may change parsed played values");
+        assert_eq!(serde_json::to_value(parsed).unwrap(), played, "only the frame-report shutdown, the seven measured defaults, the four RC15 release keys, the RC17 ant key, the three RC18 keys, the RC19 actor key, the RC20 audio key and the five RC21 picture keys may change parsed played values");
         let added = raw.as_object().unwrap().iter().filter(|(key, _)| played_raw.get(*key).is_none()).map(|(key, value)| (key.clone(), value.clone())).collect::<serde_json::Map<_, _>>();
         assert_eq!(serde_json::Value::Object(added), serde_json::json!({
-            "world_adjacent_batch":false,"exact_blends":false,"sky_cube_finish":false,
-            "fog_sky":false,"sky_cube_size":256,"low_fog":false,"actor_near_cull":0.0,
+            "world_adjacent_batch":false,"exact_blends":true,"sky_cube_finish":false,
+            "fog_sky":true,"sky_cube_size":256,"low_fog":true,"actor_near_cull":0.0,
             "sky_cube_clear_only":false,"sim_sweep_blocked":false,"sky_cube_retain":false,
-            "spike_log_ms":0.0,"detail_layers":false,"sky_depth":false,
+            "spike_log_ms":0.0,"detail_layers":false,"sky_depth":true,
             "sky_cube_capture_only":false,"sky_cube_refresh":0,"audio_combat_preload":false,"sky_cube":false,
             "sim_flight_memo":true,"ant_corpse_triangle_cull":true,"ant_corpse_opaque_shader":true,
             "water_draw_join":true,"actor_consumer_frustum_cull":true,"fx_unlit_exact":true,
@@ -3723,9 +3726,10 @@ mod tests {
         assert_eq!(raw["world_shared_buffers"], true);
         assert_eq!(raw["world_parameter_reuse"], true);
         assert_eq!(raw["water_stage_merge"], "off");
-        for key in ["render_draw_timing", "worker_probe", "light_gl_observers", "skin_worker_bench", "frame_phase_probe", "phase_census", "profile_capture", "gpu_state_probe", "depth_sentinel", "pvs_verify", "world_pass_clock", "water_normals", "world_adjacent_batch"] {
+        for key in ["render_draw_timing", "worker_probe", "light_gl_observers", "skin_worker_bench", "frame_phase_probe", "phase_census", "profile_capture", "gpu_state_probe", "depth_sentinel", "pvs_verify", "world_pass_clock", "world_adjacent_batch"] {
             assert_eq!(raw[key], false, "{key}");
         }
+        assert_eq!(raw["water_normals"], true, "RC21 ships the animated water normals");
         assert_eq!(raw["profiler"], "off");
         assert_eq!(raw["gpu_timing"], "off");
         assert_eq!(raw["gpu_mask"], serde_json::json!([]));
@@ -3830,10 +3834,10 @@ mod tests {
                    "RC16 is RC15 with the three exact fight fixes and the cull explicitly off");
     }
     #[test]
-    fn rc20_play_config_is_the_release_fallback_plus_the_measurement_keys() {
+    fn rc21_play_config_is_the_release_fallback_plus_the_measurement_keys() {
         let release = parse_runtime_config(include_bytes!("../../configs/PL-release.json"))
             .unwrap().0;
-        let play = parse_runtime_config(include_bytes!("../../configs/PL-rc20-release-play.json"))
+        let play = parse_runtime_config(include_bytes!("../../configs/PL-rc21-release-play.json"))
             .unwrap().0;
         play.validate().unwrap();
         let release_value = serde_json::to_value(release).unwrap();
@@ -3851,7 +3855,12 @@ mod tests {
                                 ("fx_add_fog_free", true),
                                 ("sky_live", true),
                                 ("actor_lean_shader", true),
-                                ("audio_level_cues_extra", true)] {
+                                ("audio_level_cues_extra", true),
+                                ("low_fog", true),
+                                ("fog_sky", true),
+                                ("exact_blends", true),
+                                ("water_normals", true),
+                                ("sky_depth", true)] {
             assert_eq!(release_value[key], expected,
                        "a fresh install runs the compiled fallback, which must ship {key}={expected}");
             assert_eq!(play_value[key], expected, "{key} in the play config");
@@ -3860,7 +3869,26 @@ mod tests {
         expected["replay_play"] = "a2-04.lgtape".into();
         expected["log_frame_time_every"] = 10.into();
         assert_eq!(play_value, expected,
-                   "the RC20 play config is the release fallback plus only the two measurement keys");
+                   "the RC21 play config is the release fallback plus only the two measurement keys");
+    }
+    // RC21 is RC20 with exactly the five fidelity keys turned on: fog on opaque walls and floors,
+    // the fog-tinted sky, the exact shader blends, the animated water normals and sky depth
+    // (no measurable device cost on 2026-11-19, owner accepted the pictures against desktop LG);
+    // every other value is RC20's.
+    #[test]
+    fn rc21_release_play_is_rc20_plus_the_fidelity_keys() {
+        let rc20 = parse_runtime_config(include_bytes!("../../configs/PL-rc20-release-play.json"))
+            .unwrap().0;
+        let rc21 = parse_runtime_config(include_bytes!("../../configs/PL-rc21-release-play.json"))
+            .unwrap().0;
+        rc21.validate().unwrap();
+        let mut expected = serde_json::to_value(rc20).unwrap();
+        for key in ["low_fog", "fog_sky", "exact_blends", "water_normals", "sky_depth"] {
+            assert_eq!(expected[key], false, "RC20 ships {key} off");
+            expected[key] = true.into();
+        }
+        assert_eq!(serde_json::to_value(rc21).unwrap(), expected,
+                   "RC21 changes only the five fidelity keys against RC20");
     }
     // RC20 is RC19 with exactly the measured first-use audio prefetch turned on (garden3
     // entrance worst frame 205 to 50 ms, gvillage 89 to 51, tower1 123 to 52, twice each on the
@@ -3937,6 +3965,7 @@ mod tests {
                                  "actor_discard_free_shader", "actor_cutout_discard_free",
                                  "actor_frontface_cull"];
         for bytes in [&include_bytes!("../../configs/PL-release.json")[..],
+                      &include_bytes!("../../configs/PL-rc21-release-play.json")[..],
                       &include_bytes!("../../configs/PL-rc20-release-play.json")[..],
                       &include_bytes!("../../configs/PL-rc19-release-play.json")[..],
                       &include_bytes!("../../configs/PL-rc18-release-play.json")[..],
@@ -3946,7 +3975,7 @@ mod tests {
             for key in KEYS {
                 let value = serde_json::to_value(&c).unwrap()[key].clone();
                 let want = key != "actor_frontface_cull";
-                assert_eq!(value, want, "a shipped RC17 to RC20 input has the wrong {key} polarity");
+                assert_eq!(value, want, "a shipped RC17 to RC21 input has the wrong {key} polarity");
             }
         }
         let (rc16, rejected) =
@@ -4050,7 +4079,8 @@ mod tests {
             assert!(!c.audio_level_cues_extra, "a frozen input enables the extra cues");
         }
         for bytes in [&include_bytes!("../../configs/PL-release.json")[..],
-                      &include_bytes!("../../configs/PL-rc20-release-play.json")[..]] {
+                      &include_bytes!("../../configs/PL-rc20-release-play.json")[..],
+                      &include_bytes!("../../configs/PL-rc21-release-play.json")[..]] {
             let (c, rejected) = parse_runtime_config(bytes).unwrap();
             assert!(rejected.is_none());
             assert!(c.audio_level_cues_extra && c.audio_cue_prefetch, "RC20 ships the extra cues on");
@@ -4774,7 +4804,7 @@ mod tests {
         let rc8_bytes = include_bytes!("../../configs/PL-rc8-release.json");
         let rc7_bytes = include_bytes!("../../configs/PL-rc7-release.json");
         let sim_bytes = include_bytes!("../../configs/vita-sim/vita-sim-release.json");
-        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "eb0c10e18e97335e9baaa26b4c69473d65b1747a9c86f483620607b563e4f556");
+        assert_eq!(format!("{:x}", Sha256::digest(release_bytes)), "28e2aa6f074af8b9c4a5d9f087670d43a47f77ed0682679a7b4fa36ebd4d7647");
         assert_eq!(format!("{:x}", Sha256::digest(rc12_bytes)), "4b1a1503b00b7826258a54fff0e69e5bdbd3a609f440bc13aaa2926aae9cb9f5");
         assert_eq!(format!("{:x}", Sha256::digest(rc11_bytes)), "00d1de6a0e8a692c4a32b7a5289e2990dcab91e422b70d76925bc8657fa6a24a");
         assert_eq!(format!("{:x}", Sha256::digest(rc10_bytes)), "78547291fe3455184564a2437addec154ba8d056d4cd4dc4e4cead80f86624c6");
@@ -4814,15 +4844,15 @@ mod tests {
         assert_eq!(baseline["world_shared_buffers"], true);
         assert_eq!(baseline["world_parameter_reuse"], true);
         assert_eq!(baseline["water_stage_merge"], "off");
-        let mut rc12_with_rc20 = rc12.clone();
+        let mut rc12_with_rc21 = rc12.clone();
         for key in ["sim_snark_move_skip", "sim_snark_sight_blocked", "sim_pool_name_match", "audio_stats_log",
                     "audio_loop_resident", "audio_cue_prefetch", "actor_discard_free_shader",
                     "actor_cutout_discard_free", "actor_frontface_cull",
                     "fx_add_lean", "fx_add_fog_free", "sky_live", "actor_lean_shader",
-                    "audio_level_cues_extra"] {
-            rc12_with_rc20[key] = baseline[key].clone();
+                    "audio_level_cues_extra", "low_fog", "fog_sky", "exact_blends", "water_normals", "sky_depth"] {
+            rc12_with_rc21[key] = baseline[key].clone();
         }
-        assert_eq!(baseline, rc12_with_rc20, "RC20 release keeps every RC12 value except the fourteen RC15 to RC20 keys");
+        assert_eq!(baseline, rc12_with_rc21, "RC21 release keeps every RC12 value except the nineteen RC15 to RC21 keys");
         assert_eq!(baseline["actor_cutout_discard_free"], true,
                    "RC17 ships the exact ant cutout program on");
         for key in ["fx_add_lean", "fx_add_fog_free", "sky_live"] {
@@ -4830,8 +4860,16 @@ mod tests {
         }
         assert_eq!(baseline["actor_lean_shader"], true, "RC19 ships the lean actor programs on");
         assert_eq!(baseline["audio_level_cues_extra"], true, "RC20 ships the extra audio cues on");
+        for key in ["low_fog", "fog_sky", "exact_blends", "water_normals", "sky_depth"] {
+            assert_eq!(baseline[key], true, "RC21 ships {key} on");
+        }
+        // The frozen RC20 release is the RC21 release with the five fidelity keys off.
+        let mut rc20_baseline = baseline.clone();
+        for key in ["low_fog", "fog_sky", "exact_blends", "water_normals", "sky_depth"] {
+            rc20_baseline[key] = false.into();
+        }
         // The frozen RC19 release is the RC20 release with the audio key off.
-        let mut rc19_baseline = baseline.clone();
+        let mut rc19_baseline = rc20_baseline.clone();
         rc19_baseline["audio_level_cues_extra"] = false.into();
         // The frozen RC18 release is the RC19 release with the actor key off.
         let mut rc18_baseline = rc19_baseline.clone();
@@ -4896,8 +4934,10 @@ mod tests {
             }
             assert_eq!(&variant, against, "{name} changes only its declared keys against its release");
         };
-        // The RC20 play package adds only its replay keys to the RC20 release.
-        check_package("PL-rc20-release-play.json", include_bytes!("../../configs/PL-rc20-release-play.json"), None, &defaults, &baseline);
+        // The RC21 play package adds only its replay keys to the RC21 release.
+        check_package("PL-rc21-release-play.json", include_bytes!("../../configs/PL-rc21-release-play.json"), None, &defaults, &baseline);
+        // The frozen RC20 play package adds only its replay keys to the frozen RC20 release.
+        check_package("PL-rc20-release-play.json", include_bytes!("../../configs/PL-rc20-release-play.json"), None, &defaults, &rc20_baseline);
         // The frozen RC19 play package adds only its replay keys to the frozen RC19 release.
         check_package("PL-rc19-release-play.json", include_bytes!("../../configs/PL-rc19-release-play.json"), None, &defaults, &rc19_baseline);
         // The frozen RC18 play package adds only its replay keys to the frozen RC18 release.
@@ -5609,7 +5649,7 @@ mod tests {
         // inputs name sky_live alone and never the scale, alpha or program keys.
         let raw: serde_json::Value = serde_json::from_slice(&std::fs::read("configs/PL-rc17-release-play.json").unwrap()).unwrap();
         assert!(raw.get("sky_live").is_none() && raw.get("sky_live_scale").is_none());
-        for name in ["PL-release.json", "PL-rc18-release-play.json", "PL-rc19-release-play.json", "PL-rc20-release-play.json"] {
+        for name in ["PL-release.json", "PL-rc18-release-play.json", "PL-rc19-release-play.json", "PL-rc20-release-play.json", "PL-rc21-release-play.json"] {
             let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(format!("configs/{name}")).unwrap()).unwrap();
             assert_eq!(raw["sky_live"], true, "{name}");
             for key in ["sky_live_scale", "sky_live_alpha", "sky_live_lite"] {

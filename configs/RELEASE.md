@@ -139,6 +139,17 @@ byte-identical with and without the key on 16 tapes. `PL-rc20-release-play.json`
 is this fallback plus only the two measurement keys; `PL-rc19-release-play.json`
 keeps the RC19 package bytes for comparison.
 
+RC21 turns on five picture keys that bring the Vita closer to desktop Looking
+Glass: `low_fog` (fog on opaque walls and floors, as `quality: full` and the
+desktop renderer draw it), `fog_sky` (the sky tinted by the fog colour instead
+of a brighter gradient that outlines fogged geometry), `exact_blends` (slime,
+flat water, grates and moss with their authored blends), `water_normals`
+(animated normal-driven water bands) and `sky_depth` (scenery behind the sky
+stays hidden). Measured on the Vita on 2026-11-19 on two maps each: no
+measurable cost. The owner accepted the pictures against desktop references.
+`PL-rc21-release-play.json` is this fallback plus only the two measurement keys;
+`PL-rc20-release-play.json` keeps the RC20 package bytes for comparison.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
