@@ -225,7 +225,7 @@ impl Clock {fn new(i:usize)->Self {Self(crate::spike_log::on().then(std::time::I
 impl Drop for Clock {fn drop(&mut self) {if let Some(t)=self.0 {CENSUS.with(|c| {let mut row=c.get();row[self.1]+=t.elapsed().as_nanos() as u64;if self.1==1 {row[3]+=1;}c.set(row);});}}}
 pub(crate) fn census_begin() {CENSUS.with(|v|v.set([0;4]));}
 pub(crate) fn census_append(out:&mut String) {
-    if !crate::render::vita_renderer::config().gpu_skin_ants {return;}
+    let c=crate::render::vita_renderer::config();if !(c.gpu_skin_ants || c.gpu_skin_actors) {return;}
     use std::fmt::Write;let [palette,submit,upload,draws]=CENSUS.with(Cell::get);
     let _=write!(out," gpu_skin={draws}/{:.6}/{:.6}/{:.6}",palette as f64/1e6,upload as f64/1e6,submit as f64/1e6);
 }

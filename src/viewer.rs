@@ -5005,7 +5005,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         {
             // Keep the CPU reference set separate so a CPU arm and a GPU arm can both run and
             // the owner can pair the same frames without one set overwriting the other.
-            let dir=if crate::render::vita_renderer::config().gpu_skin_ants {"private/gpu-skin"}
+            let c=crate::render::vita_renderer::config();
+            let dir=if c.gpu_skin_ants || c.gpu_skin_actors {"private/gpu-skin"}
                 else {"private/gpu-skin/cpu"};
             save_capture(&std::path::PathBuf::from(format!("{dir}/frame-{frame:04}.png")))?;
         }
