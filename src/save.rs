@@ -614,7 +614,7 @@ impl CheckpointSubmitTiming {
     }
 
     pub(crate) fn log(&self, frame: u64, ok: bool, has_readback: bool) {
-        let jpeg = if ok && has_readback { "worker" } else { "none" };
+        let jpeg = if ok && has_readback { "queued" } else { "none" };
         let Self { snapshot_ms, capture_ms, readback_ms, retry_ms,
             prepare_ms, job_ms, permit_ms, send_ms, flags_ms } = self;
         crate::spike_log::checkpoint_submit(frame, format_args!(
@@ -1430,6 +1430,46 @@ pub(crate) mod tests {
         assert_eq!(fs::read(finale_file(&plain.0)).unwrap(), fs::read(finale_file(&background.0)).unwrap());
         assert_eq!(fs::read(plain.file(Slot::Auto)).unwrap(), fs::read(background.file(Slot::Auto)).unwrap());
         assert!(background.store().read(Slot::Auto).unwrap().preview.is_some());
+    }
+
+    /// A non-square, non-uniform readback: a wrong or doubled flip, a lost orientation or a
+    /// different resize on the worker changes the JPEG bytes, and a readback the encoder rejects
+    /// still writes the save without a preview, as the frame path does.
+    fn oriented_readback(flip: bool, valid: bool) -> Readback {
+        let (width, height) = (33u16, 17u16);
+        let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                bytes.extend_from_slice(if y < 6 { &[255, 0, 0, 255] }
+                    else if x < 11 { &[0, 0, 255, 255] } else { &[0, 255, 0, 255] });
+            }
+        }
+        if !valid { bytes.truncate(10); }
+        Readback::from_parts(macroquad::prelude::Image { width, height, bytes }, flip)
+    }
+
+    #[test]
+    fn finale_checkpoint_background_preview_matches_the_frame_encode_for_an_oriented_readback() {
+        let _pin = Pinned::new(1_795_031_416_000);
+        let mut encoded = Vec::new();
+        for (flip, valid) in [(true, true), (false, true), (true, false)] {
+            let plain = format12::Scratch::new(&format!("checkpoint-oriented-frame-{flip}-{valid}"));
+            let background = format12::Scratch::new(&format!("checkpoint-oriented-background-{flip}-{valid}"));
+            let game = jlair2_game();
+            let preview = oriented_readback(flip, valid).encode();
+            assert_eq!(preview.is_some(), valid, "the encoder rejects only the truncated readback");
+            plain.store().write_finale_checkpoint_with_preview(&game, preview.as_ref()).unwrap();
+            let writer = CheckpointWriter::start(&background.store()).unwrap();
+            let mut pending = Some(submit_game(&writer, game, Some(oriented_readback(flip, valid))));
+            finish(&mut pending).unwrap();
+            assert_eq!(fs::read(finale_file(&plain.0)).unwrap(), fs::read(finale_file(&background.0)).unwrap(),
+                       "finale store, flip {flip}, valid {valid}");
+            assert_eq!(fs::read(plain.file(Slot::Auto)).unwrap(), fs::read(background.file(Slot::Auto)).unwrap(),
+                       "auto store, flip {flip}, valid {valid}");
+            assert_eq!(background.store().read(Slot::Auto).unwrap().preview.is_some(), valid);
+            encoded.push(preview.map(|p| serde_json::to_value(p).unwrap()));
+        }
+        assert_ne!(encoded[0], encoded[1], "the fixture is orientation-sensitive");
     }
 
     #[test]

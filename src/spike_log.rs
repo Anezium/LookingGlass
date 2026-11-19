@@ -302,8 +302,10 @@ pub(crate) fn planner(kind: usize, ms: f64, expanded: u32, tests: u32) {
         *p = (p.0 + 1, p.1 + ms, p.2 + expanded, p.3 + tests);
     });
 }
-/// Keep checkpoint profiling out of the spike it is trying to explain.
+/// Keep checkpoint profiling out of the spike it is trying to explain. Silent unless the spike
+/// log is on: an unbuffered console line costs milliseconds on the frame it would describe.
 pub(crate) fn checkpoint_submit(frame: u64, stages: std::fmt::Arguments<'_>) {
+    if !on() { return; }
     let active_frame = FRAME.with(|f| {
         let f = f.borrow();
         f.begin.map(|_| f.number)

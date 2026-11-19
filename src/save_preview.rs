@@ -94,6 +94,11 @@ impl Readback {
     pub(crate) fn fixture(color: Color) -> Self {
         Self::new(Image::gen_image_color(32, 24, color))
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_parts(frame: Image, flip: bool) -> Self {
+        Self { frame, flip }
+    }
 }
 
 #[derive(Default)]
