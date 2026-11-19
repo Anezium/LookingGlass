@@ -9,13 +9,6 @@ pub struct Preview {
     jpeg: Vec<u8>,
 }
 impl Preview {
-    fn encode(frame: Image) -> Result<Self> {
-        #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
-        let flip = flip_readback(true, &crate::render::vita_renderer::config().preview_flip);
-        #[cfg(not(all(target_os = "vita", feature = "vita_renderer")))]
-        let flip = true;
-        Self::encode_oriented(frame, flip)
-    }
     fn encode_oriented(frame: Image, flip: bool) -> Result<Self> {
         let mut pixels =
             image::RgbaImage::from_raw(frame.width.into(), frame.height.into(), frame.bytes)
@@ -36,7 +29,7 @@ impl Preview {
     }
     #[cfg(test)]
     pub(crate) fn fixture(color: Color) -> Self {
-        Self::encode(Image::gen_image_color(32, 24, color)).unwrap()
+        Readback::fixture(color).encode().unwrap()
     }
     pub fn from_value(value: serde_json::Value) -> Option<Self> {
         serde_json::from_value::<Self>(value)
@@ -74,6 +67,33 @@ impl Preview {
 #[cfg(any(test, all(target_os = "vita", feature = "vita_renderer")))]
 fn flip_readback(vita: bool, setting: &str) -> bool {
     !vita || setting == "off"
+}
+
+/// Owned CPU pixels and their orientation. The GL texture stays with the frame.
+pub(crate) struct Readback {
+    frame: Image,
+    flip: bool,
+}
+
+impl Readback {
+    fn new(frame: Image) -> Self {
+        #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
+        let flip = flip_readback(true, &crate::render::vita_renderer::config().preview_flip);
+        #[cfg(not(all(target_os = "vita", feature = "vita_renderer")))]
+        let flip = true;
+        Self { frame, flip }
+    }
+
+    pub(crate) fn encode(self) -> Option<Preview> {
+        Preview::encode_oriented(self.frame, self.flip)
+            .map_err(|error| eprintln!("Save preview unavailable: {error:#}"))
+            .ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(color: Color) -> Self {
+        Self::new(Image::gen_image_color(32, 24, color))
+    }
 }
 
 #[derive(Default)]
@@ -278,11 +298,11 @@ impl Frame {
         }
     }
     pub fn preview(&self) -> Option<Preview> {
-        Preview::encode(self.texture.as_ref()?.get_texture_data())
-            .map_err(|e| {
-                eprintln!("Save preview unavailable: {e:#}");
-            })
-            .ok()
+        self.readback().and_then(Readback::encode)
+    }
+
+    pub(crate) fn readback(&self) -> Option<Readback> {
+        Some(Readback::new(self.texture.as_ref()?.get_texture_data()))
     }
 }
 
@@ -328,11 +348,12 @@ mod tests {
                 });
             }
         }
-        let preview = Preview::encode(Image {
+        let preview = Readback::new(Image {
             width: 640,
             height: 360,
             bytes,
         })
+        .encode()
         .unwrap();
         let saved = serde_json::to_value(&preview).unwrap();
         let decoded = Preview::from_value(saved).unwrap().image().unwrap();

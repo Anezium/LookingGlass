@@ -2,7 +2,7 @@
 use crate::{
     assets::Assets, bsp::Bsp, character::Character, cheshire::Hints, collision::World,
     interaction::Interactions, inventory::Stats, movement::Player, npc::Npcs, recovery::Recovery,
-    render::Scene, story::Story,
+    render::Scene, save_preview::{Preview, Readback}, story::Story,
 };
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::*;
@@ -592,10 +592,44 @@ thread_local! {
     static TEST_SAVED_AT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
+#[derive(Default)]
+pub(crate) struct CheckpointSubmitTiming {
+    pub(crate) snapshot_ms: f64,
+    pub(crate) capture_ms: f64,
+    pub(crate) readback_ms: f64,
+    retry_ms: f64,
+    prepare_ms: f64,
+    job_ms: f64,
+    permit_ms: f64,
+    send_ms: f64,
+    flags_ms: f64,
+}
+
+impl CheckpointSubmitTiming {
+    pub(crate) fn measure<T>(ms: &mut f64, run: impl FnOnce() -> T) -> T {
+        let start = std::time::Instant::now();
+        let result = run();
+        *ms = start.elapsed().as_secs_f64() * 1000.;
+        result
+    }
+
+    pub(crate) fn log(&self, frame: u64, ok: bool, has_readback: bool) {
+        let jpeg = if ok && has_readback { "worker" } else { "none" };
+        let Self { snapshot_ms, capture_ms, readback_ms, retry_ms,
+            prepare_ms, job_ms, permit_ms, send_ms, flags_ms } = self;
+        crate::spike_log::checkpoint_submit(frame, format_args!(
+            "ok={ok} snapshot_ms={snapshot_ms:.3} capture_ms={capture_ms:.3} \
+             readback_ms={readback_ms:.3} retry_ms={retry_ms:.3} prepare_ms={prepare_ms:.3} \
+             job_ms={job_ms:.3} permit_ms={permit_ms:.3} send_ms={send_ms:.3} \
+             flags_ms={flags_ms:.3} jpeg={jpeg}"
+        ));
+    }
+}
+
 /// The frame captures both envelope timestamps before handing the checkpoint to the writer.
 struct CheckpointJob {
     game: Box<Game>,
-    preview: Option<crate::save_preview::Preview>,
+    readback: Option<Readback>,
     saved_at: [u64; 2],
     completed: SyncSender<Result<()>>,
 }
@@ -652,17 +686,19 @@ impl CheckpointWriter {
             fingerprint: store.fingerprint.clone(),
             discard_writes: store.discard_writes,
         };
-        Self::spawn(move |job| {
+        Self::spawn(move |job, preview| {
             store.write_checkpoint_pair(|destination, index| {
                 destination.write_with_preview_saved_at(
-                    Slot::Auto, &job.game, job.preview.as_ref(), SavedAt::At(job.saved_at[index]),
+                    Slot::Auto, &job.game, preview, SavedAt::At(job.saved_at[index]),
                     SaveWriter::Background,
                 )
             })
         })
     }
 
-    fn spawn(write: impl Fn(&CheckpointJob) -> Result<()> + Send + 'static) -> std::io::Result<Self> {
+    fn spawn(
+        write: impl Fn(&CheckpointJob, Option<&Preview>) -> Result<()> + Send + 'static,
+    ) -> std::io::Result<Self> {
         let (submit, jobs) = mpsc::sync_channel::<CheckpointJob>(1);
         let (ready, idle) = mpsc::sync_channel(1);
         ready.send(()).unwrap();
@@ -675,9 +711,14 @@ impl CheckpointWriter {
                     let policy = crate::audio::thread_policy(191, 0);
                     eprintln!("[lg/worker-probe] role=save-writer {}", policy.describe());
                 }
-                for job in jobs {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&job)))
-                        .unwrap_or_else(|panic| Err(anyhow::anyhow!("The save writer failed unexpectedly: {panic:?}")));
+                for mut job in jobs {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let preview = job.readback.take().and_then(Readback::encode);
+                        write(&job, preview.as_ref())
+                    }))
+                    .unwrap_or_else(|panic| {
+                        Err(anyhow::anyhow!("The save writer failed unexpectedly: {panic:?}"))
+                    });
                     let _ = job.completed.send(result);
                     if ready.send(()).is_err() {
                         break;
@@ -687,33 +728,50 @@ impl CheckpointWriter {
         Ok(Self { submit: Some(submit), idle, thread: Some(thread) })
     }
 
+    #[cfg(test)]
     pub fn submit(
         &self,
         game: Game,
-        preview: Option<crate::save_preview::Preview>,
+        readback: Option<Readback>,
         interactions: &mut Interactions,
         snapshot: impl FnOnce(&Interactions) -> Game,
     ) -> Result<PendingCheckpoint> {
-        let saved_at = [saved_at_now()?, saved_at_now()?];
-        let (completed, result) = mpsc::sync_channel(1);
-        self.idle.recv().context("The save writer stopped")?;
-        self.submit.as_ref().unwrap().send(CheckpointJob {
+        self.submit_timed(game, readback, interactions, snapshot, &mut CheckpointSubmitTiming::default())
+    }
+
+    pub(crate) fn submit_timed(
+        &self,
+        game: Game,
+        readback: Option<Readback>,
+        interactions: &mut Interactions,
+        snapshot: impl FnOnce(&Interactions) -> Game,
+        timing: &mut CheckpointSubmitTiming,
+    ) -> Result<PendingCheckpoint> {
+        use CheckpointSubmitTiming as Timing;
+        let (saved_at, completed, result) = Timing::measure(&mut timing.prepare_ms, || {
+            let saved_at = [saved_at_now()?, saved_at_now()?];
+            let (completed, result) = mpsc::sync_channel(1);
+            Ok::<_, anyhow::Error>((saved_at, completed, result))
+        })?;
+        Timing::measure(&mut timing.permit_ms, || self.idle.recv()).context("The save writer stopped")?;
+        let job = Timing::measure(&mut timing.job_ms, || CheckpointJob {
             game: Box::new(game),
-            preview,
+            readback,
             saved_at,
             completed,
-        })
-        .map_err(|_| anyhow::anyhow!("The save writer stopped"))?;
-        let requesters = interactions.levels.iter()
-            .filter(|slot| slot.ctl.checkpoint_requested())
-            .map(|slot| slot.reg.id)
-            .collect();
-        interactions.checkpoint_written();
-        Ok(PendingCheckpoint {
-            completed: result,
-            retry_snapshot: Box::new(snapshot(interactions)),
-            requesters,
-        })
+        });
+        Timing::measure(&mut timing.send_ms, || self.submit.as_ref().unwrap().send(job))
+            .map_err(|_| anyhow::anyhow!("The save writer stopped"))?;
+        let requesters = Timing::measure(&mut timing.flags_ms, || {
+            let requesters = interactions.levels.iter()
+                .filter(|slot| slot.ctl.checkpoint_requested())
+                .map(|slot| slot.reg.id)
+                .collect();
+            interactions.checkpoint_written();
+            requesters
+        });
+        let retry_snapshot = Timing::measure(&mut timing.retry_ms, || Box::new(snapshot(interactions)));
+        Ok(PendingCheckpoint { completed: result, retry_snapshot, requesters })
     }
 }
 impl Drop for CheckpointWriter {
@@ -1295,14 +1353,14 @@ pub(crate) mod tests {
         use std::time::Duration;
         let (entered, active) = mpsc::sync_channel(1);
         let (release, proceed) = mpsc::sync_channel(1);
-        let writer = CheckpointWriter::spawn(move |job| {
+        let writer = CheckpointWriter::spawn(move |job, preview| {
             store.write_checkpoint_pair(|destination, index| {
                 if index == 1 {
                     entered.send(())?;
                     proceed.recv_timeout(Duration::from_secs(5))?;
                 }
                 destination.write_with_preview_saved_at(
-                    Slot::Auto, &job.game, job.preview.as_ref(), SavedAt::At(job.saved_at[index]),
+                    Slot::Auto, &job.game, preview, SavedAt::At(job.saved_at[index]),
                     SaveWriter::Background,
                 )
             })
@@ -1333,9 +1391,9 @@ pub(crate) mod tests {
     fn submit_game(
         writer: &CheckpointWriter,
         game: Game,
-        preview: Option<crate::save_preview::Preview>,
+        readback: Option<Readback>,
     ) -> PendingCheckpoint {
-        writer.submit(game.clone(), preview, &mut Interactions::empty(), |_| game).unwrap()
+        writer.submit(game.clone(), readback, &mut Interactions::empty(), |_| game).unwrap()
     }
 
     fn snapshot_game(mut game: Game, interactions: &Interactions) -> Game {
@@ -1367,7 +1425,7 @@ pub(crate) mod tests {
         let preview = crate::save_preview::Preview::fixture(RED);
         plain.store().write_finale_checkpoint_with_preview(&game, Some(&preview)).unwrap();
         let writer = CheckpointWriter::start(&background.store()).unwrap();
-        let mut pending = Some(submit_game(&writer, game, Some(preview)));
+        let mut pending = Some(submit_game(&writer, game, Some(Readback::fixture(RED))));
         finish(&mut pending).unwrap();
         assert_eq!(fs::read(finale_file(&plain.0)).unwrap(), fs::read(finale_file(&background.0)).unwrap());
         assert_eq!(fs::read(plain.file(Slot::Auto)).unwrap(), fs::read(background.file(Slot::Auto)).unwrap());

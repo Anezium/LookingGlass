@@ -1393,11 +1393,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         };
     }
     macro_rules! submit_checkpoint {
-        ($writer:expr, $game:expr, $preview:expr) => {{
-            let game = $game;
-            match $writer.submit(game, $preview, &mut interactions, |live| {
+        ($writer:expr, $game:expr, $readback:expr, $timing:expr) => {{
+            let readback: Option<crate::save_preview::Readback> = $readback;
+            let has_readback = readback.is_some();
+            let result = $writer.submit_timed($game, readback, &mut interactions, |live| {
+                // Retry uses live state at submission, including the cleared request flags.
                 game_snapshot!(live.snapshot())
-            }) {
+            }, $timing);
+            $timing.log(frame, result.is_ok(), has_readback);
+            match result {
                 Ok(job) => pending_checkpoint = Some(job),
                 Err(error) => hud.announce(format!("Checkpoint save failed: {error:#}")),
             }
@@ -1983,6 +1987,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if matches!(host_transition.as_str(), "quick-load" | "new-game+quick-load") { load_requested = Some(Slot::Quick); }
         let mut autosave_requested = false;
         let mut finale_checkpoint_requested = None;
+        let mut checkpoint_timing = save::CheckpointSubmitTiming::default();
         if toggle_console || (console.open && focused && input.ui(KeyCode::Escape)) {
             console.open = !console.open;
             menu = false;
@@ -3295,9 +3300,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if throttle_normal {
                 // Keep the original checkpoint snapshot; only its thumbnail
                 // capture and disk write wait for the clean render boundary.
-                finale_checkpoint_requested = Some(game_snapshot!());
+                finale_checkpoint_requested = Some(if checkpoint_writer.is_some() {
+                    save::CheckpointSubmitTiming::measure(&mut checkpoint_timing.snapshot_ms, || game_snapshot!())
+                } else {
+                    game_snapshot!()
+                });
             } else if let Some(writer) = &checkpoint_writer {
-                submit_checkpoint!(writer, game_snapshot!(), None);
+                let game = save::CheckpointSubmitTiming::measure(&mut checkpoint_timing.snapshot_ms, || game_snapshot!());
+                submit_checkpoint!(writer, game, None, &mut checkpoint_timing);
             } else {
                 match store.write_finale_checkpoint(&game_snapshot!()) {
                     Ok(()) => {
@@ -4543,7 +4553,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 || (!context_before.1 && inventory_menu) || quit_after_frame;
             if preview_throttle.capture_requested(preview_mode, throttled, required) {
                 let _profile = crate::frame_profile::span("save_preview");
-                save_frame.update();
+                if finale_checkpoint_requested.is_some() && checkpoint_writer.is_some() {
+                    save::CheckpointSubmitTiming::measure(&mut checkpoint_timing.capture_ms, || save_frame.update());
+                } else {
+                    save_frame.update();
+                }
             }
         }
         if freeze_capture { paused = pause_before_capture; clock.pause(); }
@@ -4925,7 +4939,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if let Some(game) = finale_checkpoint_requested {
             if let Some(writer) = &checkpoint_writer {
-                submit_checkpoint!(writer, game, save_frame.preview());
+                use save::CheckpointSubmitTiming as Timing;
+                let readback = Timing::measure(&mut checkpoint_timing.readback_ms, || save_frame.readback());
+                submit_checkpoint!(writer, game, readback, &mut checkpoint_timing);
             } else {
                 match store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()) {
                     Ok(()) => {
