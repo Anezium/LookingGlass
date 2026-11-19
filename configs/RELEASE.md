@@ -128,6 +128,17 @@ is exact on 45 tapes. `PL-rc19-release-play.json` is this fallback plus only the
 two measurement keys; `PL-rc18-release-play.json` keeps the RC18 package bytes
 for comparison.
 
+RC20 turns on `audio_level_cues_extra`, measured on the Vita on 2026-11-19. It
+decodes each map's measured first-use clips at load, after the existing cue pass
+and only where the map keeps 4 MiB of cache headroom, so their first play no
+longer reads and decodes the WAV on the main thread. Twice each on the device:
+garden3 entrance worst frame 205 to 50 ms, gvillage 89 to 51, tower1 123 to 52,
+no late clip decode left in those windows, no audio underrun; the skool1 owner
+window is unchanged. On the host the decoded samples and the mixed audio are
+byte-identical with and without the key on 16 tapes. `PL-rc20-release-play.json`
+is this fallback plus only the two measurement keys; `PL-rc19-release-play.json`
+keeps the RC19 package bytes for comparison.
+
 The 20 renderer keys added after the played RC3 input are explicit neutral
 values: `world_adjacent_batch`, `exact_blends`, `sky_cube_finish`, `fog_sky`,
 `low_fog`, `sky_cube_clear_only`, `sim_sweep_blocked`, `sky_cube_retain`,
