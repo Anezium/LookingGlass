@@ -16,12 +16,26 @@ bone-local position/weight lanes, five palette indices, the stored SKB normal an
 UV (120 bytes a vertex). A surface with more than five influences on any vertex or more
 than 60 bones keeps CPU skinning; the refusal is remembered for the surface's lifetime.
 
-Per occurrence the CPU builds a palette of two vec4 per used bone: the bone rotation
-quaternion with the model rotation folded in, and the translation with the bone and
-model scale. The model translation is added once, as `Transform::point` does on the CPU.
-The vertex program uses 2 x 60 + 4 (Projection) + 2 = 126 vertex uniform vectors; the
-Vita reports 128. The fragment uniforms are a separate budget. Pose evaluation, tags,
-attachments, sound and gameplay stay on the CPU and are unchanged.
+Per actor draw the CPU builds one palette of two vec4 per bone, shared by the draw's
+surfaces and layers: the bone rotation quaternion with the model rotation folded in, and
+the translation with the bone and model scale. A bone is computed the first time a
+surface references it. The model translation is added once, as `Transform::point` does
+on the CPU. The vertex program uses 2 x 60 + 4 (Projection) + 2 = 126 vertex uniform
+vectors; the Vita reports 128. The fragment uniforms are a separate budget. Pose
+evaluation, tags, attachments, sound and gameplay stay on the CPU and are unchanged.
+
+## Uniform upload
+
+Each surface's stream indexes its own bones in load order, so a draw uploads only the
+`2 x bones` vectors of `Bones` the surface references; the program reads no other entry.
+With `uniform_field_cache` each skin program keeps its own field cache: the base payload
+goes per changed field, `Bones` and `SkinOrigin` only when the occurrence changes (the
+layers of one surface share it), `SkinEye` when it changes. With `fx_submit_state_cache`
+the pipeline and bindings are reapplied only after another draw, a world callback or a
+pass boundary. A skin draw does not clear the CPU programs' uniform caches: GL keeps
+uniform values per program. With `uniform_field_cache` off the whole table goes every
+draw. The counters `gpu_skin_uniform_upload_bytes`, `gpu_skin_pipeline_sets` and
+`gpu_skin_binding_sets` report what was sent.
 
 Admitted layers are plain textures and environment reflections without tcMods, vector
 UVs or dot alpha. An environment layer computes the CPU reflection coordinates
