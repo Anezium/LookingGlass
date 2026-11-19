@@ -86,6 +86,17 @@ struct Action {
     fog: Option<(Vec4, f32)>,
 }
 impl Controller {
+    #[cfg(test)]
+    pub(crate) fn presentation_fixture(fog: Vec4, sky_origin: Vec3) -> Self {
+        let name = String::from("fixture");
+        Self {
+            state: State { sky: Some(name.clone()), to: fog.to_array(), ..Default::default() },
+            skies: BTreeMap::from([(name, sky_origin)]),
+            fog_owned: true,
+            ..Default::default()
+        }
+    }
+
     pub fn load(assets: &mut Assets, map: &Bsp, name: &str) -> Result<Self> {
         let text = script(assets, name)?;
         let mut c = Self::default();
@@ -235,12 +246,18 @@ impl Controller {
             },
         )
     }
+    pub(crate) fn inputs(&self) -> (Option<Vec4>, Option<Vec3>) {
+        let fog = self.fog_owned.then(|| self.distance());
+        let sky_origin = self.state.sky.as_ref().and_then(|s| self.skies.get(s)).copied();
+        (fog, sky_origin)
+    }
     pub fn apply(&self, scene: &mut crate::render::Scene) {
-        if self.fog_owned {
-            scene.atmosphere.distance = self.distance();
+        let (fog, sky_origin) = self.inputs();
+        if let Some(fog) = fog {
+            scene.atmosphere.distance = fog;
         }
-        if let Some(p) = self.state.sky.as_ref().and_then(|s| self.skies.get(s)) {
-            scene.set_sky_origin(*p);
+        if let Some(origin) = sky_origin {
+            scene.set_sky_origin(origin);
         }
     }
     pub fn restore(&mut self, state: &State) -> Result<()> {

@@ -10,6 +10,9 @@ use crate::{
 use anyhow::ensure;
 use macroquad::camera::Camera;
 
+#[cfg(test)]
+mod presentation_tests;
+
 pub(super) struct Portal {
     pub surface: usize,
     model: usize,
@@ -20,7 +23,10 @@ pub(super) struct Portal {
     mesh: Mesh,
     local: Vec<Vec3>,
     target: Option<RenderTarget>,
+    #[cfg(not(test))]
     material: Material,
+    #[cfg(test)]
+    material: Option<Material>,
     ready: bool,
     pupil: Option<Pupil>,
     mirror: bool,
@@ -286,7 +292,10 @@ pub(super) fn load(
                     texture: None,
                 },
                 target: None,
+                #[cfg(not(test))]
                 material,
+                #[cfg(test)]
+                material: Some(material),
                 ready: false,
                 pupil, mirror, extra: vec![], hide: vec![],
             });
@@ -335,7 +344,10 @@ impl Portal {
             v.position = origin + rotation * *p;
         }
         self.mesh.texture = self.target.as_ref().map(|t| t.texture.clone());
-        gl_use_material(&self.material);
+        let material = &self.material;
+        #[cfg(test)]
+        let material = material.as_ref().expect("portal fixture cannot draw");
+        gl_use_material(material);
         crate::sim_maps::count("imm_camera_portal", 1);
         draw_mesh(&self.mesh);
         gl_use_default_material();
@@ -401,7 +413,13 @@ impl Scene {
         for p in &mut self.camera_portals { p.actor = actor; }
     }
     pub fn set_reflection(&mut self, extra: Vec<(usize, Vec3, Quat)>, hide: Vec<usize>) {
-        for portal in self.camera_portals.iter_mut().filter(|p| p.mirror) { portal.extra=extra.clone(); portal.hide=hide.clone(); }
+        self.set_reflection_lists(&extra, &hide);
+    }
+    pub(super) fn set_reflection_lists(&mut self, extra: &[(usize, Vec3, Quat)], hide: &[usize]) {
+        for portal in self.camera_portals.iter_mut().filter(|p| p.mirror) {
+            portal.extra = extra.to_vec();
+            portal.hide = hide.to_vec();
+        }
     }
     /// Prepare visible, one-level portal views before beginning the main frame's
     /// transparency queue. No main-view sky, lights or camera state is inherited.

@@ -4134,25 +4134,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Scene);
         }
         let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPresentation);
-        scene.atmosphere.liquid =
-            crate::water::Liquid::from_contents(world.liquid_at(camera)).tint();
-        interactions.presentation.apply(&mut scene);
-        if let Some(origin) = interactions.levels.iter().find_map(|s| s.ctl.sky_origin()) { scene.set_sky_origin(origin); }
-        let (mut mirror_extra, mut mirror_hide) = (Vec::new(), Vec::new());
-        for slot in &interactions.levels { let (extra, hide) = slot.ctl.reflection(); mirror_extra.extend(extra); mirror_hide.extend(hide); }
-        scene.set_reflection(mirror_extra, mirror_hide);
-        scene.set_reflection_actor(
-            interactions
-                .levels
-                .iter()
-                .find_map(|s| s.ctl.reflection_actor()),
-        );
-        if let Some(fog) = interactions.levels.iter().find_map(|s| s.ctl.scene_fog()) {
-            scene.atmosphere.distance = fog;
-        }
-        if let Some(distance) = interactions.levels.iter().find_map(|s| s.ctl.fog_distance()) {
-            scene.atmosphere.distance.w = distance;
-        }
+        let presentation = crate::presentation_input::PresentationInput::capture(&world, camera, &interactions);
+        scene.apply_presentation(&presentation);
         drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPrepare3d);
         #[cfg(feature="vita_renderer")]
         let display_clear = !crate::render::vita_renderer::display_clear_skipped();

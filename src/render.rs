@@ -10,6 +10,7 @@ use crate::{
     collision::World,
     environment::Atmosphere,
     materials::{Blend, Stage},
+    presentation_input::PresentationInput,
     texture,
 };
 use anyhow::{Context, Result};
@@ -1430,6 +1431,27 @@ impl Scene {
     }
     pub fn set_sky_origin(&mut self, origin: Vec3) {
         self.sky_origin = Some(origin);
+    }
+    pub(crate) fn apply_presentation(&mut self, input: &PresentationInput) {
+        self.atmosphere.liquid = input.liquid;
+        if let Some(fog) = input.script_fog {
+            self.atmosphere.distance = fog;
+        }
+        if let Some(origin) = input.script_sky_origin {
+            self.set_sky_origin(origin);
+        }
+        if let Some(origin) = input.controller_sky_origin {
+            self.set_sky_origin(origin);
+        }
+        let (extra, hide) = &input.reflection;
+        self.set_reflection_lists(extra, hide);
+        self.set_reflection_actor(input.reflection_actor);
+        if let Some(fog) = input.controller_fog {
+            self.atmosphere.distance = fog;
+        }
+        if let Some(distance) = input.fog_distance {
+            self.atmosphere.distance.w = distance;
+        }
     }
     pub async fn fortress_check(assets: &mut Assets) -> Result<()> {
         camera_portal::check(assets).await?;

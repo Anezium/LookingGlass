@@ -635,13 +635,11 @@ fn rebuilding_parts_or_source_indices_invalidates_membership_and_full_detection(
     );
 }
 
-#[test]
-#[should_panic(expected = "map is not shared while the level loads")]
-fn map_mut_panics_when_shared() {
+pub(super) fn scene_fixture() -> Scene {
     use macroquad::miniquad::{RawId, TextureId};
 
     let map = crate::interaction::tests::fixture();
-    let mut scene = Scene {
+    Scene {
         #[cfg(feature = "vita_renderer")]
         retained: None,
         #[cfg(feature = "vita_renderer")]
@@ -671,7 +669,13 @@ fn map_mut_panics_when_shared() {
         sky_motion: None,
         sky_props: Vec::new(),
         sky_backdrop: None,
-    };
+    }
+}
+
+#[test]
+#[should_panic(expected = "map is not shared while the level loads")]
+fn map_mut_panics_when_shared() {
+    let mut scene = scene_fixture();
     let _other_owner = Arc::clone(&scene.map);
     scene.map_mut();
 }
