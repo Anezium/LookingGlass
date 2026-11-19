@@ -170,13 +170,13 @@ unsafe extern "C" fn link(program:u32) {
             STATE.with(|s|s.borrow_mut().binaries.insert(p.key,b));
         } else {eprintln!("[lg/shader] export_unavailable hash={}",hex(&p.key));}
     }
-    if status!=0 && p.name=="retained-gpu-skin-ants" {
+    if status!=0 && p.name.starts_with("retained-gpu-skin") {
         if let Some(binary)=dump(program) {
             if let Some(stages)=stages(&binary) {
                 for (label,stage) in ["vertex","fragment"].into_iter().zip(stages) {
                     if let Some((gxp,_))=stage_gxp(stage) {
                         let half=|i|u16::from_le_bytes(gxp[i..i+2].try_into().unwrap());
-                        eprintln!("[lg/gpu-skin-native] stage={label} pa={} sa={} temporaries={} instructions={}",half(48),half(50),word(gxp,52).unwrap_or(0),word(gxp,60).unwrap_or(0));
+                        eprintln!("[lg/gpu-skin-native] program={} stage={label} pa={} sa={} temporaries={} instructions={}",p.name,half(48),half(50),word(gxp,52).unwrap_or(0),word(gxp,60).unwrap_or(0));
                     }
                 }
             }
