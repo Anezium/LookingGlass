@@ -171,13 +171,10 @@ impl Encounter {
             })
             .collect()
     }
-    pub(super) fn brush_collider(
-        &self,
-        map: &Bsp,
-        b: &data::Brush,
-        p: Vec3,
-        q: Quat,
-    ) -> Result<Collider> {
+    /// One mover brush's collider: the reviewed exit-platform boxes, or the checked inline
+    /// BSP model placed at the brush's pose. A pure function of the map, the brush record
+    /// and that pose; equal inputs build a bit-identical collider.
+    pub(super) fn brush_collider(map: &Bsp, b: &data::Brush, p: Vec3, q: Quat) -> Result<Collider> {
         if b.name.starts_with("end_plat") {
             // The original discs are patch-only; these reviewed support boxes cover their walkable tops.
             let mid = (b.min + b.max) * 0.5 + p;
@@ -204,27 +201,134 @@ impl Encounter {
         }
         Collider::model(map, b.index, p, q, true)
     }
-    pub(super) fn rebuild(&mut self, map: &Bsp) -> Result<()> {
-        let poses = self.brush_poses();
-        if poses == self.poses {
-            return Ok(());
-        }
+    /// The brushes whose colliders reach the world: artwork-only brushes and shapes parked
+    /// far below the arena never collide.
+    fn excluded(b: &data::Brush, p: Vec3) -> bool {
+        p.z < -90000.
+            || b.name.starts_with("circle")
+            || b.name.starts_with("beam")
+            || matches!(
+                b.name.as_str(),
+                "clockmin" | "clockhr" | "clock_minute_hand" | "clock_hour_hand"
+            )
+    }
+    /// One rebuild pass over the brushes, in brush order. With `reuse` off every included
+    /// brush rebuilds its collider. With `mover_shape_reuse` on, a brush whose pose tuple
+    /// equals the pose recorded in its cache entry reuses that cached collider: the inputs
+    /// are identical, so the rebuilt collider would be bit-identical. A brush excluded this
+    /// frame keeps its stale entry; it can only be reused for that same recorded pose.
+    /// A cache hit needs the exact pose bits: float equality would equate +0.0 and -0.0 (and
+    /// never match NaN), while the collider is built from the bits.
+    fn same_pose(a: &(usize, Vec3, Quat), b: &(usize, Vec3, Quat)) -> bool {
+        a.0 == b.0
+            && a.1.to_array().map(f32::to_bits) == b.1.to_array().map(f32::to_bits)
+            && a.2.to_array().map(f32::to_bits) == b.2.to_array().map(f32::to_bits)
+    }
+    pub(super) fn collect_shapes(
+        map: &Bsp,
+        brushes: &[data::Brush],
+        poses: &[(usize, Vec3, Quat)],
+        cache: &mut [Option<((usize, Vec3, Quat), Collider)>],
+        reuse: bool,
+    ) -> Result<Vec<Collider>> {
         let mut shapes = vec![];
-        for (b, (_, p, q)) in self.data.brushes.iter().zip(&poses) {
-            if p.z < -90000.
-                || b.name.starts_with("circle")
-                || b.name.starts_with("beam")
-                || matches!(
-                    b.name.as_str(),
-                    "clockmin" | "clockhr" | "clock_minute_hand" | "clock_hour_hand"
-                )
-            {
+        for (i, (b, row @ (_, p, q))) in brushes.iter().zip(poses).enumerate() {
+            if Self::excluded(b, *p) {
                 continue;
             }
-            shapes.push(self.brush_collider(map, b, *p, *q)?);
+            if reuse && cache[i].as_ref().is_some_and(|c| Self::same_pose(&c.0, row)) {
+                crate::sim_maps::count("mover_shape_reuse_hits", 1);
+                // Probe builds rebuild on every hit and require the cached collider to be the
+                // fresh one, so any input the pose key misses shows up on the host.
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                {
+                    let fresh = Self::brush_collider(map, b, *p, *q)?;
+                    assert!(fresh.probe_contents_same(&cache[i].as_ref().unwrap().1),
+                            "mover_shape_reuse: cached collider differs from a fresh build for brush {i}");
+                }
+                shapes.push(cache[i].as_ref().unwrap().1.clone());
+                continue;
+            }
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            {
+                let unchanged = crate::sim_maps::probe::mover_input_unchanged(
+                    "hatter2_rebuild", i, b.index, *p, *q);
+                crate::sim_maps::count(Self::KINDS[Self::kind_index(&b.name)], 1);
+                crate::sim_maps::count("mover_collider_builds", 1);
+                if unchanged {
+                    crate::sim_maps::count("mover_build_unchanged", 1);
+                }
+            }
+            let collider = Self::brush_collider(map, b, *p, *q)?;
+            if reuse {
+                cache[i] = Some((*row, collider.clone()));
+            }
+            shapes.push(collider);
         }
+        Ok(shapes)
+    }
+    /// Probe census classes for the About Face movers: exit platforms, the
+    /// drawbridge, the end doors, the clock-door cams, the cage/chains/knobs
+    /// group and anything else.
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    const KINDS: [&str; 6] = [
+        "mover_hatter2_end_plat_builds",
+        "mover_hatter2_bridge_builds",
+        "mover_hatter2_door_builds",
+        "mover_hatter2_clockdr_builds",
+        "mover_hatter2_cage_builds",
+        "mover_hatter2_other_builds",
+    ];
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    fn kind_index(name: &str) -> usize {
+        if name.starts_with("end_plat") {
+            0
+        } else if name == "drawbridge" {
+            1
+        } else if name == "end_doors1" {
+            2
+        } else if name.starts_with("clockdr_") {
+            3
+        } else if name.contains("cage")
+            || name.starts_with("knob")
+            || name.starts_with("chain")
+            || name.starts_with("bar")
+        {
+            4
+        } else {
+            5
+        }
+    }
+    pub(super) fn rebuild(&mut self, map: &Bsp) -> Result<()> {
+        crate::sim_maps::count("mover_rebuild_calls", 1);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_stage = crate::sim_maps::timer("movers_hatter2_rebuild_ns");
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_poses = crate::sim_maps::timer("movers_hatter2_brush_poses_ns");
+        let poses = self.brush_poses();
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        {
+            drop(_probe_poses);
+            crate::sim_maps::count("mover_pose_rows", poses.len() as u64);
+        }
+        if poses == self.poses {
+            crate::sim_maps::count("mover_rebuild_skipped", 1);
+            return Ok(());
+        }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_shapes = crate::sim_maps::timer("movers_hatter2_shape_builds_ns");
+        let reuse = crate::sim_maps::mover_shape_reuse();
+        if self.shape_cache.len() != self.data.brushes.len() {
+            self.shape_cache.resize(self.data.brushes.len(), None);
+        }
+        self.shapes = Self::collect_shapes(
+            map,
+            &self.data.brushes,
+            &poses,
+            &mut self.shape_cache,
+            reuse,
+        )?;
         self.poses = poses;
-        self.shapes = shapes;
         Ok(())
     }
     pub(super) fn scene_camera(&self) -> Option<crate::cinematic::Camera> {
@@ -389,5 +493,117 @@ mod tests {
         assert_eq!(lift(5.), 0.5);
         assert_eq!(lift(6.), 0.);
         assert_eq!(lift(7.9), 0.);
+    }
+    fn brush(name: &str, index: usize, p: Vec3) -> data::Brush {
+        data::Brush {
+            name: name.into(),
+            index,
+            pose: Transform { translation: p, rotation: Quat::IDENTITY },
+            min: vec3(-16., -16., -8.),
+            max: vec3(16., 16., 8.),
+        }
+    }
+    /// One About Face rebuild sequence: a pendulum that genuinely moves every frame, the
+    /// moving-away chain that leaves the shape list and returns, the exit platform, the end
+    /// doors, the drawbridge and a clock-door cam that stay put, and the always-excluded
+    /// clock hands. Both arms rebuild the same poses; the reuse arm keeps its cache.
+    fn reuse_sequence() -> (Vec<data::Brush>, Vec<Vec<(usize, Vec3, Quat)>>) {
+        let brushes = vec![
+            brush("testpend1", 0, vec3(0., 100., 0.)),
+            brush("bar01", 1, vec3(40., 100., 0.)),
+            brush("end_plat1", 0, vec3(-40., 100., 0.)),
+            brush("end_doors1", 1, vec3(-80., 100., 0.)),
+            brush("drawbridge", 0, vec3(80., 100., 0.)),
+            brush("clockdr_1", 1, vec3(120., 100., 0.)),
+            brush("clockmin", 0, vec3(0., 100., 0.)),
+            brush("chainmoving01", 1, vec3(160., 100., 0.)),
+        ];
+        let row = |i: usize, q: Quat, dz: f32| {
+            let b = &brushes[i];
+            (b.index, b.pose.translation + Vec3::Z * dz, q)
+        };
+        let base: Vec<_> = brushes.iter().map(|b| (b.index, b.pose.translation, b.pose.rotation)).collect();
+        let mut frames = vec![base.clone()];
+        let mut f = base.clone();
+        f[0] = row(0, Quat::from_rotation_y(0.3), 0.);
+        frames.push(f);
+        let mut f = base.clone();
+        f[0] = row(0, Quat::from_rotation_y(0.6), 0.);
+        f[7].1.z -= 100000.; // parked far below: excluded this frame
+        frames.push(f);
+        let mut f = base.clone();
+        f[0] = row(0, Quat::from_rotation_y(0.9), 0.);
+        f[1] = row(1, Quat::from_rotation_z(0.2), 0.);
+        frames.push(f);
+        let mut f = base.clone();
+        f[0] = row(0, Quat::from_rotation_y(1.2), 0.);
+        f[2] = row(2, Quat::IDENTITY, 392.); // the exit platform rises
+        f[3] = row(3, Quat::from_rotation_z(1.4), 0.);
+        f[4] = row(4, Quat::from_rotation_x(1.5707), 0.);
+        frames.push(f);
+        frames.push(frames[4].clone()); // a repeated frame: every included brush reuses
+        (brushes, frames)
+    }
+    #[test]
+    fn a_signed_zero_or_nan_pose_never_hits_the_cache() {
+        let pose = |z: f32, w: f32| (3usize, Vec3::new(-1., -1., z), Quat::from_xyzw(0., 0., 0., w));
+        assert!(Encounter::same_pose(&pose(0., 1.), &pose(0., 1.)));
+        assert!(!Encounter::same_pose(&pose(0., 1.), &pose(-0., 1.)), "+0.0 and -0.0 build different bits");
+        assert!(!Encounter::same_pose(&(4usize, pose(0., 1.).1, pose(0., 1.).2), &pose(0., 1.)), "model index");
+    }
+    #[test]
+    fn mover_shape_reuse_reproduces_the_full_rebuild_bit_for_bit() {
+        let map = crate::interaction::tests::fixture();
+        let (brushes, frames) = reuse_sequence();
+        let mut off = vec![None; brushes.len()];
+        let mut on: Vec<Option<((usize, Vec3, Quat), Collider)>> = vec![None; brushes.len()];
+        for (n, poses) in frames.iter().enumerate() {
+            let rebuilt = Encounter::collect_shapes(&map, &brushes, poses, &mut off, false).unwrap();
+            let reused = Encounter::collect_shapes(&map, &brushes, poses, &mut on, true).unwrap();
+            assert_eq!(rebuilt.len(), reused.len(), "frame {n}");
+            for (i, (full, lean)) in rebuilt.iter().zip(&reused).enumerate() {
+                assert_eq!(full.geometry_bits(), lean.geometry_bits(), "frame {n} shape {i}");
+            }
+        }
+    }
+    #[test]
+    fn mover_shape_reuse_skips_only_the_unchanged_brushes_and_rebuilds_the_rest() {
+        let map = crate::interaction::tests::fixture();
+        let (brushes, frames) = reuse_sequence();
+        let mut on: Vec<Option<((usize, Vec3, Quat), Collider)>> = vec![None; brushes.len()];
+        // Frame 0 builds everything; nothing is cached yet.
+        let shapes = Encounter::collect_shapes(&map, &brushes, &frames[0], &mut on, true).unwrap();
+        let built: Vec<_> = shapes.iter().map(Collider::hulls_location).collect();
+        // Frame 1 moves only the pendulum: every other included brush must be the very same
+        // collider allocation, and the pendulum must be a fresh build.
+        let mut moved = frames[1].clone();
+        moved[0].1.z -= 100000.; // exclude the pendulum so only unchanged brushes remain
+        let shapes = Encounter::collect_shapes(&map, &brushes, &moved, &mut on, true).unwrap();
+        for (i, collider) in shapes.iter().enumerate() {
+            assert_eq!(collider.hulls_location(), built[i + 1], "unchanged brush {i} was rebuilt");
+        }
+        // With the pendulum included again its new pose rebuilds, and the cached entry moves.
+        let before = on[0].as_ref().map(|c| c.1.hulls_location());
+        let shapes = Encounter::collect_shapes(&map, &brushes, &frames[1], &mut on, true).unwrap();
+        assert_ne!(shapes[0].hulls_location(), before.unwrap(), "the moved pendulum reused a stale shape");
+        for (i, collider) in shapes.iter().skip(1).enumerate() {
+            assert_eq!(collider.hulls_location(), built[i + 1], "unchanged brush {i} was rebuilt");
+        }
+        // The chain parks far below and returns with a pose no cache entry holds: it rebuilds.
+        Encounter::collect_shapes(&map, &brushes, &frames[2], &mut on, true).unwrap();
+        let mut fresh = frames[3].clone();
+        fresh[7].2 = fresh[7].2 * Quat::from_rotation_z(0.4);
+        let built_fresh = Encounter::collect_shapes(&map, &brushes, &fresh, &mut on, true).unwrap();
+        assert!(built_fresh.iter().all(|c| c.hulls_location() != built[6]),
+                "the returning chain reused a pose it was never built at");
+        // The entry now records the fresh pose, so the base-pose chain rebuilds too.
+        let shapes = Encounter::collect_shapes(&map, &brushes, &frames[3], &mut on, true).unwrap();
+        assert!(shapes.iter().all(|c| c.hulls_location() != built_fresh[6].hulls_location()),
+                "the chain reused a pose its entry does not record");
+        // Repeating the same frame reuses every recorded entry, the parked one included.
+        let again = Encounter::collect_shapes(&map, &brushes, &frames[3], &mut on, true).unwrap();
+        assert!(again.iter().zip(&shapes)
+                    .all(|(a, b)| a.hulls_location() == b.hulls_location()),
+                "a repeated frame did not reuse every recorded entry");
     }
 }

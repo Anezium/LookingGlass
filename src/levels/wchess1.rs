@@ -593,6 +593,8 @@ impl LevelController for Realm {
         }
         let dt = dt.min(0.1);
         self.saved.age += dt;
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_advance = crate::sim_maps::timer("movers_wchess_advance_ns");
         if let Some((i, t)) = &mut self.saved.pull {
             *t += dt;
             p.velocity = Vec3::ZERO;
@@ -628,8 +630,14 @@ impl LevelController for Realm {
                 });
             }
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_stage = crate::sim_maps::timer("movers_wchess_move_world_ns");
         self.move_world(dt, map, w, p, fixed)?;
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_scenes = crate::sim_maps::timer("movers_wchess_step_scenes_ns");
         self.step_scenes(dt, map, w, p)?;
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_board = crate::sim_maps::timer("movers_wchess_step_board_ns");
         if !self.scripted() {
             self.step_board(dt, p, w);
         }
@@ -638,7 +646,11 @@ impl LevelController for Realm {
             rotation: Quat::from_rotation_z(p.script_facing),
         };
         self.rebuild(map)?;
-        w.set_dynamic(fixed.iter().cloned().chain(self.colliders()).collect());
+        {
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_publish = crate::sim_maps::timer("movers_wchess_publish_ns");
+            w.set_dynamic(fixed.iter().cloned().chain(self.colliders()).collect());
+        }
         Ok(())
     }
     fn controlled(&self) -> bool {

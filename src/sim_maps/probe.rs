@@ -269,6 +269,45 @@ pub fn record_movers(transforms: &[(usize, Vec3Probe, macroquad::prelude::Quat)]
         "sweeps": sweeps.len(), "sweeps_sha256": hash(&sweeps), "player_feet_bits": feet, "grounded": player.grounded,
     })));
 }
+/// Mover rebuild census (probe builds only). Each recorded mover collider build
+/// reports whether its inputs are bit-identical to the previous recorded build
+/// of the same mover, so a host replay counts unchanged-input rebuilds per
+/// stage and mover kind. Keys are (stage, mover identity); identities are
+/// entity or brush indices, stable for one map, and each map owns its stage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MoverInput {
+    model: usize,
+    translation: [u32; 3],
+    rotation: [u32; 4],
+}
+thread_local! {
+    static MOVER_INPUTS: std::cell::RefCell<std::collections::BTreeMap<(&'static str, usize), MoverInput>> =
+        std::cell::RefCell::new(std::collections::BTreeMap::new());
+}
+/// One recorded mover collider build. True when the inputs equal the previous
+/// recorded build for this mover; the stored row is updated either way.
+pub fn mover_input_unchanged(
+    stage: &'static str,
+    id: usize,
+    model: usize,
+    translation: macroquad::prelude::Vec3,
+    rotation: macroquad::prelude::Quat,
+) -> bool {
+    let row = MoverInput {
+        model,
+        translation: translation.to_array().map(f32::to_bits),
+        rotation: {
+            let a = rotation.to_array();
+            [a[0].to_bits(), a[1].to_bits(), a[2].to_bits(), a[3].to_bits()]
+        },
+    };
+    MOVER_INPUTS.with(|m| {
+        let mut m = m.borrow_mut();
+        let unchanged = m.get(&(stage, id)).is_some_and(|r| *r == row);
+        m.insert((stage, id), row);
+        unchanged
+    })
+}
 pub fn skin_proof() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     enabled() && *ON.get_or_init(||std::env::var_os("LOOKING_GLASS_SKIN_PROOF").is_some())

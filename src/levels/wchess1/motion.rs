@@ -136,10 +136,64 @@ pub(super) fn load(map: &Bsp) -> Result<Vec<Object>> {
         })
         .collect()
 }
+/// Probe census classes for the Pale Realm movers: hands, lesson spikes, wave
+/// spikes, water machinery, the wheel, the lift, gates, board arrows and clips,
+/// the secret wall, camera/clip markers and anything else.
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+const KINDS: [&str; 11] = [
+    "mover_wchess_hand_builds",
+    "mover_wchess_spike_builds",
+    "mover_wchess_op1_builds",
+    "mover_wchess_water_builds",
+    "mover_wchess_wheel_builds",
+    "mover_wchess_elevator_builds",
+    "mover_wchess_gate_builds",
+    "mover_wchess_board_builds",
+    "mover_wchess_clip_builds",
+    "mover_wchess_secret_builds",
+    "mover_wchess_other_builds",
+];
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+fn kind_index(name: &str) -> usize {
+    if matches!(name, "hand_long" | "hand_short") {
+        0
+    } else if name.starts_with("bsspike") || name.starts_with("knspike") {
+        1
+    } else if name.starts_with("op1_spike") {
+        2
+    } else if matches!(name, "water" | "elevator_water" | "water_exit_block") {
+        3
+    } else if name == "waterwheel" {
+        4
+    } else if matches!(name, "elevator" | "elevator_weight_mounts") {
+        5
+    } else if matches!(name, "quad_gate_top" | "quad_gate_bottom" | "knight_gate") {
+        6
+    } else if name.starts_with("bsarrow_")
+        || name.starts_with("bsclip_")
+        || name.starts_with("knarrow")
+        || name.starts_with("knclip_")
+    {
+        7
+    } else if name.starts_with("float_secret") {
+        9
+    } else if (name.starts_with("bishop") && name.ends_with("_clip"))
+        || (name.starts_with("square") && name.ends_with("_clip"))
+        || matches!(name, "t98" | "t99" | "t100" | "t101")
+    {
+        8
+    } else {
+        10
+    }
+}
 impl Realm {
     pub(super) fn rebuild(&mut self, map: &Bsp) -> Result<()> {
+        crate::sim_maps::count("mover_rebuild_calls", 1);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_stage = crate::sim_maps::timer("movers_wchess_rebuild_ns");
         let gate = self.quad_open();
         for o in &mut self.objects {
+            crate::sim_maps::count("mover_pose_rows", 1);
             let old = o.pose;
             let n = o.name.as_str();
             o.pose = o.base;
@@ -316,10 +370,28 @@ impl Realm {
                 _ => {}
             }
             if old.translation != o.pose.translation || old.rotation != o.pose.rotation {
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                {
+                    let kind = kind_index(&o.name);
+                    let unchanged = crate::sim_maps::probe::mover_input_unchanged(
+                        "wchess_rebuild",
+                        o.id,
+                        o.model,
+                        o.pose.translation,
+                        o.pose.rotation,
+                    );
+                    crate::sim_maps::count(KINDS[kind], 1);
+                    crate::sim_maps::count("mover_collider_builds", 2);
+                    if unchanged {
+                        crate::sim_maps::count("mover_build_unchanged", 2);
+                    }
+                }
                 o.collider =
                     Collider::model(map, o.model, o.pose.translation, o.pose.rotation, true)?;
                 o.volume =
                     Collider::model(map, o.model, o.pose.translation, o.pose.rotation, false)?;
+            } else {
+                crate::sim_maps::count("mover_pose_rows_unchanged", 1);
             }
         }
         Ok(())
@@ -347,6 +419,8 @@ impl Realm {
         self.saved.elevator.step(dt);
         self.rebuild(map)?;
         if rider {
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _probe_rider = crate::sim_maps::timer("movers_wchess_rider_ns");
             let feet = p.feet + Vec3::Z * (self.saved.elevator.height - before.height);
             w.set_dynamic(
                 fixed
@@ -390,7 +464,13 @@ impl Realm {
                 }
             }
         }
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _probe_cast = crate::sim_maps::timer("movers_wchess_move_cast_ns");
         self.move_cast(dt);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        {
+            crate::sim_maps::count("mover_hazard_rows", self.objects.iter().filter(|o| o.hazard).count() as u64);
+        }
         Ok(())
     }
 }

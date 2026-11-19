@@ -95,6 +95,20 @@ fn test_arm_and_nested_overrides_are_independent_of_renderer_config() {
     assert_eq!(current(), expected);
 }
 
+/// `mover_shape_reuse`: a scoped override wins inside its body, nesting restores the
+/// outer value, and an unset lever reads off unless the whole-suite variable says on.
+#[test]
+fn mover_shape_reuse_scopes_nest_and_defaults_off_without_the_lever_variable() {
+    let env_on = std::env::var("LOOKING_GLASS_TEST_MOVER_SHAPE_REUSE").as_deref() == Ok("on");
+    assert_eq!(mover_shape_reuse(), env_on);
+    with_mover_shape_reuse(true, || {
+        assert!(mover_shape_reuse());
+        with_mover_shape_reuse(false, || assert!(!mover_shape_reuse()));
+        assert!(mover_shape_reuse());
+    });
+    assert_eq!(mover_shape_reuse(), env_on);
+}
+
 /// Small exact dependency keys for mechanism publication. No allocation, hash,
 /// epsilon, or serialized save layout is involved.
 #[derive(Clone, PartialEq, Eq)]
@@ -198,13 +212,40 @@ pub fn mover_advance_reuse() -> bool {
     #[cfg(all(not(test), not(feature="vita_renderer")))]
     { false }
 }
+#[cfg(test)]
+// Scoped test override for the `mover_shape_reuse` lever documented below.
+thread_local! { static MOVER_SHAPE_REUSE_TEST: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(crate) fn with_mover_shape_reuse<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset { fn drop(&mut self) { MOVER_SHAPE_REUSE_TEST.with(|s| s.set(self.0)); } }
+    let _reset = Reset(MOVER_SHAPE_REUSE_TEST.with(|s| s.replace(Some(on))));
+    run()
+}
+/// `mover_shape_reuse`: a mover brush whose pose did not move reuses its cached collider;
+/// only changed brushes rebuild. Default off. Tests: a scoped override, else off;
+/// LOOKING_GLASS_TEST_MOVER_SHAPE_REUSE=on runs the whole suite with the lever on.
+pub fn mover_shape_reuse() -> bool {
+    #[cfg(test)]
+    { MOVER_SHAPE_REUSE_TEST.with(|s| s.get()).unwrap_or_else(|| test_lever_env("LOOKING_GLASS_TEST_MOVER_SHAPE_REUSE")) }
+    #[cfg(all(not(test), feature="vita_renderer"))]
+    { crate::render::vita_renderer::config().mover_shape_reuse }
+    #[cfg(all(not(test), not(feature="vita_renderer")))]
+    { false }
+}
 /// Off unless the variable says on. Read once per lever: allocation tests run with a lever on,
 /// and reading the environment allocates.
 #[cfg(test)]
 fn test_lever_env(name: &'static str) -> bool {
     static SEEN: std::sync::Mutex<Vec<(&'static str, bool)>> = std::sync::Mutex::new(Vec::new());
-    thread_local! { static LOCAL: std::cell::Cell<[Option<bool>; 2]> = const { std::cell::Cell::new([None; 2]) }; }
-    let slot = usize::from(name.ends_with("MOVER_ADVANCE_REUSE"));
+    thread_local! { static LOCAL: std::cell::Cell<[Option<bool>; 3]> = const { std::cell::Cell::new([None; 3]) }; }
+    let slot = if name.ends_with("FX_ATTACHED_PERSIST") {
+        0
+    } else if name.ends_with("MOVER_ADVANCE_REUSE") {
+        1
+    } else {
+        2
+    };
     if let Some(on) = LOCAL.with(|l| l.get()[slot]) { return on; }
     let mut seen = SEEN.lock().unwrap();
     let on = seen.iter().find(|s| s.0 == name).map(|s| s.1).unwrap_or_else(|| {
