@@ -22,15 +22,16 @@ pub(crate) async fn ambient_render(assets: &mut Assets) -> Result<()> {
             if !matches!(name, "lantern.tik" | "firefly.tik") {
                 continue;
             }
-            let emitter = steam
-                .emitters
+            let (emitter, visual) = steam
+                .sim.emitters
                 .iter()
-                .find(|e| e.id == id)
+                .zip(&steam.art.emitters)
+                .find(|(e, _)| e.id == id)
                 .ok_or_else(|| anyhow::anyhow!("Missing ambient emitter {map_name}:{id}"))?;
             if name == "lantern.tik" {
                 lanterns += 1;
                 ensure!(
-                    emitter.spec.constrain == Some(Vec3::splat(3.5)) && emitter.textures.len() == 1,
+                    emitter.spec.constrain == Some(Vec3::splat(3.5)) && visual.textures.len() == 1,
                     "Lantern bounds or sprite missing"
                 );
                 ensure!(
@@ -80,7 +81,7 @@ pub(crate) async fn ambient_render(assets: &mut Assets) -> Result<()> {
     ] {
         let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, name)?;
         let mut steam = Steam::load(assets, &scene.map)?;
-        let emitter = steam.emitters.iter().find(|e| e.id == id).unwrap();
+        let emitter = steam.sim.emitters.iter().find(|e| e.id == id).unwrap();
         let target = emitter.origin
             + if name == "gvillage" {
                 Vec3::Z * 10.
@@ -105,13 +106,13 @@ pub(crate) async fn ambient_render(assets: &mut Assets) -> Result<()> {
         if name == "gvillage" {
             ensure!(
                 steam
-                    .puffs
+                    .sim.puffs
                     .iter()
-                    .any(|p| steam.emitters[p.emitter].id == id),
+                    .any(|p| steam.sim.emitters[p.emitter].id == id),
                 "Lantern pixie died inside its enclosure"
             );
-            for p in &steam.puffs {
-                if let Some(bounds) = steam.emitters[p.emitter].spec.constrain {
+            for p in &steam.sim.puffs {
+                if let Some(bounds) = steam.sim.emitters[p.emitter].spec.constrain {
                     ensure!(
                         (p.position - p.constraint_center)
                             .abs()

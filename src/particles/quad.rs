@@ -1,6 +1,6 @@
 //! Numeric per-view snapshot; resources and publications stay on the game thread.
 use crate::mesh::Mesh;
-use super::{Emitter, RenderPuffs};
+use super::{EmitterVisual, RenderPuffs};
 use crate::render_snapshot::ParticleInput;
 use macroquad::prelude::*;
 use crate::render_fx::prepared::Geometry;
@@ -15,7 +15,7 @@ fn basis(direction: Vec3) -> (Vec3, Vec3) {
     let right = direction.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
     (right, right.cross(direction).normalize_or_zero())
 }
-fn recipe(p: &ParticleInput, e: &Emitter, camera: Vec3, axes: (Vec3, Vec3)) -> Recipe {
+fn recipe(p: &ParticleInput, e: &EmitterVisual, camera: Vec3, axes: (Vec3, Vec3)) -> Recipe {
     // A compounding emitter arrives with its growth already in the size.
     let (size, growth) = if e.spec.growth_compounds { (e.spec.grown(p.size, p.age), 0.) } else { (p.size, e.spec.growth) };
     Recipe { position: p.position, size, growth, age: p.age,
@@ -46,16 +46,16 @@ pub(super) struct Buffer {
     recipes: Vec<Recipe>, output: Vec<[Vertex;4]>, publications: Vec<Rc<Geometry>>, live: usize, raw_live: usize,
 }
 impl Buffer {
-    pub(super) fn prepare(&mut self, puffs: RenderPuffs<'_>, emitters: &[Emitter], camera: Vec3, direction: Option<Vec3>) {
+    pub(super) fn prepare(&mut self, puffs: RenderPuffs<'_>, emitters: &[EmitterVisual], camera: Vec3, direction: Option<Vec3>) {
         self.prepare_mode(puffs, emitters, camera, direction, false);
     }
-    pub(super) fn prepare_world(&mut self, puffs: RenderPuffs<'_>, emitters: &[Emitter], camera: Vec3, direction: Vec3) {
+    pub(super) fn prepare_world(&mut self, puffs: RenderPuffs<'_>, emitters: &[EmitterVisual], camera: Vec3, direction: Vec3) {
         self.prepare_mode(puffs, emitters, camera, Some(direction), true);
     }
-    pub(super) fn prepare_attached(&mut self, puffs: RenderPuffs<'_>, emitters: &[Emitter], camera: Vec3) {
+    pub(super) fn prepare_attached(&mut self, puffs: RenderPuffs<'_>, emitters: &[EmitterVisual], camera: Vec3) {
         self.prepare_mode(puffs, emitters, camera, None, true);
     }
-    fn prepare_mode(&mut self, puffs: RenderPuffs<'_>, emitters: &[Emitter], camera: Vec3, direction: Option<Vec3>, raw: bool) {
+    fn prepare_mode(&mut self, puffs: RenderPuffs<'_>, emitters: &[EmitterVisual], camera: Vec3, direction: Option<Vec3>, raw: bool) {
         let _span = crate::frame_profile::span("particle_producer");
         #[cfg(all(feature="sim_maps_probe", not(target_os="vita")))]
         let census_started = crate::sim_maps::probe::draw_query::armed().then(std::time::Instant::now);
@@ -96,7 +96,7 @@ impl Buffer {
                     std::hint::black_box((p, quad(r)));
                 }
                 println!("FX_EMITTER {}", serde_json::json!({"frame": crate::sim_maps::probe::frame(),
-                    "entity": e.id, "name": e.spec.name, "image": e.spec.image, "particles": count,
+                    "entity": e.diagnostic.id, "name": e.diagnostic.name, "image": e.diagnostic.image, "particles": count,
                     "blend": if e.additive {"AlphaAdd"} else {"Alpha"}, "layers": 1,
                     "kernel_remeasure_ns": started.elapsed().as_nanos() as u64}));
             }
@@ -153,51 +153,51 @@ mod tests {
         crate::character::skinning::overlap::startup(2,false);
         let mut steam=super::super::tests::attached_fixture(4).steam;
         steam.update(0.2,Vec3::ZERO,&crate::collision::World::fixture(&[]));
-        assert!(steam.puffs.len()>=32);
+        assert!(steam.sim.puffs.len()>=32);
         let camera=vec3(25.,-10.,5.);
-        let mut buffer=Buffer::default();buffer.prepare(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera,Some(Vec3::X));
+        let mut buffer=Buffer::default();buffer.prepare(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera,Some(Vec3::X));
         let pointers=(buffer.recipes.as_ptr(),buffer.output.as_ptr(),buffer.publications[0].vertices.as_ptr());
         for _ in 0..8 {
             let scope=crate::kernel_alloc::Scope::begin();
-            buffer.prepare(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera,Some(Vec3::X));
+            buffer.prepare(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera,Some(Vec3::X));
             assert_eq!(scope.finish(),0);
             assert_eq!(pointers,(buffer.recipes.as_ptr(),buffer.output.as_ptr(),buffer.publications[0].vertices.as_ptr()));
-            for i in 0..steam.puffs.len() {
-                assert!(same(&steam.puff_mesh(i,camera,Vec3::X).vertices,&buffer.geometry(i).unwrap().vertices));
+            for i in 0..steam.sim.puffs.len() {
+                assert!(same(&steam.live_draw().puff_mesh(i,camera,Vec3::X).vertices,&buffer.geometry(i).unwrap().vertices));
             }
         }
         let scope=crate::kernel_alloc::Scope::begin();
-        for i in 0..steam.puffs.len() {std::hint::black_box(steam.puff_mesh(i,camera,Vec3::X));}
-        assert!(scope.finish()>=steam.puffs.len() as u64*2);
+        for i in 0..steam.sim.puffs.len() {std::hint::black_box(steam.live_draw().puff_mesh(i,camera,Vec3::X));}
+        assert!(scope.finish()>=steam.sim.puffs.len() as u64*2);
         let output=&mut buffer.output;let recipes=&buffer.recipes;
         crate::character::skinning::overlap::cpu_pair(|| {
             let scope=crate::kernel_alloc::Scope::begin();kernel(recipes,output);assert_eq!(scope.finish(),0);
         },||{});
-        buffer.prepare(RenderPuffs::Live(&[]),&steam.emitters,camera,Some(Vec3::Z));assert!(buffer.geometry(0).is_none());
+        buffer.prepare(RenderPuffs::Live(&[]),&steam.art.emitters,camera,Some(Vec3::Z));assert!(buffer.geometry(0).is_none());
     }
     #[test]
     fn world_and_attached_quads_match_legacy_bits_and_keep_snapshots() {
         let mut steam = super::super::tests::attached_fixture(2).steam;
         steam.update(0.2, Vec3::ZERO, &crate::collision::World::fixture(&[]));
-        assert!(!steam.puffs.is_empty());
+        assert!(!steam.sim.puffs.is_empty());
         for direction in [Vec3::X,Vec3::Z,Vec3::ZERO,vec3(0.2,-0.8,0.3)] {
             for frame in 0..20 {
-                for (i,p) in steam.puffs.iter_mut().enumerate() {
+                for (i,p) in steam.sim.puffs.iter_mut().enumerate() {
                     p.age=frame as f32*0.03; p.roll=i as f32*0.7; p.size=frame as f32;
                 }
                 for attached in [false,true] {
                     let camera=vec3(17.,-23.,8.);
                     let mut buffer=Buffer::default();
-                    buffer.prepare(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera,(!attached).then_some(direction));
-                    for (i,p) in steam.puffs.iter().enumerate() {
+                    buffer.prepare(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera,(!attached).then_some(direction));
+                    for (i,p) in steam.sim.puffs.iter().enumerate() {
                         let d=if attached {(p.position-camera).normalize_or_zero()} else {direction};
-                        let reference=steam.puff_mesh(i,camera,d);
+                        let reference=steam.live_draw().puff_mesh(i,camera,d);
                         let g=buffer.geometry(i).unwrap();
                         assert!(same(&reference.vertices,&g.vertices));
                         assert_eq!(reference.indices,g.indices);
                     }
                     let old=buffer.geometry(0).unwrap(); let bytes=old.vertices.clone();
-                    buffer.prepare(RenderPuffs::Live(&steam.puffs),&steam.emitters,Vec3::ZERO,Some(Vec3::Z));
+                    buffer.prepare(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,Vec3::ZERO,Some(Vec3::Z));
                     assert!(same(&old.vertices,&bytes));
                 }
             }
@@ -208,24 +208,24 @@ mod tests {
         crate::character::skinning::overlap::startup(2,false);
         let mut steam=super::super::tests::attached_fixture(4).steam;
         steam.update(0.2,Vec3::ZERO,&crate::collision::World::fixture(&[]));
-        steam.emitters[0].additive=false;
-        assert!(steam.puffs.len()>=32);
-        for (i,p) in steam.puffs.iter_mut().enumerate() { p.roll=i as f32*0.3; p.position+=vec3(i as f32,0.,1.); p.size=2.; }
+        steam.art.emitters[0].additive=false;
+        assert!(steam.sim.puffs.len()>=32);
+        for (i,p) in steam.sim.puffs.iter_mut().enumerate() { p.roll=i as f32*0.3; p.position+=vec3(i as f32,0.,1.); p.size=2.; }
         let camera=vec3(17.,-23.,8.);
         let mut plain=Buffer::default();let mut deferred=Buffer::default();
-        plain.prepare_attached(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera);
-        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare_attached(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera));
+        plain.prepare_attached(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera);
+        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare_attached(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera));
         assert!(deferred.recipes.iter().all(|r|r.per_puff_basis));
-        assert_eq!(deferred.raw_live,steam.puffs.len());
-        for i in 0..steam.puffs.len() {
+        assert_eq!(deferred.raw_live,steam.sim.puffs.len());
+        for i in 0..steam.sim.puffs.len() {
             assert!(same(deferred.raw_ref(i).unwrap(),&plain.raw_quad(i).unwrap()));
-            let direction=(steam.puffs[i].position-camera).normalize_or_zero();
-            assert!(same(deferred.raw_ref(i).unwrap(),&steam.puff_mesh(i,camera,direction).vertices));
+            let direction=(steam.sim.puffs[i].position-camera).normalize_or_zero();
+            assert!(same(deferred.raw_ref(i).unwrap(),&steam.live_draw().puff_mesh(i,camera,direction).vertices));
         }
         // World sets keep their one shared basis; the publication path keeps its own.
-        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare_world(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera,Vec3::X));
+        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare_world(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera,Vec3::X));
         assert!(deferred.recipes.iter().all(|r|!r.per_puff_basis));
-        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera,None));
+        crate::sim_maps::with_fx_attached_persist(true,||deferred.prepare(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera,None));
         assert!(deferred.recipes.iter().all(|r|!r.per_puff_basis));
     }
     #[test]
@@ -233,21 +233,21 @@ mod tests {
         let mut steam=super::super::tests::attached_fixture(2).steam;
         steam.update(0.2,Vec3::ZERO,&crate::collision::World::fixture(&[]));
         let camera=vec3(17.,-23.,8.);let mut buffer=Buffer::default();
-        buffer.prepare_world(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera,Vec3::X);
+        buffer.prepare_world(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera,Vec3::X);
         for frame in 0..12 {
-            for p in &mut steam.puffs {p.age=frame as f32*0.03;p.roll=frame as f32*0.7;}
+            for p in &mut steam.sim.puffs {p.age=frame as f32*0.03;p.roll=frame as f32*0.7;}
             let scope=crate::kernel_alloc::Scope::begin();
-            buffer.prepare_world(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera,Vec3::X);
+            buffer.prepare_world(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera,Vec3::X);
             assert_eq!(scope.finish(),0);assert!(buffer.publications.is_empty());
-            for i in 0..steam.puffs.len(){assert!(same(&buffer.raw_quad(i).unwrap(),&steam.puff_mesh(i,camera,Vec3::X).vertices));}
+            for i in 0..steam.sim.puffs.len(){assert!(same(&buffer.raw_quad(i).unwrap(),&steam.live_draw().puff_mesh(i,camera,Vec3::X).vertices));}
         }
-        buffer.prepare_attached(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera);
-        for i in 0..steam.puffs.len() {
-            let direction=(steam.puffs[i].position-camera).normalize_or_zero();
-            assert!(same(&buffer.raw_quad(i).unwrap(),&steam.puff_mesh(i,camera,direction).vertices));
+        buffer.prepare_attached(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera);
+        for i in 0..steam.sim.puffs.len() {
+            let direction=(steam.sim.puffs[i].position-camera).normalize_or_zero();
+            assert!(same(&buffer.raw_quad(i).unwrap(),&steam.live_draw().puff_mesh(i,camera,direction).vertices));
         }
         assert!(buffer.publications.is_empty());
-        buffer.prepare(RenderPuffs::Live(&steam.puffs),&steam.emitters,camera,None);
+        buffer.prepare(RenderPuffs::Live(&steam.sim.puffs),&steam.art.emitters,camera,None);
         assert!(buffer.raw_quad(0).is_none());assert!(buffer.geometry(0).is_some());
     }
 }

@@ -1036,6 +1036,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut retry = recovery::RetryPoint::default();
     let mut paused = false;
     let mut pitch = 0.0f32;
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let steam_poison_frame = std::env::var("LOOKING_GLASS_SNAPSHOT_POISON_STEAM_FRAME")
+        .ok().map(|value| value.parse::<u64>().expect("invalid steam poison frame"));
     let mut frame = 0;
     let mut handoff_return = crate::render_snapshot::HandoffReturn::default();
     let mut handoff_minimum_frame = 0u64;
@@ -4561,9 +4564,10 @@ interactions
             let allocations=scope.finish();
             println!("[lg/snapshot-pickups] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,pickup_input.bytes(),start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(pickup_input.overflow()));
         }
+        let steam_visit = level_art.snapshot_visit.id();
         if snapshot_enabled {
             let scope=crate::kernel_alloc::Scope::begin();let start=std::time::Instant::now();
-            let (bytes,overflow)=steam.extract_render_input();
+            let (bytes,overflow)=steam.extract_render_input(steam_visit);
             if overflow { snapshot_rejected=true;handoff_return.retire();handoff_minimum_frame=frame as u64;}let allocations=scope.finish();
             println!("[lg/snapshot-particles] frame={} bytes={} extraction_us={:.3} allocations={} overflow={}",frame,bytes,start.elapsed().as_secs_f64()*1_000_000.,allocations,u8::from(overflow));
         } else {steam.clear_render_input();}
@@ -4609,7 +4613,7 @@ interactions
         // set controls the real last-read boundary and the host census.
         let snapshot_blockers = if snapshot_enabled {
             let mut blockers = Vec::new();
-            if snapshot_rejected || !power_art.valid_input(&pickup_input)
+            if snapshot_rejected || steam.draw_input(steam_visit).is_none() || !power_art.valid_input(&pickup_input)
                 || aim_input.as_ref().is_none_or(|i| !aim_pointer.valid_input(i,level_art.snapshot_visit.id())) {
                 blockers.push("input.rejected".to_owned());
             }
@@ -4892,14 +4896,29 @@ interactions
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         {
-            scene.draw_with_particles(
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let saved_steam = if steam_poison_frame == Some(frame) {
+                assert!(snapshot_enabled && snapshot_world_free, "steam poison requires world-free draw");
+                Some(steam.poison_sim_for_draw(frame))
+            } else {
+                None
+            };
+            let captured_steam = steam.draw_input(steam_visit);
+            let particles = if snapshot_enabled && snapshot_world_free {
+                captured_steam.expect("world-free steam input was accepted")
+            } else {
+                captured_steam.unwrap_or_else(|| steam.live_draw())
+            };
+            scene.draw_particle_frame(
                 camera,
                 (target - camera).normalize_or_zero(),
                 environment_clock,
                 fullbright,
                 &transforms,
-                &steam,
+                particles,
             );
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            if let Some(sim) = saved_steam { steam.restore_sim_after_draw(sim); }
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             { drop(host_block); host_block = crate::frame_profile::span("frame_effects"); }
             #[cfg(target_os = "vita")]

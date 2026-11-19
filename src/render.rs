@@ -1608,6 +1608,18 @@ impl Scene {
         transforms: &[(usize, Vec3, Quat)],
         particles: &crate::particles::Steam,
     ) {
+        self.draw_particle_frame(camera, direction, time, fullbright, transforms, particles.live_draw());
+    }
+
+    pub(crate) fn draw_particle_frame(
+        &mut self,
+        camera: Vec3,
+        direction: Vec3,
+        time: f32,
+        fullbright: bool,
+        transforms: &[(usize, Vec3, Quat)],
+        particles: crate::particles::SteamDraw<'_>,
+    ) {
         #[cfg(target_os = "vita")]
         if crate::frame_profile::mode().no_world() {
             return;
