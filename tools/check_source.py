@@ -159,6 +159,7 @@ PINNED_FILES = {
     "configs/PL-rc20-release-play.json": "5a80f4d5636f55953909db87ba1452ded9f3cc74ffb2bcbd6e4389c9027022d0",
     "configs/PL-rc22-release-play.json": "5934d29d042279f066de5745d4e3d7d58c86ad3a02ad439b363fa2130992b5ee",
     "configs/PL-rc23-release-play.json": "7cd871c44683e21d66396d7ef91165ac6c74c2a7e87568d46ef215fe84f248cb",
+    "configs/PL-v11-play.json": "6ae3d28a56109944e3ef7cb4ea9b39043cec317d9c42514edcb22d7868a62553",
     # Tooling, licence texts and test fixtures.
     "tools/config_record/fixtures/host-bad.json": "0baa0c4b95907662865e70a9946f546c486fca6e3808dc64bab650a16b2b5912",
     "tools/config_record/fixtures/host-bad.txt": "9744a970a2ce54da3cfc3de774339a1989d6b1e4207fafe0b5686329089d0da5",
