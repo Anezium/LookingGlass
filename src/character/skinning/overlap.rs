@@ -1009,7 +1009,10 @@ impl Frame {
     }
     pub(crate) fn collect(&mut self) {
         assert!(PHASE.with(|p| p.get() == Phase::Running));
-        let panic = STORE.with(|s| s.borrow_mut().as_mut().unwrap().drain());
+        let panic = {
+            let _census = crate::phase_census::span(crate::phase_census::Region::ActorWorkerDrain);
+            STORE.with(|s| s.borrow_mut().as_mut().unwrap().drain())
+        };
         PHASE.with(|p| p.set(Phase::Ready));
         STORE.with(|s| {
             let s = s.borrow();

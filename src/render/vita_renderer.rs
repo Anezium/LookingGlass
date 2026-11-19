@@ -246,6 +246,8 @@ pub struct Config {
     pub frame_phase_probe: bool,
     /// Fixed-storage elapsed census; opt in only for a bounded benchmark.
     pub phase_census: bool,
+    /// Census the first 180 presented frames in the inclusive replay spike window.
+    pub phase_census_window: bool,
     /// Select mutable skin from actual frame consumers; keep inherited visual policy.
     pub skin_actual_consumers: bool,
     pub mover_far_lazy: bool,
@@ -646,6 +648,7 @@ impl Default for Config {
             particle_producer_reuse: true, world_puff_batches: true, attached_puff_batches: true, fx_merge_in_place: true, fx_worker_prep: true,
             frame_phase_probe: false,
             phase_census: false,
+            phase_census_window: false,
             skin_actual_consumers: true,
             mover_far_lazy: true,
             mover_lazy_publish: true,
@@ -776,6 +779,9 @@ impl Config {
     }
     fn validate(&self) -> Result<()> {
         ensure!(self.spike_log_last_frame == 0 || self.spike_log_last_frame >= self.spike_log_first_frame, "invalid spike frame window");
+        ensure!(!self.phase_census_window || (!self.phase_census && !self.replay_play.is_empty()
+            && self.spike_log_first_frame > 0 && self.spike_log_last_frame >= self.spike_log_first_frame),
+            "phase_census_window requires replay_play, explicit positive spike frame bounds, and phase_census off");
         crate::replay::validate_settings(&crate::replay::Settings { record: self.replay_record.clone(),
             play: self.replay_play.clone(), start: self.replay_start.clone(), check_every: self.replay_check_every,
             state_every: self.replay_state_every, stop_after: self.replay_stop_after })?;
@@ -2515,6 +2521,7 @@ impl Renderer {
         #[cfg(target_os = "vita")]
         if list_submit && self.gxm.proof_due() { self.proof_frame(scene, time); }
         if !alpha && config().sky && !scene.authored_sky && !config().diag_skip_sky {
+            let _census_sky = crate::phase_census::span(crate::phase_census::Region::Sky);
             #[cfg(not(target_os = "vita"))]
             let probe = super::sky_stats::begin(false);
             let _sky_span=crate::frame_profile::span("vita_world_sky_submit");
@@ -3741,6 +3748,25 @@ mod tests {
         assert_eq!(raw["tls_fast"], "on");
     }
     #[test]
+    fn replay_census_config_requires_playback_and_explicit_bounds() {
+        assert!(!Config::default().phase_census_window);
+        let valid = Config {
+            phase_census_window: true, replay_play: "fixture.lgtape".into(),
+            spike_log_first_frame: 7, spike_log_last_frame: 7, ..Config::default()
+        };
+        assert!(valid.validate().is_ok());
+        for config in [
+            Config { spike_log_first_frame: 0, ..valid.clone() },
+            Config { spike_log_last_frame: 0, ..valid.clone() },
+            Config { spike_log_last_frame: 6, ..valid.clone() },
+            Config { replay_play: String::new(), ..valid.clone() },
+            Config { phase_census: true, ..valid.clone() },
+        ] {
+            assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
     fn round5_keys_are_strict_and_off_in_historical_configs() {
         let defaults=serde_json::to_value(Config::default()).unwrap();
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
@@ -4064,7 +4090,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "phase_census_window") }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));

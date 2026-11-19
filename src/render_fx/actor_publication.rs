@@ -819,6 +819,7 @@ pub(crate) fn complete() {
         // All workers drained successfully. Build deferred layers before FRAME's mutable
         // borrow below: pass_at reads FRAME through retained_active().
         if !s.deferred.is_empty() {
+            let _census = crate::phase_census::span(crate::phase_census::Region::ActorLayerMaterialize);
             assert!(retained_active(),"deferred actor layers outside the direct view");
             // Records stay in `s.deferred` until every placeholder is filled, so a panic here
             // still lets end() find and discard all of this frame's deferred groups.

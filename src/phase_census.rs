@@ -2,12 +2,14 @@
 //! Inclusive brackets and their exclusive portions are accumulated separately;
 //! root union coverage, not a sum of inclusive children, defines the residual.
 #![allow(dead_code)]
-use std::{cell::{Cell, RefCell}, io::Write, time::Instant};
+use std::{cell::{Cell, RefCell}, io::Write, sync::atomic::{AtomicUsize, Ordering::Relaxed}, time::Instant};
 const CAPACITY: usize = 180;
 const TABLE: usize = 4096;
 const PROBES: usize = 16;
 const DEPTH: usize = 32;
 mod map_paths;
+#[cfg(feature = "vita_renderer")]
+pub(crate) mod replay_window;
 #[cfg(all(test,feature="vita_renderer"))]
 mod map_tests;
 use map_paths::{ExactEntry,parent_bit};
@@ -23,7 +25,9 @@ pub(crate) enum Region { Npc, PlayerMovement, FixedPhysics, Movers, Objects, Aud
     MergePuffBuild, MergeObserve, MergeSignature, MergePlan, MergeCopy,
     CameraScripted, CameraFollow, CameraHandoff, CameraPresentation, CameraPrepare3d, CameraTransforms,
     GatherStoryPose, GatherFrameBegin, GatherAlice, GatherNpcs, GatherLevelArt, GatherDispatch,
-    WorldDrawBetween, Other }
+    WorldDrawBetween,
+    Render, WorldFrame, Sky, ActorWorkerDrain, ActorLayerMaterialize, RenderCapture, Other }
+const LEGACY_REGIONS: usize = Region::Render as usize;
 const REGIONS: usize = Region::Other as usize;
 const NAMES: [&str; REGIONS] = ["npc_think_movement", "player_movement", "fixed_physics", "movers", "objects",
     "audio_prepare", "prepare_acoustics", "light_selection", "world_opaque", "world_visibility",
@@ -33,7 +37,8 @@ const NAMES: [&str; REGIONS] = ["npc_think_movement", "player_movement", "fixed_
     "joint_merge_puff_build", "joint_merge_observe", "joint_merge_signature", "joint_merge_plan", "joint_merge_copy",
     "camera_scripted", "camera_follow", "camera_handoff", "camera_presentation", "camera_prepare_3d", "camera_transforms_ropes",
     "gather_story_pose", "gather_frame_begin", "gather_alice", "gather_npcs", "gather_level_art", "gather_dispatch",
-    "world_draw_between"];
+    "world_draw_between", "render", "world_frame", "world_sky", "actor_worker_drain",
+    "actor_layer_materialize", "render_capture"];
 #[derive(Clone, Copy)]
 #[repr(usize)]
 pub(crate) enum Owner { Audio, Player, Npc, Camera, Other }
@@ -98,12 +103,13 @@ struct State {
     tls_base:crate::tls_count::Snapshot,
     /// TLS counting state when the survey window opened (the survey arms counting first).
     tls_window:bool,
+    replay_window: bool,
 }
 impl State {
     #[cfg(test)]
     const fn new() -> Self { Self { rows:[Row::ZERO;CAPACITY],current:Row::ZERO,count:0,accepted:0,
         start:None,pending:false,overflow:false,sequence:0,owner:Owner::Other,sweep_depth:0,scene:0,query_class:0,
-        stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE],serial_fallback_base:0,controller:2,category:4,epoch:0,exact:[ExactEntry::EMPTY;1024],tls_base:crate::tls_count::Snapshot::ZERO,tls_window:false } }
+        stack:[0;DEPTH],children:[0;DEPTH],depth:0,table:[Entry::EMPTY;TABLE],serial_fallback_base:0,controller:2,category:4,epoch:0,exact:[ExactEntry::EMPTY;1024],tls_base:crate::tls_count::Snapshot::ZERO,tls_window:false,replay_window:false } }
     fn boxed() -> Box<Self> {
         // Initialize bounded storage once, before gameplay. A full const State
         // would embed the enlarged actor rows in the native ELF's initializer.
@@ -135,8 +141,12 @@ impl State {
             std::ptr::addr_of_mut!((*p).exact).write([ExactEntry::EMPTY;1024]);
             std::ptr::addr_of_mut!((*p).tls_base).write(crate::tls_count::Snapshot::ZERO);
             std::ptr::addr_of_mut!((*p).tls_window).write(false);
+            std::ptr::addr_of_mut!((*p).replay_window).write(false);
             storage.assume_init()
         }
+    }
+    fn root_bit(&self) -> usize {
+        if self.replay_window { REGIONS } else { LEGACY_REGIONS }
     }
     fn close(&mut self, now: Instant) {
         if let Some(start) = self.start {
@@ -184,16 +194,20 @@ thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     static STATE: RefCell<Box<State>> = RefCell::new(State::boxed());
 }
-/// Set once, before the first census window opens on any thread, and never cleared.
-/// Until then every census entry point returns after one relaxed load instead of a
-/// thread-local lookup (0.56 us each on the Vita, r15d calibration). Afterwards the
-/// per-thread ACTIVE flag decides exactly as before, so a census arm is unchanged.
-static EVER_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// Bit zero retains the legacy survey gate. The remaining bits count active
+// replay frames so replay diagnostics return to the single-load path between arms.
+const LEGACY_ARMED: usize = 1;
+const REPLAY_FRAME: usize = 2;
+static ARMED: AtomicUsize = AtomicUsize::new(0);
 #[inline]
 pub(crate) fn active() -> bool {
-    EVER_ARMED.load(std::sync::atomic::Ordering::Relaxed) && ACTIVE.with(Cell::get)
+    ARMED.load(Relaxed) != 0 && ACTIVE.with(Cell::get)
 }
 pub(crate) fn is_active()->bool {active()}
+fn replay_frame_active() -> bool {
+    ARMED.load(Relaxed) >= REPLAY_FRAME && ACTIVE.with(Cell::get)
+        && STATE.with(|s| s.borrow().replay_window)
+}
 fn configured() -> bool {
     #[cfg(feature="vita_renderer")]
     {crate::render::vita_renderer::config().phase_census}
@@ -207,6 +221,7 @@ pub(crate) fn set_owner(owner:Owner) {
     if active(){STATE.with(|s|s.borrow_mut().owner=owner);}
 }
 pub(crate) fn reset() {
+    if replay_frame_active() { return; }
     ACTIVE.with(|a|a.set(false));
     // Do not touch the large fixed table in the default-off arm.
     if configured() { STATE.with(|s| {let mut s=s.borrow_mut();s.count=0;s.accepted=0;s.start=None;
@@ -214,6 +229,7 @@ pub(crate) fn reset() {
         s.table.fill(Entry::EMPTY);s.exact.fill(ExactEntry::EMPTY);}); }
 }
 pub(crate) fn begin_configured() {
+    if replay_frame_active() { return; }
     #[cfg(target_os="vita")]
     let enabled = configured() || crate::r13_survey::census_active();
     #[cfg(not(target_os="vita"))]
@@ -252,8 +268,12 @@ fn begin(enabled:bool) {
     begin_at(enabled,Instant::now());
 }
 fn begin_at(enabled:bool,now:Instant) {
-    if enabled {EVER_ARMED.store(true,std::sync::atomic::Ordering::Relaxed);}
-    ACTIVE.with(|a|a.set(enabled));if !enabled {return;}
+    if !enabled { ACTIVE.with(|a| a.set(false)); return; }
+    ARMED.fetch_or(LEGACY_ARMED, Relaxed);
+    begin_row(now);
+}
+fn begin_row(now: Instant) {
+    ACTIVE.with(|a| a.set(true));
     STATE.with(|s| {let mut s=s.borrow_mut();s.close(now);s.sequence+=1;
         s.current=Row{sequence:s.sequence,..Row::ZERO};s.controller=2;s.category=4;s.start=Some(now);s.owner=Owner::Other;
         s.depth=0;s.sweep_depth=0;
@@ -356,9 +376,10 @@ pub(crate) fn span(region:Region) -> Timer {
             Region::WorldDrawBetween=>return,
             _=>None};
         if required.is_some_and(|r|!s.stack[..s.depth].contains(&(r as usize))) {return;}
+        if region as usize >= LEGACY_REGIONS && !s.replay_window { return; }
         if s.depth==DEPTH {s.current.errors+=1;return;}
         timer.level=s.depth;let d=s.depth;s.stack[d]=region as usize;s.children[d]=0;s.depth+=1;
-        let parent=if d==0 {REGIONS} else {s.stack[d-1]};parent_bit(&mut s.current,region as usize,parent);
+        let parent=if d==0 {s.root_bit()} else {s.stack[d-1]};parent_bit(&mut s.current,region as usize,parent);
         timer.start=Some(Instant::now());
     });timer
 }
@@ -470,7 +491,8 @@ pub(crate) fn backend_report(ns:u64) {
         if s.depth!=0 {s.current.errors+=1;return;}
         let i=Region::BackendReport as usize;
         s.current.inclusive[i]+=ns;s.current.exclusive[i]+=ns;s.current.calls[i]+=1;
-        parent_bit(&mut s.current,i,REGIONS);s.current.coverage+=ns;
+        let root = s.root_bit();
+        parent_bit(&mut s.current,i,root);s.current.coverage+=ns;
     }); }
 }
 #[cfg(target_os="vita")]
@@ -490,12 +512,13 @@ impl Drop for WorldCommands {fn drop(&mut self) {
 fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
     anyhow::ensure!(!s.overflow && s.count==CAPACITY,"census requires exactly 60+120 accepted frames");
     anyhow::ensure!(s.rows[..60].iter().all(|r|!r.measured) && s.rows[60..].iter().all(|r|r.measured),"census warmup/measurement alignment");
-    anyhow::ensure!(s.rows.iter().all(|r|r.errors==0 && r.total>=r.coverage && r.total>0 && r.exclusive.iter().sum::<u64>()==r.coverage),"census hierarchy/closure failure");
-    // All allocation and encoding is after the measured window.
-    let rows:Vec<_>=s.rows.iter().enumerate().map(|(i,r)|serde_json::json!({
-        "accepted_frame":i+1,"sequence":r.sequence,"measured_frame":if r.measured {Some(i-59)}else{None},
+    write_document(s, map, None, out)
+}
+fn row_json(i: usize, r: &Row, width: usize, warmup: usize) -> serde_json::Value {
+    serde_json::json!({
+        "accepted_frame":i+1,"sequence":r.sequence,"measured_frame":r.measured.then(|| i + 1 - warmup),
         "frame_total_ns":r.total,"bracket_union_ns":r.coverage,"unbracketed_residual_ns":r.total-r.coverage,
-        "inclusive_ns":&r.inclusive[..],"exclusive_ns":&r.exclusive[..],"calls":&r.calls[..],"parent_masks":&r.parents[..],"parent_masks_hi":&r.parents_hi[..],"npc_query_categories":r.npc_queries,
+        "inclusive_ns":&r.inclusive[..width],"exclusive_ns":&r.exclusive[..width],"calls":&r.calls[..width],"parent_masks":&r.parents[..width],"parent_masks_hi":&r.parents_hi[..width],"npc_query_categories":r.npc_queries,
         "static_traversal_ns":r.static_ns,"static_traversal_counts":r.static_counts,
         "sweep_count":r.sweeps,"sweep_ns":r.sweep_ns,"acoustics_world_sweep_count":r.acoustic_sweeps,
         "acoustics_world_sweep_ns":r.acoustic_sweep_ns,"static_queries_total_hit1_hit4_hit16":r.queries,
@@ -505,19 +528,25 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "serial_fallbacks":r.serial_fallbacks,"publication_rejections":r.rejections,"diagnostic_counters":&r.counters[..],
         "added_brackets":r.calls[30..].iter().map(|&n|n as u64).sum::<u64>()-r.reused_brackets,
         "reused_brackets":r.reused_brackets,
-    })).collect();
-    let serial_fallbacks:u64=s.rows[..s.count].iter().map(|r|r.serial_fallbacks).sum();
+    })
+}
+fn write_document(s: &State, map: &str, replay: Option<serde_json::Value>, out: &mut impl Write) -> anyhow::Result<()> {
+    use serde::{ser::{SerializeMap, SerializeSeq}, Serializer};
+    let rows = &s.rows[..s.count];
+    anyhow::ensure!(rows.iter().all(|r|r.errors==0 && r.total>=r.coverage && r.total>0 && r.exclusive.iter().sum::<u64>()==r.coverage),"census hierarchy/closure failure");
+    let width = if replay.is_some() { REGIONS } else { LEGACY_REGIONS };
+    let serial_fallbacks:u64=rows.iter().map(|r|r.serial_fallbacks).sum();
     #[cfg(feature="vita_renderer")]
     let audio_static_cache=crate::render::vita_renderer::config().audio_static_cache;
     #[cfg(not(feature="vita_renderer"))]
     let audio_static_cache=false;
-    serde_json::to_writer(&mut *out,&serde_json::json!({"schema":7,"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":&COUNTERS[..],"actor_capacity":ACTORS,"serial_reasons":REASONS,
-        "audio_static_cache":audio_static_cache,"map":map,"regions":&NAMES[..],"owners":OWNERS,
+    let fields = serde_json::json!({"schema":if replay.is_some() {8} else {7},"publication_rejection_columns":PUBLICATION_REJECTIONS,"diagnostic_counter_columns":&COUNTERS[..],"actor_capacity":ACTORS,"serial_reasons":REASONS,
+        "audio_static_cache":audio_static_cache,"map":map,"regions":&NAMES[..width],"owners":OWNERS,
         "static_count_columns":["queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks"],
-        "query_classes":["room","ambient","effects"],"rows":rows,"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
+        "query_classes":["room","ambient","effects"],"capacity":CAPACITY,"table_entries":TABLE,"table_probes":PROBES,
         "serial_fallbacks":serial_fallbacks,
         "world_clocks_reused":crate::frame_profile::enabled(),"world_clock_reads_per_draw":4,
-        "parent_mask_frame_bit":REGIONS,"parent_mask_words":2,
+        "parent_mask_frame_bit":width,"parent_mask_words":2,
         "npc_query_controllers":["generic","levels","other"],
         "npc_query_categories":["gravity_recoil","navigation_detour","sight_visibility","spawn_wave","other"],
         "npc_query_columns":["queries","static_queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks","sweep_ns","static_ns","repeat_keys","table_evictions"],
@@ -528,24 +557,52 @@ fn write(s:&State,map:&str,out:&mut impl Write)->anyhow::Result<()> {
         "schema_notes":"World leaves use census-enabled Totals with four shared boundary reads per draw. With frame_total_only the full profiler is off, so world calls are added_brackets; reused_brackets applies only when the full profiler owns the clocks. Finish API/uniform leaves accumulate locally. With frame_total_only, old MetricInstant reads are inactive: upload API and uniform clocks are added. Otherwise buffer-update block reuses its existing MetricInstant pair. joint_upload_cpu exclusive and joint_uniform_prep are upper bounds including observer overhead. actor_npc_overlays includes electric/frozen entry and visibility restoration; overlay_calls counts these entries under actor_gather. Empty-bracket calibration measures the inactive span path, not active bookkeeping; clock samples include amortized outer reads. No automatic bias subtraction.",
         "schema7_notes":SCHEMA7_NOTES,"vertex_bytes":std::mem::size_of::<macroquad::prelude::Vertex>(),
         "tls_counting":s.tls_window,
-        "observer_threshold_ms":1.0}))?;writeln!(out)?;Ok(())
+        "observer_threshold_ms":1.0});
+
+    // Stream the rows after the window. Keep only one encoded row in memory.
+    struct Rows<'a> { rows: &'a [Row], width: usize, warmup: usize }
+    impl serde::Serialize for Rows<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut seq = serializer.serialize_seq(Some(self.rows.len()))?;
+            for (i, row) in self.rows.iter().enumerate() {
+                seq.serialize_element(&row_json(i, row, self.width, self.warmup))?;
+            }
+            seq.end()
+        }
+    }
+    let mut serializer = serde_json::Serializer::new(&mut *out);
+    let mut doc = serializer.serialize_map(None)?;
+    for (field, value) in fields.as_object().unwrap() {
+        doc.serialize_entry(field, value)?;
+    }
+    let warmup = if let Some(replay) = replay {
+        doc.serialize_entry("replay_window", &replay)?;
+        0
+    } else { 60 };
+    doc.serialize_entry("rows", &Rows { rows, width, warmup })?;
+    SerializeMap::end(doc)?;
+    writeln!(out)?;
+    Ok(())
 }
 const SCHEMA7_NOTES:&str="Schema 7 appends 18 leaves (67..84) and 12 counters (32..43); schema-6 indexes are unchanged. joint_merge_* nest under joint_merge_pack (signature/plan/copy run once per merge bank, normally 2 calls). camera_* nest under camera_scene; the audio listener update stays in camera_scene exclusive with its existing audio_prepare child. gather_* nest under actor_gather and may contain the older actor leaves. world_draw_between is the time between draw i's last world lap and draw i+1's first read; it reuses those reads (reused bracket). merge_*_vertices count vertices, multiply by vertex_bytes for bytes. tls_* are per-frame deltas of the pthread_getspecific counting wrapper and are zero unless the survey enabled tls_count; with census on they include the census's own lookups.";
 fn write_csv(s:&State,out:&mut impl Write)->anyhow::Result<()> {
+    write_csv_rows(s, LEGACY_REGIONS, out)
+}
+fn write_csv_rows(s: &State, width: usize, out: &mut impl Write) -> anyhow::Result<()> {
     write!(out,"accepted_frame,sequence,measured,frame_total_ns,bracket_union_ns,unbracketed_residual_ns,added_brackets,reused_brackets")?;
-    for suffix in ["inclusive_ns","exclusive_ns","calls","parent_mask","parent_mask_hi"] {for name in NAMES {write!(out,",{name}_{suffix}")?;}}
+    for suffix in ["inclusive_ns","exclusive_ns","calls","parent_mask","parent_mask_hi"] {for name in &NAMES[..width] {write!(out,",{name}_{suffix}")?;}}
     for name in PUBLICATION_REJECTIONS {write!(out,",publication_reject_{name}")?;}
     for name in COUNTERS {write!(out,",{name}")?;}
     for controller in ["generic","levels","other"] {for category in ["gravity_recoil","navigation_detour","sight_visibility","spawn_wave","other"] {
         for column in ["queries","static_queries","nodes","hulls_tested","hulls_clipped","planes","legacy_certificates","fallbacks","sweep_ns","static_ns","repeat_keys","table_evictions"] {write!(out,",npc_{controller}_{category}_{column}")?;}
     }}
     writeln!(out)?;
-    for (i,r) in s.rows.iter().enumerate() {
+    for (i,r) in s.rows[..s.count].iter().enumerate() {
         write!(out,"{},{},{},{},{},{},{},{}",i+1,r.sequence,r.measured,r.total,r.coverage,r.total-r.coverage,r.calls[30..].iter().map(|&n|n as u64).sum::<u64>()-r.reused_brackets,r.reused_brackets)?;
-        for values in [&r.inclusive[..],&r.exclusive[..]] {for n in values {write!(out,",{n}")?;}}
-        for n in r.calls {write!(out,",{n}")?;}
-        for n in r.parents {write!(out,",{n}")?;}
-        for n in r.parents_hi {write!(out,",{n}")?;}
+        for values in [&r.inclusive[..width],&r.exclusive[..width]] {for n in values {write!(out,",{n}")?;}}
+        for n in &r.calls[..width] {write!(out,",{n}")?;}
+        for n in &r.parents[..width] {write!(out,",{n}")?;}
+        for n in &r.parents_hi[..width] {write!(out,",{n}")?;}
         for n in r.rejections {write!(out,",{n}")?;}
         for n in r.counters {write!(out,",{n}")?;}
         for bucket in r.npc_queries {for n in bucket {write!(out,",{n}")?;}}
@@ -554,7 +611,7 @@ fn write_csv(s:&State,out:&mut impl Write)->anyhow::Result<()> {
     Ok(())
 }
 pub(crate) fn export(map:&str)->anyhow::Result<()> {
-    if !active(){return Ok(());}
+    if !active() || replay_frame_active(){return Ok(());}
     #[cfg(target_os="vita")]
     let path=std::path::PathBuf::from(format!("ux0:data/alice/private/frame_profile/{map}-fullbench-census-180.json"));
     #[cfg(not(target_os="vita"))]
@@ -565,7 +622,7 @@ pub(crate) fn export(map:&str)->anyhow::Result<()> {
     ACTIVE.with(|a|a.set(false));Ok(())
 }
 #[cfg(not(target_os="vita"))]
-pub(crate) fn host_finish(map:&str)->anyhow::Result<()> {if active(){STATE.with(|s|s.borrow_mut().close(Instant::now()));export(map)?;}Ok(())}
+pub(crate) fn host_finish(map:&str)->anyhow::Result<()> {if active() && !replay_frame_active(){STATE.with(|s|s.borrow_mut().close(Instant::now()));export(map)?;}Ok(())}
 
 #[cfg(test)]
 pub(crate) fn test_begin(enabled:bool) {begin(enabled);}
@@ -666,12 +723,12 @@ mod tests {
             let s=s.borrow();let mut bytes=Vec::new();write_csv(&s,&mut bytes).unwrap();
             let csv=std::str::from_utf8(&bytes).unwrap();let mut lines=csv.lines();
             let header:Vec<_>=lines.next().unwrap().split(',').collect();
-            assert_eq!(header.len(),8+5*REGIONS+11+COUNTERS.len()+15*12);
+            assert_eq!(header.len(),8+5*LEGACY_REGIONS+11+COUNTERS.len()+15*12);
             for (i,line) in lines.enumerate() {
                 let values:Vec<_>=line.split(',').collect();assert_eq!(values.len(),header.len());
                 let row=&v["rows"][i];
                 for (field,index) in [("frame_total_ns",3),("bracket_union_ns",4),("unbracketed_residual_ns",5),("added_brackets",6),("reused_brackets",7)] {assert_eq!(values[index].parse::<u64>().unwrap(),row[field].as_u64().unwrap());}
-                for (field,base) in [("inclusive_ns",8),("exclusive_ns",8+REGIONS),("calls",8+2*REGIONS),("parent_masks",8+3*REGIONS),("parent_masks_hi",8+4*REGIONS),("publication_rejections",8+5*REGIONS),("diagnostic_counters",19+5*REGIONS)] {
+                for (field,base) in [("inclusive_ns",8),("exclusive_ns",8+LEGACY_REGIONS),("calls",8+2*LEGACY_REGIONS),("parent_masks",8+3*LEGACY_REGIONS),("parent_masks_hi",8+4*LEGACY_REGIONS),("publication_rejections",8+5*LEGACY_REGIONS),("diagnostic_counters",19+5*LEGACY_REGIONS)] {
                     for (j,n) in row[field].as_array().unwrap().iter().enumerate() {assert_eq!(values[base+j].parse::<u64>().unwrap(),n.as_u64().unwrap());}
                 }
             }
@@ -733,7 +790,7 @@ mod tests {
             assert_eq!(v["rows"][60]["measured_frame"],1);assert_eq!(v["rows"][179]["measured_frame"],120);
             assert_eq!(v["schema"],7);assert_eq!(v["audio_static_cache"],true);
             assert_eq!(v["serial_fallbacks"],0);assert_eq!(v["rows"][0]["serial_fallbacks"],0);
-            assert_eq!(v["regions"].as_array().unwrap().len(),NAMES.len());
+            assert_eq!(v["regions"].as_array().unwrap().len(),LEGACY_REGIONS);
             assert_eq!(v["actor_capacity"],ACTORS);assert!(v.get("static_count_columns").is_some());
             s.overflow=true;assert!(write(&s,"fixture",&mut Vec::new()).is_err());});begin(false);
     }
@@ -832,7 +889,7 @@ mod tests {
         let run=|| {let start=Instant::now();
             for _ in 0..N {drop(std::hint::black_box(span(std::hint::black_box(Region::CameraFollow))));}
             start.elapsed().as_nanos() as f64/f64::from(N)};
-        let gated=EVER_ARMED.load(std::sync::atomic::Ordering::Relaxed);
+        let gated=ARMED.load(Relaxed) != 0;
         let first=[run(),run(),run()];
         // Arm on another thread: this thread's ACTIVE stays false, so spans take the TLS check.
         std::thread::spawn(|| {begin(true);begin(false);}).join().unwrap();
