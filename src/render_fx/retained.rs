@@ -787,11 +787,12 @@ impl Gpu {
             // Only the vertex program changes: keep the fragment route of the CPU twin.
             let variant = match program { Route::CorpseOpaque => 1, Route::ActorLean => 2, Route::ActorLeanOpaque => 3, _ => 0 };
             self.skin.as_mut().expect("accepted skin program").draw(p,skin,variant,u,depth_write,&self.white,c.actor_frontface_cull);
+            // The skin program, pipeline and bindings replaced the CPU programs' state. Their
+            // uniform values are per program in GL and stay valid: keep the field caches.
             self.submit_cache.interrupt();
             self.uniform_cache.interrupt();
-            self.field_uniforms.interrupt();
             for lite in self.lite.iter_mut().chain(&mut self.corpse_opaque).chain(self.fx_add.iter_mut().flatten()).chain(self.actor_lean.iter_mut().flatten()) {
-                lite.uniforms.interrupt(); lite.fields.interrupt();
+                lite.uniforms.interrupt();
             }
             self.stats.draws += 1;
             self.stats.triangles += p.geometry().indices.len() as u64 / 3;
@@ -801,6 +802,8 @@ impl Gpu {
             if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
             return;
         }
+        // This draw applies another program's state: the next skin draw reapplies its own.
+        if let Some(skin) = &mut self.skin { skin.interrupt_state(); }
         // The specialized bank this draw uses; `None` is the full program.
         let bank = match program {
             Route::Full => None,
@@ -1533,6 +1536,7 @@ pub(crate) fn finish_world(
     gpu.uniform_cache.interrupt(); // Probe only uninterrupted draws of this owned program.
     gpu.submit_cache.interrupt();
     gpu.field_uniforms.interrupt();
+    if let Some(s) = &mut gpu.skin { s.interrupt(); }
     if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
     if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
     for l in gpu.actor_lean.iter_mut().flatten() { l.fields.interrupt(); l.uniforms.interrupt(); }
@@ -1767,6 +1771,7 @@ pub(crate) fn finish_world(
         crate::render::vita_renderer::begin_3d_pass(PassAction::Nothing);
         macroquad::miniquad::gl::glDepthMask(1);
     }
+    if let Some(s) = &mut gpu.skin { s.interrupt_state(); }
     drop(pass_leaf);
     {
         let _span = crate::frame_profile::span("vita_fx_opaque_submit");
@@ -1778,6 +1783,7 @@ pub(crate) fn finish_world(
     let pass_leaf=crate::phase_census::span(crate::phase_census::Region::FinishPass);
     count("vita_joint_alpha_groups", list.len() as u64);
     gpu.field_uniforms.interrupt();
+    if let Some(s) = &mut gpu.skin { s.interrupt(); }
     if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
     if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
     for l in gpu.actor_lean.iter_mut().flatten() { l.fields.interrupt(); l.uniforms.interrupt(); }
@@ -1800,6 +1806,7 @@ pub(crate) fn finish_world(
                     gpu.uniform_cache.interrupt();
                     gpu.submit_cache.interrupt();
                     gpu.field_uniforms.interrupt();
+                    if let Some(s) = &mut gpu.skin { s.interrupt(); }
                     if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
                     if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
     for l in gpu.actor_lean.iter_mut().flatten() { l.fields.interrupt(); l.uniforms.interrupt(); }
@@ -1846,6 +1853,7 @@ pub(crate) fn finish_world(
     let _recycle_timer = crate::light_profile::fx_timer(crate::light_profile::FxMetric::FinishRecycle);
     gpu.submit_cache.interrupt();
     gpu.uniform_cache.interrupt();
+    if let Some(s) = &mut gpu.skin { s.interrupt(); }
     packets.clear(); gpu.packet_storage = packets;
     ranges.clear(); gpu.range_storage = ranges;
     for &id in &recycled {

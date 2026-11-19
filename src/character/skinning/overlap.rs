@@ -628,9 +628,10 @@ impl Store {
                 && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
         let instance=previous.map_or_else(super::identity::next_instance,|(_,d)|d.instance);
         let start = i.surfaces.len();
+        let mut share = crate::render_fx::GpuSkinShare::default();
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };
-            if crate::render_fx::gpu_skin_ant(surface,mesh,p.pose,p.scales,p.transform,p.scale,p.fullbright,p.alpha) {
+            if crate::render_fx::gpu_skin_ant(surface,mesh,&mut share,p.pose,p.scales,p.transform,p.scale,p.fullbright,p.alpha) {
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                 crate::sim_maps::probe::gpu_skin_occurrence(actor,mesh_id);
                 continue;

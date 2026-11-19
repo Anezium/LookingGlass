@@ -1891,15 +1891,19 @@ mod material_identity_tests {
     }
 }
 
+/// One actor draw's GPU skin palette, shared by its surfaces: create one per skeleton
+/// draw (one pose) and pass it to every `gpu_skin_ant` call of that draw.
+#[cfg(feature="vita_renderer")]
+pub(crate) type GpuSkinShare = retained::gpu_skin::Share;
 /// Opaque skinned surfaces whose layers are plain textures or environment reflections
 /// can leave the CPU mesh unpublished: their vertices are skinned in the vertex program.
 /// `gpu_skin_ants` admits only the army-ant pair; `gpu_skin_actors` every skinned model.
 #[cfg(feature="vita_renderer")]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)->bool {
+pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,share:&mut GpuSkinShare,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)->bool {
     let c=crate::render::vita_renderer::config();
     if !(c.gpu_skin_actors || c.gpu_skin_ants && source.gpu_ant) {return false;}
-    let verdict=gpu_skin_payload(c,source,mesh,pose,scales,transform,scale,fullbright,alpha);
+    let verdict=gpu_skin_payload(c,source,mesh,share,pose,scales,transform,scale,fullbright,alpha);
     retained::gpu_skin::census::note(verdict.as_ref().err().copied().unwrap_or(retained::gpu_skin::Reason::Gpu),mesh.vertices.len());
     let Ok((surface,payload))=verdict else {return false;};
     let (time,appearance)=FRAME.with(|f|{let f=f.borrow();(f.time,f.appearance)});
@@ -1918,7 +1922,7 @@ pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[cr
 }
 #[cfg(feature="vita_renderer")]
 #[allow(clippy::too_many_arguments)]
-fn gpu_skin_payload(c:&crate::render::vita_renderer::Config,source:&crate::skeletal::Surface,mesh:&Mesh,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)
+fn gpu_skin_payload(c:&crate::render::vita_renderer::Config,source:&crate::skeletal::Surface,mesh:&Mesh,share:&mut GpuSkinShare,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)
     ->Result<(Rc<Surface>,Rc<retained::gpu_skin::Occurrence>),retained::gpu_skin::Reason> {
     use retained::gpu_skin::Reason;
     if c.actor_opaque_shader || c.flat_actor_light || c.packet_min_pixels>0. || !retained_active() || !c.actor_fast_path
@@ -1935,6 +1939,6 @@ fn gpu_skin_payload(c:&crate::render::vita_renderer::Config,source:&crate::skele
     if source.vertices.len()!=mesh.vertices.len() || source.indices!=mesh.indices
         || source.vertices.iter().zip(&mesh.vertices).any(|(a,b)|a.uv.to_array().map(f32::to_bits)!=b.uv.to_array().map(f32::to_bits)) {return Err(Reason::Topology);}
     let eye=FRAME.with(|f|f.borrow().camera);
-    let payload=retained::gpu_skin::occurrence(input,pose,scales,transform,scale,fullbright,alpha,eye)?;
+    let payload=retained::gpu_skin::occurrence(input,share,pose,scales,transform,scale,fullbright,alpha,eye)?;
     Ok((surface.clone(),payload))
 }

@@ -2054,10 +2054,12 @@ fn draw_skin_deformed(
             drop(source);
             for mesh in meshes.iter().flatten() { crate::render_fx::skin(mesh); }
         } else {
+            #[cfg(feature="vita_renderer")]
+            let mut share = crate::render_fx::GpuSkinShare::default();
             for (surface, mesh) in skeleton.surfaces.iter().zip(meshes.iter_mut()) {
                 let Some(mesh) = mesh else { continue; };
                 #[cfg(feature="vita_renderer")]
-                if crate::render_fx::gpu_skin_ant(surface, mesh, pose, bone_scales, transform, scale, fullbright, alpha) { continue; }
+                if crate::render_fx::gpu_skin_ant(surface, mesh, &mut share, pose, bone_scales, transform, scale, fullbright, alpha) { continue; }
                 let _skin = crate::frame_profile::span("skinning");
                 let positions = crate::frame_profile::characters_span("characters_skinning_positions");
                 skinning::positions(&mut skinning::Job { input: &surface.vertices,
