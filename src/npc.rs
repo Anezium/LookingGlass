@@ -2353,6 +2353,24 @@ const _: fn() = || {
     send_sync::<ModelData>();
 };
 
+// `NpcArt` owns GL-affine resources and must stay on the owner thread. This fails to
+// compile (ambiguous impl) the day it becomes `Send`, in every build, Vita included.
+const _: fn() = || {
+    trait AmbiguousIfSend<A> { fn some_item() {} }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    struct Invalid;
+    impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
+    let _ = <NpcArt as AmbiguousIfSend<_>>::some_item;
+};
+
+/// Release builds keep drawing without the debug assertion; say once that NPCs were skipped.
+fn report_world_free_npc_skip(site: &str) {
+    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("[lg/overlap] world-free NPC draw skipped actors ({site}); serial fallback unavailable");
+    }
+}
+
 impl Npcs {
     pub fn greetings(&self) -> u64 { self.sim.greetings }
     /// Host-only census of incomplete schemas, including dispatch visibility reads.
@@ -3036,6 +3054,7 @@ impl NpcArtResources {
         let inputs = self.actor_inputs.as_ref().filter(|i| i.valid_resources(&self.snapshot_registry, &self.models));
         #[cfg(any(debug_assertions, not(target_os = "vita")))]
         assert!(live.is_some() || inputs.is_some(), "world-free NPC draw lost its accepted inputs");
+        if live.is_none() && inputs.is_none() { report_world_free_npc_skip("inputs"); }
         let draw_count = inputs.map_or_else(
             || live.map_or(0, |sim| sim.actors.len()),
             |_| self.snapshot_registry.slots.len(),
@@ -3167,7 +3186,7 @@ impl NpcArtResources {
             }
             #[cfg(any(debug_assertions, not(target_os = "vita")))]
             assert!(live.is_some(), "world-free NPC draw reached live fallback at slot {id}");
-            let Some(live) = live else { continue };
+            let Some(live) = live else { report_world_free_npc_skip("fallback"); continue };
             let actor = &live.actors[id];
             let corpse = actor.ant.as_ref().is_some_and(|a| a.health <= 0.);
             let dead = corpse || actor.resident.as_ref().is_some_and(|p|p.health()<=0.)
