@@ -130,7 +130,7 @@ mod tests {
         let mut output=[Vertex {position:Vec3::ZERO,normal:Vec4::ZERO,color:[0;4],uv:Vec2::ONE}];
         let fill=|v:&mut [Vertex]|{v[0].position=Vec3::X;v[0].normal=Vec4::Y;v[0].color=[3;4];};
         assert!(!cache_with_flags(&surface,actor,&mut output,p,false,true,fill));
-        output[0].position=Vec3::ZERO;output[0].uv=Vec2::splat(7.);
+        output[0]=Vertex {position:Vec3::ZERO,uv:Vec2::splat(7.),..output[0]};
         assert!(cache_with_flags(&surface,None,&mut output,p,false,true,|_|panic!("duplicate recomputed")));
         assert_eq!(output[0].position,Vec3::X);assert_eq!(output[0].uv,Vec2::splat(7.));
         begin();
