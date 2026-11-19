@@ -37,10 +37,12 @@ fn main() {
         }
         println!("cargo:rustc-link-arg=-Wl,--undefined=sceUserMainThreadStackSize");
         println!("cargo:rustc-link-arg=-Wl,--undefined=_newlib_heap_size_user");
-        // Startup tracing and actor diagnostics grow code/exception metadata.
+        // Startup tracing and actor diagnostics grow code/exception metadata, and the
+        // snapshot/overlap track adds more: the RW start moved from 0x82080000 to
+        // 0x82180000 when the merge of both no longer fitted (RX ended 49 KB past it).
         // Reserve SCE metadata slack (>=3348 bytes),
         // and verify the final program headers for every packaged build.
-        println!("cargo:rustc-link-arg=-Wl,--section-start=.init_array=0x82080000");
+        println!("cargo:rustc-link-arg=-Wl,--section-start=.init_array=0x82180000");
         if std::env::var_os("CARGO_FEATURE_VITA_RENDERER").is_some() {
             println!("cargo:rustc-link-arg=-Wl,--wrap=invoke_splashscreen");
         }
