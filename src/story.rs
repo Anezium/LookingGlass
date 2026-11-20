@@ -1,5 +1,5 @@
 //! Selected dialogue beats read from the user's archives. Never executes game scripts.
-use crate::{assets::Assets, bsp::Bsp};
+use crate::{assets::Assets, audio::step::VoiceRequest, bsp::Bsp};
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::*;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -310,16 +310,6 @@ struct Playing {
     elapsed: f32,
     started: bool,
 }
-/// The sim decides when a voice starts or stops; the owner performs it.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum VoiceRequest {
-    Play { path: String, offset_seconds: f32 },
-    Stop,
-}
-const _: fn() = || {
-    fn check<T: Send>() {}
-    check::<VoiceRequest>();
-};
 #[derive(Default)]
 pub struct Story {
     /// A scene can hold the next line until its actor movement has finished.
