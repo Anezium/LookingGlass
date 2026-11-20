@@ -148,7 +148,7 @@ impl Interactions {
             _ => None,
         }
     }
-    fn resolve_conversation(
+    pub(crate) fn resolve_conversation(
         &self,
         world: &World,
         eye: Vec3,

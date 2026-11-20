@@ -240,7 +240,7 @@ pub trait LevelController: Any + Send {
     /// Commit an existing presentation thread through the same fog/sky owner as a trigger.
     fn take_presentation_event(&mut self) -> Option<&'static str> { None }
     /// Authored emitter visibility and binding; server breath points are independent.
-    fn particles(&self, _steam: &mut crate::particles::Steam) {}
+    fn particles(&self, _steam: &mut crate::particles::SteamSim) {}
     /// Animated lights owned by this visit, selected with ordinary world lights.
     fn lights(&self) -> Vec<crate::lighting::Light> { Vec::new() }
 

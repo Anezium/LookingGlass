@@ -515,6 +515,7 @@ pub enum PickupKind {
     Weapon(usize),
     Power(crate::powerups::Kind),
 }
+#[derive(Clone)]
 pub struct Pickup {
     pub id: String,
     pub model: String,

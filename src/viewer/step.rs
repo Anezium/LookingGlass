@@ -1,7 +1,6 @@
-use super::LevelArt;
 use crate::{
     audio::step::{AudioOp, AudioStep},
-    character::{self, Character},
+    character::{self, ArtOp},
     collision::World,
     hud::HudOp,
     interaction::{self, Interactions},
@@ -11,7 +10,8 @@ use crate::{
     save::{self, Campaign},
 };
 use anyhow::Result;
-use macroquad::prelude::*;
+use macroquad::prelude::{vec2, vec3, Color, KeyCode, Vec3};
+use std::sync::Arc;
 
 /// The owned gameplay state at the synchronous step boundary.
 pub(super) struct SimState {
@@ -53,6 +53,10 @@ pub(super) struct SimState {
 const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<SimState>();
+    assert_send::<crate::input::StepInput>();
+    assert_send::<(&mut SimState, &mut StepLocals, bool, StepAInput<'_>)>();
+    assert_send::<(&mut SimState, &mut StepLocals, bool, StepBInput<'_>)>();
+    assert_send::<StepView>();
 };
 
 /// Values the owner has already resolved for the current step.
@@ -85,13 +89,6 @@ pub(super) enum Due {
     Exit(LevelExit),
 }
 
-/// Serial art handles remain outside the Send payload.
-pub(super) struct StepArt {
-    pub(super) alice: character::AliceArt,
-    pub(super) npcs: crate::npc::NpcArt,
-    pub(super) steam: crate::particles::SteamArt,
-}
-
 pub(super) struct StepScopes {
     #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
     pub(super) frame: Option<crate::frame_profile::Span>,
@@ -111,11 +108,17 @@ impl StepScopes {
     }
 }
 
-pub(super) struct StepAOwner<'a> {
-    pub(super) map: &'a crate::bsp::Bsp,
+#[derive(Default)]
+pub(super) struct ConsoleOps {
+    pub(super) close: bool,
+    pub(super) message: Option<&'static str>,
+}
+
+pub(super) struct StepAInput<'a> {
+    pub(super) map: Arc<crate::bsp::Bsp>,
     pub(super) preferences: &'a crate::preferences::Preferences,
-    pub(super) console: &'a mut crate::console::Console,
-    pub(super) power_art: &'a mut crate::powerups::Art,
+    pub(super) console: &'a mut ConsoleOps,
+    pub(super) art_ops: &'a mut Vec<ArtOp>,
     pub(super) hud_ops: &'a mut Vec<HudOp>,
     pub(super) audio_step: &'a mut AudioStep,
     pub(super) scopes: &'a mut StepScopes,
@@ -125,33 +128,39 @@ pub(super) struct StepAOwner<'a> {
     pub(super) host_transition: &'a str,
 }
 
-pub(super) struct StepBOwner<'a> {
+pub(super) struct StepBInput<'a> {
     pub(super) map_name: &'a str,
     pub(super) preferences: &'a crate::preferences::Preferences,
-    pub(super) power_art: &'a mut crate::powerups::Art,
-    pub(super) level_art: &'a LevelArt,
-    pub(super) handoff_return: &'a crate::render_snapshot::HandoffReturn,
+    pub(super) art_ops: &'a mut Vec<ArtOp>,
+    pub(super) aspect: f32,
+    pub(super) handoff_pose: Option<crate::cinematic::ActorPose>,
     pub(super) hud_ops: &'a mut Vec<HudOp>,
     pub(super) audio_step: &'a mut AudioStep,
     pub(super) scopes: &'a mut StepScopes,
     pub(super) loot_visit: &'a str,
     pub(super) loot_before: &'a [crate::loot::Source],
-    pub(super) snapshot_handoff: bool,
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     pub(super) frame: u64,
     #[cfg(target_os = "vita")]
     pub(super) bench_camera: Option<(Vec3, Vec3, bool)>,
 }
 
+pub(super) struct CameraOut {
+    pub(super) position: Vec3,
+    pub(super) target: Vec3,
+    pub(super) up: Vec3,
+    pub(super) fovy: f32,
+}
+
 pub(super) struct StepView {
+    pub(super) presentation: crate::presentation_input::PresentationInput,
+    pub(super) camera_out: CameraOut,
     pub(super) active: bool,
     pub(super) direction: Vec3,
     pub(super) targets: Vec<crate::combat::Target>,
     pub(super) pand_cinematic: bool,
     pub(super) pand_camera: Option<crate::cinematic::Camera>,
     pub(super) scripted_camera: Option<crate::cinematic::Camera>,
-    pub(super) camera: Vec3,
-    pub(super) target: Vec3,
     pub(super) show_alice: bool,
     #[cfg(target_os = "vita")]
     pub(super) gameplay_alice: bool,
@@ -198,12 +207,11 @@ pub(super) fn step_due(
 
 /// Gameplay movement when its arm is active, followed by the common story suffix.
 pub(super) fn step_a(
-    mut sim: SimState,
-    mut art: StepArt,
+    sim: &mut SimState,
     step: &mut StepLocals,
     gameplay: bool,
-    owner: StepAOwner<'_>,
-) -> (SimState, StepArt, Result<(bool, Due)>) {
+    input: StepAInput<'_>,
+) -> Result<(bool, Due)> {
     let StepLocals {
         simulate,
         overlay_before,
@@ -220,11 +228,11 @@ pub(super) fn step_a(
         summon_cat,
         ..
     } = *step;
-    let StepAOwner {
+    let StepAInput {
         map,
         preferences,
         console,
-        power_art,
+        art_ops,
         hud_ops,
         audio_step,
         scopes,
@@ -232,9 +240,7 @@ pub(super) fn step_a(
         route_session,
         saves_writable,
         host_transition,
-    } = owner;
-    let mut alice = Character::from_parts(sim.alice, art.alice);
-    let mut npcs = crate::npc::Npcs::from_parts(sim.npcs, art.npcs);
+    } = input;
     let mut advance_dialogue = step.advance_dialogue;
     let mut pending_transition = step.pending_transition.take();
     macro_rules! pressed {
@@ -336,12 +342,15 @@ pub(super) fn step_a(
                     scopes.frame("frame_interaction_search");
                     crate::frame_profile::set_owner(crate::frame_profile::Owner::InteractionSearch);
                 }
-                let talk = sim.interactions.conversation(
+                let talk = sim.interactions.resolve_conversation(
                     &sim.world,
                     sim.player.eye(),
                     aim,
-                    &npcs,
                     &sim.story,
+                    |name| {
+                        sim.npcs
+                            .talk_target(name, &sim.world, sim.player.eye(), aim)
+                    },
                 );
                 let owner = use_owner(
                     sim.story.busy(),
@@ -361,7 +370,7 @@ pub(super) fn step_a(
                         if let Some(result) =
                             sim.interactions.start_conversation(talk, &mut sim.story)
                         {
-                            npcs.begin_talk(talk.actor());
+                            sim.npcs.begin_talk(talk.actor());
                             events.merge(result);
                         }
                     }
@@ -379,7 +388,7 @@ pub(super) fn step_a(
                 }
                 events.merge(sim.interactions.update(
                     world_dt,
-                    map,
+                    &map,
                     &mut sim.world,
                     &sim.player,
                     aim,
@@ -424,12 +433,13 @@ pub(super) fn step_a(
                 };
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                 let _movers_companions = crate::sim_maps::timer("movers_companions_ns");
-                sim.interactions.companions_for_movers(&npcs.companions());
+                sim.interactions
+                    .companions_for_movers(&sim.npcs.companions());
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                 drop(_movers_companions);
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                 let _movers_targets = crate::sim_maps::timer("movers_targets_ns");
-                let mover_targets = npcs.targets();
+                let mover_targets = sim.npcs.targets();
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                 {
                     drop(_movers_targets);
@@ -446,7 +456,7 @@ pub(super) fn step_a(
                     let _time = crate::sim_maps::timer("r26_movers_ns");
                     sim.interactions.advance_school(
                         mover_dt,
-                        map,
+                        &map,
                         &mut sim.world,
                         &mut sim.player,
                     )?;
@@ -558,15 +568,15 @@ pub(super) fn step_a(
                         .is_some_and(|s| s.cinematic())
                     && !sim.interactions.levels_controlled()
                 {
-                    if alice.ice_locked() {
+                    if sim.alice.ice_locked() {
                         control = Controls::default();
                         sim.player.velocity = Vec3::ZERO;
                     }
-                    if alice.attack_movement_locked() {
+                    if sim.alice.attack_movement_locked() {
                         control = Controls::default();
                     }
                     drop(control_hooks.take());
-                    sim.world.set_weapon_obstacles(alice.ice_targets());
+                    sim.world.set_weapon_obstacles(sim.alice.ice_targets());
                     #[cfg(feature = "vita_renderer")]
                     if let Some(route) = route_session {
                         sim.clock
@@ -654,7 +664,12 @@ pub(super) fn step_a(
                             sim.player = Player::new(feet);
                             sim.yaw = angle;
                             sim.pos = sim.player.eye();
-                            alice.reset(&sim.player, sim.yaw);
+                            art_ops.push(ArtOp::RetireAliceBody);
+                            sim.alice.clear_water();
+                            art_ops.push(ArtOp::ResetWaterEmitter);
+                            sync_water(sim, art_ops);
+                            sim.alice.reset(&sim.player, sim.yaw);
+                            art_ops.push(ArtOp::ClearAliceEffects);
                             sim.follow_camera.reset();
                             sim.camera_handoff.reset();
                             sim.clock.pause();
@@ -691,7 +706,12 @@ pub(super) fn step_a(
                         &sim.pickups,
                         sim.player.feet,
                         &sim.world,
-                        |item| power_art.collected(item, sim.pickup_clock),
+                        |item| {
+                            art_ops.push(ArtOp::PickupCollected {
+                                item: item.clone(),
+                                clock: sim.pickup_clock,
+                            })
+                        },
                     ) {
                         hud_ops.push(HudOp::Announce(message.into()));
                     }
@@ -746,12 +766,12 @@ pub(super) fn step_a(
                         if sim.hints.visible() {
                             audio_step.effect("sound/character/cheshire_cat/appear.wav", None);
                         }
-                        console.open = false;
+                        console.close = true;
                     }
                     Err(message) => {
                         hud_ops.push(HudOp::Announce(message.into()));
                         if summon_cat {
-                            console.print(message);
+                            console.message = Some(message);
                         }
                     }
                 }
@@ -759,7 +779,7 @@ pub(super) fn step_a(
             sim.interactions
                 .sync_pickups(&sim.stats, &mut sim.pickups, &mut sim.story);
             if let Some(b) = &mut sim.interactions.beyond {
-                b.bind_rage_player(&mut sim.player, alice.facing());
+                b.bind_rage_player(&mut sim.player, sim.alice.facing());
             }
             let story_ready = sim.interactions.prepare_story(&mut sim.story);
             if let Some(request) = sim.story.update(
@@ -790,7 +810,7 @@ pub(super) fn step_a(
                 }
             }
             if let Some(s) = &mut sim.interactions.school2 {
-                s.summon(alice.ally_target());
+                s.summon(sim.alice.ally_target());
                 s.notarget(
                     sim.stats.ignores_alice()
                         || sim
@@ -807,7 +827,7 @@ pub(super) fn step_a(
                 );
                 sim.stats.school_items = s.quest.items.clone();
                 for &hit in &feedback.summon_hits {
-                    alice.hit_summon(hit);
+                    sim.alice.hit_summon(hit);
                 }
                 sim.stats.damage(feedback.damage);
                 if feedback.will_drain > 0. {
@@ -832,12 +852,12 @@ pub(super) fn step_a(
             if let Some(d) = &mut sim.interactions.duchess {
                 if story_active && sim.stats.alive() {
                     if let Some(target) = d.target() {
-                        d.threatened(alice.threatens(&sim.world, target));
+                        d.threatened(sim.alice.threatens(&sim.world, target));
                     }
                 }
                 let before_stage = d.state.stage;
                 d.state.notarget = sim.stats.ignores_alice();
-                d.state.opponents.summon = alice.ally_target();
+                d.state.opponents.summon = sim.alice.ally_target();
                 let f = d.update(
                     if story_active { world_dt } else { 0. },
                     &sim.world,
@@ -846,7 +866,7 @@ pub(super) fn step_a(
                     &mut sim.story,
                 );
                 for &hit in &f.summon_hits {
-                    alice.hit_summon(hit);
+                    sim.alice.hit_summon(hit);
                 }
                 sim.stats.damage(f.damage);
                 sim.player.knockback(f.impulse);
@@ -878,21 +898,18 @@ pub(super) fn step_a(
         };
         Ok((story_active, due))
     })();
-    (sim.alice, art.alice) = alice.into_parts();
-    (sim.npcs, art.npcs) = npcs.into_parts();
     step.advance_dialogue = advance_dialogue;
     step.pending_transition = pending_transition;
-    (sim, art, result)
+    result
 }
 
 /// Particles, combat, camera and listener commands at their original serial cut.
 pub(super) fn step_b(
-    mut sim: SimState,
-    mut art: StepArt,
+    sim: &mut SimState,
     step: &mut StepLocals,
     story_active: bool,
-    owner: StepBOwner<'_>,
-) -> (SimState, StepArt, StepView) {
+    input: StepBInput<'_>,
+) -> StepView {
     let StepLocals {
         simulate,
         menu,
@@ -905,26 +922,22 @@ pub(super) fn step_b(
         power_before,
         ..
     } = *step;
-    let StepBOwner {
+    let StepBInput {
         map_name,
         preferences,
-        power_art,
-        level_art,
-        handoff_return,
+        art_ops,
+        aspect,
+        handoff_pose,
         hud_ops,
         audio_step,
         scopes,
         loot_visit,
         loot_before,
-        snapshot_handoff,
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         frame,
         #[cfg(target_os = "vita")]
         bench_camera,
-    } = owner;
-    let mut alice = Character::from_parts(sim.alice, art.alice);
-    let mut npcs = crate::npc::Npcs::from_parts(sim.npcs, art.npcs);
-    let mut steam = crate::particles::Steam::from_parts(sim.steam, art.steam);
+    } = input;
     macro_rules! held {
         ($key:expr) => {
             focused && !console_input && sim.input.key(preferences, $key, false)
@@ -949,7 +962,7 @@ pub(super) fn step_b(
             {
                 #[cfg(target_os = "vita")]
                 let _hotspot = crate::frame_profile::span("steam_animate");
-                steam.animate(sim.environment_clock);
+                sim.steam.animate(sim.environment_clock);
             }
             if sim
                 .interactions
@@ -957,25 +970,25 @@ pub(super) fn step_b(
                 .as_ref()
                 .is_some_and(|s| s.theatre_finished())
             {
-                steam.stop();
+                sim.steam.stop();
             }
             {
                 #[cfg(target_os = "vita")]
                 let _hotspot = crate::frame_profile::span("steam_sync");
-                steam.sync(&sim.interactions.event_world);
+                sim.steam.sync(&sim.interactions.event_world);
             }
             if let Some(v) = &sim.interactions.village {
                 {
                     #[cfg(target_os = "vita")]
                     let _hotspot = crate::frame_profile::span("village_particle_bindings");
-                    v.place_particles(&mut steam);
+                    v.place_particles(&mut sim.steam);
                 }
             }
             if let Some(p) = &sim.interactions.pandemonium {
-                p.gate_particles(&mut steam);
+                p.gate_particles(&mut sim.steam);
             }
-            sim.interactions.place_level_particles(&mut steam);
-            steam.update_clocks(dt, world_dt, sim.pos, &sim.world);
+            sim.interactions.place_level_particles(&mut sim.steam);
+            sim.steam.update_clocks(dt, world_dt, sim.pos, &sim.world);
         }
     } // simulation: particles
     scopes.census(crate::phase_census::Region::StoryWeapons);
@@ -1010,15 +1023,8 @@ pub(super) fn step_b(
         sim.spawn_landing = true;
         step.weapon_click = None;
         sim.weapon_buttons.block();
-        alice.resume_scene(
-            &sim.player,
-            sim.yaw,
-            if snapshot_handoff && level_art.pool.is_some() {
-                handoff_return.pose(&level_art.snapshot_visit)
-            } else {
-                level_art.handoff_pose()
-            },
-        );
+        sim.alice
+            .resume_scene(&sim.player, sim.yaw, handoff_pose.as_ref());
     }
     let direction = vec3(
         sim.yaw.cos() * sim.pitch.cos(),
@@ -1056,11 +1062,11 @@ pub(super) fn step_b(
         {
             step.weapon_click = None;
             sim.weapon_buttons.block();
-            alice.cancel_weapon_action();
-            alice.dismiss_summon();
+            sim.alice.cancel_weapon_action();
+            sim.alice.dismiss_summon();
         }
         if sim.flying {
-            alice.cancel_weapon_action();
+            sim.alice.cancel_weapon_action();
         }
         if sim
             .interactions
@@ -1068,7 +1074,7 @@ pub(super) fn step_b(
             .iter()
             .any(|s| s.ctl.dismiss_summons())
         {
-            alice.dismiss_summon();
+            sim.alice.dismiss_summon();
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         {
@@ -1083,7 +1089,7 @@ pub(super) fn step_b(
         sim.interactions.activate_enemies();
         let scripted_motion = sim.interactions.scripted();
         if let Some(s) = &mut sim.interactions.encounters {
-            s.summon(alice.ally_target());
+            s.summon(sim.alice.ally_target());
             s.notarget(
                 sim.stats.ignores_alice()
                     || sim
@@ -1110,7 +1116,7 @@ pub(super) fn step_b(
                 sim.player.eye(),
             );
             for &hit in &f.summon_hits {
-                alice.hit_summon(hit);
+                sim.alice.hit_summon(hit);
             }
             sim.stats.damage(f.damage);
             sim.player.knockback(f.impulse);
@@ -1120,7 +1126,7 @@ pub(super) fn step_b(
         if sim.interactions.has_level_combat() {
             // Pool's scene-owned ants and registered controllers share the route's combat hook.
             let notarget = sim.stats.ignores_alice();
-            let summon = alice.ally_target();
+            let summon = sim.alice.ally_target();
             let dt = if active
                 && !sim.story.busy()
                 && !sim
@@ -1143,7 +1149,7 @@ pub(super) fn step_b(
             } else {
                 0.
             };
-            let threatens = |t: &crate::combat::Target| alice.threatens(&sim.world, *t);
+            let threatens = |t: &crate::combat::Target| sim.alice.threatens(&sim.world, *t);
             let f = sim.interactions.levels_step(&mut crate::level::Combat {
                 dt,
                 world: &sim.world,
@@ -1155,21 +1161,22 @@ pub(super) fn step_b(
                 threatens: &threatens,
             });
             for &hit in &f.summon_hits {
-                alice.hit_summon(hit);
+                sim.alice.hit_summon(hit);
             }
             sim.stats.damage(f.damage);
             sim.player.knockback(f.impulse);
             audio_step.feedback(f);
         }
         crate::spike_log::sim(crate::spike_log::Sim::Npcs);
-        npcs.summon(alice.ally_target());
-        npcs.activate_levels(&sim.interactions.levels);
-        npcs.notarget(sim.stats.ignores_alice());
+        sim.npcs.summon(sim.alice.ally_target());
+        sim.npcs.activate_levels(&sim.interactions.levels);
+        sim.npcs.notarget(sim.stats.ignores_alice());
         if active && !sim.story.busy() && !sim.interactions.scripted() && world_dt > 0. {
-            npcs.chess_threats(|t| alice.threatens(&sim.world, *t));
+            sim.npcs
+                .chess_threats(|t| sim.alice.threatens(&sim.world, *t));
         }
-        npcs.level_patrols(&sim.interactions.levels);
-        let feedback = npcs.update(
+        sim.npcs.level_patrols(&sim.interactions.levels);
+        let feedback = sim.npcs.update(
             if active
                 && !sim.story.busy()
                 && !sim
@@ -1187,18 +1194,19 @@ pub(super) fn step_b(
             sim.player.eye(),
         );
         crate::spike_log::sim(crate::spike_log::Sim::CombatRest);
-        alice.story_pose(&sim.story, if story_active { dt } else { 0. });
-        npcs.story_pose(
+        sim.alice
+            .story_pose(&sim.story, if story_active { dt } else { 0. });
+        sim.npcs.story_pose(
             &sim.story,
             if active { world_dt } else { 0. },
             &sim.world,
             sim.player.eye(),
         );
         if let Some(v) = &sim.interactions.village {
-            v.cinema.apply_npcs(&mut npcs);
+            v.cinema.apply_npc_sim(&mut sim.npcs);
         }
         for &hit in &feedback.summon_hits {
-            alice.hit_summon(hit);
+            sim.alice.hit_summon(hit);
         }
         sim.stats.damage(feedback.damage);
         if feedback.will_drain > 0. {
@@ -1223,7 +1231,9 @@ pub(super) fn step_b(
             sim.weapon_buttons.block();
         }
         if !sim.stats.alive() {
-            alice.die();
+            if sim.alice.die() {
+                art_ops.push(ArtOp::ClearAliceEffects);
+            }
         }
     } // simulation: combat, encounters and NPC poses
     let death_animation =
@@ -1237,16 +1247,16 @@ pub(super) fn step_b(
     let mut targets = if sim.story.busy() {
         Vec::new()
     } else {
-        npcs.targets()
+        sim.npcs.targets()
     };
     if !sim.story.busy() {
-        if sim.stats.equipped() == Some(2) || alice.croquet_contacts() {
-            targets.extend(npcs.mallet_contacts());
+        if sim.stats.equipped() == Some(2) || sim.alice.croquet_contacts() {
+            targets.extend(sim.npcs.mallet_contacts());
         }
         if let Some(t) = sim.interactions.duchess.as_ref().and_then(|d| d.target()) {
             targets.push(t);
         }
-        if let Some(summon) = alice.summon_target() {
+        if let Some(summon) = sim.alice.summon_target() {
             targets.push(summon);
         }
         targets.extend(sim.interactions.shot_targets());
@@ -1258,11 +1268,12 @@ pub(super) fn step_b(
         }
         targets.extend(sim.interactions.levels_targets());
     }
-    targets.extend(alice.ice_targets());
+    targets.extend(sim.alice.ice_targets());
     if simulate {
-        alice.world_time(dt, world_dt);
-        alice.notarget(sim.stats.ignores_alice());
-        let weapon_sounds = alice.update_funded(
+        sim.alice.world_time(dt, world_dt);
+        sim.alice.notarget(sim.stats.ignores_alice());
+        sync_water(sim, art_ops);
+        let weapon_sounds = sim.alice.update_funded(
             if (active && !pand_cinematic) || death_animation {
                 dt
             } else {
@@ -1283,11 +1294,11 @@ pub(super) fn step_b(
             },
             Some(&mut sim.stats),
         );
-        if let Some(message) = alice.take_weapon_notice() {
+        if let Some(message) = sim.alice.take_weapon_notice() {
             hud_ops.push(HudOp::Announce(message.into()));
         }
-        for mut hit in alice.take_hits() {
-            if alice.hit_ice(hit) {
+        for mut hit in sim.alice.take_hits() {
+            if sim.alice.hit_ice(hit) {
                 continue;
             }
             let hit_origin = targets
@@ -1300,11 +1311,11 @@ pub(super) fn step_b(
                 continue;
             }
             if hit.id == crate::dice::SUMMON {
-                alice.hit_summon(hit);
+                sim.alice.hit_summon(hit);
                 continue;
             }
             if hit.kind.is_demon() {
-                npcs.provoke_summon(hit.id);
+                sim.npcs.provoke_summon(hit.id);
                 if let Some(s) = &mut sim.interactions.encounters {
                     s.provoke_summon(hit.id);
                 }
@@ -1377,15 +1388,15 @@ pub(super) fn step_b(
                 }
                 continue;
             }
-            if let Some((message, sound)) = npcs.hit(hit) {
+            if let Some((message, sound)) = sim.npcs.hit(hit) {
                 hud_ops.push(HudOp::Announce(message.into()));
                 audio_step.effect(sound, Some(hit_origin));
             }
         }
-        sim.world.set_weapon_obstacles(alice.ice_targets());
+        sim.world.set_weapon_obstacles(sim.alice.ice_targets());
         if active && loot_visit == save::visit_key(map_name, sim.entry_spawn.as_deref()) {
             let mut after = sim.interactions.loot_sources();
-            after.extend(npcs.loot_sources());
+            after.extend(sim.npcs.loot_sources());
             for message in crate::loot::tick_with(
                 &mut sim.stats,
                 loot_visit,
@@ -1394,7 +1405,12 @@ pub(super) fn step_b(
                 &after,
                 sim.player.feet,
                 &sim.world,
-                |item| power_art.collected(item, sim.pickup_clock),
+                |item| {
+                    art_ops.push(ArtOp::PickupCollected {
+                        item: item.clone(),
+                        clock: sim.pickup_clock,
+                    })
+                },
             ) {
                 hud_ops.push(HudOp::Announce(message.into()));
                 audio_step.effect("sound/item/essence/small/mtespu.wav", None);
@@ -1435,11 +1451,11 @@ pub(super) fn step_b(
         for sound in weapon_sounds {
             audio_step.effect(sound, None);
         }
-        for (path, origin) in alice.take_world_audio() {
+        for (path, origin) in sim.alice.take_world_audio() {
             audio_step.effect(path, Some(origin));
         }
-        audio_step.world(&sim.interactions, alice.audio_loops());
-        for cue in alice.take_audio() {
+        audio_step.world(&sim.interactions, sim.alice.audio_loops());
+        for cue in sim.alice.take_audio() {
             audio_step.ops.push(AudioOp::Animation(cue));
         }
         audio_step.ops.push(AudioOp::Player {
@@ -1448,8 +1464,8 @@ pub(super) fn step_b(
             underwater: sim.player.immersion.level == 3,
             drowning: sim.player.immersion.level == 3 && sim.player.breath.remaining() <= 0.,
         });
-        alice.power_appearance(&sim.stats);
-        alice.water_appearance(&sim.player);
+        sim.alice.power_appearance(&sim.stats);
+        sync_water(sim, art_ops);
     } // simulation: Alice, weapons and world audio
     let rage_scene = sim
         .interactions
@@ -1457,7 +1473,7 @@ pub(super) fn step_b(
         .as_ref()
         .and_then(|b| b.rage_scene());
     if let Some((time, finished)) = rage_scene.filter(|_| simulate) {
-        alice.rage_scene(time, finished, &sim.player);
+        sim.alice.rage_scene(time, finished, &sim.player);
     }
     scopes.census(crate::phase_census::Region::CameraScene);
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -1667,24 +1683,45 @@ pub(super) fn step_b(
             voice_paused: !story_active,
         });
     } // simulation: audio listener and clocks
-    (sim.alice, art.alice) = alice.into_parts();
-    (sim.npcs, art.npcs) = npcs.into_parts();
-    (sim.steam, art.steam) = steam.into_parts();
-    (
-        sim,
-        art,
-        StepView {
-            active,
-            direction,
-            targets,
-            pand_cinematic,
-            pand_camera,
-            scripted_camera,
-            camera,
-            target,
-            show_alice,
-            #[cfg(target_os = "vita")]
-            gameplay_alice,
-        },
-    )
+    let presentation = crate::presentation_input::PresentationInput::capture(
+        &sim.world,
+        camera,
+        &sim.interactions,
+    );
+    let camera_out = CameraOut {
+        position: camera,
+        target,
+        up: pand_camera.map_or(Vec3::Z, |c| c.up),
+        fovy: sim
+            .interactions
+            .beyond
+            .as_ref()
+            .and_then(|b| b.scene_fovy(aspect))
+            .or_else(|| {
+                sim.interactions
+                    .levels
+                    .iter()
+                    .find_map(|s| s.ctl.scene_fovy(aspect))
+            })
+            .unwrap_or(75.0f32.to_radians()),
+    };
+    StepView {
+        presentation,
+        camera_out,
+        active,
+        direction,
+        targets,
+        pand_cinematic,
+        pand_camera,
+        scripted_camera,
+        show_alice,
+        #[cfg(target_os = "vita")]
+        gameplay_alice,
+    }
+}
+
+fn sync_water(sim: &mut SimState, art_ops: &mut Vec<ArtOp>) {
+    if sim.alice.water_appearance(&sim.player) {
+        art_ops.push(ArtOp::ResetWaterEmitter);
+    }
 }

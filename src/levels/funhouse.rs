@@ -514,7 +514,7 @@ impl LevelController for Funhouse {
             }
         }
     }
-    fn particles(&self, p: &mut crate::particles::Steam) {
+    fn particles(&self, p: &mut crate::particles::SteamSim) {
         self.particle_state(p)
     }
     fn sound_state(

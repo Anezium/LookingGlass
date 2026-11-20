@@ -516,7 +516,7 @@ impl LevelController for Forest {
             )
         })
     }
-    fn particles(&self, p: &mut crate::particles::Steam) {
+    fn particles(&self, p: &mut crate::particles::SteamSim) {
         p.gate(&[
             (crate::entity::Id(96), self.altar()),
             (crate::entity::Id(73), self.saved.returning),

@@ -182,7 +182,7 @@ impl LevelController for Labyrinth {
             }
         }
     }
-    fn particles(&self, s: &mut crate::particles::Steam) {
+    fn particles(&self, s: &mut crate::particles::SteamSim) {
         s.gate(&[(Id(818), self.gust(2)), (Id(823), self.gust(1))]);
     }
     fn combat(&mut self, c: &mut crate::level::Combat<'_>) -> crate::combat::Feedback {

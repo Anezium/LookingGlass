@@ -484,7 +484,7 @@ impl LevelController for Encounter {
     fn upgraded(&mut self) {
         self.saved.initialized = true;
     }
-    fn particles(&self, steam: &mut crate::particles::Steam) {
+    fn particles(&self, steam: &mut crate::particles::SteamSim) {
         steam.gate(&[
             (crate::entity::Id(11), false),
             (crate::entity::Id(12), false),

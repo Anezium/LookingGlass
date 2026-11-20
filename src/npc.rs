@@ -2474,6 +2474,8 @@ fn report_world_free_npc_skip(site: &str) {
 }
 
 impl Npcs {
+    pub(crate) fn sim_mut(&mut self) -> &mut NpcSim { &mut self.sim }
+
     pub(crate) fn into_parts(self) -> (NpcSim, NpcArt) {
         (self.sim, self.art)
     }

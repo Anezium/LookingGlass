@@ -335,7 +335,7 @@ impl LevelController for Queen {
     fn allow_cheshire(&self) -> bool {
         false
     }
-    fn particles(&self, steam: &mut crate::particles::Steam) {
+    fn particles(&self, steam: &mut crate::particles::SteamSim) {
         let active = matches!(
             self.saved.phase,
             Phase::Queen2 | Phase::Death | Phase::Ending

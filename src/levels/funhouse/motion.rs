@@ -573,7 +573,7 @@ impl Funhouse {
         w.set_settled_supports(self.settled_supports());
         Ok(())
     }
-    pub fn particle_state(&self, p: &mut crate::particles::Steam) {
+    pub fn particle_state(&self, p: &mut crate::particles::SteamSim) {
         let mut gates = vec![];
         let mut poses = vec![];
         for (id, name, base) in &self.data.emitters {

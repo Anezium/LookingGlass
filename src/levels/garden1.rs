@@ -494,7 +494,7 @@ impl LevelController for Garden {
             )
             .collect()
     }
-    fn particles(&self, steam: &mut crate::particles::Steam) {
+    fn particles(&self, steam: &mut crate::particles::SteamSim) {
         // This emitter belongs to the shell cue, not the map's always-on ambience.
         steam.gate(&[(crate::entity::Id(15), false)]);
     }

@@ -667,6 +667,8 @@ fn random(seed: &mut u32) -> f32 {
     (*seed >> 8) as f32 / 16777216.
 }
 impl Steam {
+    pub(crate) fn sim_mut(&mut self) -> &mut SteamSim { &mut self.sim }
+
     pub(crate) fn into_parts(self) -> (SteamSim, SteamArt) {
         (self.sim, self.art)
     }

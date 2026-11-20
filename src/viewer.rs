@@ -935,7 +935,7 @@ impl SnapshotTiming {
 
 mod step;
 use step::{
-    step_a, step_b, step_due, Due, SimState, StepAOwner, StepArt, StepBOwner, StepLocals, StepScopes,
+    step_a, step_b, step_due, Due, SimState, ConsoleOps, StepAInput, StepBInput, StepLocals, StepScopes,
     StepView,
 };
 
@@ -1724,14 +1724,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             audio_step.apply_at_barrier($barrier, &mut audio, &mut assets, &world)
         };
     }
-    // The owner barriers continue using the original live facades in I2.
-    // Split/join is a move of each half at the sync-call boundary.
+    let mut art_ops = Vec::new();
+    // Owner transactions still use the live bindings between the serial calls.
     macro_rules! serial_step {
         ($function:ident $(, $arg:expr)* $(,)?) => {{
-            let (alice_sim, alice_art) = alice.into_parts();
+            let (alice_sim, mut alice_art) = alice.into_parts();
             let (npcs_sim, npcs_art) = npcs.into_parts();
             let (steam_sim, steam_art) = steam.into_parts();
-            let state = SimState {
+            let mut state = Box::new(SimState {
                 world,
                 interactions,
                 alice: alice_sim,
@@ -1765,12 +1765,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 player,
                 campaign,
                 played,
-            };
-            let art = StepArt { alice: alice_art, npcs: npcs_art, steam: steam_art };
-            let (state, art, result) = $function(state, art $(, $arg)*);
-            alice = Character::from_parts(state.alice, art.alice);
-            npcs = crate::npc::Npcs::from_parts(state.npcs, art.npcs);
-            steam = crate::particles::Steam::from_parts(state.steam, art.steam);
+            });
+            let result = $function(&mut state $(, $arg)*);
+            for op in art_ops.drain(..) {
+                if let Some(body) = op.apply(&mut alice_art, &mut power_art) {
+                    state.alice.recycle_body_input(body);
+                }
+            }
+            alice = Character::from_parts(state.alice, alice_art);
+            npcs = crate::npc::Npcs::from_parts(state.npcs, npcs_art);
+            steam = crate::particles::Steam::from_parts(state.steam, steam_art);
             world = state.world;
             interactions = state.interactions;
             input = state.input;
@@ -3111,11 +3115,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame: Some(viewer_block),
             census: Some(census_block),
         };
-        let (story_active, mut due) = serial_step!(step_a, &mut step_locals, gameplay, StepAOwner {
-            map: &scene.map,
+        let mut console_ops = ConsoleOps::default();
+        let step_a_result = serial_step!(step_a, &mut step_locals, gameplay, StepAInput {
+            map: scene.map.clone(),
             preferences: &preferences,
-            console: &mut console,
-            power_art: &mut power_art,
+            console: &mut console_ops,
+            art_ops: &mut art_ops,
             hud_ops: &mut hud_ops,
             audio_step: &mut audio_step,
             scopes: &mut step_scopes,
@@ -3123,7 +3128,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             route_session: &mut route_session,
             saves_writable,
             host_transition: &host_transition,
-        })?;
+        });
+        if console_ops.close { console.open = false; }
+        if let Some(message) = console_ops.message { console.print(message); }
+        let (story_active, mut due) = step_a_result?;
         if simulate {
         if matches!(due, Due::Checkpoint) {
             if throttle_normal {
@@ -3297,21 +3305,24 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         } // simulation: story and transitions
         let StepView {
-            active, direction, targets, pand_cinematic, pand_camera, scripted_camera, camera, target, show_alice,
+            presentation, camera_out, active, direction, targets, pand_cinematic, pand_camera, scripted_camera, show_alice,
             #[cfg(target_os = "vita")]
             gameplay_alice,
-        } = serial_step!(step_b, &mut step_locals, story_active, StepBOwner {
+        } = serial_step!(step_b, &mut step_locals, story_active, StepBInput {
             map_name: &maps[current],
             preferences: &preferences,
-            power_art: &mut power_art,
-            level_art: &level_art,
-            handoff_return: &handoff_return,
+            art_ops: &mut art_ops,
+            aspect: screen_width() / screen_height(),
+            handoff_pose: if snapshot_handoff && level_art.pool.is_some() {
+                handoff_return.pose(&level_art.snapshot_visit).cloned()
+            } else {
+                level_art.handoff_pose().cloned()
+            },
             hud_ops: &mut hud_ops,
             audio_step: &mut audio_step,
             scopes: &mut step_scopes,
             loot_visit: &loot_visit,
             loot_before: &loot_before,
-            snapshot_handoff,
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             frame,
             #[cfg(target_os = "vita")]
@@ -3322,6 +3333,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(target_os = "vita")]
         { viewer_block = step_scopes.frame.take().unwrap(); }
         census_block = step_scopes.census.take().unwrap();
+        let (camera, target) = (camera_out.position, camera_out.target);
         // The step, including any Pool of Tears re-publication, is complete.
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         let acoustic_view = (simulate && force_acoustic_view).then(|| {
@@ -3352,7 +3364,6 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Scene);
         }
         let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPresentation);
-        let presentation = crate::presentation_input::PresentationInput::capture(&world, camera, &interactions);
         scene.apply_presentation(&presentation);
         drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraPrepare3d);
         #[cfg(feature="vita_renderer")]
@@ -3371,20 +3382,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             aspect:crate::sim_maps::probe::enabled().then_some(960./544.),
             #[cfg(feature="vita_renderer")]
             viewport: crate::render::vita_renderer::world_viewport(),
-            position: camera,
-            target,
-            up: pand_camera.map_or(Vec3::Z, |c| c.up),
-            fovy: interactions
-                .beyond
-                .as_ref()
-                .and_then(|b| b.scene_fovy(screen_width() / screen_height()))
-                .or_else(|| {
-                    interactions
-                        .levels
-                        .iter()
-                        .find_map(|s| s.ctl.scene_fovy(screen_width() / screen_height()))
-                })
-                .unwrap_or(75.0f32.to_radians()),
+            position: camera_out.position,
+            target: camera_out.target,
+            up: camera_out.up,
+            fovy: camera_out.fovy,
             z_near: 2.,
             z_far: crate::render::draw_distance_far(30000.),
             ..Default::default()
@@ -3445,13 +3446,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             {
                 #[cfg(target_os = "vita")]
                 let _hotspot = crate::frame_profile::span("village_particle_bindings");
-                v.place_particles(&mut steam);
+                v.place_particles(steam.sim_mut());
             }
         }
         if let Some(p) = &interactions.pandemonium {
-            p.gate_particles(&mut steam);
+            p.gate_particles(steam.sim_mut());
         }
-        interactions.place_level_particles(&mut steam);
+        interactions.place_level_particles(steam.sim_mut());
         // All resolvers execute without issuing graphics calls. The opt-in runs
         // them before submission; the control preserves the original HUD phase.
         macro_rules! resolve_prompt { () => {{

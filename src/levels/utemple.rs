@@ -550,7 +550,7 @@ impl LevelController for Temple {
     fn liquids(&self) -> Vec<Liquid> {
         vec![self.motion.water.clone()]
     }
-    fn particles(&self, steam: &mut crate::particles::Steam) {
+    fn particles(&self, steam: &mut crate::particles::SteamSim) {
         steam.gate(
             &self
                 .data

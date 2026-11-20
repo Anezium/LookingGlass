@@ -627,6 +627,10 @@ const _: fn() = || {
 };
 
 impl AliceSim {
+    pub(crate) fn take_weapon_notice(&mut self) -> Option<&'static str> {
+        self.weapon_notice.take()
+    }
+
     pub(crate) fn recycle_body_input(&mut self, input: BodyInput) {
         self.body_arena = input;
     }
@@ -1732,7 +1736,7 @@ impl Character {
     }
 
     pub(crate) fn take_weapon_notice(&mut self) -> Option<&'static str> {
-        self.sim.weapon_notice.take()
+        self.sim.take_weapon_notice()
     }
 
     #[cfg(any(debug_assertions, not(target_os = "vita")))]
