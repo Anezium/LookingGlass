@@ -170,6 +170,22 @@ impl Rig {
                 (bone.rotation * Quat::from_rotation_x(self.angle * amount)).normalize();
         }
     }
+    pub fn pose(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32) -> Vec<Transform> {
+        let mut local = local.to_vec();
+        self.apply(&mut local, mouth);
+        skeleton.global_pose(&local)
+    }
+    pub(crate) fn pose_into(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32, scratch: &mut Vec<Transform>, world: &mut Vec<Transform>) {
+        scratch.clear(); scratch.extend_from_slice(local);
+        self.apply(scratch, mouth);
+        world.clear();
+        for (bone, &pose) in skeleton.bones.iter().zip(scratch.iter()) {
+            world.push(match bone.parent {
+                Some(p) => Transform { rotation: (world[p].rotation * pose.rotation).normalize(), translation: world[p].point(pose.translation) },
+                None => pose,
+            });
+        }
+    }
 }
 
 struct Blink {
@@ -183,6 +199,9 @@ struct Blink {
 }
 pub struct Face {
     rig: Rig,
+    art: FaceArt,
+}
+pub(crate) struct FaceArt {
     blink: Option<Blink>,
 }
 impl Face {
@@ -223,29 +242,24 @@ impl Face {
         } else {
             None
         };
-        Ok(Self { rig, blink })
+        Ok(Self { rig, art: FaceArt { blink } })
     }
     pub fn mouth_angle(&mut self, degrees: f32) {
         if degrees.is_finite() && (0. ..=90.).contains(&degrees) {
             self.rig.angle = degrees.to_radians();
         }
     }
+    pub(crate) fn into_parts(self) -> (Rig, FaceArt) {
+        (self.rig, self.art)
+    }
     pub fn pose(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32) -> Vec<Transform> {
-        let mut local = local.to_vec();
-        self.rig.apply(&mut local, mouth);
-        skeleton.global_pose(&local)
+        self.rig.pose(skeleton, local, mouth)
     }
-    pub(crate) fn pose_into(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32, scratch: &mut Vec<Transform>, world: &mut Vec<Transform>) {
-        scratch.clear(); scratch.extend_from_slice(local);
-        self.rig.apply(scratch, mouth);
-        world.clear();
-        for (bone, &pose) in skeleton.bones.iter().zip(scratch.iter()) {
-            world.push(match bone.parent {
-                Some(p) => Transform { rotation: (world[p].rotation * pose.rotation).normalize(), translation: world[p].point(pose.translation) },
-                None => pose,
-            });
-        }
+    pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
+        self.art.blink(meshes, time, alive);
     }
+}
+impl FaceArt {
     pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
         if let Some(b) = &self.blink {
             if let Some(mesh) = &mut meshes[b.surface] {
@@ -590,7 +604,7 @@ mod snapshot_pose_tests {
     #[test]
     fn reused_facial_arena_matches_original_hierarchy_bits_after_changes() {
         let skeleton=Skeleton{bones:vec![crate::skeletal::Bone{parent:None,name:"root".into()},crate::skeletal::Bone{parent:Some(0),name:"jaw".into()}],surfaces:Vec::new(),skin_bounds:Vec::new()};
-        let face=Face{rig:Rig{mouth:Some(1),angle:0.2},blink:None};
+        let face=Rig{mouth:Some(1),angle:0.2};
         let mut local=vec![Transform{translation:Vec3::X,rotation:Quat::from_rotation_z(0.37)},Transform{translation:Vec3::Y,rotation:Quat::from_rotation_x(0.2)}];
         let mut scratch=Vec::new();let mut out=Vec::new();
         for mouth in [0.,0.25,1.,f32::NAN,0.] {

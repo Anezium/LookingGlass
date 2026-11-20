@@ -193,7 +193,7 @@ impl Playing {
     }
 }
 pub struct Actions {
-    clips: Vec<Animation>,
+    clips: Arc<[Animation]>,
     pub playing: Option<Playing>,
     pub selected: usize,
     pub pose: Vec<Transform>,
@@ -357,12 +357,12 @@ impl Actions {
             && self.cooldowns[selected] <= 0.00001
     }
     pub fn load(assets: &mut Assets, bones: usize, pose: &[Transform]) -> Result<Self> {
-        let clips = ACTION_CLIPS
+        let clips: Vec<_> = ACTION_CLIPS
             .iter()
             .map(|name| Animation::parse(&assets.read(&format!("models/alice/{name}.ska"))?, bones))
             .collect::<Result<_>>()?;
         Ok(Self {
-            clips,
+            clips: clips.into(),
             playing: None,
             selected: 0,
             pose: pose.to_vec(),
@@ -1404,6 +1404,9 @@ pub(crate) struct HeldInput {
     view_scale: f32,
 }
 impl HeldInput {
+    fn valid_slots(&self, props: usize) -> bool {
+        self.commands.len() <= 3 && self.commands.iter().all(|&(slot, _, _, _, _)| slot < props)
+    }
     pub(crate) fn bytes(&self) -> usize { std::mem::size_of::<Self>() + self.commands.len() * std::mem::size_of::<(usize, Transform, f32, f32, bool)>() }
 }
 #[derive(Default)]
@@ -1414,6 +1417,12 @@ pub(crate) struct EffectsInput {
     trail: Vec<Trail>, flight_trails: Vec<Trail>, first_person: bool, view_muzzle: Option<Vec3>,
 }
 impl EffectsInput {
+    fn valid_slots(&self, props: usize) -> bool {
+        self.heavy.records() + self.ice.records() + self.jacks.records() + self.bombs.records()
+            + self.dice.records() + self.projectiles.len() + self.blasts.len() + self.sparks.len()
+            + self.trail.len() + self.flight_trails.len() <= 16384
+            && self.projectiles.iter().all(|p| p.prop() < props)
+    }
     pub(crate) fn bytes(&self)->usize {
         std::mem::size_of::<Self>() + self.heavy.heap_bytes()+self.ice.heap_bytes()+self.jacks.heap_bytes()+self.bombs.heap_bytes()+self.dice.heap_bytes()
             + self.projectiles.len()*std::mem::size_of::<Projectile>() + self.projectiles.iter().map(|p|p.trail.bytes()).sum::<usize>()
@@ -2396,12 +2405,29 @@ impl Visuals {
         self.heavy.render_records()+self.ice.render_records()+self.jacks.render_records()+self.bombs.render_records()+self.dice.render_records()
             +self.projectiles.len()+self.blasts.len()+self.sparks.len()+self.trail.len()+self.flight_trails.len()>16384
     }
-    pub(crate) fn extract_effects(&self, out: &mut EffectsInput, art: &VisualArt) {
+    pub(crate) fn valid_body_inputs(
+        &self,
+        held: &HeldInput,
+        effects: &EffectsInput,
+        summon_art: Option<&crate::dice::Art>,
+    ) -> bool {
+        let props = self.prop_geometry.len();
+        held.valid_slots(props) && effects.valid_slots(props)
+            && summon_art.map_or_else(
+                || effects.dice.demon.is_none() && effects.dice.puppet.is_none(),
+                |art| art.valid_render_input(&effects.dice),
+            )
+    }
+    pub(crate) fn extract_effects(&self, out: &mut EffectsInput, summon_art: Option<&crate::dice::Art>) {
         self.heavy.extract_render(&mut out.heavy); self.ice.extract_render(&mut out.ice);
         self.jacks.extract_render(&mut out.jacks); self.bombs.extract_render(&mut out.bombs);
         self.dice.extract_render(&mut out.dice);
         // overlap: summon extraction still reads art (step 2 provides a CPU PuppetInput producer)
-        art.dice_art.extract_render_pose(&mut out.dice);
+        if let Some(art) = summon_art {
+            art.extract_render_pose(&mut out.dice);
+        } else {
+            out.dice.puppet = None;
+        }
         out.projectiles.clone_from(&self.projectiles); out.blasts.clone_from(&self.blasts);
         out.sparks.clone_from(&self.sparks); out.trail.clone_from(&self.trail); out.flight_trails.clone_from(&self.flight_trails);
         out.first_person=self.first_person; out.view_muzzle=self.view_muzzle;
@@ -2590,13 +2616,14 @@ impl VisualArt {
         }
         gl_use_default_material();
     }
-    pub(crate) fn valid_held_input(&self,input:&HeldInput)->bool {
-        input.commands.len()<=3 && input.commands.iter().all(|&(slot,_,_,_,_)|slot<self.props.len())
+    pub(crate) fn valid_held_input(&self, input: &HeldInput) -> bool {
+        input.valid_slots(self.props.len())
     }
-    pub(crate) fn valid_effects_input(&self,input:&EffectsInput)->bool {
-        input.heavy.records()+input.ice.records()+input.jacks.records()+input.bombs.records()+input.dice.records()
-            +input.projectiles.len()+input.blasts.len()+input.sparks.len()+input.trail.len()+input.flight_trails.len()<=16384
-            && input.projectiles.iter().all(|p|p.prop()<self.props.len()) && self.dice_art.valid_render_input(&input.dice)
+    pub(crate) fn valid_effects_input(&self, input: &EffectsInput) -> bool {
+        input.valid_slots(self.props.len()) && self.dice_art.valid_render_input(&input.dice)
+    }
+    pub(crate) fn summon_art(&self) -> &crate::dice::Art {
+        &self.dice_art
     }
     pub fn draw_effects(
         &mut self,
@@ -3074,7 +3101,7 @@ pub(crate) fn test_actions_with_bones(bones: usize) -> Actions {
         };
         bones
     ];
-    let clips = (0..ACTION_CLIPS.len())
+    let clips: Vec<_> = (0..ACTION_CLIPS.len())
         .map(|i| Animation {
             frames: (0..[
                 9, 21, 21, 21, 21, 5, 17, 16, 16, 27, 18, 43, 1, 32, 5, 18, 12, 5, 16, 73,
@@ -3097,7 +3124,7 @@ pub(crate) fn test_actions_with_bones(bones: usize) -> Actions {
         })
         .collect();
     Actions {
-        clips,
+        clips: clips.into(),
         playing: None,
         selected: 0,
         pose: base.clone(),

@@ -3780,7 +3780,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             },
             Some(&mut stats),
         );
-        if let Some(message) = alice.weapon_notice.take() {
+        if let Some(message) = alice.take_weapon_notice() {
             hud.announce(message);
         }
         for mut hit in alice.take_hits() {
@@ -4643,6 +4643,9 @@ interactions
             }
             if interactions.pandemonium.is_some() { blockers.push("effects.pandemonium".into()); }
             if interactions.duchess.is_some() { blockers.push("effects.duchess".into()); }
+            if alice.has_live_summon() {
+                blockers.push("alice.dice_summon".into());
+            }
             let npc = npcs.snapshot_fence_census();
             blockers.extend(npc.keys().cloned());
             let save = save_requested || autosave_requested || finale_checkpoint_requested.is_some()
@@ -4663,6 +4666,8 @@ interactions
             blockers
         } else {Vec::new()};
         let snapshot_world_free=snapshot_blockers.is_empty() && !snapshot_tail_fenced;
+        #[cfg(any(debug_assertions, not(target_os = "vita")))]
+        alice.require_body_input(snapshot_enabled && snapshot_world_free);
         crate::spike_log::world_free_decision(snapshot_world_free,frame as u64);
         if snapshot_enabled {
             snapshot_fenced_frames += u64::from(!snapshot_world_free);

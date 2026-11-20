@@ -134,7 +134,7 @@ impl State {
 }
 
 pub struct Performance {
-    clips: BTreeMap<String, Animation>,
+    clips: std::sync::Arc<BTreeMap<String, Animation>>,
     pub state: State,
 }
 impl Performance {
@@ -159,7 +159,7 @@ impl Performance {
             );
         }
         Ok(Self {
-            clips,
+            clips: std::sync::Arc::new(clips),
             state: State::fresh(),
         })
     }

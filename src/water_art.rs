@@ -20,9 +20,27 @@ pub struct Art {
     warning_frame: f32,
     back: usize,
     mouth: usize,
+    view: RefCell<(Atmosphere, Vec3)>,
+}
+
+#[derive(Default)]
+pub(crate) struct State {
     visible: bool,
     warning: Option<f32>,
-    view: RefCell<(Atmosphere, Vec3)>,
+}
+impl State {
+    pub(crate) fn sync(&mut self, player: &Player) -> bool {
+        self.visible = player.breath.shell
+            && player.immersion.level >= 2
+            && player.immersion.kind != crate::water::Liquid::Lava;
+        let warning = (player.immersion.level == 3)
+            .then(|| player.breath.warning_age())
+            .flatten();
+        let reset_emitter = self.warning.is_some() && warning.is_none();
+        self.warning = warning;
+        reset_emitter
+    }
+    pub(crate) fn render_state(&self) -> (bool, Option<f32>) { (self.visible, self.warning) }
 }
 
 /// Exercise the actual Character draw path, including immediate paused restores.
@@ -237,46 +255,19 @@ impl Art {
             warning_frame,
             back: tag("tag_back")?,
             mouth: tag("tag_mouth")?,
-            visible: false,
-            warning: None,
             view: RefCell::new((Atmosphere::default(), Vec3::ZERO)),
         })
     }
-    pub fn reset(&mut self) {
-        self.visible = false;
-        self.warning = None;
+    pub(crate) fn reset_emitter(&mut self) {
         self.bubbles = self.bubbles.fork();
-    }
-    pub fn sync(&mut self, player: &Player) {
-        self.visible = player.breath.shell
-            && player.immersion.level >= 2
-            && player.immersion.kind != crate::water::Liquid::Lava;
-        let warning = (player.immersion.level == 3)
-            .then(|| player.breath.warning_age())
-            .flatten();
-        if self.warning.is_some() && warning.is_none() {
-            self.bubbles = self.bubbles.fork();
-        }
-        self.warning = warning;
     }
     pub fn atmosphere(&self, atmosphere: &Atmosphere, camera: Vec3) {
         *self.view.borrow_mut() = (atmosphere.clone(), camera);
     }
-    pub(crate) fn render_state(&self) -> (bool, Option<f32>) { (self.visible, self.warning) }
-    pub(crate) fn draw_input(&mut self, state: (bool, Option<f32>), pose: &[Transform], body: Transform, scale: f32, time: f32, bright: bool) {
-        self.draw_resolved(state, pose, body, scale, time, bright);
-    }
-    pub fn draw(
-        &mut self,
-        pose: &[Transform],
-        body: Transform,
-        scale: f32,
-        time: f32,
-        fullbright: bool,
+    pub(crate) fn draw_input(
+        &mut self, state: (bool, Option<f32>), pose: &[Transform], body: Transform,
+        scale: f32, time: f32, fullbright: bool,
     ) {
-        self.draw_resolved((self.visible, self.warning), pose, body, scale, time, fullbright);
-    }
-    fn draw_resolved(&mut self, state: (bool, Option<f32>), pose: &[Transform], body: Transform, scale: f32, time: f32, fullbright: bool) {
         let tag = |index: usize| Transform {
             translation: body.point(pose[index].translation * scale),
             rotation: body.rotation * pose[index].rotation,

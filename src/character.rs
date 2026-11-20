@@ -14,7 +14,7 @@ use macroquad::{
     miniquad::{Comparison, PipelineParams, ShaderSource},
     prelude::*,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 pub(crate) mod skinning;
 pub(crate) fn skinning_bench_begin() {skinning::bench_begin();}
 pub(crate) fn skinning_bench_end() {skinning::bench_end();}
@@ -135,7 +135,7 @@ struct Animator {
     sound_clip: Option<usize>,
     resume_audio: bool,
     sound_span: Option<(usize, crate::audio::events::Span)>,
-    clips: Vec<Animation>,
+    clips: Arc<[Animation]>,
     motion: Motion,
     time: f32,
     transition: f32,
@@ -191,7 +191,7 @@ impl Animator {
             sound_clip: None,
             resume_audio: false,
             sound_span: None,
-            clips,
+            clips: clips.into(),
             motion: Motion::Idle,
             time: 0.,
             transition: 1.,
@@ -533,7 +533,7 @@ struct BodyInput {
     water_time: f32,
     water: (bool, Option<f32>),
     power: crate::power_pose::State,
-    power_remaining:f32,
+    power_remaining: f32,
     frozen: bool,
     effects: crate::weapons::EffectsInput,
     held: crate::weapons::HeldInput,
@@ -560,39 +560,73 @@ impl BodyInput {
     }
 }
 pub struct Character {
-    snapshot_visit: crate::render_snapshot::RenderVisit,
-    body_input: Option<BodyInput>,
+    sim: AliceSim,
+    art: AliceArt,
+}
+
+pub(crate) struct AliceSim {
     body_arena: BodyInput,
     body_scratch: Vec<Transform>,
-    skin_identity: skinning::identity::ActorId,
-    pub weapon_notice: Option<&'static str>,
-    _material_layers: Vec<std::rc::Rc<crate::render_fx::Surface>>,
+    weapon_notice: Option<&'static str>,
     foot_rig: crate::footing::Rig,
     foot_state: crate::footing::State,
     acting: crate::acting::Acting,
-    face: crate::facial::Face,
+    face: crate::facial::Rig,
     mouth: f32,
     face_time: f32,
     sound_events: crate::audio::events::Model,
     power_pose: crate::power_pose::Performance,
-    power_remaining:f32,
-    power_art: crate::power_pose::Art,
-    water_art: crate::water_art::Art,
-    skeleton: Skeleton,
+    power_remaining: f32,
+    skeleton: Arc<Skeleton>,
     animator: Animator,
-    meshes: Vec<Option<Mesh>>,
-    material: SkinMaterial,
     scale: f32,
     facing: f32,
     actions: Actions,
     visuals: Visuals,
-    visual_art: VisualArt,
     upper: Vec<bool>,
     tags: [usize; 3],
     anchors: [Transform; 3],
+    // Saved sway state also drives simulation-side muzzle and trail anchors.
     viewmodel: crate::viewmodel::ViewModel,
+    water: crate::water_art::State,
 }
-impl Character {
+
+/// Alice's render resources must be dropped on the owner thread. Texture2D is
+/// Send in our macroquad revision, but dropping it touches the GL context.
+/// The Rc-backed material layers keep AliceArt confined to the owner.
+pub(crate) struct AliceArt {
+    snapshot_visit: crate::render_snapshot::RenderVisit,
+    body_input: Option<BodyInput>,
+    skin_identity: skinning::identity::ActorId,
+    _material_layers: Vec<std::rc::Rc<crate::render_fx::Surface>>,
+    power_art: crate::power_pose::Art,
+    water_art: crate::water_art::Art,
+    meshes: Vec<Option<Mesh>>,
+    material: SkinMaterial,
+    visual_art: VisualArt,
+    skeleton: Arc<Skeleton>,
+    face: crate::facial::FaceArt,
+    acting: crate::acting::Art,
+    #[cfg(any(debug_assertions, not(target_os = "vita")))]
+    require_body_input: bool,
+}
+
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<AliceSim>();
+
+    // This lookup becomes ambiguous if AliceArt gains Send. The live owner
+    // has Rc-backed material layers and SkinMaterial, both of which forbid it.
+    trait AmbiguousIfSend<Marker> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    struct IsSend;
+    impl<T: ?Sized + Send> AmbiguousIfSend<IsSend> for T {}
+    let _ = <AliceArt as AmbiguousIfSend<_>>::check;
+};
+
+impl AliceSim {
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             power: self.power_pose.state.clone(),
@@ -607,25 +641,25 @@ impl Character {
             viewmodel: self.viewmodel.clone(),
         }
     }
+
     pub fn restore(&mut self, s: &Snapshot) -> Result<()> {
-        self.retire_body_input();
         s.validate(self.skeleton.bones.len())?;
         self.power_pose.state = s.power.clone();
         self.foot_state = s.feet.clone();
         self.actions.restore(&s.actions)?;
         self.acting.restore(&s.acting)?;
         self.visuals.restore(&s.projectiles)?;
-        self.visual_art.clear();
         self.animator.restore(&s.animator);
         self.face_time = s.face_time;
         self.mouth = 0.;
         self.facing = s.facing;
         self.anchors = s.anchors;
         self.viewmodel = s.viewmodel.clone();
-        self.water_art.reset();
+        self.water = Default::default();
         Ok(())
     }
-    pub fn die(&mut self) {
+
+    fn die(&mut self) -> bool {
         self.power_pose.state.sync(None);
         if !matches!(
             self.animator.motion,
@@ -639,144 +673,12 @@ impl Character {
             self.actions.reset(&self.animator.pose);
             self.visuals.cancel_staff();
             self.visuals.clear();
-            self.visual_art.clear();
+            return true;
         }
+        false
     }
-    pub fn load(assets: &mut Assets) -> Result<Self> {
-        let _r13=crate::allocation_census::Scope::new(4);
-        let def = Definition::alice(assets)?;
-        let skeleton = Skeleton::parse(&assets.read(&format!("{}/{}", def.path, def.model))?)?;
-        let mut clips = Vec::new();
-        for name in CLIPS {
-            let path = format!("{}/{name}.ska", def.path);
-            clips.push(
-                Animation::parse(&assets.read(&path)?, skeleton.bones.len())
-                    .with_context(|| path)?,
-            );
-        }
-        let specs = texture::read_materials(assets)?;
-        let mut textures = BTreeMap::<String, Texture2D>::new();
-        let mut meshes = Vec::new();
-        let mut material_layers = Vec::new();
-        for surface in &skeleton.surfaces {
-            // The extra cap surfaces are only used by the original dismemberment system.
-            if ["material15", "material16", "material17"].contains(&surface.name.as_str()) {
-                meshes.push(None);
-                continue;
-            }
-            let skin = def
-                .skins
-                .get(&surface.name)
-                .context("Alice surface has no skin")?;
-            let path = texture::resolve(assets, &format!("{}/{skin}", def.path), &specs)
-                .or_else(|| texture::resolve(assets, skin, &specs))
-                .with_context(|| format!("Alice skin not found: {skin}"))?;
-            let tex = if let Some(tex) = textures.get(&path) {
-                tex.clone()
-            } else {
-                let image = texture::decode(assets, &path)?;
-                let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
-                tex.set_filter(FilterMode::Linear);
-                textures.insert(path, tex.clone());
-                tex
-            };
-            material_layers.push(crate::render_fx::register(
-                assets,
-                &tex,
-                &[format!("{}/{skin}", def.path), skin.clone()],
-                &specs,
-            )?);
-            meshes.push(Some(Mesh { upload_identity: None, surface: material_layers.last().cloned(),
-                vertices: surface
-                    .vertices
-                    .iter()
-                    .map(|v| Vertex {
-                        position: Vec3::ZERO,
-                        uv: v.uv,
-                        color: [255; 4],
-                        normal: Vec4::ZERO,
-                    })
-                    .collect(),
-                indices: surface.indices.clone(),
-                texture: Some(tex),
-            }));
-        }
-        let face = crate::facial::Face::load(
-            assets,
-            "models/alice.tik",
-            &def,
-            &skeleton,
-            &meshes,
-            &specs,
-        )?;
-        let material = skin_material()?;
-        println!(
-            "Alice: {} bones, {} visible surfaces, {} locomotion clips",
-            skeleton.bones.len(),
-            meshes.iter().flatten().count(),
-            clips.len()
-        );
-        let tag = |name| {
-            skeleton
-                .bones
-                .iter()
-                .position(|b| b.name == name)
-                .with_context(|| format!("Missing Alice attachment {name}"))
-        };
-        let tags = [
-            tag("tag_weapon")?,
-            tag("tag_ball_linked")?,
-            tag("tag_ball_free")?,
-        ];
-        let power_pose = crate::power_pose::Performance::load(assets, &def, skeleton.bones.len())?;
-        let power_art = crate::power_pose::Art::load(assets, &skeleton, &meshes, &specs)?;
-        let water_art = crate::water_art::Art::load(assets, &skeleton, &specs)?;
-        let mut upper = Vec::new();
-        for b in &skeleton.bones {
-            upper.push(b.name == "Bip01 Spine" || b.parent.is_some_and(|p| upper[p]));
-        }
-        let mut animator = Animator::new(clips);
-        animator.scale = def.scale;
-        let foot_rig = crate::footing::Rig::new(&skeleton, &animator.pose, def.scale);
-        let actions = Actions::load(assets, skeleton.bones.len(), &animator.pose)?;
-        let (visuals, visual_art) = Visuals::load(assets)?;
-        Ok(Self {
-            snapshot_visit: Default::default(), body_input: None, body_arena: Default::default(), body_scratch: Vec::new(),
-            skin_identity: Default::default(),
-            weapon_notice: None,
-            foot_rig,
-            _material_layers: material_layers,
-            foot_state: Default::default(),
-            acting: crate::acting::Acting::load(assets, &def, &skeleton, &specs)?,
-            face,
-            mouth: 0.,
-            face_time: 0.,
-            sound_events: crate::audio::events::Model::load(assets, "models/alice.tik")?,
-            power_pose,
-            power_remaining:0., power_art,
-            water_art,
-            skeleton,
-            animator,
-            meshes,
-            material,
-            scale: def.scale,
-            facing: 0.,
-            actions,
-            visuals,
-            visual_art,
-            upper,
-            tags,
-            anchors: [Transform {
-                rotation: Quat::IDENTITY,
-                translation: Vec3::ZERO,
-            }; 3],
-            viewmodel: crate::viewmodel::ViewModel::default(),
-        })
-    }
+
     pub fn reset(&mut self, player: &Player, yaw: f32) {
-        self.retire_body_input();
-        self.water_art.reset();
-        self.water_art.sync(player);
         self.power_pose.state.interrupt();
         self.foot_state = Default::default();
         self.acting.reset();
@@ -786,15 +688,17 @@ impl Character {
         self.animator.reset(player);
         self.actions.reset(&self.animator.pose);
         self.visuals.clear();
-        self.visual_art.clear();
         self.viewmodel.reset();
     }
+
     pub fn notarget(&mut self, value: bool) {
         self.visuals.dice.notarget = value;
     }
+
     pub fn facing(&self) -> f32 {
         self.facing
     }
+
     pub fn rage_scene(&mut self, time: f32, finished: bool, player: &Player) {
         self.power_pose
             .rage_scene(time, finished, &mut self.actions.pose);
@@ -805,6 +709,7 @@ impl Character {
             self.visuals.cancel_staff();
         }
     }
+
     /// Resume from the actual last cinematic pose without clearing live effects.
     /// A distant cutaway or a scaled Alice cannot seed an ordinary body pose.
     pub fn resume_scene(
@@ -832,25 +737,13 @@ impl Character {
         }
         self.actions.reset(&self.animator.pose);
     }
+
     pub fn cancel_weapon_action(&mut self) {
         self.actions.reset(&self.animator.pose);
         self.visuals.cancel_staff();
         self.weapon_notice = None;
     }
-    pub fn update(
-        &mut self,
-        dt: f32,
-        player: &Player,
-        running: bool,
-        weapon: WeaponInput,
-        context: &crate::combat::Context<'_>,
-    ) -> Vec<&'static str> {
-        if !dt.is_finite() || dt <= 0. {
-            self.animator.sound_span = None;
-            return Vec::new();
-        }
-        self.update_funded(dt, player, running, weapon, context, None)
-    }
+
     pub fn update_funded(
         &mut self,
         dt: f32,
@@ -860,7 +753,6 @@ impl Character {
         context: &crate::combat::Context<'_>,
         mut stats: Option<&mut crate::inventory::Stats>,
     ) -> Vec<&'static str> {
-        self.water_art.sync(player);
         if let Some(stats) = stats.as_deref() {
             self.power_appearance(stats);
         }
@@ -1061,27 +953,35 @@ impl Character {
         self.actions.finish_frame();
         sounds
     }
+
     pub fn ice_locked(&self) -> bool {
         self.visuals.ice_locked()
     }
+
     pub fn attack_movement_locked(&self) -> bool {
         self.actions.movement_locked()
     }
+
     pub fn ice_targets(&self) -> Vec<crate::combat::Target> {
         self.visuals.ice_targets()
     }
+
     pub fn croquet_contacts(&self) -> bool {
         self.actions.equipment().0 == 2 || self.visuals.croquet_in_flight()
     }
+
     pub fn hit_ice(&mut self, hit: crate::combat::Hit) -> bool {
         self.visuals.hit_ice(hit)
     }
+
     pub fn audio_loops(&self) -> Vec<crate::audio::LoopCue> {
         self.visuals.audio_loops()
     }
+
     pub fn take_world_audio(&mut self) -> Vec<(&'static str, Vec3)> {
         std::mem::take(&mut self.visuals.spatial_sounds)
     }
+
     pub fn take_audio(&mut self) -> Vec<crate::audio::events::Cue> {
         let mut cues = self.acting.take_audio();
         let Some((index, span)) = self.animator.sound_span.take() else {
@@ -1100,35 +1000,37 @@ impl Character {
         }
         cues
     }
+
     pub fn ready_to_attack(&self, selected: usize) -> bool {
         self.actions.ready_to_attack(selected)
             && self.animator.motion != Motion::Death
             && (selected != 6 || self.visuals.dice.ready())
     }
+
     pub fn summon_target(&self) -> Option<crate::combat::Target> {
         self.visuals.dice.target()
     }
+
     pub fn ally_target(&self) -> Option<crate::combat::Target> {
         self.visuals.dice.ally_target()
     }
+
     pub fn dismiss_summon(&mut self) {
         self.visuals.dice.dismiss();
     }
+
     pub fn hit_summon(&mut self, hit: crate::combat::Hit) {
         self.visuals.dice.hit(hit);
     }
+
     pub fn threatens(&self, world: &World, target: crate::combat::Target) -> bool {
         self.visuals.threatens(world, target)
     }
+
     pub fn take_hits(&mut self) -> Vec<crate::combat::Hit> {
         std::mem::take(&mut self.visuals.hits)
     }
-    pub fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, camera: Vec3) {
-        self.water_art.atmosphere(atmosphere, camera);
-        self.material.atmosphere(atmosphere, camera);
-        self.visual_art.atmosphere(atmosphere, camera);
-        self.power_art.atmosphere(camera);
-    }
+
     pub fn world_time(&mut self, dt: f32, world_dt: f32) {
         let frozen = world_dt == 0. && dt > 0.;
         self.visuals.time_stopped = frozen;
@@ -1139,6 +1041,7 @@ impl Character {
         });
         self.actions.time_stopped = frozen;
     }
+
     pub fn power_appearance(&mut self, stats: &crate::inventory::Stats) {
         self.power_remaining=stats.powers.rage;
         self.visuals.dice.rage = stats.powers.rage > 0.;
@@ -1152,9 +1055,7 @@ impl Character {
             self.actions.unarm(&self.animator.pose);
         }
     }
-    pub fn water_appearance(&mut self, player: &Player) {
-        self.water_art.sync(player);
-    }
+
     pub fn story_pose(&mut self, story: &crate::story::Story, dt: f32) {
         self.acting.dialogue(story);
         self.face_time += dt.max(0.);
@@ -1164,63 +1065,96 @@ impl Character {
             story.mouth(&["fakeplayer", "player", "alice"])
         };
     }
-    fn retire_body_input(&mut self) {
-        self.clear_body_input(); self.snapshot_visit=Default::default();
-    }
-    pub(crate) fn clear_body_input(&mut self) {
-        if let Some(input)=self.body_input.take() { self.body_arena=input; }
-    }
-    pub(crate) fn extract_body(&mut self, feet: Vec3) -> (usize, bool) {
-        self.clear_body_input();
-        if self.actions.pose.len()!=self.skeleton.bones.len() || self.actions.pose.len()>65536 || self.visuals.render_effects_overflow() { return (0,true); }
-        let input=&mut self.body_arena;
-        input.visit=self.snapshot_visit.id();input.slot=0;
-        self.face.pose_into(&self.skeleton,&self.actions.pose,self.mouth,&mut self.body_scratch,&mut input.pose);
-        input.transform=Transform { translation:feet+Vec3::Z*self.animator.offset, rotation:Quat::from_rotation_z(self.facing) };
-        input.scale=self.scale; input.face_time=self.face_time; input.alive=self.animator.motion!=Motion::Death;
-        input.water_time=self.animator.time; input.water=self.water_art.render_state();
-        input.power_remaining=self.power_remaining; input.power=self.power_pose.state.render_state(); input.frozen=self.visuals.ice_locked();
-        self.acting.render_attachments(&mut input.attachments,&self.skeleton);
-        input.show_held=!matches!(self.animator.motion,Motion::Death|Motion::Rope|Motion::Cart|Motion::Airship)
+
+    fn extract_body(
+        &mut self,
+        feet: Vec3,
+        visit: u64,
+        summon_art: Option<&crate::dice::Art>,
+    ) -> (usize, bool) {
+        let bones = self.skeleton.bones.len();
+        if self.actions.pose.len() != bones || bones > 65536 || self.visuals.render_effects_overflow() {
+            return (0, true);
+        }
+        let input = &mut self.body_arena;
+        input.visit = visit;
+        input.slot = 0;
+        self.face.pose_into(
+            &self.skeleton,
+            &self.actions.pose,
+            self.mouth,
+            &mut self.body_scratch,
+            &mut input.pose,
+        );
+        input.transform = Transform {
+            translation: feet + Vec3::Z * self.animator.offset,
+            rotation: Quat::from_rotation_z(self.facing),
+        };
+        input.scale = self.scale;
+        input.face_time = self.face_time;
+        input.alive = self.animator.motion != Motion::Death;
+        input.water_time = self.animator.time;
+        input.water = self.water.render_state();
+        input.power_remaining = self.power_remaining;
+        input.power = self.power_pose.state.render_state();
+        input.frozen = self.visuals.ice_locked();
+        self.acting.render_attachments(&mut input.attachments, &self.skeleton);
+        input.show_held = !matches!(self.animator.motion, Motion::Death | Motion::Rope | Motion::Cart | Motion::Airship)
             && !self.acting.hide_weapon() && !input.power.performing;
-        self.visuals.extract_held(&self.actions,&self.anchors,&mut input.held);
-        self.visuals.extract_effects(&mut input.effects, &self.visual_art);
-        let overflow=!input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) || !self.visual_art.valid_effects_input(&input.effects) || !self.visual_art.valid_held_input(&input.held) || !self.acting.valid_attachments(&input.attachments);
-        let bytes=input.bytes();
-        if !overflow { self.body_input=Some(std::mem::take(input)); }
-        (bytes,overflow)
+        self.visuals.extract_held(&self.actions, &self.anchors, &mut input.held);
+        self.visuals.extract_effects(&mut input.effects, summon_art);
+
+        let overflow = !input.valid(visit, bones)
+            || !self.visuals.valid_body_inputs(&input.held, &input.effects, summon_art)
+            || !self.acting.valid_attachments(&input.attachments);
+        (input.bytes(), overflow)
     }
-    pub fn draw(&mut self, feet: Vec3, fullbright: bool) {
-        self.draw_ghost(feet, fullbright, false);
+
+    pub fn visual_counts(&self) -> (u64, u64) {
+        (self.visuals.shots, self.visuals.impacts)
     }
-    fn draw_body(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
-        self.power_art.remaining(self.power_remaining);
+
+    pub fn lights(&self) -> Vec<crate::lighting::Light> {
+        self.visuals.lights()
+    }
+}
+
+impl AliceArt {
+    pub fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, camera: Vec3) {
+        self.water_art.atmosphere(atmosphere, camera);
+        self.material.atmosphere(atmosphere, camera);
+        self.visual_art.atmosphere(atmosphere, camera);
+        self.power_art.atmosphere(camera);
+    }
+
+    fn draw_live(&mut self, sim: &AliceSim, feet: Vec3, fullbright: bool, ghost: bool) {
+        self.power_art.remaining(sim.power_remaining);
         let _identity = self.skin_identity.scope();
-        let feet = feet + Vec3::Z * self.animator.offset;
+        let feet = feet + Vec3::Z * sim.animator.offset;
         let prepared = skinning::prepared::pose(
-            (&self.skeleton as *const Skeleton as usize, &self.face as *const _ as usize),
-            &self.actions.pose, self.mouth, &[],
-            || (self.face.pose(&self.skeleton, &self.actions.pose, self.mouth), Vec::new()),
+            (Arc::as_ptr(&self.skeleton) as usize, &sim.face as *const _ as usize),
+            &sim.actions.pose, sim.mouth, &[],
+            || (sim.face.pose(&self.skeleton, &sim.actions.pose, sim.mouth), Vec::new()),
         );
         let pose = &prepared.pose;
         self.power_art
-            .skin(&mut self.meshes, &self.power_pose.state);
-        if self.power_pose.state.skin().is_none() {
+            .skin(&mut self.meshes, &sim.power_pose.state);
+        if sim.power_pose.state.skin().is_none() {
             self.face.blink(
                 &mut self.meshes,
-                self.face_time,
-                self.animator.motion != Motion::Death,
+                sim.face_time,
+                sim.animator.motion != Motion::Death,
             );
         }
         let mut hidden = Vec::new();
         for (i, surface) in self.skeleton.surfaces.iter().enumerate() {
-            if self.power_pose.state.hidden(&surface.name) {
+            if sim.power_pose.state.hidden(&surface.name) {
                 hidden.push((i, self.meshes[i].take()));
             }
         }
-        let rotation = Quat::from_rotation_z(self.facing);
-        let _skin_guard = skinning::CullGuard::preserve(self.visuals.ice_locked()
-            || self.power_pose.state.form == Some(crate::power_pose::Form::Rage));
+        let rotation = Quat::from_rotation_z(sim.facing);
+        let _skin_guard = skinning::CullGuard::preserve(sim.visuals.ice_locked()
+            || sim.power_pose.state.form == Some(crate::power_pose::Form::Rage));
         let skin_visible = draw_skin(
             &self.skeleton,
             &mut self.meshes,
@@ -1229,7 +1163,7 @@ impl Character {
                 translation: feet,
                 rotation,
             },
-            self.scale,
+            sim.scale,
             fullbright,
         );
         if skinning::overlap::gather_only() {
@@ -1237,20 +1171,20 @@ impl Character {
             return;
         }
         if skin_visible {
-            self.visual_art.frozen_body_input(&self.meshes, self.visuals.ice_locked());
-            self.power_art.surface_effects(&self.meshes, &self.power_pose.state);
+            self.visual_art.frozen_body_input(&self.meshes, sim.visuals.ice_locked());
+            self.power_art.surface_effects(&self.meshes, &sim.power_pose.state);
         }
         for (i, mesh) in hidden {
             self.meshes[i] = mesh;
         }
         self.power_art.draw(
-            &self.power_pose.state,
+            &sim.power_pose.state,
             &pose,
             Transform {
                 translation: feet,
                 rotation,
             },
-            self.scale,
+            sim.scale,
             fullbright,
         );
         self.material.bind_appearance(Appearance {
@@ -1258,40 +1192,43 @@ impl Character {
             ..Default::default()
         });
         self.acting.draw(
+            &sim.acting,
             &self.skeleton,
             &pose,
             Transform {
                 translation: feet,
                 rotation,
             },
-            self.scale,
+            sim.scale,
             fullbright,
         );
-        if self.animator.motion != Motion::Death {
-            self.water_art.draw(
+        if sim.animator.motion != Motion::Death {
+            self.water_art.draw_input(
+                sim.water.render_state(),
                 &pose,
                 Transform {
                     translation: feet,
                     rotation,
                 },
-                self.scale,
-                self.animator.time,
+                sim.scale,
+                sim.animator.time,
                 fullbright,
             );
             self.material.bind_appearance(Appearance { ghost, ..Default::default() });
         }
         if !matches!(
-            self.animator.motion,
+            sim.animator.motion,
             Motion::Death | Motion::Rope | Motion::Cart | Motion::Airship
-        ) && !self.acting.hide_weapon()
-            && !self.power_pose.state.performing
+        ) && !sim.acting.hide_weapon()
+            && !sim.power_pose.state.performing
         {
             self.visual_art
-                .draw_held(&self.visuals, &self.actions, &self.anchors, fullbright);
+                .draw_held(&sim.visuals, &sim.actions, &sim.anchors, fullbright);
         }
         gl_use_default_material();
     }
-    fn publish_body(&mut self, input: &BodyInput, fullbright: bool, ghost: bool) {
+
+    fn draw(&mut self, input: &BodyInput, fullbright: bool, ghost: bool) {
         self.power_art.remaining(input.power_remaining);
         let _identity = self.skin_identity.scope();
         let pose = &input.pose;
@@ -1367,55 +1304,432 @@ impl Character {
         if input.show_held { self.visual_art.draw_held_input(&input.held, fullbright); }
         gl_use_default_material();
     }
-    pub fn draw_ghost(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
-        if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors) { return; }
-        let material = self.material.clone();
-        material.draw(
-            Appearance {
-                ghost,
-                ..Default::default()
-            },
-            || {
-                if let Some(input) = self.body_input.take() {
-                    if input.valid(self.snapshot_visit.id(), self.skeleton.bones.len()) && self.visual_art.valid_effects_input(&input.effects) && self.visual_art.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
-                        self.publish_body(&input, fullbright, ghost);
-                    } else { self.draw_body(feet, fullbright, ghost); }
-                    self.body_input = Some(input);
-                } else { self.draw_body(feet, fullbright, ghost); }
-            },
-        );
-        if !skinning::overlap::gather_only() { gl_use_default_material(); }
+
+    fn valid_body_input(&self, input: &BodyInput) -> bool {
+        input.valid(self.snapshot_visit.id(), self.skeleton.bones.len())
+            && self.visual_art.valid_effects_input(&input.effects)
+            && self.visual_art.valid_held_input(&input.held)
+            && self.acting.valid_attachments(&input.attachments)
     }
-    pub fn draw_effects(&mut self, camera: Vec3, fullbright: bool, show_alice: bool) {
-        if let Some(input)=self.body_input.take() {
-            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) && self.visual_art.valid_effects_input(&input.effects) && self.visual_art.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
-                self.visual_art.draw_effects_input(&input.effects,&self.material,camera,fullbright,show_alice);
-            } else { self.visual_art.draw_effects(&self.visuals, &self.material,camera,fullbright,show_alice); }
-            self.body_input=Some(input);
-        } else { self.visual_art.draw_effects(&self.visuals, &self.material,camera,fullbright,show_alice); }
+
+    fn assert_live_fallback(&self) {
+        #[cfg(any(debug_assertions, not(target_os = "vita")))]
+        assert!(!self.require_body_input, "world-free Alice draw fell back to live simulation");
     }
-    pub fn draw_first_person(&mut self, fullbright: bool) {
-        if let Some(input)=self.body_input.take() {
-            if input.valid(self.snapshot_visit.id(),self.skeleton.bones.len()) && self.visual_art.valid_effects_input(&input.effects) && self.visual_art.valid_held_input(&input.held) && self.acting.valid_attachments(&input.attachments) {
-                self.material.bind();self.visual_art.draw_held_input(&input.held,fullbright);
-                crate::render::depth_read_only(||self.visual_art.draw_view_trail_input(&input.effects));gl_use_default_material();
-            } else {self.draw_first_person_live(fullbright);}
-            self.body_input=Some(input);
-        } else {self.draw_first_person_live(fullbright);}
-    }
-    fn draw_first_person_live(&mut self, fullbright: bool) {
+
+    fn draw_first_person_live(&mut self, sim: &AliceSim, fullbright: bool) {
         self.material.bind();
         self.visual_art
-            .draw_held(&self.visuals, &self.actions, &self.anchors, fullbright);
-        crate::render::depth_read_only(|| self.visual_art.draw_view_trail(&self.visuals));
+            .draw_held(&sim.visuals, &sim.actions, &sim.anchors, fullbright);
+        crate::render::depth_read_only(|| self.visual_art.draw_view_trail(&sim.visuals));
         gl_use_default_material();
     }
+
+    fn draw_viewmodel(&mut self, input: &BodyInput, fullbright: bool) {
+        self.material.bind();
+        self.visual_art.draw_held_input(&input.held, fullbright);
+        crate::render::depth_read_only(|| self.visual_art.draw_view_trail_input(&input.effects));
+        gl_use_default_material();
+    }
+}
+
+impl Character {
+    pub fn snapshot(&self) -> Snapshot {
+        self.sim.snapshot()
+    }
+
+    pub fn restore(&mut self, snapshot: &Snapshot) -> Result<()> {
+        self.retire_body_input();
+        self.sim.restore(snapshot)?;
+        self.art.visual_art.clear();
+        self.art.water_art.reset_emitter();
+        Ok(())
+    }
+
+    pub fn die(&mut self) {
+        if self.sim.die() {
+            self.art.visual_art.clear();
+        }
+    }
+
+    pub fn load(assets: &mut Assets) -> Result<Self> {
+        let _r13=crate::allocation_census::Scope::new(4);
+        let def = Definition::alice(assets)?;
+        let skeleton = Arc::new(Skeleton::parse(&assets.read(&format!("{}/{}", def.path, def.model))?)?);
+        let mut clips = Vec::new();
+        for name in CLIPS {
+            let path = format!("{}/{name}.ska", def.path);
+            clips.push(
+                Animation::parse(&assets.read(&path)?, skeleton.bones.len())
+                    .with_context(|| path)?,
+            );
+        }
+        let specs = texture::read_materials(assets)?;
+        let mut textures = BTreeMap::<String, Texture2D>::new();
+        let mut meshes = Vec::new();
+        let mut material_layers = Vec::new();
+        for surface in &skeleton.surfaces {
+            // The extra cap surfaces are only used by the original dismemberment system.
+            if ["material15", "material16", "material17"].contains(&surface.name.as_str()) {
+                meshes.push(None);
+                continue;
+            }
+            let skin = def
+                .skins
+                .get(&surface.name)
+                .context("Alice surface has no skin")?;
+            let path = texture::resolve(assets, &format!("{}/{skin}", def.path), &specs)
+                .or_else(|| texture::resolve(assets, skin, &specs))
+                .with_context(|| format!("Alice skin not found: {skin}"))?;
+            let tex = if let Some(tex) = textures.get(&path) {
+                tex.clone()
+            } else {
+                let image = texture::decode(assets, &path)?;
+                let tex = crate::texture::upload_rgba8(image.width, image.height, &image.pixels);
+                tex.set_filter(FilterMode::Linear);
+                textures.insert(path, tex.clone());
+                tex
+            };
+            material_layers.push(crate::render_fx::register(
+                assets,
+                &tex,
+                &[format!("{}/{skin}", def.path), skin.clone()],
+                &specs,
+            )?);
+            meshes.push(Some(Mesh { upload_identity: None, surface: material_layers.last().cloned(),
+                vertices: surface
+                    .vertices
+                    .iter()
+                    .map(|v| Vertex {
+                        position: Vec3::ZERO,
+                        uv: v.uv,
+                        color: [255; 4],
+                        normal: Vec4::ZERO,
+                    })
+                    .collect(),
+                indices: surface.indices.clone(),
+                texture: Some(tex),
+            }));
+        }
+        let (face, face_art) = crate::facial::Face::load(
+            assets,
+            "models/alice.tik",
+            &def,
+            &skeleton,
+            &meshes,
+            &specs,
+        )?.into_parts();
+        let material = skin_material()?;
+        println!(
+            "Alice: {} bones, {} visible surfaces, {} locomotion clips",
+            skeleton.bones.len(),
+            meshes.iter().flatten().count(),
+            clips.len()
+        );
+        let tag = |name| {
+            skeleton
+                .bones
+                .iter()
+                .position(|b| b.name == name)
+                .with_context(|| format!("Missing Alice attachment {name}"))
+        };
+        let tags = [
+            tag("tag_weapon")?,
+            tag("tag_ball_linked")?,
+            tag("tag_ball_free")?,
+        ];
+        let power_pose = crate::power_pose::Performance::load(assets, &def, skeleton.bones.len())?;
+        let power_art = crate::power_pose::Art::load(assets, &skeleton, &meshes, &specs)?;
+        let water_art = crate::water_art::Art::load(assets, &skeleton, &specs)?;
+        let mut upper = Vec::new();
+        for b in &skeleton.bones {
+            upper.push(b.name == "Bip01 Spine" || b.parent.is_some_and(|p| upper[p]));
+        }
+        let mut animator = Animator::new(clips);
+        animator.scale = def.scale;
+        let foot_rig = crate::footing::Rig::new(&skeleton, &animator.pose, def.scale);
+        let actions = Actions::load(assets, skeleton.bones.len(), &animator.pose)?;
+        let (visuals, visual_art) = Visuals::load(assets)?;
+        let (acting, acting_art) = crate::acting::Acting::load(assets, &def, &skeleton, &specs)?;
+        let sim = AliceSim {
+            body_arena: Default::default(),
+            body_scratch: Vec::new(),
+            weapon_notice: None,
+            foot_rig,
+            foot_state: Default::default(),
+            acting,
+            face,
+            mouth: 0.,
+            face_time: 0.,
+            sound_events: crate::audio::events::Model::load(assets, "models/alice.tik")?,
+            power_pose,
+            power_remaining: 0.,
+            skeleton: Arc::clone(&skeleton),
+            animator,
+            scale: def.scale,
+            facing: 0.,
+            actions,
+            visuals,
+            upper,
+            tags,
+            anchors: [Transform {
+                rotation: Quat::IDENTITY,
+                translation: Vec3::ZERO,
+            }; 3],
+            viewmodel: crate::viewmodel::ViewModel::default(),
+            water: Default::default(),
+        };
+        let art = AliceArt {
+            snapshot_visit: Default::default(),
+            body_input: None,
+            skin_identity: Default::default(),
+            _material_layers: material_layers,
+            power_art,
+            water_art,
+            meshes,
+            material,
+            visual_art,
+            skeleton,
+            face: face_art,
+            acting: acting_art,
+            #[cfg(any(debug_assertions, not(target_os = "vita")))]
+            require_body_input: false,
+        };
+        Ok(Self { sim, art })
+    }
+
+    pub fn reset(&mut self, player: &Player, yaw: f32) {
+        self.retire_body_input();
+        self.sim.water = Default::default();
+        self.art.water_art.reset_emitter();
+        self.water_appearance(player);
+        self.sim.reset(player, yaw);
+        self.art.visual_art.clear();
+    }
+
+    pub fn notarget(&mut self, value: bool) {
+        self.sim.notarget(value)
+    }
+
+    pub fn facing(&self) -> f32 {
+        self.sim.facing()
+    }
+
+    pub fn rage_scene(&mut self, time: f32, finished: bool, player: &Player) {
+        self.sim.rage_scene(time, finished, player)
+    }
+
+    /// Resume from the actual last cinematic pose without clearing live effects.
+    /// A distant cutaway or a scaled Alice cannot seed an ordinary body pose.
+    pub fn resume_scene(
+        &mut self,
+        player: &Player,
+        yaw: f32,
+        pose: Option<&crate::cinematic::ActorPose>,
+    ) {
+        self.sim.resume_scene(player, yaw, pose)
+    }
+
+    pub fn cancel_weapon_action(&mut self) {
+        self.sim.cancel_weapon_action()
+    }
+
+    pub fn update(
+        &mut self,
+        dt: f32,
+        player: &Player,
+        running: bool,
+        weapon: WeaponInput,
+        context: &crate::combat::Context<'_>,
+    ) -> Vec<&'static str> {
+        if !dt.is_finite() || dt <= 0. {
+            self.sim.animator.sound_span = None;
+            return Vec::new();
+        }
+        self.update_funded(dt, player, running, weapon, context, None)
+    }
+
+    pub fn update_funded(
+        &mut self,
+        dt: f32,
+        player: &Player,
+        running: bool,
+        weapon: WeaponInput,
+        context: &crate::combat::Context<'_>,
+        stats: Option<&mut crate::inventory::Stats>,
+    ) -> Vec<&'static str> {
+        self.water_appearance(player);
+        self.sim.update_funded(dt, player, running, weapon, context, stats)
+    }
+
+    pub fn ice_locked(&self) -> bool {
+        self.sim.ice_locked()
+    }
+
+    pub fn attack_movement_locked(&self) -> bool {
+        self.sim.attack_movement_locked()
+    }
+
+    pub fn ice_targets(&self) -> Vec<crate::combat::Target> {
+        self.sim.ice_targets()
+    }
+
+    pub fn croquet_contacts(&self) -> bool {
+        self.sim.croquet_contacts()
+    }
+
+    pub fn hit_ice(&mut self, hit: crate::combat::Hit) -> bool {
+        self.sim.hit_ice(hit)
+    }
+
+    pub fn audio_loops(&self) -> Vec<crate::audio::LoopCue> {
+        self.sim.audio_loops()
+    }
+
+    pub fn take_world_audio(&mut self) -> Vec<(&'static str, Vec3)> {
+        self.sim.take_world_audio()
+    }
+
+    pub fn take_audio(&mut self) -> Vec<crate::audio::events::Cue> {
+        self.sim.take_audio()
+    }
+
+    pub fn ready_to_attack(&self, selected: usize) -> bool {
+        self.sim.ready_to_attack(selected)
+    }
+
+    pub fn summon_target(&self) -> Option<crate::combat::Target> {
+        self.sim.summon_target()
+    }
+
+    pub fn ally_target(&self) -> Option<crate::combat::Target> {
+        self.sim.ally_target()
+    }
+
+    pub fn dismiss_summon(&mut self) {
+        self.sim.dismiss_summon()
+    }
+
+    pub fn hit_summon(&mut self, hit: crate::combat::Hit) {
+        self.sim.hit_summon(hit)
+    }
+
+    pub fn threatens(&self, world: &World, target: crate::combat::Target) -> bool {
+        self.sim.threatens(world, target)
+    }
+
+    pub fn take_hits(&mut self) -> Vec<crate::combat::Hit> {
+        self.sim.take_hits()
+    }
+
+    pub fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, camera: Vec3) {
+        self.art.atmosphere(atmosphere, camera);
+    }
+
+    pub fn world_time(&mut self, dt: f32, world_dt: f32) {
+        self.sim.world_time(dt, world_dt)
+    }
+
+    pub fn power_appearance(&mut self, stats: &crate::inventory::Stats) {
+        self.sim.power_appearance(stats)
+    }
+
+    pub fn water_appearance(&mut self, player: &Player) {
+        // Emitter history stays on the serial path at the original sync point.
+        if self.sim.water.sync(player) {
+            self.art.water_art.reset_emitter();
+        }
+    }
+
+    pub fn story_pose(&mut self, story: &crate::story::Story, dt: f32) {
+        self.sim.story_pose(story, dt)
+    }
+
+    fn retire_body_input(&mut self) {
+        self.clear_body_input();
+        self.art.snapshot_visit = Default::default();
+    }
+
+    pub(crate) fn clear_body_input(&mut self) {
+        if let Some(input) = self.art.body_input.take() {
+            self.sim.body_arena = input;
+        }
+    }
+
+    pub(crate) fn extract_body(&mut self, feet: Vec3) -> (usize, bool) {
+        self.clear_body_input();
+        let summon_art = self.has_live_summon().then(|| self.art.visual_art.summon_art());
+        let (bytes, overflow) = self.sim.extract_body(feet, self.art.snapshot_visit.id(), summon_art);
+        if !overflow {
+            self.art.body_input = Some(std::mem::take(&mut self.sim.body_arena));
+        }
+        (bytes, overflow)
+    }
+
+    pub(crate) fn has_live_summon(&self) -> bool {
+        self.sim.visuals.dice.demon.is_some()
+    }
+
+    pub(crate) fn take_weapon_notice(&mut self) -> Option<&'static str> {
+        self.sim.weapon_notice.take()
+    }
+
+    #[cfg(any(debug_assertions, not(target_os = "vita")))]
+    pub(crate) fn require_body_input(&mut self, required: bool) {
+        self.art.require_body_input = required;
+    }
+
+    pub fn draw(&mut self, feet: Vec3, fullbright: bool) {
+        self.draw_ghost(feet, fullbright, false);
+    }
+
+    pub fn draw_ghost(&mut self, feet: Vec3, fullbright: bool, ghost: bool) {
+        if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors) { return; }
+        let material = self.art.material.clone();
+        material.draw(Appearance { ghost, ..Default::default() }, || {
+            let input = self.art.body_input.take();
+            if let Some(input) = input.as_ref().filter(|input| self.art.valid_body_input(input)) {
+                self.art.draw(input, fullbright, ghost);
+            } else {
+                self.art.assert_live_fallback();
+                self.art.draw_live(&self.sim, feet, fullbright, ghost);
+            }
+            self.art.body_input = input;
+        });
+        if !skinning::overlap::gather_only() { gl_use_default_material(); }
+    }
+
+    pub fn draw_effects(&mut self, camera: Vec3, fullbright: bool, show_alice: bool) {
+        let art = &mut self.art;
+        let input = art.body_input.take();
+        if let Some(input) = input.as_ref().filter(|input| art.valid_body_input(input)) {
+            art.visual_art.draw_effects_input(&input.effects, &art.material, camera, fullbright, show_alice);
+        } else {
+            art.assert_live_fallback();
+            art.visual_art.draw_effects(&self.sim.visuals, &art.material, camera, fullbright, show_alice);
+        }
+        art.body_input = input;
+    }
+
+    pub fn draw_first_person(&mut self, fullbright: bool) {
+        let input = self.art.body_input.take();
+        if let Some(input) = input.as_ref().filter(|input| self.art.valid_body_input(input)) {
+            self.art.draw_viewmodel(input, fullbright);
+        } else {
+            self.art.assert_live_fallback();
+            self.art.draw_first_person_live(&self.sim, fullbright);
+        }
+        self.art.body_input = input;
+    }
+
     pub fn visual_counts(&self) -> (u64, u64) {
-        (self.visuals.shots, self.visuals.impacts)
+        self.sim.visual_counts()
     }
+
     pub fn lights(&self) -> Vec<crate::lighting::Light> {
-        self.visuals.lights()
+        self.sim.lights()
     }
+
     /// Renderer regression after a staged scene; keep the live shared pipeline.
     pub(crate) async fn check_visible(&mut self, label: &str) -> Result<()> {
         let player = crate::movement::Player::new(Vec3::ZERO);
@@ -1652,17 +1966,17 @@ pub async fn render_animations(assets: &mut Assets) -> Result<()> {
         ("talk_gnomes_01", 0.8, crate::weapons::UNARMED),
         ("pain_front", 0.2, 0),
     ] {
-        alice.actions.selected = weapon;
-        alice.actions.playing = None;
-        alice.acting.stage(clip, time, weapon)?;
-        alice.actions.pose = alice.animator.pose.clone();
+        alice.sim.actions.selected = weapon;
+        alice.sim.actions.playing = None;
+        alice.sim.acting.stage(clip, time, weapon)?;
+        alice.sim.actions.pose = alice.sim.animator.pose.clone();
         alice
-            .acting
-            .apply(&mut alice.actions.pose, &alice.upper, true);
-        let pose = alice.skeleton.global_pose(&alice.actions.pose);
-        alice.anchors = alice.tags.map(|i| Transform {
+            .sim.acting
+            .apply(&mut alice.sim.actions.pose, &alice.sim.upper, true);
+        let pose = alice.sim.skeleton.global_pose(&alice.sim.actions.pose);
+        alice.sim.anchors = alice.sim.tags.map(|i| Transform {
             rotation: pose[i].rotation,
-            translation: pose[i].translation * alice.scale,
+            translation: pose[i].translation * alice.sim.scale,
         });
         for frame in 0..3 {
             animation_camera(clip);
@@ -1694,7 +2008,7 @@ pub async fn render_animations(assets: &mut Assets) -> Result<()> {
         for (label, speaking, time) in [("rest", false, 0.), ("gesture", true, 3.)] {
             for frame in 0..3 {
                 animation_camera_bounds(name, min, max);
-                alice.material.bind();
+                alice.art.material.bind();
                 actor.draw_performance(
                     speaking,
                     time,
@@ -1739,7 +2053,7 @@ pub async fn render_animations(assets: &mut Assets) -> Result<()> {
         for (label, time) in [("start", 0.), ("moving", 1.5)] {
             for frame in 0..3 {
                 animation_camera_bounds(name, min, max);
-                alice.material.bind();
+                alice.art.material.bind();
                 prop.draw_frame(
                     Transform {
                         translation: Vec3::ZERO,
@@ -2049,7 +2363,7 @@ pub async fn check_visibility(assets: &mut Assets) -> Result<()> {
         alice.resume_scene(&player, 0., Some(end_pose));
         anyhow::ensure!(
             alice
-                .animator
+                .sim.animator
                 .pose
                 .iter()
                 .zip(&end_pose.local)
@@ -2059,7 +2373,7 @@ pub async fn check_visibility(assets: &mut Assets) -> Result<()> {
         let saved = alice.snapshot();
         alice.restore(&serde_json::from_slice(&serde_json::to_vec(&saved)?)?)?;
         anyhow::ensure!(
-            alice.animator.transition == 0.,
+            alice.sim.animator.transition == 0.,
             "Pose blend lost after saving"
         );
         visibility_camera(player.feet, 1.);
@@ -2790,7 +3104,7 @@ pub async fn render_presentation(assets: &mut Assets) -> Result<()> {
                 frame += 1;
             }
             anyhow::ensure!(
-                alice.power_pose.state.form == Some(form),
+                alice.sim.power_pose.state.form == Some(form),
                 "Power disappeared"
             );
             visibility_camera(Vec3::ZERO, 1.);
@@ -2828,7 +3142,7 @@ pub async fn render_presentation(assets: &mut Assets) -> Result<()> {
         stats.update(60.);
         alice.power_appearance(&stats);
         anyhow::ensure!(
-            alice.power_pose.state.form.is_none(),
+            alice.sim.power_pose.state.form.is_none(),
             "Expired skin remained"
         );
         visibility_camera(Vec3::ZERO, 1.);
@@ -2839,7 +3153,7 @@ pub async fn render_presentation(assets: &mut Assets) -> Result<()> {
         alice.power_appearance(&stats);
         alice.die();
         anyhow::ensure!(
-            alice.power_pose.state.form.is_none(),
+            alice.sim.power_pose.state.form.is_none(),
             "Power survived death"
         );
         println!("PASS native {name} growth, alternate skin, save pixel equality, pause, expiry and death");
@@ -2945,7 +3259,7 @@ mod tests {
                 a.unarmed = unarmed;
                 a.large = large;
                 // A one-second walk with the short root travel from issue #2.
-                a.clips[index].distance = 51.7;
+                Arc::get_mut(&mut a.clips).unwrap()[index].distance = 51.7;
                 let mut p = Player::new(Vec3::ZERO);
                 p.grounded = true;
                 p.velocity = Vec3::X * crate::movement::WALK_SPEED * fraction;
@@ -2973,8 +3287,8 @@ mod tests {
     fn walking_equipment_and_run_changes_preserve_stride_and_save_continuation() {
         let mut a = animator();
         a.unarmed = true;
-        a.clips[1].distance = 51.7;
-        a.clips[9].frame_time = 0.04;
+        Arc::get_mut(&mut a.clips).unwrap()[1].distance = 51.7;
+        Arc::get_mut(&mut a.clips).unwrap()[9].frame_time = 0.04;
         let mut p = Player::new(Vec3::ZERO);
         p.grounded = true;
         p.velocity = Vec3::X * crate::movement::WALK_SPEED;
@@ -3011,7 +3325,7 @@ mod tests {
     fn rope_cycle_uses_both_hands_and_only_distance_along_rope() {
         let mut a = animator();
         for i in [22, 23, 30, 31] {
-            for (j, frame) in a.clips[i].frames.iter_mut().enumerate() {
+            for (j, frame) in Arc::get_mut(&mut a.clips).unwrap()[i].frames.iter_mut().enumerate() {
                 // Stationary root frames must not skip the hand-placement pose.
                 frame.delta = if j % 2 == 0 { Vec3::ZERO } else { Vec3::Z * 5. };
                 frame.pose[0].translation.x = if i < 30 { j as f32 } else { 20. - j as f32 };
@@ -3411,25 +3725,25 @@ pub(crate) async fn snapshot_render_check(assets:&mut Assets)->Result<()> {
                 alice.update(1./60.,&player,false,WeaponInput{dice:3,selected:weapon,aim:Vec3::X,click:((case<11 && (case!=10 || tick<120)) || case==15).then_some(case%2==0 || case==15),first_person:case%3==0,..Default::default()},&ctx);
             }
             if case==11 || case==12 {
-                alice.power_pose.state.form=Some(if case==11 {crate::power_pose::Form::Rage}else{crate::power_pose::Form::Tea});
-                alice.power_pose.state.age=8.1;alice.power_pose.state.performing=true;alice.power_remaining=2.;
+                alice.sim.power_pose.state.form=Some(if case==11 {crate::power_pose::Form::Rage}else{crate::power_pose::Form::Tea});
+                alice.sim.power_pose.state.age=8.1;alice.sim.power_pose.state.performing=true;alice.sim.power_remaining=2.;
             }
             if case==13 {player.breath.shell=true;player.immersion.level=3;alice.water_appearance(&player);}
             if case==14 {
                 let definition=Definition::alice(assets)?;
                 let gesture=crate::acting::clip_names(&definition).into_iter().next().context("Missing gesture control")?;
-                alice.acting.stage(&gesture,0.4,weapon)?;
-                alice.acting.apply(&mut alice.actions.pose,&alice.upper,true);
+                alice.sim.acting.stage(&gesture,0.4,weapon)?;
+                alice.sim.acting.apply(&mut alice.sim.actions.pose,&alice.sim.upper,true);
             }
-            if case==10 {anyhow::ensure!(alice.visuals.dice.demon.is_some(),"Summon control did not summon");if let Some(d)=&mut alice.visuals.dice.demon {d.feet=Vec3::Y*50.;}}
+            if case==10 {anyhow::ensure!(alice.sim.visuals.dice.demon.is_some(),"Summon control did not summon");if let Some(d)=&mut alice.sim.visuals.dice.demon {d.feet=Vec3::Y*50.;}}
             if case==15 {anyhow::ensure!(alice.ice_locked(),"Ice shell control did not freeze");}
-            alice.mouth=0.7;alice.face_time=case as f32*0.37;
+            alice.sim.mouth=0.7;alice.sim.face_time=case as f32*0.37;
             if captured {
                 let (_,overflow)=alice.extract_body(player.feet);anyhow::ensure!(!overflow,"Alice control overflow {case}");
-                alice.actions.pose.clear();alice.actions.selected=crate::weapons::UNARMED;alice.scale=0.;alice.facing=2.;
-                alice.animator.motion=Motion::Death;alice.power_pose.state=Default::default();alice.power_remaining=0.;alice.acting.reset();
-                alice.visuals.clear();
-                alice.visual_art.clear();
+                alice.sim.actions.pose.clear();alice.sim.actions.selected=crate::weapons::UNARMED;alice.sim.scale=0.;alice.sim.facing=2.;
+                alice.sim.animator.motion=Motion::Death;alice.sim.power_pose.state=Default::default();alice.sim.power_remaining=0.;alice.sim.acting.reset();
+                alice.sim.visuals.clear();
+                alice.art.visual_art.clear();
             }
             let view=Camera3D{position:vec3(150.,-190.,85.),target:Vec3::Z*38.,up:Vec3::Z,fovy:65_f32.to_radians(),z_near:2.,z_far:30000.,..Default::default()};
             clear_background(BLACK);set_camera(&view);crate::render_fx::begin_view(&view,2.5,&atmosphere,false);
