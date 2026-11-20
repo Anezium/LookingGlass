@@ -390,7 +390,6 @@ pub struct Config {
     /// Picture-changing (stored normals instead of rebuilt face normals): opt in only.
     pub gpu_skin_actors: bool,
     /// Share immutable vertex and index buffers between GPU skin packets.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub gpu_skin_shared_streams: bool,
     /// Diagnostic PNGs at three replay frames; never enabled by the skin key alone.
     pub gpu_skin_capture: bool,
@@ -4233,7 +4232,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "low_fog_skip" | "low_fog_cheaper" | "low_fog_per_vertex" | "mover_shape_reuse" | "phase_census_window") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "gpu_skin_shared_streams" | "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "low_fog_skip" | "low_fog_cheaper" | "low_fog_per_vertex" | "mover_shape_reuse" | "phase_census_window") }
     #[test]
     fn gpu_skin_keys_are_explicitly_default_off_and_strict_booleans() {
         let c=Config::default();assert!(!c.gpu_skin_ants && !c.gpu_skin_actors && !c.gpu_skin_capture);

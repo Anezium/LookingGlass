@@ -13,7 +13,7 @@ mod add_program;
 mod actor_lean;
 pub(crate) mod gpu_skin;
 use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
-use super::{Frame, Pass, FRAME};
+use super::{Frame, Group, Pass, FRAME};
 use crate::environment::Atmosphere;
 use anyhow::{ensure, Context, Result};
 use macroquad::{miniquad::*, prelude::*};
