@@ -72,6 +72,21 @@ pub struct Frame {
     pub pad: Option<[u8; 4]>,
     pub chars: Vec<char>,
     pub quit: bool,
+    // Owner-captured gameplay metadata, outside the tape format.
+    pub(crate) desktop_pad: Option<crate::input::RawPad>,
+    pub(crate) vita_analog: bool,
+}
+
+impl Frame {
+    pub(crate) fn key(&self, key: KeyCode, edge: bool) -> bool {
+        let bits = if edge { self.keys_pressed } else { self.keys_down };
+        bits != 0 && KEYS.iter().position(|&k| k == key).is_some_and(|bit| bits >> bit & 1 != 0)
+    }
+
+    pub(crate) fn mouse_button(&self, button: MouseButton, edge: bool) -> bool {
+        let bits = if edge { self.mouse_pressed } else { self.mouse_down };
+        bits >> button_bit(button) & 1 != 0
+    }
 }
 
 const OFF: u8 = 0;
@@ -93,6 +108,17 @@ static CHARS: Mutex<Vec<char>> = Mutex::new(Vec::new());
 /// Tape seconds, the sum of the frame times of every step so far, as f64 bits.
 static CLOCK: AtomicU64 = AtomicU64::new(0);
 static ORIGIN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+struct ClockView {
+    dt: f32,
+    clock_bits: u64,
+    origin: std::time::Instant,
+}
+
+thread_local! {
+    static CLOCK_VIEW: std::cell::Cell<Option<ClockView>> = const { std::cell::Cell::new(None) };
+}
 
 fn mode() -> u8 {
     MODE.load(Relaxed)
@@ -123,12 +149,14 @@ fn bits_pad(bits: u64) -> Option<[u8; 4]> {
 /// Start answering from installed frames. `replay` selects whether the Vita pad read comes
 /// from the frame (replay) or from the console (record).
 pub(super) fn activate(replay: bool) {
+    CLOCK_VIEW.set(None);
     CLOCK.store(0f64.to_bits(), Relaxed);
     *ORIGIN.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
     PAD.store(0, Relaxed);
     MODE.store(if replay { REPLAY } else { RECORD }, Relaxed);
 }
 pub(super) fn deactivate() {
+    CLOCK_VIEW.set(None);
     MODE.store(OFF, Relaxed);
     CHARS.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
@@ -153,7 +181,11 @@ pub(super) fn install(frame: &Frame) {
     // Served by pop() from the end, like macroquad: store reversed.
     chars.extend(frame.chars.iter().rev());
     let clock = f64::from_bits(CLOCK.load(Relaxed)) + f64::from(frame.dt);
-    CLOCK.store(clock.to_bits(), Relaxed);
+    let clock_bits = clock.to_bits();
+    CLOCK.store(clock_bits, Relaxed);
+    if let Some(origin) = *ORIGIN.lock().unwrap_or_else(|p| p.into_inner()) {
+        CLOCK_VIEW.set(Some(ClockView { dt: frame.dt, clock_bits, origin }));
+    }
 }
 /// The pad the game read during the step that is ending (record), for the tape.
 pub(super) fn last_pad() -> Option<[u8; 4]> {
@@ -162,6 +194,12 @@ pub(super) fn last_pad() -> Option<[u8; 4]> {
 
 /// Everything macroquad reports for this frame. Chars are drained from its queue.
 pub(super) fn capture_live() -> Frame {
+    let mut f = capture_live_controls();
+    f.chars = std::iter::from_fn(macroquad::input::get_char_pressed).collect();
+    f
+}
+
+fn capture_live_controls() -> Frame {
     use macroquad::input as mq;
     let mut f = Frame { dt: macroquad::time::get_frame_time(), ..Default::default() };
     for (i, key) in KEYS.iter().enumerate() {
@@ -178,9 +216,27 @@ pub(super) fn capture_live() -> Frame {
     }
     f.mouse = mq::mouse_position();
     f.wheel = mq::mouse_wheel();
-    f.chars = std::iter::from_fn(mq::get_char_pressed).collect();
     f.quit = mq::is_quit_requested();
     f
+}
+
+/// Owner-side gameplay sample. Character input remains queued for the modal UI or console.
+pub(crate) fn capture_controls() -> Frame {
+    if !active() { return capture_live_controls(); }
+    let mouse = MOUSE_BITS.load(Relaxed);
+    Frame {
+        dt: get_frame_time(),
+        keys_down: load_u128(&KEYS_DOWN),
+        keys_pressed: load_u128(&KEYS_PRESSED),
+        keys_released: load_u128(&KEYS_RELEASED),
+        mouse_down: mouse as u8,
+        mouse_pressed: (mouse >> 8) as u8,
+        mouse_released: (mouse >> 16) as u8,
+        mouse: mouse_position(),
+        wheel: mouse_wheel(),
+        quit: is_quit_requested(),
+        ..Default::default()
+    }
 }
 
 pub fn is_key_down(key: KeyCode) -> bool {
@@ -225,16 +281,21 @@ pub fn is_quit_requested() -> bool {
     QUIT.load(Relaxed)
 }
 pub fn get_frame_time() -> f32 {
+    if let Some(view) = CLOCK_VIEW.get() { return view.dt; }
     if !active() { return macroquad::time::get_frame_time(); }
     f32::from_bits(DT.load(Relaxed))
 }
 /// Seconds since the first step while active, so time differences match between runs.
 pub fn get_time() -> f64 {
+    if let Some(view) = CLOCK_VIEW.get() { return f64::from_bits(view.clock_bits); }
     if !active() { return macroquad::time::get_time(); }
     f64::from_bits(CLOCK.load(Relaxed))
 }
 /// Wall clock for gameplay timers that would otherwise read `Instant::now()`.
 pub fn now() -> std::time::Instant {
+    if let Some(view) = CLOCK_VIEW.get() {
+        return view.origin + std::time::Duration::from_secs_f64(f64::from_bits(view.clock_bits));
+    }
     if !active() { return std::time::Instant::now(); }
     let origin = ORIGIN.lock().unwrap_or_else(|p| p.into_inner()).unwrap_or_else(std::time::Instant::now);
     origin + std::time::Duration::from_secs_f64(f64::from_bits(CLOCK.load(Relaxed)))

@@ -4,7 +4,7 @@ use crate::preferences::Preferences;
 use macroquad::prelude::*;
 // Recorded or replayed input when a tape is active; otherwise the macroquad calls.
 use crate::replay::input::{
-    get_frame_time, get_time, is_key_down, is_key_pressed, is_mouse_button_down, is_mouse_button_pressed, mouse_wheel,
+    get_time, is_key_down, is_key_pressed, is_mouse_button_down, is_mouse_button_pressed, mouse_wheel, Frame,
 };
 use std::collections::HashSet;
 
@@ -128,7 +128,7 @@ fn mouse_button(name: &str) -> Option<MouseButton> {
 /// Host probe only: `LOOKING_GLASS_SCRIPT_KEYS="frame:key:hold,..."` presses `key` (a binding
 /// name such as `3` or `Mouse 2`) at `frame` and holds it for `hold` frames (default 1).
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-fn scripted(name: &str, edge: bool) -> bool {
+fn scripted_keys() -> Vec<(String, bool, bool)> {
     use std::sync::OnceLock;
     static KEYS: OnceLock<Vec<(u64, String, u64)>> = OnceLock::new();
     let keys = KEYS.get_or_init(|| std::env::var("LOOKING_GLASS_SCRIPT_KEYS").map_or_else(|_| Vec::new(), |text| {
@@ -139,9 +139,27 @@ fn scripted(name: &str, edge: bool) -> bool {
             (frame, parts[1].trim().to_string(), hold)
         }).collect()
     }));
-    if keys.is_empty() || !crate::sim_maps::probe::enabled() { return false; }
+    if keys.is_empty() || !crate::sim_maps::probe::enabled() { return Vec::new(); }
     let now = crate::sim_maps::probe::frame();
-    keys.iter().any(|(frame, key, hold)| key == name && if edge { now == *frame } else { (*frame..*frame + hold).contains(&now) })
+    keys.iter().filter_map(|&(frame, ref key, hold)| {
+        let pressed = now == frame;
+        let held = (frame..frame + hold).contains(&now);
+        (pressed || held).then(|| (key.clone(), pressed, held))
+    }).collect()
+}
+
+fn captured_binding(frame: &Frame, name: &str, edge: bool) -> bool {
+    if let Some(key) = key_code(name) {
+        return frame.key(key, edge);
+    }
+    if let Some(button) = mouse_button(name) {
+        return frame.mouse_button(button, edge);
+    }
+    match name {
+        "Wheel Up" => frame.wheel.1 > 0.,
+        "Wheel Down" => frame.wheel.1 < 0.,
+        _ => false,
+    }
 }
 fn physical(name: &str, edge: bool) -> bool {
     if let Some(k) = key_code(name) {
@@ -205,8 +223,8 @@ fn pad_mask(name: &str) -> u32 {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-struct RawPad {
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct RawPad {
     buttons: u16,
     lt: u8,
     rt: u8,
@@ -252,9 +270,8 @@ fn stick(x: i16, y: i16, deadzone: f32) -> Vec2 {
 // Read the analog magnitude without changing the pinned miniquad backend.
 // Backend W/A/S/D still serves menus/host emulation, but not Vita gameplay movement.
 // A host runs it only in a cross replay (`replay::input::cross`).
-fn vita_sticks(deadzone: f32) -> (Vec2, Vec2) {
-    // The SceCtrl read lives in replay::input so a tape can record or supply it.
-    let Some([lx, ly, rx, ry]) = crate::replay::input::vita_pad() else { return (Vec2::ZERO, Vec2::ZERO); };
+fn vita_sticks(pad: Option<[u8; 4]>, deadzone: f32) -> (Vec2, Vec2) {
+    let Some([lx, ly, rx, ry]) = pad else { return (Vec2::ZERO, Vec2::ZERO); };
     let axis = |v: u8| (((v as f32 - 128.) / 127.).clamp(-1., 1.) * 32767.) as i16;
     (stick(axis(lx), -axis(ly), deadzone),
      stick(axis(rx), -axis(ry), deadzone))
@@ -347,9 +364,34 @@ impl Pad {
     }
 }
 
+pub(crate) struct StepInput {
+    // The next step uses the ID and clock bits to seed its worker view.
+    #[allow(dead_code)]
+    pub step: u64,
+    pub frame: Frame,
+    pub focused: bool,
+    pub dt: f32,
+    #[allow(dead_code)]
+    pub clock_bits: u64,
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    scripted_keys: Vec<(String, bool, bool)>,
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    recovery_key: Option<KeyCode>,
+}
+
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<StepInput>();
+};
+
 #[derive(Default)]
 pub struct Input {
     pad: Pad,
+    frame: Frame,
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    scripted_keys: Vec<(String, bool, bool)>,
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    recovery_key: std::cell::Cell<Option<KeyCode>>,
     slot: Option<u32>,
     retry: f64,
     blocked: HashSet<String>,
@@ -362,8 +404,14 @@ pub struct Input {
 }
 impl Input {
     pub fn update(&mut self, prefs: &Preferences, focused: bool) {
+        let step = self.capture_step(0, focused, get_time);
+        self.apply_step(&step, prefs);
+    }
+
+    pub(crate) fn capture_step(&mut self, step: u64, focused: bool, time: impl Fn() -> f64) -> StepInput {
+        // Desktop XInput capture is outside P0 overlap, which requires renderer=vita.
         let mut raw = self.slot.and_then(read_pad);
-        if raw.is_none() && get_time() >= self.retry {
+        if raw.is_none() && time() >= self.retry {
             self.slot = (0..4).find(|i| {
                 if let Some(p) = read_pad(*i) {
                     raw = Some(p);
@@ -372,26 +420,52 @@ impl Input {
                     false
                 }
             });
-            self.retry = get_time() + 1.;
+            self.retry = time() + 1.;
         }
-        self.disconnected = self.pad.connected && raw.is_none() && self.using_pad;
-        self.pad
-            .update(raw, focused, prefs.pad_deadzone, get_frame_time().min(0.1));
-        if cfg!(target_os = "vita") || crate::replay::input::cross() {
+        let mut frame = crate::replay::input::capture_controls();
+        frame.desktop_pad = raw;
+        frame.vita_analog = cfg!(target_os = "vita") || crate::replay::input::cross();
+        if focused && frame.vita_analog {
+            // Keep the recording's SceCtrl sample at the gameplay capture point.
+            frame.pad = crate::replay::input::vita_pad();
+        }
+        StepInput {
+            step, focused, dt: frame.dt, clock_bits: time().to_bits(), frame,
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            scripted_keys: scripted_keys(),
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            recovery_key: crate::transition_memory::host_recovery_key().inspect(|_| {
+                crate::transition_memory::host_recovery_clear_key();
+            }),
+        }
+    }
+
+    pub(crate) fn apply_step(&mut self, step: &StepInput, prefs: &Preferences) {
+        self.update_from(&step.frame, prefs, step.focused);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        {
+            self.scripted_keys.clone_from(&step.scripted_keys);
+            self.recovery_key.set(step.recovery_key);
+        }
+    }
+
+    pub fn update_from(&mut self, frame: &Frame, prefs: &Preferences, focused: bool) {
+        self.disconnected = self.pad.connected && frame.desktop_pad.is_none() && self.using_pad;
+        self.pad.update(frame.desktop_pad, focused, prefs.pad_deadzone, frame.dt.min(0.1));
+        if frame.vita_analog {
             if !self.focused {
                 self.vita_neutral = true;
                 self.vita_look_neutral = true;
             }
-            let (movement, look) = if focused { vita_sticks(prefs.pad_deadzone) }
+            let (movement, look) = if focused { vita_sticks(frame.pad, prefs.pad_deadzone) }
                 else { (Vec2::ZERO, Vec2::ZERO) };
             self.pad.move_axis = resumed_axis(movement, &mut self.vita_neutral);
             self.pad.look_axis = resumed_axis(look, &mut self.vita_look_neutral);
         }
         if !focused {
-            self.suppress();
+            self.suppress_with(|name| captured_binding(frame, name, false));
         }
-        self.blocked
-            .retain(|s| physical(s, false) && !physical(s, true));
+        self.blocked.retain(|name| captured_binding(frame, name, false) && !captured_binding(frame, name, true));
         if focused
             && (self.pad.pressed != 0
                 || self.pad.move_axis != Vec2::ZERO
@@ -400,18 +474,23 @@ impl Input {
             self.using_pad = true;
         }
         if focused
-            && (KEYS.iter().any(|(_, k)| is_key_pressed(*k))
+            && (KEYS.iter().any(|(_, k)| frame.key(*k, true))
                 || [MouseButton::Left, MouseButton::Right, MouseButton::Middle]
                     .iter()
-                    .any(|b| is_mouse_button_pressed(*b))
-                || mouse_wheel().1 != 0.)
+                    .any(|&b| frame.mouse_button(b, true))
+                || frame.wheel.1 != 0.)
         {
             self.using_pad = false;
         }
         self.focused = focused;
+        self.frame.clone_from(frame);
     }
     /// On menus/load/focus boundaries, held inputs must be released before reuse.
     pub fn suppress(&mut self) {
+        self.suppress_with(|name| physical(name, false));
+    }
+
+    fn suppress_with(&mut self, held: impl Fn(&str) -> bool) {
         {
             self.vita_neutral = true;
             self.vita_look_neutral = true;
@@ -419,12 +498,12 @@ impl Input {
         }
         self.pad.suppress();
         for &(s, _) in KEYS {
-            if physical(s, false) {
+            if held(s) {
                 self.blocked.insert(s.into());
             }
         }
         for s in ["Mouse 1", "Mouse 2", "Mouse 3"] {
-            if physical(s, false) {
+            if held(s) {
                 self.blocked.insert(s.into());
             }
         }
@@ -450,8 +529,8 @@ impl Input {
     }
     pub fn ui(&self, key: KeyCode) -> bool {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        if crate::transition_memory::host_recovery_key() == Some(key) {
-            crate::transition_memory::host_recovery_clear_key();
+        if self.recovery_key.get() == Some(key) {
+            self.recovery_key.set(None);
             return true;
         }
         let mask = match key {
@@ -462,9 +541,9 @@ impl Input {
             _ => 0,
         };
         self.focused
-            && (is_key_pressed(key)
+            && (self.frame.key(key, true)
                 || (key == KeyCode::Escape && Preferences::vita_emulation()
-                    && is_key_pressed(KeyCode::Backspace))
+                    && self.frame.key(KeyCode::Backspace, true))
                 || self.pad.nav_pressed & mask != 0
                 || match key {
                     KeyCode::Enter => self.pad_pressed("A"),
@@ -473,7 +552,7 @@ impl Input {
                 })
     }
     pub fn action(&self, prefs: &Preferences, original: &str, edge: bool) -> bool {
-        self.action_with(prefs, original, edge, physical)
+        self.action_with(prefs, original, edge, |name, edge| captured_binding(&self.frame, name, edge))
     }
     fn action_with(&self, prefs: &Preferences, original: &str, edge: bool,
         physical: impl Fn(&str, bool) -> bool) -> bool {
@@ -483,14 +562,14 @@ impl Input {
         let name = row.map_or(original, |i| prefs.bindings[i].as_str());
         // Scripted host keys stand in for a focused window.
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        if scripted(name, edge) {
+        if self.scripted_keys.iter().any(|(key, pressed, held)| key == name && if edge { *pressed } else { *held }) {
             return true;
         }
         if !self.focused {
             return false;
         }
         // The backend quantizes the Vita stick to W/A/S/D; use its analog read instead.
-        if (cfg!(target_os = "vita") || crate::replay::input::cross()) && matches!(name, "W" | "S" | "A" | "D") { return false; }
+        if self.frame.vita_analog && matches!(name, "W" | "S" | "A" | "D") { return false; }
         (!self.blocked.contains(name) && physical(name, edge))
             || row.is_some_and(|i| {
                 let mask = pad_mask(&prefs.pad_bindings[i]);
@@ -505,18 +584,15 @@ impl Input {
     pub fn key(&self, prefs: &Preferences, key: KeyCode, edge: bool) -> bool {
         key_name(key).map_or_else(
             || {
-                self.focused
-                    && if edge {
-                        is_key_pressed(key)
-                    } else {
-                        is_key_down(key)
-                    }
+                self.focused && self.frame.key(key, edge)
             },
             |name| self.action(prefs, name, edge),
         )
     }
     pub fn film_skip(&self, prefs: &Preferences) -> bool {
-        self.film_skip_with(prefs, Preferences::vita_emulation(), physical)
+        self.film_skip_with(prefs, Preferences::vita_emulation(), |name, edge| {
+            captured_binding(&self.frame, name, edge)
+        })
     }
     fn film_skip_with(&self, prefs: &Preferences, handheld: bool, physical: impl Fn(&str, bool) -> bool) -> bool {
         self.action_with(prefs, "Enter", false, &physical) || self.pad_held("A")

@@ -492,6 +492,7 @@ pub struct Config {
     pub route_world_wish: bool,
     /// Record a play into this tape file (src/replay). Empty: off. Needs replay_start.
     pub replay_record: String,
+    pub sim_overlap: bool,
     /// Replay this tape file instead of the pad. Empty: off.
     pub replay_play: String,
     /// Where a recording starts: "save:<slot>" or "chapter:<map>[$<entrance>][@<difficulty>]".
@@ -724,6 +725,7 @@ impl Default for Config {
             route_heading_lock:true,
             route_world_wish: false,
             replay_record: String::new(),
+            sim_overlap: false,
             replay_play: String::new(),
             replay_start: String::new(),
             replay_check_every: 30,
@@ -782,6 +784,8 @@ impl Config {
     }
     fn validate(&self) -> Result<()> {
         ensure!(self.spike_log_last_frame == 0 || self.spike_log_last_frame >= self.spike_log_first_frame, "invalid spike frame window");
+        ensure!(!self.sim_overlap || self.replay_record.is_empty(), "replay_record and sim_overlap are exclusive");
+        ensure!(!self.sim_overlap || self.renderer == "vita", "sim_overlap requires renderer=vita");
         crate::replay::validate_settings(&crate::replay::Settings { record: self.replay_record.clone(),
             play: self.replay_play.clone(), start: self.replay_start.clone(), check_every: self.replay_check_every,
             state_every: self.replay_state_every, stop_after: self.replay_stop_after })?;
@@ -4774,6 +4778,15 @@ mod tests {
             assert_eq!(variant, baseline, "an isolated RC4 variant changes only its declared keys");
         }
     }
+    #[test]
+    fn runtime_config_refuses_recording_with_sim_overlap() {
+        let record = br#"{"replay_record":"play.lgtape","replay_start":"chapter:potears2"}"#;
+        assert!(parse_runtime_config(record).is_ok());
+        let both = br#"{"replay_record":"play.lgtape","replay_start":"chapter:potears2","sim_overlap":true}"#;
+        let error = parse_runtime_config(both).err().expect("recording with overlap was accepted");
+        assert_eq!(error.to_string(), "replay_record and sim_overlap are exclusive");
+    }
+
     #[test]
     fn release_inputs_add_only_their_declared_keys_and_packages_add_their_replay_keys() {
         use sha2::{Digest, Sha256};

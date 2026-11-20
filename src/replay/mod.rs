@@ -79,8 +79,8 @@ pub fn validate_settings(s: &Settings) -> Result<()> {
 }
 
 /// What a check covers. The viewer fills it only on steps that need a check.
-pub struct Probe<'a> {
-    pub map: &'a str,
+pub struct OwnedProbe {
+    pub map: String,
     pub feet: Vec3,
     pub velocity: Vec3,
     pub yaw: f32,
@@ -91,13 +91,46 @@ pub struct Probe<'a> {
     pub weapon: usize,
     pub ticks: u64,
     pub environment_clock: f32,
-    pub targets: &'a [crate::combat::Target],
+    pub targets: Vec<crate::combat::Target>,
     /// Serialized full simulation state, when the step asks for it.
     pub state: Option<Vec<u8>>,
     /// Time spent gathering this probe, logged so the cost of checks on the console is known.
     pub cost_us: u64,
 }
-pub fn digest(p: &Probe) -> String {
+#[cfg(not(target_os = "vita"))]
+impl OwnedProbe {
+    pub(crate) fn assert_same_state(&self, top: &Self, frame: u64, step: u64, path: &str) {
+        macro_rules! same {
+            ($field:ident, $convert:expr) => {
+                assert_eq!($convert(self.$field), $convert(top.$field),
+                    "replay probe mismatch frame={frame} step={step} path={path} field={}", stringify!($field));
+            };
+        }
+        assert_eq!(self.map, top.map, "replay probe mismatch frame={frame} step={step} path={path} field=map");
+        same!(feet, |v: Vec3| v.to_array().map(f32::to_bits));
+        same!(velocity, |v: Vec3| v.to_array().map(f32::to_bits));
+        same!(yaw, f32::to_bits);
+        same!(pitch, f32::to_bits);
+        same!(sanity, f32::to_bits);
+        same!(will, f32::to_bits);
+        same!(alive, |v| v);
+        same!(weapon, |v| v);
+        same!(ticks, |v| v);
+        same!(environment_clock, f32::to_bits);
+        assert_eq!(self.targets.len(), top.targets.len(),
+            "replay probe mismatch frame={frame} step={step} path={path} field=targets.len");
+        for (index, (a, b)) in self.targets.iter().zip(&top.targets).enumerate() {
+            assert_eq!(a.id, b.id, "replay probe mismatch frame={frame} step={step} path={path} field=targets[{index}].id");
+            assert_eq!(a.center.to_array().map(f32::to_bits), b.center.to_array().map(f32::to_bits),
+                "replay probe mismatch frame={frame} step={step} path={path} field=targets[{index}].center");
+            assert_eq!(a.half.to_array().map(f32::to_bits), b.half.to_array().map(f32::to_bits),
+                "replay probe mismatch frame={frame} step={step} path={path} field=targets[{index}].half");
+        }
+        assert!(self.state == top.state, "replay probe mismatch frame={frame} step={step} path={path} field=state");
+    }
+}
+
+pub fn digest(p: &OwnedProbe) -> String {
     let mut h = Sha256::new();
     h.update((p.map.len() as u32).to_le_bytes());
     h.update(p.map.as_bytes());
@@ -108,23 +141,23 @@ pub fn digest(p: &Probe) -> String {
     h.update((p.weapon as u32).to_le_bytes());
     h.update(p.ticks.to_le_bytes());
     h.update((p.targets.len() as u32).to_le_bytes());
-    for t in p.targets {
+    for t in &p.targets {
         h.update((t.id as u32).to_le_bytes());
         for v in t.center.to_array().iter().chain(&t.half.to_array()) { h.update(v.to_bits().to_le_bytes()); }
     }
     format!("{:x}", h.finalize())[..16].to_owned()
 }
-fn check_row(step: u64, p: &Probe) -> (tape::Check, u64) {
+fn check_row(step: u64, p: &OwnedProbe) -> (tape::Check, u64) {
     let started = std::time::Instant::now();
     let c = check_value(step, p);
     (c, p.cost_us + started.elapsed().as_micros() as u64)
 }
-fn check_value(step: u64, p: &Probe) -> tape::Check {
+fn check_value(step: u64, p: &OwnedProbe) -> tape::Check {
     tape::Check {
         step,
         digest: digest(p),
         state: p.state.as_ref().map(|s| format!("{:x}", Sha256::digest(s))[..16].to_owned()),
-        map: p.map.into(),
+        map: p.map.clone(),
         feet: p.feet.to_array(),
         sanity: p.sanity,
         hostiles: p.targets.len(),
@@ -283,7 +316,7 @@ impl Session {
     /// Call at the top of every viewer frame, before any input is read. A failing recording
     /// (a full memory card, say) ends with a log line and play goes on without a tape; a failing
     /// replay ends the replay.
-    pub fn begin_step(&mut self, map: &str, alive: bool, probe: Option<Probe>) -> Step {
+    pub fn begin_step(&mut self, map: &str, alive: bool, probe: Option<OwnedProbe>) -> Step {
         match self.try_step(map, alive, probe) {
             Ok(step) => step,
             Err(e) => {
@@ -295,7 +328,7 @@ impl Session {
             }
         }
     }
-    fn try_step(&mut self, map: &str, alive: bool, probe: Option<Probe>) -> Result<Step> {
+    fn try_step(&mut self, map: &str, alive: bool, probe: Option<OwnedProbe>) -> Result<Step> {
         if self.ended { return Ok(Step::Off); }
         let step = self.step;
         let mut events = Vec::new();
@@ -479,13 +512,13 @@ mod tests {
     #[test]
     fn digest_sees_every_covered_value() {
         let targets = [crate::combat::Target { id: 3, center: Vec3::new(1., 2., 3.), half: Vec3::ONE }];
-        let base = || Probe { map: "potears2", feet: Vec3::ZERO, velocity: Vec3::ZERO, yaw: 0., pitch: 0., sanity: 100.,
-            will: 50., alive: true, weapon: 1, ticks: 9, environment_clock: 2., targets: &targets, state: None, cost_us: 0 };
+        let base = || OwnedProbe { map: "potears2".into(), feet: Vec3::ZERO, velocity: Vec3::ZERO, yaw: 0., pitch: 0., sanity: 100.,
+            will: 50., alive: true, weapon: 1, ticks: 9, environment_clock: 2., targets: targets.to_vec(), state: None, cost_us: 0 };
         let d = digest(&base());
         assert_eq!(d.len(), 16);
-        let changes: [Box<dyn Fn(&mut Probe)>; 8] = [
+        let changes: [Box<dyn Fn(&mut OwnedProbe)>; 8] = [
             Box::new(|p| p.feet.x = f32::EPSILON), Box::new(|p| p.sanity = 99.99), Box::new(|p| p.ticks += 1),
-            Box::new(|p| p.map = "potears1"), Box::new(|p| p.alive = false), Box::new(|p| p.targets = &[]),
+            Box::new(|p| p.map = "potears1".into()), Box::new(|p| p.alive = false), Box::new(|p| p.targets.clear()),
             Box::new(|p| p.velocity.z = -1.), Box::new(|p| p.yaw = -0.),
         ];
         for change in changes {

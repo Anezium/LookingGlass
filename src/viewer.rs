@@ -1575,6 +1575,41 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }};
     }
+    let mut stored_replay_probe: Option<(crate::replay::OwnedProbe, &'static str)> = None;
+    #[cfg(not(target_os = "vita"))]
+    let mut replay_probe_fallbacks = 0u64;
+    #[cfg(not(target_os = "vita"))]
+    let mut replay_probe_assertions = 0u64;
+    macro_rules! replay_probe {
+        ($want_state:expr) => {{
+            let gather = std::time::Instant::now();
+            let targets = npcs.targets();
+            let state = $want_state.then(|| serde_json::to_vec(&serde_json::json!({
+                "player": player, "stats": stats, "interactions": interactions.snapshot(),
+                "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
+                "character": alice.snapshot(), "environment_clock": environment_clock,
+                "pickup_clock": pickup_clock, "yaw": yaw, "pitch": pitch, "ticks": clock.ticks,
+            }))).transpose()?;
+            crate::replay::OwnedProbe {
+                map: maps[current].clone(), feet: player.feet, velocity: player.velocity,
+                yaw, pitch, sanity: stats.sanity(), will: stats.will(), alive: stats.alive(),
+                weapon: stats.selected(), ticks: clock.ticks, environment_clock, targets, state,
+                cost_us: gather.elapsed().as_micros() as u64,
+            }
+        }};
+    }
+    macro_rules! finish_replay_step {
+        ($path:literal) => {
+            if let Some(r) = replay.as_ref().filter(|r| r.running()) {
+                let due = r.due();
+                // Host builds compare the lightweight probe even between tape checks.
+                if cfg!(not(target_os = "vita")) || due.is_some() {
+                    assert!(stored_replay_probe.is_none(), "duplicate replay probe for one step");
+                    stored_replay_probe = Some((replay_probe!(due.unwrap_or(false)), $path));
+                }
+            }
+        };
+    }
     let mut overlap_probe = crate::overlap_probe::Probe::configured();
     loop {
         #[cfg(feature="vita_renderer")]
@@ -1619,23 +1654,26 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     (wrap(d.y.atan2(d.x) - yaw), d.truncate().length())
                 }).min_by(|a, b| a.1.total_cmp(&b.1)));
             }
-            let targets;
-            let probe = match r.due() {
-                None => None,
-                Some(want_state) => {
-                    let gather = std::time::Instant::now();
-                    targets = npcs.targets();
-                    // The host oracle's state set: every snapshot a save or a probe covers.
-                    let state = want_state.then(|| serde_json::to_vec(&serde_json::json!({
-                        "player": player, "stats": stats, "interactions": interactions.snapshot(),
-                        "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
-                        "character": alice.snapshot(), "environment_clock": environment_clock,
-                        "pickup_clock": pickup_clock, "yaw": yaw, "pitch": pitch, "ticks": clock.ticks,
-                    }))).transpose()?;
-                    Some(crate::replay::Probe { map: &maps[current], feet: player.feet, velocity: player.velocity,
-                        yaw, pitch, sanity: stats.sanity(), will: stats.will(), alive: stats.alive(),
-                        weapon: stats.selected(), ticks: clock.ticks, environment_clock, targets: &targets, state,
-                        cost_us: gather.elapsed().as_micros() as u64 })
+            let due = r.due();
+            let probe = if let Some((probe, _path)) = stored_replay_probe.take() {
+                #[cfg(not(target_os = "vita"))]
+                {
+                    let top = replay_probe!(due.unwrap_or(false));
+                    probe.assert_same_state(&top, frame, r.current_step(), _path);
+                    replay_probe_assertions += 1;
+                }
+                due.map(|_| probe)
+            } else {
+                #[cfg(not(target_os = "vita"))]
+                if r.running() {
+                    replay_probe_fallbacks += 1;
+                    let step = r.current_step();
+                    let path = if step == 0 { "initial" } else { "missing-step-end" };
+                    println!("[lg/replay-probe] probe.fallback={replay_probe_fallbacks} frame={frame} step={step} path={path}");
+                }
+                match due {
+                    Some(want_state) => Some(replay_probe!(want_state)),
+                    None => None,
                 }
             };
             match r.begin_step(&maps[current], stats.alive(), probe) {
@@ -1674,6 +1712,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             println!("bench: done 120 frames mode={}, report ux0:data/alice/private/frame_profile/{}-{}-120.json", mode.name(), maps[current], mode.name());
                         } else {println!("bench: done 120 frames mode={} profiler=light", mode.name());}
                     }
+                    finish_replay_step!("benchmark");
                     break;
                 }
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
@@ -1713,17 +1752,24 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let simulate = true;
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
-        input.update(&preferences, physical_input && window_focused() && !bench && !route_running);
+        let step_input = input.capture_step(
+            replay.as_ref().filter(|r| r.running()).map_or(frame, |r| r.current_step() - 1),
+            physical_input && window_focused() && !bench && !route_running,
+            get_time,
+        );
+        input.apply_step(&step_input, &preferences);
         #[cfg(feature="native_timing")]
         timing.with(|r| {if r.schedule.is_some(){r.schedule_input(input.diagnostic_activity());}});
         preview_throttle.advance_frame();
         let host_transition = crate::transition_memory::host_action(frame);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if host_transition.is_empty() && std::env::var_os("LOOKING_GLASS_TRANSITION_RESUME").is_some() { paused = false; }
+        let mut input_frame_yielded = false;
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if frame == 1 {
             if let Some(path) = std::env::var_os("LOOKING_GLASS_TRANSITION_PORTAL_CAPTURE") {
                 scene.show_transition_portal(&world, std::path::Path::new(&path)).await?;
+                input_frame_yielded = true;
             }
             if let Ok(path) = std::env::var("LOOKING_GLASS_TRANSITION_SNAPSHOT") {
                 std::fs::write(path, serde_json::to_vec(&game_snapshot!())?)?;
@@ -1751,7 +1797,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut quit_after_frame = is_quit_requested()
             || (replay.as_ref().is_some_and(|r| r.replaying()) && macroquad::input::is_quit_requested());
         quit_after_frame |= host_transition == "quit";
-        if quit_after_frame && !throttle_normal { break; }
+        if quit_after_frame && !throttle_normal {
+            finish_replay_step!("quit");
+            break;
+        }
         if physical_input && window_focused() && !console.open && !bench {
             if (is_key_pressed(KeyCode::Escape) || input.pad_pressed("Start"))
                 && !menu
@@ -1791,6 +1840,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::log_report_error(crate::frame_profile::report(&maps[current]));
             // Consume Escape before entering the separate modal frame loop. No
             // physics, story, enemies, power-up timers or world clocks run there.
+            input_frame_yielded = true;
             drop(census_block);
             next_frame().await;
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
@@ -1910,6 +1960,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             clock.pause();
             input.suppress();
             if pending_menu_save.is_none() && pending_menu_newgame.is_none() && !quit_after_frame {
+                finish_replay_step!("pause");
                 drop(census_block);
             next_frame().await;
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
@@ -1918,7 +1969,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         let freeze_capture = opening_escape_menu || pending_menu_save.is_some() || pending_menu_newgame.is_some() || quit_after_frame;
         if freeze_capture { paused = true; clock.pause(); }
-        let elapsed = get_frame_time();
+        // A modal owner loop may have advanced the framework since capture.
+        let elapsed = if input_frame_yielded { get_frame_time() } else { step_input.dt };
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         let elapsed = crate::sim_maps::probe::elapsed(elapsed);
         #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
@@ -1979,7 +2031,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             )
             .await
             {
-                Ok(false) => break,
+                Ok(false) => {
+                    finish_replay_step!("opening-quit");
+                    break;
+                }
                 Err(e) => {
                     eprintln!("Opening film unavailable: {e:#}");
                     hud.announce("Opening film unavailable / continuing to Wonderland");
@@ -2217,7 +2272,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         fullbright = !fullbright;
                         console.print(format!("Fullbright {fullbright}"));
                     }
-                    Ok(Command::Quit) => { if throttle_normal { quit_after_frame = true; } else { break; } },
+                    Ok(Command::Quit) => {
+                        if throttle_normal { quit_after_frame = true; }
+                        else { finish_replay_step!("console-quit"); break; }
+                    },
                 }
             }
         }
@@ -2263,6 +2321,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             } else {
                 hud.announce("Save/load is unavailable in a staged preview");
             }
+            finish_replay_step!("quick-or-console-load");
             drop(census_block);
             next_frame().await;
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
@@ -2556,6 +2615,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             // All per-frame clocks, targets and inputs above belong to the old
             // attempt. Begin a fresh frame before advancing the restored one.
+            finish_replay_step!("death-retry");
             drop(census_block);
             next_frame().await;
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
@@ -3347,7 +3407,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             )
             .await
             {
-                Ok(false) => break,
+                Ok(false) => {
+                    finish_replay_step!("ending-quit");
+                    break;
+                }
                 Err(e) => eprintln!("Ending film failed: {e:#}"),
                 Ok(true) => (),
             }
@@ -3357,6 +3420,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             escape_menu.open(crate::menu::Page::Credits, &preferences, audio.settings);
             escape_menu.message = "Campaign complete / Continue replays the final encounter".into();
             clock.pause();
+            finish_replay_step!("ending");
             continue;
         }
         if let Some(exit) = pending_transition.take() {
@@ -4453,13 +4517,6 @@ interactions
                 frame, dynamic_input.bytes(), dynamic_input.capacity_bytes(), us, allocations,
                 dynamic_input.transforms.len(), 0, 0);
         }
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let extracted_probe_state = (snapshot_enabled && crate::sim_maps::probe::enabled()).then(|| serde_json::json!({
-            "player": player, "stats": stats, "interactions": interactions.snapshot(),
-            "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
-            "character": alice.snapshot(), "environment_clock": environment_clock,
-            "pickup_clock": pickup_clock, "transforms": transforms,
-        }));
         // Resolve dynamic lights at the simulation boundary. Resident lighting
         // textures and the selected-light TLS stay owned by the renderer.
         let extracted_lights = snapshot_enabled.then(|| {
@@ -5384,6 +5441,8 @@ interactions
         #[cfg(target_os = "vita")]
         drop(viewer_block);
         drop(save_path);
+        // Both immediate and deferred checkpoint acknowledgements have completed.
+        finish_replay_step!("tail");
         let profiler_path=crate::phase_census::span(crate::phase_census::Region::TailProfiler);
         if !active {
             frame_profile.cancel();
@@ -5422,7 +5481,7 @@ interactions
         crate::frame_phases::mark(2);
         crate::spike_log::cpu_end();
         // Save completion and optional diagnostics are serial fences. Ordinary
-        // enabled frames have consumed owned HUD/timing/probe inputs above.
+        // enabled frames have consumed owned HUD and timing inputs above.
         if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
         #[cfg(target_os = "vita")]
         {
@@ -5455,15 +5514,13 @@ interactions
             #[cfg(feature = "vita_renderer")]
             crate::sim_maps::probe::record_exact_frame(&maps[current], frame, matches!(frame, 0 | 59 | 60 | 119 | 120 | 179))?;
             crate::sim_maps::probe::shot(frame)?;
-            let state = if let Some(state) = &extracted_probe_state { state } else {
-                &serde_json::json!({
+            let state = serde_json::json!({
                     "player": player, "stats": stats, "interactions": interactions.snapshot(),
                     "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
                     "character": alice.snapshot(), "environment_clock": environment_clock,
                     "pickup_clock": pickup_clock, "transforms": transforms,
-                })
-            };
-            crate::sim_maps::probe::end(frame, &maps[current], active, state);
+            });
+            crate::sim_maps::probe::end(frame, &maps[current], active, &state);
         }
         #[cfg(feature = "vita_renderer")]
         let presented_probe = load_probe.take();
@@ -5532,6 +5589,10 @@ interactions
         if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
     }
     crate::spike_log::end_play();
+    #[cfg(not(target_os = "vita"))]
+    if replay.is_some() {
+        println!("[lg/replay-probe] assertions={replay_probe_assertions} probe.fallback={replay_probe_fallbacks}");
+    }
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
     // Host-only, sim_maps_probe-only: the allocator ledger's continuous peak since the
     // map load began (transition_begin resets it) against the 192 MiB newlib ceiling.
