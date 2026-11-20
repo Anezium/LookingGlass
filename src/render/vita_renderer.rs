@@ -6235,7 +6235,7 @@ mod overlap_probe_tests {
             let reserved = diag || sim;
             let mut config = Config {
                 diag_overlap: diag, sim_overlap: sim, skin_workers: 1,
-                audio_pcm_worker: true, ..Config::default()
+                audio_pcm_worker: true, actor_single_prepare: false, ..Config::default()
             };
             assert_eq!(config.cpu1_reserved(), reserved);
             super::with_config(|current| *current = config.clone(), || {
@@ -6270,6 +6270,7 @@ mod overlap_probe_tests {
         for sim_overlap in [false, true] {
             let bytes = serde_json::to_vec(&serde_json::json!({
                 "sim_overlap": sim_overlap, "skin_workers": 1, "audio_pcm_worker": true,
+                "diag_snapshot": true, "diag_snapshot_log": true,
             })).unwrap();
             let (config, _) = parse_runtime_config(&bytes).unwrap();
             let start = Barrier::new(2);
