@@ -110,14 +110,53 @@ static CLOCK: AtomicU64 = AtomicU64::new(0);
 static ORIGIN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
 #[derive(Clone, Copy)]
-struct ClockView {
-    dt: f32,
-    clock_bits: u64,
-    origin: std::time::Instant,
+pub(crate) struct ClockView {
+    pub(crate) dt: f32,
+    pub(crate) clock_bits: u64,
+    pub(crate) instant: std::time::Instant,
 }
 
 thread_local! {
     static CLOCK_VIEW: std::cell::Cell<Option<ClockView>> = const { std::cell::Cell::new(None) };
+    static IN_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A step clock belongs to the thread that installed it.
+#[must_use]
+pub(crate) struct StepClockGuard {
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ClockView {
+    pub(crate) fn capture() -> Self {
+        let clock_bits = source_time().to_bits();
+        let instant = if active() {
+            tape_instant(clock_bits)
+        } else {
+            std::time::Instant::now()
+        };
+        Self { dt: source_frame_time(), clock_bits, instant }
+    }
+
+    pub(crate) fn enter(self) -> StepClockGuard {
+        assert!(!IN_STEP.replace(true), "nested step clock");
+        CLOCK_VIEW.set(Some(self));
+        StepClockGuard { _thread: std::marker::PhantomData }
+    }
+}
+
+impl Drop for StepClockGuard {
+    fn drop(&mut self) {
+        CLOCK_VIEW.set(None);
+        IN_STEP.set(false);
+    }
+}
+
+fn clock_view() -> Option<ClockView> {
+    let view = CLOCK_VIEW.get();
+    #[cfg(not(target_os = "vita"))]
+    assert!(!IN_STEP.get() || view.is_some(), "missing clock view inside simulation step");
+    view
 }
 
 fn mode() -> u8 {
@@ -149,14 +188,12 @@ fn bits_pad(bits: u64) -> Option<[u8; 4]> {
 /// Start answering from installed frames. `replay` selects whether the Vita pad read comes
 /// from the frame (replay) or from the console (record).
 pub(super) fn activate(replay: bool) {
-    CLOCK_VIEW.set(None);
     CLOCK.store(0f64.to_bits(), Relaxed);
     *ORIGIN.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
     PAD.store(0, Relaxed);
     MODE.store(if replay { REPLAY } else { RECORD }, Relaxed);
 }
 pub(super) fn deactivate() {
-    CLOCK_VIEW.set(None);
     MODE.store(OFF, Relaxed);
     CHARS.lock().unwrap_or_else(|p| p.into_inner()).clear();
 }
@@ -181,11 +218,7 @@ pub(super) fn install(frame: &Frame) {
     // Served by pop() from the end, like macroquad: store reversed.
     chars.extend(frame.chars.iter().rev());
     let clock = f64::from_bits(CLOCK.load(Relaxed)) + f64::from(frame.dt);
-    let clock_bits = clock.to_bits();
-    CLOCK.store(clock_bits, Relaxed);
-    if let Some(origin) = *ORIGIN.lock().unwrap_or_else(|p| p.into_inner()) {
-        CLOCK_VIEW.set(Some(ClockView { dt: frame.dt, clock_bits, origin }));
-    }
+    CLOCK.store(clock.to_bits(), Relaxed);
 }
 /// The pad the game read during the step that is ending (record), for the tape.
 pub(super) fn last_pad() -> Option<[u8; 4]> {
@@ -225,7 +258,7 @@ pub(crate) fn capture_controls() -> Frame {
     if !active() { return capture_live_controls(); }
     let mouse = MOUSE_BITS.load(Relaxed);
     Frame {
-        dt: get_frame_time(),
+        dt: source_frame_time(),
         keys_down: load_u128(&KEYS_DOWN),
         keys_pressed: load_u128(&KEYS_PRESSED),
         keys_released: load_u128(&KEYS_RELEASED),
@@ -280,25 +313,35 @@ pub fn is_quit_requested() -> bool {
     if !active() { return macroquad::input::is_quit_requested(); }
     QUIT.load(Relaxed)
 }
-pub fn get_frame_time() -> f32 {
-    if let Some(view) = CLOCK_VIEW.get() { return view.dt; }
+pub(crate) fn source_frame_time() -> f32 {
     if !active() { return macroquad::time::get_frame_time(); }
     f32::from_bits(DT.load(Relaxed))
 }
-/// Seconds since the first step while active, so time differences match between runs.
-pub fn get_time() -> f64 {
-    if let Some(view) = CLOCK_VIEW.get() { return f64::from_bits(view.clock_bits); }
+
+pub(crate) fn source_time() -> f64 {
     if !active() { return macroquad::time::get_time(); }
     f64::from_bits(CLOCK.load(Relaxed))
 }
+
+fn tape_instant(clock_bits: u64) -> std::time::Instant {
+    let origin = ORIGIN.lock().unwrap_or_else(|p| p.into_inner()).unwrap_or_else(std::time::Instant::now);
+    origin + std::time::Duration::from_secs_f64(f64::from_bits(clock_bits))
+}
+
+pub fn get_frame_time() -> f32 {
+    clock_view().map_or_else(source_frame_time, |view| view.dt)
+}
+
+/// Seconds since the first step while active, so time differences match between runs.
+pub fn get_time() -> f64 {
+    clock_view().map_or_else(source_time, |view| f64::from_bits(view.clock_bits))
+}
+
 /// Wall clock for gameplay timers that would otherwise read `Instant::now()`.
 pub fn now() -> std::time::Instant {
-    if let Some(view) = CLOCK_VIEW.get() {
-        return view.origin + std::time::Duration::from_secs_f64(f64::from_bits(view.clock_bits));
-    }
+    if let Some(view) = clock_view() { return view.instant; }
     if !active() { return std::time::Instant::now(); }
-    let origin = ORIGIN.lock().unwrap_or_else(|p| p.into_inner()).unwrap_or_else(std::time::Instant::now);
-    origin + std::time::Duration::from_secs_f64(f64::from_bits(CLOCK.load(Relaxed)))
+    tape_instant(CLOCK.load(Relaxed))
 }
 
 /// Host only, for diagnostics: `LOOKING_GLASS_REPLAY_CROSS` lets a host replay a tape recorded on a
