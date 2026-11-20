@@ -2638,7 +2638,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     let prefix = format!("drop:{loot_visit}:");
                     stats.collected.retain(|key| !key.starts_with(&prefix));
                 }
-                story.recover(&mut audio);
+                apply_voice_request(story.recover(), &mut assets, &mut audio);
                 hints.recover();
                 interactions.reset_contacts();
                 spawn_landing = true;
@@ -3239,16 +3239,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             b.bind_rage_player(&mut player, alice.facing());
         }
         let story_ready = interactions.prepare_story(&mut story);
-        story.update(
+        if let Some(request) = story.update(
             if story_active && story_ready && hints.prepare_story(&story) {
                 elapsed
             } else {
                 0.
             },
             advance_dialogue,
-            &mut assets,
-            &mut audio,
-        );
+        ) {
+            apply_voice_request(request, &mut assets, &mut audio);
+        }
         interactions.sync_cinematic_story(&story);
         hints.sync(&interactions);
         if hints.update(if story_active { dt } else { 0. }, story.hint_active()) {
@@ -5942,6 +5942,16 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
     Ok(())
 }
 
+// The sim emits a voice request; the owner performs it at the same call site,
+// keeping today's order until the audio op list takes over.
+fn apply_voice_request(request: crate::story::VoiceRequest, assets: &mut Assets, audio: &mut Audio) {
+    match request {
+        crate::story::VoiceRequest::Play { path, offset_seconds } => {
+            audio.speak_from(assets, &path, offset_seconds);
+        }
+        crate::story::VoiceRequest::Stop => audio.stop_voice(),
+    }
+}
 // The chapter chooser owns Down while open; the inventory-opening edge cannot cycle.
 fn inventory_toggle(pressed: bool, menu: bool, inventory: &mut bool) -> bool {
     if pressed && !menu { *inventory = !*inventory; return *inventory; }
