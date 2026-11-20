@@ -9,7 +9,7 @@ use crate::{
     interaction::{self, Interactions},
     inventory::{self, Catalog, Stats},
     look::{window_focused, MouseLook},
-    movement::{Controls, FixedClock, Player, EYE_HEIGHT},
+    movement::{FixedClock, Player, EYE_HEIGHT},
     recovery::{self, Recovery},
     Options,
 };
@@ -933,6 +933,12 @@ impl SnapshotTiming {
     }
 }
 
+mod step;
+use step::{
+    step_a, step_b, step_due, Due, SimState, StepAOwner, StepArt, StepBOwner, StepLocals, StepScopes,
+    StepView,
+};
+
 pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os="vita")]
     let mut r13_survey = crate::r13_survey::Survey::open(&mut options)?;
@@ -1718,6 +1724,86 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             audio_step.apply_at_barrier($barrier, &mut audio, &mut assets, &world)
         };
     }
+    // The owner barriers continue using the original live facades in I2.
+    // Split/join is a move of each half at the sync-call boundary.
+    macro_rules! serial_step {
+        ($function:ident $(, $arg:expr)* $(,)?) => {{
+            let (alice_sim, alice_art) = alice.into_parts();
+            let (npcs_sim, npcs_art) = npcs.into_parts();
+            let (steam_sim, steam_art) = steam.into_parts();
+            let state = SimState {
+                world,
+                interactions,
+                alice: alice_sim,
+                npcs: npcs_sim,
+                steam: steam_sim,
+                input,
+                weapon_buttons,
+                pickup_feedback,
+                third_person,
+                follow_camera,
+                camera_handoff,
+                rail_camera,
+                clock,
+                recovery,
+                retry,
+                paused,
+                post_game,
+                skip_scene,
+                hints,
+                entry_spawn,
+                stats,
+                pickups,
+                pickup_clock,
+                environment_clock,
+                story,
+                pos,
+                yaw,
+                pitch,
+                flying,
+                spawn_landing,
+                player,
+                campaign,
+                played,
+            };
+            let art = StepArt { alice: alice_art, npcs: npcs_art, steam: steam_art };
+            let (state, art, result) = $function(state, art $(, $arg)*);
+            alice = Character::from_parts(state.alice, art.alice);
+            npcs = crate::npc::Npcs::from_parts(state.npcs, art.npcs);
+            steam = crate::particles::Steam::from_parts(state.steam, art.steam);
+            world = state.world;
+            interactions = state.interactions;
+            input = state.input;
+            weapon_buttons = state.weapon_buttons;
+            pickup_feedback = state.pickup_feedback;
+            third_person = state.third_person;
+            follow_camera = state.follow_camera;
+            camera_handoff = state.camera_handoff;
+            rail_camera = state.rail_camera;
+            clock = state.clock;
+            recovery = state.recovery;
+            retry = state.retry;
+            paused = state.paused;
+            post_game = state.post_game;
+            skip_scene = state.skip_scene;
+            hints = state.hints;
+            entry_spawn = state.entry_spawn;
+            stats = state.stats;
+            pickups = state.pickups;
+            pickup_clock = state.pickup_clock;
+            environment_clock = state.environment_clock;
+            story = state.story;
+            pos = state.pos;
+            yaw = state.yaw;
+            pitch = state.pitch;
+            flying = state.flying;
+            spawn_landing = state.spawn_landing;
+            player = state.player;
+            campaign = state.campaign;
+            played = state.played;
+            result
+        }};
+    }
     loop {
         debug_assert!(audio_step.ops.is_empty());
         // The tape oracle uses release builds. Check the same invariant there.
@@ -2100,8 +2186,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let elapsed=if let Some(r)=&mut route_session {(elapsed-r.recording_pause_seconds()).max(0.)}else{elapsed};
         let mut weapon_click;
         let mut weapon_input_enabled = false;
-        let mut pending_transition = None;
-        let mut advance_dialogue = false;
+        let pending_transition = None;
+        let advance_dialogue = false;
         let dt = if simulate { elapsed.clamp(0., 0.05) } else { 0. };
         let world_dt = stats.powers.world_dt(dt);
         #[cfg(feature = "native_timing")]
@@ -2453,15 +2539,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
             continue;
         }
-        // Step 8 dispatches from here, after the owner prologue.
+        // Install the sampled clock before the owner head.
         let step = StepGuard::enter();
         step_input.refresh_clock();
         step_guards = Some((step, step_input.enter_clock()));
         macro_rules! pressed {
             ($key:expr) => { focused && !console_input && input.key(&preferences, $key, true) };
-        }
-        macro_rules! held {
-            ($key:expr) => { focused && !console_input && input.key(&preferences, $key, false) };
         }
         if input.ui(KeyCode::Escape) && !console_input {
             if inventory_menu {
@@ -2735,6 +2818,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         // A failed attempt must roll the entire world back with Alice. Do this
         // before the live transport guard: dying during a ride must remain retryable.
+        let mut gameplay = false;
         if new_campaign_memory.is_none() && pending_menu_newgame.is_none()
             && saves_enabled && !stats.alive() && (recover || restart || console_restart) {
             #[cfg(feature = "native_timing")]
@@ -2999,532 +3083,49 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && focused
             && stats.alive()
         {
-            if !scripted_view && !bench {
-                #[cfg(target_os = "vita")]
-                input.vita_look(&preferences, elapsed, &mut yaw, &mut pitch);
-                #[cfg(not(target_os = "vita"))]
-                if crate::replay::input::cross() {
-                    input.vita_look(&preferences, elapsed, &mut yaw, &mut pitch);
-                } else {
-                let look = input.look(&preferences);
-                yaw -= look.x * dt * 2.5;
-                pitch += look.y * dt * 2.;
-                }
-            }
-            if !scripted_view && held!(KeyCode::Left) {
-                yaw += dt * 1.3;
-            }
-            if !scripted_view && held!(KeyCode::Right) {
-                yaw -= dt * 1.3;
-            }
-            if !scripted_view && held!(KeyCode::Up) {
-                pitch += dt;
-            }
-            if !scripted_view && held!(KeyCode::Down) {
-                pitch -= dt;
-            }
-            pitch = pitch.clamp(-1.5, 1.5);
-            let forward = vec3(
-                yaw.cos() * pitch.cos(),
-                yaw.sin() * pitch.cos(),
-                pitch.sin(),
-            );
-            let right = vec3(yaw.sin(), -yaw.cos(), 0.);
-            let mut movement = forward * input.movement().y + right * input.movement().x;
-            if held!(KeyCode::W) {
-                movement += forward;
-            }
-            if held!(KeyCode::S) {
-                movement -= forward;
-            }
-            if held!(KeyCode::D) {
-                movement += right;
-            }
-            if held!(KeyCode::A) {
-                movement -= right;
-            }
-            if flying {
-                player.release_rope();
-            }
-            if flying && held!(KeyCode::E) {
-                movement.z += 1.;
-            }
-            if flying && held!(KeyCode::Q) {
-                movement.z -= 1.;
-            }
-            let speed = if held!(KeyCode::LeftShift) { 800. } else { 220. };
-            if flying {
-                pos += movement.normalize_or_zero() * speed * dt;
-                clock.pause();
-            } else {
-                // Looking up/down must not change walking speed or produce flight.
-                let aim = vec3(
-                    yaw.cos() * pitch.cos(),
-                    yaw.sin() * pitch.cos(),
-                    pitch.sin(),
-                );
-                use crate::interaction::friendly::{use_owner, UseOwner};
-                let shared_rope = player.rope_prompt(&world).is_some();
-                let world_rope = interactions
-                    .pandemonium
-                    .as_ref()
-                    .is_some_and(|p| p.prompt(&world, player.eye()).is_some());
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                { drop(host_block); host_block = crate::frame_profile::span("frame_interaction_search"); }
-                crate::spike_log::sim(crate::spike_log::Sim::Search);
-                #[cfg(target_os = "vita")]
-                {
-                    drop(viewer_block);
-                    viewer_block = crate::frame_profile::span("frame_interaction_search");
-                    crate::frame_profile::set_owner(crate::frame_profile::Owner::InteractionSearch);
-                }
-                let talk =
-                    interactions.conversation(&world, player.eye(), aim, &npcs, &story);
-                let owner = use_owner(
-                    story.busy(),
-                    interactions.scripted(),
-                    shared_rope,
-                    world_rope,
-                    talk.is_some(),
-                    interactions
-                        .prompt(&world, player.eye(), aim)
-                        .is_some(),
-                );
-                let use_pressed = pressed!(KeyCode::E);
-                advance_dialogue = use_pressed && owner == UseOwner::Dialogue;
-                let mut events = interaction::Events::default();
-                if use_pressed && owner == UseOwner::Talk {
-                    if let Some(talk) = talk {
-                        if let Some(result) = interactions.start_conversation(talk, &mut story) {
-                            npcs.begin_talk(talk.actor());
-                            events.merge(result);
-                        }
-                    }
-                }
-                drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Objects);
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                { drop(host_block); host_block = crate::frame_profile::span("frame_interactions"); }
-                crate::spike_log::sim(crate::spike_log::Sim::Interactions);
-                #[cfg(target_os = "vita")]
-                {
-                    drop(viewer_block);
-                    viewer_block = crate::frame_profile::span("frame_interactions");
-                    crate::frame_profile::set_owner(crate::frame_profile::Owner::Interactions);
-                }
-                events.merge(interactions.update(
-                    world_dt,
-                    &scene.map,
-                    &mut world,
-                    &player,
-                    aim,
-                    use_pressed && owner == UseOwner::World,
-                )?);
-                if events.damage > 0. {
-                    stats.damage(events.damage);
-                    hud_ops.push(HudOp::Announce("Hazard / Sanity lost".into()));
-                }
-                for event in events.story {
-                    story.trigger(&event);
-                }
-                pending_transition = events.transition.or(pending_transition);
-                if let Some(message) = events.message {
-                    hud_ops.push(HudOp::Announce(message.into()));
-                }
-                if let Some(sound) = events.sound {
-                    audio_step.effect(sound, None);
-                }
-                drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Movers);
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                { drop(host_block); host_block = crate::frame_profile::span("frame_movers"); }
-                crate::spike_log::sim(crate::spike_log::Sim::Movers);
-                #[cfg(target_os = "vita")]
-                {
-                    drop(viewer_block);
-                    viewer_block = crate::frame_profile::span("frame_movers");
-                    crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
-            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
-                }
-                let was_cinematic = interactions.scripted();
-                let mover_dt = if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt };
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                let _movers_companions = crate::sim_maps::timer("movers_companions_ns");
-                interactions.companions_for_movers(&npcs.companions());
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                drop(_movers_companions);
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                let _movers_targets = crate::sim_maps::timer("movers_targets_ns");
-                let mover_targets = npcs.targets();
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                {
-                    drop(_movers_targets);
-                    crate::sim_maps::count("movers_target_rows", mover_targets.len() as u64);
-                }
-                interactions.actors_for_movers(&mover_targets);
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                if crate::sim_maps::probe::mover_replay_enabled() {
-                    if let Some(s) = &interactions.school2 { crate::sim_maps::probe::mover_ride(s.moving_tops(), &mut player); }
-                }
-                {
-                    let _time = crate::sim_maps::timer("r26_movers_ns");
-                    interactions.advance_school(mover_dt, &scene.map, &mut world, &mut player)?;
-                }
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                if crate::sim_maps::probe::mover_replay_enabled() {
-                    crate::sim_maps::probe::record_movers(&interactions.transforms(), &world, &player);
-                }
-                drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::PlayerMovement);
-                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-                { drop(host_block); host_block = crate::frame_profile::span("frame_movement"); }
-                crate::spike_log::sim(crate::spike_log::Sim::Movement);
-                #[cfg(target_os = "vita")]
-                {
-                    drop(viewer_block);
-                    viewer_block = crate::frame_profile::span("frame_movement");
-                    crate::frame_profile::set_owner(crate::frame_profile::Owner::Movement);
-                    crate::phase_census::set_owner(crate::phase_census::Owner::Player);
-                }
-                let prepare_path=crate::phase_census::span(crate::phase_census::Region::PlayerPrepare);
-                crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::PlayerPrepare,1);
-                if was_cinematic && !interactions.scripted() {
-                    yaw = player.script_facing;
-                    pitch = 0.;
-                    clock.pause();
-                    spawn_landing = true;
-                }
-                let before_feet = player.feet;
-                let before_water = player.immersion;
-                let before_drowning = player.breath.hits;
-                let before_air_warning = player.breath.warning_age().is_some();
-                stats.prepare_player(&mut player);
-                let before_grounded = player.grounded;
-                // A supported spawn has already landed before its first tick.
-                // Its first later fall must receive ordinary fall damage.
-                if before_grounded {
-                    spawn_landing = false;
-                }
-                interactions.prepare_player(&mut stats, &mut player);
-                let before_jumps = player.jumps;
-                let before_landings = player.landings;
-                let before_fall = player.velocity.z;
-                let flat = vec2(yaw.cos(), yaw.sin());
-                let right = vec2(yaw.sin(), -yaw.cos());
-                let mut wish = flat * input.movement().y + right * input.movement().x;
-                if held!(KeyCode::W) {
-                    wish += flat;
-                }
-                if held!(KeyCode::S) {
-                    wish -= flat;
-                }
-                if held!(KeyCode::D) {
-                    wish += right;
-                }
-                if held!(KeyCode::A) {
-                    wish -= right;
-                }
-                let mut control = Controls {
-                    use_pressed: use_pressed
-                        && matches!(owner, UseOwner::SharedRope | UseOwner::Traversal),
-                    wish: wish.clamp_length_max(1.),
-                    swim: movement.clamp_length_max(1.),
-                    rise: f32::from(held!(KeyCode::Space)) - f32::from(held!(KeyCode::LeftControl)),
-                    jump: !overlay_before && pressed!(KeyCode::Space),
-                    run: input.running(&preferences, held!(KeyCode::LeftShift)),
-                };
-                #[cfg(target_os = "vita")]
-                if bench {
-                    control = Controls::default();
-                }
-                interactions.filter_level_controls(&mut control);
-                drop(prepare_path);
-                let mut control_hooks=Some(crate::phase_census::span(crate::phase_census::Region::PlayerHooks));
-                crate::phase_census::count_under(crate::phase_census::Region::PlayerMovement,crate::phase_census::Counter::PlayerHooks,1);
-                let controlled = interactions
-                    .pandemonium
-                    .as_mut()
-                    .is_some_and(|p| p.control(world_dt, &world, &mut player, control));
-                if !controlled
-                    && !scripted_view
-                    && !interactions.scripted()
-                    && !interactions
-                        .duchess
-                        .as_ref()
-                        .is_some_and(|d| d.controlled())
-                    && !interactions.school.as_ref().is_some_and(|s| s.cinematic())
-                    && !interactions.levels_controlled()
-                {
-                    if alice.ice_locked() {
-                        control = Controls::default();
-                        player.velocity = Vec3::ZERO;
-                    }
-                    if alice.attack_movement_locked() {
-                        control = Controls::default();
-                    }
-                    drop(control_hooks.take());
-                    world.set_weapon_obstacles(alice.ice_targets());
-                    #[cfg(feature="vita_renderer")]
-                    if let Some(route)=&mut route_session {
-                        clock.advance_route(elapsed as f64,&world,&mut player,|p|route.control(&world,p,&mut yaw,&mut pitch));
-                    } else {clock.advance(elapsed as f64,&world,&mut player,control);}
-                    #[cfg(not(feature="vita_renderer"))]
-                    clock.advance(elapsed as f64,&world,&mut player,control);
-                }
-                drop(control_hooks);
-                pos = player.eye();
-                audio_step.ops.push(AudioOp::Movement {
-                    distance: (player.feet - before_feet).truncate().length(),
-                    grounded: player.grounded
-                        && before_grounded
-                        && player.immersion.level == 0
-                        && !input.running(&preferences, held!(KeyCode::LeftShift)),
-                    jumped: player.jumps > before_jumps,
-                    landed: player.landings > before_landings && before_fall < -90.,
-                });
-                audio_step.ops.push(AudioOp::Water {
-                    dt,
-                    before: before_water.level,
-                    now: player.immersion.level,
-                    speed: player.velocity.length(),
-                });
-                if before_water.level < 2 && player.immersion.level >= 2 {
-                    hud_ops.push(HudOp::Announce("Swimming / Space rise / Ctrl dive / look and W to swim".into()));
-                }
-                let liquid_damage = std::mem::take(&mut player.liquid_damage);
-                stats.damage(liquid_damage);
-                if player.breath.hits != before_drowning {
-                    audio_step.effect("sound/character/alice/choke1.wav", None);
-                }
-                if !before_air_warning && player.breath.warning_age().is_some()
-                    && player.immersion.level == 3 && stats.alive() {
-                    audio_step.effect("sound/character/alice/choke2.wav", None);
-                }
-                if liquid_damage > 0. && before_water.kind != player.immersion.kind {
-                    hud_ops.push(HudOp::Announce("Harmful liquid / Sanity lost".into()));
-                }
-                if player.landings > before_landings {
-                    let lost = if spawn_landing {
-                        0.
-                    } else {
-                        stats.fall(player.landing_speed)
-                    };
-                    spawn_landing = false;
-                    if lost > 0. {
-                        hud_ops.push(HudOp::Announce(format!("Hard landing / -{lost:.0} Sanity").into()));
-                    }
-                }
-                hints.sync(&interactions);
-                hints.observe(before_feet, player.feet);
-                let events = interactions.triggers(dt, before_feet, player.feet);
-                for event in &events.story {
-                    story.trigger(event);
-                }
-                if events.damage > 0. {
-                    stats.damage(events.damage);
-                    hud_ops.push(HudOp::Announce("Hazard / Sanity lost".into()));
-                }
-                if let Some(message) = events.message {
-                    hud_ops.push(HudOp::Announce(message.into()));
-                }
-                if let Some(sound) = events.sound {
-                    audio_step.effect(sound, None);
-                }
-                if stats.alive() {
-                    pending_transition = events.transition.or(pending_transition);
-                    if let Some((feet, angle)) = events.teleport {
-                        if world.body_clear(feet) {
-                            player = Player::new(feet);
-                            yaw = angle;
-                            pos = player.eye();
-                            alice.reset(&player, yaw);
-                            follow_camera.reset();
-                            camera_handoff.reset();
-                            clock.pause();
-                            spawn_landing = true;
-                            recovery.clear();
-                            hud_ops.push(HudOp::Announce("Teleported".into()));
-                        } else {
-                            hud_ops.push(HudOp::Announce("Teleport destination is obstructed".into()));
-                        }
-                    }
-                }
-                if !in_transport && recovery::outside_world(&world, player.feet) {
-                    stats.damage(10000.);
-                    pending_transition = None;
-                    hud_ops.push(HudOp::Announce("Lost beyond the level / Enter to retry".into()));
-                }
-                if stats.alive() {
-                    let dice_before = stats.copies(6);
-                    let rage_before = stats.powers.rage;
-                    if let Some(s) = &mut interactions.school {
-                        let e = s.collect_secret(&mut stats, player.feet, &world);
-                        if let Some(m) = e.message {
-                            hud_ops.push(HudOp::Announce(m.into()));
-                        }
-                        for event in e.story {
-                            story.trigger(&event);
-                        }
-                    }
-                    for message in inventory::collect_with(
-                        &mut stats,
-                        &pickups,
-                        player.feet,
-                        &world,
-                        |item| power_art.collected(item, pickup_clock),
-                    ) {
-                        hud_ops.push(HudOp::Announce(message.into()));
-                    }
-                    if stats.copies(6) > dice_before {
-                        story.trigger("dice_cat");
-                    }
-                    if stats.powers.rage > rage_before {
-                        audio_step.effect("sound/item/ragebox/ragebox_pickup.wav", None);
-                    }
-                    if player.script_motion == 0 {
-                        recovery.observe(&world, &interactions, &player, yaw);
-                    }
-                }
-            }
+            gameplay = true;
         } else if simulate {
             clock.pause();
         }
-        let story_active = !paused
-            && !menu
-            && !inventory_menu
-            && !console_input
-            && focused
-            && !flying
-            && stats.alive();
+        let mut step_locals = StepLocals {
+            simulate,
+            overlay_before,
+            menu,
+            inventory_menu,
+            console_input,
+            focused,
+            scripted_view,
+            bench,
+            elapsed,
+            dt,
+            world_dt,
+            in_transport,
+            summon_cat,
+            power_before,
+            advance_dialogue, pending_transition, weapon_click,
+        };
+        let mut step_scopes = StepScopes {
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            frame: Some(host_block),
+            #[cfg(target_os = "vita")]
+            frame: Some(viewer_block),
+            census: Some(census_block),
+        };
+        let (story_active, mut due) = serial_step!(step_a, &mut step_locals, gameplay, StepAOwner {
+            map: &scene.map,
+            preferences: &preferences,
+            console: &mut console,
+            power_art: &mut power_art,
+            hud_ops: &mut hud_ops,
+            audio_step: &mut audio_step,
+            scopes: &mut step_scopes,
+            #[cfg(feature = "vita_renderer")]
+            route_session: &mut route_session,
+            saves_writable,
+            host_transition: &host_transition,
+        })?;
         if simulate {
-        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::StoryWeapons);
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        { drop(host_block); host_block = crate::frame_profile::span("frame_story"); }
-        crate::spike_log::sim(crate::spike_log::Sim::Story);
-        #[cfg(target_os = "vita")]
-        {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_story");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
-            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
-        }
-        hints.sync(&interactions);
-        if (summon_cat || (story_active && pressed!(KeyCode::C))) && !in_transport {
-            let outcome = if !stats.alive() || flying {
-                Err("Return to walking and retry before summoning Cheshire.")
-            } else {
-                hints.summon(&mut story, &world, player.feet, yaw, player.swimming)
-            };
-            match outcome {
-                Ok(()) => {
-                    if hints.visible() {
-                        audio_step.effect("sound/character/cheshire_cat/appear.wav", None);
-                    }
-                    console.open = false;
-                }
-                Err(message) => {
-                    hud_ops.push(HudOp::Announce(message.into()));
-                    if summon_cat {
-                        console.print(message);
-                    }
-                }
-            }
-        }
-        interactions.sync_pickups(&stats, &mut pickups, &mut story);
-        if let Some(b) = &mut interactions.beyond {
-            b.bind_rage_player(&mut player, alice.facing());
-        }
-        let story_ready = interactions.prepare_story(&mut story);
-        if let Some(request) = story.update(
-            if story_active && story_ready && hints.prepare_story(&story) {
-                elapsed
-            } else {
-                0.
-            },
-            advance_dialogue,
-        ) {
-            audio_step.ops.push(AudioOp::Voice(request));
-        }
-        interactions.sync_cinematic_story(&story);
-        hints.sync(&interactions);
-        if hints.update(if story_active { dt } else { 0. }, story.hint_active()) {
-            audio_step.effect("sound/character/cheshire_cat/disappear.wav", None);
-        }
-        for event in story.take_completed() {
-            let effects = interactions.completed_dialogue(&event);
-            if let Some(message) = effects.message {
-                hud_ops.push(HudOp::Announce(message.into()));
-            }
-            if let Some(sound) = effects.sound {
-                audio_step.effect(sound, None);
-            }
-        }
-        if let Some(s) = &mut interactions.school2 {
-            s.summon(alice.ally_target());
-            s.notarget(
-                stats.ignores_alice()
-                    || interactions.school.as_ref().is_some_and(|s| s.cinematic()),
-            );
-            let (events, feedback) = s.update(
-                if story_active { world_dt } else { 0. },
-                &world,
-                player.feet,
-                story.busy(),
-            );
-            stats.school_items = s.quest.items.clone();
-            for &hit in &feedback.summon_hits {
-                alice.hit_summon(hit);
-            }
-            stats.damage(feedback.damage);
-            if feedback.will_drain > 0. {
-                stats.spend_will(feedback.will_drain.min(stats.will()));
-            }
-            player.knockback(feedback.impulse);
-            for event in events.story {
-                story.trigger(&event);
-            }
-            audio_step.feedback(feedback);
-            if let Some(sound) = events.sound {
-                audio_step.effect(sound, None);
-            }
-            if let Some(message) = events.message {
-                hud_ops.push(HudOp::Announce(message.into()));
-            }
-        }
-        if let Some(s) = &mut interactions.school {
-            s.sync_inventory(&mut stats);
-        }
-        if let Some(d) = &mut interactions.duchess {
-            if story_active && stats.alive() {
-                if let Some(target) = d.target() {
-                    d.threatened(alice.threatens(&world, target));
-                }
-            }
-            let before_stage = d.state.stage;
-            d.state.notarget = stats.ignores_alice();
-            d.state.opponents.summon = alice.ally_target();
-            let f = d.update(
-                if story_active { world_dt } else { 0. },
-                &world,
-                &mut player,
-                &mut stats,
-                &mut story,
-            );
-            for &hit in &f.summon_hits {
-                alice.hit_summon(hit);
-            }
-            stats.damage(f.damage);
-            player.knockback(f.impulse);
-            audio_step.feedback(f);
-            if before_stage == crate::duchess::Stage::Waiting && d.cinematic() {
-                recovery.clear();
-            }
-            if in_transport && !d.cinematic() {
-                yaw = player.script_facing;
-                pitch = 0.;
-                clock.pause();
-                spawn_landing = true;
-            }
-            pos = player.eye();
-        }
-        if story_active && saves_writable && interactions.levels.iter().any(|s| s.ctl.checkpoint_requested()) {
+        if matches!(due, Due::Checkpoint) {
             if throttle_normal {
                 // Keep the original checkpoint snapshot; only its thumbnail
                 // capture and disk write wait for the clean render boundary.
@@ -3539,8 +3140,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 Err(e) => { hud_ops.push(HudOp::Announce(format!("Checkpoint save failed: {e:#}").into())); }
             }
             }
+            due = step_due(false, story_active, post_game, &mut interactions, &mut story,
+                &mut step_locals.pending_transition, &host_transition);
         }
-        if story_active && interactions.levels.iter().any(|s| s.ctl.ending_ready()) && !post_game {
+        if matches!(due, Due::Ending) {
             post_game = true;
             campaign.completed.insert(save::visit_key(&maps[current], entry_spawn.as_deref()));
             if saves_writable { if let Err(e) = store.mark_complete() { eprintln!("Completion marker failed: {e:#}"); } }
@@ -3575,16 +3178,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             finish_replay_step!("ending");
             continue;
         }
-        if let Some(exit) = pending_transition.take() {
-            story.defer_exit(exit);
-        }
-        if story_active {
-            pending_transition = interactions.take_story_exit(&mut story);
-        }
-        if host_transition == "natural-exit" {
-            pending_transition = Some((crate::transition_memory::host_destination(), None));
-        }
-        if let Some(exit) = pending_transition {
+        if let Due::Exit(exit) = due {
             options.difficulty = stats.difficulty;
             let (name, target_spawn) = exit.clone();
             let leaving = level_snapshot!();
@@ -3673,7 +3267,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     clock.pause();
                     pitch = 0.;
                     spawn_landing = true;
-                    weapon_click = None;
+                    step_locals.weapon_click = None;
                     weapon_buttons.block();
                     level_art = next.art;
                     skip_scene = crate::cinematic::Skip::default();
@@ -3702,641 +3296,32 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         } // simulation: story and transitions
-        drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Particles);
-        if simulate {
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        { drop(host_block); host_block = crate::frame_profile::span("frame_particles"); }
-        crate::spike_log::sim(crate::spike_log::Sim::Particles);
-        #[cfg(target_os = "vita")]
-        {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_particles");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
-            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
-        }
-        if !paused && !menu && !inventory_menu && !console_input && focused && stats.alive() {
-            environment_clock += world_dt;
-            {
-                #[cfg(target_os = "vita")]
-                let _hotspot = crate::frame_profile::span("steam_animate");
-                steam.animate(environment_clock);
-            }
-            if interactions
-                .school
-                .as_ref()
-                .is_some_and(|s| s.theatre_finished())
-            {
-                steam.stop();
-            }
-            {
-                #[cfg(target_os = "vita")]
-                let _hotspot = crate::frame_profile::span("steam_sync");
-                steam.sync(&interactions.event_world);
-            }
-            if let Some(v) = &interactions.village {
-                {
-                    #[cfg(target_os = "vita")]
-                    let _hotspot = crate::frame_profile::span("village_particle_bindings");
-                    v.place_particles(&mut steam);
-                }
-            }
-            if let Some(p) = &interactions.pandemonium {
-                p.gate_particles(&mut steam);
-            }
-            interactions.place_level_particles(&mut steam);
-            steam.update_clocks(dt, world_dt, pos, &world);
-        }
-        } // simulation: particles
-        drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::StoryWeapons);
-        crate::spike_log::sim(crate::spike_log::Sim::Combat);
-        #[cfg(target_os = "vita")]
-        if simulate {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_combat");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::Combat);
-        }
-        // Scene controllers may finish during movement, dialogue or boss updates.
-        // Resolve the handoff once, after all three, before animation/aim/rendering.
-        let still_scripted = interactions.scripted()
-            || interactions.duchess.as_ref().is_some_and(|d| d.cinematic())
-            || interactions
-                .school
-                .as_ref()
-                .and_then(|s| s.return_visit.as_ref())
-                .is_some_and(|s| s.camera().is_some());
-        if simulate && camera_handoff.was_scripted() && !still_scripted {
-            if !third_person {
-                camera_handoff.skip();
-            }
-            yaw = player.script_facing;
-            pitch = 0.;
-            pos = player.eye();
-            clock.pause();
-            spawn_landing = true;
-            weapon_click = None;
-            weapon_buttons.block();
-            alice.resume_scene(&player, yaw, if snapshot_handoff && level_art.pool.is_some() {
-                handoff_return.pose(&level_art.snapshot_visit)
-            } else { level_art.handoff_pose() });
-        }
-        let direction = vec3(
-            yaw.cos() * pitch.cos(),
-            yaw.sin() * pitch.cos(),
-            pitch.sin(),
-        );
-        let active = !paused
-            && !menu
-            && !inventory_menu
-            && !console_input
-            && focused
-            && !flying
-            && stats.alive();
-        if active && simulate {
-            played = true;
-            stats.update(dt);
-            pickup_clock += dt;
-        }
-        // Keep conversation participants safe while listening. Exploration continues;
-        // enemies and attacks resume after the conversation.
-        let pand_cinematic =
-            interactions.duchess.as_ref().is_some_and(|d| d.cinematic()) || interactions.scripted();
-        if simulate {
-        if story.busy()
-            || pand_cinematic
-            || interactions.school.as_ref().is_some_and(|s| s.cinematic())
-        {
-            weapon_click = None;
-            weapon_buttons.block();
-            alice.cancel_weapon_action();
-            alice.dismiss_summon();
-        }
-        if flying {
-            alice.cancel_weapon_action();
-        }
-        if interactions.levels.iter().any(|s| s.ctl.dismiss_summons()) {
-            alice.dismiss_summon();
-        }
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        { drop(host_block); host_block = crate::frame_profile::span("frame_combat"); }
-        crate::spike_log::sim(crate::spike_log::Sim::Encounters);
-        #[cfg(target_os = "vita")]
-        {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_combat");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::Combat);
-        }
-        interactions.activate_enemies();
-        let scripted_motion = interactions.scripted();
-        if let Some(s) = &mut interactions.encounters {
-            s.summon(alice.ally_target());
-            s.notarget(
-                stats.ignores_alice()
-                    || interactions.school.as_ref().is_some_and(|s| s.cinematic()),
-            );
-            let f = s.update(
-                if active
-                    && !story.busy()
-                    && !interactions.school.as_ref().is_some_and(|s| s.cinematic())
-                    && !scripted_motion
-                {
-                    world_dt
-                } else {
-                    0.
-                },
-                &world,
-                player.eye(),
-            );
-            for &hit in &f.summon_hits {
-                alice.hit_summon(hit);
-            }
-            stats.damage(f.damage);
-            player.knockback(f.impulse);
-            audio_step.feedback(f);
-        }
-        crate::spike_log::sim(crate::spike_log::Sim::Levels);
-        if interactions.has_level_combat() {
-            // Pool's scene-owned ants and registered controllers share the route's combat hook.
-            let notarget = stats.ignores_alice();
-            let summon = alice.ally_target();
-            let dt = if active
-                && !story.busy()
-                && !interactions.school.as_ref().is_some_and(|s| s.cinematic())
-                && !scripted_motion
-            {
-                if interactions.levels.iter().any(|s| s.ctl.ignores_watch()) { dt } else { world_dt }
-            } else {
-                0.
-            };
-            let threatens = |t: &crate::combat::Target| alice.threatens(&world, *t);
-            let f = interactions.levels_step(&mut crate::level::Combat {
-                dt,
-                world: &world,
-                player: &mut player,
-                stats: &mut stats,
-                story: &mut story,
-                notarget,
-                summon,
-                threatens: &threatens,
-            });
-            for &hit in &f.summon_hits {
-                alice.hit_summon(hit);
-            }
-            stats.damage(f.damage);
-            player.knockback(f.impulse);
-            audio_step.feedback(f);
-        }
-        crate::spike_log::sim(crate::spike_log::Sim::Npcs);
-        npcs.summon(alice.ally_target());
-        npcs.activate_levels(&interactions.levels);
-        npcs.notarget(stats.ignores_alice());
-        if active && !story.busy() && !interactions.scripted() && world_dt > 0. {
-            npcs.chess_threats(|t| alice.threatens(&world, *t));
-        }
-        npcs.level_patrols(&interactions.levels);
-        let feedback = npcs.update(
-            if active
-                && !story.busy()
-                && !interactions.school.as_ref().is_some_and(|s| s.cinematic())
-                && !interactions.scripted()
-            {
-                world_dt
-            } else {
-                0.
-            },
-            &world,
-            player.eye(),
-        );
-        crate::spike_log::sim(crate::spike_log::Sim::CombatRest);
-        alice.story_pose(&story, if story_active { dt } else { 0. });
-        npcs.story_pose(
-            &story,
-            if active { world_dt } else { 0. },
-            &world,
-            player.eye(),
-        );
-        if let Some(v) = &interactions.village {
-            v.cinema.apply_npcs(&mut npcs);
-        }
-        for &hit in &feedback.summon_hits {
-            alice.hit_summon(hit);
-        }
-        stats.damage(feedback.damage);
-        if feedback.will_drain > 0. {
-            stats.spend_will(feedback.will_drain.min(stats.will()));
-        }
-        player.knockback(feedback.impulse);
-        if feedback.damage > 0. {
-            println!(
-                "Guard struck Alice: {} damage, {} sanity",
-                feedback.damage,
-                stats.sanity()
-            );
-            hud_ops.push(HudOp::Announce("Card guard struck you".into()));
-        }
-        audio_step.feedback(feedback);
-        if player.script_motion > 0 || player.ledge.is_some() || interactions.level_blocks_weapons() {
-            weapon_click = None;
-            weapon_buttons.block();
-        }
-        if !stats.alive() {
-            alice.die();
-        }
-        } // simulation: combat, encounters and NPC poses
-        let death_animation =
-            !stats.alive() && focused && !paused && !menu && !inventory_menu && !console_input;
-        crate::spike_log::sim(crate::spike_log::Sim::Alice);
-        #[cfg(target_os = "vita")]
-        if simulate {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_alice");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::Alice);
-        }
-        let mut targets = if story.busy() {
-            Vec::new()
-        } else {
-            npcs.targets()
-        };
-        if !story.busy() {
-            if stats.equipped() == Some(2) || alice.croquet_contacts() {
-                targets.extend(npcs.mallet_contacts());
-            }
-            if let Some(t) = interactions.duchess.as_ref().and_then(|d| d.target()) {
-                targets.push(t);
-            }
-            if let Some(summon) = alice.summon_target() {
-                targets.push(summon);
-            }
-            targets.extend(interactions.shot_targets());
-            if let Some(s) = &interactions.encounters {
-                targets.extend(s.targets());
-            }
-            if let Some(s) = &interactions.school2 {
-                targets.extend(s.targets());
-            }
-            targets.extend(interactions.levels_targets());
-        }
-        targets.extend(alice.ice_targets());
-        if simulate {
-        alice.world_time(dt, world_dt);
-        alice.notarget(stats.ignores_alice());
-        let weapon_sounds = alice.update_funded(
-            if (active && !pand_cinematic) || death_animation {
-                dt
-            } else {
-                0.
-            },
-            &player,
-            input.running(&preferences, held!(KeyCode::LeftShift)),
-            character::WeaponInput {
-                dice: stats.copies(6),
-                first_person: !third_person && !flying,
-                selected: stats.equipped().unwrap_or(crate::weapons::UNARMED),
-                click: weapon_click,
-                aim: direction,
-            },
-            &crate::combat::Context {
-                world: &world,
-                targets: &targets,
-            },
-            Some(&mut stats),
-        );
-        if let Some(message) = alice.take_weapon_notice() {
-            hud_ops.push(HudOp::Announce(message.into()));
-        }
-        for mut hit in alice.take_hits() {
-            if alice.hit_ice(hit) {
-                continue;
-            }
-            let hit_origin = targets
-                .iter()
-                .find(|t| t.id == hit.id)
-                .map_or(player.eye(), |t| t.center);
-            if hit.id == crate::dice::ALICE {
-                stats.damage(hit.damage);
-                player.knockback(hit.knockback * 2.5);
-                continue;
-            }
-            if hit.id == crate::dice::SUMMON {
-                alice.hit_summon(hit);
-                continue;
-            }
-            if hit.kind.is_demon() {
-                npcs.provoke_summon(hit.id);
-                if let Some(s) = &mut interactions.encounters {
-                    s.provoke_summon(hit.id);
-                }
-                if let Some(s) = &mut interactions.school2 {
-                    s.provoke_summon(hit.id);
-                }
-                interactions.levels_provoke_summon(hit.id);
-                if hit.id == crate::duchess::ID {
-                    if let Some(d) = &mut interactions.duchess {
-                        d.state.opponents.demon = true;
-                    }
-                }
-                hit.kind = hit.kind.means();
-            } else {
-                hit.damage = stats.attack_damage(hit.damage);
-            }
-            if hit.id == crate::duchess::ID {
-                // A projectile still in flight after Alice dies must not lock retry in a defeat cinematic.
-                if !stats.alive() {
-                    continue;
-                }
-                if let Some(sound) = interactions
-                    .duchess
-                    .as_mut()
-                    .and_then(|d| d.hit(hit.damage))
-                {
-                    audio_step.effect(sound, Some(hit_origin));
-                }
-                continue;
-            }
-            // Each registration's exact hit range comes before the `>= encounters::BASE`
-            // catch-all below, which would otherwise swallow every registry id.
-            if let Some(sound) = interactions.hit_level(hit) {
-                if let Some(sound) = sound {
-                    audio_step.effect(sound, Some(hit_origin));
-                }
-                continue;
-            }
-            if hit.id >= crate::encounters::BASE {
-                if let Some(sound) = interactions.encounters.as_mut().and_then(|s| s.hit(hit)) {
-                    audio_step.effect(sound, Some(hit_origin));
-                }
-                continue;
-            }
-            if hit.id >= crate::interaction::SHOT_BASE {
-                let e = interactions.shoot(hit);
-                if let Some(message) = e.message {
-                    hud_ops.push(HudOp::Announce(message.into()));
-                }
-                if let Some(sound) = e.sound {
-                    audio_step.effect(sound, Some(hit_origin));
-                }
-                interactions.sync(&mut world);
-                continue;
-            }
-            if hit.id >= crate::school2::ENEMY_BASE {
-                if let Some(sound) = interactions
-                    .school2
-                    .as_mut()
-                    .and_then(|s| s.hit_attack(hit))
-                {
-                    audio_step.effect(sound, Some(hit_origin));
-                }
-                continue;
-            }
-            if let Some((message, sound)) = npcs.hit(hit) {
-                hud_ops.push(HudOp::Announce(message.into()));
-                audio_step.effect(sound, Some(hit_origin));
-            }
-        }
-        world.set_weapon_obstacles(alice.ice_targets());
-        if active && loot_visit == save::visit_key(&maps[current], entry_spawn.as_deref()) {
-            let mut after = interactions.loot_sources();
-            after.extend(npcs.loot_sources());
-            for message in crate::loot::tick_with(
-                &mut stats,
-                &loot_visit,
-                world_dt,
-                &loot_before,
-                &after,
-                player.feet,
-                &world,
-                |item| power_art.collected(item, pickup_clock),
-            ) {
-                hud_ops.push(HudOp::Announce(message.into()));
-                audio_step.effect("sound/item/essence/small/mtespu.wav", None);
-            }
-            if let Some(message) =
-                pickup_feedback.update(&stats, &pickups, &loot_visit, player.feet, &world)
-            {
-                hud_ops.push(HudOp::Announce(message.into()));
-            }
-        }
-        if stats.active_power().map(|(k, _)| k) != power_before {
-            if let Some((kind, _)) = stats.active_power() {
-                audio_step.effect(match kind {
-                    crate::powerups::Kind::Rage => "sound/item/ragebox/ragebox_power.wav",
-                    crate::powerups::Kind::Tea => "sound/item/tea/powerup.wav",
-                    crate::powerups::Kind::Glass => "sound/item/glass/powerup.wav",
-                }, None);
-            }
-        }
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        { drop(host_block); host_block = crate::frame_profile::span("frame_audio"); }
-        crate::spike_log::sim(crate::spike_log::Sim::Audio);
-        #[cfg(target_os = "vita")]
-        {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_audio");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
-            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
-        }
-        for sound in weapon_sounds {
-            audio_step.effect(sound, None);
-        }
-        for (path, origin) in alice.take_world_audio() {
-            audio_step.effect(path, Some(origin));
-        }
-        audio_step.world(&interactions, alice.audio_loops());
-        for cue in alice.take_audio() {
-            audio_step.ops.push(AudioOp::Animation(cue));
-        }
-        audio_step.ops.push(AudioOp::Player {
-            sanity: stats.sanity() as f32,
-            swimming: player.swimming,
-            underwater: player.immersion.level == 3,
-            drowning: player.immersion.level == 3 && player.breath.remaining() <= 0.,
-        });
-        alice.power_appearance(&stats);
-        alice.water_appearance(&player);
-        } // simulation: Alice, weapons and world audio
-        let rage_scene = interactions.beyond.as_ref().and_then(|b| b.rage_scene());
-        if let Some((time, finished)) = rage_scene.filter(|_| simulate) {
-            alice.rage_scene(time, finished, &player);
-        }
-        drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::CameraScene);
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        { drop(host_block); host_block = crate::frame_profile::span("frame_camera"); }
-        crate::spike_log::sim(crate::spike_log::Sim::Camera);
-        #[cfg(target_os = "vita")]
-        {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_camera");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::Camera);
-            crate::phase_census::set_owner(crate::phase_census::Owner::Camera);
-        }
-        let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraScripted);
-        let mut pand_camera = interactions.camera_after(
-            interactions
-                .duchess
-                .as_ref()
-                .and_then(|d| d.camera(&world))
-                .or_else(|| interactions.pandemonium.as_ref().and_then(|p| p.camera()))
-                .or_else(|| interactions.pool.as_ref().and_then(|p| p.camera()))
-                .or_else(|| interactions.school.as_ref().and_then(|s| s.scene_camera()))
-                .or_else(|| interactions.school2.as_ref().and_then(|s| s.scene_camera()))
-                .or_else(|| {
-                    interactions
-                        .beyond
-                        .as_ref()
-                        .and_then(|b| b.scene_camera_in(&world))
-                })
-                .or_else(|| {
-                    interactions
-                        .fortress
-                        .as_ref()
-                        .and_then(|f| f.cinema.camera(&f.state.cinema))
-                })
-                .or_else(|| {
-                    interactions
-                        .village
-                        .as_ref()
-                        .and_then(|v| v.cinema.camera())
-                }),
-            &world,
-        );
-        if let Some(camera) = pand_camera.filter(|_| {
-            interactions
-                .pandemonium
-                .as_ref()
-                .is_some_and(|p| p.rail_camera_active())
-        }) {
-            pand_camera = Some(
-                rail_camera.rail(
-                    &world,
-                    camera,
-                    &interactions
-                        .pandemonium
-                        .as_ref()
-                        .unwrap()
-                        .rail_camera_ahead(),
-                    if active { dt } else { 0. },
-                ),
-            );
-        } else {
-            rail_camera.reset();
-        }
-        let cinematic_camera = interactions
-            .school
-            .as_ref()
-            .and_then(|s| s.return_visit.as_ref())
-            .and_then(|s| s.camera());
-        let scripted_camera = pand_camera.or_else(|| {
-            cinematic_camera.map(|(eye, target, _)| crate::cinematic::Camera::look(eye, target))
-        });
-        drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraFollow);
-        let (eye, aim, gameplay_alice) = (|| {
+        let StepView {
+            active, direction, targets, pand_cinematic, pand_camera, scripted_camera, camera, target, show_alice,
             #[cfg(target_os = "vita")]
-            if let Some(pose) = bench_camera {
-                return pose;
-            }
-            if third_person && !flying {
-                follow_camera.update(
-                    &world,
-                    player.feet,
-                    direction,
-                    preferences.camera_distance,
-                    if active { dt } else { 0. },
-                )
-            } else {
-                follow_camera.reset();
-                (pos, pos + direction, false)
-            }
-        })();
-        drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraHandoff);
-        let fade = interactions
-            .fade_after(
-                interactions
-                    .village
-                    .as_ref()
-                    .map(|v| v.cinema.fade())
-                    .or_else(|| {
-                        interactions
-                            .fortress
-                            .as_ref()
-                            .map(|f| f.cinema.fade(&f.state.cinema))
-                    })
-                    .or_else(|| {
-                        interactions
-                            .pandemonium
-                            .as_ref()
-                            .map(|p| (p.fade_color(), p.fade()))
-                    })
-                    .or_else(|| interactions.pool.as_ref().map(|p| p.fade()))
-                    .or_else(|| interactions.beyond.as_ref().map(|b| b.scene_fade()))
-                    .or_else(|| interactions.school.as_ref().map(|s| s.scene_fade()))
-                    .or_else(|| interactions.school2.as_ref().map(|s| s.scene_fade())),
-            )
-            .map_or(Color::new(0., 0., 0., 0.), |(c, a)| Color { a, ..c });
-        if scripted_camera.is_some() {
-            camera_handoff.return_duration(
-                if interactions
-                    .pool
-                    .as_ref()
-                    .is_some_and(|p| p.scene_id() == Some(crate::pool::cinema::ENTRY))
-                {
-                    2.
-                } else {
-                    0.45
-                },
-            );
-        }
-        let view = (|| {
+            gameplay_alice,
+        } = serial_step!(step_b, &mut step_locals, story_active, StepBOwner {
+            map_name: &maps[current],
+            preferences: &preferences,
+            power_art: &mut power_art,
+            level_art: &level_art,
+            handoff_return: &handoff_return,
+            hud_ops: &mut hud_ops,
+            audio_step: &mut audio_step,
+            scopes: &mut step_scopes,
+            loot_visit: &loot_visit,
+            loot_before: &loot_before,
+            snapshot_handoff,
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            frame,
             #[cfg(target_os = "vita")]
-            if let Some((eye, target, _)) = bench_camera {
-                return crate::cinematic::Camera::look(eye, target);
-            }
-            camera_handoff.update(
-                &world,
-                scripted_camera,
-                crate::cinematic::Camera::look(eye, aim),
-                fade,
-                if active { dt } else { 0. },
-            )
-        })();
-        let quake = interactions
-            .pool
-            .as_ref()
-            .map_or(Vec3::ZERO, |p| p.quake_offset())
-            + interactions.levels.iter().map(|s| s.ctl.quake_offset()).sum::<Vec3>();
-        let (camera, target) = (view.eye + quake, view.target + quake);
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let (camera,target)=crate::sim_maps::probe::moving_view(frame,camera,target);
-        #[cfg(target_os = "vita")]
-        let (camera, target) = bench_camera.map_or((camera, target), |(eye, target, _)| (eye, target));
-        let show_alice = !interactions.level_hides_player()
-            && if scripted_camera.is_some() {
-                rage_scene.is_some_and(|(_, finished)| !finished)
-                    || (cinematic_camera.is_some_and(|(_, _, show)| show) && pand_camera.is_none())
-            } else {
-                gameplay_alice && camera.distance(player.feet + Vec3::Z * 32.) > 30.
-            };
-        drop(census_leaf);
-        if simulate {
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        { drop(host_block); host_block = crate::frame_profile::span("frame_audio_mix"); }
-        crate::spike_log::sim(crate::spike_log::Sim::AudioMix);
-        #[cfg(target_os = "vita")]
-        {
-            drop(viewer_block);
-            viewer_block = crate::frame_profile::span("frame_audio_mix");
-            crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
-            crate::phase_census::set_owner(crate::phase_census::Owner::Other);
-        }
-        let listen_direction = target - camera;
-        audio_step.ops.push(AudioOp::Listen {
-            listener: camera,
-            submerged: world.liquid_at(camera) != 0,
-            dt: elapsed,
-            world_dt,
-            yaw: listen_direction.y.atan2(listen_direction.x),
-            paused: console_input || menu || paused || inventory_menu || !focused,
-            voice_paused: !story_active,
+            bench_camera,
         });
-        } // simulation: audio listener and clocks
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        { host_block = step_scopes.frame.take().unwrap(); }
+        #[cfg(target_os = "vita")]
+        { viewer_block = step_scopes.frame.take().unwrap(); }
+        census_block = step_scopes.census.take().unwrap();
         // The step, including any Pool of Tears re-publication, is complete.
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         let acoustic_view = (simulate && force_acoustic_view).then(|| {
