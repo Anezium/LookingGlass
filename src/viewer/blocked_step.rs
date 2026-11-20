@@ -57,6 +57,11 @@ impl Worker {
             if !initialized {
                 crate::skin_worker::pin_reserved_cpu1();
                 crate::skin_worker::inventory("sim-pipeline", Some(0x20000));
+                #[cfg(target_os = "vita")]
+                if let Some((_, bytes)) = crate::skin_worker::current_stack() {
+                    let entry_margin = crate::skin_worker::current_stack_margin().unwrap_or(0);
+                    println!("[lg/sim-overlap] thread_info_stack_bytes={bytes} entry_margin_bytes={entry_margin}");
+                }
                 initialized = true;
             }
             let Request {
@@ -76,7 +81,7 @@ impl Worker {
                 #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
                 frame: None,
             };
-            let (mut job, output) = match input {
+            let (job, output) = match input {
                 Input::A(input) => {
                     let (job, due) = step_a(job, input, &mut scopes);
                     (job, Output::A(due))
@@ -85,6 +90,14 @@ impl Worker {
                     let map = seal.map(|_| input.map_name.clone());
                     let (job, view) = step_b(job, input, &mut scopes);
                     job.sim.world.capture_acoustic_view(&mut acoustic);
+                    #[cfg(not(target_os = "vita"))]
+                    let view = {
+                        let mut view = view;
+                        if wrong_stamp_frame == Some(stamp.frame.frame) {
+                            view.stamp.slot_generation = view.stamp.slot_generation.wrapping_add(1);
+                        }
+                        view
+                    };
                     let seal = seal.map(|want_state| job.replay_probe(map.as_deref().unwrap(), want_state)).transpose();
                     let output = match seal {
                         Ok(seal) => Ok((view, acoustic.unwrap(), seal)),
@@ -96,10 +109,6 @@ impl Worker {
             drop(scopes);
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             probe.swap();
-            #[cfg(not(target_os = "vita"))]
-            if wrong_stamp_frame == Some(stamp.frame.frame) && matches!(&output, Output::B(_)) {
-                job.stamp.slot_generation = job.stamp.slot_generation.wrapping_add(1);
-            }
             *slot = Some(Reply {
                 job, output,
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -128,7 +137,10 @@ impl Worker {
         }).map_err(|error| anyhow!("W0 sim worker: {error:?}"))?;
         let reply = slot.take().expect("missing blocked step reply");
         assert_eq!(stamp, expected, "stale sim transport stamp");
-        assert_eq!(reply.job.stamp, expected, "stale sim output stamp");
+        assert_eq!(reply.job.stamp, expected, "stale sim state stamp");
+        if let Output::B(Ok((view, _, _))) = &reply.output {
+            assert_eq!(view.stamp, expected, "stale sim output stamp");
+        }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         {
             let mut probe = reply.probe;
