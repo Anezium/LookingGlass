@@ -715,6 +715,18 @@ impl Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_os = "vita"))]
+    #[test]
+    #[should_panic(expected = "missing clock view inside simulation step")]
+    fn simulation_step_without_clock_view_panics() {
+        std::thread::spawn(|| {
+            let _step = replay_input::StepGuard::enter();
+            replay_input::get_time();
+        })
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
     #[test]
     fn step_input_installs_the_clock_on_the_calling_thread() {
         let instant = std::time::Instant::now();
@@ -732,6 +744,7 @@ mod tests {
             recovery_key: None,
         };
         std::thread::spawn(move || {
+            let _step = replay_input::StepGuard::enter();
             let _clock = step.enter_clock();
             assert_eq!(replay_input::get_time().to_bits(), step.clock_bits);
             assert_eq!(replay_input::get_frame_time().to_bits(), step.dt.to_bits());

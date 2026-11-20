@@ -121,6 +121,26 @@ thread_local! {
     static IN_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Marks simulation execution on the dispatch thread, independently of the clock view.
+#[must_use]
+pub(crate) struct StepGuard {
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl StepGuard {
+    pub(crate) fn enter() -> Self {
+        assert!(!IN_STEP.get(), "nested simulation step");
+        IN_STEP.set(true);
+        Self { _thread: std::marker::PhantomData }
+    }
+}
+
+impl Drop for StepGuard {
+    fn drop(&mut self) {
+        IN_STEP.set(false);
+    }
+}
+
 /// A step clock belongs to the thread that installed it.
 #[must_use]
 pub(crate) struct StepClockGuard {
@@ -139,7 +159,7 @@ impl ClockView {
     }
 
     pub(crate) fn enter(self) -> StepClockGuard {
-        assert!(!IN_STEP.replace(true), "nested step clock");
+        assert!(CLOCK_VIEW.get().is_none(), "nested step clock");
         CLOCK_VIEW.set(Some(self));
         StepClockGuard { _thread: std::marker::PhantomData }
     }
@@ -148,7 +168,6 @@ impl ClockView {
 impl Drop for StepClockGuard {
     fn drop(&mut self) {
         CLOCK_VIEW.set(None);
-        IN_STEP.set(false);
     }
 }
 

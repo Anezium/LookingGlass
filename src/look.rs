@@ -1,6 +1,6 @@
 //! Relative mouse-look; movement is measured in counts, never scaled by frame time.
 use macroquad::prelude::*;
-use crate::replay::input::{mouse_position};
+use crate::input::PointerFrame;
 
 pub mod stick;
 
@@ -14,7 +14,13 @@ pub struct MouseLook {
     pub inverted: bool,
 }
 impl MouseLook {
-    pub fn update(&mut self, capture: bool, yaw: &mut f32, pitch: &mut f32) {
+    pub(crate) fn update(
+        &mut self,
+        capture: bool,
+        pointer: PointerFrame,
+        yaw: &mut f32,
+        pitch: &mut f32,
+    ) {
         if self.grabbed != capture {
             set_cursor_grab(capture);
             show_mouse(!capture);
@@ -23,8 +29,8 @@ impl MouseLook {
         }
         // Macroquad accumulates raw motion while grabbed. Undo its logical-pixel DPI
         // conversion so sensitivity stays independent of window size and display scale.
-        let (x, y) = mouse_position();
-        let position = vec2(x, y) * miniquad::window::dpi_scale();
+        let (x, y) = pointer.position;
+        let position = vec2(x, y) * pointer.dpi;
         let delta = sample_motion(&mut self.previous, position, capture);
         let sensitivity = if self.sensitivity > 0. {
             self.sensitivity
