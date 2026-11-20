@@ -333,6 +333,18 @@ impl Input {
 #[derive(Clone, Copy)]
 struct DrawValues { transform: Transform, time: f32, speaking: bool, dissolve: f32 }
 impl Hints {
+    pub(crate) fn capture(&self, rig: &crate::npc::PuppetRig, story: &Story, visit: u64) -> Input {
+        Input {
+            visit,
+            body: self.draw_values().map(|values| {
+                let mut rig = rig.clone();
+                rig.mouth(story.mouth(&["summoned_cheshire"]));
+                let clip = if values.speaking { "sit_talk1" } else { "sit_idle1" };
+                (rig.extract_draw(clip, values.time, true, values.transform, 1.), values.dissolve)
+            }),
+        }
+    }
+
     fn draw_values(&self) -> Option<DrawValues> {
         let a = self.appearance.as_ref()?;
         let transform = a.transform?;
@@ -358,6 +370,10 @@ impl Art {
             material: crate::character::skin_material()?,
         })
     }
+    pub(crate) fn capture_rig(&self) -> crate::npc::PuppetRig {
+        self.model.rig()
+    }
+
     pub(crate) fn extract(&mut self, hints: &Hints, story: &Story, visit: u64) -> Input {
         self.story_pose(story);
         Input { visit, body: hints.draw_values().map(|v| (self.model.extract_draw(
@@ -393,10 +409,48 @@ impl Art {
         gl_use_default_material();
     }
 }
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_pure_capture(assets: &mut Assets) {
+    let mut art = Art::load(assets).unwrap();
+    let rig = art.capture_rig();
+    let mut hints = tests::fixture();
+    let mut story = Story::default();
+    let mut line = hints.fallback[0].clone();
+    line.lips = crate::facial::LipTrack::parse(b"1 8 128 128 128 128 128 128 128 128").unwrap();
+    story.summon_hint(line);
+    story.tick(0.1, false);
+    assert!(story.mouth(&["summoned_cheshire"]) > 0.);
+    let visit = crate::render_snapshot::RenderVisit::default().id();
+    assert!(hints.capture(&rig, &story, visit).body.is_none());
+    assert!(art.extract(&hints, &story, visit).body.is_none());
+    for (elapsed, leaving) in [(0.7, None), (3.5, None), (4., Some(0.8)), (5., Some(2.5))] {
+        let mut beat = CatBeat::new();
+        beat.elapsed = elapsed;
+        beat.leaving = leaving;
+        hints.appearance = Some(Appearance {
+            transform: Some(Transform { translation: Vec3::X, rotation: Quat::IDENTITY }),
+            beat,
+        });
+        let pure = hints.capture(&rig, &story, visit);
+        let owner = art.extract(&hints, &story, visit);
+        assert_eq!(pure.visit, owner.visit);
+        assert_eq!(pure.bytes(), owner.bytes());
+        assert!(art.valid_input(&pure, visit));
+        match (&pure.body, &owner.body) {
+            (Some((a, fade_a)), Some((b, fade_b))) => {
+                assert_eq!(fade_a, fade_b);
+                a.assert_same(b);
+            }
+            (None, None) => {}
+            _ => panic!("Cheshire body presence differs"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> Hints {
+    pub(super) fn fixture() -> Hints {
         Hints {
             allowed: true,
             regions: vec![],

@@ -522,7 +522,7 @@ impl Animator {
 
 /// Single renderer resource slot, qualified by the Character lifetime/restore generation.
 /// No controller, texture, mesh or pointer is carried by this input.
-struct BodyInput {
+pub(crate) struct BodyInput {
     visit: u64,
     slot:usize,
     pose: Vec<Transform>,
@@ -627,6 +627,10 @@ const _: fn() = || {
 };
 
 impl AliceSim {
+    pub(crate) fn recycle_body_input(&mut self, input: BodyInput) {
+        self.body_arena = input;
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             power: self.power_pose.state.clone(),
@@ -660,7 +664,7 @@ impl AliceSim {
     }
 
     #[must_use = "true means the owner must clear the heavy, ice and bomb emitter history (art-side write)"]
-    fn die(&mut self) -> bool {
+    pub(crate) fn die(&mut self) -> bool {
         self.power_pose.state.sync(None);
         if !matches!(
             self.animator.motion,
@@ -690,6 +694,17 @@ impl AliceSim {
         self.actions.reset(&self.animator.pose);
         self.visuals.clear();
         self.viewmodel.reset();
+    }
+
+    /// Synchronize water state and report whether to emit ResetWaterEmitter.
+    #[must_use]
+    pub(crate) fn water_appearance(&mut self, player: &Player) -> bool {
+        self.water.sync(player)
+    }
+
+    /// Drop the old water state before synchronizing the reset player's appearance.
+    pub(crate) fn clear_water(&mut self) {
+        self.water = Default::default();
     }
 
     pub fn notarget(&mut self, value: bool) {
@@ -1120,6 +1135,43 @@ impl AliceSim {
     }
 }
 
+/// Apply these commands on the graphics owner in the order emitted by simulation.
+/// The caller runs Alice's simulation methods and emits conditional resets only
+/// when the corresponding simulation transition requires them.
+pub(crate) enum ArtOp {
+    PickupCollected { item: crate::inventory::Pickup, clock: f32 },
+    ClearAliceEffects,
+    ResetWaterEmitter,
+    RetireAliceBody,
+}
+
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<ArtOp>();
+    send::<BodyInput>();
+};
+
+impl ArtOp {
+    /// A retired body packet can be reused as Alice's simulation capture arena.
+    #[must_use]
+    pub(crate) fn apply(
+        self,
+        alice: &mut AliceArt,
+        pickups: &mut crate::powerups::Art,
+    ) -> Option<BodyInput> {
+        match self {
+            Self::PickupCollected { item, clock } => pickups.collected(&item, clock),
+            Self::ClearAliceEffects => alice.visual_art.clear(),
+            Self::ResetWaterEmitter => alice.water_art.reset_emitter(),
+            Self::RetireAliceBody => {
+                alice.snapshot_visit = Default::default();
+                return alice.body_input.take();
+            }
+        }
+        None
+    }
+}
+
 impl AliceArt {
     pub fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, camera: Vec3) {
         self.water_art.atmosphere(atmosphere, camera);
@@ -1335,6 +1387,14 @@ impl AliceArt {
 }
 
 impl Character {
+    pub(crate) fn into_parts(self) -> (AliceSim, AliceArt) {
+        (self.sim, self.art)
+    }
+
+    pub(crate) fn from_parts(sim: AliceSim, art: AliceArt) -> Self {
+        Self { sim, art }
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.sim.snapshot()
     }
@@ -3225,6 +3285,116 @@ pub async fn render_presentation(assets: &mut Assets) -> Result<()> {
     alice.check_visible("power-up presentation").await?;
     println!("PASS native weapon-only first person for ten toys, switch/attack/wall poses and restored view placement");
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod split_art_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires Xvfb and LOOKING_GLASS_TEST_DATA with the local game archives"]
+    fn split_art_and_capture_fixtures() {
+        let data = std::env::var_os("LOOKING_GLASS_TEST_DATA").expect("game archive directory");
+        macroquad::Window::new("Overlap leaf fixtures", async move {
+            let mut assets = Assets::open(std::path::Path::new(&data)).unwrap();
+            character_round_trip_and_art_ops(&mut assets);
+            crate::npc::test_split_and_owned_slots(&mut assets);
+            crate::cheshire::test_pure_capture(&mut assets);
+            crate::targeting::test_pure_capture(&mut assets);
+            crate::powerups::test_pickup_capture(&mut assets);
+            crate::level::test_hud_capture(&mut assets);
+            macroquad::miniquad::window::quit();
+        });
+    }
+
+    fn character_round_trip_and_art_ops(assets: &mut Assets) {
+        let mut direct = Character::load(assets).unwrap();
+        let mut deferred = Character::load(assets).unwrap();
+        let mut direct_pickups = crate::powerups::Art::load(assets).unwrap();
+        let mut deferred_pickups = crate::powerups::Art::load(assets).unwrap();
+        let mut wet = Player::new(vec3(1., 2., 3.));
+        wet.immersion.level = 3;
+        wet.immersion.kind = crate::water::Liquid::Water;
+        wet.breath.shell = true;
+        wet.breath.submerged = 15.25;
+        let dry = Player::new(Vec3::ZERO);
+        for alice in [&mut direct, &mut deferred] {
+            alice.reset(&wet, 0.25);
+            assert!(alice.sim.water.render_state().1.is_some());
+            assert!(!alice.extract_body(wet.feet).1);
+        }
+        let saved = |alice: &Character| serde_json::to_value(alice.snapshot()).unwrap();
+        let before = saved(&deferred);
+        let visit = deferred.art.snapshot_visit.id();
+        let pose = deferred.art.body_input.as_ref().unwrap().pose.as_ptr();
+        let identity = deferred.art.skin_identity;
+        let (mut sim, mut art) = deferred.into_parts();
+        let deferred = Character::from_parts(sim, art);
+        assert_eq!(before, saved(&deferred));
+        assert_eq!(visit, deferred.art.snapshot_visit.id());
+        assert_eq!(pose, deferred.art.body_input.as_ref().unwrap().pose.as_ptr());
+        assert!(identity == deferred.art.skin_identity);
+        (sim, art) = deferred.into_parts();
+
+        for owner in [&mut direct.art, &mut art] {
+            assert!(owner.water_art.fixture_bubble_count(true) > 0);
+        }
+        let pickup = |model: &str| crate::inventory::Pickup {
+            id: model.into(), model: model.into(), origin: Vec3::X,
+            kind: crate::inventory::PickupKind::Sanity, amount: 1.,
+        };
+        let world = World::fixture(&[]);
+        let context = crate::combat::Context { world: &world, targets: &[] };
+        for (clock, model) in [(1., "p_h2"), (2., "unbound"), (3., "p_h1")] {
+            direct_pickups.collected(&pickup(model), clock);
+        }
+        let direct_sounds = direct.update_funded(0., &dry, false, Default::default(), &context, None);
+        assert_eq!(direct.art.water_art.fixture_bubble_count(false), 0);
+        direct.water_appearance(&wet);
+        direct.water_appearance(&dry);
+        direct.die();
+        direct.die();
+        direct.reset(&wet, 0.75);
+
+        let mut ops: Vec<_> = [(1., "p_h2"), (2., "unbound"), (3., "p_h1")].into_iter()
+            .map(|(clock, model)| ArtOp::PickupCollected { item: pickup(model), clock })
+            .collect();
+        assert!(sim.water_appearance(&dry));
+        ops.push(ArtOp::ResetWaterEmitter);
+        let deferred_sounds = sim.update_funded(0., &dry, false, Default::default(), &context, None);
+        for player in [&wet, &dry] {
+            if sim.water_appearance(player) {
+                ops.push(ArtOp::ResetWaterEmitter);
+            }
+        }
+        assert!(sim.die());
+        ops.push(ArtOp::ClearAliceEffects);
+        assert!(!sim.die());
+        ops.push(ArtOp::RetireAliceBody);
+        ops.push(ArtOp::ResetWaterEmitter);
+        sim.clear_water();
+        assert!(!sim.water_appearance(&wet));
+        sim.reset(&wet, 0.75);
+        ops.push(ArtOp::ClearAliceEffects);
+
+        for op in ops {
+            if let Some(packet) = op.apply(&mut art, &mut deferred_pickups) {
+                sim.recycle_body_input(packet);
+            }
+        }
+        let mut deferred = Character::from_parts(sim, art);
+        assert_eq!(direct_sounds, deferred_sounds);
+        assert_eq!(saved(&direct), saved(&deferred));
+        assert_eq!(direct.sim.water.render_state(), deferred.sim.water.render_state());
+        assert_eq!(deferred.art.water_art.fixture_bubble_count(false), 0);
+        assert_eq!(deferred.sim.body_arena.visit, visit);
+        assert_eq!(deferred.sim.body_arena.pose.as_ptr(), pose);
+        assert!(direct.art.body_input.is_none() && deferred.art.body_input.is_none());
+        assert_ne!(deferred.art.snapshot_visit.id(), visit);
+        let direct_history = direct_pickups.capture_history().1;
+        assert_eq!(direct_history, deferred_pickups.capture_history().1);
+        assert_eq!(direct_history.iter().map(|event| event.3).collect::<Vec<_>>(), [0, 1]);
+    }
 }
 
 #[cfg(test)]

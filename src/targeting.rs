@@ -2,9 +2,11 @@
 use crate::{assets::Assets, combat, environment::Atmosphere, particles::Attached};
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::*;
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
-struct Rule {
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub(crate) struct Rule {
     kind: u8,
     range: f32,
 }
@@ -58,11 +60,28 @@ pub struct Sight {
     /// None suppresses the marker for menus, performances and unavailable weapons.
     pub weapon: Option<usize>,
 }
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct Input { generation:u64, scene_visit:u64, point:Option<(usize,Rule,Vec3)> }
+
+impl Input {
+    pub(crate) fn capture(
+        rules: &[Rule],
+        ctx: &combat::Context<'_>,
+        sight: Sight,
+        generation: u64,
+        scene_visit: u64,
+    ) -> Self {
+        let point = sight.weapon.and_then(|weapon| {
+            let rule = *rules.get(weapon)?;
+            Some((weapon, rule, endpoint(ctx, sight.eye, sight.direction, rule)?))
+        });
+        Self { generation, scene_visit, point }
+    }
+}
 pub struct Pointer {
     visit:crate::render_snapshot::RenderVisit,
     effect: Attached,
-    rules: Vec<Rule>,
+    rules: Arc<[Rule]>,
     age: f32,
     previous: Option<(usize, Vec3)>,
 }
@@ -83,7 +102,7 @@ impl Pointer {
         Ok(Self {
             visit:Default::default(),
             effect,
-            rules,
+            rules: rules.into(),
             age: 0.,
             previous: None,
         })
@@ -99,16 +118,13 @@ impl Pointer {
         let input=self.resolve(ctx,sight,self.visit.id());
         self.draw_input(&input,self.visit.id(),dt,camera,atmosphere);
     }
+    /// Copy the CPU inputs once while the pointer is on the owner.
+    pub(crate) fn capture_rules(&self) -> (u64, Arc<[Rule]>) {
+        (self.visit.id(), Arc::clone(&self.rules))
+    }
+
     pub(crate) fn resolve(&self,ctx:&combat::Context<'_>,sight:Sight,scene_visit:u64)->Input {
-        let point = sight.weapon.and_then(|weapon| {
-            let rule = *self.rules.get(weapon)?;
-            Some((
-                weapon,
-                rule,
-                endpoint(ctx, sight.eye, sight.direction, rule)?,
-            ))
-        });
-        Input{generation:self.visit.id(),scene_visit,point}
+        Input::capture(&self.rules, ctx, sight, self.visit.id(), scene_visit)
     }
     pub(crate) fn valid_input(&self,input:&Input,scene_visit:u64)->bool {
         input.generation==self.visit.id() && input.scene_visit==scene_visit && input.point.as_ref().is_none_or(|(slot,_,_)|*slot<self.rules.len())
@@ -215,6 +231,24 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
         println!("PASS aim marker {name}: {pixels} pixels");
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_pure_capture(assets: &mut Assets) {
+    let pointer = Pointer::load(assets).unwrap();
+    let (generation, rules) = pointer.capture_rules();
+    assert!(Arc::ptr_eq(&rules, &pointer.capture_rules().1));
+    let world = crate::collision::World::fixture(&[(vec3(100., -20., -20.), vec3(110., 20., 20.))]);
+    let ctx = combat::Context { world: &world, targets: &[] };
+    let visit = crate::render_snapshot::RenderVisit::default().id();
+    for (eye, direction) in [(Vec3::ZERO, Vec3::X), (Vec3::ZERO, Vec3::ZERO), (Vec3::X * 105., Vec3::X)] {
+        for weapon in (0..=rules.len()).map(Some).chain([None]) {
+            let sight = || Sight { eye, direction, weapon };
+            let captured = Input::capture(&rules, &ctx, sight(), generation, visit);
+            assert_eq!(captured, pointer.resolve(&ctx, sight(), visit));
+            assert!(pointer.valid_input(&captured, visit));
+        }
+    }
 }
 
 #[cfg(test)]

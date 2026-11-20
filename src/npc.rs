@@ -874,6 +874,21 @@ impl PuppetInput {
             + self.hidden.keys().map(|p| std::mem::size_of::<(String, bool)>() + p.len()).sum::<usize>()
             + self.handoff.as_ref().map_or(0, |p| p.local.len()*std::mem::size_of::<Transform>())
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn assert_same(&self, other: &Self) {
+        let serial = |pose: &[Transform]| serde_json::to_value(pose).unwrap();
+        assert_eq!(serial(&self.pose), serial(&other.pose));
+        assert_eq!(self.scales, other.scales);
+        assert!(self.handoff.is_none() && other.handoff.is_none());
+        assert_eq!(self.visual, other.visual);
+        assert_eq!(self.time, other.time);
+        assert_eq!(self.alive, other.alive);
+        assert_eq!(serial(&[self.transform]), serial(&[other.transform]));
+        assert_eq!(self.scale, other.scale);
+        assert_eq!(self.attachments, other.attachments);
+        assert_eq!(self.frozen, other.frozen);
+        assert_eq!(self.hidden, other.hidden);
+    }
     pub(crate) fn bones(&self) -> usize { self.pose.len() }
     pub(crate) fn with_attachments(mut self, value: bool) -> Self {
         self.attachments = value;
@@ -2225,6 +2240,18 @@ struct SnapshotRegistry {
     // Required owned commands; omissions may never silently read live actors.
     owned_slots: Vec<usize>,
 }
+/// Owned command slots for one registry generation, in actor order.
+pub(crate) struct OwnedSlots {
+    pub(crate) generation: u64,
+    pub(crate) slots: Vec<usize>,
+}
+
+fn owned_slots(actors: &[Actor]) -> impl Iterator<Item = usize> + '_ {
+    actors.iter().enumerate()
+        .filter(|(_, actor)| actor.ant.is_some() || actor.snapshot_ambient() || actor.snapshot_resident())
+        .map(|(slot, _)| slot)
+}
+
 impl SnapshotRegistry {
     fn retire(&mut self) {
         self.generation = crate::character::skinning::identity::next_instance();
@@ -2363,7 +2390,7 @@ pub struct Npcs {
     art: NpcArt,
     sim: NpcSim,
 }
-struct NpcSim {
+pub(crate) struct NpcSim {
     /// Battle Royale places enemies above a player-only ceiling.
     actor_world: Option<World>,
     garden: Option<garden::Logic>,
@@ -2389,9 +2416,9 @@ struct NpcSim {
     models: Vec<Arc<ModelData>>,
 }
 
-type NpcArt = owner_thread::NpcArt<NpcArtResources>;
+pub(crate) type NpcArt = owner_thread::NpcArt<NpcArtResources>;
 
-struct NpcArtResources {
+pub(crate) struct NpcArtResources {
     snapshot_registry: SnapshotRegistry,
     actor_inputs: Option<ActorInputs>,
     // GPU-only state, discarded on restore/level change and never serialized.
@@ -2447,6 +2474,14 @@ fn report_world_free_npc_skip(site: &str) {
 }
 
 impl Npcs {
+    pub(crate) fn into_parts(self) -> (NpcSim, NpcArt) {
+        (self.sim, self.art)
+    }
+
+    pub(crate) fn from_parts(sim: NpcSim, art: NpcArt) -> Self {
+        Self { sim, art }
+    }
+
     pub fn greetings(&self) -> u64 { self.sim.greetings }
     /// Host-only census of incomplete schemas, including dispatch visibility reads.
     /// Presence is intentional: a hidden actor still consults live state before returning.
@@ -2492,8 +2527,7 @@ impl Npcs {
         if changed || registry.generation == 0 {
             registry.retire();
             registry.slots.extend(self.sim.actors.iter().map(|a| (a.skin_identity,a.model)));
-            registry.owned_slots.extend(self.sim.actors.iter().enumerate()
-                .filter(|(_,a)| a.ant.is_some() || a.snapshot_ambient() || a.snapshot_resident()).map(|(slot,_)|slot));
+            registry.owned_slots.extend(owned_slots(&self.sim.actors));
         }
         let view = ActorCaptureView {
             camera,
@@ -3607,6 +3641,11 @@ struct ActorCaptureView {
 const MAX_SNAPSHOT_ACTORS: usize = 1024;
 
 impl NpcSim {
+    /// The owner supplies the generation of the registry this capture targets.
+    pub(crate) fn capture_owned_slots(&self, generation: u64) -> OwnedSlots {
+        OwnedSlots { generation, slots: owned_slots(&self.actors).collect() }
+    }
+
     fn extract_actors(&self, view: ActorCaptureView) -> ActorInputs {
         let ActorCaptureView { camera, direction, skip_live, skip_ant_corpses, .. } = view;
         const MAX_BONES: usize = 65536;
@@ -5260,6 +5299,43 @@ impl crate::cards::Rig for ModelData {
     fn sever(&self) -> Option<&crate::dismember::Recipe> {
         self.card_cut.as_ref()
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_split_and_owned_slots(assets: &mut Assets) {
+    let visit = "potears2";
+    let map = Bsp::parse(&assets.read(&format!("maps/{visit}.bsp")).unwrap()).unwrap();
+    let mut npcs = Npcs::load(assets, &map, visit, None, false, false).unwrap();
+    let extracted = npcs.extract_ants(Vec3::ZERO, Vec3::X);
+    let registry = &npcs.art.resources.snapshot_registry;
+    assert!(!registry.owned_slots.is_empty());
+    let owned = npcs.sim.capture_owned_slots(registry.generation);
+    assert_eq!(owned.slots, registry.owned_slots);
+    assert_eq!(owned.generation, registry.generation);
+    assert_ne!(owned.generation, 0);
+
+    let snapshot = serde_json::to_value(npcs.snapshot()).unwrap();
+    let slots = registry.slots.clone();
+    let actors = npcs.sim.actors.as_ptr();
+    let inputs = npcs.art.resources.actor_inputs.as_ref().unwrap().bytes();
+    let art = std::rc::Rc::clone(&npcs.art.resources.attack_fx);
+    let greetings = npcs.greetings();
+    let (sim, owner) = npcs.into_parts();
+    let mut npcs = Npcs::from_parts(sim, owner);
+    assert_eq!(serde_json::to_value(npcs.snapshot()).unwrap(), snapshot);
+    assert!(std::rc::Rc::ptr_eq(&npcs.art.resources.attack_fx, &art));
+    assert_eq!(npcs.sim.actors.as_ptr(), actors);
+    assert_eq!(npcs.greetings(), greetings);
+    assert_eq!(npcs.art.resources.actor_inputs.as_ref().unwrap().bytes(), inputs);
+    assert_eq!(npcs.art.resources.snapshot_registry.generation, owned.generation);
+    assert!(npcs.art.resources.snapshot_registry.slots == slots);
+    assert_eq!(npcs.extract_ants(Vec3::ZERO, Vec3::X), extracted);
+
+    npcs.art.resources.snapshot_registry.retire();
+    npcs.extract_ants(Vec3::ZERO, Vec3::X);
+    let rebuilt = &npcs.art.resources.snapshot_registry;
+    assert_ne!(rebuilt.generation, owned.generation);
+    assert_eq!(npcs.sim.capture_owned_slots(rebuilt.generation).slots, owned.slots);
 }
 
 #[cfg(test)]

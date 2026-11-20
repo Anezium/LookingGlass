@@ -49,6 +49,7 @@ impl HudInput {
     }
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) enum Primitive {
     Dialog(Rect),
     Label(String, f32, f32, f32, Color),
@@ -57,6 +58,7 @@ pub(crate) enum Primitive {
 }
 /// Numeric resource identity only. Ui and all texture/font handles remain in
 /// the graphics owner registry; this command can cross the simulation boundary.
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct HudCommand {
     ui: u64,
     primitive: Primitive,
@@ -80,12 +82,17 @@ impl HudCommand {
     }
 }
 pub(crate) struct Painter<'a> {
-    ui: &'a std::rc::Rc<crate::ui::Ui>,
+    ui: u64,
     out: &'a mut Vec<HudCommand>,
     bytes: usize,
 }
 impl<'a> Painter<'a> {
-    pub fn new(ui: &'a std::rc::Rc<crate::ui::Ui>, out: &'a mut Vec<HudCommand>) -> Self {
+    pub fn new(ui: &std::rc::Rc<crate::ui::Ui>, out: &'a mut Vec<HudCommand>) -> Self {
+        Self::for_resource(ui.resource_id(), out)
+    }
+
+    /// Accept a sampled resource id without consulting the owner UI registry.
+    pub(crate) fn for_resource(ui: u64, out: &'a mut Vec<HudCommand>) -> Self {
         let bytes = out.len()*std::mem::size_of::<HudCommand>()
             + out.iter().map(HudCommand::text_capacity).sum::<usize>();
         Self { ui, out, bytes }
@@ -103,7 +110,7 @@ impl<'a> Painter<'a> {
     }
     fn push(&mut self, primitive: Primitive) {
         if !self.room(0) { return; }
-        let command = HudCommand { ui: self.ui.resource_id(), primitive };
+        let command = HudCommand { ui: self.ui, primitive };
         self.bytes += std::mem::size_of::<HudCommand>() + command.text_capacity();
         self.out.push(command);
     }
