@@ -7,7 +7,7 @@
 //! takes whatever button the live bindings give jump. `{skip}` takes the scene-skip
 //! label. Buttons the bindings cannot move (Start, the sticks, Cross and Circle on
 //! fixed screens) are plain text.
-use crate::{input::Input, preferences::Preferences};
+use crate::{hud_view::HudView, preferences::Preferences};
 use std::borrow::Cow;
 
 /// Exact desktop text, then its handheld template.
@@ -94,10 +94,10 @@ pub fn handheld(text: &str, label: impl Fn(&str) -> String) -> Option<String> {
 
 /// What the screen shows for `text`: the handheld wording under the Vita
 /// controls when the table has one, otherwise `text` unchanged.
-pub fn shown<'a>(text: &'a str, input: &Input, prefs: &Preferences) -> Cow<'a, str> {
-    if Preferences::vita_emulation() {
+pub fn shown<'a>(text: &'a str, view: &HudView, prefs: &Preferences) -> Cow<'a, str> {
+    if view.handheld {
         let label = |action: &str| {
-            if action == "skip" { input.film_skip_label(prefs) } else { input.label(prefs, action) }
+            if action == "skip" { view.film_skip_label(prefs) } else { view.label(prefs, action) }
         };
         if let Some(s) = handheld(text, label) {
             return Cow::Owned(s);
@@ -108,8 +108,8 @@ pub fn shown<'a>(text: &'a str, input: &Input, prefs: &Preferences) -> Cow<'a, s
 
 /// A world prompt as shown: the table wording, else the leading use key in the
 /// "E  verb", "E / verb" and "E: verb" forms replaced by the use action's label.
-pub fn world_prompt(text: &str, input: &Input, prefs: &Preferences) -> String {
-    use_key(&shown(text, input, prefs), &input.label(prefs, "E"))
+pub fn world_prompt(text: &str, view: &HudView, prefs: &Preferences) -> String {
+    use_key(&shown(text, view, prefs), &view.label(prefs, "E"))
 }
 
 pub fn use_key(text: &str, label: &str) -> String {

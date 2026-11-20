@@ -1,4 +1,6 @@
 use crate::{
+    hud::HudOp,
+    hud_view::HudView,
     assets::Assets,
     audio::Audio,
     character::{self, Character},
@@ -180,7 +182,7 @@ async fn rebuild_outgoing(
                 loop {
                     escape_menu.backdrop();
                     ui.toast("Could not restore the current map", screen_height() - 110.);
-                    ui.toast(&crate::prompts::shown("Enter / Cross: retry    Escape / Circle: quit", &recovery_input, preferences), screen_height() - 70.);
+                    ui.toast(&crate::prompts::shown("Enter / Cross: retry    Escape / Circle: quit", &HudView::capture(&recovery_input), preferences), screen_height() - 70.);
                     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
                     crate::transition_memory::host_recovery_capture(attempts, screen_frame + 1);
                     next_frame().await;
@@ -774,7 +776,7 @@ pub async fn check_level_swaps(assets: &mut Assets, options: &Options) -> Result
                 &stats,
                 &catalog,
                 false,
-                &crate::input::Input::default(),
+                &HudView::capture(&crate::input::Input::default()),
                 &crate::preferences::Preferences::default(),
             );
             next_frame().await;
@@ -1586,6 +1588,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }};
     }
     let mut overlap_probe = crate::overlap_probe::Probe::configured();
+    // Early exits and post-HUD saves leave their notices for the next HUD block.
+    let mut hud_ops = Vec::new();
     loop {
         #[cfg(feature="vita_renderer")]
         let snapshot_handoff = crate::render::vita_renderer::config().diag_snapshot;
@@ -1749,7 +1753,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let context_before = (menu, inventory_menu, console.open, paused);
         if input.disconnected {
             paused = true;
-            hud.announce("Controller disconnected / reconnect or use keyboard and mouse");
+            hud_ops.push(HudOp::Announce("Controller disconnected / reconnect or use keyboard and mouse".into()));
         }
         let pause_before_capture = paused;
         #[cfg(feature = "vita_renderer")]
@@ -1872,7 +1876,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             Ok(game) => match restore_transition!(game, "native-load", true, replace) {
                               Ok(()) => {
                                 escape_menu.close();
-                                hud.announce("Game restored / P or click to resume");
+                                hud_ops.push(HudOp::Announce("Game restored / P or click to resume".into()));
                               }
                               Err(e) => {
                                 #[cfg(feature = "native_timing")]
@@ -1992,7 +1996,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 Ok(false) => break,
                 Err(e) => {
                     eprintln!("Opening film unavailable: {e:#}");
-                    hud.announce("Opening film unavailable / continuing to Wonderland");
+                    hud_ops.push(HudOp::Announce("Opening film unavailable / continuing to Wonderland".into()));
                 }
                 Ok(true) => (),
             }
@@ -2257,7 +2261,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         } else {
                             "Game restored / P or click to resume"
                         };
-                        hud.announce(message);
+                        hud_ops.push(HudOp::Announce(message.into()));
                         console.print(message);
                     }
                     Err(e) => {
@@ -2266,12 +2270,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         #[cfg(feature = "native_timing")]
                         timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
                         let message = format!("Load failed: {e:#}");
-                        hud.announce(&message);
+                        hud_ops.push(HudOp::Announce(message.clone().into()));
                         console.print(&message);
                     }
                 }
             } else {
-                hud.announce("Save/load is unavailable in a staged preview");
+                hud_ops.push(HudOp::Announce("Save/load is unavailable in a staged preview".into()));
             }
             drop(census_block);
             next_frame().await;
@@ -2374,7 +2378,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             &mut yaw,
             &mut pitch,
         );
-        hud.update(dt);
+        hud_ops.push(HudOp::Tick(dt));
         if focused && !console_input && stats.alive() && !menu && (inventory_menu || !paused) {
             let keys = [
                 KeyCode::Key1,
@@ -2390,16 +2394,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             ];
             let selected = keys.iter().position(|&k| pressed(k)).or_else(|| {
                 if inventory_menu {
-                    hud.inventory_hit()
+                    crate::hud::inventory_hit()
                 } else {
                     None
                 }
             });
             if let Some(i) = selected {
                 if stats.select(i) {
-                    hud.selected(&stats);
+                    if let Some(selected) = stats.equipped() {
+                        hud_ops.push(HudOp::Announce(inventory::WEAPONS[selected].1.into()));
+                    }
                 } else {
-                    hud.announce(format!("Not yet available: {}", inventory::WEAPONS[i].1));
+                    hud_ops.push(HudOp::Announce(format!("Not yet available: {}", inventory::WEAPONS[i].1).into()));
                 }
             }
             let (previous, next) = inventory_cycle(inventory_opened,
@@ -2409,7 +2415,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     || (inventory_menu && (input.ui(KeyCode::Down) || input.ui(KeyCode::Right))));
             if previous || next {
                 stats.cycle(if next { 1 } else { -1 });
-                hud.selected(&stats);
+                if let Some(selected) = stats.equipped() {
+                    hud_ops.push(HudOp::Announce(inventory::WEAPONS[selected].1.into()));
+                }
             }
             weapon_input_enabled = !inventory_menu
                 && stats.equipped().is_some()
@@ -2424,11 +2432,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     || input.action(&preferences, "Mouse 2", true))
             {
                 if !crate::weapons::supported(stats.selected()) {
-                    hud.announce("This toy's attacks are not yet available");
+                    hud_ops.push(HudOp::Announce("This toy's attacks are not yet available".into()));
                 } else if stats.selected() == 6 && !alice.ready_to_attack(6) {
-                    hud.announce("Demon Dice are still active or recovering");
+                    hud_ops.push(HudOp::Announce("Demon Dice are still active or recovering".into()));
                 } else if stats.selected() == 9 && stats.powers.recharge > 0. {
-                    hud.announce("Pocket Watch is recharging");
+                    hud_ops.push(HudOp::Announce("Pocket Watch is recharging".into()));
                 }
             }
         }
@@ -2533,7 +2541,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 weapon_buttons.block();
                 recovery.clear();
                 spawn_landing = true;
-                hud.announce("Scene skipped");
+                hud_ops.push(HudOp::Announce("Scene skipped".into()));
                 #[cfg(target_os = "vita")]
                 if bench {
                     println!("bench: skipped scene {}", skip_id.unwrap_or("unknown"));
@@ -2553,14 +2561,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             match result {
                 Ok(()) => {
                     weapon_buttons.block();
-                    hud.announce("Checkpoint restored");
+                    hud_ops.push(HudOp::Announce("Checkpoint restored".into()));
                     println!("Death retry: restored complete checkpoint for {}", maps[current]);
                 }
                 Err(e) => {
                     paused = true;
                     #[cfg(feature = "native_timing")]
                     timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::OPERATION));
-                    hud.announce(format!("Could not restore checkpoint: {e:#}"));
+                    hud_ops.push(HudOp::Announce(format!("Could not restore checkpoint: {e:#}").into()));
                     eprintln!("Death retry failed: {e:#}");
                 }
             }
@@ -2572,11 +2580,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             continue;
         }
         if (recover || restart || console_restart) && in_transport {
-            hud.announce(if interactions.scripted() {
+            hud_ops.push(HudOp::Announce((if interactions.scripted() {
                 "A scene is playing / hold Enter to skip"
             } else {
                 "The ride is in progress / recovery is available after landing"
-            });
+            }).into()));
         }
         if (recover || restart || console_restart) && !in_transport {
             #[cfg(feature = "native_timing")]
@@ -2641,18 +2649,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 weapon_click = None;
                 weapon_buttons.block();
                 notice.clear();
-                hud.announce(if nearby {
+                hud_ops.push(HudOp::Announce((if nearby {
                     "Restored to footing before the fall"
                 } else {
                     "Restored at the level entrance"
-                });
+                }).into()));
                 println!(
                     "Recovery: feet={:?}, nearby={nearby}, sanity={}",
                     player.feet,
                     stats.sanity()
                 );
             } else {
-                hud.announce("Entrance is obstructed / choose another level with Tab");
+                hud_ops.push(HudOp::Announce("Entrance is obstructed / choose another level with Tab".into()));
             }
         }
         if (console_fly || (pressed(KeyCode::F4) && !menu && !inventory_menu)) && stats.alive() {
@@ -2920,14 +2928,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 )?);
                 if events.damage > 0. {
                     stats.damage(events.damage);
-                    hud.announce("Hazard / Sanity lost");
+                    hud_ops.push(HudOp::Announce("Hazard / Sanity lost".into()));
                 }
                 for event in events.story {
                     story.trigger(&event);
                 }
                 pending_transition = events.transition.or(pending_transition);
                 if let Some(message) = events.message {
-                    hud.announce(message);
+                    hud_ops.push(HudOp::Announce(message.into()));
                 }
                 if let Some(sound) = events.sound {
                     audio.world_effect(&sound);
@@ -3085,7 +3093,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     player.velocity.length(),
                 );
                 if before_water.level < 2 && player.immersion.level >= 2 {
-                    hud.announce("Swimming / Space rise / Ctrl dive / look and W to swim");
+                    hud_ops.push(HudOp::Announce("Swimming / Space rise / Ctrl dive / look and W to swim".into()));
                 }
                 let liquid_damage = std::mem::take(&mut player.liquid_damage);
                 stats.damage(liquid_damage);
@@ -3097,7 +3105,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     audio.world_effect("sound/character/alice/choke2.wav");
                 }
                 if liquid_damage > 0. && before_water.kind != player.immersion.kind {
-                    hud.announce("Harmful liquid / Sanity lost");
+                    hud_ops.push(HudOp::Announce("Harmful liquid / Sanity lost".into()));
                 }
                 if player.landings > before_landings {
                     let lost = if spawn_landing {
@@ -3107,7 +3115,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     };
                     spawn_landing = false;
                     if lost > 0. {
-                        hud.announce(format!("Hard landing / -{lost:.0} Sanity"));
+                        hud_ops.push(HudOp::Announce(format!("Hard landing / -{lost:.0} Sanity").into()));
                     }
                 }
                 hints.sync(&interactions);
@@ -3118,10 +3126,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
                 if events.damage > 0. {
                     stats.damage(events.damage);
-                    hud.announce("Hazard / Sanity lost");
+                    hud_ops.push(HudOp::Announce("Hazard / Sanity lost".into()));
                 }
                 if let Some(message) = events.message {
-                    hud.announce(message);
+                    hud_ops.push(HudOp::Announce(message.into()));
                 }
                 if let Some(sound) = events.sound {
                     audio.world_effect(&sound);
@@ -3139,16 +3147,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             clock.pause();
                             spawn_landing = true;
                             recovery.clear();
-                            hud.announce("Teleported");
+                            hud_ops.push(HudOp::Announce("Teleported".into()));
                         } else {
-                            hud.announce("Teleport destination is obstructed");
+                            hud_ops.push(HudOp::Announce("Teleport destination is obstructed".into()));
                         }
                     }
                 }
                 if !in_transport && recovery::outside_world(&world, player.feet) {
                     stats.damage(10000.);
                     pending_transition = None;
-                    hud.announce("Lost beyond the level / Enter to retry");
+                    hud_ops.push(HudOp::Announce("Lost beyond the level / Enter to retry".into()));
                 }
                 if stats.alive() {
                     let dice_before = stats.copies(6);
@@ -3156,7 +3164,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     if let Some(s) = &mut interactions.school {
                         let e = s.collect_secret(&mut stats, player.feet, &world);
                         if let Some(m) = e.message {
-                            hud.announce(m);
+                            hud_ops.push(HudOp::Announce(m.into()));
                         }
                         for event in e.story {
                             story.trigger(&event);
@@ -3169,7 +3177,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         &world,
                         |item| power_art.collected(item, pickup_clock),
                     ) {
-                        hud.announce(message);
+                        hud_ops.push(HudOp::Announce(message.into()));
                     }
                     if stats.copies(6) > dice_before {
                         story.trigger("dice_cat");
@@ -3219,7 +3227,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     console.open = false;
                 }
                 Err(message) => {
-                    hud.announce(message);
+                    hud_ops.push(HudOp::Announce(message.into()));
                     if summon_cat {
                         console.print(message);
                     }
@@ -3249,7 +3257,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         for event in story.take_completed() {
             let effects = interactions.completed_dialogue(&event);
             if let Some(message) = effects.message {
-                hud.announce(message);
+                hud_ops.push(HudOp::Announce(message.into()));
             }
             if let Some(sound) = effects.sound {
                 audio.world_effect(&sound);
@@ -3284,7 +3292,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 audio.world_effect(&sound);
             }
             if let Some(message) = events.message {
-                hud.announce(message);
+                hud_ops.push(HudOp::Announce(message.into()));
             }
         }
         if let Some(s) = &mut interactions.school {
@@ -3333,9 +3341,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 Ok(()) => {
                     for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
                     retry.remember(game_snapshot!());
-                    hud.announce("Checkpoint saved");
+                    hud_ops.push(HudOp::Announce("Checkpoint saved".into()));
                 }
-                Err(e) => { hud.announce(&format!("Checkpoint save failed: {e:#}")); }
+                Err(e) => { hud_ops.push(HudOp::Announce(format!("Checkpoint save failed: {e:#}").into())); }
             }
             }
         }
@@ -3475,7 +3483,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         current,
                         entry_spawn.as_deref(),
                     );
-                    hud.announce(&level_choices[visit].title);
+                    hud_ops.push(HudOp::Announce(level_choices[visit].title.clone().into()));
                     #[cfg(feature = "native_timing")]
                     timing_ready!(crate::native_timing::Reason::Natural);
                     drop(outgoing);
@@ -3488,7 +3496,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     interactions.transition_failed(&exit);
                     #[cfg(feature = "native_timing")]
                     timing.with(|r| r.event(crate::native_timing::Milestone::LoadFailed, crate::native_timing::TRANSITION));
-                    hud.announce(format!("Could not enter next map: {e}"));
+                    hud_ops.push(HudOp::Announce(format!("Could not enter next map: {e}").into()));
                 }
             }
         }
@@ -3722,7 +3730,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 feedback.damage,
                 stats.sanity()
             );
-            hud.announce("Card guard struck you");
+            hud_ops.push(HudOp::Announce("Card guard struck you".into()));
         }
         audio.feedback(&feedback);
         if player.script_motion > 0 || player.ledge.is_some() || interactions.level_blocks_weapons() {
@@ -3792,7 +3800,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             Some(&mut stats),
         );
         if let Some(message) = alice.take_weapon_notice() {
-            hud.announce(message);
+            hud_ops.push(HudOp::Announce(message.into()));
         }
         for mut hit in alice.take_hits() {
             if alice.hit_ice(hit) {
@@ -3860,7 +3868,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if hit.id >= crate::interaction::SHOT_BASE {
                 let e = interactions.shoot(hit);
                 if let Some(message) = e.message {
-                    hud.announce(message);
+                    hud_ops.push(HudOp::Announce(message.into()));
                 }
                 if let Some(sound) = e.sound {
                     audio.world_effect_at(&sound, hit_origin);
@@ -3879,7 +3887,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 continue;
             }
             if let Some((message, sound)) = npcs.hit(hit) {
-                hud.announce(message);
+                hud_ops.push(HudOp::Announce(message.into()));
                 audio.world_effect_at(sound, hit_origin);
             }
         }
@@ -3897,13 +3905,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 &world,
                 |item| power_art.collected(item, pickup_clock),
             ) {
-                hud.announce(message);
+                hud_ops.push(HudOp::Announce(message.into()));
                 audio.world_effect("sound/item/essence/small/mtespu.wav");
             }
             if let Some(message) =
                 pickup_feedback.update(&stats, &pickups, &loot_visit, player.feet, &world)
             {
-                hud.announce(message);
+                hud_ops.push(HudOp::Announce(message.into()));
             }
         }
         if stats.active_power().map(|(k, _)| k) != power_before {
@@ -5062,6 +5070,9 @@ interactions
             viewer_block = crate::frame_profile::span("frame_hud");
             crate::frame_profile::set_owner(crate::frame_profile::Owner::Hud);
         }
+        hud.apply(&mut hud_ops);
+        // Owner transactions can update the live Input before this HUD pass.
+        let hud_view = HudView::capture(&input);
         let hud_stats = hud_snapshot.as_ref().map_or_else(|| &stats, |s| &s.stats);
         let hud_breath = hud_snapshot.as_ref().map_or_else(|| &player.breath, |s| &s.breath);
         let hud_immersion = hud_snapshot.as_ref().map_or_else(|| player.immersion.level, |s| s.immersion);
@@ -5089,7 +5100,7 @@ interactions
                 hud_path=crate::phase_census::span(crate::phase_census::Region::HudDraw);
                 crate::phase_census::count_under(crate::phase_census::Region::Hud,crate::phase_census::Counter::HudDraw,1);
                 if let Some(prompt) = prompt {
-                    let prompt = crate::prompts::world_prompt(&prompt, &input, &preferences);
+                    let prompt = crate::prompts::world_prompt(&prompt, &hud_view, &preferences);
                     ui.toast(&prompt, screen_height() - 112.);
                 }
             }
@@ -5107,12 +5118,12 @@ interactions
             } else { resolve_objective!(help) };
             let show_details = help || menu;
             if paused && !menu && !inventory_menu && !console_input && !help {
-                ui.paused(&if crate::preferences::Preferences::vita_emulation() {
+                ui.paused(&if hud_view.handheld {
                     "Cross or Start to resume".into()
-                } else if input.desktop_pad() {
+                } else if hud_view.desktop_pad() {
                     "A or Start to resume".into()
                 } else {
-                    format!("{} or click to resume", input.label(&preferences, "P"))
+                    format!("{} or click to resume", hud_view.label(&preferences, "P"))
                 });
             }
             if help && !menu && !inventory_menu && !console_input {
@@ -5126,7 +5137,7 @@ interactions
                     crate::ui::INK,
                 );
                 if let Some(objective) = &objective {
-                    let objective = crate::prompts::shown(objective, &input, &preferences);
+                    let objective = crate::prompts::shown(objective, &hud_view, &preferences);
                     let rows = crate::story::wrap(&objective, 548., |t| ui.body.width(t, 14.));
                     for (i, line) in rows.iter().take(3).enumerate() {
                         ui.body.draw_left(
@@ -5138,11 +5149,11 @@ interactions
                         );
                     }
                 }
-                let movement = if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
+                let movement = if hud_view.desktop_pad() || hud_view.handheld {
                     format!(
                         "Left stick: move   {}: jump / rise   {}: dive",
-                        input.label(&preferences, "Space"),
-                        input.label(&preferences, "Ctrl")
+                        hud_view.label(&preferences, "Space"),
+                        hud_view.label(&preferences, "Ctrl")
                     )
                 } else {
                     preferences.controls_text(if flying {
@@ -5159,38 +5170,38 @@ interactions
                     movement,
                     format!(
                         "{}: look   {}: change view",
-                        if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
+                        if hud_view.desktop_pad() || hud_view.handheld {
                             "Right stick"
                         } else {
                             "Mouse / look keys"
                         },
-                        input.label(&preferences, "V")
+                        hud_view.label(&preferences, "V")
                     ),
                     format!(
                         "{} / {}: primary / alternate attack",
-                        input.label(&preferences, "Mouse 1"),
-                        input.label(&preferences, "Mouse 2")
+                        hud_view.label(&preferences, "Mouse 1"),
+                        hud_view.label(&preferences, "Mouse 2")
                     ),
                     format!(
                         "{} / {}: toy   {}: inventory",
-                        input.label(&preferences, "Wheel Up"),
-                        input.label(&preferences, "Wheel Down"),
-                        input.label(&preferences, "I")
+                        hud_view.label(&preferences, "Wheel Up"),
+                        hud_view.label(&preferences, "Wheel Down"),
+                        hud_view.label(&preferences, "I")
                     ),
                     format!(
                         "{}: Cheshire hints    {}: advance dialogue",
-                        input.label(&preferences, "C"),
-                        input.label(&preferences, "E")
+                        hud_view.label(&preferences, "C"),
+                        hud_view.label(&preferences, "E")
                     ),
                     format!(
                         "{}: recover    Save / Load in the main menu",
-                        input.label(&preferences, "R")
+                        hud_view.label(&preferences, "R")
                     ),
                     format!(
                         "{}: menus   {}: chapters   {}: help",
-                        if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() { "Start" } else { "Esc" },
-                        input.label(&preferences, "Tab"),
-                        input.label(&preferences, "H")
+                        if hud_view.desktop_pad() || hud_view.handheld { "Start" } else { "Esc" },
+                        hud_view.label(&preferences, "Tab"),
+                        hud_view.label(&preferences, "H")
                     ),
                 ];
                 for (i, line) in lines.iter().enumerate() {
@@ -5212,18 +5223,18 @@ interactions
                     &maps,
                     options.difficulty,
                     focused && !console_input,
-                    input.desktop_pad(),
+                    hud_view.desktop_pad(),
                 );
             }
             if (!show_details || inventory_menu) && !hud_scripted {
                 let inventory_path=inventory_menu.then(||crate::phase_census::span(crate::phase_census::Region::HudMenus));
                 if inventory_menu {crate::phase_census::count_under(crate::phase_census::Region::Hud,crate::phase_census::Counter::HudMenus,1);}
-                hud.draw(hud_stats, &catalog, inventory_menu, &input, &preferences);
+                hud.draw(hud_stats, &catalog, inventory_menu, &hud_view, &preferences);
                 drop(inventory_path);
                 #[cfg(feature = "vita_renderer")]
                 { hud_submitted = true; }
                 if !paused && !inventory_menu && !console_input && hud_stats.alive() {
-                    hud.draw_notice(&input, &preferences);
+                    hud.draw_notice(&hud_view, &preferences);
                 }
             }
             if !menu && !inventory_menu && !console_input && hud_stats.alive() {
@@ -5296,9 +5307,9 @@ interactions
                 if preferences.subtitles {
                     if let Some(snapshot) = &hud_snapshot {
                         if let Some(subtitle) = &snapshot.subtitle {
-                            subtitle.draw(&input.label(&preferences, "E"), &ui);
+                            subtitle.draw(&hud_view.label(&preferences, "E"), &ui);
                         }
-                    } else { story.draw(&input.label(&preferences, "E"), &ui); }
+                    } else { story.draw(&hud_view.label(&preferences, "E"), &ui); }
                 }
                 if let Some(snapshot) = &hud_snapshot {
                     for command in &snapshot.level { command.draw(); }
@@ -5312,12 +5323,12 @@ interactions
                 {
                     skip_scene.draw(
                         &ui,
-                        &input.film_skip_label(&preferences),
+                        &hud_view.film_skip_label(&preferences),
                     );
                 }
             }
             if audio.settings.muted && help && !inventory_menu && !console_input {
-                ui.toast(&crate::prompts::shown("Sound muted - M to restore", &input, &preferences), 18.);
+                ui.toast(&crate::prompts::shown("Sound muted - M to restore", &hud_view, &preferences), 18.);
             }
             if !notice.is_empty() {
                 ui.toast(&notice, 74.);
@@ -5367,19 +5378,19 @@ interactions
             match store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()) {
                 Ok(()) => {
                     for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
-                    retry.remember(game_snapshot!()); hud.announce("Checkpoint saved");
+                    retry.remember(game_snapshot!()); hud_ops.push(HudOp::Announce("Checkpoint saved".into()));
                 }
-                Err(e) => hud.announce(&format!("Checkpoint save failed: {e:#}")),
+                Err(e) => hud_ops.push(HudOp::Announce(format!("Checkpoint save failed: {e:#}").into())),
             }
         }
         if save_requested || autosave_requested {
             if !saves_writable {
                 if save_requested {
-                    hud.announce("Saving is unavailable in a staged preview");
+                    hud_ops.push(HudOp::Announce("Saving is unavailable in a staged preview".into()));
                 }
             } else if !stats.alive() {
                 if save_requested {
-                    hud.announce("Retry or load a game before saving");
+                    hud_ops.push(HudOp::Announce("Retry or load a game before saving".into()));
                 }
             } else {
                 let slot = if save_requested {
@@ -5395,18 +5406,18 @@ interactions
                     Ok(()) => {
                         retry.remember(captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()));
                         played = true;
-                        hud.announce(if slot == Slot::Quick {
+                        hud_ops.push(HudOp::Announce((if slot == Slot::Quick {
                             "Game saved / F9 to load"
                         } else {
                             "Progress saved"
-                        });
+                        }).into()));
                         if save_requested {
                             console.print("Game saved / F9 to load");
                         }
                     }
                     Err(e) => {
                         let message = format!("Save failed: {e:#}");
-                        hud.announce(&message);
+                        hud_ops.push(HudOp::Announce(message.clone().into()));
                         console.print(message);
                     }
                 }
@@ -5881,7 +5892,7 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         let hud_start = std::time::Instant::now();
         {
             let _timer = crate::light_profile::render_timer(crate::light_profile::RenderPhase::Hud);
-            hud.draw(&state.game.stats, &catalog, false, &input, &prefs);
+            hud.draw(&state.game.stats, &catalog, false, &HudView::capture(&input), &prefs);
         }
         cpu_ns += hud_start.elapsed().as_nanos() as u64;
         if matches!(frame, 179 | 189 | 199 | 209 | 219 | 229 | 239) {

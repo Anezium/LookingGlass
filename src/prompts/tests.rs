@@ -1,3 +1,4 @@
+use crate::input::Input;
 use super::*;
 
 const SINGLE_KEYS: &[&str] = &["W", "S", "D", "E", "Q", "P", "C", "V", "H", "R", "M"];
@@ -124,14 +125,15 @@ fn vita_controls_show_the_handheld_text() {
         return; // Run with LOOKING_GLASS_VITA_CONTROLS=1 to cover this branch on the host.
     }
     let (input, prefs) = vita_preset();
+    let view = HudView::capture(&input);
     for (desktop, _) in HANDHELD {
-        let shown = shown(desktop, &input, &prefs);
+        let shown = shown(desktop, &view, &prefs);
         assert_eq!(Some(shown.as_ref()), vita_wording(desktop, &input, &prefs).as_deref());
         assert!(desktop_keys(&shown).is_empty(), "{shown:?}");
     }
-    assert_eq!(world_prompt("E: use lever", &input, &prefs), "Square: use lever");
-    assert_eq!(world_prompt("E grab rope", &input, &prefs), "Square grab rope");
-    assert_eq!(shown("Checkpoint saved", &input, &prefs), "Checkpoint saved");
+    assert_eq!(world_prompt("E: use lever", &view, &prefs), "Square: use lever");
+    assert_eq!(world_prompt("E grab rope", &view, &prefs), "Square grab rope");
+    assert_eq!(shown("Checkpoint saved", &view, &prefs), "Checkpoint saved");
 }
 
 #[test]
@@ -141,8 +143,9 @@ fn desktop_controls_keep_the_desktop_text() {
     }
     let input = Input::default();
     let prefs = Preferences::default();
+    let view = HudView::capture(&input);
     for (desktop, _) in HANDHELD {
-        assert_eq!(shown(desktop, &input, &prefs), *desktop);
+        assert_eq!(shown(desktop, &view, &prefs), *desktop);
     }
 }
 

@@ -2,10 +2,12 @@
 use crate::mesh::Mesh;
 use crate::{
     assets::Assets,
+    hud_view::HudView,
     inventory::{Catalog, Pickup, PickupKind, Stats, WEAPONS},
     texture,
 };
 use anyhow::Result;
+use std::borrow::Cow;
 use macroquad::prelude::*;
 use crate::replay::input::{is_key_down, is_key_released, is_mouse_button_pressed, mouse_position};
 
@@ -33,6 +35,44 @@ pub fn air(breath: &crate::water::Breath, ui: &crate::ui::Ui) {
     ui.toast(&text, screen_height() - 76.);
 }
 
+pub(crate) enum HudOp {
+    Announce(Cow<'static, str>),
+    Tick(f32),
+}
+
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<HudOp>();
+};
+
+#[derive(Default)]
+struct Notice {
+    message: String,
+    remaining: f32,
+}
+
+impl Notice {
+    fn announce(&mut self, text: impl Into<String>) {
+        self.message = text.into();
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        if hud_trace_enabled() {
+            println!("HUD_ANNOUNCE {:?}", self.message);
+        }
+        self.remaining = (2.5 + self.message.chars().count() as f32 * 0.035).clamp(3.5, 8.);
+    }
+    fn update(&mut self, dt: f32) {
+        self.remaining = (self.remaining - dt.max(0.)).max(0.);
+    }
+    fn apply(&mut self, ops: &mut Vec<HudOp>) {
+        for op in ops.drain(..) {
+            match op {
+                HudOp::Announce(text) => self.announce(text),
+                HudOp::Tick(dt) => self.update(dt),
+            }
+        }
+    }
+}
+
 pub struct Hud {
     pub ui: std::rc::Rc<crate::ui::Ui>,
     meters: [Texture2D; 2],
@@ -45,8 +85,7 @@ pub struct Hud {
     back: crate::tan::Model,
     back_texture: Texture2D,
     liquids: [Texture2D; 2],
-    pub message: String,
-    remaining: f32,
+    notice: Notice,
 }
 fn load(assets: &mut Assets, path: &str) -> Result<Texture2D> {
     let image = texture::decode(assets, path)?;
@@ -94,25 +133,18 @@ impl Hud {
                 load(assets, "models/ui/pieces/main/skin_health02.ftx")?,
                 load(assets, "models/ui/pieces/main/skin_mana01.ftx")?,
             ],
-            message: String::new(),
-            remaining: 0.,
+            notice: Notice::default(),
         })
     }
     pub fn announce(&mut self, text: impl Into<String>) {
-        self.message = text.into();
-        self.remaining = (2.5 + self.message.chars().count() as f32 * 0.035).clamp(3.5, 8.);
+        self.notice.announce(text);
     }
-    pub fn update(&mut self, dt: f32) {
-        self.remaining = (self.remaining - dt.max(0.)).max(0.);
+    pub(crate) fn apply(&mut self, ops: &mut Vec<HudOp>) {
+        self.notice.apply(ops);
     }
-    pub fn selected(&mut self, stats: &Stats) {
-        if let Some(selected) = stats.equipped() {
-            self.announce(WEAPONS[selected].1);
-        }
-    }
-    pub fn draw_notice(&self, input: &crate::input::Input, prefs: &crate::preferences::Preferences) {
-        if self.remaining > 0. && !self.message.is_empty() {
-            let text = crate::prompts::shown(&self.message, input, prefs);
+    pub fn draw_notice(&self, view: &HudView, prefs: &crate::preferences::Preferences) {
+        if self.notice.remaining > 0. && !self.notice.message.is_empty() {
+            let text = crate::prompts::shown(&self.notice.message, view, prefs);
             // Leave the top-center encounter meter unobstructed.
             self.ui.toast(&text, 80. * crate::ui::overlay_scale());
         }
@@ -201,7 +233,7 @@ impl Hud {
         stats: &Stats,
         catalog: &Catalog,
         inventory: bool,
-        input: &crate::input::Input,
+        view: &HudView,
         prefs: &crate::preferences::Preferences,
     ) {
         let text_scale = crate::ui::overlay_scale();
@@ -234,7 +266,7 @@ impl Hud {
             }
         }
         if inventory {
-            self.draw_inventory(stats, catalog, input, prefs);
+            self.draw_inventory(stats, catalog, view, prefs);
             return;
         }
         let (w, h) = (screen_width(), screen_height());
@@ -280,10 +312,10 @@ impl Hud {
             self.ui.center(
                 &format!(
                     "{} - retry",
-                    if input.desktop_pad() {
+                    if view.desktop_pad() {
                         "A".into()
                     } else {
-                        input.label(prefs, "Enter")
+                        view.label(prefs, "Enter")
                     }
                 ),
                 Rect::new(r.x + 20. * text_scale, r.y + 64. * text_scale, r.w - 40. * text_scale, 26. * text_scale),
@@ -291,7 +323,7 @@ impl Hud {
                 crate::ui::INK,
             );
             self.ui.center(
-                if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
+                if view.desktop_pad() || view.handheld {
                     "Start - load a game or change options"
                 } else {
                     "Esc - load a game or change options"
@@ -302,22 +334,11 @@ impl Hud {
             );
         }
     }
-    pub fn inventory_hit(&self) -> Option<usize> {
-        if !is_mouse_button_pressed(MouseButton::Left)
-            || !crate::menu::pointer_input_allowed(
-                crate::preferences::Preferences::vita_emulation(),
-                is_key_down(KeyCode::Enter), is_key_released(KeyCode::Enter))
-        {
-            return None;
-        }
-        let p = Vec2::from(mouse_position());
-        (0..10).find(|&i| slot(i).contains(p))
-    }
     fn draw_inventory(
         &self,
         stats: &Stats,
         catalog: &Catalog,
-        input: &crate::input::Input,
+        view: &HudView,
         prefs: &crate::preferences::Preferences,
     ) {
         let first = slot(0);
@@ -344,14 +365,14 @@ impl Hud {
             ink,
         );
         self.ui.center(
-            &if crate::preferences::Preferences::vita_emulation() {
+            &if view.handheld {
                 "D-pad: select    Cross: equip    Circle: return".into()
-            } else if input.desktop_pad() {
+            } else if view.desktop_pad() {
                 "D-pad: select    A: equip    B: return".into()
             } else {
                 format!(
                     "Arrows / click: select    {} / Esc: return",
-                    input.label(prefs, "I")
+                    view.label(prefs, "I")
                 )
             },
             Rect::new(first.x, first.y - 39., width, 23.),
@@ -377,10 +398,10 @@ impl Hud {
                 },
             );
             self.ui.font.left(
-                &if input.desktop_pad() || crate::preferences::Preferences::vita_emulation() {
+                &if view.desktop_pad() || view.handheld {
                     String::new()
                 } else {
-                    input.label(prefs, &format!("{}", (i + 1) % 10))
+                    view.label(prefs, &format!("{}", (i + 1) % 10))
                 },
                 r.x + 7.,
                 r.y + 24.,
@@ -432,8 +453,8 @@ impl Hud {
             &if stats.equipped().is_some() {
                 format!(
                     "{} / {}: primary / alternate attack",
-                    input.label(prefs, "Mouse 1"),
-                    input.label(prefs, "Mouse 2")
+                    view.label(prefs, "Mouse 1"),
+                    view.label(prefs, "Mouse 2")
                 )
             } else {
                 "Find a toy to equip".into()
@@ -442,9 +463,9 @@ impl Hud {
             20.,
             ink,
         );
-        if self.remaining > 0. {
+        if self.notice.remaining > 0. {
             self.ui.center(
-                &self.message,
+                &self.notice.message,
                 Rect::new(first.x, last.bottom() + 65., width, 22.),
                 19.,
                 ink,
@@ -485,7 +506,6 @@ pub(crate) async fn check_presentation(assets: &mut Assets) -> Result<()> {
     let mut hud = Hud::load(assets)?;
     let catalog = Catalog::load(assets)?;
     let prefs = crate::preferences::Preferences::default();
-    let input = crate::input::Input::default();
     for (width, height) in [(640, 480), (1200, 680), (1920, 1080), (3840, 2160)] {
         request_new_screen_size(width as f32, height as f32);
         for _ in 0..8 { next_frame().await; }
@@ -496,13 +516,14 @@ pub(crate) async fn check_presentation(assets: &mut Assets) -> Result<()> {
             if page == "death" { stats.damage(10000.); }
             hud.announce("A new chapter is ready. Your toys and progress have been carried into this visit. Explore the room at your own pace; you can open the main menu whenever you need to save, load, or adjust your controls.");
             for frame in 0..3 {
+                let view = HudView::capture(&crate::input::Input::default());
                 set_default_camera();
                 clear_background(Color::from_hex(0x242228));
-                hud.draw(&stats, &catalog, false, &input, &prefs);
+                hud.draw(&stats, &catalog, false, &view, &prefs);
                 if page == "pause" {
                     hud.ui.paused("P or click to resume");
                 } else if page == "play" {
-                    hud.draw_notice(&input, &prefs);
+                    hud.draw_notice(&view, &prefs);
                     boss_meter(&hud.ui, "Encounter", 0.6);
                     crate::story::draw_subtitle(
                         "The path winds through the room. Look around carefully, then choose where to go next.",
@@ -518,6 +539,31 @@ pub(crate) async fn check_presentation(assets: &mut Assets) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+fn hud_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("LOOKING_GLASS_HUD_TRACE").is_some())
+}
+
+pub(crate) fn inventory_hit() -> Option<usize> {
+    if !is_mouse_button_pressed(MouseButton::Left)
+        || !crate::menu::pointer_input_allowed(
+            crate::preferences::Preferences::vita_emulation(),
+            is_key_down(KeyCode::Enter), is_key_released(KeyCode::Enter))
+    {
+        return None;
+    }
+    let p = Vec2::from(mouse_position());
+    let hit = (0..10).find(|&i| slot(i).contains(p));
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    if hud_trace_enabled() {
+        if let Some(index) = hit {
+            println!("HUD_INVENTORY_HIT slot={index}");
+        }
+    }
+    hit
+}
+
 fn slot(index: usize) -> Rect {
     let width = (screen_width() - 48.).clamp(400., 900.);
     let gap = 10.;
@@ -589,5 +635,52 @@ fn tan_picture(
             indices,
             texture: Some(texture.clone()),
         });
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    #[test]
+    fn announce_before_and_after_tick() {
+        let mut notice = Notice::default();
+        let mut ops = vec![HudOp::Announce("first".into()), HudOp::Tick(1.)];
+        notice.apply(&mut ops);
+        assert_eq!(notice.message, "first");
+        assert_eq!(notice.remaining, 2.5);
+
+        ops.extend([HudOp::Tick(1.), HudOp::Announce("second".into())]);
+        notice.apply(&mut ops);
+        assert_eq!(notice.message, "second");
+        assert_eq!(notice.remaining, 3.5);
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn two_announces_in_one_frame_keep_the_last_duration() {
+        let mut notice = Notice::default();
+        let mut ops = vec![
+            HudOp::Announce("x".repeat(200).into()),
+            HudOp::Announce("last".into()),
+            HudOp::Tick(0.5),
+        ];
+        notice.apply(&mut ops);
+        assert_eq!(notice.message, "last");
+        assert_eq!(notice.remaining, 3.);
+    }
+
+    #[test]
+    fn early_exit_keeps_the_notice_until_the_next_hud_pass() {
+        let mut notice = Notice::default();
+        let mut ops = vec![HudOp::Announce("early".into())];
+        // The first iteration exits before its tick and before HUD apply.
+        assert!(notice.message.is_empty());
+
+        ops.push(HudOp::Tick(0.25));
+        notice.apply(&mut ops);
+        assert_eq!(notice.message, "early");
+        assert_eq!(notice.remaining, 3.25);
+        assert!(ops.is_empty());
     }
 }
