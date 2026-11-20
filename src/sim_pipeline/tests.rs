@@ -458,6 +458,7 @@ fn entry_pulses_twice_then_presents_first() {
     assert!(classified < sample && sample < present);
     assert!(pipeline.state.is_none() && pipeline.in_flight);
     assert!(pipeline.slots[0].is_some() && pipeline.slots[1].is_none());
+    pipeline.shutdown().unwrap();
 }
 
 #[test]
@@ -529,7 +530,43 @@ fn mid_step_return_resumes_with_due_without_pulsing() {
     assert!(!trace.iter().any(|event| matches!(
         event, Event::Captured(s, _) | Event::Render(s, _) if n(*s) == 2
     )));
+    assert_eq!(
+        pipeline
+            .slots
+            .each_ref()
+            .map(|slot| slot.as_ref().unwrap().slot),
+        [0, 1]
+    );
+    assert!(pipeline.slots[1].as_ref().unwrap().sample.is_none());
+    assert_eq!(pipeline.state.as_ref().unwrap().stepped, 2);
     assert!(!pipeline.in_flight);
+}
+
+#[test]
+fn mid_step_on_entry_resumes_without_second_pulse() {
+    let (mut pipeline, mut owner, rx) = setup(&[Kind::Mid, Kind::Free]);
+    continue_one(&mut pipeline, &mut owner);
+    let trace = events(&rx);
+    assert_tape(&trace, 1);
+    assert!(trace.iter().any(|event| matches!(
+        event, Event::Resume(s, CHECKPOINT) if s.frame == frame(1)
+    )));
+    assert!(!trace
+        .iter()
+        .any(|event| matches!(event, Event::Captured(..) | Event::Render(..))));
+    assert_eq!(
+        pipeline
+            .slots
+            .each_ref()
+            .map(|slot| slot.as_ref().unwrap().slot),
+        [0, 1]
+    );
+    assert!(pipeline
+        .slots
+        .iter()
+        .flatten()
+        .all(|slot| slot.sample.is_none()));
+    assert!(pipeline.state.is_some() && !pipeline.in_flight);
 }
 
 #[test]
@@ -578,6 +615,8 @@ fn consecutive_fences_keep_both_slots_idle() {
 fn last_free_presents_before_next_owner_fence_work() {
     let (mut pipeline, mut owner, rx) = setup(&[Kind::Free, Kind::Free, Kind::Fence]);
     continue_one(&mut pipeline, &mut owner);
+    assert!(pipeline.state.is_none() && pipeline.in_flight);
+    owner.yield_in_render = true;
     continue_one(&mut pipeline, &mut owner);
     let trace = events(&rx);
     assert_tape(&trace, 3);
@@ -589,7 +628,13 @@ fn last_free_presents_before_next_owner_fence_work() {
         &trace,
         |event| matches!(event, Event::Serial(s) if n(*s) == 3),
     );
-    assert!(last < fence);
+    let yielded = position(
+        &trace,
+        |event| matches!(event, Event::Yield(s) if n(*s) == 2),
+    );
+    assert!(last < yielded && yielded < fence);
+    assert!(pipeline.state.is_some() && !pipeline.in_flight);
+    assert!(pipeline.slots.iter().all(Option::is_some));
 }
 
 #[test]
@@ -623,7 +668,24 @@ fn quit_flushes_held_image_and_quit_after_frame_is_serial() {
 }
 
 #[test]
-fn draw_error_returns_without_present_and_drop_joins() {
+fn exit_on_entry_leaves_state_and_both_slots_home() {
+    for exit in [Exit::Quit, Exit::EndOfTape] {
+        let (mut pipeline, mut owner, rx) = setup(&[]);
+        owner.exit = exit;
+        assert_eq!(
+            run(pipeline.iteration(&mut owner)),
+            Ok(Iteration::Stop(exit))
+        );
+        assert_eq!(events(&rx), [Event::Exit(exit)]);
+        assert_eq!(pipeline.state.as_ref().unwrap().stepped, 0);
+        assert!(pipeline.slots.iter().all(Option::is_some));
+        assert!(!pipeline.in_flight);
+        pipeline.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn draw_error_returns_without_present_and_shutdown_joins() {
     bounded(|| {
         let (mut pipeline, mut owner, rx) = setup(&[Kind::Free, Kind::Free]);
         owner.inside_render = Box::new(|_| Err(Fault::Draw));
@@ -632,7 +694,7 @@ fn draw_error_returns_without_present_and_drop_joins() {
             Err(PipelineError::Owner(Fault::Draw))
         );
         assert!(pipeline.in_flight);
-        drop(pipeline);
+        pipeline.shutdown().unwrap();
         let trace = events(&rx);
         assert!(presents(&trace).is_empty());
         assert!(trace
@@ -641,6 +703,18 @@ fn draw_error_returns_without_present_and_drop_joins() {
         assert!(!trace
             .iter()
             .any(|event| matches!(event, Event::Audio(s) if n(*s) == 2)));
+        let consumed = trace
+            .iter()
+            .filter_map(|event| match event {
+                Event::ConsumeSeal(stamp) => Some(stamp.frame),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(consumed, [frame(1)]);
+        let seal = position(&trace, |event| matches!(event, Event::ConsumeSeal(_)));
+        let sample = position(&trace, |event| *event == Event::Sample(frame(2)));
+        let render = position(&trace, |event| matches!(event, Event::Render(..)));
+        assert!(seal < sample && sample < render);
     });
 }
 
@@ -765,6 +839,57 @@ fn idle_drop_closes_jobs_and_joins() {
 }
 
 #[test]
+#[should_panic(expected = "worker-side assertion")]
+fn worker_assertion_fails_owner_at_shutdown() {
+    let (trace, _rx) = sync_channel(512);
+    let mut pipeline = TestPipeline::new(
+        State::default(),
+        slots(),
+        None,
+        worker(
+            trace.clone(),
+            |stamp| assert_eq!(n(stamp), 1, "worker-side assertion"),
+            |_| {},
+            |_| {},
+        ),
+    )
+    .unwrap();
+    let mut owner = Model::new(&[Kind::Free, Kind::Free], trace);
+    continue_one(&mut pipeline, &mut owner);
+    pipeline
+        .shutdown()
+        .unwrap_or_else(|panic| resume_unwind(panic));
+}
+
+#[test]
+#[should_panic(expected = "worker panic during drop")]
+fn drop_propagates_worker_panic() {
+    let pipeline = TestPipeline::spawn(State::default(), slots(), None, 1, |jobs, _done| {
+        assert!(jobs.recv().is_ok(), "worker panic during drop");
+    })
+    .unwrap();
+    drop(pipeline);
+}
+
+#[test]
+#[should_panic(expected = "owner unwind")]
+fn drop_preserves_owner_panic_during_worker_panic() {
+    struct PanicOnDrop;
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("dropping worker panic payload");
+        }
+    }
+
+    let _pipeline = TestPipeline::spawn(State::default(), slots(), None, 1, |jobs, _done| {
+        assert!(jobs.recv().is_err());
+        std::panic::panic_any(PanicOnDrop);
+    })
+    .unwrap();
+    panic!("owner unwind");
+}
+
+#[test]
 fn owner_error_returns_while_worker_is_mid_step() {
     bounded(|| {
         let (trace, rx) = sync_channel(512);
@@ -798,11 +923,12 @@ fn owner_error_returns_while_worker_is_mid_step() {
             run(pipeline.iteration(&mut owner)),
             Err(PipelineError::Owner(Fault::Draw))
         );
+        assert!(pipeline.in_flight);
         assert!(events(&rx)
             .iter()
             .all(|event| !matches!(event, Event::Captured(s, _) if n(*s) == 2)));
         release.send(()).unwrap();
-        drop(pipeline);
+        pipeline.shutdown().unwrap();
         assert!(events(&rx)
             .iter()
             .any(|event| matches!(event, Event::Captured(s, _) if n(*s) == 2)));
@@ -843,8 +969,9 @@ fn shutdown_releases_worker_blocked_sending_done() {
             run(pipeline.iteration(&mut owner)),
             Err(PipelineError::Owner(Fault::Draw))
         );
+        assert!(pipeline.in_flight);
         assert!(result.try_recv().is_err());
-        drop(pipeline);
+        pipeline.shutdown().unwrap();
         result.try_recv().unwrap();
     });
 }
@@ -879,8 +1006,8 @@ fn owner_first_and_worker_first_with_delays() {
                 )
                 .unwrap();
                 let mut owner = Model::new(&[Kind::Free, Kind::Free], trace);
-                owner.before_render = Box::new(move |_| {
-                    if !owner_first {
+                owner.before_render = Box::new(move |stamp| {
+                    if n(stamp) == 1 && !owner_first {
                         worker_end.recv_timeout(WAIT).unwrap();
                     }
                     Ok(())
@@ -889,17 +1016,26 @@ fn owner_first_and_worker_first_with_delays() {
                     thread::sleep(delay);
                     Ok(())
                 });
-                owner.after_render = Box::new(move |_| {
-                    if owner_first {
+                owner.after_render = Box::new(move |stamp| {
+                    if n(stamp) == 1 && owner_first {
                         owner_ended.send(()).unwrap();
                     }
                     Ok(())
                 });
                 continue_one(&mut pipeline, &mut owner);
-                drop(pipeline);
+                assert!(pipeline.in_flight);
+                assert_eq!(
+                    run(pipeline.iteration(&mut owner)),
+                    Ok(Iteration::Stop(Exit::EndOfTape))
+                );
+                pipeline.shutdown().unwrap();
                 let trace = events(&rx);
+                assert_tape(&trace, 2);
                 if owner_first {
-                    let draw_end = position(&trace, |event| matches!(event, Event::DrawEnd(..)));
+                    let draw_end = position(
+                        &trace,
+                        |event| matches!(event, Event::DrawEnd(s, _) if n(*s) == 1),
+                    );
                     let work = position(
                         &trace,
                         |event| matches!(event, Event::Work(s, ..) if n(*s) == 2),
@@ -910,7 +1046,10 @@ fn owner_first_and_worker_first_with_delays() {
                         &trace,
                         |event| matches!(event, Event::Captured(s, _) if n(*s) == 2),
                     );
-                    let draw = position(&trace, |event| matches!(event, Event::Render(..)));
+                    let draw = position(
+                        &trace,
+                        |event| matches!(event, Event::Render(s, _) if n(*s) == 1),
+                    );
                     assert!(captured < draw);
                 }
             });
@@ -918,10 +1057,19 @@ fn owner_first_and_worker_first_with_delays() {
     }
 }
 
-fn rendezvous(dispatch_enabled: bool) -> TestResult {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RendezvousOrder {
+    Overlap,
+    DispatchDisabled,
+    RenderFirst,
+}
+
+fn rendezvous(order: RendezvousOrder) -> TestResult {
     bounded(move || {
         let (worker_mark, worker_in_step) = sync_channel(1);
         let (owner_mark, owner_in_render) = sync_channel(1);
+        let (render_returned, allow_worker) = sync_channel(1);
+        let (exchanged, worker_exchanged) = sync_channel(1);
         let (trace, _rx) = sync_channel(512);
         let mut pipeline = Pipeline::new(
             State::default(),
@@ -929,13 +1077,20 @@ fn rendezvous(dispatch_enabled: bool) -> TestResult {
             None,
             worker(
                 trace.clone(),
-                |_| {},
+                move |stamp| {
+                    if n(stamp) == 2 && order == RendezvousOrder::RenderFirst {
+                        // Model serial scheduling with a causal gate. Even a
+                        // delayed render gets its full timeout before step 2.
+                        allow_worker.recv_timeout(3 * WAIT).unwrap();
+                    }
+                },
                 move |stamp| {
                     if n(stamp) == 2 {
                         worker_mark.send(()).unwrap();
                         owner_in_render
                             .recv_timeout(WAIT)
                             .expect("worker missed render rendezvous");
+                        exchanged.send(()).unwrap();
                     }
                 },
                 |_| {},
@@ -943,7 +1098,7 @@ fn rendezvous(dispatch_enabled: bool) -> TestResult {
         )
         .unwrap();
         let mut owner = Model::new(&[Kind::Free, Kind::Free], trace);
-        owner.dispatch_enabled = dispatch_enabled;
+        owner.dispatch_enabled = order != RendezvousOrder::DispatchDisabled;
         owner.inside_render = Box::new(move |stamp| {
             assert_eq!(n(stamp), 1);
             // Send our mark from inside render, then wait for the stepping worker.
@@ -953,19 +1108,38 @@ fn rendezvous(dispatch_enabled: bool) -> TestResult {
                 Fault::RendezvousTimeout
             })
         });
-        run(pipeline.iteration(&mut owner))
+        let result = run(pipeline.iteration(&mut owner));
+        render_returned.send(()).unwrap();
+        pipeline.shutdown().unwrap();
+        if order == RendezvousOrder::DispatchDisabled {
+            assert!(worker_exchanged.try_recv().is_err());
+        } else {
+            worker_exchanged.try_recv().unwrap();
+        }
+        result
     })
 }
 
 #[test]
 fn rendezvous_requires_both_lanes_inside_their_intervals() {
-    assert_eq!(rendezvous(true), Ok(Iteration::Continue));
+    assert_eq!(
+        rendezvous(RendezvousOrder::Overlap),
+        Ok(Iteration::Continue)
+    );
 }
 
 #[test]
 fn rendezvous_times_out_when_overlap_dispatch_is_disabled() {
     assert_eq!(
-        rendezvous(false),
+        rendezvous(RendezvousOrder::DispatchDisabled),
+        Err(PipelineError::Owner(Fault::RendezvousTimeout))
+    );
+}
+
+#[test]
+fn rendezvous_times_out_with_both_hooks_in_serial_order() {
+    assert_eq!(
+        rendezvous(RendezvousOrder::RenderFirst),
         Err(PipelineError::Owner(Fault::RendezvousTimeout))
     );
 }

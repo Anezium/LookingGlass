@@ -68,6 +68,8 @@ pub trait Owner<J, S, O, D> {
     fn pulse(&mut self, state: &mut S) -> Result<Pulse<J>, Self::Error>;
 
     /// Apply audio, publish, validate and decide the disposition with state home.
+    /// Before using the output, check that the worker refilled it for this stamp.
+    /// Debug-assert the captured stamp where the output type exposes one.
     /// A rejected capture's provisional seal must be replaced by the fenced path.
     fn classify(
         &mut self,
@@ -138,7 +140,8 @@ pub struct Pipeline<J, S, O, D> {
 impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
     Pipeline<J, S, O, D>
 {
-    /// The worker resets or refills the supplied buffer as part of each step.
+    /// The worker resets or refills the supplied buffer for each step's stamp.
+    /// The owner's `classify` checks freshness before using a complete output.
     /// Both buffers are returned to their own slots for reuse.
     pub fn new(
         state: S,
@@ -194,7 +197,8 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
     /// pre-fence or exit flushes the held image before continuing or stopping.
     ///
     /// Stop, error or cancellation during an iteration is terminal. Drop the
-    /// pipeline to release any work still in flight and join its thread.
+    /// pipeline to release any work still in flight and join its thread, or call
+    /// `shutdown` to inspect the worker's result explicitly.
     pub async fn iteration<A: Owner<J, S, O, D>>(
         &mut self,
         owner: &mut A,
@@ -333,25 +337,43 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
     }
 
     fn disconnected<E>(&mut self) -> PipelineError<E> {
-        drop(self.jobs.take());
-        drop(self.done.take());
-        if let Some(worker) = self.worker.take() {
-            if let Err(panic) = worker.join() {
-                resume_unwind(panic);
-            }
+        if let Err(panic) = self.close_and_join() {
+            resume_unwind(panic);
         }
         PipelineError::Disconnected
     }
 }
 
-impl<J, S, O, D> Drop for Pipeline<J, S, O, D> {
-    fn drop(&mut self) {
+impl<J, S, O, D> Pipeline<J, S, O, D> {
+    /// Release any work still in flight and join, returning a worker panic to
+    /// the caller. Dropping without calling this method propagates the panic.
+    pub fn shutdown(mut self) -> thread::Result<()> {
+        self.close_and_join()
+    }
+
+    fn close_and_join(&mut self) -> thread::Result<()> {
         drop(self.jobs.take());
         // Release a pending send before joining, even with a rendezvous Done channel.
         drop(self.done.take());
-        if let Some(worker) = self.worker.take() {
-            // A normal join resumes a worker panic. Shutdown preserves an owner error.
-            let _ = worker.join();
+        self.worker.take().map_or(Ok(()), JoinHandle::join)
+    }
+}
+
+impl<J, S, O, D> Drop for Pipeline<J, S, O, D> {
+    fn drop(&mut self) {
+        if let Err(panic) = self.close_and_join() {
+            if !thread::panicking() {
+                resume_unwind(panic);
+            }
+            // The worker's panic hook already reported the payload. Log the
+            // shutdown failure while preserving the owner's active unwind.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "sim-pipeline worker panicked during owner unwind"
+            );
+            // A custom panic payload can itself panic when dropped.
+            std::mem::forget(panic);
         }
     }
 }
