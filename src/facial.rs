@@ -614,7 +614,7 @@ mod snapshot_pose_tests {
         let mut local=vec![Transform{translation:Vec3::X,rotation:Quat::from_rotation_z(0.37)},Transform{translation:Vec3::Y,rotation:Quat::from_rotation_x(0.2)}];
         let mut scratch=Vec::new();let mut out=Vec::new();
         for mouth in [0.,0.25,1.,f32::NAN,0.] {
-            let expected=face.pose(&skeleton,&local,mouth);face.pose_into(&skeleton,&local,mouth,&mut scratch,&mut out);
+            let expected=face.pose(&skeleton,&local,mouth,None);face.pose_into(&skeleton,&local,mouth,&mut scratch,&mut out);
             for (a,b) in expected.iter().zip(&out){assert_eq!(a.translation.to_array().map(f32::to_bits),b.translation.to_array().map(f32::to_bits));assert_eq!(a.rotation.to_array().map(f32::to_bits),b.rotation.to_array().map(f32::to_bits));}
             local[0].translation+=Vec3::Z;
         }
