@@ -456,6 +456,16 @@ pub(crate) struct Gpu {
     puff_batches: [world_puffs::Bank; 2],
     bounds: packet_cull::Bounds,
 }
+/// Credit omitted geometry separately from the logical packet transcript and
+/// preserve the state binding that subsequent packets already account for.
+fn emit_actor_geometry(zero_glow: bool) -> bool {
+    if zero_glow {
+        count("vita_actor_zero_glow_draws", 1);
+        crate::spike_log::actor_zero_glow();
+    }
+    !zero_glow
+}
+
 /// The specialized program bank of a route: 0 lean/unlit-exact, 1 corpse, 2 and 3 additive,
 /// 4 and 5 lean actor. It borrows only the bank fields, so the full program's caches stay usable.
 fn program_bank<'a>(lite: &'a mut Option<Lite>, corpse: &'a mut Option<Lite>, fx_add: &'a mut [Option<Lite>; 2],
@@ -787,7 +797,8 @@ impl Gpu {
         if let Some(skin)=&p.gpu_skin {
             // Only the vertex program changes: keep the fragment route of the CPU twin.
             let variant = match program { Route::CorpseOpaque => 1, Route::ActorLean => 2, Route::ActorLeanOpaque => 3, _ => 0 };
-            self.skin.as_mut().expect("accepted skin program").draw(p,skin,variant,u,depth_write,&self.white,c.actor_frontface_cull);
+            self.skin.as_mut().expect("accepted skin program").draw(
+                p, skin, variant, u, depth_write, &self.white, c.actor_frontface_cull, zero_glow);
             // The skin program, pipeline and bindings replaced the CPU programs' state. Their
             // uniform values are per program in GL and stay valid: keep the field caches.
             self.submit_cache.interrupt();
@@ -907,12 +918,7 @@ impl Gpu {
                 macroquad::miniquad::gl::glEnable(0x0B44); // GL_CULL_FACE
                 macroquad::miniquad::gl::glCullFace(0x0404); // GL_FRONT; experimental authored winding
             } }
-            // Keep the logical packet and the same GL state transitions for this
-            // experiment. Only the certified geometry submission can go away.
-            if zero_glow {
-                count("vita_actor_zero_glow_draws", 1);
-                crate::spike_log::actor_zero_glow();
-            } else {
+            if emit_actor_geometry(zero_glow && program == Route::ActorLean) {
                 ctx.draw(0, p.geometry().indices.len() as i32, 1);
             }
             unsafe { if cull { macroquad::miniquad::gl::glDisable(0x0B44); } }
@@ -1772,8 +1778,8 @@ pub(crate) fn finish_world(
                     lean.pipelines.contains_key(&(1, false)) && lean.pipelines.contains_key(&(2, false)))
                 && {
                     let (base_group, base_pass, base_slot, base_uniforms) = &packets[i - 1];
-                    base_group == group && *base_pass == 0 && base_slot == b
-                        && zero_glow::certified(&groups[*base_group].passes[*base_pass], base_uniforms, p, u)
+                    base_group == group && *base_pass == 0
+                        && zero_glow::certified(&groups[*base_group].passes[*base_pass], base_uniforms, p, u, base_slot == b)
                 };
             gpu.draw(p, *b, u, !groups[id].transparent, groups[id].ant_dead, zero_glow);
         }

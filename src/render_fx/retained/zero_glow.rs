@@ -67,10 +67,26 @@ impl TextureProof {
     }
 }
 
-/// Slots must bind the same CPU-skinned vertex/index stream. The caller also
-/// checks that both pipelines use the very same linked lean program.
-pub(super) fn certified(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &Pass, gu: &[f32; UNIFORM_FLOATS]) -> bool {
-    if base.effect || glow.effect || base.gpu_skin.is_some() || glow.gpu_skin.is_some()
+/// An identical CPU stream or GPU skin occurrence supplies the same vertex
+/// positions in both pipelines. GPU skinning derives UV from the bind mesh
+/// for ordinary layers and emits a constant vertex alpha of one.
+fn skin_pair(base: &Pass, glow: &Pass, same_slot: bool) -> bool {
+    match (&base.gpu_skin, &glow.gpu_skin) {
+        (None, None) => same_slot,
+        (Some(base), Some(glow)) => !base.environment && !glow.environment
+            && std::rc::Rc::ptr_eq(&base.occurrence, &glow.occurrence)
+            && glow.occurrence.bounds().is_some_and(|(lo, hi)| bounded(lo) && bounded(hi)),
+        _ => false,
+    }
+}
+
+fn bounded(position: Vec3) -> bool {
+    position.is_finite() && position.abs().max_element() <= 8192.
+}
+
+/// The caller checks that both draws select the same linked lean program.
+pub(super) fn certified(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &Pass, gu: &[f32; UNIFORM_FLOATS], same_slot: bool) -> bool {
+    if base.effect || glow.effect
         || base.blend_index != 1 || glow.blend_index != 2 || base.depth_equal || glow.depth_equal
         || base.cutout != 1. || glow.cutout != 0. || glow.fog != 1.
         || base.clamp || glow.clamp || base.gain.w != 1. || glow.gain != Vec4::ONE
@@ -85,7 +101,7 @@ pub(super) fn certified(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &Pass, gu
     let mesh = glow.geometry();
     // Cap this experiment at the small, fully certified body parts. Larger
     // mixed parts have uncovered base samples and can change depth and alpha.
-    if mesh.indices.len() != 44 * 3 {
+    if mesh.indices.len() != 44 * 3 || !skin_pair(base, glow, same_slot) {
         return false;
     }
 
@@ -110,8 +126,8 @@ pub(super) fn certified(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &Pass, gu
             let mut max = Vec2::splat(f32::NEG_INFINITY);
             for &index in triangle {
                 let Some(vertex) = mesh.vertices.get(usize::from(index)) else { return false; };
-                if vertex.color[3] != 255 || !vertex.uv.is_finite() || !vertex.position.is_finite() ||
-                    !(vertex.position.abs().max_element() <= 8192.) {
+                if !vertex.uv.is_finite()
+                    || (glow.gpu_skin.is_none() && (vertex.color[3] != 255 || !bounded(vertex.position))) {
                     return false;
                 }
                 min = min.min(vertex.uv);

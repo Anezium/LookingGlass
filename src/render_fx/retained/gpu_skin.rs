@@ -238,7 +238,7 @@ impl Gpu {
     }
     /// One GPU-skinned packet. `variant` is the fragment program the CPU twin would use.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw(&mut self,p:&Pass,skin:&Skin,variant:usize,u:&[f32;UNIFORM_FLOATS],depth_write:bool,white:&Texture2D,cull:bool) {
+    pub(super) fn draw(&mut self,p:&Pass,skin:&Skin,variant:usize,u:&[f32;UNIFORM_FLOATS],depth_write:bool,white:&Texture2D,cull:bool,zero_glow:bool) {
         let _span=crate::frame_profile::span("gpu_skin_upload_draw");
         let _clock=Clock::new(1);
         let variant=if self.shaders[variant].is_some() {variant} else {count("vita_gpu_skin_variant_fallbacks",1);0};
@@ -273,7 +273,9 @@ impl Gpu {
         if !crate::gpu_timing::masked(crate::gpu_timing::MASK_ACTORS) {
             // Same opt-in front-face cull as the CPU actor draw, restored at once.
             unsafe { if cull { gl::glEnable(0x0B44); gl::glCullFace(0x0404); } }
-            ctx.draw(0,occurrence.input.source.indices.len() as i32,1);
+            if emit_actor_geometry(zero_glow && variant == 2) {
+                ctx.draw(0, occurrence.input.source.indices.len() as i32, 1);
+            }
             unsafe { if cull { gl::glDisable(0x0B44); } }
         }
         count("gpu_skin_draws",1);count("gpu_skin_logical_palette_bytes",(occurrence.bones()*32) as u64);count("gpu_skin_uniform_upload_bytes",bytes);
