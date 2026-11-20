@@ -699,7 +699,7 @@ pub(crate) async fn check_loading_screen(assets: &mut Assets, options: &Options)
         let restored = Box::pin(save::Restored::build_async(assets, saved)).await?;
         let mut art = LevelArt::default();
         art.prepare(assets, &restored.scene, &restored.interactions, true)?;
-        restore_install_yield!($($clock)?);
+        crate::loading_screen::between("level_art_models_textures").await;
         let restore_ms = start.elapsed().as_secs_f64() * 1000.;
         expect("death-retry", map)?;
         drop(load);
@@ -1245,7 +1245,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let mut install_timing = crate::startup::Phase::new("restore_install");
             level_art.prepare(&mut assets, &scene, &interactions, true)?;
             install_timing.mark("level_art_models_textures");
-            crate::loading_screen::between("level_art_models_textures").await;
+            restore_install_yield!($($clock)?);
             skip_scene = crate::cinematic::Skip::default();
             audio.load(&mut assets, &maps[current], &scene.map);
             install_timing.mark("audio_load");
