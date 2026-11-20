@@ -62,6 +62,18 @@ pub(crate) fn begin_view(
     atmosphere: &Atmosphere,
     fullbright: bool,
     flush: bool,
+) {
+    let c = crate::render::vita_renderer::config();
+    let gpu_skin_actors = c.gpu_skin_actors && c.gpu_skin_actor_maps.is_none();
+    begin_scene_view(camera, time, atmosphere, fullbright, flush, gpu_skin_actors);
+}
+
+pub(crate) fn begin_scene_view(
+    camera: &Camera3D,
+    time: f32,
+    atmosphere: &Atmosphere,
+    fullbright: bool,
+    flush: bool,
     gpu_skin_actors: bool,
 ) {
     use macroquad::camera::Camera;
