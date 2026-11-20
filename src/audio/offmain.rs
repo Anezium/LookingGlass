@@ -377,6 +377,7 @@ mod tests {
 #[cfg(test)]
 mod lifetime_tests {
     use super::*;
+    use crate::collision::World;
     #[test]
     fn reset_and_late_return_release_outgoing_map_without_allocating() {
         let world = World::fixture(&[(Vec3::splat(-5.), Vec3::splat(5.))]);
