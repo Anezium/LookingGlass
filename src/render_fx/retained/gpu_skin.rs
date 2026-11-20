@@ -22,6 +22,7 @@ thread_local! {
     /// Refused surfaces, kept while the load-time surface lives (identity checked).
     static REFUSED: RefCell<BTreeMap<usize,(std::sync::Weak<SkinSurface>,Reason)>> = RefCell::default();
 }
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct Vertex { offsets: [[f32;4];5], indices: [f32;4], fifth: f32, normal: [f32;3], uv: [f32;2] }
 pub(crate) struct Input { source: Arc<SkinSurface>, vertices: Vec<Vertex>, bones: Vec<usize>, placeholder: Rc<crate::render_fx::prepared::Geometry>,
@@ -169,7 +170,7 @@ fn skin_meta()->ShaderMeta {
     let mut m=meta();
     m.uniforms.uniforms.extend([UniformDesc::new("Bones",UniformType::Float4).array(BONES*2),UniformDesc::new("SkinOrigin",UniformType::Float4),UniformDesc::new("SkinEye",UniformType::Float4)]);m
 }
-struct Buffers { _input:Rc<Input>, vertex:BufferId,index:BufferId,bindings:Option<Bindings> }
+struct Buffers { _input:Rc<Input>, vertex:BufferId,index:BufferId,first:i32,stream:usize,owns_buffers:bool,bindings:Option<Bindings> }
 /// Fragment program variants, indexed like `variant()`: 0 full, 1 discard-free,
 /// 2 lean, 3 lean discard-free. A missing variant draws with the full program.
 pub(crate) const VARIANTS: [&str; 4] = ["retained-gpu-skin-ants","retained-gpu-skin-discard-free","retained-gpu-skin-lean","retained-gpu-skin-lean-opaque"];
@@ -227,14 +228,67 @@ impl Gpu {
     pub(super) fn interrupt_state(&mut self) {self.state=State::default();}
     /// Pass and frame boundaries, where the CPU programs' uniform caches are cleared too.
     pub(super) fn interrupt(&mut self) {self.interrupt_state();for u in &mut self.uniforms {u.interrupt();}}
-    pub(super) fn upload(&mut self,skin:&Occurrence) {
+    pub(super) fn upload(&mut self,skin:&Occurrence,groups:&[Group]) {
         let id=Rc::as_ptr(&skin.input) as usize;
+        if crate::render::vita_renderer::config().gpu_skin_shared_streams && !self.buffers.contains_key(&id) {
+            self.pack_new_streams(groups);
+        }
         self.buffers.entry(id).or_insert_with(|| {
             let ctx=unsafe{get_internal_gl()}.quad_context;
             let vertex=ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable,BufferSource::slice(&skin.input.vertices));
             let index=ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable,BufferSource::slice(&skin.input.source.indices));
-            Buffers {_input:skin.input.clone(),vertex,index,bindings:None}
+            Buffers {_input:skin.input.clone(),vertex,index,first:0,stream:id,owns_buffers:true,bindings:None}
         });
+    }
+    /// Called only on the first upload of a new stream. The first pass that
+    /// references it also knows the other immutable inputs queued for upload.
+    /// The page owner retains its input until renderer teardown, so its address
+    /// remains a unique binding key. Subsequent passes keep the original order.
+    fn pack_new_streams(&mut self, groups: &[Group]) {
+        let mut inputs = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut vertex_count = 0;
+        let mut index_count = 0;
+        for pass in groups.iter().flat_map(|group| &group.passes) {
+            let Some(skin) = &pass.gpu_skin else { continue };
+            let input = &skin.occurrence.input;
+            let id = Rc::as_ptr(input) as usize;
+            if self.buffers.contains_key(&id) || !seen.insert(id) { continue; }
+            let indices = &input.source.indices;
+            if indices.is_empty() || input.vertices.len() > u16::MAX as usize ||
+                indices.iter().any(|&index| usize::from(index) >= input.vertices.len()) {
+                continue;
+            }
+            // Keep the maximum u16 value unused (fixed-index primitive restart).
+            // Bound staging and the signed byte offset accepted by Miniquad.
+            if vertex_count + input.vertices.len() > u16::MAX as usize ||
+                index_count + indices.len() > 262144 { continue; }
+            inputs.push(input);
+            vertex_count += input.vertices.len();
+            index_count += indices.len();
+        }
+        if inputs.len() < 2 { return; }
+
+        let mut vertices = Vec::with_capacity(vertex_count);
+        let mut indices = Vec::with_capacity(index_count);
+        for input in &inputs {
+            let base = vertices.len() as u16;
+            vertices.extend_from_slice(&input.vertices);
+            indices.extend(input.source.indices.iter().map(|&index| base + index));
+        }
+        let ctx = unsafe { get_internal_gl() }.quad_context;
+        let vertex = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Immutable, BufferSource::slice(&vertices));
+        let index = ctx.new_buffer(BufferType::IndexBuffer, BufferUsage::Immutable, BufferSource::slice(&indices));
+        let stream = Rc::as_ptr(inputs[0]) as usize;
+        let mut first = 0;
+        for input in inputs {
+            let id = Rc::as_ptr(input) as usize;
+            self.buffers.insert(id, Buffers {
+                _input: input.clone(), vertex, index, first, stream,
+                owns_buffers: id == stream, bindings: None,
+            });
+            first += input.source.indices.len() as i32;
+        }
     }
     /// One GPU-skinned packet. `variant` is the fragment program the CPU twin would use.
     #[allow(clippy::too_many_arguments)]
@@ -262,10 +316,11 @@ impl Gpu {
         // bindings (vertex layout); otherwise only a changed stream or texture does.
         let key=(variant,p.blend_index,p.depth_equal,depth_write);
         let state=!c.fx_submit_state_cache || self.state.pipeline!=Some(key);
-        let binding=state || self.state.bindings!=Some((id,texture));
+        let binding=state || self.state.bindings!=Some((b.stream,texture));
+        let first=b.first;
         if state {ctx.apply_pipeline(pipeline);unsafe{gl::glDepthMask(u8::from(depth_write));}count("gpu_skin_pipeline_sets",1);}
         if binding {ctx.apply_bindings(bindings);count("gpu_skin_binding_sets",1);}
-        self.state=State {pipeline:Some(key),bindings:Some((id,texture))};
+        self.state=State {pipeline:Some(key),bindings:Some((b.stream,texture))};
         let bytes={let _upload=Clock::new(2);self.uniforms(variant,skin,u,c.uniform_field_cache)};
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::gpu_skin_packet(occurrence.input.vertices.len(),occurrence.input.source.indices.len(),u,
@@ -273,7 +328,7 @@ impl Gpu {
         if !crate::gpu_timing::masked(crate::gpu_timing::MASK_ACTORS) {
             // Same opt-in front-face cull as the CPU actor draw, restored at once.
             unsafe { if cull { gl::glEnable(0x0B44); gl::glCullFace(0x0404); } }
-            ctx.draw(0,occurrence.input.source.indices.len() as i32,1);
+            ctx.draw(first,occurrence.input.source.indices.len() as i32,1);
             unsafe { if cull { gl::glDisable(0x0B44); } }
         }
         count("gpu_skin_draws",1);count("gpu_skin_logical_palette_bytes",(occurrence.bones()*32) as u64);count("gpu_skin_uniform_upload_bytes",bytes);
@@ -319,7 +374,7 @@ impl Gpu {
 }
 impl Drop for Gpu {fn drop(&mut self) {
     AVAILABLE.with(|v|v.set(v.get()-1));let ctx=unsafe{get_internal_gl()}.quad_context;
-    for (_,b) in std::mem::take(&mut self.buffers) {ctx.delete_buffer(b.vertex);ctx.delete_buffer(b.index);}
+    for (_,b) in std::mem::take(&mut self.buffers) {if b.owns_buffers {ctx.delete_buffer(b.vertex);ctx.delete_buffer(b.index);}}
     for (_,p) in std::mem::take(&mut self.pipelines) {ctx.delete_pipeline(p);}
     for shader in self.shaders.iter().flatten() {ctx.delete_shader(*shader);}
 }}

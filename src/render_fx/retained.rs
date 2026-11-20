@@ -597,9 +597,9 @@ impl Gpu {
         );
         Ok(gpu)
     }
-    fn upload(&mut self, slot: usize, p: &Pass, leaves: &mut crate::phase_census::FinishLeaves) -> Result<usize> {
+    fn upload(&mut self, slot: usize, p: &Pass, groups: &[Group], leaves: &mut crate::phase_census::FinishLeaves) -> Result<usize> {
         crate::game_thread::assert_current();
-        if let Some(skin)=&p.gpu_skin { self.skin.as_mut().context("GPU skin pipeline unavailable")?.upload(&skin.occurrence); return Ok(slot); }
+        if let Some(skin)=&p.gpu_skin { self.skin.as_mut().context("GPU skin pipeline unavailable")?.upload(&skin.occurrence, groups); return Ok(slot); }
         let _skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("upload"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let _actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("upload",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
@@ -1688,7 +1688,7 @@ pub(crate) fn finish_world(
                 crate::phase_census::count(0,1);
                 let shared=p.geometry.as_ref().filter(|_|p.gpu_skin.is_none()).map(|m|std::rc::Rc::as_ptr(m) as usize);
                 let previous=shared.and_then(|id|shared_uploads.get(&id).copied());
-                let upload=if let Some(b)=previous {crate::phase_census::count(1,1);count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p,&mut leaves)};
+                let upload=if let Some(b)=previous {crate::phase_census::count(1,1);count("vita_actor_geometry_uploads_skipped",1);Ok(b)}else{gpu.upload(packets.len(),p,&groups,&mut leaves)};
                 match upload {
                     Ok(b) => {
                         if let Some(id)=shared {shared_uploads.insert(id,b);}

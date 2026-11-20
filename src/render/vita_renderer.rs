@@ -389,6 +389,9 @@ pub struct Config {
     /// stream (<= 5 influences, <= 28 bones); everything else keeps CPU skinning.
     /// Picture-changing (stored normals instead of rebuilt face normals): opt in only.
     pub gpu_skin_actors: bool,
+    /// Share immutable vertex and index buffers between GPU skin packets.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub gpu_skin_shared_streams: bool,
     /// Diagnostic PNGs at three replay frames; never enabled by the skin key alone.
     pub gpu_skin_capture: bool,
     /// Conservative skin bounds; late overlays and normal-driven layers opt out.
@@ -721,6 +724,7 @@ impl Default for Config {
             bone_palette: false,
             gpu_skin_ants: false,
             gpu_skin_actors: false,
+            gpu_skin_shared_streams: false,
             gpu_skin_capture: false,
             skin_frustum_cull: true,
             fast_frustum: true,
