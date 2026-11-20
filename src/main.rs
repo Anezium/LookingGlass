@@ -10,6 +10,8 @@ mod tls_count;
 mod gpu_timing;
 mod pass_clock;
 mod sim_maps;
+#[allow(dead_code)] // The viewer wires the protocol in I2.
+mod sim_pipeline;
 mod acting;
 mod ambient_animation;
 mod animation_events;
