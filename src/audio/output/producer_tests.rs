@@ -384,6 +384,11 @@ fn actual_worker_fake_clock_and_config_false_have_bounded_clocks_and_stack() {
             send: Some(tx),
         };
         let hooks = TestHooks {
+            // Linux overflows with a 16 KiB request. The macOS readback below
+            // still checks the original request against the 32 KiB reserve.
+            #[cfg(target_os = "linux")]
+            stack: 256 * 1024,
+            #[cfg(not(target_os = "linux"))]
             stack: 16 * 1024,
             ..TestHooks::default()
         };
