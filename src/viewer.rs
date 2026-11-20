@@ -8,7 +8,7 @@ use crate::{
     hud::Hud,
     interaction::{self, Interactions},
     inventory::{self, Catalog, Stats},
-    look::{window_focused, MouseLook},
+    look::window_focused,
     movement::{Controls, FixedClock, Player, EYE_HEIGHT},
     recovery::{self, Recovery},
     Options,
@@ -17,9 +17,71 @@ use anyhow::{Context, Result};
 use macroquad::prelude::*;
 // Recorded or replayed input when a tape is active; otherwise the macroquad calls.
 use crate::replay::input::{
-    get_char_pressed, get_frame_time, get_time, is_key_down, is_key_pressed, is_mouse_button_pressed, is_quit_requested,
-    mouse_position,
+    get_char_pressed, get_time, is_key_pressed, is_quit_requested,
+    source_frame_time, ClockView,
 };
+
+const SENSITIVITY: f32 = 0.0025;
+
+#[derive(Default)]
+struct MouseLook {
+    grabbed: bool,
+    previous: Option<Vec2>,
+    sensitivity: f32,
+    inverted: bool,
+}
+impl MouseLook {
+    fn update(&mut self, capture: bool, pointer: crate::input::PointerFrame, yaw: &mut f32, pitch: &mut f32) {
+        if self.grabbed != capture {
+            set_cursor_grab(capture);
+            show_mouse(!capture);
+            self.grabbed = capture;
+            self.previous = None;
+        }
+        // Macroquad accumulates raw motion while grabbed. Undo its logical-pixel DPI
+        // conversion so sensitivity stays independent of window size and display scale.
+        let (x, y) = pointer.position;
+        let position = vec2(x, y) * pointer.dpi;
+        let delta = sample_motion(&mut self.previous, position, capture);
+        let sensitivity = if self.sensitivity > 0. {
+            self.sensitivity
+        } else {
+            1.
+        };
+        turn(
+            vec2(delta.x, delta.y * if self.inverted { -1. } else { 1. }) * sensitivity,
+            yaw,
+            pitch,
+        );
+    }
+    fn release(&mut self) {
+        if self.grabbed {
+            set_cursor_grab(false);
+            show_mouse(true);
+            self.grabbed = false;
+        }
+        self.previous = None;
+    }
+}
+impl Drop for MouseLook {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn sample_motion(previous: &mut Option<Vec2>, position: Vec2, capture: bool) -> Vec2 {
+    if !capture || !position.is_finite() {
+        *previous = None;
+        return Vec2::ZERO;
+    }
+    previous
+        .replace(position)
+        .map_or(Vec2::ZERO, |last| position - last)
+}
+fn turn(delta: Vec2, yaw: &mut f32, pitch: &mut f32) {
+    *yaw = (*yaw - delta.x * SENSITIVITY).rem_euclid(std::f32::consts::TAU);
+    *pitch = (*pitch - delta.y * SENSITIVITY).clamp(-1.5, 1.5);
+}
 
 #[cfg(target_os = "vita")]
 #[link(name = "SceProcessmgr_stub")]
@@ -1124,10 +1186,27 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             Loaded { scene, world } = $next;
         };
     }
+    // Yield to owner work without a step clock. Only the controls that the base
+    // reads live can change on return: pad and suppression remain Input state.
+    macro_rules! owner_yield {
+        ($clock:ident, $future:expr) => {{
+            let in_step = $clock.take().is_some();
+            let result = ($future).await;
+            input.refresh_controls();
+            if in_step {
+                $clock = Some(ClockView::capture().enter());
+            }
+            result
+        }};
+    }
+    macro_rules! restore_install_yield {
+        () => { crate::loading_screen::between("level_art_models_textures").await };
+        ($clock:ident) => { owner_yield!($clock, crate::loading_screen::between("level_art_models_textures")) };
+    }
     macro_rules! apply_loaded {
         ($restored:expr) => { apply_loaded!($restored, true) };
         ($restored:expr, $pause:expr) => { apply_loaded!($restored, $pause, replace) };
-        ($restored:expr, $pause:expr, $install:ident) => {{
+        ($restored:expr, $pause:expr, $install:ident $(, $clock:ident)?) => {{
             #[cfg(feature = "vita_renderer")]
             { load_probe = Some(crate::restore_diagnostic::Probe::new("restore")); }
             let r = $restored;
@@ -1178,7 +1257,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             let mut install_timing = crate::startup::Phase::new("restore_install");
             level_art.prepare(&mut assets, &scene, &interactions, true)?;
             install_timing.mark("level_art_models_textures");
-            crate::loading_screen::between("level_art_models_textures").await;
+            restore_install_yield!($($clock)?);
             skip_scene = crate::cinematic::Skip::default();
             audio.load(&mut assets, &maps[current], &scene.map);
             install_timing.mark("audio_load");
@@ -1513,7 +1592,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }};
     }
     macro_rules! rollback_resources {
-        ($checkpoint:expr, $outgoing:expr, $particles:expr, $audio:expr, $reload_alice:expr) => {{
+        ($checkpoint:expr, $outgoing:expr, $particles:expr, $audio:expr, $reload_alice:expr, $clock:ident) => {{
             if let Some((art, cast, particles, level)) = $outgoing.take() {
                 level_art = art; npcs = cast; steam = particles;
                 Loaded { scene, world } = level;
@@ -1522,9 +1601,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 // This is a live resource checkpoint, not an external saved game.
                 // Dead, airborne and scripted frames must not pass save validators
                 // or migrate/reset their untouched live controllers and clocks.
-                let Some(rebuilt) = Box::pin(rebuild_outgoing(&mut assets, &$checkpoint,
+                let Some(rebuilt) = owner_yield!($clock, Box::pin(rebuild_outgoing(&mut assets, &$checkpoint,
                     &interactions, stats.difficulty, &options, $reload_alice,
-                    &mut escape_menu, &ui, &preferences)).await else {
+                    &mut escape_menu, &ui, &preferences))) else {
                     mouse_look.release();
                     // Transition's drop guard closes this operation as failed.
                     return Ok(());
@@ -1540,7 +1619,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }};
     }
     macro_rules! restore_transition {
-        ($game:expr, $kind:expr, $pause:expr, $install:ident) => {{
+        ($game:expr, $kind:expr, $pause:expr, $install:ident, $clock:ident) => {{
             let incoming = $game;
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             let incoming = {
@@ -1564,15 +1643,15 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let _share = crate::texture::load_scope();
                 let mut outgoing = unload_scene!();
                 let outgoing_alice = if crate::transition_memory::legacy_overlap() { Some(alice) } else { drop(alice); None };
-                crate::loading_screen::released().await;
+                owner_yield!($clock, crate::loading_screen::released());
                 memory.after_release();
-                let result = match Box::pin(save::Restored::build_async(&mut assets, incoming)).await {
+                let result = match owner_yield!($clock, Box::pin(save::Restored::build_async(&mut assets, incoming))) {
                     Ok(restored) => {
-                        apply_loaded!(restored, $pause, $install);
+                        apply_loaded!(restored, $pause, $install, $clock);
                         Ok(())
                     }
                     Err(error) => {
-                        let character = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, true);
+                        let character = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, true, $clock);
                         alice = if let Some(alice) = outgoing_alice { alice } else {
                             character.expect("successful outgoing rebuild includes Alice")
                         };
@@ -1586,6 +1665,45 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
               }
             }
         }};
+    }
+    let mut stored_replay_probe: Option<(crate::replay::OwnedProbe, &'static str)> = None;
+    #[cfg(not(target_os = "vita"))]
+    let mut replay_probe_fallbacks = 0u64;
+    #[cfg(not(target_os = "vita"))]
+    let mut previous_step_exit = "before-first-step";
+    #[cfg(not(target_os = "vita"))]
+    let mut replay_probe_assertions = 0u64;
+    macro_rules! replay_probe {
+        ($want_state:expr) => {{
+            let gather = std::time::Instant::now();
+            let targets = npcs.targets();
+            let state = $want_state.then(|| serde_json::to_vec(&serde_json::json!({
+                "player": player, "stats": stats, "interactions": interactions.snapshot(),
+                "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
+                "character": alice.snapshot(), "environment_clock": environment_clock,
+                "pickup_clock": pickup_clock, "yaw": yaw, "pitch": pitch, "ticks": clock.ticks,
+            }))).transpose()?;
+            crate::replay::OwnedProbe {
+                map: maps[current].clone(), feet: player.feet, velocity: player.velocity,
+                yaw, pitch, sanity: stats.sanity(), will: stats.will(), alive: stats.alive(),
+                weapon: stats.selected(), ticks: clock.ticks, environment_clock, targets, state,
+                cost_us: gather.elapsed().as_micros() as u64,
+            }
+        }};
+    }
+    macro_rules! finish_replay_step {
+        ($path:literal) => {
+            if let Some(r) = replay.as_ref().filter(|r| r.running()) {
+                #[cfg(not(target_os = "vita"))]
+                { previous_step_exit = $path; }
+                let due = r.due();
+                // Host builds compare the lightweight probe even between tape checks.
+                if cfg!(not(target_os = "vita")) || due.is_some() {
+                    assert!(stored_replay_probe.is_none(), "duplicate replay probe for one step");
+                    stored_replay_probe = Some((replay_probe!(due.unwrap_or(false)), $path));
+                }
+            }
+        };
     }
     let mut overlap_probe = crate::overlap_probe::Probe::configured();
     // Early exits and post-HUD saves leave their notices for the next HUD block.
@@ -1633,23 +1751,27 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     (wrap(d.y.atan2(d.x) - yaw), d.truncate().length())
                 }).min_by(|a, b| a.1.total_cmp(&b.1)));
             }
-            let targets;
-            let probe = match r.due() {
-                None => None,
-                Some(want_state) => {
-                    let gather = std::time::Instant::now();
-                    targets = npcs.targets();
-                    // The host oracle's state set: every snapshot a save or a probe covers.
-                    let state = want_state.then(|| serde_json::to_vec(&serde_json::json!({
-                        "player": player, "stats": stats, "interactions": interactions.snapshot(),
-                        "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
-                        "character": alice.snapshot(), "environment_clock": environment_clock,
-                        "pickup_clock": pickup_clock, "yaw": yaw, "pitch": pitch, "ticks": clock.ticks,
-                    }))).transpose()?;
-                    Some(crate::replay::Probe { map: &maps[current], feet: player.feet, velocity: player.velocity,
-                        yaw, pitch, sanity: stats.sanity(), will: stats.will(), alive: stats.alive(),
-                        weapon: stats.selected(), ticks: clock.ticks, environment_clock, targets: &targets, state,
-                        cost_us: gather.elapsed().as_micros() as u64 })
+            let due = r.due();
+            let probe = if let Some((probe, _path)) = stored_replay_probe.take() {
+                #[cfg(not(target_os = "vita"))]
+                {
+                    let top = replay_probe!(due.unwrap_or(false));
+                    probe.assert_same_state(&top, frame, r.current_step(), _path);
+                    replay_probe_assertions += 1;
+                }
+                due.map(|_| probe)
+            } else {
+                #[cfg(not(target_os = "vita"))]
+                if r.running() {
+                    let step = r.current_step();
+                    assert_eq!(step, 0,
+                        "missing replay step seal: frame={frame} step={step} previous_exit={previous_step_exit}");
+                    replay_probe_fallbacks += 1;
+                    println!("[lg/replay-probe] probe.fallback={replay_probe_fallbacks} frame={frame} step={step} path=initial");
+                }
+                match due {
+                    Some(want_state) => Some(replay_probe!(want_state)),
+                    None => None,
                 }
             };
             match r.begin_step(&maps[current], stats.alive(), probe) {
@@ -1664,6 +1786,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     break;
                 }
             }
+        }
+        #[cfg(not(target_os = "vita"))]
+        if replay.as_ref().is_some_and(|r| r.running()) {
+            previous_step_exit = "unmarked";
         }
         #[cfg(not(target_os="vita"))]
         crate::frame_profile::begin_creation_frame();
@@ -1688,6 +1814,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             println!("bench: done 120 frames mode={}, report ux0:data/alice/private/frame_profile/{}-{}-120.json", mode.name(), maps[current], mode.name());
                         } else {println!("bench: done 120 frames mode={} profiler=light", mode.name());}
                     }
+                    finish_replay_step!("benchmark");
                     break;
                 }
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
@@ -1727,7 +1854,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let simulate = true;
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
-        input.update(&preferences, physical_input && window_focused() && !bench && !route_running);
+        let mut step_clock = None;
+        let mut step_input = input.capture_step(
+            replay.as_ref().filter(|r| r.running()).map_or(frame, |r| r.current_step() - 1),
+            physical_input && window_focused() && !bench && !route_running,
+        );
+        input.apply_step(&step_input, &preferences);
         #[cfg(feature="native_timing")]
         timing.with(|r| {if r.schedule.is_some(){r.schedule_input(input.diagnostic_activity());}});
         preview_throttle.advance_frame();
@@ -1737,7 +1869,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if frame == 1 {
             if let Some(path) = std::env::var_os("LOOKING_GLASS_TRANSITION_PORTAL_CAPTURE") {
-                scene.show_transition_portal(&world, std::path::Path::new(&path)).await?;
+                owner_yield!(step_clock,
+                    scene.show_transition_portal(&world, std::path::Path::new(&path)))?;
             }
             if let Ok(path) = std::env::var("LOOKING_GLASS_TRANSITION_SNAPSHOT") {
                 std::fs::write(path, serde_json::to_vec(&game_snapshot!())?)?;
@@ -1765,7 +1898,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut quit_after_frame = is_quit_requested()
             || (replay.as_ref().is_some_and(|r| r.replaying()) && macroquad::input::is_quit_requested());
         quit_after_frame |= host_transition == "quit";
-        if quit_after_frame && !throttle_normal { break; }
+        if quit_after_frame && !throttle_normal {
+            finish_replay_step!("quit");
+            break;
+        }
         if physical_input && window_focused() && !console.open && !bench {
             if (is_key_pressed(KeyCode::Escape) || input.pad_pressed("Start"))
                 && !menu
@@ -1783,6 +1919,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if let Some(r) = replay.as_mut().filter(|r| r.running()) {
                 r.stop("menu");
                 if r.replaying() { break; }
+                input.refresh_controls();
             }
         }
         // A modal menu owns its own frames. Render one frozen clean world frame
@@ -1806,11 +1943,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Consume Escape before entering the separate modal frame loop. No
             // physics, story, enemies, power-up timers or world clocks run there.
             drop(census_block);
-            next_frame().await;
+            owner_yield!(step_clock, next_frame());
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
             let action = if host_transition == "native-load" { crate::menu::Action::Load(Slot::Auto) }
                 else if host_transition.starts_with("new-game") { crate::menu::Action::NewGame(options.difficulty) } else {
-                escape_menu.run(&mut preferences, &mut audio, &store, pos, yaw, &mut input).await
+                owner_yield!(step_clock, escape_menu.run(&mut preferences, &mut audio, &store, pos, yaw, &mut input))
             };
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::ModalExit, crate::native_timing::MODAL));
@@ -1821,7 +1958,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
                 Action::Quit => { if throttle_normal { quit_after_frame = true; } else { break; } },
                 Action::Chapters => {
-                    match escape_menu
+                    match owner_yield!(step_clock, escape_menu
                         .choose_chapter(
                             &maps,
                             current,
@@ -1830,8 +1967,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             &preferences,
                             &mut audio,
                             &mut input,
-                        )
-                        .await
+                        ))
                     {
                         crate::menu::ChapterChoice::Begin(choice) => {
                             chapter_requested = Some(choice);
@@ -1873,7 +2009,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             .read(slot)
                             .map(|loaded| loaded.game)
                         {
-                            Ok(game) => match restore_transition!(game, "native-load", true, replace) {
+                            Ok(game) => match restore_transition!(game, "native-load", true, replace, step_clock) {
                               Ok(()) => {
                                 escape_menu.close();
                                 hud_ops.push(HudOp::Announce("Game restored / P or click to resume".into()));
@@ -1924,6 +2060,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             clock.pause();
             input.suppress();
             if pending_menu_save.is_none() && pending_menu_newgame.is_none() && !quit_after_frame {
+                finish_replay_step!("pause");
                 drop(census_block);
             next_frame().await;
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
@@ -1932,7 +2069,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         let freeze_capture = opening_escape_menu || pending_menu_save.is_some() || pending_menu_newgame.is_some() || quit_after_frame;
         if freeze_capture { paused = true; clock.pause(); }
-        let elapsed = get_frame_time();
+        let elapsed = source_frame_time();
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         let elapsed = crate::sim_maps::probe::elapsed(elapsed);
         #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
@@ -1983,17 +2120,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 "new-game", &maps[current], "gvillage"));
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningEnter, crate::native_timing::CINEMA));
-            match crate::movie::play(
+            match owner_yield!(step_clock, crate::movie::play(
                 &mut assets,
                 &mut audio,
                 &ui,
                 &mut input,
                 &preferences,
                 "opening",
-            )
-            .await
-            {
-                Ok(false) => break,
+            )) {
+                Ok(false) => {
+                    finish_replay_step!("opening-quit");
+                    break;
+                }
                 Err(e) => {
                     eprintln!("Opening film unavailable: {e:#}");
                     hud_ops.push(HudOp::Announce("Opening film unavailable / continuing to Wonderland".into()));
@@ -2231,7 +2369,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         fullbright = !fullbright;
                         console.print(format!("Fullbright {fullbright}"));
                     }
-                    Ok(Command::Quit) => { if throttle_normal { quit_after_frame = true; } else { break; } },
+                    Ok(Command::Quit) => {
+                        if throttle_normal { quit_after_frame = true; }
+                        else { finish_replay_step!("console-quit"); break; }
+                    },
                 }
             }
         }
@@ -2250,7 +2391,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let result = match store.read(slot) {
                     Ok(loaded) => {
                         let backup = loaded.backup;
-                        restore_transition!(loaded.game, "quick-or-console-load", true, replace).map(|()| backup)
+                        restore_transition!(loaded.game, "quick-or-console-load", true, replace, step_clock).map(|()| backup)
                     }
                     Err(error) => Err(error),
                 };
@@ -2277,13 +2418,21 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             } else {
                 hud_ops.push(HudOp::Announce("Save/load is unavailable in a staged preview".into()));
             }
+            finish_replay_step!("quick-or-console-load");
             drop(census_block);
             next_frame().await;
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
             continue;
         }
-        let pressed = |key| focused && !console_input && input.key(&preferences, key, true);
-        let held = |key| focused && !console_input && input.key(&preferences, key, false);
+        // Step 8 dispatches from here, after the owner prologue.
+        step_input.refresh_clock();
+        step_clock = Some(step_input.enter_clock());
+        macro_rules! pressed {
+            ($key:expr) => { focused && !console_input && input.key(&preferences, $key, true) };
+        }
+        macro_rules! held {
+            ($key:expr) => { focused && !console_input && input.key(&preferences, $key, false) };
+        }
         if input.ui(KeyCode::Escape) && !console_input {
             if inventory_menu {
                 inventory_menu = false;
@@ -2291,7 +2440,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 menu = false;
             }
         }
-        if pressed(KeyCode::Tab) && !survey_owns_select {
+        if pressed!(KeyCode::Tab) && !survey_owns_select {
             menu = !menu;
             inventory_menu = false;
             help_until = 0.0;
@@ -2300,14 +2449,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 level_choices.len(),
             );
         }
-        let inventory_opened = inventory_toggle(pressed(KeyCode::I) && focused, menu, &mut inventory_menu);
-        if inventory_opened || (!menu && pressed(KeyCode::I) && focused) {
+        let inventory_opened = inventory_toggle(pressed!(KeyCode::I) && focused, menu, &mut inventory_menu);
+        if inventory_opened || (!menu && pressed!(KeyCode::I) && focused) {
             menu = false;
             help_until = 0.;
             clock.pause();
         }
         let mut audio_changed = false;
-        if pressed(KeyCode::M) {
+        if pressed!(KeyCode::M) {
             audio.settings.muted = !audio.settings.muted;
             audio_changed = true;
         }
@@ -2316,7 +2465,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 notice = format!("Could not save sound settings: {e}");
             }
         }
-        if (pressed(KeyCode::H) || pressed(KeyCode::F1))
+        if (pressed!(KeyCode::H) || pressed!(KeyCode::F1))
             && !menu
             && !inventory_menu
             && !console_input
@@ -2327,28 +2476,29 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 get_time() + 8.0
             };
         }
-        if pressed(KeyCode::F2) {
+        if pressed!(KeyCode::F2) {
             fullbright = !fullbright;
         }
-        if pressed(KeyCode::V) && !menu && !inventory_menu && !console_input {
+        if pressed!(KeyCode::V) && !menu && !inventory_menu && !console_input {
             third_person = !third_person;
             follow_camera.reset();
             camera_handoff.reset();
         }
-        if pressed(KeyCode::P) && focused {
+        if pressed!(KeyCode::P) && focused {
             paused = !paused;
             clock.pause();
         }
         let was_paused = paused;
+        let pointer = input.pointer();
         if paused
             && focused
             && !menu
             && !inventory_menu
             && !console_input
-            && (is_mouse_button_pressed(MouseButton::Left) || input.pad_pressed("A"))
+            && (input.frame().mouse_button(MouseButton::Left, true) || input.pad_pressed("A"))
         {
-            let (mx, my) = mouse_position();
-            if mx >= 0. && my >= 0. && mx < screen_width() && my < screen_height() {
+            let (mx, my) = pointer.position;
+            if mx >= 0. && my >= 0. && mx < pointer.width && my < pointer.height {
                 paused = false;
                 clock.pause();
             }
@@ -2375,6 +2525,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && !bench
                 && !route_running
                 && stats.alive(),
+            pointer,
             &mut yaw,
             &mut pitch,
         );
@@ -2392,7 +2543,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 KeyCode::Key9,
                 KeyCode::Key0,
             ];
-            let selected = keys.iter().position(|&k| pressed(k)).or_else(|| {
+            let selected = keys.iter().position(|&k| pressed!(k)).or_else(|| {
                 if inventory_menu {
                     crate::hud::inventory_hit()
                 } else {
@@ -2456,10 +2607,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             && !menu
             && !inventory_menu
             && !console_input
-            && ((!stats.alive() && (pressed(KeyCode::Enter) || input.pad_pressed("A")))
-                || (!paused && pressed(KeyCode::R)));
+            && ((!stats.alive() && (pressed!(KeyCode::Enter) || input.pad_pressed("A")))
+                || (!paused && pressed!(KeyCode::R)));
         let restart =
-            focused && !menu && !inventory_menu && !console_input && pressed(KeyCode::Home);
+            focused && !menu && !inventory_menu && !console_input && pressed!(KeyCode::Home);
         // Discard recovery input as well as the dead-player Retry branch. A
         // queued New Game must not move/reset the outgoing live frame either.
         let new_game_owns_input = new_campaign_memory.is_some() || pending_menu_newgame.is_some();
@@ -2515,7 +2666,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && stats.alive(),
             input.film_skip(&preferences),
         );
-        skip_scene.note_input(input.film_skip(&preferences), is_key_down(KeyCode::Enter), is_key_down(KeyCode::E));
+        skip_scene.note_input(
+            input.film_skip(&preferences),
+            input.frame().key(KeyCode::Enter, false),
+            input.frame().key(KeyCode::E, false),
+        );
         #[cfg(target_os = "vita")]
         // Use the same scene owner/end-state path as a held Cross skip.
         let skip_requested = skip_requested
@@ -2555,7 +2710,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             let result = match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref())) {
-                Ok(game) => restore_transition!(game, "death-retry", false, retry),
+                Ok(game) => restore_transition!(game, "death-retry", false, retry, step_clock),
                 Err(error) => Err(error),
             };
             match result {
@@ -2574,6 +2729,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             // All per-frame clocks, targets and inputs above belong to the old
             // attempt. Begin a fresh frame before advancing the restored one.
+            finish_replay_step!("death-retry");
+            drop(step_clock.take());
             drop(census_block);
             next_frame().await;
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
@@ -2663,7 +2820,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 hud_ops.push(HudOp::Announce("Entrance is obstructed / choose another level with Tab".into()));
             }
         }
-        if (console_fly || (pressed(KeyCode::F4) && !menu && !inventory_menu)) && stats.alive() {
+        if (console_fly || (pressed!(KeyCode::F4) && !menu && !inventory_menu)) && stats.alive() {
             if flying {
                 let feet = pos - Vec3::Z * EYE_HEIGHT;
                 if world.body_clear(feet) {
@@ -2718,16 +2875,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 };
                 let _loading = crate::loading_screen::begin("chapter-or-console", &maps[selected]);
                 let mut outgoing = unload_scene!();
-                crate::loading_screen::released().await;
+                owner_yield!(step_clock, crate::loading_screen::released());
                 memory.after_release();
-                match Box::pin(enter_level_async(
+                match owner_yield!(step_clock, Box::pin(enter_level_async(
                     &mut assets,
                     &maps[selected],
                     selected_entry.as_deref(),
                     None,
                     &options,
                     !options.fly,
-                )).await {
+                ))) {
                     Ok(next) => {
                         #[cfg(feature = "native_timing")]
                         timing.with(|r| r.before_install());
@@ -2787,7 +2944,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         memory.finish(true);
                     }
                     Err(e) => {
-                        let _ = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, false);
+                        let _ = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, false, step_clock);
                         drop(outgoing);
                         memory.finish(false);
                         #[cfg(feature = "native_timing")]
@@ -2818,16 +2975,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 pitch += look.y * dt * 2.;
                 }
             }
-            if !scripted_view && held(KeyCode::Left) {
+            if !scripted_view && held!(KeyCode::Left) {
                 yaw += dt * 1.3;
             }
-            if !scripted_view && held(KeyCode::Right) {
+            if !scripted_view && held!(KeyCode::Right) {
                 yaw -= dt * 1.3;
             }
-            if !scripted_view && held(KeyCode::Up) {
+            if !scripted_view && held!(KeyCode::Up) {
                 pitch += dt;
             }
-            if !scripted_view && held(KeyCode::Down) {
+            if !scripted_view && held!(KeyCode::Down) {
                 pitch -= dt;
             }
             pitch = pitch.clamp(-1.5, 1.5);
@@ -2838,28 +2995,28 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             );
             let right = vec3(yaw.sin(), -yaw.cos(), 0.);
             let mut movement = forward * input.movement().y + right * input.movement().x;
-            if held(KeyCode::W) {
+            if held!(KeyCode::W) {
                 movement += forward;
             }
-            if held(KeyCode::S) {
+            if held!(KeyCode::S) {
                 movement -= forward;
             }
-            if held(KeyCode::D) {
+            if held!(KeyCode::D) {
                 movement += right;
             }
-            if held(KeyCode::A) {
+            if held!(KeyCode::A) {
                 movement -= right;
             }
             if flying {
                 player.release_rope();
             }
-            if flying && held(KeyCode::E) {
+            if flying && held!(KeyCode::E) {
                 movement.z += 1.;
             }
-            if flying && held(KeyCode::Q) {
+            if flying && held!(KeyCode::Q) {
                 movement.z -= 1.;
             }
-            let speed = if held(KeyCode::LeftShift) { 800. } else { 220. };
+            let speed = if held!(KeyCode::LeftShift) { 800. } else { 220. };
             if flying {
                 pos += movement.normalize_or_zero() * speed * dt;
                 clock.pause();
@@ -2897,7 +3054,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         .prompt(&world, player.eye(), aim)
                         .is_some(),
                 );
-                let use_pressed = pressed(KeyCode::E);
+                let use_pressed = pressed!(KeyCode::E);
                 advance_dialogue = use_pressed && owner == UseOwner::Dialogue;
                 let mut events = interaction::Events::default();
                 if use_pressed && owner == UseOwner::Talk {
@@ -3016,16 +3173,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let flat = vec2(yaw.cos(), yaw.sin());
                 let right = vec2(yaw.sin(), -yaw.cos());
                 let mut wish = flat * input.movement().y + right * input.movement().x;
-                if held(KeyCode::W) {
+                if held!(KeyCode::W) {
                     wish += flat;
                 }
-                if held(KeyCode::S) {
+                if held!(KeyCode::S) {
                     wish -= flat;
                 }
-                if held(KeyCode::D) {
+                if held!(KeyCode::D) {
                     wish += right;
                 }
-                if held(KeyCode::A) {
+                if held!(KeyCode::A) {
                     wish -= right;
                 }
                 let mut control = Controls {
@@ -3033,9 +3190,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         && matches!(owner, UseOwner::SharedRope | UseOwner::Traversal),
                     wish: wish.clamp_length_max(1.),
                     swim: movement.clamp_length_max(1.),
-                    rise: f32::from(held(KeyCode::Space)) - f32::from(held(KeyCode::LeftControl)),
-                    jump: !overlay_before && pressed(KeyCode::Space),
-                    run: input.running(&preferences, held(KeyCode::LeftShift)),
+                    rise: f32::from(held!(KeyCode::Space)) - f32::from(held!(KeyCode::LeftControl)),
+                    jump: !overlay_before && pressed!(KeyCode::Space),
+                    run: input.running(&preferences, held!(KeyCode::LeftShift)),
                 };
                 #[cfg(target_os = "vita")]
                 if bench {
@@ -3082,7 +3239,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     player.grounded
                         && before_grounded
                         && player.immersion.level == 0
-                        && !input.running(&preferences, held(KeyCode::LeftShift)),
+                        && !input.running(&preferences, held!(KeyCode::LeftShift)),
                     player.jumps > before_jumps,
                     player.landings > before_landings && before_fall < -90.,
                 );
@@ -3213,7 +3370,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         hints.sync(&interactions);
-        if (summon_cat || (story_active && pressed(KeyCode::C))) && !in_transport {
+        if (summon_cat || (story_active && pressed!(KeyCode::C))) && !in_transport {
             let outcome = if !stats.alive() || flying {
                 Err("Return to walking and retry before summoning Cheshire.")
             } else {
@@ -3352,20 +3509,21 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             campaign.completed.insert(save::visit_key(&maps[current], entry_spawn.as_deref()));
             if saves_writable { if let Err(e) = store.mark_complete() { eprintln!("Completion marker failed: {e:#}"); } }
             mouse_look.release();
-            input.suppress();
+            input.suppress_captured();
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::EndingEnter, crate::native_timing::CINEMA));
-            match crate::movie::play(
+            match owner_yield!(step_clock, crate::movie::play(
                 &mut assets,
                 &mut audio,
                 &ui,
                 &mut input,
                 &preferences,
                 "ending",
-            )
-            .await
-            {
-                Ok(false) => break,
+            )) {
+                Ok(false) => {
+                    finish_replay_step!("ending-quit");
+                    break;
+                }
                 Err(e) => eprintln!("Ending film failed: {e:#}"),
                 Ok(true) => (),
             }
@@ -3375,6 +3533,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             escape_menu.open(crate::menu::Page::Credits, &preferences, audio.settings);
             escape_menu.message = "Campaign complete / Continue replays the final encounter".into();
             clock.pause();
+            finish_replay_step!("ending");
             continue;
         }
         if let Some(exit) = pending_transition.take() {
@@ -3401,14 +3560,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::TransitionBegin, crate::native_timing::TRANSITION));
             let _loading = crate::loading_screen::begin("natural-exit", &name);
-            present_transition_loading(&name).await;
+            owner_yield!(step_clock, present_transition_loading(&name));
             let transition_started = std::time::Instant::now();
             let checkpoint = game_snapshot!();
             let particles = steam.runtime();
             let audio_checkpoint = audio.transition_checkpoint();
             let mut memory = crate::transition_memory::Transition::begin("natural-exit", &maps[current], &name);
             let mut outgoing = unload_scene!();
-            crate::transition_memory::released_with(|| {
+            owner_yield!(step_clock, crate::transition_memory::released_with(|| {
                 crate::loading_screen::draw_or(|| draw_transition_loading(&name));
                 // Inspect the submitted loading frame before the swap. Reading
                 // the next back buffer after next_frame only sees its clear.
@@ -3416,7 +3575,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 if let Some(path) = std::env::var_os("LOOKING_GLASS_LOADING_BUILD_CAPTURE") {
                     save_capture(std::path::Path::new(&path)).expect("last loading frame before build");
                 }
-            }).await;
+            }));
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             if crate::transition_memory::legacy_overlap() {
                 if let (Some(source), Some(target)) = (std::env::var_os("LOOKING_GLASS_LOADING_CAPTURE"), std::env::var_os("LOOKING_GLASS_LOADING_BUILD_CAPTURE")) {
@@ -3424,7 +3583,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
             memory.after_release();
-            let arrived = Box::pin(enter_natural(&mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options)).await;
+            let arrived = owner_yield!(step_clock, Box::pin(enter_natural(
+                &mut assets, &mut next_stats, &mut next_campaign, leaving, &exit, &options,
+            )));
             match arrived {
                 Ok((next, arrived_player, arrived_eye, arrived_yaw)) => {
                     #[cfg(feature = "native_timing")]
@@ -3490,7 +3651,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     memory.finish(true);
                 }
                 Err(e) => {
-                    let _ = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, false);
+                    let _ = rollback_resources!(checkpoint, outgoing, particles, audio_checkpoint, false, step_clock);
                     drop(outgoing);
                     memory.finish(false);
                     interactions.transition_failed(&exit);
@@ -3785,7 +3946,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 0.
             },
             &player,
-            input.running(&preferences, held(KeyCode::LeftShift)),
+            input.running(&preferences, held!(KeyCode::LeftShift)),
             character::WeaponInput {
                 dice: stats.copies(6),
                 first_person: !third_person && !flying,
@@ -4471,13 +4632,6 @@ interactions
                 frame, dynamic_input.bytes(), dynamic_input.capacity_bytes(), us, allocations,
                 dynamic_input.transforms.len(), 0, 0);
         }
-        #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        let extracted_probe_state = (snapshot_enabled && crate::sim_maps::probe::enabled()).then(|| serde_json::json!({
-            "player": player, "stats": stats, "interactions": interactions.snapshot(),
-            "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
-            "character": alice.snapshot(), "environment_clock": environment_clock,
-            "pickup_clock": pickup_clock, "transforms": transforms,
-        }));
         // Resolve dynamic lights at the simulation boundary. Resident lighting
         // textures and the selected-light TLS stay owned by the renderer.
         let extracted_lights = snapshot_enabled.then(|| {
@@ -5426,6 +5580,8 @@ interactions
         #[cfg(target_os = "vita")]
         drop(viewer_block);
         drop(save_path);
+        // Both immediate and deferred checkpoint acknowledgements have completed.
+        finish_replay_step!("tail");
         let profiler_path=crate::phase_census::span(crate::phase_census::Region::TailProfiler);
         if !active {
             frame_profile.cancel();
@@ -5464,7 +5620,7 @@ interactions
         crate::frame_phases::mark(2);
         crate::spike_log::cpu_end();
         // Save completion and optional diagnostics are serial fences. Ordinary
-        // enabled frames have consumed owned HUD/timing/probe inputs above.
+        // enabled frames have consumed owned HUD and timing inputs above.
         if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
         #[cfg(target_os = "vita")]
         {
@@ -5497,15 +5653,13 @@ interactions
             #[cfg(feature = "vita_renderer")]
             crate::sim_maps::probe::record_exact_frame(&maps[current], frame, matches!(frame, 0 | 59 | 60 | 119 | 120 | 179))?;
             crate::sim_maps::probe::shot(frame)?;
-            let state = if let Some(state) = &extracted_probe_state { state } else {
-                &serde_json::json!({
+            let state = serde_json::json!({
                     "player": player, "stats": stats, "interactions": interactions.snapshot(),
                     "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
                     "character": alice.snapshot(), "environment_clock": environment_clock,
                     "pickup_clock": pickup_clock, "transforms": transforms,
-                })
-            };
-            crate::sim_maps::probe::end(frame, &maps[current], active, state);
+            });
+            crate::sim_maps::probe::end(frame, &maps[current], active, &state);
         }
         #[cfg(feature = "vita_renderer")]
         let presented_probe = load_probe.take();
@@ -5555,6 +5709,7 @@ interactions
                 crate::replay_capture::save(step)?;
             }
         }
+        drop(step_clock.take());
         next_frame().await;
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }
@@ -5574,6 +5729,10 @@ interactions
         if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
     }
     crate::spike_log::end_play();
+    #[cfg(not(target_os = "vita"))]
+    if replay.is_some() {
+        println!("[lg/replay-probe] assertions={replay_probe_assertions} probe.fallback={replay_probe_fallbacks}");
+    }
     if let Some(r) = &mut replay { r.finish(replay_end.unwrap_or("exit")); }
     // Host-only, sim_maps_probe-only: the allocator ledger's continuous peak since the
     // map load began (transition_begin resets it) against the 192 MiB newlib ceiling.

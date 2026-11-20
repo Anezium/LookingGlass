@@ -72,6 +72,21 @@ pub struct Frame {
     pub pad: Option<[u8; 4]>,
     pub chars: Vec<char>,
     pub quit: bool,
+    // Owner-captured gameplay metadata, outside the tape format.
+    pub(crate) desktop_pad: Option<crate::input::RawPad>,
+    pub(crate) vita_analog: bool,
+}
+
+impl Frame {
+    pub(crate) fn key(&self, key: KeyCode, edge: bool) -> bool {
+        let bits = if edge { self.keys_pressed } else { self.keys_down };
+        bits != 0 && KEYS.iter().position(|&k| k == key).is_some_and(|bit| bits >> bit & 1 != 0)
+    }
+
+    pub(crate) fn mouse_button(&self, button: MouseButton, edge: bool) -> bool {
+        let bits = if edge { self.mouse_pressed } else { self.mouse_down };
+        bits >> button_bit(button) & 1 != 0
+    }
 }
 
 const OFF: u8 = 0;
@@ -93,6 +108,56 @@ static CHARS: Mutex<Vec<char>> = Mutex::new(Vec::new());
 /// Tape seconds, the sum of the frame times of every step so far, as f64 bits.
 static CLOCK: AtomicU64 = AtomicU64::new(0);
 static ORIGIN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+#[derive(Clone, Copy)]
+pub(crate) struct ClockView {
+    pub(crate) dt: f32,
+    pub(crate) clock_bits: u64,
+    pub(crate) instant: std::time::Instant,
+}
+
+thread_local! {
+    static CLOCK_VIEW: std::cell::Cell<Option<ClockView>> = const { std::cell::Cell::new(None) };
+    static IN_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A step clock belongs to the thread that installed it.
+#[must_use]
+pub(crate) struct StepClockGuard {
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ClockView {
+    pub(crate) fn capture() -> Self {
+        let clock_bits = source_time().to_bits();
+        let instant = if active() {
+            tape_instant(clock_bits)
+        } else {
+            std::time::Instant::now()
+        };
+        Self { dt: source_frame_time(), clock_bits, instant }
+    }
+
+    pub(crate) fn enter(self) -> StepClockGuard {
+        assert!(!IN_STEP.replace(true), "nested step clock");
+        CLOCK_VIEW.set(Some(self));
+        StepClockGuard { _thread: std::marker::PhantomData }
+    }
+}
+
+impl Drop for StepClockGuard {
+    fn drop(&mut self) {
+        CLOCK_VIEW.set(None);
+        IN_STEP.set(false);
+    }
+}
+
+fn clock_view() -> Option<ClockView> {
+    let view = CLOCK_VIEW.get();
+    #[cfg(not(target_os = "vita"))]
+    assert!(!IN_STEP.get() || view.is_some(), "missing clock view inside simulation step");
+    view
+}
 
 fn mode() -> u8 {
     MODE.load(Relaxed)
@@ -162,6 +227,12 @@ pub(super) fn last_pad() -> Option<[u8; 4]> {
 
 /// Everything macroquad reports for this frame. Chars are drained from its queue.
 pub(super) fn capture_live() -> Frame {
+    let mut f = capture_live_controls();
+    f.chars = std::iter::from_fn(macroquad::input::get_char_pressed).collect();
+    f
+}
+
+fn capture_live_controls() -> Frame {
     use macroquad::input as mq;
     let mut f = Frame { dt: macroquad::time::get_frame_time(), ..Default::default() };
     for (i, key) in KEYS.iter().enumerate() {
@@ -178,9 +249,27 @@ pub(super) fn capture_live() -> Frame {
     }
     f.mouse = mq::mouse_position();
     f.wheel = mq::mouse_wheel();
-    f.chars = std::iter::from_fn(mq::get_char_pressed).collect();
     f.quit = mq::is_quit_requested();
     f
+}
+
+/// Owner-side gameplay sample. Character input remains queued for the modal UI or console.
+pub(crate) fn capture_controls() -> Frame {
+    if !active() { return capture_live_controls(); }
+    let mouse = MOUSE_BITS.load(Relaxed);
+    Frame {
+        dt: source_frame_time(),
+        keys_down: load_u128(&KEYS_DOWN),
+        keys_pressed: load_u128(&KEYS_PRESSED),
+        keys_released: load_u128(&KEYS_RELEASED),
+        mouse_down: mouse as u8,
+        mouse_pressed: (mouse >> 8) as u8,
+        mouse_released: (mouse >> 16) as u8,
+        mouse: mouse_position(),
+        wheel: mouse_wheel(),
+        quit: is_quit_requested(),
+        ..Default::default()
+    }
 }
 
 pub fn is_key_down(key: KeyCode) -> bool {
@@ -224,20 +313,35 @@ pub fn is_quit_requested() -> bool {
     if !active() { return macroquad::input::is_quit_requested(); }
     QUIT.load(Relaxed)
 }
-pub fn get_frame_time() -> f32 {
+pub(crate) fn source_frame_time() -> f32 {
     if !active() { return macroquad::time::get_frame_time(); }
     f32::from_bits(DT.load(Relaxed))
 }
-/// Seconds since the first step while active, so time differences match between runs.
-pub fn get_time() -> f64 {
+
+pub(crate) fn source_time() -> f64 {
     if !active() { return macroquad::time::get_time(); }
     f64::from_bits(CLOCK.load(Relaxed))
 }
+
+fn tape_instant(clock_bits: u64) -> std::time::Instant {
+    let origin = ORIGIN.lock().unwrap_or_else(|p| p.into_inner()).unwrap_or_else(std::time::Instant::now);
+    origin + std::time::Duration::from_secs_f64(f64::from_bits(clock_bits))
+}
+
+pub fn get_frame_time() -> f32 {
+    clock_view().map_or_else(source_frame_time, |view| view.dt)
+}
+
+/// Seconds since the first step while active, so time differences match between runs.
+pub fn get_time() -> f64 {
+    clock_view().map_or_else(source_time, |view| f64::from_bits(view.clock_bits))
+}
+
 /// Wall clock for gameplay timers that would otherwise read `Instant::now()`.
 pub fn now() -> std::time::Instant {
+    if let Some(view) = clock_view() { return view.instant; }
     if !active() { return std::time::Instant::now(); }
-    let origin = ORIGIN.lock().unwrap_or_else(|p| p.into_inner()).unwrap_or_else(std::time::Instant::now);
-    origin + std::time::Duration::from_secs_f64(f64::from_bits(CLOCK.load(Relaxed)))
+    tape_instant(CLOCK.load(Relaxed))
 }
 
 /// Host only, for diagnostics: `LOOKING_GLASS_REPLAY_CROSS` lets a host replay a tape recorded on a
