@@ -61,10 +61,10 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/character/skinning/census.rs:18` | `GROUPS` | cache | Actor draw enters skin gather, prepare and collect. Keep scratch, workers and draw scopes with the gather owner. See line 21. |
 | `src/character/skinning/cull_tests.rs:26` | `KEEP` | state | No. Test fixture or override. Keep scoped to its test thread or harness. See line 58. |
 | `src/character/skinning/cull_tests.rs:26` | `thread_local!` | state | TLS block. No. Test fixture or override. Keep scoped to its test thread or harness. |
-| `src/character/skinning/identity.rs:5` | `thread_local!` | counter | TLS block. NPC or skin-instance construction allocates an ID. Use atomic IDs at integration, assert no concurrent owner allocation, compare exact serial IDs. |
-| `src/character/skinning/identity.rs:6` | `NEXT` | counter | NPC or skin-instance construction allocates an ID. Use atomic IDs at integration, assert no concurrent owner allocation, compare exact serial IDs. See line 15. |
-| `src/character/skinning/identity.rs:7` | `NEXT_INSTANCE` | counter | NPC or skin-instance construction allocates an ID. Use atomic IDs at integration, assert no concurrent owner allocation, compare exact serial IDs. See line 11. |
-| `src/character/skinning/identity.rs:8` | `CURRENT` | state | Draw installs ActorId scope. Retain TLS on drawing thread. See line 20. |
+| `src/character/skinning/identity.rs:7` | `NEXT` | counter | Process-wide atomic actor counter. A host owner allocation during a step panics. |
+| `src/character/skinning/identity.rs:8` | `NEXT_INSTANCE` | counter | Process-wide atomic skin-instance counter, guarded by the same host rule. |
+| `src/character/skinning/identity.rs:14` | `CURRENT` | state | Draw installs ActorId scope on its thread. |
+| `src/character/skinning/identity.rs:13` | `OWNER_STEP_IN_FLIGHT` | state | Host owner guard. Held over dispatch and receive. |
 | `src/character/skinning/overlap.rs:30` | `thread_local!` | cache | TLS block. Actor draw enters skin gather, prepare and collect. Keep scratch, workers and draw scopes with the gather owner. |
 | `src/character/skinning/overlap.rs:31` | `PHASE` | cache | Actor draw enters skin gather, prepare and collect. Keep scratch, workers and draw scopes with the gather owner. See line 35. |
 | `src/character/skinning/overlap.rs:32` | `STORE` | cache | Actor draw enters skin gather, prepare and collect. Keep scratch, workers and draw scopes with the gather owner. See line 62. |

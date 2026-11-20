@@ -297,6 +297,18 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
             .map_err(PipelineError::Owner)
     }
 
+    /// W0 uses a single idle slot and returns state before the owner resumes.
+    /// A continuation of the same frame uses the same capture stamp.
+    pub fn run_blocked(&mut self, stamp: Stamp, input: J)
+        -> Result<(Stamp, Step<D>, &mut O), PipelineError<std::convert::Infallible>>
+    {
+        self.submit(0, stamp, input)?;
+        let Done { work, step } = self.join()?;
+        self.state = Some(work.state);
+        self.slots[work.slot] = Some(work.output);
+        Ok((work.stamp, step, self.slots[work.slot].as_mut().unwrap()))
+    }
+
     fn dispatch<E>(&mut self, slot: usize, frame: Frame, input: J) -> Result<(), PipelineError<E>> {
         assert!(!self.in_flight);
         let generation = &mut self.generations[slot];
@@ -307,6 +319,11 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
             frame,
             slot_generation: *generation,
         };
+        self.submit(slot, stamp, input)
+    }
+
+    fn submit<E>(&mut self, slot: usize, stamp: Stamp, input: J) -> Result<(), PipelineError<E>> {
+        assert!(!self.in_flight);
         let work = Work {
             stamp,
             state: self.state.take().unwrap(),

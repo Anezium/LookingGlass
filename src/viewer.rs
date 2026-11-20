@@ -1002,6 +1002,7 @@ impl SnapshotTiming {
 }
 
 mod step;
+mod blocked_step;
 mod free_render;
 use step::{
     step_a, step_b, step_due, Due, SimState, ConsoleOps, StepAInput, StepBInput, StepJob, StepLocals, StepScopes,
@@ -1203,8 +1204,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut wave_input=Vec::new();
     let mut pickup_input=crate::powerups::PickupInput::default();
     let mut snapshot_fenced_frames = 0u64;
-    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     let mut acoustic_view = None;
+    #[cfg(feature = "vita_renderer")]
+    let sim_overlap = crate::render::vita_renderer::config().sim_overlap;
+    #[cfg(not(feature = "vita_renderer"))]
+    let sim_overlap = false;
+    let mut sim_worker = sim_overlap.then(blocked_step::Worker::new).transpose()?;
+    let mut worker_generation = 0u64;
+    let mut dispatched_frames = 0u64;
     let mut menu = false;
     let mut inventory_menu = false;
     let mut help_until = 0.0;
@@ -1754,7 +1761,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }};
     }
-    let mut stored_replay_probe: Option<(crate::replay::OwnedProbe, &'static str)> = None;
+    use crate::sim_pipeline::{Frame as StampFrame, Stamp};
+    let mut frame_stamp: Stamp;
+    let mut stored_replay_probe: Option<(Stamp, crate::replay::OwnedProbe, &'static str)> = None;
     #[cfg(not(target_os = "vita"))]
     let mut replay_probe_fallbacks = 0u64;
     #[cfg(not(target_os = "vita"))]
@@ -1763,20 +1772,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut replay_probe_assertions = 0u64;
     macro_rules! replay_probe {
         ($want_state:expr) => {{
-            let gather = std::time::Instant::now();
-            let targets = npcs.targets();
-            let state = $want_state.then(|| serde_json::to_vec(&serde_json::json!({
-                "player": player, "stats": stats, "interactions": interactions.snapshot(),
-                "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
-                "character": alice.snapshot(), "environment_clock": environment_clock,
-                "pickup_clock": pickup_clock, "yaw": yaw, "pitch": pitch, "ticks": clock.ticks,
-            }))).transpose()?;
-            crate::replay::OwnedProbe {
-                map: maps[current].clone(), feet: player.feet, velocity: player.velocity,
-                yaw, pitch, sanity: stats.sanity(), will: stats.will(), alive: stats.alive(),
-                weapon: stats.selected(), ticks: clock.ticks, environment_clock, targets, state,
-                cost_us: gather.elapsed().as_micros() as u64,
-            }
+            step::capture_replay_probe!(maps[current].as_str(), $want_state, player, stats,
+                interactions, npcs, story, hints, alice, environment_clock, pickup_clock, yaw, pitch, clock)
         }};
     }
     macro_rules! finish_replay_step {
@@ -1788,7 +1785,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 // Host builds compare the lightweight probe even between tape checks.
                 if cfg!(not(target_os = "vita")) || due.is_some() {
                     assert!(stored_replay_probe.is_none(), "duplicate replay probe for one step");
-                    stored_replay_probe = Some((replay_probe!(due.unwrap_or(false)), $path));
+                    stored_replay_probe = Some((frame_stamp, replay_probe!(due.unwrap_or(false)), $path));
                 }
             }
         };
@@ -1803,9 +1800,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         };
     }
     let mut art_ops = Vec::new();
-    // Owner transactions still use the live bindings between the serial calls.
-    macro_rules! serial_step {
-        ($function:ident, $locals:ident, $scopes:ident, $step_input:expr $(,)?) => {{
+    // Owner transactions observe the live bindings between the two simulation cuts.
+    macro_rules! run_step {
+        ($function:ident, $locals:ident, $scopes:ident, $step_input:expr,
+            $stamp:expr, $worker:expr, $clock:expr, $send:expr, $reply:pat => $value:expr $(,)?) => {{
             let (alice_sim, mut alice_art) = alice.into_parts();
             let (npcs_sim, npcs_art) = npcs.into_parts();
             let (steam_sim, steam_art) = steam.into_parts();
@@ -1844,14 +1842,22 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 campaign,
                 played,
             });
-            let (job, result) = $function(StepJob {
-                sim, locals: $locals,
+            let job = StepJob {
+                stamp: $stamp, sim, locals: $locals,
                 art_ops, hud_ops, audio_step, console: ConsoleOps::default(),
                 #[cfg(feature = "vita_renderer")]
                 route_control: route_session.as_mut().map(crate::route_replay::Session::take_control),
-            }, $step_input, &mut $scopes);
+            };
+            let step_input = $step_input;
+            let (job, result) = if let Some(worker) = $worker {
+                let (job, result) = worker.run(job, $clock, $send(step_input))?;
+                let $reply = result else { unreachable!("unexpected sim worker reply"); };
+                (job, $value)
+            } else {
+                $function(job, step_input, &mut $scopes)
+            };
             let StepJob {
-                sim: mut state, locals, art_ops: ops, hud_ops: hud, audio_step: audio,
+                stamp: _, sim: mut state, locals, art_ops: ops, hud_ops: hud, audio_step: audio,
                 console: console_ops,
                 #[cfg(feature = "vita_renderer")]
                 route_control,
@@ -1946,6 +1952,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             paused=false;
         }
         // One tape step per viewer frame, before any input or frame time is read.
+        let mut first_replay_step = false;
         if let Some(r) = &mut replay {
             if r.wants_aim() {
                 let wrap = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
@@ -1955,7 +1962,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }).min_by(|a, b| a.1.total_cmp(&b.1)));
             }
             let due = r.due();
-            let probe = if let Some((probe, _path)) = stored_replay_probe.take() {
+            let probe = if let Some((stamp, probe, _path)) = stored_replay_probe.take() {
+                assert_eq!(stamp.frame.tape_step, r.current_step(), "stale replay seal stamp");
                 #[cfg(not(target_os = "vita"))]
                 {
                     let top = replay_probe!(due.unwrap_or(false));
@@ -1980,6 +1988,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             match r.begin_step(&maps[current], stats.alive(), probe) {
                 crate::replay::Step::Run { first: true } => {
                     // Same input state in a recording and its replay, whatever came before.
+                    first_replay_step = true;
                     input = crate::input::Input::default();
                     input.suppress();
                 }
@@ -1991,6 +2000,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
             }
         }
+        frame_stamp = Stamp {
+            frame: StampFrame {
+                frame,
+                tape_step: replay.as_ref().map_or(0, |r| r.current_step()),
+                visit_id: level_art.snapshot_visit.id(),
+            },
+            slot_generation: 0,
+        };
         #[cfg(not(target_os = "vita"))]
         if replay.as_ref().is_some_and(|r| r.running()) {
             previous_step_exit = "unmarked";
@@ -3188,6 +3205,31 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         } else if simulate {
             clock.pause();
         }
+        // This is the positive gameplay arm. Owner transactions and retained
+        // renderer fallback stay on the serial lane.
+        #[cfg(feature = "vita_renderer")]
+        let step_load_probe = load_probe.is_some();
+        #[cfg(not(feature = "vita_renderer"))]
+        let step_load_probe = false;
+        #[cfg(target_os = "vita")]
+        let step_survey = r13_survey.is_some();
+        #[cfg(not(target_os = "vita"))]
+        let step_survey = false;
+        let dispatchable = sim_overlap && gameplay && !first_replay_step && !step_load_probe
+            && !bench && !route_running && !step_survey && host_transition.is_empty()
+            && !save_requested && !autosave_requested && !quit_after_frame
+            && pending_menu_save.is_none() && pending_menu_newgame.is_none()
+            && context_before == (menu, inventory_menu, console.open, paused)
+            && frame_stamp.frame.visit_id == level_art.snapshot_visit.id()
+            && scene.retained_active()
+            && level_art.handoff_pose().is_none()
+            && (!snapshot_handoff || handoff_return.pose(&level_art.snapshot_visit).is_none())
+            && options.frames.is_none_or(|limit| frame + 1 < limit);
+        if dispatchable {
+            worker_generation = worker_generation.checked_add(1).expect("sim slot generation exhausted");
+            frame_stamp.slot_generation = worker_generation;
+            dispatched_frames += 1;
+        }
         let mut step_locals = StepLocals {
             simulate,
             overlay_before,
@@ -3212,16 +3254,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame: Some(viewer_block),
             census: Some(census_block),
         };
-        let (step_a_result, console_ops) = serial_step!(step_a, step_locals, step_scopes, StepAInput {
+        let (step_a_result, console_ops) = run_step!(step_a, step_locals, step_scopes, StepAInput {
             gameplay,
             map: scene.map.clone(),
             preferences: preferences.clone(),
             saves_writable,
             host_natural_exit: host_transition == "natural-exit",
-        });
+        }, frame_stamp, sim_worker.as_mut().filter(|_| dispatchable), step_input.clock(),
+            blocked_step::Input::A, blocked_step::Output::A(result) => result);
         if console_ops.close { console.open = false; }
         if let Some(message) = console_ops.message { console.print(message); }
         let (story_active, mut due) = step_a_result?;
+        let worker_complete = dispatchable && matches!(due, Due::None);
         if simulate {
         if matches!(due, Due::Checkpoint) {
             if throttle_normal {
@@ -3393,11 +3437,20 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         } // simulation: story and transitions
+        if !worker_complete {
+            frame_stamp.frame.visit_id = level_art.snapshot_visit.id();
+        }
+        let seal_request = replay.as_ref().filter(|r| r.running()).and_then(|r| {
+            let due = r.due();
+            (snapshot_handoff && (cfg!(not(target_os = "vita")) || due.is_some()))
+                .then_some(due.unwrap_or(false))
+        });
+        let mut worker_seal = None;
         let (StepView {
-            presentation, camera_out, dynamic: mut dynamic_input, active, direction, targets, pand_cinematic, scripted_camera, show_alice,
+            stamp: present_stamp, presentation, camera_out, dynamic: mut dynamic_input, active, direction, targets, pand_cinematic, scripted_camera, show_alice,
             #[cfg(target_os = "vita")]
             gameplay_alice,
-        }, _) = serial_step!(step_b, step_locals, step_scopes, StepBInput {
+        }, _) = run_step!(step_b, step_locals, step_scopes, StepBInput {
             story_active,
             map_name: maps[current].clone(),
             preferences: preferences.clone(),
@@ -3413,7 +3466,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame,
             #[cfg(target_os = "vita")]
             bench_camera,
-        });
+        }, frame_stamp, sim_worker.as_mut().filter(|_| worker_complete), step_input.clock(),
+            |input| blocked_step::Input::B(input, acoustic_view.take(), seal_request),
+            blocked_step::Output::B(result) => {
+                let (view, acoustic, seal) = result?;
+                acoustic_view = Some(acoustic);
+                worker_seal = seal.map(|probe| (view.stamp, probe, "tail"));
+                view
+            });
+        assert_eq!(present_stamp, frame_stamp, "stale present stamp");
+        assert_eq!(present_stamp.frame.visit_id, level_art.snapshot_visit.id(), "stale present visit");
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         { host_block = step_scopes.frame.take().unwrap(); }
         #[cfg(target_os = "vita")]
@@ -3421,22 +3483,26 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         census_block = step_scopes.census.take().unwrap();
         let (camera, target) = (camera_out.position, camera_out.target);
         // The step, including any Pool of Tears re-publication, is complete.
-        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        if simulate && force_acoustic_view {
-            let started = profile_acoustic_view.then(std::time::Instant::now);
-            let view = world.capture_acoustic_view(&mut acoustic_view);
-            if let Some(started) = started {
-                let ns = started.elapsed().as_nanos();
-                let (settled, dynamic, weapon) = view.collider_counts();
-                println!("ACOUSTIC_CAPTURE frame={frame} ns={ns} settled={settled} dynamic={dynamic} weapon={weapon}");
-            }
-            audio_step.apply(&mut audio, &mut assets, view);
+        if worker_complete {
+            audio_step.apply(&mut audio, &mut assets, acoustic_view.as_ref().unwrap());
         } else {
-            audio_step.apply(&mut audio, &mut assets, &world);
-        }
-        #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
-        {
-            audio_step.apply(&mut audio, &mut assets, &world);
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            if simulate && force_acoustic_view {
+                let started = profile_acoustic_view.then(std::time::Instant::now);
+                let view = world.capture_acoustic_view(&mut acoustic_view);
+                if let Some(started) = started {
+                    let ns = started.elapsed().as_nanos();
+                    let (settled, dynamic, weapon) = view.collider_counts();
+                    println!("ACOUSTIC_CAPTURE frame={frame} ns={ns} settled={settled} dynamic={dynamic} weapon={weapon}");
+                }
+                audio_step.apply(&mut audio, &mut assets, view);
+            } else {
+                audio_step.apply(&mut audio, &mut assets, &world);
+            }
+            #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+            {
+                audio_step.apply(&mut audio, &mut assets, &world);
+            }
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_scene"); }
@@ -3487,18 +3553,22 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(feature = "vita_renderer"))]
         let world_only = false;
         drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraTransforms);
-        let rope_hand = interactions
-            .pandemonium
-            .as_ref()
-            .and_then(|p| p.rope_hand())
-            .or_else(|| {
-                player
-                    .rope
-                    .as_ref()
-                    .and_then(|g| world.traversal.rope(g.id))
-                    .map(|r| (r.model, player.feet + Vec3::Z * 40.))
-            });
-        scene.update_ropes(&world, world_dt, rope_hand, &dynamic_input.transforms);
+        if worker_complete {
+            assert!(scene.retained_active(), "worker frame reached the legacy rope path");
+        } else {
+            let rope_hand = interactions
+                .pandemonium
+                .as_ref()
+                .and_then(|p| p.rope_hand())
+                .or_else(|| {
+                    player
+                        .rope
+                        .as_ref()
+                        .and_then(|g| world.traversal.rope(g.id))
+                        .map(|r| (r.model, player.feet + Vec3::Z * 40.))
+                });
+            scene.update_ropes(&world, world_dt, rope_hand, &dynamic_input.transforms);
+        }
         drop(census_leaf);
         crate::spike_log::sim(crate::spike_log::Sim::Particles2);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Particles);
@@ -4690,73 +4760,80 @@ interactions
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         drop(hud_timer);
-        if let Some(slot) = pending_menu_save.take() {
-            escape_menu.message = match store.write_with_preview(slot, &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()), save_frame.preview().as_ref()) {
-                Ok(()) => { retry.remember(captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!())); played = true; format!("Game saved in {}", slot.title()) }
-                Err(e) => format!("Save failed: {e:#}"),
-            };
-        }
-        if let Some(difficulty) = pending_menu_newgame.take() {
-            let saved = if saves_writable && stats.alive() && !post_game {
-                store.write_with_preview(Slot::Auto, &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()), save_frame.preview().as_ref())
-            } else { Ok(()) };
-            if !saves_enabled {
-                escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
-                escape_menu.message = "New Game is unavailable in a staged preview".into();
-            } else if let Err(e) = saved {
-                escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
-                escape_menu.message = format!("Could not preserve the current game: {e:#}");
-            } else {
-                post_game = false; escape_menu.post_game = false; new_game_requested = Some(difficulty);
-            }
-        }
-        if let Some(game) = finale_checkpoint_requested {
-            match acknowledge_checkpoint(
-                store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()),
-                &mut interactions.levels,
-            ) {
-                Ok(()) => {
-                    retry.remember(game_snapshot!()); hud_ops.push(HudOp::Announce("Checkpoint saved".into()));
-                }
-                Err(e) => hud_ops.push(HudOp::Announce(format!("Checkpoint save failed: {e:#}").into())),
-            }
-        }
-        if save_requested || autosave_requested {
-            if !saves_writable {
-                if save_requested {
-                    hud_ops.push(HudOp::Announce("Saving is unavailable in a staged preview".into()));
-                }
-            } else if !stats.alive() {
-                if save_requested {
-                    hud_ops.push(HudOp::Announce("Retry or load a game before saving".into()));
-                }
-            } else {
-                let slot = if save_requested {
-                    Slot::Quick
-                } else {
-                    Slot::Auto
+        let tail_context_changed = context_before != (menu, inventory_menu, console.open, paused);
+        let free_tail = snapshot_world_free && !tail_context_changed && (!dispatchable || worker_complete);
+        let tail_hud_len = hud_ops.len();
+        if free_tail {
+            assert!(!tail_save_fence, "free tail would mutate save state");
+        } else {
+            if let Some(slot) = pending_menu_save.take() {
+                escape_menu.message = match store.write_with_preview(slot, &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()), save_frame.preview().as_ref()) {
+                    Ok(()) => { retry.remember(captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!())); played = true; format!("Game saved in {}", slot.title()) }
+                    Err(e) => format!("Save failed: {e:#}"),
                 };
-                match store.write_with_preview(
-                    slot,
-                    &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()),
-                    save_frame.preview().as_ref(),
+            }
+            if let Some(difficulty) = pending_menu_newgame.take() {
+                let saved = if saves_writable && stats.alive() && !post_game {
+                    store.write_with_preview(Slot::Auto, &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()), save_frame.preview().as_ref())
+                } else { Ok(()) };
+                if !saves_enabled {
+                    escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
+                    escape_menu.message = "New Game is unavailable in a staged preview".into();
+                } else if let Err(e) = saved {
+                    escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
+                    escape_menu.message = format!("Could not preserve the current game: {e:#}");
+                } else {
+                    post_game = false; escape_menu.post_game = false; new_game_requested = Some(difficulty);
+                }
+            }
+            if let Some(game) = finale_checkpoint_requested {
+                match acknowledge_checkpoint(
+                    store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()),
+                    &mut interactions.levels,
                 ) {
                     Ok(()) => {
-                        retry.remember(captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()));
-                        played = true;
-                        hud_ops.push(HudOp::Announce((if slot == Slot::Quick {
-                            "Game saved / F9 to load"
-                        } else {
-                            "Progress saved"
-                        }).into()));
-                        if save_requested {
-                            console.print("Game saved / F9 to load");
-                        }
+                        retry.remember(game_snapshot!()); hud_ops.push(HudOp::Announce("Checkpoint saved".into()));
                     }
-                    Err(e) => {
-                        let message = format!("Save failed: {e:#}");
-                        hud_ops.push(HudOp::Announce(message.clone().into()));
-                        console.print(message);
+                    Err(e) => hud_ops.push(HudOp::Announce(format!("Checkpoint save failed: {e:#}").into())),
+                }
+            }
+            if save_requested || autosave_requested {
+                if !saves_writable {
+                    if save_requested {
+                        hud_ops.push(HudOp::Announce("Saving is unavailable in a staged preview".into()));
+                    }
+                } else if !stats.alive() {
+                    if save_requested {
+                        hud_ops.push(HudOp::Announce("Retry or load a game before saving".into()));
+                    }
+                } else {
+                    let slot = if save_requested {
+                        Slot::Quick
+                    } else {
+                        Slot::Auto
+                    };
+                    match store.write_with_preview(
+                        slot,
+                        &captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()),
+                        save_frame.preview().as_ref(),
+                    ) {
+                        Ok(()) => {
+                            retry.remember(captured_save.as_ref().cloned().unwrap_or_else(|| game_snapshot!()));
+                            played = true;
+                            hud_ops.push(HudOp::Announce((if slot == Slot::Quick {
+                                "Game saved / F9 to load"
+                            } else {
+                                "Progress saved"
+                            }).into()));
+                            if save_requested {
+                                console.print("Game saved / F9 to load");
+                            }
+                        }
+                        Err(e) => {
+                            let message = format!("Save failed: {e:#}");
+                            hud_ops.push(HudOp::Announce(message.clone().into()));
+                            console.print(message);
+                        }
                     }
                 }
             }
@@ -4765,7 +4842,17 @@ interactions
         drop(viewer_block);
         drop(save_path);
         // Both immediate and deferred checkpoint acknowledgements have completed.
-        finish_replay_step!("tail");
+        if free_tail {
+            assert_eq!(tail_hud_len, hud_ops.len(), "free tail pushed a HUD operation");
+        }
+        if let Some(seal) = worker_seal.filter(|_| free_tail) {
+            assert_eq!(seal.0, present_stamp, "stale worker seal stamp");
+            assert!(stored_replay_probe.replace(seal).is_none(), "duplicate replay probe for one step");
+            #[cfg(not(target_os = "vita"))]
+            { previous_step_exit = "tail"; }
+        } else {
+            finish_replay_step!("tail");
+        }
         let profiler_path=crate::phase_census::span(crate::phase_census::Region::TailProfiler);
         if !active {
             frame_profile.cancel();
@@ -4829,21 +4916,22 @@ interactions
         #[cfg(not(target_os="vita"))]
         if !route_running {crate::frame_profile::end_creation_frame();}
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        if !crate::sim_maps::probe::enabled() && crate::replay::input::cross() { crate::sim_maps::probe::shot(frame)?; }
+        if !crate::sim_maps::probe::enabled() && crate::replay::input::cross() { crate::sim_maps::probe::shot(present_stamp.frame.frame)?; }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         if crate::sim_maps::probe::enabled() {
             drop(host_block);
             // Every frame's pixels are hashed; the domain edges also keep a PNG.
             #[cfg(feature = "vita_renderer")]
-            crate::sim_maps::probe::record_exact_frame(&maps[current], frame, matches!(frame, 0 | 59 | 60 | 119 | 120 | 179))?;
-            crate::sim_maps::probe::shot(frame)?;
+            crate::sim_maps::probe::record_exact_frame(&maps[current], present_stamp.frame.frame,
+                matches!(present_stamp.frame.frame, 0 | 59 | 60 | 119 | 120 | 179))?;
+            crate::sim_maps::probe::shot(present_stamp.frame.frame)?;
             let state = serde_json::json!({
                     "player": player, "stats": stats, "interactions": interactions.snapshot(),
                     "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
                     "character": alice.snapshot(), "environment_clock": environment_clock,
                     "pickup_clock": pickup_clock, "transforms": transforms,
             });
-            crate::sim_maps::probe::end(frame, &maps[current], active, &state);
+            crate::sim_maps::probe::end(present_stamp.frame.frame, &maps[current], active, &state);
         }
         #[cfg(feature = "vita_renderer")]
         let presented_probe = load_probe.take();
@@ -4860,8 +4948,8 @@ interactions
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(
-                "private/screenshots/{}-{frame}.png",
-                maps[current]
+                "private/screenshots/{}-{}.png",
+                maps[current], present_stamp.frame.frame + 1
             )))?;
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -4885,15 +4973,16 @@ interactions
             flush_audio!("frame-limit");
             break;
         }
-        if context_before != (menu, inventory_menu, console.open, paused) {
+        if tail_context_changed {
+            assert!(!free_tail, "free tail would suppress simulation input");
             input.suppress();
         }
         if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
         crate::frame_phases::mark(9);
         drop(census_tail);
         #[cfg(feature = "vita_renderer")]
-        if let Some(r) = &replay {
-            let step = r.current_step();
+        if replay.is_some() {
+            let step = present_stamp.frame.tape_step;
             if crate::replay_capture::wanted(step) {
                 crate::replay_capture::save(step)?;
             }
@@ -4917,6 +5006,12 @@ interactions
         }
         if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
     }
+    if sim_overlap {
+        drop(sim_worker.take());
+        println!("[lg/sim-overlap] dispatched_frames={dispatched_frames}");
+    }
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    crate::collision::report_lazy_shapes();
     crate::spike_log::end_play();
     #[cfg(not(target_os = "vita"))]
     if replay.is_some() {

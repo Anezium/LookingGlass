@@ -126,6 +126,34 @@ pub fn begin() {
         START.with(|s| *s.borrow_mut() = Some(Instant::now()));
     }
 }
+/// The blocked owner lends these probe rows to the simulation lane. Returning the
+/// same accumulators preserves the ordering of probes before and after the hop.
+#[derive(Default)]
+pub(crate) struct StepRows {
+    counts: BTreeMap<&'static str, u64>,
+    spans: BTreeMap<&'static str, f64>,
+    mover_replay: Option<serde_json::Value>,
+    npc_actor: String,
+    npc_decisions: BTreeMap<String, (Sha256, u64)>,
+    sah: Vec<serde_json::Value>,
+}
+
+impl StepRows {
+    pub(crate) fn swap(&mut self) {
+        COUNTS.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.counts));
+        SPANS.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.spans));
+        MOVER_REPLAY.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.mover_replay));
+        NPC_ACTOR.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.npc_actor));
+        NPC_DECISIONS.with(|v| std::mem::swap(&mut *v.borrow_mut(), &mut self.npc_decisions));
+        crate::collision::sah_probe::swap(&mut self.sah);
+    }
+}
+
+pub(crate) fn begin_worker_step(frame: u64) {
+    FRAME_NO.with(|v| v.set(frame));
+    crate::collision::sah_probe::begin();
+}
+
 pub fn end(frame: u64, map: &str, active: bool, state: &impl serde::Serialize) {
     if !enabled() { return; }
     crate::collision::sah_probe::end(frame,map);

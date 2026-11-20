@@ -1,4 +1,4 @@
-//! Runtime actor identities survive vector moves and never enter saves or workers.
+//! Runtime actor identities survive vector moves and never enter saves.
 use std::{
     cell::Cell,
     sync::atomic::{AtomicU64, Ordering},
