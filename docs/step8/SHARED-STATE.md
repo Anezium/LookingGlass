@@ -49,8 +49,8 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/audio.rs:77` | `GAME_STAGE` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 83. |
 | `src/audio.rs:78` | `GAME_STAGE_AT` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 82. |
 | `src/audio.rs:79` | `GAME_ORIGIN` | cache | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 81. |
-| `src/audio.rs:1099` | `SAH_MIXER` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 1177. |
-| `src/audio.rs:1099` | `thread_local!` | diagnostic | TLS block. Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. |
+| `src/audio.rs:1104` | `SAH_MIXER` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 1182. |
+| `src/audio.rs:1104` | `thread_local!` | diagnostic | TLS block. Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. |
 | `src/campaign.rs:216` | `KEYS` | cache | Campaign progression, story dispatch or save/restore reads authored visit data. Share immutable tables. See line 217. |
 | `src/campaign_chain/graph.rs:118` | `ROWS` | state | Campaign progression, story dispatch or save/restore reads authored visit data. Share immutable tables. See line 754. |
 | `src/campaign_route.rs:38` | `LEGS` | state | Campaign progression, story dispatch or save/restore reads authored visit data. Share immutable tables. See line 172. |
