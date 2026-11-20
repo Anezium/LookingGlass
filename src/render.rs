@@ -2449,7 +2449,7 @@ impl Scene {
             && !vita_renderer::world_only()
         {
             self.retained.as_mut().unwrap().begin_fx();
-            crate::render_fx::retained::begin_view(
+            crate::render_fx::retained::begin_scene_view(
                 camera,
                 time,
                 &self.atmosphere,
