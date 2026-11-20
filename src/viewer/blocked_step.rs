@@ -77,6 +77,8 @@ impl Worker {
                 crate::sim_maps::probe::begin_worker_step(stamp.frame.frame);
                 probe.swap();
             }
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let _lazy_profile = crate::collision::lazy_profile::enter(crate::collision::lazy_profile::Lane::Worker);
             let mut scopes = StepScopes { census: None,
                 #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
                 frame: None,

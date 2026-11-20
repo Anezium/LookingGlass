@@ -6,7 +6,7 @@ Source review at 3e90ce9. Reachability includes the free simulation step, condit
 
 `AcousticView` owns the end-of-step solid publications read by audio. Static geometry and dynamic buckets use shared Arcs. The settled, dynamic and weapon lists are cloned in publication order, keeping the same shape placements. Capture follows the final Pool of Tears dynamic publication. The owner completes static audio rays with the captured lists. Live lighting and shadow queries still use `World`; free snapshot render consumes captured light selection, shadow geometry and liquid tint.
 
-`Collider::lazy` shares `Arc<Placed>` with simulation. Audio completion calls `hulls` on admitted settled supports. Dynamic queries call `trace_query` and may initialize complete hulls, or initialize `Placed::candidates` and individual triangle bevel hulls when `sim_triangle_candidates` is on. Weapon obstacles are eager boxes. Movement and NPC sweeps can reach the same placements. Camera liquid capture uses separate liquid colliders. Consider first-touch costs at visit entry and for newly published placements in step 8.
+`Collider::lazy` shares `Arc<Placed>` with simulation. Audio completion calls `hulls` on admitted settled supports. Dynamic queries call `trace_query` and may initialize complete hulls, or initialize `Placed::candidates` and individual triangle bevel hulls when `sim_triangle_candidates` is on. Weapon obstacles are eager boxes. Movement and NPC sweeps can reach the same placements. Camera liquid capture uses separate liquid colliders. With overlap enabled, all three caches publish completed values atomically. Concurrent first touches may each build a value and then use the published winner. Bevel construction still requires a query that intersects the triangle bounds. With overlap disabled, the original single-initializer cache is used.
 
 School2 clones share Template.eager and .last_lazy (src/collision/model_shape.rs:185–186). These are sim-owned placement caches behind the two approved mutexes. Preserve cache identity and pose keys across clones.
 
@@ -94,8 +94,10 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/character.rs:2100` | `thread_local!` | cache | TLS block. Level art load, draw or HUD lookup uses graphics resources. Keep creation, upload and release on the owner. |
 | `src/character.rs:2104` | `SKIN_MATERIAL` | cache | Level art load, draw or HUD lookup uses graphics resources. Keep creation, upload and release on the owner. See line 2107. |
 | `src/cinematic.rs:179` | `NEXT` | counter | Film entry constructs FilmTransaction. Serialize transaction IDs in the fenced cinematic path. See line 180. |
-| `src/collision/model_shape.rs:251` | `SAMPLES` | diagnostic | Host-only atomic totals for cold shape builds and waiters. Printed once after the W0 worker joins. |
-| `src/collision/model_shape.rs:254` | `ENABLED` | immutable | Host-only lazy shape profiling switch, sampled once before recording. |
+| `src/collision/model_shape.rs:288` | `thread_local!` | diagnostic | Host lazy shape profiling scopes stay local to the thread executing the audio or simulation cut. |
+| `src/collision/model_shape.rs:289` | `LANE` | diagnostic | Tags per-frame cold build time as audio, sim worker or other owner work. W0 returns worker times in its existing probe rows. |
+| `src/collision/model_shape.rs:315` | `SAMPLES` | diagnostic | Host-only atomic totals for cold shape builds and cold callers that reused a published value. Printed at viewer exit. |
+| `src/collision/model_shape.rs:318` | `ENABLED` | immutable | Host-only lazy shape profiling switch, sampled once before recording. |
 | `src/collision/sah.rs:4` | `BUILDS` | counter | World construction builds static SAH. Retain build count with world loader. See line 5. |
 | `src/collision/sah_probe.rs:4` | `thread_local!` | diagnostic | TLS block. Player/NPC/camera sweeps record the SAH corpus. Carry query owner, stamp and ordered rows back from sim. |
 | `src/collision/sah_probe.rs:5` | `ACTIVE` | diagnostic | Player/NPC/camera sweeps record the SAH corpus. Carry query owner, stamp and ordered rows back from sim. See line 11. |

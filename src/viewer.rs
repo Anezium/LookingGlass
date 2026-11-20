@@ -5014,7 +5014,7 @@ interactions
         println!("[lg/sim-overlap] dispatched_frames={dispatched_frames}");
     }
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-    crate::collision::report_lazy_shapes();
+    crate::collision::lazy_profile::report();
     crate::spike_log::end_play();
     #[cfg(not(target_os = "vita"))]
     if replay.is_some() {
