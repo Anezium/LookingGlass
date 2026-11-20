@@ -4546,7 +4546,7 @@ interactions
         let snapshot_log = crate::render::vita_renderer::config().snapshot_log_enabled();
         #[cfg(not(feature="vita_renderer"))]
         let snapshot_log = false;
-        let timing = snapshot_log.then(SnapshotTiming::start);
+        let hud_snapshot_timing = snapshot_log.then(SnapshotTiming::start);
         let hud_snapshot = snapshot_enabled.then(|| crate::render_snapshot::HudInput {
             visit: level_art.snapshot_visit.id(),
             prompt: if !world_only && active { resolve_prompt!() } else { None },
@@ -4574,7 +4574,7 @@ interactions
             || ((save_requested || autosave_requested) && saves_writable && stats.alive())) {
             Some(game_snapshot!())
         } else { None };
-        if let (Some(timing), Some(snapshot)) = (timing, &hud_snapshot) {
+        if let (Some(timing), Some(snapshot)) = (hud_snapshot_timing, &hud_snapshot) {
             let (us, allocations) = timing.finish();
             println!("[lg/snapshot] frame={} hud_bytes={} extraction_us={:.3} allocations={} save={}",
                 frame, snapshot.bytes(), us, allocations, captured_save.is_some());
