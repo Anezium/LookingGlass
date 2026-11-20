@@ -1677,6 +1677,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     // level art, particles or decoded level PCM survive into the build.
     macro_rules! unload_scene {
         () => {{
+            // The recycle slot shares the outgoing World geometry. Release it
+            // before budgeting the destination build.
+            if sim_overlap { drop(acoustic_view.take()); }
             crate::render_fx::release_scene();
             let resources = (level_art, npcs, steam, Loaded { scene, world });
             if crate::transition_memory::legacy_overlap() { Some(resources) } else {
