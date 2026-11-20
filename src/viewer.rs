@@ -1109,6 +1109,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     let steam_poison_frame = std::env::var("LOOKING_GLASS_SNAPSHOT_POISON_STEAM_FRAME")
         .ok().map(|value| value.parse::<u64>().expect("invalid steam poison frame"));
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let force_acoustic_view = std::env::var("LOOKING_GLASS_ACOUSTIC_VIEW").as_deref() == Ok("1");
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let profile_acoustic_view = std::env::var("LOOKING_GLASS_ACOUSTIC_VIEW_PROFILE").as_deref() == Ok("1");
     let mut frame = 0;
     let mut handoff_return = crate::render_snapshot::HandoffReturn::default();
     let mut handoff_minimum_frame = 0u64;
@@ -4333,7 +4337,26 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             voice_paused: !story_active,
         });
         } // simulation: audio listener and clocks
+        // The step, including any Pool of Tears re-publication, is complete.
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let acoustic_view = (simulate && force_acoustic_view).then(|| {
+            let started = profile_acoustic_view.then(std::time::Instant::now);
+            let view = world.acoustic_view();
+            if let Some(started) = started {
+                let ns = started.elapsed().as_nanos();
+                let (settled, dynamic, weapon) = view.collider_counts();
+                println!("ACOUSTIC_CAPTURE frame={frame} ns={ns} settled={settled} dynamic={dynamic} weapon={weapon}");
+            }
+            view
+        });
+        #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
         audio_step.apply(&mut audio, &mut assets, &world);
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        if let Some(view) = acoustic_view {
+            audio_step.apply(&mut audio, &mut assets, &view);
+        } else {
+            audio_step.apply(&mut audio, &mut assets, &world);
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_scene"); }
         crate::spike_log::sim(crate::spike_log::Sim::Scene);

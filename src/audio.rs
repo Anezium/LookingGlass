@@ -14,7 +14,7 @@ pub mod events;
 mod reaction;
 pub mod regression;
 pub mod world;
-use crate::{assets::Assets, bsp::Bsp, collision::{StaticGeometry, Trace, World}};
+use crate::{assets::Assets, bsp::Bsp, collision::{AcousticView, StaticGeometry, Trace, World}};
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::{vec3, Vec3};
 use rodio::{Decoder, OutputStream, Source};
@@ -53,6 +53,24 @@ impl AcousticWorld for World {
 
     fn audio_sweep(&self, start: Vec3, end: Vec3) -> Trace {
         self.sweep(start, end, Vec3::ZERO)
+    }
+}
+
+impl AcousticWorld for AcousticView {
+    fn acoustic_scene_key(&self) -> usize {
+        AcousticView::acoustic_scene_key(self)
+    }
+
+    fn audio_geometry(&self) -> Arc<StaticGeometry> {
+        AcousticView::audio_geometry(self)
+    }
+
+    fn audio_complete(&self, trace: Trace, start: Vec3, end: Vec3) -> Trace {
+        AcousticView::audio_complete(self, trace, start, end)
+    }
+
+    fn audio_sweep(&self, start: Vec3, end: Vec3) -> Trace {
+        self.sweep(start, end)
     }
 }
 

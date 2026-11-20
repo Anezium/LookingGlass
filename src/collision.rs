@@ -596,6 +596,125 @@ impl DynamicBucket {
         }).collect()
     }
 }
+/// End-of-step collision data used by audio rays. Cloned colliders retain the
+/// same immutable shape placements, including their lazy caches.
+pub(crate) struct AcousticView {
+    static_geometry: std::sync::Arc<StaticGeometry>,
+    settled_supports: Vec<Collider>,
+    dynamic: Vec<Collider>,
+    dynamic_bounds: Option<Bounds>,
+    dynamic_buckets: std::sync::Arc<Vec<DynamicBucket>>,
+    weapon_obstacles: Vec<(usize, Collider)>,
+}
+
+impl AcousticView {
+    pub(crate) fn acoustic_scene_key(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.static_geometry) as usize
+    }
+
+    pub(crate) fn audio_geometry(&self) -> std::sync::Arc<StaticGeometry> {
+        self.static_geometry.clone()
+    }
+
+    pub(crate) fn audio_complete(&self, result: Trace, start: Vec3, end: Vec3) -> Trace {
+        let dynamic = DynamicSweep {
+            colliders: &self.dynamic,
+            bounds: self.dynamic_bounds,
+            buckets: &self.dynamic_buckets,
+        };
+        complete_audio(result, start, end, &self.settled_supports, &self.weapon_obstacles,
+            |result| dynamic.sweep(result, start, end, Vec3::ZERO))
+    }
+
+    pub(crate) fn sweep(&self, start: Vec3, end: Vec3) -> Trace {
+        self.audio_complete(self.static_geometry.sweep(start, end), start, end)
+    }
+
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    pub(crate) fn collider_counts(&self) -> (usize, usize, usize) {
+        (self.settled_supports.len(), self.dynamic.len(), self.weapon_obstacles.len())
+    }
+}
+
+struct DynamicSweep<'a> {
+    colliders: &'a [Collider],
+    bounds: Option<Bounds>,
+    buckets: &'a [DynamicBucket],
+}
+
+impl DynamicSweep<'_> {
+    fn sweep(&self, mut result: Trace, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        if self.colliders.is_empty() {
+            return result;
+        }
+        let query = SweepBounds::new(start, end, half);
+        // This is the exact first predicate of Collider::trace, applied to a
+        // conservative union. Include SKIN through the unchanged SweepBounds.
+        if self.bounds.is_none_or(|b| !b.overlaps(query.bounds)) {
+            #[cfg(target_os = "vita")]
+            add_counter(Counter::DynamicBoundsRejected, 1);
+            return result;
+        }
+        let candidates = crate::sim_maps::dynamic_buckets().then(|| {
+            let mut indices = Vec::new();
+            for bucket in self.buckets.iter() {
+                crate::sim_maps::count("dynamic_buckets_tested", 1);
+                // Use precisely the old AABB predicate, rather than a tighter
+                // slab predicate whose rounding could prune an old candidate.
+                if bucket.bounds.overlaps(query.bounds) { indices.extend_from_slice(&bucket.indices); }
+            }
+            indices.sort_unstable();
+            indices
+        });
+        let count = candidates.as_ref().map_or(self.colliders.len(), Vec::len);
+        crate::sim_maps::count("dynamic_colliders_tested", count as u64);
+        #[cfg(target_os = "vita")]
+        add_counter(Counter::DynamicCollidersTested, count as u32);
+        let mut rejected = 0;
+        for n in 0..count {
+            let collider = &self.colliders[candidates.as_ref().map_or(n, |v| v[n])];
+            if collider.bounds.is_none_or(|b| !b.overlaps(query.bounds)) {
+                rejected += 1;
+                continue;
+            }
+            // Reuse reciprocal directions/padding rather than rebuilding them
+            // for every dynamic collider. Slab rejection and clip remain exact.
+            let t = collider.trace_query(start, end, half, &query);
+            result.start_solid |= t.start_solid;
+            result.all_solid |= t.all_solid;
+            if t.fraction < result.fraction {
+                result.fraction = t.fraction;
+                result.normal = t.normal;
+            }
+        }
+        #[cfg(target_os = "vita")]
+        add_counter(Counter::DynamicCollidersRejected, rejected);
+        crate::sim_maps::count("dynamic_colliders_rejected", rejected as u64);
+        result
+    }
+}
+
+// Start with the static result and preserve the live world's clipping order.
+fn complete_audio(
+    mut result: Trace, start: Vec3, end: Vec3,
+    settled_supports: &[Collider], weapon_obstacles: &[(usize, Collider)],
+    sweep_dynamic: impl FnOnce(Trace) -> Trace,
+) -> Trace {
+    let query = SweepBounds::new(start, end, Vec3::ZERO);
+    for c in settled_supports {
+        if crate::sim_maps::npc_queries() && c.bounds.is_none_or(|b| !query.overlaps(b)) { continue; }
+        for h in c.hulls().iter() {
+            if crate::sim_maps::npc_queries() && !query.overlaps(h.bounds) { continue; }
+            clip_hull(h, start, end, Vec3::ZERO, &mut result);
+        }
+    }
+    let mut result = sweep_dynamic(result);
+    for (_, c) in weapon_obstacles {
+        for h in c.hulls().iter() { clip_hull(h, start, end, Vec3::ZERO, &mut result); }
+    }
+    result
+}
+
 #[derive(Debug, Default)]
 struct LightCertificates { entries: Vec<([u32; 9], bool)>, next: usize }
 
@@ -845,7 +964,10 @@ impl Drop for StaticGeometry {fn drop(&mut self){
 }}
 const _: fn() = || {
     fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
     assert_send::<World>();
+    assert_send::<AcousticView>();
+    assert_sync::<Collider>();
 };
 
 impl World {
@@ -1077,23 +1199,24 @@ impl World {
             max,
         }
     }
-    /// Complete the immutable static result against this frame's live geometry.
-    /// Audio uses only fraction/start-solid; preserve the original clipping order.
-    pub(crate) fn audio_complete(&self, mut result: Trace, start: Vec3, end: Vec3) -> Trace {
-        let query = SweepBounds::new(start, end, Vec3::ZERO);
-        for c in &self.settled_supports {
-            if crate::sim_maps::npc_queries() && c.bounds.is_none_or(|b| !query.overlaps(b)) { continue; }
-            for h in c.hulls().iter() {
-                if crate::sim_maps::npc_queries() && !query.overlaps(h.bounds) { continue; }
-                clip_hull(h, start, end, Vec3::ZERO, &mut result);
-            }
+    /// Take the view after the step's last solid publication.
+    #[cfg_attr(not(any(test, all(feature = "sim_maps_probe", not(target_os = "vita")))), allow(dead_code))]
+    pub(crate) fn acoustic_view(&self) -> AcousticView {
+        AcousticView {
+            static_geometry: self.static_geometry.clone(),
+            settled_supports: self.settled_supports.clone(),
+            dynamic: self.dynamic.clone(),
+            dynamic_bounds: self.dynamic_bounds,
+            dynamic_buckets: self.dynamic_buckets.clone(),
+            weapon_obstacles: self.weapon_obstacles.clone(),
         }
-        let mut result = self.sweep_dynamic(result, start, end, Vec3::ZERO);
-        for (_, c) in &self.weapon_obstacles {
-            for h in c.hulls().iter() { clip_hull(h, start, end, Vec3::ZERO, &mut result); }
-        }
-        result
     }
+
+    pub(crate) fn audio_complete(&self, result: Trace, start: Vec3, end: Vec3) -> Trace {
+        complete_audio(result, start, end, &self.settled_supports, &self.weapon_obstacles,
+            |result| self.sweep_dynamic(result, start, end, Vec3::ZERO))
+    }
+
     /// Scope exact static/settled query reuse to one immutable NPC update. Dynamic
     /// colliders are still swept on every request. Entries never survive a publication; scratch capacity is reused.
     pub fn with_npc_queries<T>(&self, run: impl FnOnce() -> T) -> T {
@@ -1490,55 +1613,18 @@ impl World {
         }
         self.sweep_dynamic(self.ledge_trace(start, end, half), start, end, half)
     }
-    fn sweep_dynamic(&self, mut result: Trace, start: Vec3, end: Vec3, half: Vec3) -> Trace {
-        if self.dynamic.is_empty() {
-            return result;
-        }
-        let query = SweepBounds::new(start, end, half);
-        // This is the exact first predicate of Collider::trace, applied to a
-        // conservative union. Include SKIN through the unchanged SweepBounds.
-        if self.dynamic_bounds.is_none_or(|b| !b.overlaps(query.bounds)) {
-            #[cfg(target_os = "vita")]
-            add_counter(Counter::DynamicBoundsRejected, 1);
-            return result;
-        }
-        let candidates = crate::sim_maps::dynamic_buckets().then(|| {
-            let mut indices = Vec::new();
-            for bucket in self.dynamic_buckets.iter() {
-                crate::sim_maps::count("dynamic_buckets_tested", 1);
-                // Use precisely the old AABB predicate, rather than a tighter
-                // slab predicate whose rounding could prune an old candidate.
-                if bucket.bounds.overlaps(query.bounds) { indices.extend_from_slice(&bucket.indices); }
-            }
-            indices.sort_unstable();
-            indices
-        });
-        let count = candidates.as_ref().map_or(self.dynamic.len(), Vec::len);
-        crate::sim_maps::count("dynamic_colliders_tested", count as u64);
-        #[cfg(target_os = "vita")]
-        add_counter(Counter::DynamicCollidersTested, count as u32);
-        let mut rejected = 0;
-        for n in 0..count {
-            let collider = &self.dynamic[candidates.as_ref().map_or(n, |v| v[n])];
-            if collider.bounds.is_none_or(|b| !b.overlaps(query.bounds)) {
-                rejected += 1;
-                continue;
-            }
-            // Reuse reciprocal directions/padding rather than rebuilding them
-            // for every dynamic collider. Slab rejection and clip remain exact.
-            let t = collider.trace_query(start, end, half, &query);
-            result.start_solid |= t.start_solid;
-            result.all_solid |= t.all_solid;
-            if t.fraction < result.fraction {
-                result.fraction = t.fraction;
-                result.normal = t.normal;
-            }
-        }
-        #[cfg(target_os = "vita")]
-        add_counter(Counter::DynamicCollidersRejected, rejected);
-        crate::sim_maps::count("dynamic_colliders_rejected", rejected as u64);
+    fn sweep_dynamic(&self, result: Trace, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        let dynamic = DynamicSweep {
+            colliders: &self.dynamic,
+            bounds: self.dynamic_bounds,
+            buckets: &self.dynamic_buckets,
+        };
+        let result = dynamic.sweep(result, start, end, half);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-        if std::env::var_os("LOOKING_GLASS_HEDGE3_VERIFY").is_some() {
+        if !self.dynamic.is_empty()
+            && std::env::var_os("LOOKING_GLASS_HEDGE3_VERIFY").is_some()
+            && self.dynamic_bounds.is_some_and(|b| b.overlaps(SweepBounds::new(start, end, half).bounds))
+        {
             let mut reference = self.ledge_trace(start, end, half);
             for collider in &self.dynamic {
                 let t = collider.trace(start, end, half);
@@ -1991,6 +2077,90 @@ fn triangle_hull(a: Vec3, b: Vec3, c: Vec3) -> Option<Hull> {
 mod dynamic_tests;
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn acoustic_view_preserves_trace_bits_across_republication() {
+        use super::*;
+
+        let triangle = model_shape::Template::triangles(&[[
+            vec3(-22., -12., 0.),
+            vec3(22., -12., 0.),
+            vec3(0., 20., 0.),
+        ]]);
+        let mut seed = 0x5920_AF41u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 10000) as f32 / 10000.
+        };
+        let mut rays = vec![
+            (vec3(-60., 0., 100.), vec3(-60., 0., -10.)), // settled
+            (vec3(0., 28., 100.), vec3(0., 28., -10.)),   // leaf
+            (vec3(60., 0., 100.), vec3(60., 0., -10.)),   // weapon
+            (vec3(60., 0., 45.), vec3(60., 0., 46.)),     // all solid
+            (vec3(0., 500., 10.), vec3(0., 501., 10.)),   // miss
+        ];
+        for _ in 0..4096 {
+            let a = vec3(next() * 240. - 120., next() * 200. - 100., next() * 140. - 40.);
+            let b = a + vec3(next() * 240. - 120., next() * 200. - 100., next() * 140. - 70.);
+            rays.push((a, b));
+        }
+
+        for sah in [false, true] {
+            set_sah_enabled_for_test(Some(sah));
+            for candidates in [false, true] {
+                crate::sim_maps::with_r2_switches([candidates, false, false], || {
+                    crate::sim_maps::with_test_switches([false, false, candidates, false], || {
+                        let mut world = World::fixture(&[(vec3(-100., -80., -25.), vec3(100., 80., 0.))]);
+                        let settled = triangle.at(vec3(-60., 0., 30.), Quat::IDENTITY);
+                        let leaf = triangle.at(vec3(0., 28., 37.), Quat::from_rotation_z(0.4));
+                        world.set_settled_supports(vec![settled.clone()]);
+                        let weapon = crate::combat::Target { id: 7, center: vec3(60., 0., 45.), half: Vec3::splat(8.) };
+                        world.set_weapon_obstacles(vec![weapon]);
+                        // Rotated leaf patches, brush clips, and a moving boulder,
+                        // in the same publication order used by Pool of Tears.
+                        world.set_dynamic(vec![
+                            triangle.at(vec3(0., -30., 24.), Quat::from_rotation_z(-0.6)),
+                            leaf.clone(),
+                            Collider::box_bounds(vec3(-12., -12., 0.), vec3(12., 12., 16.)),
+                            Collider::box_bounds(vec3(30., 15., 0.), vec3(48., 48., 38.)),
+                            Collider::box_bounds(vec3(50., 15., 0.), vec3(80., 36., 22.)),
+                        ]);
+                        if crate::sim_maps::dynamic_buckets() {
+                            assert_eq!(world.dynamic_buckets.len(), 2);
+                        }
+                        let view = world.acoustic_view();
+                        assert_eq!(view.acoustic_scene_key(), world.acoustic_scene_key());
+                        assert!(settled.placement_pending() && leaf.placement_pending());
+                        let mut captured = Vec::with_capacity(rays.len());
+                        for &(a, b) in &rays {
+                            let trace = sight_log::bits(view.sweep(a, b));
+                            assert_eq!(trace, sight_log::bits(world.sweep(a, b, Vec3::ZERO)), "ray {a} -> {b}");
+                            captured.push(trace);
+                        }
+                        assert!(!settled.placement_pending() && !leaf.placement_pending());
+                        assert!(captured[0..3].iter().all(|trace| f32::from_bits(trace.0) < 0.75));
+                        assert!(captured[3].2 && captured[3].3);
+                        assert_eq!(captured[4], sight_log::bits(Trace::default()));
+
+                        world.set_dynamic(vec![triangle.at(vec3(0., 28., 90.), Quat::IDENTITY)]);
+                        world.set_settled_supports(Vec::new());
+                        world.set_weapon_obstacles(Vec::new());
+                        let later = world.acoustic_view();
+                        drop(world);
+                        for (&(a, b), expected) in rays.iter().zip(&captured) {
+                            assert_eq!(sight_log::bits(view.sweep(a, b)), *expected);
+                        }
+                        for (i, &(a, b)) in rays[..3].iter().enumerate() {
+                            assert_ne!(sight_log::bits(later.sweep(a, b)), captured[i]);
+                        }
+                    });
+                });
+            }
+        }
+        set_sah_enabled_for_test(None);
+    }
+
     #[test]
     fn flight_witness_does_not_cache_mutable_geometry() {
         use super::*;
