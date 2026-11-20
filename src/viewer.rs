@@ -109,6 +109,39 @@ struct LevelDispatch {
     cheshire: Option<crate::cheshire::Input>,
     overflow: bool,
 }
+const _: fn() = || {
+    fn send<T: Send>() {}
+    // School2 mesh clones share a Template with RefCell caches; Interactions is pending.
+    send::<crate::story::Story>();
+    send::<crate::cheshire::Hints>();
+    send::<crate::input::Input>();
+    send::<Recovery>();
+    send::<recovery::RetryPoint>();
+    send::<crate::cinematic::Skip>();
+    send::<crate::cinematic::Camera>();
+    send::<crate::camera::Follow>();
+    send::<crate::camera::Handoff>();
+    send::<Player>();
+    send::<Stats>();
+    send::<FixedClock>();
+    send::<Campaign>();
+    send::<Vec<inventory::Pickup>>();
+    send::<crate::replay::OwnedProbe>();
+    send::<ClockView>();
+    send::<crate::lighting::Selection>();
+    send::<LevelDispatch>();
+    send::<crate::render_snapshot::HudInput>();
+    send::<crate::render_snapshot::TailInput>();
+    send::<crate::render_snapshot::DynamicInput>();
+    send::<crate::render_snapshot::ParticleInput>();
+    send::<crate::render_snapshot::WaveInput>();
+    send::<crate::cheshire::Input>();
+    send::<crate::targeting::Input>();
+    send::<crate::powerups::PickupInput>();
+    send::<std::sync::Arc<dyn crate::level::LevelCapture>>();
+    send::<Box<dyn std::any::Any + Send>>();
+};
+
 impl LevelDispatch {
     fn valid(&self, art: &LevelArt) -> bool {
         !self.overflow && self.visit == art.snapshot_visit.id()

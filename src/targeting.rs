@@ -8,6 +8,11 @@ struct Rule {
     kind: u8,
     range: f32,
 }
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Vec<Rule>>();
+};
+
 impl Rule {
     fn read(text: &str) -> Result<Self> {
         let mut rule = Self {
