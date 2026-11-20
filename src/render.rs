@@ -150,6 +150,9 @@ struct Batch {
     model: Option<usize>,
 }
 pub struct Scene {
+    /// The actor skinning decision for this visit, selected from the map at load.
+    #[cfg(feature = "vita_renderer")]
+    pub(crate) gpu_skin_actors: bool,
     #[cfg(feature = "vita_renderer")]
     retained: Option<vita_renderer::Renderer>,
     #[cfg(feature = "vita_renderer")]
@@ -2141,6 +2144,8 @@ impl Scene {
         println!("Loaded {name}: {triangles} triangles, {} batches, {animated} animated batches, {} fog volumes, distance fog {}, {} fallback images",batches.len(),atmosphere.volumes.len(),atmosphere.distance.w,missing.len());
         let mut scene = Self {
             #[cfg(feature = "vita_renderer")]
+            gpu_skin_actors: vita_renderer::config().gpu_skin_actors_for_map(name),
+            #[cfg(feature = "vita_renderer")]
             retained: None,
             #[cfg(feature = "vita_renderer")]
             authored_sky: false,
@@ -2450,6 +2455,7 @@ impl Scene {
                 &self.atmosphere,
                 fullbright,
                 flush,
+                self.gpu_skin_actors,
             );
             return;
         }

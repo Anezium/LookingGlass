@@ -62,6 +62,7 @@ pub(crate) fn begin_view(
     atmosphere: &Atmosphere,
     fullbright: bool,
     flush: bool,
+    gpu_skin_actors: bool,
 ) {
     use macroquad::camera::Camera;
     #[cfg(not(target_os = "vita"))]
@@ -81,6 +82,7 @@ pub(crate) fn begin_view(
         *f = Frame {
             active: true,
             direct: true,
+            gpu_skin_actors,
             groups, group_pool, world_puffs,
             camera: camera.position,
             direction: (camera.target - camera.position).normalize_or_zero(),
@@ -551,7 +553,7 @@ impl Gpu {
         let mut gpu = Self {
             _game_thread: crate::game_thread::GameThread::new(),
             shader,
-            skin: (c.gpu_skin_ants || c.gpu_skin_actors).then(|| {
+            skin: (c.gpu_skin_ants || FRAME.with(|f| f.borrow().gpu_skin_actors)).then(|| {
                 // The same fragment sources as the four actor routes above.
                 let sources = actor_lean::sources();
                 gpu_skin::Gpu::new([

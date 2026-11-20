@@ -389,6 +389,9 @@ pub struct Config {
     /// stream (<= 5 influences, <= 28 bones); everything else keeps CPU skinning.
     /// Picture-changing (stored normals instead of rebuilt face normals): opt in only.
     pub gpu_skin_actors: bool,
+    /// Restrict actor GPU skinning to these exact map names when supplied.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_gpu_skin_actor_maps")]
+    pub gpu_skin_actor_maps: Option<Vec<String>>,
     /// Reuse exact program uniforms and binding state across GPU skin draws.
     pub gpu_skin_submit_reuse: bool,
     /// Diagnostic PNGs at three replay frames; never enabled by the skin key alone.
@@ -585,6 +588,11 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
     });
     Ok(maps)
 }
+fn deserialize_gpu_skin_actor_maps<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error> {
+    <Vec<String> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -723,6 +731,7 @@ impl Default for Config {
             bone_palette: false,
             gpu_skin_ants: false,
             gpu_skin_actors: false,
+            gpu_skin_actor_maps: None,
             gpu_skin_submit_reuse: false,
             gpu_skin_capture: false,
             skin_frustum_cull: true,
@@ -793,6 +802,12 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
     }
 }
 impl Config {
+    pub(super) fn gpu_skin_actors_for_map(&self, name: &str) -> bool {
+        self.gpu_skin_actors
+            && self.gpu_skin_actor_maps.as_ref().is_none_or(|maps| maps.iter().any(|map| map == name))
+    }
+
+
     pub(super) fn selection(&self, name: &str) -> (bool, &'static str) {
         if self.renderer != "vita" { return (false, "configuration"); }
         if self.legacy_maps.iter().any(|m| m == "*" || m == name) {
@@ -4241,6 +4256,34 @@ mod tests {
         assert!(on.gpu_skin_ants && !on.gpu_skin_capture);
         assert!(serde_json::from_str::<Config>(r#"{"gpu_skin_ants":5}"#).is_err());
         let raw=serde_json::to_value(c).unwrap();assert_eq!(raw["gpu_skin_ants"],false);assert_eq!(raw["gpu_skin_capture"],false);
+    }
+    #[test]
+    fn gpu_skin_actor_maps_are_optional_and_strict() {
+        let (defaults, _) = parse_runtime_config(br#"{"gpu_skin_actors":true}"#).unwrap();
+        assert!(defaults.gpu_skin_actor_maps.is_none());
+        assert!(defaults.gpu_skin_actors_for_map("garden1"));
+        assert!(serde_json::to_value(&defaults).unwrap().get("gpu_skin_actor_maps").is_none());
+
+        let (listed, _) = parse_runtime_config(
+            br#"{"gpu_skin_actors":true,"gpu_skin_actor_maps":["wchess1","skool1"]}"#,
+        ).unwrap();
+        assert!(listed.gpu_skin_actors_for_map("wchess1"));
+        assert!(listed.gpu_skin_actors_for_map("skool1"));
+        assert!(!listed.gpu_skin_actors_for_map("garden1"));
+        assert!(!listed.gpu_skin_actors_for_map("WCHESS1"));
+        let output = config_log_lines(&listed);
+        let printed: Config = serde_json::from_str(
+            output[0].strip_prefix("[lg/vita-renderer] config ").unwrap(),
+        ).unwrap();
+        assert_eq!(printed.gpu_skin_actor_maps, listed.gpu_skin_actor_maps);
+
+        let (empty, _) = parse_runtime_config(br#"{"gpu_skin_actors":true,"gpu_skin_actor_maps":[]}"#).unwrap();
+        assert!(!empty.gpu_skin_actors_for_map("wchess1"));
+        let (off, _) = parse_runtime_config(br#"{"gpu_skin_actor_maps":["wchess1"]}"#).unwrap();
+        assert!(!off.gpu_skin_actors_for_map("wchess1"));
+        for invalid in ["null", "true", "1", r#""wchess1""#, "{}", "[1]", "[null]"] {
+            assert!(parse_runtime_config(format!(r#"{{"gpu_skin_actor_maps":{invalid}}}"#).as_bytes()).is_err());
+        }
     }
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("gpu_skin_ants").is_none_or(|on|on==false));

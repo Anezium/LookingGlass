@@ -91,6 +91,8 @@ struct Frame {
     direct: bool,
     #[cfg(feature = "vita_renderer")]
     depth_read_only: bool,
+    #[cfg(feature = "vita_renderer")]
+    gpu_skin_actors: bool,
     camera: Vec3,
     direction: Vec3,
     time: f32,
@@ -1897,12 +1899,12 @@ mod material_identity_tests {
 pub(crate) type GpuSkinShare = retained::gpu_skin::Share;
 /// Opaque skinned surfaces whose layers are plain textures or environment reflections
 /// can leave the CPU mesh unpublished: their vertices are skinned in the vertex program.
-/// `gpu_skin_ants` admits only the army-ant pair; `gpu_skin_actors` every skinned model.
+/// `gpu_skin_ants` admits the army-ant pair; a visit can admit every skinned model.
 #[cfg(feature="vita_renderer")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gpu_skin_ant(source:&crate::skeletal::Surface,mesh:&Mesh,share:&mut GpuSkinShare,pose:&[crate::skeletal::Transform],scales:&[f32],transform:crate::skeletal::Transform,scale:f32,fullbright:bool,alpha:f32)->bool {
     let c=crate::render::vita_renderer::config();
-    if !(c.gpu_skin_actors || c.gpu_skin_ants && source.gpu_ant) {return false;}
+    if !(c.gpu_skin_ants && source.gpu_ant || FRAME.with(|f| f.borrow().gpu_skin_actors)) {return false;}
     let verdict=gpu_skin_payload(c,source,mesh,share,pose,scales,transform,scale,fullbright,alpha);
     retained::gpu_skin::census::note(verdict.as_ref().err().copied().unwrap_or(retained::gpu_skin::Reason::Gpu),mesh.vertices.len());
     let Ok((surface,payload))=verdict else {return false;};
