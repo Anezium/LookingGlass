@@ -492,6 +492,7 @@ pub struct Config {
     pub route_world_wish: bool,
     /// Record a play into this tape file (src/replay). Empty: off. Needs replay_start.
     pub replay_record: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sim_overlap: bool,
     /// Replay this tape file instead of the pad. Empty: off.
     pub replay_play: String,
@@ -4780,6 +4781,8 @@ mod tests {
     }
     #[test]
     fn runtime_config_refuses_recording_with_sim_overlap() {
+        assert!(serde_json::to_value(Config::default()).unwrap().get("sim_overlap").is_none());
+        assert!(parse_runtime_config(br#"{"sim_overlap":true}"#).unwrap().0.sim_overlap);
         let record = br#"{"replay_record":"play.lgtape","replay_start":"chapter:potears2"}"#;
         assert!(parse_runtime_config(record).is_ok());
         let both = br#"{"replay_record":"play.lgtape","replay_start":"chapter:potears2","sim_overlap":true}"#;
