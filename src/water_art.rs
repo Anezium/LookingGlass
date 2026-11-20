@@ -29,6 +29,7 @@ pub(crate) struct State {
     warning: Option<f32>,
 }
 impl State {
+    #[must_use = "true means the owner must fork the bubble emitter history (art-side write)"]
     pub(crate) fn sync(&mut self, player: &Player) -> bool {
         self.visible = player.breath.shell
             && player.immersion.level >= 2

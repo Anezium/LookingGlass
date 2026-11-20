@@ -659,6 +659,7 @@ impl AliceSim {
         Ok(())
     }
 
+    #[must_use = "true means the owner must clear the heavy, ice and bomb emitter history (art-side write)"]
     fn die(&mut self) -> bool {
         self.power_pose.state.sync(None);
         if !matches!(
