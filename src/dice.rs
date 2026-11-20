@@ -1306,7 +1306,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
     let crate::render::Loaded { mut scene, world } = crate::render::Scene::load(assets, "skool2")?;
     let mut i = crate::interaction::Interactions::load(&scene.map)?;
     i.set_entry(assets, &scene.map, "skool2", None)?;
-    let mut visuals = crate::weapons::Visuals::load(assets)?;
+    let (mut visuals, mut visual_art) = crate::weapons::Visuals::load(assets)?;
     let material = crate::character::skin_material()?;
     let data = Data::load(assets)?;
     // Stage on the gym floor, below its rafters, with room for the largest summon.
@@ -1358,6 +1358,7 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
         };
         for phase in phases {
             visuals.clear();
+            visual_art.clear();
             let delta = if matches!(
                 phase,
                 Phase::Melee | Phase::Claw | Phase::Follow | Phase::ChargeHit
@@ -1438,8 +1439,8 @@ pub async fn render_check(assets: &mut Assets) -> Result<()> {
                 });
                 scene.draw(camera, 0., false, false, &i.transforms());
                 material.atmosphere(&scene.atmosphere, camera);
-                visuals.atmosphere(&scene.atmosphere, camera);
-                visuals.draw_effects(&material, camera, false, false);
+                visual_art.atmosphere(&scene.atmosphere, camera);
+                visual_art.draw_effects(&visuals, &material, camera, false, false);
                 crate::render::depth_read_only(|| {
                     scene.draw(camera, 0., false, true, &i.transforms())
                 });

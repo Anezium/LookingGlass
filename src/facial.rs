@@ -178,6 +178,17 @@ impl Rig {
         self.apply_with_angle(&mut local, mouth, angle);
         skeleton.global_pose(&local)
     }
+    pub(crate) fn pose_into(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32, scratch: &mut Vec<Transform>, world: &mut Vec<Transform>) {
+        scratch.clear(); scratch.extend_from_slice(local);
+        self.apply(scratch, mouth);
+        world.clear();
+        for (bone, &pose) in skeleton.bones.iter().zip(scratch.iter()) {
+            world.push(match bone.parent {
+                Some(p) => Transform { rotation: (world[p].rotation * pose.rotation).normalize(), translation: world[p].point(pose.translation) },
+                None => pose,
+            });
+        }
+    }
 }
 
 struct Blink {
@@ -191,8 +202,10 @@ struct Blink {
 }
 pub struct Face {
     rig: Rig,
-    blink: Option<Blink>,
+    art: BlinkArt,
 }
+/// Alice's name for the owner-thread blink art; NPCs use the same type as `BlinkArt`.
+pub(crate) type FaceArt = BlinkArt;
 impl Face {
     pub fn load(
         assets: &mut Assets,
@@ -231,33 +244,25 @@ impl Face {
         } else {
             None
         };
-        Ok(Self { rig, blink })
+        Ok(Self { rig, art: BlinkArt(blink) })
     }
     pub(crate) fn into_parts(self) -> (Rig, BlinkArt) {
-        (self.rig, BlinkArt(self.blink))
+        (self.rig, self.art)
     }
     pub fn pose(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32) -> Vec<Transform> {
         self.rig.pose(skeleton, local, mouth, None)
     }
-    pub(crate) fn pose_into(&self, skeleton: &Skeleton, local: &[Transform], mouth: f32, scratch: &mut Vec<Transform>, world: &mut Vec<Transform>) {
-        scratch.clear(); scratch.extend_from_slice(local);
-        self.rig.apply(scratch, mouth);
-        world.clear();
-        for (bone, &pose) in skeleton.bones.iter().zip(scratch.iter()) {
-            world.push(match bone.parent {
-                Some(p) => Transform { rotation: (world[p].rotation * pose.rotation).normalize(), translation: world[p].point(pose.translation) },
-                None => pose,
-            });
-        }
-    }
     pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
-        Blink::apply(self.blink.as_ref(), meshes, time, alive);
+        self.art.apply(meshes, time, alive);
     }
 }
 pub(crate) struct BlinkArt(Option<Blink>);
 impl BlinkArt {
     pub(crate) fn apply(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
         Blink::apply(self.0.as_ref(), meshes, time, alive);
+    }
+    pub fn blink(&self, meshes: &mut [Option<Mesh>], time: f32, alive: bool) {
+        self.apply(meshes, time, alive);
     }
 }
 impl Blink {
@@ -605,7 +610,7 @@ mod snapshot_pose_tests {
     #[test]
     fn reused_facial_arena_matches_original_hierarchy_bits_after_changes() {
         let skeleton=Skeleton{bones:vec![crate::skeletal::Bone{parent:None,name:"root".into()},crate::skeletal::Bone{parent:Some(0),name:"jaw".into()}],surfaces:Vec::new(),skin_bounds:Vec::new()};
-        let face=Face{rig:Rig{mouth:Some(1),angle:0.2},blink:None};
+        let face=Rig{mouth:Some(1),angle:0.2};
         let mut local=vec![Transform{translation:Vec3::X,rotation:Quat::from_rotation_z(0.37)},Transform{translation:Vec3::Y,rotation:Quat::from_rotation_x(0.2)}];
         let mut scratch=Vec::new();let mut out=Vec::new();
         for mouth in [0.,0.25,1.,f32::NAN,0.] {

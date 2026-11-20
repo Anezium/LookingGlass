@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::*;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 pub const IDLE_FAMILIES: [&str; 11] = [
     "knife_idle",
@@ -55,15 +55,18 @@ struct Clip {
     animation: Animation,
 }
 pub struct Acting {
-    clips: BTreeMap<String, Clip>,
+    clips: Arc<BTreeMap<String, Clip>>,
     commands: Commands,
-    props: BTreeMap<String, Prop>,
+    prop_models: Vec<String>,
     sounds: Sounds,
     cues: Vec<crate::audio::events::Cue>,
     pub state: State,
     dialogue: Option<String>,
     health: Option<f32>,
     hurt: bool,
+}
+pub(crate) struct Art {
+    props: BTreeMap<String, Prop>,
 }
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
@@ -78,12 +81,12 @@ struct Play {
     time: f32,
 }
 impl Acting {
-    pub fn load(
+    pub(crate) fn load(
         assets: &mut Assets,
         def: &Definition,
         skeleton: &Skeleton,
         specs: &BTreeMap<String, texture::MaterialSpec>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Art)> {
         let mut clips = BTreeMap::new();
         for name in clip_names(def) {
             let file = &def.animations[&name];
@@ -114,17 +117,18 @@ impl Acting {
                 }
             }
         }
-        Ok(Self {
-            clips,
+        let prop_models = props.keys().cloned().collect();
+        Ok((Self {
+            clips: Arc::new(clips),
             commands,
-            props,
+            prop_models,
             sounds: Sounds::load(assets, "models/alice.tik")?,
             cues: vec![],
             state: State::default(),
             dialogue: None,
             health: None,
             hurt: false,
-        })
+        }, Art { props }))
     }
     pub fn restore(&mut self, state: &State) -> Result<()> {
         ensure!(
@@ -308,44 +312,12 @@ impl Acting {
         if self.state.current.is_none() { return; }
         for (tag, attachment) in self.visual().attachments {
             let bone = skeleton.bones.iter().position(|b| b.name == tag).unwrap();
-            let slot = self.props.keys().position(|name| name == &attachment.model).unwrap();
+            let slot = self.prop_models.iter().position(|name| name == &attachment.model).unwrap();
             out.push((slot, bone, attachment.scale, attachment.age));
         }
     }
     pub(crate) fn valid_attachments(&self,input:&[(usize,usize,f32,f32)])->bool {
-        input.iter().all(|&(slot,_,_,_)|slot<self.props.len())
-    }
-    pub(crate) fn draw_attachments(&mut self, input: &[(usize, usize, f32, f32)], pose: &[Transform], transform: Transform, scale: f32, bright: bool) {
-        for &(slot, bone, size, age) in input {
-            self.props.values_mut().nth(slot).unwrap().draw_frame(
-                Transform { translation: transform.point(pose[bone].translation * scale), rotation: transform.rotation * pose[bone].rotation },
-                scale * size, bright, age, true);
-        }
-    }
-    pub fn draw(
-        &mut self,
-        skeleton: &Skeleton,
-        pose: &[Transform],
-        transform: Transform,
-        scale: f32,
-        fullbright: bool,
-    ) {
-        if self.state.current.is_none() {
-            return;
-        }
-        for (tag, attachment) in self.visual().attachments {
-            let bone = skeleton.bones.iter().position(|b| b.name == tag).unwrap();
-            self.props.get_mut(&attachment.model).unwrap().draw_frame(
-                Transform {
-                    translation: transform.point(pose[bone].translation * scale),
-                    rotation: transform.rotation * pose[bone].rotation,
-                },
-                scale * attachment.scale,
-                fullbright,
-                attachment.age,
-                true,
-            );
-        }
+        input.iter().all(|&(slot,_,_,_)|slot<self.prop_models.len())
     }
     pub fn take_audio(&mut self) -> Vec<crate::audio::events::Cue> {
         std::mem::take(&mut self.cues)
@@ -368,6 +340,45 @@ impl Acting {
             }),
             ..State::default()
         })
+    }
+}
+
+impl Art {
+    pub(crate) fn valid_attachments(&self, input: &[(usize, usize, f32, f32)]) -> bool {
+        input.iter().all(|&(slot, _, _, _)| slot < self.props.len())
+    }
+    pub(crate) fn draw_attachments(&mut self, input: &[(usize, usize, f32, f32)], pose: &[Transform], transform: Transform, scale: f32, bright: bool) {
+        for &(slot, bone, size, age) in input {
+            self.props.values_mut().nth(slot).unwrap().draw_frame(
+                Transform { translation: transform.point(pose[bone].translation * scale), rotation: transform.rotation * pose[bone].rotation },
+                scale * size, bright, age, true);
+        }
+    }
+    pub fn draw(
+        &mut self,
+        sim: &Acting,
+        skeleton: &Skeleton,
+        pose: &[Transform],
+        transform: Transform,
+        scale: f32,
+        fullbright: bool,
+    ) {
+        if sim.state.current.is_none() {
+            return;
+        }
+        for (tag, attachment) in sim.visual().attachments {
+            let bone = skeleton.bones.iter().position(|b| b.name == tag).unwrap();
+            self.props.get_mut(&attachment.model).unwrap().draw_frame(
+                Transform {
+                    translation: transform.point(pose[bone].translation * scale),
+                    rotation: transform.rotation * pose[bone].rotation,
+                },
+                scale * attachment.scale,
+                fullbright,
+                attachment.age,
+                true,
+            );
+        }
     }
 }
 
@@ -447,7 +458,7 @@ mod tests {
             )
         })
         .collect();
-        Acting { clips, commands: Commands::parse("animations { mallet_idle1 test.ska { server { 2 hideweapon 1 2 attachmodel toy.tik tag_hand } } }").unwrap(), props: BTreeMap::new(), sounds: Sounds::default(), cues: vec![], state: State::default(), dialogue: None, health: None, hurt: false }
+        Acting { clips: Arc::new(clips), commands: Commands::parse("animations { mallet_idle1 test.ska { server { 2 hideweapon 1 2 attachmodel toy.tik tag_hand } } }").unwrap(), prop_models: Vec::new(), sounds: Sounds::default(), cues: vec![], state: State::default(), dialogue: None, health: None, hurt: false }
     }
     #[test]
     fn fidgets_pause_restore_and_cancel_on_attack_movement_or_equipment_change() {

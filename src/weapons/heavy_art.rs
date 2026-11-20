@@ -1,7 +1,7 @@
 //! Original archive materials and animation-owned smoke; shared GPU resources.
 use crate::mesh::Mesh;
 use super::{
-    heavy::{Kind, State},
+    heavy::Kind,
     Prop,
 };
 use crate::{
@@ -163,7 +163,6 @@ impl BeamRig {
 pub(super) struct Art {
     props: Vec<Prop>,
     beam: BeamRig,
-    pub view_muzzle: Option<Vec3>,
     templates: Vec<Attached>,
     emitters: BTreeMap<(usize, u32), Attached>,
     pub atmosphere: std::cell::RefCell<Atmosphere>,
@@ -238,7 +237,6 @@ impl Art {
         templates[4].orient_velocity("burst1");
         Ok(Self {
             beam: BeamRig::load(a, specs)?,
-            view_muzzle: None,
             props,
             templates,
             emitters: Default::default(),
@@ -247,16 +245,6 @@ impl Art {
     }
     pub fn cannon(&mut self, pose: Transform, scale: f32, time: f32, fullbright: bool) {
         self.props[0].draw_frame(pose, scale, fullbright, time, false);
-    }
-    pub fn draw(
-        &mut self,
-        s: &State,
-        camera: Vec3,
-        fullbright: bool,
-        first_person: bool,
-        body: &crate::character::SkinMaterial,
-    ) {
-        self.draw_input(s.render_view(), self.view_muzzle, camera, fullbright, first_person, body);
     }
     pub(crate) fn draw_input(
         &mut self,
