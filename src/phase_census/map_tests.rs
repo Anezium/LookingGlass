@@ -78,7 +78,10 @@ fn r15_four_map_paths_record_every_leaf_without_test_activation() {
         let document=test_survey_json().unwrap();
         for row in document["rows"].as_array().unwrap() {
             assert_eq!(row["added_brackets"],1522+added);assert_eq!(row["reused_brackets"],506);
-            for i in 52..REGIONS {if row["calls"][i].as_u64().unwrap()>0 {seen[i]=true;assert!(row["inclusive_ns"][i].as_u64().unwrap()>0);}}
+            // A single short leaf can read 0 ns on a coarse monotonic clock; the timed leaves together cannot.
+            let mut timed=0;
+            for i in 52..REGIONS {if row["calls"][i].as_u64().unwrap()>0 {seen[i]=true;timed+=row["inclusive_ns"][i].as_u64().unwrap();}}
+            assert!(timed>0);
             assert_eq!(row["exclusive_ns"].as_array().unwrap().iter().map(|v|v.as_u64().unwrap()).sum::<u64>()+row["unbracketed_residual_ns"].as_u64().unwrap(),row["frame_total_ns"].as_u64().unwrap());
         }
         if let Ok(dir)=std::env::var("ALICE_TIMING_TEST_OUTPUT") {
@@ -114,10 +117,10 @@ fn r15_real_cpu_paths_keep_outputs_and_record_work() {
      {let _prepare=path_span(Region::PlayerPrepare);interactions.prepare_player(&mut stats,&mut player);interactions.filter_level_controls(&mut crate::movement::Controls::default());}
      let mut clock=crate::movement::FixedClock::default();clock.advance(1./60.,&world,&mut player,crate::movement::Controls::default());
      interactions.triggers(1./60.,player.feet,player.feet);}
-    STATE.with(|s|{let s=s.borrow();for region in [Region::FxAttachedSample,Region::FxQuadBuild,Region::FxPairWait,Region::PlayerPrepare,Region::PlayerHooks,Region::FixedPhysics,Region::PlayerChecks] {
+    STATE.with(|s|{let s=s.borrow();let mut timed=0;for region in [Region::FxAttachedSample,Region::FxQuadBuild,Region::FxPairWait,Region::PlayerPrepare,Region::PlayerHooks,Region::FixedPhysics,Region::PlayerChecks] {
         assert!(s.current.calls[region as usize]>0,"missing {:?}",region);
-        assert!(s.current.inclusive[region as usize]>0);
-    }assert!(s.current.counters[Counter::AttachedLive as usize]>0);assert!(s.current.counters[Counter::PlayerTicks as usize]>0);assert_eq!(s.current.errors,0);});
+        timed+=s.current.inclusive[region as usize];
+    }assert!(timed>0);assert!(s.current.counters[Counter::AttachedLive as usize]>0);assert!(s.current.counters[Counter::PlayerTicks as usize]>0);assert_eq!(s.current.errors,0);});
     begin(false);
 }
 
