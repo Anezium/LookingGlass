@@ -203,7 +203,6 @@ async fn rage_scene(
     let mut stats = crate::inventory::Stats::for_level("fortress2", None);
     stats.powerup(crate::powerups::Kind::Rage);
     let hud = crate::hud::Hud::load(assets)?;
-    let input = crate::input::Input::default();
     let prefs = crate::preferences::Preferences::default();
     let mut elapsed = 0.;
     for at in [0.75, 2.05, 2.65, 3.4, 5.8, 7.9, 10.5, 12.8] {
@@ -290,7 +289,8 @@ async fn rage_scene(
                 println!("PASS Rage aura {at}: {red} red pixels");
             }
             set_default_camera();
-            hud.draw(&stats, catalog, false, &input, &prefs);
+            let view = crate::hud_view::HudView::capture(&crate::input::Input::default());
+            hud.draw(&stats, catalog, false, &view, &prefs);
             if frame == 2 {
                 crate::viewer::save_capture(std::path::Path::new(&format!(
                     "private/rage-scene-{at:.2}.png"
