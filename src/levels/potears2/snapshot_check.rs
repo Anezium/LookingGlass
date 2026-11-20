@@ -2,6 +2,12 @@
 use super::*;
 pub(super) async fn check(assets: &mut Assets) -> Result<()> {
     fn assert_send<T:Send>() {} assert_send::<ArtInput>();
+    // The viewer's path: the capture source reads the controller and story numbers, the art
+    // publishes the value. The source is taken before the call so it borrows no art.
+    fn capture(art:&mut Art,o:&PoolTwo,story:&Story)->(usize,bool) {
+        let source=art.capture_source().unwrap();let pose=source.story(story);
+        art.publish_snapshot(source.capture(o,&pose))
+    }
     let map=Bsp::parse(&assets.read("maps/potears2.bsp")?)?;
     let atmosphere=crate::environment::Atmosphere::default();let mut art=Art::load(assets)?;let mut checked=0;
     for case in 0..16 {
@@ -38,7 +44,7 @@ pub(super) async fn check(assets: &mut Assets) -> Result<()> {
             ensure!(story.mouth(&[if case%2==0 {"billthelizard"}else{"fakeplayer"}])>0.4,"Missing active lips");
             art.story_pose(&story);
             if captured {
-                let (_,overflow)=art.capture(o,&story);ensure!(!overflow && art.snapshot_ready(),"Fixture rejected {case}");
+                let (_,overflow)=capture(&mut art,o,&story);ensure!(!overflow && art.snapshot_ready(),"Fixture rejected {case}");
                 let old=art.input.as_ref().unwrap().visit;art.input.as_mut().unwrap().visit=0;
                 ensure!(!art.snapshot_ready() && !art.draw_snapshot(&atmosphere,view.position,true)
                     && !art.effects_snapshot(view.position,&atmosphere),"Stale visit accepted");
@@ -63,8 +69,8 @@ pub(super) async fn check(assets: &mut Assets) -> Result<()> {
     }
     let mut i=Interactions::load(&map)?;i.set_entry(assets,&map,"potears2",None)?;let o=super::super::owner(&mut i)?;
     let guard=o.saved.guards[0].clone();o.saved.guards=vec![guard.clone();1025];
-    ensure!(art.capture(o,&Story::default())==(0,true) && art.input.is_none(),"Unbounded guard capture");
+    ensure!(capture(&mut art,o,&Story::default())==(0,true) && art.input.is_none(),"Unbounded guard capture");
     o.saved.guards=vec![guard];o.saved.guards[0].shots=vec![crate::ant::Bullet {at:Vec3::ZERO,grenade:false,direction:Vec3::X,age:0.2};16385];
-    ensure!(art.capture(o,&Story::default())==(0,true) && art.input.is_none(),"Unbounded projectile capture");
+    ensure!(capture(&mut art,o,&Story::default())==(0,true) && art.input.is_none(),"Unbounded projectile capture");
     println!("PASS snapshot potears2: {checked} exact body/effect/lips/poisoned-controller controls; stale/resource/cast/projectile rejection");Ok(())
 }

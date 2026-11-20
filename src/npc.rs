@@ -747,11 +747,99 @@ struct ModelArt {
     electric_attachments: Vec<usize>,
     electric_props: Vec<String>,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PoseOverrides {
     hidden: BTreeMap<String, bool>,
     bone_scales: Vec<(usize, f32)>,
     mouth_angle: Option<f32>,
+}
+impl PoseOverrides {
+    fn set_mouth_angle(&mut self, degrees: f32) {
+        if degrees.is_finite() && (0. ..=90.).contains(&degrees) {
+            self.mouth_angle = Some(degrees.to_radians());
+        }
+    }
+}
+/// Everything a script Puppet's pose is computed from. `Puppet` and `PuppetRig` both sample
+/// through this view, so the simulation and the art share one arithmetic path.
+struct PoseSource<'a> {
+    data: &'a ModelData,
+    attachments: bool,
+    mouth: f32,
+    handoff: bool,
+    watch: &'a crate::facial::Watch,
+    overrides: &'a PoseOverrides,
+}
+impl PoseSource<'_> {
+    fn extract_draw(&self, clip: &str, time: f32, looping: bool,
+        transform: Transform, scale: f32) -> PuppetInput {
+        let d = self.data;
+        let animation = d.clips.get(clip).unwrap_or(&d.clips[&d.idle]);
+        let mut local = animation.sample(time, looping);
+        self.watch.apply(&d.skeleton, &mut local);
+        let handoff = self.handoff.then(|| crate::cinematic::ActorPose {
+            rendered: None, local: local.clone(), transform, scale });
+        let mut pose = d.mouth_rig.pose(&d.skeleton, &local, self.mouth, self.overrides.mouth_angle);
+        let scales = if self.overrides.bone_scales.is_empty() { Vec::new() } else {
+            crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.overrides.bone_scales)
+        };
+        PuppetInput { pose, scales, handoff,
+            visual: d.events.visual(clip, time, animation.duration(), animation.frame_time, looping),
+            time, alive: !clip.starts_with("death"), transform, scale,
+            attachments: self.attachments, frozen: clip == "death_frozen", hidden: self.overrides.hidden.clone() }
+    }
+    fn sample_tag(
+        &self,
+        name: &str,
+        clip: &str,
+        time: f32,
+        transform: Transform,
+        scale: f32,
+        looping: bool,
+    ) -> Option<Transform> {
+        let d = self.data;
+        let tag = d.skeleton.bones.iter().position(|b| b.name == name)?;
+        let mut local = d.clips.get(clip)?.sample(time, looping);
+        self.watch.apply(&d.skeleton, &mut local);
+        let mut pose = d.skeleton.global_pose(&local);
+        crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.overrides.bone_scales);
+        Some(Transform {
+            translation: transform.point(pose[tag].translation * d.def.scale * scale),
+            rotation: transform.rotation * pose[tag].rotation,
+        })
+    }
+}
+/// The CPU side of a script Puppet: the shared model data and the per-instance pose state.
+/// The simulation samples poses and tags from it without the Puppet's art.
+#[derive(Clone)]
+pub(crate) struct PuppetRig {
+    data: Arc<ModelData>,
+    attachments: bool,
+    mouth: f32,
+    handoff: bool,
+    watch: crate::facial::Watch,
+    overrides: PoseOverrides,
+}
+impl PuppetRig {
+    fn source(&self) -> PoseSource<'_> {
+        PoseSource { data: &self.data, attachments: self.attachments, mouth: self.mouth,
+            handoff: self.handoff, watch: &self.watch, overrides: &self.overrides }
+    }
+    pub(crate) fn snapshot_bones(&self) -> usize { self.data.skeleton.bones.len() }
+    pub(crate) fn extract_draw(&self, clip: &str, time: f32, looping: bool,
+        transform: Transform, scale: f32) -> PuppetInput {
+        self.source().extract_draw(clip, time, looping, transform, scale)
+    }
+    pub(crate) fn tag(&self, name: &str, clip: &str, time: f32, transform: Transform, scale: f32)
+        -> Option<Transform> {
+        self.source().sample_tag(name, clip, time, transform, scale, false)
+    }
+    pub(crate) fn looping_tag(&self, name: &str, clip: &str, time: f32, transform: Transform, scale: f32)
+        -> Option<Transform> {
+        self.source().sample_tag(name, clip, time, transform, scale, true)
+    }
+    pub(crate) fn mouth(&mut self, amount: f32) { self.mouth = amount; }
+    pub(crate) fn mouth_angle(&mut self, degrees: f32) { self.overrides.set_mouth_angle(degrees); }
 }
 
 /// A script-owned actor using the same mesh, attachment and animation path as placed NPCs.
@@ -793,23 +881,19 @@ impl PuppetInput {
     }
 }
 impl Puppet {
+    fn source(&self) -> PoseSource<'_> {
+        PoseSource { data: &self.model.data, attachments: self.attachments, mouth: self.mouth,
+            handoff: self.handoff.is_some(), watch: &self.watch, overrides: &self.overrides }
+    }
+    /// A copy of the CPU side as it stands now, for a simulation-side capture.
+    pub(crate) fn rig(&self) -> PuppetRig {
+        PuppetRig { data: self.model.data.clone(), attachments: self.attachments, mouth: self.mouth,
+            handoff: self.handoff.is_some(), watch: self.watch.clone(), overrides: self.overrides.clone() }
+    }
     pub(crate) fn snapshot_bones(&self) -> usize { self.model.data.skeleton.bones.len() }
     pub(crate) fn extract_draw(&self, clip: &str, time: f32, looping: bool,
         transform: Transform, scale: f32) -> PuppetInput {
-        let d = &self.model.data;
-        let animation = d.clips.get(clip).unwrap_or(&d.clips[&d.idle]);
-        let mut local = animation.sample(time, looping);
-        self.watch.apply(&d.skeleton, &mut local);
-        let handoff = self.handoff.as_ref().map(|_| crate::cinematic::ActorPose {
-            rendered: None, local: local.clone(), transform, scale });
-        let mut pose = d.mouth_rig.pose(&d.skeleton, &local, self.mouth, self.overrides.mouth_angle);
-        let scales = if self.overrides.bone_scales.is_empty() { Vec::new() } else {
-            crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.overrides.bone_scales)
-        };
-        PuppetInput { pose, scales, handoff,
-            visual: d.events.visual(clip, time, animation.duration(), animation.frame_time, looping),
-            time, alive: !clip.starts_with("death"), transform, scale,
-            attachments: self.attachments, frozen: clip == "death_frozen", hidden: self.overrides.hidden.clone() }
+        self.source().extract_draw(clip, time, looping, transform, scale)
     }
     pub(crate) fn valid_input(&self, input: &PuppetInput) -> bool {
         input.pose.len() == self.model.data.skeleton.bones.len()
@@ -916,16 +1000,7 @@ impl Puppet {
         scale: f32,
         looping: bool,
     ) -> Option<Transform> {
-        let d = &self.model.data;
-        let tag = d.skeleton.bones.iter().position(|b| b.name == name)?;
-        let mut local = d.clips.get(clip)?.sample(time, looping);
-        self.watch.apply(&d.skeleton, &mut local);
-        let mut pose = d.skeleton.global_pose(&local);
-        crate::skeletal::scale_pose(&d.skeleton, &mut pose, &self.overrides.bone_scales);
-        Some(Transform {
-            translation: transform.point(pose[tag].translation * d.def.scale * scale),
-            rotation: transform.rotation * pose[tag].rotation,
-        })
+        self.source().sample_tag(name, clip, time, transform, scale, looping)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn draw_filtered(
@@ -954,9 +1029,7 @@ impl Puppet {
     }
     /// Scene-local authored jaw range; caller resets it between scenes.
     pub fn mouth_angle(&mut self, degrees: f32) {
-        if degrees.is_finite() && (0. ..=90.).contains(&degrees) {
-            self.overrides.mouth_angle = Some(degrees.to_radians());
-        }
+        self.overrides.set_mouth_angle(degrees);
     }
     pub fn watch(&mut self, watch: crate::facial::Watch) {
         self.watch = watch;
@@ -2351,6 +2424,8 @@ const _: fn() = || {
     fn send_sync<T: Send + Sync>() {}
     send::<NpcSim>();
     send_sync::<ModelData>();
+    send_sync::<PuppetRig>();
+    send::<PuppetInput>();
 };
 
 // `NpcArt` owns GL-affine resources and must stay on the owner thread. This fails to

@@ -290,7 +290,14 @@ impl LevelArt {
             _ => {}
         }
         for (art, slot) in self.levels.iter_mut().zip(&i.levels) {
-            if let Some(a)=art { a.extract_snapshot(&*slot.ctl,story); }
+            if let Some(a)=art {
+                // A capture source reads the controller and story numbers only; the art
+                // then consumes the plain value it returned.
+                if let Some(source)=a.capture_source() {
+                    let pose=source.story(story);
+                    a.publish_snapshot(source.capture(&*slot.ctl,&pose));
+                } else { a.extract_snapshot(&*slot.ctl,story); }
+            }
         }
         LevelDispatch { visit: self.snapshot_visit.id(),
             selected: [i.fortress.is_some(), i.school.is_some(), i.village.is_some(),
