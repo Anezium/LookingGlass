@@ -103,7 +103,7 @@ impl AudioStep {
             return;
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        if std::env::var_os("LOOKING_GLASS_AUDIO_STEP_BARRIERS").is_some() {
+        if super::proof::enabled() {
             println!(
                 "AUDIO_STEP_BARRIER frame={} barrier={_barrier} ops={}",
                 self.frame,
