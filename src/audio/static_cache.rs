@@ -3,7 +3,8 @@
 //! (+0 bits), no ignored entity, and the solid mask baked into the immutable World
 //! at construction. Scene identity therefore also identifies its mask/tree/hulls.
 //! Mutable completion is deliberately outside the cached value.
-use crate::collision::{StaticGeometry, Trace, World};
+use super::AcousticWorld;
+use crate::collision::{StaticGeometry, Trace};
 use macroquad::prelude::Vec3;
 use std::sync::Arc;
 
@@ -37,13 +38,13 @@ impl Cache {
         self.next.fill(0);
         self.geometry = None;
     }
-    pub(super) fn begin(&mut self, world: &World) {
+    pub(super) fn begin(&mut self, world: &impl AcousticWorld) {
         if self.geometry.as_ref().is_none_or(|g| Arc::as_ptr(g) as usize != world.acoustic_scene_key()) {
             self.reset();
             self.geometry = Some(world.audio_geometry());
         }
     }
-    pub(super) fn sweep(&mut self, world: &World, start: Vec3, end: Vec3) -> Trace {
+    pub(super) fn sweep(&mut self, world: &impl AcousticWorld, start: Vec3, end: Vec3) -> Trace {
         let _census = crate::phase_census::sweep();
         // Check per query as well as per frame, making cross-scene misuse safe.
         self.begin(world);

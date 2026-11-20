@@ -2,7 +2,7 @@ use crate::{
     hud::HudOp,
     hud_view::HudView,
     assets::Assets,
-    audio::Audio,
+    audio::{step::{AudioOp, AudioStep, VoiceRequest}, Audio},
     character::{self, Character},
     collision::World,
     hud::Hud,
@@ -1680,7 +1680,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut overlap_probe = crate::overlap_probe::Probe::configured();
     // Early exits and post-HUD saves leave their notices for the next HUD block.
     let mut hud_ops = Vec::new();
+    let mut audio_step = AudioStep::default();
+    macro_rules! flush_audio {
+        ($barrier:literal) => {
+            audio_step.apply_at_barrier($barrier, &mut audio, &mut assets, &world)
+        };
+    }
     loop {
+        debug_assert!(audio_step.ops.is_empty());
+        // The tape oracle uses release builds. Check the same invariant there.
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        assert!(audio_step.ops.is_empty());
+        audio_step.frame = frame;
         #[cfg(feature="vita_renderer")]
         let snapshot_handoff = crate::render::vita_renderer::config().diag_snapshot;
         #[cfg(not(feature="vita_renderer"))]
@@ -1710,6 +1721,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if route.should_finish() {
                 route.finish(&store,&game_snapshot!(),yaw,pitch)?;
                 crate::frame_profile::report(&maps[current])?;
+                flush_audio!("route-end");
                 break;
             }
             paused=false;
@@ -1755,6 +1767,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 crate::replay::Step::Run { .. } | crate::replay::Step::Off => {}
                 crate::replay::Step::Finish => {
                     replay_end = Some(if r.replaying() { "tape-end" } else { "step-limit" });
+                    flush_audio!("replay-end");
                     break;
                 }
             }
@@ -1787,6 +1800,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         } else {println!("bench: done 120 frames mode={} profiler=light", mode.name());}
                     }
                     finish_replay_step!("benchmark");
+                    flush_audio!("benchmark-end");
                     break;
                 }
                 if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
@@ -1872,6 +1886,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         quit_after_frame |= host_transition == "quit";
         if quit_after_frame && !throttle_normal {
             finish_replay_step!("quit");
+            flush_audio!("quit");
             break;
         }
         if physical_input && window_focused() && !console.open && !bench {
@@ -1879,10 +1894,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && !menu
                 && !inventory_menu
             {
+                flush_audio!("escape-open");
                 escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
             } else if is_key_pressed(KeyCode::F3) {
                 menu = false;
                 inventory_menu = false;
+                flush_audio!("escape-open");
                 escape_menu.open(crate::menu::Page::Audio, &preferences, audio.settings);
             }
         }
@@ -1890,7 +1907,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if escape_menu.page.is_some() {
             if let Some(r) = replay.as_mut().filter(|r| r.running()) {
                 r.stop("menu");
-                if r.replaying() { break; }
+                if r.replaying() { flush_audio!("menu-replay-end"); break; }
                 input.refresh_controls();
             }
         }
@@ -1915,6 +1932,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // Consume Escape before entering the separate modal frame loop. No
             // physics, story, enemies, power-up timers or world clocks run there.
             drop(census_block);
+            flush_audio!("escape-modal");
             owner_yield!(step_guards, next_frame());
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
             let action = if host_transition == "native-load" { crate::menu::Action::Load(Slot::Auto) }
@@ -1928,8 +1946,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 Action::Resume => {
                     paused = false;
                 }
-                Action::Quit => { if throttle_normal { quit_after_frame = true; } else { break; } },
+                Action::Quit => { if throttle_normal { quit_after_frame = true; } else { flush_audio!("escape-quit"); break; } },
                 Action::Chapters => {
+                    flush_audio!("chapter-picker");
                     match owner_yield!(step_guards, escape_menu
                         .choose_chapter(
                             &maps,
@@ -1945,7 +1964,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             chapter_requested = Some(choice);
                             escape_menu.close();
                         }
-                        crate::menu::ChapterChoice::Quit => { if throttle_normal { quit_after_frame = true; } else { break; } },
+                        crate::menu::ChapterChoice::Quit => { if throttle_normal { quit_after_frame = true; } else { flush_audio!("chapter-picker-quit"); break; } },
                         crate::menu::ChapterChoice::Back => (),
                     }
                 }
@@ -2032,6 +2051,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             clock.pause();
             input.suppress();
             if pending_menu_save.is_none() && pending_menu_newgame.is_none() && !quit_after_frame {
+                flush_audio!("pause-continue");
                 finish_replay_step!("pause");
                 drop(census_block);
             next_frame().await;
@@ -2092,6 +2112,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 "new-game", &maps[current], "gvillage"));
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningEnter, crate::native_timing::CINEMA));
+            flush_audio!("opening-film");
             match owner_yield!(step_guards, crate::movie::play(
                 &mut assets,
                 &mut audio,
@@ -2101,6 +2122,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 "opening",
             )) {
                 Ok(false) => {
+                    flush_audio!("opening-quit");
                     finish_replay_step!("opening-quit");
                     break;
                 }
@@ -2143,6 +2165,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if console.open && focused {
             if let Some(command) = console.input(&chars) {
+                flush_audio!("console");
                 use crate::console::Command;
                 match command {
                     Err(message) => console.print(message),
@@ -2343,7 +2366,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     }
                     Ok(Command::Quit) => {
                         if throttle_normal { quit_after_frame = true; }
-                        else { finish_replay_step!("console-quit"); break; }
+                        else { finish_replay_step!("console-quit"); flush_audio!("console-quit"); break; }
                     },
                 }
             }
@@ -2355,7 +2378,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // A load reads the slot as it is now, which a later replay cannot rely on.
             if let Some(r) = replay.as_mut().filter(|r| r.running()) {
                 r.stop("load");
-                if r.replaying() { break; }
+                if r.replaying() { flush_audio!("load-replay-end"); break; }
             }
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
@@ -2363,6 +2386,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 let result = match store.read(slot) {
                     Ok(loaded) => {
                         let backup = loaded.backup;
+                        flush_audio!("quick-or-console-load");
                         restore_transition!(loaded.game, "quick-or-console-load", true, replace, step_guards).map(|()| backup)
                     }
                     Err(error) => Err(error),
@@ -2390,6 +2414,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             } else {
                 hud_ops.push(HudOp::Announce("Save/load is unavailable in a staged preview".into()));
             }
+            flush_audio!("quick-or-console-load-continue");
             finish_replay_step!("quick-or-console-load");
             drop(census_block);
             next_frame().await;
@@ -2657,7 +2682,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 skip_scene.event("engine_exit accepted=true");
                 camera_handoff.skip();
                 if speaking {
-                    audio.stop_voice();
+                    audio_step.ops.push(AudioOp::Voice(VoiceRequest::Stop));
                 }
                 skip_scene.event(&format!("soundtrack_stop=not-applicable voice_stop={speaking}"));
                 skip_scene.handoff("skipped");
@@ -2683,7 +2708,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             let result = match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref())) {
-                Ok(game) => restore_transition!(game, "death-retry", false, retry, step_guards),
+                Ok(game) => {
+                    flush_audio!("death-retry");
+                    restore_transition!(game, "death-retry", false, retry, step_guards)
+                }
                 Err(error) => Err(error),
             };
             match result {
@@ -2702,6 +2730,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             // All per-frame clocks, targets and inputs above belong to the old
             // attempt. Begin a fresh frame before advancing the restored one.
+            flush_audio!("death-retry-continue");
             finish_replay_step!("death-retry");
             drop(step_guards.take());
             drop(census_block);
@@ -2762,13 +2791,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 stats.restore();
                 npcs.reset_combat();
                 if options.larva_preview && maps[current] == "centipede1" {
+                    flush_audio!("larva-preview");
                     npcs = crate::npc::Npcs::larva_preview(&mut assets)?;
                     npcs.update(0., &world, player.eye());
                     stats.loot.remove(&loot_visit);
                     let prefix = format!("drop:{loot_visit}:");
                     stats.collected.retain(|key| !key.starts_with(&prefix));
                 }
-                apply_voice_request(story.recover(), &mut assets, &mut audio);
+                audio_step.ops.push(AudioOp::Voice(story.recover()));
                 hints.recover();
                 interactions.reset_contacts();
                 spawn_landing = true;
@@ -2842,6 +2872,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
                 let checkpoint = game_snapshot!();
                 let particles = steam.runtime();
+                flush_audio!("chapter-or-console");
                 let audio_checkpoint = audio.transition_checkpoint();
                 let mut memory = if let Some(memory) = new_campaign_memory.take() { memory } else {
                     crate::transition_memory::Transition::begin("chapter-or-console", &maps[current], &maps[selected])
@@ -3068,7 +3099,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     hud_ops.push(HudOp::Announce(message.into()));
                 }
                 if let Some(sound) = events.sound {
-                    audio.world_effect(&sound);
+                    audio_step.effect(sound, None);
                 }
                 drop(census_block); census_block = crate::phase_census::span(crate::phase_census::Region::Movers);
                 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -3207,32 +3238,32 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }
                 drop(control_hooks);
                 pos = player.eye();
-                audio.movement(
-                    (player.feet - before_feet).truncate().length(),
-                    player.grounded
+                audio_step.ops.push(AudioOp::Movement {
+                    distance: (player.feet - before_feet).truncate().length(),
+                    grounded: player.grounded
                         && before_grounded
                         && player.immersion.level == 0
                         && !input.running(&preferences, held!(KeyCode::LeftShift)),
-                    player.jumps > before_jumps,
-                    player.landings > before_landings && before_fall < -90.,
-                );
-                audio.water(
+                    jumped: player.jumps > before_jumps,
+                    landed: player.landings > before_landings && before_fall < -90.,
+                });
+                audio_step.ops.push(AudioOp::Water {
                     dt,
-                    before_water.level,
-                    player.immersion.level,
-                    player.velocity.length(),
-                );
+                    before: before_water.level,
+                    now: player.immersion.level,
+                    speed: player.velocity.length(),
+                });
                 if before_water.level < 2 && player.immersion.level >= 2 {
                     hud_ops.push(HudOp::Announce("Swimming / Space rise / Ctrl dive / look and W to swim".into()));
                 }
                 let liquid_damage = std::mem::take(&mut player.liquid_damage);
                 stats.damage(liquid_damage);
                 if player.breath.hits != before_drowning {
-                    audio.world_effect("sound/character/alice/choke1.wav");
+                    audio_step.effect("sound/character/alice/choke1.wav", None);
                 }
                 if !before_air_warning && player.breath.warning_age().is_some()
                     && player.immersion.level == 3 && stats.alive() {
-                    audio.world_effect("sound/character/alice/choke2.wav");
+                    audio_step.effect("sound/character/alice/choke2.wav", None);
                 }
                 if liquid_damage > 0. && before_water.kind != player.immersion.kind {
                     hud_ops.push(HudOp::Announce("Harmful liquid / Sanity lost".into()));
@@ -3262,7 +3293,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     hud_ops.push(HudOp::Announce(message.into()));
                 }
                 if let Some(sound) = events.sound {
-                    audio.world_effect(&sound);
+                    audio_step.effect(sound, None);
                 }
                 if stats.alive() {
                     pending_transition = events.transition.or(pending_transition);
@@ -3313,7 +3344,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                         story.trigger("dice_cat");
                     }
                     if stats.powers.rage > rage_before {
-                        audio.world_effect("sound/item/ragebox/ragebox_pickup.wav");
+                        audio_step.effect("sound/item/ragebox/ragebox_pickup.wav", None);
                     }
                     if player.script_motion == 0 {
                         recovery.observe(&world, &interactions, &player, yaw);
@@ -3352,7 +3383,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             match outcome {
                 Ok(()) => {
                     if hints.visible() {
-                        audio.world_effect("sound/character/cheshire_cat/appear.wav");
+                        audio_step.effect("sound/character/cheshire_cat/appear.wav", None);
                     }
                     console.open = false;
                 }
@@ -3377,12 +3408,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             },
             advance_dialogue,
         ) {
-            apply_voice_request(request, &mut assets, &mut audio);
+            audio_step.ops.push(AudioOp::Voice(request));
         }
         interactions.sync_cinematic_story(&story);
         hints.sync(&interactions);
         if hints.update(if story_active { dt } else { 0. }, story.hint_active()) {
-            audio.world_effect("sound/character/cheshire_cat/disappear.wav");
+            audio_step.effect("sound/character/cheshire_cat/disappear.wav", None);
         }
         for event in story.take_completed() {
             let effects = interactions.completed_dialogue(&event);
@@ -3390,7 +3421,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 hud_ops.push(HudOp::Announce(message.into()));
             }
             if let Some(sound) = effects.sound {
-                audio.world_effect(&sound);
+                audio_step.effect(sound, None);
             }
         }
         if let Some(s) = &mut interactions.school2 {
@@ -3417,9 +3448,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             for event in events.story {
                 story.trigger(&event);
             }
-            audio.feedback(&feedback);
+            audio_step.feedback(feedback);
             if let Some(sound) = events.sound {
-                audio.world_effect(&sound);
+                audio_step.effect(sound, None);
             }
             if let Some(message) = events.message {
                 hud_ops.push(HudOp::Announce(message.into()));
@@ -3449,7 +3480,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             stats.damage(f.damage);
             player.knockback(f.impulse);
-            audio.feedback(&f);
+            audio_step.feedback(f);
             if before_stage == crate::duchess::Stage::Waiting && d.cinematic() {
                 recovery.clear();
             }
@@ -3485,6 +3516,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             input.suppress_captured();
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::EndingEnter, crate::native_timing::CINEMA));
+            flush_audio!("ending-film");
             match owner_yield!(step_guards, crate::movie::play(
                 &mut assets,
                 &mut audio,
@@ -3494,6 +3526,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 "ending",
             )) {
                 Ok(false) => {
+                    flush_audio!("ending-quit");
                     finish_replay_step!("ending-quit");
                     break;
                 }
@@ -3506,6 +3539,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             escape_menu.open(crate::menu::Page::Credits, &preferences, audio.settings);
             escape_menu.message = "Campaign complete / Continue replays the final encounter".into();
             clock.pause();
+            flush_audio!("ending-continue");
             finish_replay_step!("ending");
             continue;
         }
@@ -3527,6 +3561,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // the ledger until the destination's window half has loaded too.
             let (mut next_stats, mut next_campaign) = (stats.clone(), campaign.clone());
             clock.pause();
+            flush_audio!("natural-exit");
             audio.update(0., pos, yaw, true, true);
             #[cfg(target_os="vita")]
             crate::frame_profile::log_report_error(crate::frame_profile::report(&maps[current]));
@@ -3784,7 +3819,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             stats.damage(f.damage);
             player.knockback(f.impulse);
-            audio.feedback(&f);
+            audio_step.feedback(f);
         }
         crate::spike_log::sim(crate::spike_log::Sim::Levels);
         if interactions.has_level_combat() {
@@ -3816,7 +3851,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             stats.damage(f.damage);
             player.knockback(f.impulse);
-            audio.feedback(&f);
+            audio_step.feedback(f);
         }
         crate::spike_log::sim(crate::spike_log::Sim::Npcs);
         npcs.summon(alice.ally_target());
@@ -3866,7 +3901,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             );
             hud_ops.push(HudOp::Announce("Card guard struck you".into()));
         }
-        audio.feedback(&feedback);
+        audio_step.feedback(feedback);
         if player.script_motion > 0 || player.ledge.is_some() || interactions.level_blocks_weapons() {
             weapon_click = None;
             weapon_buttons.block();
@@ -3981,7 +4016,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .as_mut()
                     .and_then(|d| d.hit(hit.damage))
                 {
-                    audio.world_effect_at(sound, hit_origin);
+                    audio_step.effect(sound, Some(hit_origin));
                 }
                 continue;
             }
@@ -3989,13 +4024,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             // catch-all below, which would otherwise swallow every registry id.
             if let Some(sound) = interactions.hit_level(hit) {
                 if let Some(sound) = sound {
-                    audio.world_effect_at(sound, hit_origin);
+                    audio_step.effect(sound, Some(hit_origin));
                 }
                 continue;
             }
             if hit.id >= crate::encounters::BASE {
                 if let Some(sound) = interactions.encounters.as_mut().and_then(|s| s.hit(hit)) {
-                    audio.world_effect_at(sound, hit_origin);
+                    audio_step.effect(sound, Some(hit_origin));
                 }
                 continue;
             }
@@ -4005,7 +4040,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     hud_ops.push(HudOp::Announce(message.into()));
                 }
                 if let Some(sound) = e.sound {
-                    audio.world_effect_at(&sound, hit_origin);
+                    audio_step.effect(sound, Some(hit_origin));
                 }
                 interactions.sync(&mut world);
                 continue;
@@ -4016,13 +4051,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .as_mut()
                     .and_then(|s| s.hit_attack(hit))
                 {
-                    audio.world_effect_at(sound, hit_origin);
+                    audio_step.effect(sound, Some(hit_origin));
                 }
                 continue;
             }
             if let Some((message, sound)) = npcs.hit(hit) {
                 hud_ops.push(HudOp::Announce(message.into()));
-                audio.world_effect_at(sound, hit_origin);
+                audio_step.effect(sound, Some(hit_origin));
             }
         }
         world.set_weapon_obstacles(alice.ice_targets());
@@ -4040,7 +4075,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 |item| power_art.collected(item, pickup_clock),
             ) {
                 hud_ops.push(HudOp::Announce(message.into()));
-                audio.world_effect("sound/item/essence/small/mtespu.wav");
+                audio_step.effect("sound/item/essence/small/mtespu.wav", None);
             }
             if let Some(message) =
                 pickup_feedback.update(&stats, &pickups, &loot_visit, player.feet, &world)
@@ -4050,11 +4085,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         if stats.active_power().map(|(k, _)| k) != power_before {
             if let Some((kind, _)) = stats.active_power() {
-                audio.world_effect(match kind {
+                audio_step.effect(match kind {
                     crate::powerups::Kind::Rage => "sound/item/ragebox/ragebox_power.wav",
                     crate::powerups::Kind::Tea => "sound/item/tea/powerup.wav",
                     crate::powerups::Kind::Glass => "sound/item/glass/powerup.wav",
-                });
+                }, None);
             }
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -4068,22 +4103,21 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         for sound in weapon_sounds {
-            audio.weapon_effect(sound);
+            audio_step.effect(sound, None);
         }
         for (path, origin) in alice.take_world_audio() {
-            audio.world_effect_at(path, origin);
+            audio_step.effect(path, Some(origin));
         }
-        audio.world(&mut assets, &interactions, alice.audio_loops());
+        audio_step.world(&interactions, alice.audio_loops());
         for cue in alice.take_audio() {
-            audio.animation(cue);
+            audio_step.ops.push(AudioOp::Animation(cue));
         }
-        audio.player_state(
-            &mut assets,
-            stats.sanity() as f32,
-            player.swimming,
-            player.immersion.level == 3,
-            player.immersion.level == 3 && player.breath.remaining() <= 0.,
-        );
+        audio_step.ops.push(AudioOp::Player {
+            sanity: stats.sanity() as f32,
+            swimming: player.swimming,
+            underwater: player.immersion.level == 3,
+            drowning: player.immersion.level == 3 && player.breath.remaining() <= 0.,
+        });
         alice.power_appearance(&stats);
         alice.water_appearance(&player);
         } // simulation: Alice, weapons and world audio
@@ -4260,23 +4294,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
-        audio.prepare(
-            &mut assets,
-            &world,
-            camera,
-            world.liquid_at(camera) != 0,
-            elapsed,
-        );
         let listen_direction = target - camera;
-        audio.update_clocks(
-            elapsed,
+        audio_step.ops.push(AudioOp::Listen {
+            listener: camera,
+            submerged: world.liquid_at(camera) != 0,
+            dt: elapsed,
             world_dt,
-            camera,
-            listen_direction.y.atan2(listen_direction.x),
-            console_input || menu || paused || inventory_menu || !focused,
-            !story_active,
-        );
+            yaw: listen_direction.y.atan2(listen_direction.x),
+            paused: console_input || menu || paused || inventory_menu || !focused,
+            voice_paused: !story_active,
+        });
         } // simulation: audio listener and clocks
+        audio_step.apply(&mut audio, &mut assets, &world);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_scene"); }
         crate::spike_log::sim(crate::spike_log::Sim::Scene);
@@ -5655,7 +5684,11 @@ interactions
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::phase_census::accept(active, frame > 60);
-        if quit_after_frame { if snapshot_tail_fenced { crate::spike_log::world_last_read(); } break; }
+        if quit_after_frame {
+            if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
+            flush_audio!("quit-after-frame");
+            break;
+        }
         if options.frames.is_some_and(|limit| frame >= limit) {
             #[cfg(all(feature="vita_renderer",not(target_os="vita")))]
             println!("[lg/vita-renderer] host frame report {}",crate::render::vita_renderer::report());
@@ -5667,6 +5700,7 @@ interactions
             if let Some(path) = &options.capture {
                 save_capture(path)?;
             }
+            flush_audio!("frame-limit");
             break;
         }
         if context_before != (menu, inventory_menu, console.open, paused) {
@@ -6072,17 +6106,6 @@ pub(crate) async fn check_renderer_host(assets: &mut Assets, options: &Options) 
         "particle_settle_frames":600,"warmup_frames":60,"steam_visible_pixels_proven":true}))?)?;
     println!("PASS renderer host reference: 120 frozen timing frames, 60 invalidation frames, fifteen captures including HUD and visible steam");
     Ok(())
-}
-
-// The sim emits a voice request; the owner performs it at the same call site,
-// keeping today's order until the audio op list takes over.
-fn apply_voice_request(request: crate::story::VoiceRequest, assets: &mut Assets, audio: &mut Audio) {
-    match request {
-        crate::story::VoiceRequest::Play { path, offset_seconds } => {
-            audio.speak_from(assets, &path, offset_seconds);
-        }
-        crate::story::VoiceRequest::Stop => audio.stop_voice(),
-    }
 }
 // The chapter chooser owns Down while open; the inventory-opening edge cannot cycle.
 fn inventory_toggle(pressed: bool, menu: bool, inventory: &mut bool) -> bool {

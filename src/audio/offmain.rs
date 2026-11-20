@@ -1,8 +1,8 @@
 //! Default-off immutable acoustic work on the existing PCM producer.
 //! One reusable bounded packet crosses SPSC queues. PCM demand wins before
 //! every trace; no game World, decoder, sink or lazy collider leaves main.
-use super::queue;
-use crate::collision::{StaticGeometry, Trace, World};
+use super::{queue, AcousticWorld};
+use crate::collision::{StaticGeometry, Trace};
 use macroquad::prelude::Vec3;
 use std::{
     sync::{
@@ -109,7 +109,7 @@ impl Client {
         }
         self.ready = false;
     }
-    pub(super) fn begin(&mut self, world: &World) {
+    pub(super) fn begin(&mut self, world: &impl AcousticWorld) {
         self.ready = false;
         self.read = 0;
         self.count = 0;
@@ -188,9 +188,9 @@ impl Client {
         }
         self.wait_max_us = self.wait_max_us.max(start.elapsed().as_micros());
     }
-    pub(super) fn complete(&mut self, world: &World, start: Vec3, end: Vec3) -> Trace {
+    pub(super) fn complete(&mut self, world: &impl AcousticWorld, start: Vec3, end: Vec3) -> Trace {
         if !self.ready {
-            return world.sweep(start, end, Vec3::ZERO);
+            return world.audio_sweep(start, end);
         }
         let b = self.batch.as_ref().unwrap();
         let q = Query { start, end };
@@ -251,6 +251,7 @@ impl Drop for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collision::World;
     use macroquad::prelude::vec3;
     fn test_box(center: Vec3, half: Vec3) -> crate::collision::Collider {
         crate::collision::Collider::box_bounds(center - half, center + half)
@@ -376,6 +377,7 @@ mod tests {
 #[cfg(test)]
 mod lifetime_tests {
     use super::*;
+    use crate::collision::World;
     #[test]
     fn reset_and_late_return_release_outgoing_map_without_allocating() {
         let world = World::fixture(&[(Vec3::splat(-5.), Vec3::splat(5.))]);

@@ -4,6 +4,7 @@ mod offmain;
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
 mod proof;
 mod static_cache;
+pub(crate) mod step;
 mod queue;
 pub mod sink;
 mod output;
@@ -13,7 +14,7 @@ pub mod events;
 mod reaction;
 pub mod regression;
 pub mod world;
-use crate::{assets::Assets, bsp::Bsp, collision::World};
+use crate::{assets::Assets, bsp::Bsp, collision::{StaticGeometry, Trace, World}};
 use anyhow::{ensure, Context, Result};
 use macroquad::prelude::{vec3, Vec3};
 use rodio::{Decoder, OutputStream, Source};
@@ -29,6 +30,31 @@ use std::{
     },
     time::Duration,
 };
+
+pub(crate) trait AcousticWorld {
+    fn acoustic_scene_key(&self) -> usize;
+    fn audio_geometry(&self) -> Arc<StaticGeometry>;
+    fn audio_complete(&self, trace: Trace, start: Vec3, end: Vec3) -> Trace;
+    fn audio_sweep(&self, start: Vec3, end: Vec3) -> Trace;
+}
+
+impl AcousticWorld for World {
+    fn acoustic_scene_key(&self) -> usize {
+        World::acoustic_scene_key(self)
+    }
+
+    fn audio_geometry(&self) -> Arc<StaticGeometry> {
+        World::audio_geometry(self)
+    }
+
+    fn audio_complete(&self, trace: Trace, start: Vec3, end: Vec3) -> Trace {
+        World::audio_complete(self, trace, start, end)
+    }
+
+    fn audio_sweep(&self, start: Vec3, end: Vec3) -> Trace {
+        self.sweep(start, end, Vec3::ZERO)
+    }
+}
 
 static GAME_STAGE: AtomicU32 = AtomicU32::new(0);
 static GAME_STAGE_AT: AtomicU32 = AtomicU32::new(0);
@@ -1526,22 +1552,8 @@ impl Audio {
             self.world_effect("sound/character/alice/gasp1.wav");
         }
     }
-    pub fn weapon_effect(&mut self, path: &str) {
-        self.world_effect(path);
-    }
     pub fn world_effect(&mut self, path: &str) {
         self.queue(path, None, 1.);
-    }
-    pub fn feedback(&mut self, feedback: &crate::combat::Feedback) {
-        for (path, origin) in &feedback.cue_sounds {
-            self.world_effect_at(path, *origin);
-        }
-        for path in &feedback.sounds {
-            self.world_effect(path);
-        }
-        for (path, origin) in &feedback.spatial_sounds {
-            self.world_effect_at(path, *origin);
-        }
     }
     pub fn world_effect_at(&mut self, path: &str, origin: Vec3) {
         self.queue(path, Some(origin), 1.);
@@ -1578,7 +1590,7 @@ impl Audio {
     pub fn prepare(
         &mut self,
         assets: &mut Assets,
-        world: &World,
+        world: &impl AcousticWorld,
         listener: Vec3,
         submerged: bool,
         dt: f32,
@@ -1641,7 +1653,7 @@ impl Audio {
         // optional-client branch per trace, and never takes/restores client state.
         let offmain = self.playback.as_ref().is_some_and(|p| p._worker.is_some() && p.mixer.acoustics.is_some());
         if !offmain {
-            self.prepare_acoustics(listener, submerged, dt, |a,b| world.sweep(a,b,Vec3::ZERO));
+            self.prepare_acoustics(listener, submerged, dt, |a,b| world.audio_sweep(a,b));
             return;
         }
         let mut client = self.playback.as_mut().and_then(|p| p.mixer.acoustics.take());
@@ -1663,11 +1675,11 @@ impl Audio {
         if let Some(c) = client.as_mut() {
             self.prepare_acoustics(listener, submerged, dt, |a,b| c.complete(world,a,b));
         } else {
-            self.prepare_acoustics(listener, submerged, dt, |a,b| world.sweep(a,b,Vec3::ZERO));
+            self.prepare_acoustics(listener, submerged, dt, |a,b| world.audio_sweep(a,b));
         }
         if let Some(p) = &mut self.playback { p.mixer.acoustics = client; }
     }
-    fn prepare_cached_acoustics(&mut self, world: &World, listener: Vec3, submerged: bool, dt: f32) {
+    fn prepare_cached_acoustics(&mut self, world: &impl AcousticWorld, listener: Vec3, submerged: bool, dt: f32) {
         // Move ownership without allocating; the generic kernel keeps the same ray order.
         let mut cache = self.static_cache.take().unwrap();
         cache.begin(world);
@@ -1714,11 +1726,11 @@ impl Audio {
     pub fn world(
         &mut self,
         assets: &mut Assets,
-        interactions: &crate::interaction::Interactions,
-        mut loops: Vec<LoopCue>,
+        clocks: Vec<world::Clock>,
+        mood: Option<&str>,
+        loops: Vec<LoopCue>,
     ) {
-        let clocks = world::collect(interactions, &mut loops);
-        if let Some(mood) = interactions.levels.iter().find_map(|s| s.ctl.music_mood()) {
+        if let Some(mood) = mood {
             if let Err(e) = self.mood(assets, mood) { eprintln!("Scene music unavailable: {e:#}"); }
         }
         for (path, origin) in self.world_sounds.update(clocks) {

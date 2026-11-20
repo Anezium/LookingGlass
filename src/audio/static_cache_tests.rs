@@ -1,5 +1,5 @@
 use super::*;
-use crate::{assets::Assets, bsp::Bsp};
+use crate::{assets::Assets, bsp::Bsp, collision::World};
 use macroquad::prelude::vec3;
 use std::{hint::black_box, path::PathBuf, time::Instant};
 
