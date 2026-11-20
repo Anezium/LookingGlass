@@ -40,6 +40,7 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/audio/proof.rs:16` | `thread_local!` | diagnostic | TLS block. Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. |
 | `src/audio/proof.rs:17` | `MIX` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 30. |
 | `src/audio/proof.rs:21` | `ON` | cache | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 22. |
+| `src/audio/output.rs:723` | `REPORTED` | diagnostic | No. PCM producer startup prints its thread layout once (N1, Vita only). Owner of the audio producer thread; never reached from the step. |
 | `src/audio/queue.rs:54` | `thread_local!` | state | TLS block. No. Test fixture or override. Keep scoped to its test thread or harness. |
 | `src/audio/queue.rs:56` | `PUSH_OBSERVER` | state | No. Test fixture or override. Keep scoped to its test thread or harness. See line 61. |
 | `src/audio/sink.rs:12` | `API_MAX_US` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 21. |
@@ -585,6 +586,7 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/sim_maps.rs:434` | `THINK_TEST` | state | No. Test fixture or override. Keep scoped to its test thread or harness. See line 437. |
 | `src/sim_maps.rs:434` | `thread_local!` | state | TLS block. No. Test fixture or override. Keep scoped to its test thread or harness. |
 | `src/skin_worker.rs:145` | `SPIN_US` | state | Existing skin worker reads its spin policy. Keep with skin dispatch and worker configuration. See line 146. |
+| `src/skin_worker.rs:501` | `REPORTED` | diagnostic | No. Audio callback startup reports the CPU1 layout once (N1, Vita only). Audio callback thread; never reached from the step. |
 | `src/skin_worker.rs:477` | `APPLIED` | state | No. Test fixture or override. Keep scoped to its test thread or harness. See line 478. |
 | `src/skin_worker.rs:477` | `thread_local!` | state | TLS block. Existing skin worker reads its spin policy. Keep with skin dispatch and worker configuration. |
 | `src/spike_log.rs:85` | `FRAME` | diagnostic | Step movement, NPC, camera or presentation instrumentation. Stamp samples on their measuring thread and join at the owner tail. See line 224. |
