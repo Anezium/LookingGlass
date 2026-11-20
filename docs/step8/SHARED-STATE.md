@@ -4,7 +4,9 @@ Source review at 3e90ce9. Reachability includes the free simulation step, condit
 
 ## Shared collision data
 
-Collider.lazy (src/collision.rs:235) shares Placed. Placed.hulls and .candidates (src/collision/model_shape.rs:193–194) initialize through hulls and visit_query. Each Candidates.triangles entry at line 201 also lazily materializes its exact bevel hull. Movement and NPC sweeps reach visit_query through Collider::trace. Camera liquid capture reaches contains/hulls through World::liquid_at. Live lighting/shadow rendering can sweep World, including dynamic placements. Free snapshot render consumes captured light selection, shadow geometry and liquid tint. Keep live world queries fenced and pre-touch any shared placements exposed to both phases at visit entry, or before publishing a newly moved placement. Re-audit dynamic lifetime when 6d merges.
+`AcousticView` owns the end-of-step solid publications read by audio. Static geometry and dynamic buckets use shared Arcs. The settled, dynamic and weapon lists are cloned in publication order, keeping the same shape placements. Capture follows the final Pool of Tears dynamic publication. The owner completes static audio rays with the captured lists. Live lighting and shadow queries still use `World`; free snapshot render consumes captured light selection, shadow geometry and liquid tint.
+
+`Collider::lazy` shares `Arc<Placed>` with simulation. Audio completion calls `hulls` on admitted settled supports. Dynamic queries call `trace_query` and may initialize complete hulls, or initialize `Placed::candidates` and individual triangle bevel hulls when `sim_triangle_candidates` is on. Weapon obstacles are eager boxes. Movement and NPC sweeps can reach the same placements. Camera liquid capture uses separate liquid colliders. Consider first-touch costs at visit entry and for newly published placements in step 8.
 
 School2 clones share Template.eager and .last_lazy (src/collision/model_shape.rs:185–186). These are sim-owned placement caches behind the two approved mutexes. Preserve cache identity and pose keys across clones.
 
@@ -43,11 +45,11 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/audio/queue.rs:54` | `thread_local!` | state | TLS block. No. Test fixture or override. Keep scoped to its test thread or harness. |
 | `src/audio/queue.rs:56` | `PUSH_OBSERVER` | state | No. Test fixture or override. Keep scoped to its test thread or harness. See line 61. |
 | `src/audio/sink.rs:12` | `API_MAX_US` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 21. |
-| `src/audio.rs:33` | `GAME_STAGE` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 39. |
-| `src/audio.rs:34` | `GAME_STAGE_AT` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 38. |
-| `src/audio.rs:35` | `GAME_ORIGIN` | cache | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 37. |
-| `src/audio.rs:1055` | `SAH_MIXER` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 1133. |
-| `src/audio.rs:1055` | `thread_local!` | diagnostic | TLS block. Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. |
+| `src/audio.rs:77` | `GAME_STAGE` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 83. |
+| `src/audio.rs:78` | `GAME_STAGE_AT` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 82. |
+| `src/audio.rs:79` | `GAME_ORIGIN` | cache | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 81. |
+| `src/audio.rs:1099` | `SAH_MIXER` | diagnostic | Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. See line 1177. |
+| `src/audio.rs:1099` | `thread_local!` | diagnostic | TLS block. Audio preparation feeds apply/mix/decode. Retain control writes on the audio owner and collect proof in producer order. |
 | `src/campaign.rs:216` | `KEYS` | cache | Campaign progression, story dispatch or save/restore reads authored visit data. Share immutable tables. See line 217. |
 | `src/campaign_chain/graph.rs:118` | `ROWS` | state | Campaign progression, story dispatch or save/restore reads authored visit data. Share immutable tables. See line 754. |
 | `src/campaign_route.rs:38` | `LEGS` | state | Campaign progression, story dispatch or save/restore reads authored visit data. Share immutable tables. See line 172. |
