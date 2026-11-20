@@ -8,14 +8,18 @@ pub(crate) struct Probe {
 impl Probe {
     pub(crate) fn configured() -> Self {
         #[cfg(feature="vita_renderer")]
-        let ms = crate::render::vita_renderer::config().diag_overlap_burn_ms;
+        let ms = {
+            let config = crate::render::vita_renderer::config();
+            if config.diag_overlap { config.diag_overlap_burn_ms } else { 0 }
+        };
         #[cfg(not(feature="vita_renderer"))]
         let ms = 0;
         let worker = if ms == 0 { None } else {
             let (tx, rx) = mpsc::sync_channel(1);
             let (done, result) = mpsc::sync_channel(1);
             let handle = thread::Builder::new().name("overlap-burn".into()).stack_size(512*1024).spawn(move || {
-                crate::skin_worker::pin_overlap_burn();
+                crate::skin_worker::pin_reserved_cpu1();
+                crate::skin_worker::inventory("overlap-burn", Some(0x20000));
                 // 2 MiB exceeds the shared L2; volatile read/write prevents dead-store removal.
                 let mut memory = vec![1u32; 512*1024];
                 while rx.recv() == Ok(true) {
@@ -64,7 +68,14 @@ mod tests {
         crate::render::vita_renderer::with_config(|c| c.diag_overlap_burn_ms=0, || {
             let p=Probe::configured(); assert!(p.worker.is_none());
         });
-        crate::render::vita_renderer::with_config(|c| c.diag_overlap_burn_ms=1, || {
+        crate::render::vita_renderer::with_config(|c| {
+            c.sim_overlap = true;
+            c.diag_overlap_burn_ms = 1;
+        }, || assert!(Probe::configured().worker.is_none()));
+        crate::render::vita_renderer::with_config(|c| {
+            c.diag_overlap = true;
+            c.diag_overlap_burn_ms = 1;
+        }, || {
             let mut p=Probe::configured();
             for _ in 0..3 { p.begin(); p.finish(); }
             p.begin(); // Drop must drain completion before requesting shutdown.

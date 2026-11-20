@@ -167,6 +167,9 @@ pub struct Config {
     pub diag_overlap: bool,
     /// Serial owned HUD input extraction experiment; no scheduling changes.
     pub diag_snapshot: bool,
+    /// Emit per-frame snapshot diagnostics. Omission preserves the pre-overlap default.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "optional_bool")]
+    pub diag_snapshot_log: Option<bool>,
     /// Memory-touching CPU1 load per render frame; zero disables the burn thread.
     pub diag_overlap_burn_ms: u32,
     pub skin_workers: usize,
@@ -633,7 +636,7 @@ impl Default for Config {
             world_parameter_time_split: true,
             uniform_field_cache: true,
             render_draw_timing: false,
-            worker_probe: false, diag_snapshot: false, diag_overlap: false, diag_overlap_burn_ms: 0, skin_workers: 2, skin_overlap: true,
+            worker_probe: false, diag_snapshot: false, diag_snapshot_log: None, diag_overlap: false, diag_overlap_burn_ms: 0, skin_workers: 2, skin_overlap: true,
             lights_early_out: true, fx_submit_state_cache: true, actor_layer_reuse: false, actor_single_prepare: true,
             actor_publication_occurrences: true,
             actor_deferred_layers: true,
@@ -783,6 +786,15 @@ impl Config {
         self.actor_single_prepare && self.skin_overlap && self.skin_workers > 0 && self.actor_fast_path && self.actor_layer_cache
             && self.fx_prepare_cache && !self.actor_layer_reuse && self.renderer=="vita"
     }
+    pub(crate) fn cpu1_reserved(&self) -> bool {
+        self.diag_overlap || self.sim_overlap
+    }
+    pub(crate) fn snapshot_log_enabled(&self) -> bool {
+        self.diag_snapshot && self.diag_snapshot_log.unwrap_or(!self.sim_overlap)
+    }
+    pub(crate) fn timed_kernel_allocations(&self) -> bool {
+        !self.sim_overlap
+    }
     fn validate(&self) -> Result<()> {
         ensure!(self.spike_log_last_frame == 0 || self.spike_log_last_frame >= self.spike_log_first_frame, "invalid spike frame window");
         ensure!(!self.sim_overlap || self.replay_record.is_empty(), "replay_record and sim_overlap are exclusive");
@@ -799,11 +811,13 @@ impl Config {
         ensure!(self.audio_ambient_voices<=128 && self.audio_cull_gain.is_finite() && (0. ..=0.1).contains(&self.audio_cull_gain), "invalid audio voice budget");
         ensure!(!self.actor_single_prepare || self.actor_single_prepare_active(),
             "actor_single_prepare requires renderer=vita, skin_overlap=true, skin_workers>0, actor_fast_path=true, actor_layer_cache=true, fx_prepare_cache=true and actor_layer_reuse=false");
+        ensure!(self.timed_kernel_allocations() || !self.skin_worker_bench,
+            "sim_overlap excludes skin_worker_bench and its timed allocation scopes");
         ensure!(!self.skin_worker_bench || self.skin_workers == 0, "skin_worker_bench requires skin_workers=0 to isolate overlap");
         ensure!(self.diag_overlap_burn_ms <= 20, "diag_overlap_burn_ms must be 0..20");
         ensure!(self.diag_overlap || self.diag_overlap_burn_ms == 0, "burn requires diag_overlap");
-        ensure!(!self.diag_overlap || (self.skin_workers == 1 && self.skin_overlap && self.audio_pcm_worker && self.audio_producer_affinity == 0x40000),
-            "diag_overlap reserves CPU1: requires one skin worker, buffered audio and audio on CPU2");
+        ensure!(!self.cpu1_reserved() || (self.skin_workers == 1 && self.skin_overlap && self.audio_pcm_worker && self.audio_producer_affinity == 0x40000),
+            "CPU1 reservation requires one overlapping skin worker, buffered audio and audio on CPU2");
         ensure!(!self.skin_overlap || self.skin_workers > 0, "skin_overlap requires skin_workers=1 or 2");
         ensure!(self.skin_workers <= 2, "skin_workers must be 0, 1 or 2");
         ensure!(matches!(self.save_preview.as_str(), "throttled" | "every_frame"), "save_preview must be throttled or every_frame");
@@ -891,6 +905,10 @@ fn config_log_lines(c: &Config) -> [String; 2] {
         format!("[lg/vita-renderer] report_cadence effective_log_frame_time_every={}", report_cadence(c)),
     ]
 }
+fn optional_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<bool>, D::Error> {
+    <bool as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 /// Reject a malformed report cadence, or a join without a live parameter table, without
 /// discarding unrelated flags.
 fn parse_runtime_config(bytes: &[u8]) -> Result<(Config, Option<String>)> {
@@ -4782,7 +4800,7 @@ mod tests {
     #[test]
     fn runtime_config_refuses_recording_with_sim_overlap() {
         assert!(serde_json::to_value(Config::default()).unwrap().get("sim_overlap").is_none());
-        assert!(parse_runtime_config(br#"{"sim_overlap":true}"#).unwrap().0.sim_overlap);
+        assert!(parse_runtime_config(br#"{"sim_overlap":true,"skin_workers":1,"audio_pcm_worker":true}"#).unwrap().0.sim_overlap);
         let record = br#"{"replay_record":"play.lgtape","replay_start":"chapter:potears2"}"#;
         assert!(parse_runtime_config(record).is_ok());
         let both = br#"{"replay_record":"play.lgtape","replay_start":"chapter:potears2","sim_overlap":true}"#;
@@ -6211,6 +6229,93 @@ mod tests {
 #[cfg(test)]
 mod overlap_probe_tests {
     use super::Config;
+    #[test]
+    fn cpu1_reservation_requires_the_reserved_layout_in_each_arm() {
+        for (diag, sim) in [(false, false), (true, false), (false, true), (true, true)] {
+            let reserved = diag || sim;
+            let mut config = Config {
+                diag_overlap: diag, sim_overlap: sim, skin_workers: 1,
+                audio_pcm_worker: true, actor_single_prepare: false, ..Config::default()
+            };
+            assert_eq!(config.cpu1_reserved(), reserved);
+            super::with_config(|current| *current = config.clone(), || {
+                assert_eq!(crate::skin_worker::mask(0), if reserved { 0x40000 } else { 0x20000 });
+                assert_eq!(crate::skin_worker::mask(1), 0x40000);
+            });
+            config.validate().unwrap();
+            for (workers, skin_overlap, buffered, affinity) in [
+                (2, true, true, 0x40000),
+                (1, false, true, 0x40000),
+                (1, true, false, 0x40000),
+                (1, true, true, 0x20000),
+            ] {
+                config.skin_workers = workers;
+                config.skin_overlap = skin_overlap;
+                config.audio_pcm_worker = buffered;
+                config.audio_producer_affinity = affinity;
+                assert_eq!(config.validate().is_err(), reserved);
+            }
+            config.audio_producer_affinity = 0x40000;
+            config.diag_overlap_burn_ms = 6;
+            assert_eq!(config.validate().is_ok(), diag);
+        }
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    #[test]
+    fn validated_sim_overlap_cannot_enter_timed_allocation_scopes_on_two_threads() {
+        use super::{parse_runtime_config, with_config};
+        use std::sync::Barrier;
+
+        for sim_overlap in [false, true] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "sim_overlap": sim_overlap, "skin_workers": 1, "audio_pcm_worker": true,
+                "diag_snapshot": true, "diag_snapshot_log": true,
+            })).unwrap();
+            let (config, _) = parse_runtime_config(&bytes).unwrap();
+            let start = Barrier::new(2);
+            let entered = Barrier::new(2);
+            std::thread::scope(|threads| {
+                for _ in 0..2 {
+                    threads.spawn(|| with_config(|current| *current = config.clone(), || {
+                        start.wait();
+                        let scope = crate::kernel_alloc::Scope::begin_timed();
+                        entered.wait(); // Both threads have attempted entry before either drops its scope.
+                        assert_eq!(scope.is_some(), !sim_overlap);
+                    }));
+                }
+            });
+        }
+
+        let error = parse_runtime_config(br#"{"sim_overlap":true,"skin_workers":1,"audio_pcm_worker":true,"skin_worker_bench":true}"#)
+            .unwrap_err();
+        assert!(error.to_string().contains("timed allocation scopes"));
+    }
+
+    #[test]
+    fn snapshot_rows_default_by_sim_mode_and_accept_boolean_overrides() {
+        assert!(serde_json::to_value(Config::default()).unwrap().get("diag_snapshot_log").is_none());
+        for sim in [false, true] {
+            for snapshot in [false, true] {
+                for override_log in [None, Some(false), Some(true)] {
+                    let mut value = serde_json::json!({
+                        "sim_overlap": sim, "diag_snapshot": snapshot,
+                        "skin_workers": 1, "audio_pcm_worker": true,
+                    });
+                    if let Some(enabled) = override_log {
+                        value["diag_snapshot_log"] = enabled.into();
+                    }
+                    let (config, _) = super::parse_runtime_config(&serde_json::to_vec(&value).unwrap()).unwrap();
+                    assert_eq!(config.snapshot_log_enabled(), snapshot && override_log.unwrap_or(!sim));
+                    assert_eq!(config.diag_snapshot_log, override_log);
+                }
+            }
+        }
+        for invalid in [serde_json::json!(1), serde_json::json!("false"), serde_json::Value::Null] {
+            assert!(serde_json::from_value::<Config>(serde_json::json!({"diag_snapshot_log": invalid})).is_err());
+        }
+    }
+
     #[test]
     fn overlap_reservation_and_burn_are_explicit() {
         let default=Config::default();

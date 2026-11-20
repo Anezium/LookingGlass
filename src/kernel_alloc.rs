@@ -179,6 +179,14 @@ impl Scope {
         imp::begin();
         Self
     }
+    /// Runtime timing probes share one counter on Vita. Sim overlap excludes them.
+    pub(crate) fn begin_timed() -> Option<Self> {
+        #[cfg(feature = "vita_renderer")]
+        if !crate::render::vita_renderer::config().timed_kernel_allocations() {
+            return None;
+        }
+        Some(Self::begin())
+    }
     pub(crate) fn finish(self) -> u64 {
         let n = imp::finish();
         std::mem::forget(self);
