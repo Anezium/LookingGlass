@@ -120,7 +120,6 @@ pub(super) struct StepJob {
     pub(super) art_ops: Vec<ArtOp>,
     pub(super) hud_ops: Vec<HudOp>,
     pub(super) audio_step: AudioStep,
-    pub(super) scopes: StepScopes,
     pub(super) console: ConsoleOps,
     #[cfg(feature = "vita_renderer")]
     pub(super) route_control: Option<crate::route_replay::Control>,
@@ -209,14 +208,13 @@ pub(super) fn step_due(
 }
 
 /// Gameplay movement when its arm is active, followed by the common story suffix.
-pub(super) fn step_a(mut job: StepJob, input: StepAInput) -> (StepJob, Result<(bool, Due)>) {
+pub(super) fn step_a(mut job: StepJob, input: StepAInput, scopes: &mut StepScopes) -> (StepJob, Result<(bool, Due)>) {
     let StepJob {
         sim,
         locals: step,
         art_ops,
         hud_ops,
         audio_step,
-        scopes,
         console,
         #[cfg(feature = "vita_renderer")]
         route_control,
@@ -908,14 +906,13 @@ pub(super) fn step_a(mut job: StepJob, input: StepAInput) -> (StepJob, Result<(b
 }
 
 /// Particles, combat, camera and listener commands at their original serial cut.
-pub(super) fn step_b(mut job: StepJob, input: StepBInput) -> (StepJob, StepView) {
+pub(super) fn step_b(mut job: StepJob, input: StepBInput, scopes: &mut StepScopes) -> (StepJob, StepView) {
     let StepJob {
         sim,
         locals: step,
         art_ops,
         hud_ops,
         audio_step,
-        scopes,
         ..
     } = &mut job;
     let StepLocals {

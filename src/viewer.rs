@@ -387,7 +387,7 @@ impl LevelArt {
         if let Some(a) = &mut self.village {
             a.story_pose(story);
         }
-        if !owned { if let Some(art) = &mut self.cheshire { art.story_pose(story); } }
+        if let Some(art) = &mut self.cheshire { art.story_pose(story); }
         if let Some(art) = &mut self.pandemonium {
             art.story_pose(story);
         }
@@ -1845,19 +1845,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 played,
             });
             let (job, result) = $function(StepJob {
-                sim, locals: $locals, scopes: $scopes,
+                sim, locals: $locals,
                 art_ops, hud_ops, audio_step, console: ConsoleOps::default(),
                 #[cfg(feature = "vita_renderer")]
                 route_control: route_session.as_mut().map(crate::route_replay::Session::take_control),
-            }, $step_input);
+            }, $step_input, &mut $scopes);
             let StepJob {
-                sim: mut state, locals, scopes, art_ops: ops, hud_ops: hud, audio_step: audio,
+                sim: mut state, locals, art_ops: ops, hud_ops: hud, audio_step: audio,
                 console: console_ops,
                 #[cfg(feature = "vita_renderer")]
                 route_control,
             } = job;
             $locals = locals;
-            $scopes = scopes;
             art_ops = ops;
             hud_ops = hud;
             audio_step = audio;
