@@ -101,15 +101,33 @@ impl Art {
         (self.snapshot_visit.id(), &self.collected)
     }
 
-    pub(crate) fn extract_input(&mut self,items:&[crate::inventory::Pickup],stats:&crate::inventory::Stats,visit:&str,camera:Vec3,clock:f32,will_draw:bool,out:&mut Input) {
-        if out.visit != visit { self.snapshot_visit = Default::default(); }
-        out.capture_with_slots(self.snapshot_visit.id(), items, stats, visit, camera, clock,
-            will_draw, &self.collected,
-            |model| self.collection_fx.keys().position(|key| key == model).expect("resident collection effect"));
-        // Keep the legacy pruning point and its pre-prune overflow check.
-        if will_draw && !out.overflow {
-            self.collected.retain(|(_, _, start, _)| collection_active(clock, *start));
+    pub(crate) fn prepare_visit(&mut self, previous: &Input, visit: &str) {
+        if previous.visit != visit {
+            self.snapshot_visit = Default::default();
         }
+    }
+
+    pub(crate) fn publish_input(&mut self, input: &Input, will_draw: bool) {
+        // Preserve the owner pruning point and the pre-prune overflow test.
+        if will_draw && self.valid_input(input) {
+            self.collected.retain(|(_, _, start, _)| collection_active(input.clock, *start));
+        }
+    }
+
+    pub(crate) fn extract_input(
+        &mut self,
+        items: &[crate::inventory::Pickup],
+        stats: &crate::inventory::Stats,
+        visit: &str,
+        camera: Vec3,
+        clock: f32,
+        will_draw: bool,
+        out: &mut Input,
+    ) {
+        self.prepare_visit(out, visit);
+        let (generation, history) = self.capture_history();
+        out.capture(generation, items, stats, visit, camera, clock, will_draw, history);
+        self.publish_input(out, will_draw);
     }
     pub(crate) fn valid_input(&self,input:&Input)->bool {
         !input.overflow && input.generation==self.snapshot_visit.id()

@@ -153,6 +153,13 @@ pub(crate) struct DynamicInput {
     pub transforms: Vec<(usize, Vec3, Quat)>,
 }
 impl DynamicInput {
+    pub(crate) fn finish_view(&mut self, view: Mat4, atmosphere: &crate::environment::Atmosphere) {
+        self.view = view;
+        self.fog = atmosphere.distance;
+        self.liquid = atmosphere.liquid;
+    }
+
+
     pub fn bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.transforms.len() * std::mem::size_of::<(usize, Vec3, Quat)>()

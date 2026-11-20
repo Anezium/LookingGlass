@@ -54,8 +54,8 @@ const _: fn() = || {
     fn assert_send<T: Send>() {}
     assert_send::<SimState>();
     assert_send::<crate::input::StepInput>();
-    assert_send::<(&mut SimState, &mut StepLocals, bool, StepAInput<'_>)>();
-    assert_send::<(&mut SimState, &mut StepLocals, bool, StepBInput<'_>)>();
+    assert_send::<(StepJob, StepAInput)>();
+    assert_send::<(StepJob, StepBInput)>();
     assert_send::<StepView>();
 };
 
@@ -114,31 +114,34 @@ pub(super) struct ConsoleOps {
     pub(super) message: Option<&'static str>,
 }
 
-pub(super) struct StepAInput<'a> {
-    pub(super) map: Arc<crate::bsp::Bsp>,
-    pub(super) preferences: &'a crate::preferences::Preferences,
-    pub(super) console: &'a mut ConsoleOps,
-    pub(super) art_ops: &'a mut Vec<ArtOp>,
-    pub(super) hud_ops: &'a mut Vec<HudOp>,
-    pub(super) audio_step: &'a mut AudioStep,
-    pub(super) scopes: &'a mut StepScopes,
+pub(super) struct StepJob {
+    pub(super) sim: Box<SimState>,
+    pub(super) locals: StepLocals,
+    pub(super) art_ops: Vec<ArtOp>,
+    pub(super) hud_ops: Vec<HudOp>,
+    pub(super) audio_step: AudioStep,
+    pub(super) scopes: StepScopes,
+    pub(super) console: ConsoleOps,
     #[cfg(feature = "vita_renderer")]
-    pub(super) route_session: &'a mut Option<crate::route_replay::Session>,
-    pub(super) saves_writable: bool,
-    pub(super) host_transition: &'a str,
+    pub(super) route_control: Option<crate::route_replay::Control>,
 }
 
-pub(super) struct StepBInput<'a> {
-    pub(super) map_name: &'a str,
-    pub(super) preferences: &'a crate::preferences::Preferences,
-    pub(super) art_ops: &'a mut Vec<ArtOp>,
+pub(super) struct StepAInput {
+    pub(super) gameplay: bool,
+    pub(super) map: Arc<crate::bsp::Bsp>,
+    pub(super) preferences: Arc<crate::preferences::Preferences>,
+    pub(super) saves_writable: bool,
+    pub(super) host_natural_exit: bool,
+}
+
+pub(super) struct StepBInput {
+    pub(super) story_active: bool,
+    pub(super) map_name: String,
+    pub(super) preferences: Arc<crate::preferences::Preferences>,
     pub(super) aspect: f32,
     pub(super) handoff_pose: Option<crate::cinematic::ActorPose>,
-    pub(super) hud_ops: &'a mut Vec<HudOp>,
-    pub(super) audio_step: &'a mut AudioStep,
-    pub(super) scopes: &'a mut StepScopes,
-    pub(super) loot_visit: &'a str,
-    pub(super) loot_before: &'a [crate::loot::Source],
+    pub(super) loot_visit: String,
+    pub(super) loot_before: Vec<crate::loot::Source>,
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     pub(super) frame: u64,
     #[cfg(target_os = "vita")]
@@ -155,11 +158,11 @@ pub(super) struct CameraOut {
 pub(super) struct StepView {
     pub(super) presentation: crate::presentation_input::PresentationInput,
     pub(super) camera_out: CameraOut,
+    pub(super) dynamic: crate::render_snapshot::DynamicInput,
     pub(super) active: bool,
     pub(super) direction: Vec3,
     pub(super) targets: Vec<crate::combat::Target>,
     pub(super) pand_cinematic: bool,
-    pub(super) pand_camera: Option<crate::cinematic::Camera>,
     pub(super) scripted_camera: Option<crate::cinematic::Camera>,
     pub(super) show_alice: bool,
     #[cfg(target_os = "vita")]
@@ -176,7 +179,7 @@ pub(super) fn step_due(
     interactions: &mut Interactions,
     story: &mut crate::story::Story,
     pending_transition: &mut Option<LevelExit>,
-    host_transition: &str,
+    host_natural_exit: bool,
 ) -> Due {
     if checkpoint_allowed
         && story_active
@@ -196,7 +199,7 @@ pub(super) fn step_due(
     if story_active {
         *pending_transition = interactions.take_story_exit(story);
     }
-    if host_transition == "natural-exit" {
+    if host_natural_exit {
         *pending_transition = Some((crate::transition_memory::host_destination(), None));
     }
     match pending_transition.take() {
@@ -206,12 +209,18 @@ pub(super) fn step_due(
 }
 
 /// Gameplay movement when its arm is active, followed by the common story suffix.
-pub(super) fn step_a(
-    sim: &mut SimState,
-    step: &mut StepLocals,
-    gameplay: bool,
-    input: StepAInput<'_>,
-) -> Result<(bool, Due)> {
+pub(super) fn step_a(mut job: StepJob, input: StepAInput) -> (StepJob, Result<(bool, Due)>) {
+    let StepJob {
+        sim,
+        locals: step,
+        art_ops,
+        hud_ops,
+        audio_step,
+        scopes,
+        console,
+        #[cfg(feature = "vita_renderer")]
+        route_control,
+    } = &mut job;
     let StepLocals {
         simulate,
         overlay_before,
@@ -229,18 +238,13 @@ pub(super) fn step_a(
         ..
     } = *step;
     let StepAInput {
+        gameplay,
         map,
         preferences,
-        console,
-        art_ops,
-        hud_ops,
-        audio_step,
-        scopes,
-        #[cfg(feature = "vita_renderer")]
-        route_session,
         saves_writable,
-        host_transition,
+        host_natural_exit,
     } = input;
+    let preferences = &preferences;
     let mut advance_dialogue = step.advance_dialogue;
     let mut pending_transition = step.pending_transition.take();
     macro_rules! pressed {
@@ -578,7 +582,7 @@ pub(super) fn step_a(
                     drop(control_hooks.take());
                     sim.world.set_weapon_obstacles(sim.alice.ice_targets());
                     #[cfg(feature = "vita_renderer")]
-                    if let Some(route) = route_session {
+                    if let Some(route) = route_control {
                         sim.clock
                             .advance_route(elapsed as f64, &sim.world, &mut sim.player, |p| {
                                 route.control(&sim.world, p, &mut sim.yaw, &mut sim.pitch)
@@ -891,7 +895,7 @@ pub(super) fn step_a(
                 &mut sim.interactions,
                 &mut sim.story,
                 &mut pending_transition,
-                host_transition,
+                host_natural_exit,
             )
         } else {
             Due::None
@@ -900,16 +904,20 @@ pub(super) fn step_a(
     })();
     step.advance_dialogue = advance_dialogue;
     step.pending_transition = pending_transition;
-    result
+    (job, result)
 }
 
 /// Particles, combat, camera and listener commands at their original serial cut.
-pub(super) fn step_b(
-    sim: &mut SimState,
-    step: &mut StepLocals,
-    story_active: bool,
-    input: StepBInput<'_>,
-) -> StepView {
+pub(super) fn step_b(mut job: StepJob, input: StepBInput) -> (StepJob, StepView) {
+    let StepJob {
+        sim,
+        locals: step,
+        art_ops,
+        hud_ops,
+        audio_step,
+        scopes,
+        ..
+    } = &mut job;
     let StepLocals {
         simulate,
         menu,
@@ -923,14 +931,11 @@ pub(super) fn step_b(
         ..
     } = *step;
     let StepBInput {
+        story_active,
         map_name,
         preferences,
-        art_ops,
         aspect,
         handoff_pose,
-        hud_ops,
-        audio_step,
-        scopes,
         loot_visit,
         loot_before,
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -938,6 +943,9 @@ pub(super) fn step_b(
         #[cfg(target_os = "vita")]
         bench_camera,
     } = input;
+    let preferences = &preferences;
+    let loot_visit = loot_visit.as_str();
+    let loot_before = loot_before.as_slice();
     macro_rules! held {
         ($key:expr) => {
             focused && !console_input && sim.input.key(preferences, $key, false)
@@ -1394,7 +1402,7 @@ pub(super) fn step_b(
             }
         }
         sim.world.set_weapon_obstacles(sim.alice.ice_targets());
-        if active && loot_visit == save::visit_key(map_name, sim.entry_spawn.as_deref()) {
+        if active && loot_visit == save::visit_key(&map_name, sim.entry_spawn.as_deref()) {
             let mut after = sim.interactions.loot_sources();
             after.extend(sim.npcs.loot_sources());
             for message in crate::loot::tick_with(
@@ -1705,23 +1713,168 @@ pub(super) fn step_b(
             })
             .unwrap_or(75.0f32.to_radians()),
     };
-    StepView {
+    let mut transforms = sim.interactions.transforms();
+    transforms.extend(sim.world.traversal.transforms(&sim.player));
+    let dynamic = crate::render_snapshot::DynamicInput {
+        alice_feet: sim.player.feet,
+        alice_visible: show_alice
+            && !sim
+                .interactions
+                .school
+                .as_ref()
+                .is_some_and(|s| s.cinematic()),
+        alice_shadow: show_alice && sim.stats.invisible <= 0.,
+        alice_ghost: sim.stats.invisible > 0.,
+        alice_effects: show_alice,
+        environment_clock: sim.environment_clock,
+        pickup_clock: sim.pickup_clock,
+        transforms,
+        ..Default::default()
+    };
+    let view = StepView {
         presentation,
         camera_out,
+        dynamic,
         active,
         direction,
         targets,
         pand_cinematic,
-        pand_camera,
         scripted_camera,
         show_alice,
         #[cfg(target_os = "vita")]
         gameplay_alice,
-    }
+    };
+    (job, view)
 }
 
 fn sync_water(sim: &mut SimState, art_ops: &mut Vec<ArtOp>) {
     if sim.alice.water_appearance(&sim.player) {
         art_ops.push(ArtOp::ResetWaterEmitter);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{level::LevelController, story::Story};
+    use std::any::Any;
+
+    struct Checkpoint {
+        pending: bool,
+        ending: bool,
+    }
+
+    impl LevelController for Checkpoint {
+        fn id(&self) -> &'static str {
+            "checkpoint-fixture"
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn checkpoint_requested(&self) -> bool {
+            self.pending
+        }
+        fn checkpoint_written(&mut self) {
+            self.pending = false;
+        }
+        fn ending_ready(&self) -> bool {
+            self.ending && !self.pending
+        }
+    }
+
+    fn fixture(ending: bool) -> Interactions {
+        let mut interactions = Interactions::empty();
+        interactions.levels.push(crate::level::Slot {
+            reg: &crate::levels::qlair::REGISTRATION,
+            ctl: Box::new(Checkpoint {
+                pending: true,
+                ending,
+            }),
+        });
+        interactions
+    }
+
+    #[test]
+    fn step_due_checkpoint_ack_and_ending_precede_story_exit() {
+        let mut interactions = fixture(true);
+        let mut story = Story::default();
+        let mut pending = None;
+        let exit = ("song".to_owned(), Some("story-spawn".to_owned()));
+        story.defer_exit(exit.clone());
+
+        assert!(matches!(
+            step_due(
+                true,
+                true,
+                false,
+                &mut interactions,
+                &mut story,
+                &mut pending,
+                false
+            ),
+            Due::Checkpoint
+        ));
+        assert_eq!(story.pending_exit_map(), Some("song"));
+        super::super::acknowledge_checkpoint(Ok(()), &mut interactions.levels).unwrap();
+        assert!(matches!(
+            step_due(
+                false,
+                true,
+                false,
+                &mut interactions,
+                &mut story,
+                &mut pending,
+                false
+            ),
+            Due::Ending
+        ));
+        assert_eq!(story.pending_exit_map(), Some("song"));
+        assert!(
+            matches!(step_due(false, true, true, &mut interactions, &mut story, &mut pending, false), Due::Exit(out) if out == exit)
+        );
+        assert!(story.pending_exit_map().is_none());
+    }
+
+    #[test]
+    fn step_due_failed_ack_keeps_checkpoint_pending_and_host_override_wins() {
+        let mut interactions = fixture(false);
+        let mut story = Story::default();
+        let mut pending = None;
+        story.defer_exit(("story-only".into(), None));
+
+        assert!(super::super::acknowledge_checkpoint(
+            Err(anyhow::anyhow!("write failed")),
+            &mut interactions.levels
+        )
+        .is_err());
+        assert!(matches!(
+            step_due(
+                true,
+                true,
+                false,
+                &mut interactions,
+                &mut story,
+                &mut pending,
+                false
+            ),
+            Due::Checkpoint
+        ));
+        assert!(
+            matches!(step_due(false, true, false, &mut interactions, &mut story, &mut pending, true),
+            Due::Exit((map, None)) if map == crate::transition_memory::host_destination())
+        );
+        assert!(story.pending_exit_map().is_none());
+        assert!(interactions.levels[0].ctl.checkpoint_requested());
+    }
+
+    #[test]
+    fn sim_state_size() {
+        println!(
+            "SimState {} bytes (boxed at the serial adapter)",
+            std::mem::size_of::<SimState>()
+        );
     }
 }

@@ -19,6 +19,16 @@ const _: fn() = || {
 };
 
 impl PresentationInput {
+    pub(crate) fn apply_atmosphere(&self, atmosphere: &mut crate::environment::Atmosphere) {
+        atmosphere.liquid = self.liquid;
+        if let Some(fog) = self.controller_fog.or(self.script_fog) {
+            atmosphere.distance = fog;
+        }
+        if let Some(distance) = self.fog_distance {
+            atmosphere.distance.w = distance;
+        }
+    }
+
     pub fn capture(world: &World, camera: Vec3, interactions: &Interactions) -> Self {
         let liquid = Liquid::from_contents(world.liquid_at(camera)).tint();
         let (script_fog, script_sky_origin) = interactions.presentation.inputs();
@@ -42,6 +52,58 @@ impl PresentationInput {
             reflection_actor,
             controller_fog,
             fog_distance,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{environment::Atmosphere, render_snapshot::DynamicInput};
+    use macroquad::prelude::Mat4;
+
+    #[test]
+    fn finishes_consecutive_frames_from_current_atmosphere() {
+        let mut presentation = PresentationInput {
+            liquid: Vec4::ZERO,
+            script_fog: None,
+            script_sky_origin: None,
+            controller_sky_origin: None,
+            reflection: Default::default(),
+            reflection_actor: None,
+            controller_fog: None,
+            fog_distance: None,
+        };
+        let mut atmosphere = Atmosphere::default();
+        let mut dynamic = DynamicInput::default();
+        let storyboard = Vec4::new(0.1, 0.2, 0.3, 100.);
+        let controller = Vec4::new(0.4, 0.5, 0.6, 200.);
+        let partial = controller.truncate().extend(250.);
+        let underwater = Liquid::Water.tint();
+        let frames = [
+            (Some(storyboard), None, None, Vec4::ZERO, storyboard),
+            (
+                Some(storyboard),
+                Some(controller),
+                None,
+                underwater,
+                controller,
+            ),
+            (None, None, Some(250.), underwater, partial),
+            (None, None, None, Vec4::ZERO, partial),
+        ];
+        for (index, (script, actual, distance, liquid, expected)) in frames.into_iter().enumerate()
+        {
+            presentation.script_fog = script;
+            presentation.controller_fog = actual;
+            presentation.fog_distance = distance;
+            presentation.liquid = liquid;
+            presentation.apply_atmosphere(&mut atmosphere);
+            let view = Mat4::from_translation(Vec3::X * index as f32);
+            dynamic.finish_view(view, &atmosphere);
+            assert_eq!(dynamic.fog, expected);
+            assert_eq!(dynamic.liquid, liquid);
+            assert_eq!(dynamic.view, view);
         }
     }
 }

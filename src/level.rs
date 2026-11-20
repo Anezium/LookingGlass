@@ -453,6 +453,37 @@ pub(crate) trait HudCapture: Send + Sync {
     );
 }
 
+type HudCaptureFn = fn(&dyn LevelController, HudCaptureView, &mut crate::render_snapshot::Painter<'_>);
+
+impl HudCapture for HudCaptureFn {
+    fn capture_hud(
+        &self,
+        level: &dyn LevelController,
+        view: HudCaptureView,
+        paint: &mut crate::render_snapshot::Painter<'_>,
+    ) {
+        self(level, view, paint);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HudSource {
+    pub(crate) resource: u64,
+    pub(crate) capture: HudCaptureFn,
+}
+
+impl HudSource {
+    pub(crate) fn capture(
+        self,
+        level: &dyn LevelController,
+        view: HudCaptureView,
+        out: &mut Vec<crate::render_snapshot::HudCommand>,
+    ) {
+        let mut painter = crate::render_snapshot::Painter::for_resource(self.resource, out);
+        self.capture.capture_hud(level, view, &mut painter);
+    }
+}
+
 const _: fn() = || {
     fn send<T: Send>() {}
     send::<Slot>();
@@ -489,6 +520,8 @@ pub trait LevelArt: Any {
     /// Effects drawn with the particle pass, after the world.
     fn effects(&mut self, _level: &dyn LevelController, _camera: Vec3, _atmosphere: &Atmosphere) {}
     fn hud(&mut self, _level: &dyn LevelController) {}
+    fn hud_capture_source(&self) -> Option<HudSource> { None }
+    #[cfg(all(test, target_os = "linux"))]
     fn hud_input(&self, _level: &dyn LevelController, _out: &mut Vec<crate::render_snapshot::HudCommand>) {}
     /// The pose Alice resumes from when a scene hands control back.
     fn handoff_pose(&self) -> Option<&ActorPose> {
@@ -567,13 +600,10 @@ pub(crate) fn test_hud_capture(assets: &mut crate::assets::Assets) {
         fn as_any(&self) -> &dyn Any { self }
         fn as_any_mut(&mut self) -> &mut dyn Any { self }
     }
-    struct Capture;
-    impl HudCapture for Capture {
-        fn capture_hud(&self, level: &dyn LevelController, view: HudCaptureView, paint: &mut Painter<'_>) {
-            paint.boss(level.id(), 0.5);
-            paint.dialog(Rect::new(view.width - 180., 12., 180., 48.));
-            paint.rectangle(0., view.height - 12., 32., 7., RED);
-        }
+    fn capture(level: &dyn LevelController, view: HudCaptureView, paint: &mut Painter<'_>) {
+        paint.boss(level.id(), 0.5);
+        paint.dialog(Rect::new(view.width - 180., 12., 180., 48.));
+        paint.rectangle(0., view.height - 12., 32., 7., RED);
     }
 
     use macroquad::prelude::{Rect, RED, screen_height, screen_width};
@@ -582,12 +612,13 @@ pub(crate) fn test_hud_capture(assets: &mut crate::assets::Assets) {
     let mut owner = Vec::new();
     art.hud_input(level.as_ref(), &mut owner);
     let view = HudCaptureView { width: screen_width(), height: screen_height() };
-    let ui = art.0.resource_id();
+    let source = HudSource { resource: art.0.resource_id(), capture };
     let pure = std::thread::spawn(move || {
         let mut out = Vec::new();
-        Capture.capture_hud(level.as_ref(), view, &mut Painter::for_resource(ui, &mut out));
+        source.capture(level.as_ref(), view, &mut out);
         out
     }).join().unwrap();
+    assert_eq!(pure.len(), 3);
     assert_eq!(pure, owner);
     assert!(pure.iter().all(HudCommand::valid));
     drop(art);

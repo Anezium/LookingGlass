@@ -269,17 +269,9 @@ impl LevelArt for Art {
             }
         }
     }
-    fn hud_input(&self, l: &dyn LevelController, out: &mut Vec<crate::render_snapshot::HudCommand>) {
-        let mut paint = crate::render_snapshot::Painter::new(&self.ui, out);
-        let o = l.downcast_ref::<Centipede>().unwrap();
-        if o.saved.phase == Phase::Fight && o.saved.battle.hits < 6 {
-            // Each of the six accepted weak-point reactions advances the fight.
-            paint.boss(
-                "CENTIPEDE",
-                (6 - o.saved.battle.hits) as f32 / 6.,
-            );
-        }
-        }
+    fn hud_capture_source(&self) -> Option<crate::level::HudSource> {
+        Some(crate::level::HudSource { resource: self.ui.resource_id(), capture: capture_hud })
+    }
     fn hud(&mut self, l: &dyn LevelController) {
         let o = l.downcast_ref::<Centipede>().unwrap();
         if o.saved.phase == Phase::Fight && o.saved.battle.hits < 6 {
@@ -296,5 +288,20 @@ impl LevelArt for Art {
     }
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+fn capture_hud(
+    l: &dyn LevelController,
+    _view: crate::level::HudCaptureView,
+    paint: &mut crate::render_snapshot::Painter<'_>,
+) {
+    let o = l.downcast_ref::<Centipede>().unwrap();
+    if o.saved.phase == Phase::Fight && o.saved.battle.hits < 6 {
+        // Each of the six accepted weak-point reactions advances the fight.
+        paint.boss(
+            "CENTIPEDE",
+            (6 - o.saved.battle.hits) as f32 / 6.,
+        );
     }
 }

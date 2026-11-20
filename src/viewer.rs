@@ -142,6 +142,35 @@ const _: fn() = || {
     send::<Box<dyn std::any::Any + Send>>();
 };
 
+struct HudSources {
+    duchess: Option<u64>,
+    registered: Vec<(usize, crate::level::HudSource)>,
+}
+
+impl HudSources {
+    fn capture(
+        &self,
+        interactions: &Interactions,
+        view: crate::level::HudCaptureView,
+    ) -> Vec<crate::render_snapshot::HudCommand> {
+        let mut commands = Vec::new();
+        if let (Some(resource), Some(duchess)) = (self.duchess, &interactions.duchess) {
+            let mut painter = crate::render_snapshot::Painter::for_resource(resource, &mut commands);
+            crate::duchess::capture_hud(duchess, view, &mut painter);
+        }
+        for &(index, source) in &self.registered {
+            if let Some(slot) = interactions.levels.get(index) {
+                source.capture(&*slot.ctl, view, &mut commands);
+            }
+        }
+        commands
+    }
+}
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<HudSources>();
+};
+
 impl LevelDispatch {
     fn valid(&self, art: &LevelArt) -> bool {
         !self.overflow && self.visit == art.snapshot_visit.id()
@@ -340,7 +369,9 @@ impl LevelArt {
                 i.duchess.is_some(), i.school2.is_some(), i.encounters.is_some()],
             registered: self.levels.iter().map(Option::is_some).collect(),
             school_staging: i.school.as_ref().is_some_and(|s| s.scene_id() == Some(crate::school::cinema::THEATRE)),
-            cheshire: self.cheshire.as_mut().map(|a| a.extract(hints, story, self.snapshot_visit.id())),
+            cheshire: self.cheshire.as_ref().map(|art| {
+                hints.capture(&art.capture_rig(), story, self.snapshot_visit.id())
+            }),
             overflow: self.levels.len() > 1024 || self.levels.len() != i.levels.len(),
         }
     }
@@ -453,6 +484,43 @@ impl LevelArt {
         }
     }
     /// Registered controllers' effects, drawn with the particle pass.
+    fn draw_captured(
+        &mut self,
+        command: &LevelDispatch,
+        atmosphere: &crate::environment::Atmosphere,
+        camera: Vec3,
+        fullbright: bool,
+    ) {
+        if let (Some(art), Some(input)) = (&mut self.cheshire, &command.cheshire) {
+            art.draw_input(input, atmosphere, camera, fullbright);
+        }
+        if command.selected[5] {
+            if let Some(art) = &mut self.pool {
+                assert!(art.publish_input(fullbright, atmosphere, camera));
+            }
+        }
+        if command.selected[9] {
+            if let Some(art) = &mut self.encounters {
+                assert!(art.draw_snapshot(fullbright, atmosphere, camera));
+            }
+        }
+        for (selected, art) in command.registered.iter().zip(&mut self.levels) {
+            if let (true, Some(art)) = (*selected, art) {
+                assert!(art.draw_snapshot(atmosphere, camera, fullbright));
+            }
+        }
+    }
+
+    fn captured_effects(&mut self, command: &LevelDispatch, camera: Vec3, atmosphere: &crate::environment::Atmosphere) {
+        for (selected, art) in command.registered.iter().zip(&mut self.levels) {
+            if let (true, Some(art)) = (*selected, art) {
+                if !art.snapshot_effects_empty() {
+                    assert!(art.effects_snapshot(camera, atmosphere));
+                }
+            }
+        }
+    }
+
     fn effects(&mut self, i: &Interactions, camera: Vec3, atmosphere: &crate::environment::Atmosphere) {
         self.effects_dispatch(i, None, camera, atmosphere);
     }
@@ -479,12 +547,12 @@ impl LevelArt {
             }
         }
     }
-    fn hud_input(&self, i: &Interactions, out: &mut Vec<crate::render_snapshot::HudCommand>) {
-        if let (Some(art), Some(d)) = (&self.duchess, &i.duchess) {
-            art.hud_input(d, out);
-        }
-        for (art, slot) in self.levels.iter().zip(&i.levels) {
-            if let Some(a) = art { a.hud_input(&*slot.ctl, out); }
+    fn hud_sources(&self) -> HudSources {
+        HudSources {
+            duchess: self.duchess.as_ref().map(crate::duchess::Art::hud_resource),
+            registered: self.levels.iter().enumerate().filter_map(|(index, art)| {
+                Some((index, art.as_ref()?.hud_capture_source()?))
+            }).collect(),
         }
     }
     /// Registered controllers' HUD elements.
@@ -934,10 +1002,19 @@ impl SnapshotTiming {
 }
 
 mod step;
+mod free_render;
 use step::{
-    step_a, step_b, step_due, Due, SimState, ConsoleOps, StepAInput, StepBInput, StepLocals, StepScopes,
+    step_a, step_b, step_due, Due, SimState, ConsoleOps, StepAInput, StepBInput, StepJob, StepLocals, StepScopes,
     StepView,
 };
+
+fn acknowledge_checkpoint(result: Result<()>, levels: &mut [crate::level::Slot]) -> Result<()> {
+    result?;
+    for slot in levels {
+        slot.ctl.checkpoint_written();
+    }
+    Ok(())
+}
 
 pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     #[cfg(target_os="vita")]
@@ -966,7 +1043,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     let mut escape_menu = crate::menu::Menu::load(&mut assets).context("Loading original menus")?;
     eprintln!("[lg/startup] menu done elapsed_ms={:.3}",startup.elapsed().as_secs_f64()*1000.);
-    let mut preferences = crate::preferences::Preferences::load();
+    let mut preferences = std::sync::Arc::new(crate::preferences::Preferences::load());
     let mut input = crate::input::Input::default();
     let mut weapon_buttons = crate::weapon_rules::Buttons::default();
     weapon_buttons.block();
@@ -998,7 +1075,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let store_start = std::time::Instant::now();
     let store = Store::new(options.save_dir.clone(), fingerprint);
     // A tape session (src/replay) picks the start and, for a replay, the control settings.
-    let mut replay = crate::replay::Session::open(&mut options, &store, &mut preferences)?;
+    let mut replay = crate::replay::Session::open(&mut options, &store, std::sync::Arc::make_mut(&mut preferences))?;
     #[cfg(feature="vita_renderer")]
     anyhow::ensure!(!(replay.is_some() && route_session.is_some()), "replay and route diagnostics are exclusive");
     let replay_resume = replay.as_mut().and_then(|r| r.take_resume());
@@ -1058,7 +1135,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         match start::choose(
             &mut options,
             &mut escape_menu,
-            &mut preferences,
+            std::sync::Arc::make_mut(&mut preferences),
             &mut input,
             &mut audio,
             &store,
@@ -1126,7 +1203,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut wave_input=Vec::new();
     let mut pickup_input=crate::powerups::PickupInput::default();
     let mut snapshot_fenced_frames = 0u64;
-    let mut dynamic_input = crate::render_snapshot::DynamicInput::default();
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let mut acoustic_view = None;
     let mut menu = false;
     let mut inventory_menu = false;
     let mut help_until = 0.0;
@@ -1727,11 +1805,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let mut art_ops = Vec::new();
     // Owner transactions still use the live bindings between the serial calls.
     macro_rules! serial_step {
-        ($function:ident $(, $arg:expr)* $(,)?) => {{
+        ($function:ident, $locals:ident, $scopes:ident, $step_input:expr $(,)?) => {{
             let (alice_sim, mut alice_art) = alice.into_parts();
             let (npcs_sim, npcs_art) = npcs.into_parts();
             let (steam_sim, steam_art) = steam.into_parts();
-            let mut state = Box::new(SimState {
+            let sim = Box::new(SimState {
                 world,
                 interactions,
                 alice: alice_sim,
@@ -1766,7 +1844,27 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 campaign,
                 played,
             });
-            let result = $function(&mut state $(, $arg)*);
+            let (job, result) = $function(StepJob {
+                sim, locals: $locals, scopes: $scopes,
+                art_ops, hud_ops, audio_step, console: ConsoleOps::default(),
+                #[cfg(feature = "vita_renderer")]
+                route_control: route_session.as_mut().map(crate::route_replay::Session::take_control),
+            }, $step_input);
+            let StepJob {
+                sim: mut state, locals, scopes, art_ops: ops, hud_ops: hud, audio_step: audio,
+                console: console_ops,
+                #[cfg(feature = "vita_renderer")]
+                route_control,
+            } = job;
+            $locals = locals;
+            $scopes = scopes;
+            art_ops = ops;
+            hud_ops = hud;
+            audio_step = audio;
+            #[cfg(feature = "vita_renderer")]
+            if let Some(control) = route_control {
+                route_session.as_mut().unwrap().restore_control(control);
+            }
             for op in art_ops.drain(..) {
                 if let Some(body) = op.apply(&mut alice_art, &mut power_art) {
                     state.alice.recycle_body_input(body);
@@ -1805,7 +1903,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             player = state.player;
             campaign = state.campaign;
             played = state.played;
-            result
+            (result, console_ops)
         }};
     }
     loop {
@@ -2059,7 +2157,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             census_block=crate::phase_census::span(crate::phase_census::Region::Other);
             let action = if host_transition == "native-load" { crate::menu::Action::Load(Slot::Auto) }
                 else if host_transition.starts_with("new-game") { crate::menu::Action::NewGame(options.difficulty) } else {
-                owner_yield!(step_guards, escape_menu.run(&mut preferences, &mut audio, &store, pos, yaw, &mut input))
+                owner_yield!(step_guards, escape_menu.run(std::sync::Arc::make_mut(&mut preferences), &mut audio, &store, pos, yaw, &mut input))
             };
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::ModalExit, crate::native_timing::MODAL));
@@ -2431,7 +2529,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                             crate::console::gameplay::camera(
                                 value,
                                 &mut third_person,
-                                &mut preferences,
+                                std::sync::Arc::make_mut(&mut preferences),
                             );
                             follow_camera.reset();
                             camera_handoff.reset();
@@ -3115,19 +3213,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame: Some(viewer_block),
             census: Some(census_block),
         };
-        let mut console_ops = ConsoleOps::default();
-        let step_a_result = serial_step!(step_a, &mut step_locals, gameplay, StepAInput {
+        let (step_a_result, console_ops) = serial_step!(step_a, step_locals, step_scopes, StepAInput {
+            gameplay,
             map: scene.map.clone(),
-            preferences: &preferences,
-            console: &mut console_ops,
-            art_ops: &mut art_ops,
-            hud_ops: &mut hud_ops,
-            audio_step: &mut audio_step,
-            scopes: &mut step_scopes,
-            #[cfg(feature = "vita_renderer")]
-            route_session: &mut route_session,
+            preferences: preferences.clone(),
             saves_writable,
-            host_transition: &host_transition,
+            host_natural_exit: host_transition == "natural-exit",
         });
         if console_ops.close { console.open = false; }
         if let Some(message) = console_ops.message { console.print(message); }
@@ -3139,9 +3230,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 // capture and disk write wait for the clean render boundary.
                 finale_checkpoint_requested = Some(game_snapshot!());
             } else {
-            match store.write_finale_checkpoint(&game_snapshot!()) {
+            match acknowledge_checkpoint(store.write_finale_checkpoint(&game_snapshot!()), &mut interactions.levels) {
                 Ok(()) => {
-                    for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
                     retry.remember(game_snapshot!());
                     hud_ops.push(HudOp::Announce("Checkpoint saved".into()));
                 }
@@ -3149,7 +3239,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
             }
             due = step_due(false, story_active, post_game, &mut interactions, &mut story,
-                &mut step_locals.pending_transition, &host_transition);
+                &mut step_locals.pending_transition, host_transition == "natural-exit");
         }
         if matches!(due, Due::Ending) {
             post_game = true;
@@ -3304,25 +3394,22 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         } // simulation: story and transitions
-        let StepView {
-            presentation, camera_out, active, direction, targets, pand_cinematic, pand_camera, scripted_camera, show_alice,
+        let (StepView {
+            presentation, camera_out, dynamic: mut dynamic_input, active, direction, targets, pand_cinematic, scripted_camera, show_alice,
             #[cfg(target_os = "vita")]
             gameplay_alice,
-        } = serial_step!(step_b, &mut step_locals, story_active, StepBInput {
-            map_name: &maps[current],
-            preferences: &preferences,
-            art_ops: &mut art_ops,
+        }, _) = serial_step!(step_b, step_locals, step_scopes, StepBInput {
+            story_active,
+            map_name: maps[current].clone(),
+            preferences: preferences.clone(),
             aspect: screen_width() / screen_height(),
             handoff_pose: if snapshot_handoff && level_art.pool.is_some() {
                 handoff_return.pose(&level_art.snapshot_visit).cloned()
             } else {
                 level_art.handoff_pose().cloned()
             },
-            hud_ops: &mut hud_ops,
-            audio_step: &mut audio_step,
-            scopes: &mut step_scopes,
-            loot_visit: &loot_visit,
-            loot_before: &loot_before,
+            loot_visit,
+            loot_before,
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             frame,
             #[cfg(target_os = "vita")]
@@ -3336,22 +3423,20 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let (camera, target) = (camera_out.position, camera_out.target);
         // The step, including any Pool of Tears re-publication, is complete.
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        let acoustic_view = (simulate && force_acoustic_view).then(|| {
+        if simulate && force_acoustic_view {
             let started = profile_acoustic_view.then(std::time::Instant::now);
-            let view = world.acoustic_view();
+            let view = world.capture_acoustic_view(&mut acoustic_view);
             if let Some(started) = started {
                 let ns = started.elapsed().as_nanos();
                 let (settled, dynamic, weapon) = view.collider_counts();
                 println!("ACOUSTIC_CAPTURE frame={frame} ns={ns} settled={settled} dynamic={dynamic} weapon={weapon}");
             }
-            view
-        });
-        #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
-        audio_step.apply(&mut audio, &mut assets, &world);
-        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        if let Some(view) = acoustic_view {
-            audio_step.apply(&mut audio, &mut assets, &view);
+            audio_step.apply(&mut audio, &mut assets, view);
         } else {
+            audio_step.apply(&mut audio, &mut assets, &world);
+        }
+        #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+        {
             audio_step.apply(&mut audio, &mut assets, &world);
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -3403,8 +3488,6 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(not(feature = "vita_renderer"))]
         let world_only = false;
         drop(census_leaf); let census_leaf = crate::phase_census::span(crate::phase_census::Region::CameraTransforms);
-        let mut transforms = interactions.transforms();
-        transforms.extend(world.traversal.transforms(&player));
         let rope_hand = interactions
             .pandemonium
             .as_ref()
@@ -3416,7 +3499,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     .and_then(|g| world.traversal.rope(g.id))
                     .map(|r| (r.model, player.feet + Vec3::Z * 40.))
             });
-        scene.update_ropes(&world, world_dt, rope_hand, &transforms);
+        scene.update_ropes(&world, world_dt, rope_hand, &dynamic_input.transforms);
         drop(census_leaf);
         crate::spike_log::sim(crate::spike_log::Sim::Particles2);
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::Particles);
@@ -3627,7 +3710,9 @@ interactions
             immersion: player.immersion.level, script_motion: player.script_motion,
             swimming: player.swimming, scripted: interactions.scripted(),
             fades: resolve_fades!(), subtitle: story.subtitle_input(), skip: resolve_skip!(),
-            level: { let mut commands = Vec::new(); level_art.hud_input(&interactions, &mut commands); commands },
+            level: level_art.hud_sources().capture(&interactions, crate::level::HudCaptureView {
+                width: screen_width(), height: screen_height(),
+            }),
         });
         // Validate the entire HUD batch before drawing any command. A rejection
         // retains the serial live fallback and fences this frame.
@@ -3655,17 +3740,7 @@ interactions
         if snapshot_enabled {
             use macroquad::camera::Camera;
             let timing = snapshot_log.then(SnapshotTiming::start);
-            dynamic_input.alice_feet=player.feet;
-            dynamic_input.alice_visible=show_alice && !interactions.school.as_ref().is_some_and(|s|s.cinematic());
-            dynamic_input.alice_shadow=show_alice && stats.invisible<=0.;
-            dynamic_input.alice_ghost=stats.invisible>0.;dynamic_input.alice_effects=show_alice;
-            dynamic_input.view = world_camera.matrix();
-            dynamic_input.environment_clock = environment_clock;
-            dynamic_input.pickup_clock = pickup_clock;
-            dynamic_input.fog = scene.atmosphere.distance;
-            dynamic_input.liquid = scene.atmosphere.liquid;
-            dynamic_input.transforms.clear();
-            dynamic_input.transforms.extend_from_slice(&transforms);
+            dynamic_input.finish_view(world_camera.matrix(), &scene.atmosphere);
             if let Some(timing) = timing {
                 let (us, allocations) = timing.finish();
                 println!("[lg/snapshot-dynamic] frame={} bytes={} capacity_bytes={} extraction_us={:.3} allocations={} transforms={} particles={} pickups={}",
@@ -3773,7 +3848,11 @@ interactions
             let timing = snapshot_log.then(SnapshotTiming::start);
             #[cfg(target_os="vita")] let will_draw=!crate::frame_profile::mode().no_world() && !world_only;
             #[cfg(not(target_os="vita"))] let will_draw=!world_only;
-            power_art.extract_input(&pickups,&stats,&save::visit_key(&maps[current],entry_spawn.as_deref()),camera,pickup_clock,will_draw,&mut pickup_input);
+            let visit = save::visit_key(&maps[current], entry_spawn.as_deref());
+            power_art.prepare_visit(&pickup_input, &visit);
+            let (generation, history) = power_art.capture_history();
+            pickup_input.capture(generation, &pickups, &stats, &visit, camera, pickup_clock, will_draw, history);
+            power_art.publish_input(&pickup_input, will_draw);
             if pickup_input.overflow() {snapshot_rejected=true;handoff_return.retire();handoff_minimum_frame=frame as u64;}
             if let Some(timing) = timing {
                 let (us, allocations) = timing.finish();
@@ -3817,7 +3896,12 @@ interactions
                 && player.script_motion == 0
                 && player.ledge.is_none()
                 && !player.climbing();
-            let input=aim_pointer.resolve(&crate::combat::Context{world:&world,targets:&targets},crate::targeting::Sight{eye:player.eye(),direction,weapon:can_aim.then(||stats.equipped()).flatten()},level_art.snapshot_visit.id());
+            let (generation, rules) = aim_pointer.capture_rules();
+            let input = crate::targeting::Input::capture(
+                &rules, &crate::combat::Context { world: &world, targets: &targets },
+                crate::targeting::Sight { eye: player.eye(), direction, weapon: can_aim.then(|| stats.equipped()).flatten() },
+                generation, level_art.snapshot_visit.id(),
+            );
             if let Some(timing) = timing {
                 let (us, allocations) = timing.finish();
                 println!("[lg/snapshot-aim] frame={} bytes={} extraction_us={:.3} allocations={} overflow=0",frame,std::mem::size_of_val(&input),us,allocations);
@@ -3841,7 +3925,8 @@ interactions
         // set controls the real last-read boundary and the host census.
         let snapshot_blockers = if snapshot_enabled {
             let mut blockers = Vec::new();
-            if snapshot_rejected || steam.draw_input(steam_visit).is_none() || !power_art.valid_input(&pickup_input)
+            if snapshot_rejected || !alice.body_ready() || steam.draw_input(steam_visit).is_none()
+                || level_art.pool.as_ref().is_some_and(|p| !p.snapshot_ready()) || !power_art.valid_input(&pickup_input)
                 || aim_input.as_ref().is_none_or(|i| !aim_pointer.valid_input(i,level_art.snapshot_visit.id())) {
                 blockers.push("input.rejected".to_owned());
             }
@@ -3911,9 +3996,53 @@ interactions
         }
         // All simulation queries and rejection decisions precede this boundary.
         // Remaining families/failures keep the conservative end-of-3D marker.
+        let captured_hud_view = snapshot_world_free.then(|| HudView::capture(&input));
         crate::spike_log::world_last_read();
-        let transforms = if snapshot_enabled { dynamic_input.transforms.as_slice() } else { transforms.as_slice() };
+        let transforms = dynamic_input.transforms.as_slice();
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
+        if snapshot_world_free {
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let saved_steam = (steam_poison_frame == Some(frame)).then(|| {
+                let saved = steam.poison_sim_for_draw(frame);
+                if std::env::var_os("LOOKING_GLASS_SNAPSHOT_POISON_STEAM_RECAPTURE").is_some() {
+                    let (_, overflow) = steam.extract_render_input(steam_visit);
+                    assert!(!overflow, "poison recapture has to publish");
+                }
+                saved
+            });
+            #[cfg(target_os = "vita")]
+            let draw_world = !crate::frame_profile::mode().no_world();
+            #[cfg(not(target_os = "vita"))]
+            let draw_world = true;
+            let scopes = free_render::FreeRender {
+                scene: &mut scene, level_art: &mut level_art,
+                alice: alice.art_mut(), npcs: npcs.art_mut(), steam: steam.art(),
+                power_art: &mut power_art, aim_pointer: &mut aim_pointer, hud: &hud,
+                handoff_return: &mut handoff_return, overlap_probe: &mut overlap_probe,
+                world_camera: &world_camera, dynamic: &dynamic_input,
+                level: level_dispatch.as_ref().expect("validated dispatch"),
+                pickups: &pickup_input, waves: &wave_input, aim: aim_input.as_ref().expect("validated aim"),
+                shadow: shadow_input.expect("captured shadow"),
+                lights: extracted_lights.expect("captured lights"),
+                first_person: first_person_input.expect("captured first-person flag"),
+                empty_level_effects, fullbright, draw_world, world_only,
+                aim_dt: if active { dt } else { 0. }, frame, handoff_minimum_frame, snapshot_log,
+            }.draw(census_block,
+                #[cfg(target_os = "vita")]
+                viewer_block,
+                #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+                host_block,
+            );
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            if let Some(sim) = saved_steam { steam.restore_sim_after_draw(sim); }
+            census_block = scopes.census_block;
+            #[cfg(target_os = "vita")]
+            { viewer_block = scopes.viewer_block; }
+            #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
+            { host_block = scopes.host_block; }
+        } else {
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            assert_ne!(steam_poison_frame, Some(frame), "steam poison requires a world-free frame");
         if snapshot_enabled {
             if level_art.pool.is_some() { handoff_return.expect(&level_art.snapshot_visit, 4, frame as u64); }
             crate::render_snapshot::handoff_render_begin(&level_art.snapshot_visit, frame as u64);
@@ -4132,13 +4261,6 @@ interactions
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         {
-            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-            let saved_steam = if steam_poison_frame == Some(frame) {
-                assert!(snapshot_enabled && snapshot_world_free, "steam poison requires world-free draw");
-                Some(steam.poison_sim_for_draw(frame))
-            } else {
-                None
-            };
             let captured_steam = steam.draw_input(steam_visit);
             let particles = if snapshot_enabled && snapshot_world_free {
                 captured_steam.expect("world-free steam input was accepted")
@@ -4153,8 +4275,6 @@ interactions
                 &transforms,
                 particles,
             );
-            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-            if let Some(sim) = saved_steam { steam.restore_sim_after_draw(sim); }
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             { drop(host_block); host_block = crate::frame_profile::span("frame_effects"); }
             #[cfg(target_os = "vita")]
@@ -4264,6 +4384,7 @@ interactions
             crate::frame_profile::set_owner(crate::frame_profile::Owner::None);
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
+        }
         if !snapshot_world_free {crate::spike_log::world_last_read();}
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
@@ -4288,7 +4409,7 @@ interactions
         }
         hud.apply(&mut hud_ops);
         // Owner transactions can update the live Input before this HUD pass.
-        let hud_view = HudView::capture(&input);
+        let hud_view = captured_hud_view.unwrap_or_else(|| HudView::capture(&input));
         let hud_stats = hud_snapshot.as_ref().map_or_else(|| &stats, |s| &s.stats);
         let hud_breath = hud_snapshot.as_ref().map_or_else(|| &player.breath, |s| &s.breath);
         let hud_immersion = hud_snapshot.as_ref().map_or_else(|| player.immersion.level, |s| s.immersion);
@@ -4591,9 +4712,11 @@ interactions
             }
         }
         if let Some(game) = finale_checkpoint_requested {
-            match store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()) {
+            match acknowledge_checkpoint(
+                store.write_finale_checkpoint_with_preview(&game, save_frame.preview().as_ref()),
+                &mut interactions.levels,
+            ) {
                 Ok(()) => {
-                    for slot in &mut interactions.levels { slot.ctl.checkpoint_written(); }
                     retry.remember(game_snapshot!()); hud_ops.push(HudOp::Announce("Checkpoint saved".into()));
                 }
                 Err(e) => hud_ops.push(HudOp::Announce(format!("Checkpoint save failed: {e:#}").into())),

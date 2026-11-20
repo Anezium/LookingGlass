@@ -1202,14 +1202,30 @@ impl World {
     /// Take the view after the step's last solid publication.
     #[cfg_attr(not(any(test, all(feature = "sim_maps_probe", not(target_os = "vita")))), allow(dead_code))]
     pub(crate) fn acoustic_view(&self) -> AcousticView {
-        AcousticView {
+        let mut slot = None;
+        self.capture_acoustic_view(&mut slot);
+        slot.unwrap()
+    }
+
+    pub(crate) fn capture_acoustic_view<'a>(
+        &self,
+        slot: &'a mut Option<AcousticView>,
+    ) -> &'a AcousticView {
+        let view = slot.get_or_insert_with(|| AcousticView {
             static_geometry: self.static_geometry.clone(),
-            settled_supports: self.settled_supports.clone(),
-            dynamic: self.dynamic.clone(),
-            dynamic_bounds: self.dynamic_bounds,
+            settled_supports: Vec::new(),
+            dynamic: Vec::new(),
+            dynamic_bounds: None,
             dynamic_buckets: self.dynamic_buckets.clone(),
-            weapon_obstacles: self.weapon_obstacles.clone(),
-        }
+            weapon_obstacles: Vec::new(),
+        });
+        view.static_geometry = self.static_geometry.clone();
+        view.dynamic_buckets = self.dynamic_buckets.clone();
+        view.dynamic_bounds = self.dynamic_bounds;
+        view.settled_supports.clone_from(&self.settled_supports);
+        view.dynamic.clone_from(&self.dynamic);
+        view.weapon_obstacles.clone_from(&self.weapon_obstacles);
+        view
     }
 
     pub(crate) fn audio_complete(&self, result: Trace, start: Vec3, end: Vec3) -> Trace {

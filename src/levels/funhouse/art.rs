@@ -176,31 +176,9 @@ impl LevelArt for Art {
         }
         self.bursts.retain(|k, _| live.contains(k));
     }
-    fn hud_input(&self, l: &dyn LevelController, out: &mut Vec<crate::render_snapshot::HudCommand>) {
-        let mut paint = crate::render_snapshot::Painter::new(&self.ui, out);
-        let o = l.downcast_ref::<Funhouse>().unwrap();
-        if !o.saved.fight {
-            return;
-        }
-        for (i, b) in o.saved.bosses.iter().enumerate() {
-            let x = screen_width() * 0.5 - 220. + i as f32 * 240.;
-            paint.dialog(Rect::new(x - 12., 12., 214., 48.));
-            paint.label(
-                if i == 0 { "TWEEDLEDEE" } else { "TWEEDLEDUM" },
-                x,
-                31.,
-                18.,
-                WHITE,
-            );
-            paint.rectangle(
-                x,
-                40.,
-                190. * b.health / if i == 0 { 800. } else { 900. },
-                7.,
-                Color::new(0.65, 0.16, 0.21, 0.9),
-            );
-        }
-        }
+    fn hud_capture_source(&self) -> Option<crate::level::HudSource> {
+        Some(crate::level::HudSource { resource: self.ui.resource_id(), capture: capture_hud })
+    }
     fn hud(&mut self, l: &dyn LevelController) {
         let o = l.downcast_ref::<Funhouse>().unwrap();
         if !o.saved.fight {
@@ -233,5 +211,34 @@ impl LevelArt for Art {
     }
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+fn capture_hud(
+    l: &dyn LevelController,
+    view: crate::level::HudCaptureView,
+    paint: &mut crate::render_snapshot::Painter<'_>,
+) {
+    let o = l.downcast_ref::<Funhouse>().unwrap();
+    if !o.saved.fight {
+        return;
+    }
+    for (i, b) in o.saved.bosses.iter().enumerate() {
+        let x = view.width * 0.5 - 220. + i as f32 * 240.;
+        paint.dialog(Rect::new(x - 12., 12., 214., 48.));
+        paint.label(
+            if i == 0 { "TWEEDLEDEE" } else { "TWEEDLEDUM" },
+            x,
+            31.,
+            18.,
+            WHITE,
+        );
+        paint.rectangle(
+            x,
+            40.,
+            190. * b.health / if i == 0 { 800. } else { 900. },
+            7.,
+            Color::new(0.65, 0.16, 0.21, 0.9),
+        );
     }
 }

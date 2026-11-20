@@ -1177,6 +1177,32 @@ impl ArtOp {
 }
 
 impl AliceArt {
+    fn with_body(&mut self, draw: impl FnOnce(&mut Self, &BodyInput)) {
+        let input = self.body_input.take().expect("validated Alice snapshot");
+        assert!(self.valid_body_input(&input));
+        draw(self, &input);
+        self.body_input = Some(input);
+    }
+
+    pub(crate) fn draw_captured(&mut self, fullbright: bool, ghost: bool) {
+        if crate::draw_diagnostics::skip(crate::draw_diagnostics::Class::LiveActors) { return; }
+        let material = self.material.clone();
+        material.draw(Appearance { ghost, ..Default::default() }, || {
+            self.with_body(|art, input| art.draw(input, fullbright, ghost));
+        });
+        if !skinning::overlap::gather_only() { gl_use_default_material(); }
+    }
+
+    pub(crate) fn draw_captured_effects(&mut self, camera: Vec3, fullbright: bool, show_alice: bool) {
+        self.with_body(|art, input| {
+            art.visual_art.draw_effects_input(&input.effects, &art.material, camera, fullbright, show_alice);
+        });
+    }
+
+    pub(crate) fn draw_captured_first_person(&mut self, fullbright: bool) {
+        self.with_body(|art, input| art.draw_viewmodel(input, fullbright));
+    }
+
     pub fn atmosphere(&self, atmosphere: &crate::environment::Atmosphere, camera: Vec3) {
         self.water_art.atmosphere(atmosphere, camera);
         self.material.atmosphere(atmosphere, camera);
@@ -1391,6 +1417,12 @@ impl AliceArt {
 }
 
 impl Character {
+    pub(crate) fn art_mut(&mut self) -> &mut AliceArt { &mut self.art }
+
+    pub(crate) fn body_ready(&self) -> bool {
+        self.art.body_input.as_ref().is_some_and(|input| self.art.valid_body_input(input))
+    }
+
     pub(crate) fn into_parts(self) -> (AliceSim, AliceArt) {
         (self.sim, self.art)
     }

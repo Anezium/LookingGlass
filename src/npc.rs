@@ -2253,6 +2253,23 @@ fn owned_slots(actors: &[Actor]) -> impl Iterator<Item = usize> + '_ {
 }
 
 impl SnapshotRegistry {
+    fn publish_membership(
+        &mut self,
+        keys: Vec<(crate::character::skinning::identity::ActorId, usize)>,
+        membership: OwnedSlots,
+    ) -> bool {
+        if membership.generation != self.generation {
+            return false;
+        }
+        if self.generation == 0 || self.slots != keys {
+            self.retire();
+            self.slots.extend(keys);
+            self.owned_slots.extend(membership.slots);
+            return true;
+        }
+        self.owned_slots == membership.slots
+    }
+
     fn retire(&mut self) {
         self.generation = crate::character::skinning::identity::next_instance();
         self.slots.clear(); self.owned_slots.clear();
@@ -2473,7 +2490,17 @@ fn report_world_free_npc_skip(site: &str) {
     }
 }
 
+impl NpcArt {
+    pub(crate) fn draw_captured(
+        &mut self, camera: Vec3, direction: Vec3, atmosphere: &Atmosphere, fullbright: bool,
+    ) {
+        self.resources.draw(camera, direction, atmosphere, fullbright, None);
+    }
+}
+
 impl Npcs {
+    pub(crate) fn art_mut(&mut self) -> &mut NpcArt { &mut self.art }
+
     pub(crate) fn sim_mut(&mut self) -> &mut NpcSim { &mut self.sim }
 
     pub(crate) fn into_parts(self) -> (NpcSim, NpcArt) {
@@ -2522,15 +2549,9 @@ impl Npcs {
             self.art.resources.actor_inputs = Some(ActorInputs { overflow: true, ..Default::default() });
             return (std::mem::size_of::<ActorInputs>(), 0, true);
         }
-        let registry = &mut self.art.resources.snapshot_registry;
-        let changed = registry.slots.len() != self.sim.actors.len()
-            || registry.slots.iter().zip(&self.sim.actors)
-                .any(|((id, model), a)| *id != a.skin_identity || *model != a.model);
-        if changed || registry.generation == 0 {
-            registry.retire();
-            registry.slots.extend(self.sim.actors.iter().map(|a| (a.skin_identity,a.model)));
-            registry.owned_slots.extend(owned_slots(&self.sim.actors));
-        }
+        let generation = self.art.resources.snapshot_registry.generation;
+        let membership = self.sim.capture_owned_slots(generation);
+        let keys: Vec<_> = self.sim.actors.iter().map(|a| (a.skin_identity, a.model)).collect();
         let view = ActorCaptureView {
             camera,
             direction,
@@ -2539,11 +2560,8 @@ impl Npcs {
             #[cfg(feature = "vita_renderer")]
             near_cull: crate::render::vita_renderer::config().actor_near_cull,
         };
-        let mut inputs = self.sim.extract_actors(view);
-        inputs.generation = registry.generation;
-        let result = (inputs.bytes(), inputs.ants.len(), inputs.overflow);
-        self.art.resources.actor_inputs = Some(inputs);
-        result
+        let inputs = self.sim.extract_actors(view);
+        self.art.resources.publish_actors(keys, membership, inputs)
     }
     pub(crate) fn clear_actor_inputs(&mut self) { self.art.resources.actor_inputs = None; }
     pub(crate) fn check_school2_ownership(&self) -> Result<()> {
@@ -3143,6 +3161,24 @@ impl Npcs {
     }
 }
 impl NpcArtResources {
+    fn publish_actors(
+        &mut self,
+        keys: Vec<(crate::character::skinning::identity::ActorId, usize)>,
+        membership: OwnedSlots,
+        mut inputs: ActorInputs,
+    ) -> (usize, usize, bool) {
+        let registry = &mut self.snapshot_registry;
+        if !registry.publish_membership(keys, membership) {
+            self.actor_inputs = None;
+            return (0, 0, true);
+        }
+        inputs.generation = registry.generation;
+        let result = (inputs.bytes(), inputs.ants.len(), inputs.overflow);
+        self.actor_inputs = Some(inputs);
+        result
+    }
+
+
     fn draw(
         &mut self,
         camera: Vec3,
@@ -5343,6 +5379,20 @@ pub(crate) fn test_split_and_owned_slots(assets: &mut Assets) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actor_publication_rejects_membership_for_retired_generation() {
+        let mut registry = SnapshotRegistry::default();
+        let keys = vec![(Default::default(), 0)];
+        assert!(registry.publish_membership(keys.clone(), OwnedSlots { generation: 0, slots: vec![0] }));
+        let stale = OwnedSlots { generation: registry.generation, slots: vec![0] };
+        registry.retire();
+        assert!(!registry.publish_membership(keys.clone(), stale));
+        assert!(registry.slots.is_empty());
+        let current = OwnedSlots { generation: registry.generation, slots: vec![0] };
+        assert!(registry.publish_membership(keys, current));
+        assert_eq!(registry.owned_slots, vec![0]);
+    }
+
     #[test]
     fn actor_snapshot_rejects_stale_overflow_and_malformed_batches() {
         fn assert_send<T: Send>() {} assert_send::<ActorInputs>();
