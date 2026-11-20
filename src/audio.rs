@@ -863,6 +863,11 @@ impl<S> Monitor<S> {
 impl<S: Source<Item = f32>> Iterator for Monitor<S> {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
+        // The buffered producer uses pcm_block; this is the direct device path.
+        #[cfg(target_os = "vita")]
+        if self.block.is_empty() {
+            crate::skin_worker::audio_callback_startup();
+        }
         let sample = acoustics::limit(self.source.next().unwrap_or(0.));
         self.block.push(sample);
         if self.block.len() == 1024 {

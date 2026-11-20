@@ -242,6 +242,11 @@ fn app_main() {
         light_profile::set_mode(frame_profile::Mode::read());
         skin_worker::set_spin_us(c.worker_spin_us);
         character::skinning::startup(c.skin_workers, c.worker_probe, c.skin_worker_bench, c.skin_overlap);
+        #[cfg(target_os = "vita")]
+        {
+            skin_worker::startup_inventory("game");
+            eprintln!("[lg/thread-layout] role=sim status=pending mask=na priority=na");
+        }
         gpu_timing::before_gl_init();
         frame_phases::initialize();
         phase_census::initialize();

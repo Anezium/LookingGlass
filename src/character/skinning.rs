@@ -413,12 +413,12 @@ impl Bench {
         // UnsafeCell keeps normal-frame access to Bench metadata from asserting
         // exclusive ownership of the output while the worker has it.
         let batch = unsafe { &mut *storage.get() };
-        let allocations = crate::kernel_alloc::Scope::begin();
+        let allocations = crate::kernel_alloc::Scope::begin_timed();
         let start = std::time::Instant::now();
         batch.compute();
         self.main = crate::skin_worker::Measurement {
             ns: start.elapsed().as_nanos() as u64,
-            malloc_calls: allocations.finish(),
+            malloc_calls: allocations.map_or(0, crate::kernel_alloc::Scope::finish),
         };
         let wait = std::time::Instant::now();
         self.idle = self.worker.execute(|| batch.compute());

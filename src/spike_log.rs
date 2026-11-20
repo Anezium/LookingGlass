@@ -418,9 +418,9 @@ mod tests {
 }
 
 #[inline]
-pub(crate) fn overlap_enabled() -> bool {
+pub(crate) fn cpu1_reserved() -> bool {
     #[cfg(feature="vita_renderer")]
-    { crate::render::vita_renderer::config().diag_overlap }
+    { crate::render::vita_renderer::config().cpu1_reserved() }
     #[cfg(not(feature="vita_renderer"))]
     { false }
 }
@@ -434,7 +434,10 @@ pub(crate) fn overlap_burn(ms: f64, render_ms: f64, bytes: u64) {
 /// Split observation alone never changes CPU reservation or starts the burn.
 fn split_enabled() -> bool {
     #[cfg(feature="vita_renderer")]
-    { overlap_enabled() || crate::render::vita_renderer::config().diag_snapshot }
+    {
+        let config = crate::render::vita_renderer::config();
+        config.diag_overlap || config.diag_snapshot
+    }
     #[cfg(not(feature="vita_renderer"))]
     { false }
 }

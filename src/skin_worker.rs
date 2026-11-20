@@ -1,9 +1,11 @@
 //! Persistent math workers: fixed application masks, explicit stacks, no renderer imports.
 pub(crate) const STACK_BYTES: usize = 512 * 1024;
 pub(crate) fn mask(worker: usize) -> i32 {
-    #[cfg(feature="vita_renderer")]
-    if crate::render::vita_renderer::config().diag_overlap { return 0x40000; }
-    [0x20000, 0x40000][worker]
+    if crate::spike_log::cpu1_reserved() {
+        0x40000
+    } else {
+        [0x20000, 0x40000][worker]
+    }
 }
 
 #[cfg(target_os = "vita")]
@@ -43,15 +45,40 @@ extern "C" {
     fn sceKernelGetThreadInfo(id: i32, info: *mut ThreadInfo) -> i32;
     fn sceKernelGetCpuId() -> i32;
 }
+#[cfg(target_os = "vita")]
+fn thread_info() -> (i32, i32, ThreadInfo) {
+    unsafe {
+        let id = sceKernelGetThreadId();
+        let mut info: ThreadInfo = std::mem::zeroed();
+        info.size = std::mem::size_of::<ThreadInfo>() as u32;
+        let rc = sceKernelGetThreadInfo(id, &mut info);
+        (id, rc, info)
+    }
+}
+
 /// The calling thread's stack as (lowest address, size in bytes), as the kernel reports it.
 #[cfg(target_os = "vita")]
 pub(crate) fn current_stack() -> Option<(usize, usize)> {
-    unsafe {
-        let mut info: ThreadInfo = std::mem::zeroed();
-        info.size = std::mem::size_of::<ThreadInfo>() as u32;
-        let rc = sceKernelGetThreadInfo(sceKernelGetThreadId(), &mut info);
-        (rc >= 0 && info.stack != 0 && info.stack_size > 0).then_some((info.stack as usize, info.stack_size as usize))
-    }
+    let (_, rc, info) = thread_info();
+    (rc >= 0 && info.stack != 0 && info.stack_size > 0)
+        .then_some((info.stack as usize, info.stack_size as usize))
+}
+
+/// Approximate free bytes below a local on the current Vita thread's descending stack.
+/// Call along the worker paths to sample margin at their current depth.
+#[cfg(target_os = "vita")]
+pub(crate) fn current_stack_margin() -> Option<usize> {
+    let (low, size) = current_stack()?;
+    let marker = 0u8;
+    let here = std::hint::black_box(&marker) as *const u8 as usize;
+    here.checked_sub(low).filter(|&margin| margin < size)
+}
+
+#[cfg(target_os = "vita")]
+pub(crate) fn startup_inventory(role: &str) {
+    let (id, rc, info) = thread_info();
+    eprintln!("[lg/thread-layout] role={role} id={id} info_rc={rc} mask={:#x} priority={}",
+        info.affinity, info.priority);
 }
 /// Kernel readback is deliberately used instead of pthread_getaffinity_np.
 pub(crate) fn pin(worker: usize, probe: bool) {
@@ -60,6 +87,9 @@ pub(crate) fn pin(worker: usize, probe: bool) {
         let id = sceKernelGetThreadId();
         let requested = mask(worker);
         let rc = sceKernelChangeThreadCpuAffinityMask(id, requested);
+        if rc >= 0 {
+            startup_inventory(if worker == 0 { "skin-0" } else { "skin-1" });
+        }
         if probe {
             eprintln!(
                 "[lg/worker-probe] worker={worker} affinity_rc={rc} requested={requested:#x}"
@@ -90,11 +120,7 @@ pub(crate) fn pin_game(probe: bool) {
 pub(crate) fn inventory(role: &str, requested: Option<i32>) {
     #[cfg(target_os = "vita")]
     unsafe {
-        assert_eq!(std::mem::size_of::<ThreadInfo>(), 0x80);
-        let id = sceKernelGetThreadId();
-        let mut info: ThreadInfo = std::mem::zeroed();
-        info.size = std::mem::size_of::<ThreadInfo>() as u32;
-        let rc = sceKernelGetThreadInfo(id, &mut info);
+        let (id, rc, info) = thread_info();
         let mut histogram = [0u32; 4];
         let start = std::time::Instant::now();
         let mut value = 1u32;
@@ -205,7 +231,7 @@ impl Worker {
                     let (address, call) = s.work.take().unwrap();
                     other.work_ready.store(false, Ordering::Relaxed);
                     drop(s);
-                    let allocations = measured.then(crate::kernel_alloc::Scope::begin);
+                    let allocations = if measured { crate::kernel_alloc::Scope::begin_timed() } else { None };
                     let start = std::time::Instant::now();
                     let result =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
@@ -459,27 +485,37 @@ mod persistent_tests {
     }
 }
 
-/// Dedicated diagnostic core; workers are remapped to CPU2 only in diag_overlap mode.
-pub(crate) fn pin_overlap_burn() {
+/// Pin the calling sim or diagnostic thread to the reserved application core.
+pub(crate) fn pin_reserved_cpu1() {
     #[cfg(target_os="vita")]
     unsafe {
         let rc = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x20000);
-        assert!(rc >= 0, "overlap burn affinity failed: {rc}");
-        inventory("overlap-burn", Some(0x20000));
+        assert!(rc >= 0, "CPU1 affinity failed: {rc}");
     }
 }
 
 /// CPAL pins its consumer to CPU1 before starting the stream. Move it only from
-/// its own callback, after that startup readback, to reserve the diagnostic core.
+/// its own callback, after CPAL's startup readback, when CPU1 is reserved.
 #[cfg(target_os="vita")]
-pub(crate) fn overlap_audio_callback() {
-    if !crate::spike_log::overlap_enabled() { return; }
+pub(crate) fn audio_callback_startup() {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    let reserved = crate::spike_log::cpu1_reserved();
+    if !reserved && REPORTED.load(Ordering::Relaxed) {
+        return;
+    }
     thread_local! { static APPLIED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-    APPLIED.with(|applied| if !applied.replace(true) {
-        unsafe {
-            let rc=sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(),0x40000);
-            assert!(rc >= 0, "overlap audio callback affinity failed: {rc}");
-            inventory("overlap-audio-callback",Some(0x40000));
+    APPLIED.with(|applied| {
+        if applied.replace(true) {
+            return;
+        }
+        if reserved {
+            unsafe {
+                let rc = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x40000);
+                assert!(rc >= 0, "overlap audio callback affinity failed: {rc}");
+            }
+        }
+        if !REPORTED.swap(true, Ordering::Relaxed) {
+            startup_inventory("pcm-callback");
         }
     });
 }
