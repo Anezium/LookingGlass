@@ -1,5 +1,6 @@
 """Audit the Git index before a source commit. Read-only; never uploads."""
 from pathlib import Path, PurePosixPath
+from collections import Counter
 import argparse
 import hashlib
 import json
@@ -384,15 +385,102 @@ def working_files(root=ROOT):
     return result
 
 
+# Review all static declarations, including user-defined types and immutable
+# tables, so a wrapper around an atomic or lock cannot evade the inventory.
+SHARED_STATE = "docs/step8/SHARED-STATE.md"
+RUST_TRIVIA = re.compile(
+    r'//[^\n]*|/\*|\*/|(?:b?r)(?P<hash>\#*)".*?"(?P=hash)|"(?:\\.|[^"\\])*"'
+    r"|'(?:\\(?:u\{[\da-fA-F_]+\}|x[\da-fA-F]{2}|.)|[^'\\\n])'",
+    re.S,
+)
+SHARED_DECL = re.compile(r"(?<!')\bstatic\s+(?:mut\s+)?(\$?(?:r\#)?\w+)\s*:(?!:)|\b(thread_local)\s*!")
+
+
+def shared_declarations(source, path=""):
+    # Keep offsets stable for diagnostics. Rust block comments can nest.
+    def blank(match):
+        return re.sub(r"[^\n]", " ", match.group())
+    parts = []
+    pos = 0
+    while hit := RUST_TRIVIA.search(source, pos):
+        parts.append(source[pos:hit.start()])
+        pos = hit.end()
+        if hit.group() == "/*":
+            depth = 1
+            for marker in re.finditer(r"/\*|\*/", source[pos:]):
+                depth += 1 if marker.group() == "/*" else -1
+                if not depth:
+                    pos += marker.end()
+                    break
+            else:
+                pos = len(source)
+            parts.append(re.sub(r"[^\n]", " ", source[hit.start():pos]))
+        else:
+            parts.append(blank(hit))
+    parts.append(source[pos:])
+    code = "".join(parts)
+    for hit in SHARED_DECL.finditer(code):
+        yield source.count("\n", 0, hit.start()) + 1, hit[1] or "thread_local!"
+
+    # These GL macros emit one lock for each entry in their invocation.
+    gl_macros = {
+        "src/render_tail.rs": ("api", "FN"),
+        "src/render_direct.rs": ("wrappers", "REAL"),
+        "src/render_tail/vgl_scenes.rs": ("next", ""),
+    }
+    if path in gl_macros:
+        macro, slot = gl_macros[path]
+        for call in re.finditer(r"\b" + macro + r"\s*!\s*\{", code):
+            start = call.end()
+            depth = 1
+            for brace in re.finditer(r"[{}]", code[start:]):
+                depth += 1 if brace.group() == "{" else -1
+                if not depth:
+                    break
+            entries = code[start:start + brace.start()]
+            names = r"\b(gl\w+)\s*\(" if slot else r"\b(\w+)\s*:\s*fn\s*\("
+            for entry in re.finditer(names, entries):
+                name = entry[1] + ("::" + slot if slot else "")
+                yield source.count("\n", 0, start + entry.start()) + 1, name
+
+
+def record_shared_state(path, data, actual):
+    if path.startswith("src/") and path.endswith(".rs"):
+        for line, name in shared_declarations(data.decode("utf-8", errors="replace"), path):
+            actual.append((path, line, name))
+
+
+def shared_state_errors(actual, inventory):
+    reviewed = Counter(re.findall(r"^\| `(src/[^\n`]+):\d+` \| `([^`]+)` \|", inventory, re.M))
+    errors = []
+    for path, line, name in actual:
+        key = (path, name)
+        if reviewed[key] <= 0:
+            errors.append(f"{path}:{line}: review {name} in {SHARED_STATE}")
+        reviewed[key] -= 1
+    for (path, name), count in reviewed.items():
+        if count > 0:
+            errors.append(f"{SHARED_STATE}: stale declaration {path} {name}")
+    return errors
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worktree", action="store_true", help="audit current tracked and new files without staging")
     args = parser.parse_args()
+    actual = []
+    inventory = ""
     if args.worktree:
         files = working_files()
         errors = []
         for p in files:
-            errors.extend(audit_data(p.relative_to(ROOT).as_posix(), p.read_bytes()))
+            path = p.relative_to(ROOT).as_posix()
+            data = p.read_bytes()
+            errors.extend(audit_data(path, data))
+            record_shared_state(path, data, actual)
+            if path == SHARED_STATE:
+                inventory = data.decode("utf-8")
+        errors.extend(shared_state_errors(actual, inventory))
         if errors:
             print("Source worktree audit failed:\n" + "\n".join(errors))
             return 1
@@ -417,8 +505,12 @@ def main():
             errors.append(f"Unexpectedly large source file: {path}")
             continue
         data = subprocess.check_output(["git", "cat-file", "blob", blob], cwd=ROOT)
+        record_shared_state(path, data, actual)
+        if path == SHARED_STATE:
+            inventory = data.decode("utf-8")
         total += len(data)
         errors.extend(audit_data(path, data))
+    errors.extend(shared_state_errors(actual, inventory))
     if errors:
         print("Source audit failed:\n" + "\n".join(errors))
         return 1
