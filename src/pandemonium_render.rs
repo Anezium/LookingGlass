@@ -312,7 +312,7 @@ pub async fn check_machinery(assets: &mut Assets) -> Result<()> {
         for frame in 0..420 {
             i.advance_school(1. / 60., &scene.map, &mut world, &mut player)?;
             steam.sync(&i.event_world);
-            i.pandemonium.as_ref().unwrap().gate_particles(&mut steam);
+            i.pandemonium.as_ref().unwrap().gate_particles(steam.sim_mut());
             steam.update(1. / 60., eye, &world);
             clear_background(BLACK);
             set_camera(&Camera3D {

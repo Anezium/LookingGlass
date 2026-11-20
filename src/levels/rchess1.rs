@@ -492,7 +492,7 @@ impl LevelController for Encounter {
             normal
         }
     }
-    fn particles(&self, steam: &mut crate::particles::Steam) {
+    fn particles(&self, steam: &mut crate::particles::SteamSim) {
         steam.gate(
             &self
                 .data

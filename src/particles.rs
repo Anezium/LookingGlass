@@ -667,6 +667,10 @@ fn random(seed: &mut u32) -> f32 {
     (*seed >> 8) as f32 / 16777216.
 }
 impl Steam {
+    pub(crate) fn art(&self) -> &SteamArt { &self.art }
+
+    pub(crate) fn sim_mut(&mut self) -> &mut SteamSim { &mut self.sim }
+
     pub(crate) fn into_parts(self) -> (SteamSim, SteamArt) {
         (self.sim, self.art)
     }
@@ -790,7 +794,7 @@ impl SteamArt {
         if let Some(input) = self.input.take() { self.arena = input; }
     }
 
-    fn draw_input(&self, visit: u64) -> Option<SteamDraw<'_>> {
+    pub(crate) fn draw_input(&self, visit: u64) -> Option<SteamDraw<'_>> {
         let input = self.input.as_ref().filter(|input| input.visit == visit)?;
         Some(SteamDraw { art: self, puffs: RenderPuffs::Input(&input.puffs) })
     }

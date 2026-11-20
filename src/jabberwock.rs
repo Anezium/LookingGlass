@@ -383,7 +383,7 @@ impl Encounter {
     }
 }
 impl LevelController for Encounter {
-    fn particles(&self, steam: &mut crate::particles::Steam) {
+    fn particles(&self, steam: &mut crate::particles::SteamSim) {
         // The reward scene draws this altar itself. Its placed copy must never
         // emit as ambient scenery, including before the reward and after pickup.
         if let Some(id) = self.data.eye_altar {

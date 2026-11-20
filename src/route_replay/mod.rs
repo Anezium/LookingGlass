@@ -130,23 +130,30 @@ struct End {
     blade_copies: u32,
     knife_done: bool,
 }
-pub struct Session {
+/// The route sampler's CPU state. The session keeps timing and file output.
+pub(crate) struct Control {
     mode: Mode,
-    root: PathBuf,
-    run_id: String,
     tape: Tape,
     tick: u64,
     cursor: usize,
     moving_ticks: u64,
     post_moving_ticks: u64,
     status: Status,
-    entry_saved: bool,
     drift_reported: bool,
     heading_ticks:u32,
     heading_total:u64,
     route_error:Option<String>,
-    opening_played:bool,
     segment: String,
+    done: bool,
+    #[cfg(not(target_os = "vita"))]
+    driver: record::Driver,
+}
+pub struct Session {
+    control: Option<Control>,
+    root: PathBuf,
+    run_id: String,
+    entry_saved: bool,
+    opening_played:bool,
     frame_start: Option<Instant>,
     wall: Vec<(String, f64)>,
     counters: Vec<[u32;8]>,
@@ -155,15 +162,12 @@ pub struct Session {
     counter_peaks: [u32;8],
     start: Instant,
     startup_seconds:f64,
-    done: bool,
     heap_start: Option<u64>,
     windows: u64,
     total_frames: u64,
     shader_after_warmup: u64,
     pipeline_after_warmup: u64,
     aggregates: BTreeMap<String, (u64, f64, Vec<u64>)>,
-    #[cfg(not(target_os = "vita"))]
-    driver: record::Driver,
 }
 impl Session {
     pub fn open(options: &mut Options) -> Result<Option<Self>> {
@@ -247,19 +251,27 @@ impl Session {
                 .as_nanos()
         );
         Ok(Some(Self {
-            mode,
+            control: Some(Control {
+                mode,
+                tape,
+                tick: 0,
+                cursor: 0,
+                moving_ticks: 0,
+                post_moving_ticks: 0,
+                status: Status::default(),
+                drift_reported: false,
+                heading_ticks: 0,
+                heading_total: 0,
+                route_error: None,
+                segment: "arrival".into(),
+                done: false,
+                #[cfg(not(target_os = "vita"))]
+                driver: record::Driver::default(),
+            }),
             run_id,
             root,
-            tape,
-            tick: 0,
-            cursor: 0,
-            moving_ticks: 0,
-            post_moving_ticks: 0,
-            status: Status::default(),
             entry_saved: false,
-            drift_reported: false,
-            heading_ticks:0,heading_total:0,route_error:None,opening_played:false,
-            segment: "arrival".into(),
+            opening_played: false,
             frame_start: None,
             wall: Vec::new(),
             counters: Vec::new(),
@@ -267,20 +279,26 @@ impl Session {
             counter_sums: [0;8],
             counter_peaks: [0;8],
             start: Instant::now(),startup_seconds:0.,
-            done: false,
             heap_start: None,
             windows: 0,
             total_frames: 0,
             shader_after_warmup: 0,
             pipeline_after_warmup: 0,
             aggregates: BTreeMap::new(),
-            #[cfg(not(target_os = "vita"))]
-            driver: record::Driver::default(),
         }))
     }
+    pub(crate) fn take_control(&mut self) -> Control {
+        self.control.take().expect("route control in session")
+    }
+
+    pub(crate) fn restore_control(&mut self, control: Control) {
+        assert!(self.control.replace(control).is_none());
+    }
+
     pub fn resume(&self, store: &Store) -> Result<Option<crate::save::Loaded>> {
-        if self.mode != Mode::Continue {
-            return if self.mode == Mode::Replay && self.tape.start == "save:slot1" {
+        let control = self.control.as_ref().unwrap();
+        if control.mode != Mode::Continue {
+            return if control.mode == Mode::Replay && control.tape.start == "save:slot1" {
                 Ok(Some(store.read(Slot::parse("slot1")?)?))
             } else {
                 Ok(None)
@@ -291,7 +309,7 @@ impl Session {
         ))
     }
     pub fn entry_checkpoint_due(&mut self) -> bool {
-        if self.mode == Mode::Record && self.status.entry_done && !self.entry_saved {
+        if self.control.as_ref().unwrap().mode == Mode::Record && self.control.as_ref().unwrap().status.entry_done && !self.entry_saved {
             self.entry_saved = true;
             true
         } else {
@@ -300,22 +318,22 @@ impl Session {
     }
     #[cfg(not(target_os = "vita"))]
     pub fn recording_pause_seconds(&mut self) -> f32 {
-        if self.mode == Mode::Record {
-            std::mem::take(&mut self.driver.planning_seconds)
+        if self.control.as_ref().unwrap().mode == Mode::Record {
+            std::mem::take(&mut self.control.as_mut().unwrap().driver.planning_seconds)
         } else {
             0.
         }
     }
     pub fn continuing(&self) -> bool {
-        self.mode == Mode::Continue
+        self.control.as_ref().unwrap().mode == Mode::Continue
     }
-    pub fn needs_opening(&self)->bool {self.mode==Mode::Replay && self.tape.start=="new_game"}
+    pub fn needs_opening(&self)->bool {self.control.as_ref().unwrap().mode==Mode::Replay && self.control.as_ref().unwrap().tape.start=="new_game"}
     pub fn opening_complete(&mut self) {self.opening_played=true;println!("[lg/route] opening film complete");}
     pub fn begin_frame(&mut self, status: Status) -> Result<()> {
         let now = Instant::now();
         if let Some(start) = self.frame_start.take() {
             let ms = now.duration_since(start).as_secs_f64() * 1000.;
-            self.wall.push((self.segment.clone(), ms));
+            self.wall.push((self.control.as_ref().unwrap().segment.clone(), ms));
             let counters=crate::frame_profile::route_counters();
             self.counters.push(counters);
             self.counter_samples+=1;
@@ -324,7 +342,7 @@ impl Session {
                 self.counter_peaks[i]=self.counter_peaks[i].max(counters[i]);
             }
             self.total_frames += 1;
-            for label in [self.segment.as_str(), "whole-passage"] {
+            for label in [self.control.as_ref().unwrap().segment.as_str(), "whole-passage"] {
                 let a = self
                     .aggregates
                     .entry(label.into())
@@ -352,31 +370,162 @@ impl Session {
             );
         }
         self.frame_start = Some(now);
-        self.status = status;
+        let control = self.control.as_mut().unwrap();
+        control.status = status;
         ensure!(
-            self.status.map == "gvillage" && self.status.alive && !self.status.flying,
+            control.status.map == "gvillage" && control.status.alive && !control.status.flying,
             "route left playable village state tick={} segment={} status={}",
-            self.tick,
-            self.segment,
-            serde_json::to_string(&self.status)?
+            control.tick,
+            control.segment,
+            serde_json::to_string(&control.status)?
         );
         ensure!(self.start.elapsed().as_secs() < 3600, "route wall timeout");
-        if !self.status.entry_done {
-            self.segment = "arrival".into();
-        } else if self.status.blade_copies > 0 && !self.status.knife_done {
-            self.segment = "knife_cat".into();
-            if self.mode == Mode::Record
-                && !self.tape.gates.iter().any(|g| g.scene_done == "knife_cat")
+        if !control.status.entry_done {
+            control.segment = "arrival".into();
+        } else if control.status.blade_copies > 0 && !control.status.knife_done {
+            control.segment = "knife_cat".into();
+            if control.mode == Mode::Record
+                && !control.tape.gates.iter().any(|g| g.scene_done == "knife_cat")
             {
-                self.tape.gates.push(Gate {
-                    tick: self.tick,
+                control.tape.gates.push(Gate {
+                    tick: control.tick,
                     scene_done: "knife_cat".into(),
                 });
             }
         }
         Ok(())
     }
-    pub fn control(
+    fn export_window(&mut self) -> Result<()> {
+        if self.wall.is_empty() {
+            return Ok(());
+        }
+        let dir = self.root.join("route-frame-windows").join(&self.run_id);
+        std::fs::create_dir_all(&dir)?;
+        self.windows += 1;
+        std::fs::write(
+            dir.join(format!("window-{:05}.json", self.windows)),
+            serde_json::to_vec(&self.wall)?,
+        )?;
+        ensure!(self.counters.len()==self.wall.len(),"route counter/window alignment");
+        std::fs::write(
+            dir.join(format!("counters-{:05}.json", self.windows)),
+            serde_json::to_vec(&self.counters)?,
+        )?;
+        self.wall.clear();
+        self.counters.clear();
+        Ok(())
+    }
+    pub fn should_finish(&self) -> bool {
+        self.control.as_ref().unwrap().done || self.control.as_ref().unwrap().mode == Mode::Continue
+    }
+    pub fn finish(&mut self, store: &Store, game: &Game, yaw: f32, pitch: f32) -> Result<()> {
+        let control = self.control.as_ref().unwrap();
+        ensure!(control.route_error.is_none(),"{}",control.route_error.as_deref().unwrap_or(""));
+        ensure!(!self.needs_opening()||self.opening_played,"New Game route did not complete opening film");
+        #[cfg(not(target_os = "vita"))]
+        ensure!(
+            control.driver.error.is_none(),
+            "{}",
+            control.driver.error.as_deref().unwrap_or("")
+        );
+        ensure!(
+            control.status.knife_done && control.status.blade_copies == 1,
+            "route did not finish authored Blade/knife_cat progression"
+        );
+        let end = End {
+            map: control.status.map.clone(),
+            feet: game.player.feet.to_array(),
+            yaw,
+            pitch,
+            blade_copies: control.status.blade_copies,
+            knife_done: control.status.knife_done,
+        };
+        std::fs::create_dir_all(&self.root)?;
+        if control.mode == Mode::Continue {
+            let expected: End =
+                serde_json::from_slice(&std::fs::read(self.root.join("route-end.json"))?)?;
+            ensure!(
+                end.map == expected.map
+                    && Vec3::from_array(end.feet).distance(Vec3::from_array(expected.feet)) < 0.01
+                    && (yaw - expected.yaw).abs() < 0.0001
+                    && (pitch - expected.pitch).abs() < 0.0001,
+                "Continue pose mismatch"
+            );
+            println!(
+                "[lg/route] PASS Continue map={} feet={:?}",
+                end.map, end.feet
+            );
+        } else {
+            ensure!(
+                control.post_moving_ticks as f64 / 120. >= control.tape.min_moving_seconds,
+                "route has fewer than 60 seconds of moving inputs after knife_cat"
+            );
+            store.write(Slot::Auto, game)?;
+            if control.mode == Mode::Record {
+                control.tape.validate()?;
+                std::fs::write(
+                    self.root.join("route-inputs.json"),
+                    serde_json::to_vec_pretty(&control.tape)?,
+                )?;
+            }
+            std::fs::write(
+                self.root.join("route-end.json"),
+                serde_json::to_vec_pretty(&end)?,
+            )?;
+            println!(
+                "[lg/route] PASS saved map={} feet={:?} moving_s={:.3} post_knife_cat_s={:.3}",
+                end.map,
+                end.feet,
+                control.moving_ticks as f64 / 120.,
+                control.post_moving_ticks as f64 / 120.
+            );
+        }
+        let save_ms = self
+            .frame_start
+            .take()
+            .map(|s| s.elapsed().as_secs_f64() * 1000.);
+        if let Some(ms) = save_ms {
+            self.wall.push(("save-or-continue".into(), ms));
+            // No draw during this interval; excluded from rendered-frame counter means.
+            self.counters.push([0;8]);
+            self.total_frames += 1;
+            for label in ["save-or-continue", "whole-passage"] {
+                let a = self
+                    .aggregates
+                    .entry(label.into())
+                    .or_insert_with(|| (0, 0., vec![0; 4001]));
+                a.0 += 1;
+                a.1 += ms;
+                a.2[(ms.round() as usize).min(4000)] += 1;
+            }
+        }
+        self.export_window()?;
+        let control = self.control.as_ref().unwrap();
+        let stats=self.aggregates.iter().map(|(label,(n,sum,hist))|{
+            let percentile=|rank:u64|{let mut count=0;hist.iter().enumerate().find_map(|(i,&v)|{count+=v;(count>rank).then_some(i)})};
+            (label,serde_json::json!({"samples":n,"mean_ms":if *n>0{Some(sum/(*n as f64))}else{None},"median_ms_rounded":percentile(n/2),"p95_ms_rounded":percentile(n*95/100)}))
+        }).collect::<BTreeMap<_,_>>();
+        let heap_end = crate::frame_profile::heap_used_bytes();
+        println!(
+            "[lg/route] heap end start={:?} end={heap_end:?}",
+            self.heap_start
+        );
+        let count_summary=|i:usize| serde_json::json!({"samples":self.counter_samples,"mean":(self.counter_samples>0).then(||self.counter_sums[i] as f64/self.counter_samples as f64),"max":self.counter_peaks[i]});
+        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":control.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":control.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"counter_raw_path":format!("route-frame-windows/{}/counters-*.json",self.run_id),"counter_columns":["live_puffs","fx_gpu_draws","skinned_draws_total","skinned_draws_culled","gpu_probe_upload_requests","gpu_probe_identical_uploads","gpu_probe_uniform_requests","gpu_probe_identical_uniforms"],"counter_population":"Rendered frames; final save-only row is all zeros and excluded from means. FX draws count direct dynamic actor/object/effect packets, including first-person.","live_puffs":count_summary(0),"fx_gpu_draws":count_summary(1),"skinned_draws_total":count_summary(2),"skinned_draws_culled":count_summary(3),"gpu_probe_upload_requests":count_summary(4),"gpu_probe_identical_uploads":count_summary(5),"gpu_probe_uniform_requests":count_summary(6),"gpu_probe_identical_uniforms":count_summary(7),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.counters.capacity()*std::mem::size_of::<[u32;8]>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"opening_film_played":self.opening_played,"camera_alignment_ticks":control.heading_total,"camera_alignment_seconds":control.heading_total as f64/120.,"input_timeline":"120Hz script excludes scene waits and bounded camera recentering; frame wall includes both","scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":if crate::light_profile::full() {"full"} else {"light"}});
+        std::fs::write(
+            self.root.join(if self.continuing() {
+                "route-continue-report.json"
+            } else {
+                "route-report.json"
+            }),
+            serde_json::to_vec_pretty(&report)?,
+        )?;
+        Ok(())
+    }
+}
+
+impl Control {
+    pub(crate) fn control(
         &mut self,
         world: &crate::collision::World,
         player: &Player,
@@ -501,131 +650,6 @@ impl Session {
             run: s.run,
             ..Default::default()
         }
-    }
-    fn export_window(&mut self) -> Result<()> {
-        if self.wall.is_empty() {
-            return Ok(());
-        }
-        let dir = self.root.join("route-frame-windows").join(&self.run_id);
-        std::fs::create_dir_all(&dir)?;
-        self.windows += 1;
-        std::fs::write(
-            dir.join(format!("window-{:05}.json", self.windows)),
-            serde_json::to_vec(&self.wall)?,
-        )?;
-        ensure!(self.counters.len()==self.wall.len(),"route counter/window alignment");
-        std::fs::write(
-            dir.join(format!("counters-{:05}.json", self.windows)),
-            serde_json::to_vec(&self.counters)?,
-        )?;
-        self.wall.clear();
-        self.counters.clear();
-        Ok(())
-    }
-    pub fn should_finish(&self) -> bool {
-        self.done || self.mode == Mode::Continue
-    }
-    pub fn finish(&mut self, store: &Store, game: &Game, yaw: f32, pitch: f32) -> Result<()> {
-        ensure!(self.route_error.is_none(),"{}",self.route_error.as_deref().unwrap_or(""));
-        ensure!(!self.needs_opening()||self.opening_played,"New Game route did not complete opening film");
-        #[cfg(not(target_os = "vita"))]
-        ensure!(
-            self.driver.error.is_none(),
-            "{}",
-            self.driver.error.as_deref().unwrap_or("")
-        );
-        ensure!(
-            self.status.knife_done && self.status.blade_copies == 1,
-            "route did not finish authored Blade/knife_cat progression"
-        );
-        let end = End {
-            map: self.status.map.clone(),
-            feet: game.player.feet.to_array(),
-            yaw,
-            pitch,
-            blade_copies: self.status.blade_copies,
-            knife_done: self.status.knife_done,
-        };
-        std::fs::create_dir_all(&self.root)?;
-        if self.mode == Mode::Continue {
-            let expected: End =
-                serde_json::from_slice(&std::fs::read(self.root.join("route-end.json"))?)?;
-            ensure!(
-                end.map == expected.map
-                    && Vec3::from_array(end.feet).distance(Vec3::from_array(expected.feet)) < 0.01
-                    && (yaw - expected.yaw).abs() < 0.0001
-                    && (pitch - expected.pitch).abs() < 0.0001,
-                "Continue pose mismatch"
-            );
-            println!(
-                "[lg/route] PASS Continue map={} feet={:?}",
-                end.map, end.feet
-            );
-        } else {
-            ensure!(
-                self.post_moving_ticks as f64 / 120. >= self.tape.min_moving_seconds,
-                "route has fewer than 60 seconds of moving inputs after knife_cat"
-            );
-            store.write(Slot::Auto, game)?;
-            if self.mode == Mode::Record {
-                self.tape.validate()?;
-                std::fs::write(
-                    self.root.join("route-inputs.json"),
-                    serde_json::to_vec_pretty(&self.tape)?,
-                )?;
-            }
-            std::fs::write(
-                self.root.join("route-end.json"),
-                serde_json::to_vec_pretty(&end)?,
-            )?;
-            println!(
-                "[lg/route] PASS saved map={} feet={:?} moving_s={:.3} post_knife_cat_s={:.3}",
-                end.map,
-                end.feet,
-                self.moving_ticks as f64 / 120.,
-                self.post_moving_ticks as f64 / 120.
-            );
-        }
-        let save_ms = self
-            .frame_start
-            .take()
-            .map(|s| s.elapsed().as_secs_f64() * 1000.);
-        if let Some(ms) = save_ms {
-            self.wall.push(("save-or-continue".into(), ms));
-            // No draw during this interval; excluded from rendered-frame counter means.
-            self.counters.push([0;8]);
-            self.total_frames += 1;
-            for label in ["save-or-continue", "whole-passage"] {
-                let a = self
-                    .aggregates
-                    .entry(label.into())
-                    .or_insert_with(|| (0, 0., vec![0; 4001]));
-                a.0 += 1;
-                a.1 += ms;
-                a.2[(ms.round() as usize).min(4000)] += 1;
-            }
-        }
-        self.export_window()?;
-        let stats=self.aggregates.iter().map(|(label,(n,sum,hist))|{
-            let percentile=|rank:u64|{let mut count=0;hist.iter().enumerate().find_map(|(i,&v)|{count+=v;(count>rank).then_some(i)})};
-            (label,serde_json::json!({"samples":n,"mean_ms":if *n>0{Some(sum/(*n as f64))}else{None},"median_ms_rounded":percentile(n/2),"p95_ms_rounded":percentile(n*95/100)}))
-        }).collect::<BTreeMap<_,_>>();
-        let heap_end = crate::frame_profile::heap_used_bytes();
-        println!(
-            "[lg/route] heap end start={:?} end={heap_end:?}",
-            self.heap_start
-        );
-        let count_summary=|i:usize| serde_json::json!({"samples":self.counter_samples,"mean":(self.counter_samples>0).then(||self.counter_sums[i] as f64/self.counter_samples as f64),"max":self.counter_peaks[i]});
-        let report = serde_json::json!({"version":VERSION,"continue":self.continuing(),"moving_input_seconds":self.moving_ticks as f64/120.,"post_knife_cat_moving_input_seconds":self.post_moving_ticks as f64/120.,"end":end,"frame_wall_ms":stats.get(&"whole-passage".to_string()),"segments":stats,"raw_windows":self.windows,"run_id":self.run_id,"raw_path":format!("route-frame-windows/{}/window-*.json",self.run_id),"counter_raw_path":format!("route-frame-windows/{}/counters-*.json",self.run_id),"counter_columns":["live_puffs","fx_gpu_draws","skinned_draws_total","skinned_draws_culled","gpu_probe_upload_requests","gpu_probe_identical_uploads","gpu_probe_uniform_requests","gpu_probe_identical_uniforms"],"counter_population":"Rendered frames; final save-only row is all zeros and excluded from means. FX draws count direct dynamic actor/object/effect packets, including first-person.","live_puffs":count_summary(0),"fx_gpu_draws":count_summary(1),"skinned_draws_total":count_summary(2),"skinned_draws_culled":count_summary(3),"gpu_probe_upload_requests":count_summary(4),"gpu_probe_identical_uploads":count_summary(5),"gpu_probe_uniform_requests":count_summary(6),"gpu_probe_identical_uniforms":count_summary(7),"window_capacity_frames":300,"histogram_segment_limit":64,"profiler_capacity_bytes":self.wall.capacity()*std::mem::size_of::<(String,f64)>()+self.counters.capacity()*std::mem::size_of::<[u32;8]>()+self.aggregates.values().map(|a|a.2.capacity()*8).sum::<usize>(),"quantiles":"1ms histogram, >=4000ms in overflow bin; raw windows permit exact quantiles","save_cpu_ms":save_ms,"wall_seconds":self.start.elapsed().as_secs_f64(),"opening_film_played":self.opening_played,"camera_alignment_ticks":self.heading_total,"camera_alignment_seconds":self.heading_total as f64/120.,"input_timeline":"120Hz script excludes scene waits and bounded camera recentering; frame wall includes both","scene_startup_seconds":self.startup_seconds,"including_scene_startup_seconds":self.startup_seconds+self.start.elapsed().as_secs_f64(),"startup_population":"Session open to first ready frame; pilot launch timestamp also captures pre-session initialization","shader_creations_after_60_frames":self.shader_after_warmup,"pipeline_creations_after_60_frames":self.pipeline_after_warmup,"heap":{"start_bytes":self.heap_start,"end_bytes":heap_end,"delta_bytes":self.heap_start.zip(heap_end).map(|(a,b)|b as i64-a as i64)},"configuration":{"vita_renderer":crate::render::vita_renderer::config(),"vita_sim":crate::vita_sim::effective()},"cumulative_frame_profiler":if crate::light_profile::full() {"full"} else {"light"}});
-        std::fs::write(
-            self.root.join(if self.continuing() {
-                "route-continue-report.json"
-            } else {
-                "route-report.json"
-            }),
-            serde_json::to_vec_pretty(&report)?,
-        )?;
-        Ok(())
     }
 }
 

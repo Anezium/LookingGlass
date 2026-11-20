@@ -1071,7 +1071,7 @@ impl Pandemonium {
             _ => (),
         }
     }
-    pub fn gate_particles(&self, steam: &mut crate::particles::Steam) {
+    pub fn gate_particles(&self, steam: &mut crate::particles::SteamSim) {
         steam.gate(&self.machinery.emissions(self.state.age));
     }
     pub fn colliders(&self) -> impl Iterator<Item = Collider> + '_ {

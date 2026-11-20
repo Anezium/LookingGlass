@@ -630,7 +630,7 @@ pub(super) fn render(a: &mut Assets) -> super::super::BoxFuture<'_> {
                 )?;
                 steam.animate(n as f32 / 60.);
                 steam.sync(&i.event_world);
-                owner(&mut i)?.particles(&mut steam);
+                owner(&mut i)?.particles(steam.sim_mut());
                 steam.update(1. / 60., p.eye(), &w);
             }
             art.story_pose(&story);

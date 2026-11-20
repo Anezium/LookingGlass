@@ -78,7 +78,7 @@ impl Interactions {
     }
     pub fn level_hides_player(&self) -> bool { self.levels.iter().any(|s| s.ctl.hides_player()) }
     pub fn level_blocks_weapons(&self) -> bool { self.levels.iter().any(|s| s.ctl.blocks_weapons()) }
-    pub fn place_level_particles(&self, steam: &mut crate::particles::Steam) {
+    pub fn place_level_particles(&self, steam: &mut crate::particles::SteamSim) {
         for s in &self.levels {
             s.ctl.particles(steam);
         }

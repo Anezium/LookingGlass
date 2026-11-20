@@ -38,7 +38,7 @@ pub async fn check(assets: &mut Assets) -> Result<()> {
         for frame in 0..frames {
             i.advance_school(1. / 60., &scene.map, &mut world, &mut p)?;
             steam.sync(&i.event_world);
-            i.village.as_ref().unwrap().place_particles(&mut steam);
+            i.village.as_ref().unwrap().place_particles(steam.sim_mut());
             steam.update(1. / 60., eye, &world);
             clear_background(BLACK);
             set_camera(&Camera3D {

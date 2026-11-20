@@ -128,7 +128,7 @@ impl Village {
             })
             .collect()
     }
-    pub fn place_particles(&self, steam: &mut crate::particles::Steam) {
+    pub fn place_particles(&self, steam: &mut crate::particles::SteamSim) {
         let emissions = self.emissions();
         steam.place(
             &emissions

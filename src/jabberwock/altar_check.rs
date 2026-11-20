@@ -61,7 +61,7 @@ async fn audit(a: &mut Assets) -> Result<()> {
             if restored { interactions.restore(&snapshot, &map)?; }
             for _ in 0..60 {
                 steam.sync(&interactions.event_world);
-                interactions.place_level_particles(&mut steam);
+                interactions.place_level_particles(steam.sim_mut());
                 steam.update(1. / 60., at, &world);
             }
             let (enabled, count) = steam.emission(Id(id)).context("Missing scripted altar emitter")?;
@@ -75,7 +75,7 @@ async fn audit(a: &mut Assets) -> Result<()> {
             interactions.prepare_player(&mut stats, &mut p);
             ensure!(stats.staff_component, "Staff pickup fixture missed the altar");
             steam.sync(&interactions.event_world);
-            interactions.place_level_particles(&mut steam);
+            interactions.place_level_particles(steam.sim_mut());
             ensure!(steam.emission(Id(id)).is_some_and(|s| !s.0), "Staff altar kept emitting after pickup");
         }
     }
@@ -109,7 +109,7 @@ pub(super) async fn render(a: &mut Assets) -> Result<()> {
         let mut steam = Steam::load(a, &scene.map)?;
         for _ in 0..120 {
             steam.sync(&interactions.event_world);
-            if gate { o.particles(&mut steam); }
+            if gate { o.particles(steam.sim_mut()); }
             steam.update(1. / 60., camera.eye, &world);
         }
         let state = steam.emission(id).unwrap();

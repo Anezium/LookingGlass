@@ -774,6 +774,10 @@ impl Cinema {
         }
     }
     pub fn apply_npcs(&self, npcs: &mut crate::npc::Npcs) {
+        self.apply_npc_sim(npcs.sim_mut());
+    }
+
+    pub(crate) fn apply_npc_sim(&self, npcs: &mut crate::npc::NpcSim) {
         let mut hidden = vec!["rabbit_actor1", "cat_hole1", "knife_cat"];
         match self.state.beat {
             Some(Beat::Gnome(i) | Beat::End(i)) => {

@@ -271,7 +271,7 @@ pub(super) async fn render(a: &mut Assets) -> Result<()> {
         let mut interactions = Interactions::load(&map)?;
         interactions.set_entry(a, &map, "hedge3", None)?;
         particles.sync(&interactions.event_world);
-        m.particles(&mut particles);
+        m.particles(particles.sim_mut());
         let mut world = World::from_bsp(&map)?;
         world.set_dynamic(m.colliders());
         ensure!(
