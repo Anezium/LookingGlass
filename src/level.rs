@@ -434,6 +434,25 @@ pub trait LevelCapture: Send + Sync {
     fn capture(&self, level: &dyn LevelController, story: &StoryPose) -> Box<dyn Any + Send>;
 }
 
+/// Values sampled on the owner at the HUD capture point.
+#[derive(Clone, Copy)]
+pub(crate) struct HudCaptureView {
+    pub(crate) width: f32,
+    pub(crate) height: f32,
+}
+
+/// A level HUD capture can append bounded commands from the controller and a
+/// sampled viewport. The owner binds the UI identity when it constructs the
+/// painter and validates the resulting batch before drawing.
+pub(crate) trait HudCapture: Send + Sync {
+    fn capture_hud(
+        &self,
+        level: &dyn LevelController,
+        view: HudCaptureView,
+        painter: &mut crate::render_snapshot::Painter<'_>,
+    );
+}
+
 const _: fn() = || {
     fn send<T: Send>() {}
     send::<Slot>();
@@ -533,6 +552,48 @@ pub fn step_controllers(slots: &mut [Slot], combat: &mut Combat<'_>) -> Feedback
     total
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_hud_capture(assets: &mut crate::assets::Assets) {
+    use crate::render_snapshot::{HudCommand, Painter};
+
+    struct FixtureArt(std::rc::Rc<crate::ui::Ui>);
+    impl LevelArt for FixtureArt {
+        fn hud_input(&self, level: &dyn LevelController, out: &mut Vec<HudCommand>) {
+            let mut paint = Painter::new(&self.0, out);
+            paint.boss(level.id(), 0.5);
+            paint.dialog(Rect::new(macroquad::prelude::screen_width() - 180., 12., 180., 48.));
+            paint.rectangle(0., macroquad::prelude::screen_height() - 12., 32., 7., RED);
+        }
+        fn as_any(&self) -> &dyn Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    }
+    struct Capture;
+    impl HudCapture for Capture {
+        fn capture_hud(&self, level: &dyn LevelController, view: HudCaptureView, paint: &mut Painter<'_>) {
+            paint.boss(level.id(), 0.5);
+            paint.dialog(Rect::new(view.width - 180., 12., 180., 48.));
+            paint.rectangle(0., view.height - 12., 32., 7., RED);
+        }
+    }
+
+    use macroquad::prelude::{Rect, RED, screen_height, screen_width};
+    let art = FixtureArt(crate::ui::Ui::load(assets).unwrap());
+    let level = tests::hud_fixture();
+    let mut owner = Vec::new();
+    art.hud_input(level.as_ref(), &mut owner);
+    let view = HudCaptureView { width: screen_width(), height: screen_height() };
+    let ui = art.0.resource_id();
+    let pure = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        Capture.capture_hud(level.as_ref(), view, &mut Painter::for_resource(ui, &mut out));
+        out
+    }).join().unwrap();
+    assert_eq!(pure, owner);
+    assert!(pure.iter().all(HudCommand::valid));
+    drop(art);
+    assert!(pure.iter().all(|command| !command.valid()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +675,11 @@ mod tests {
                 notarget_seen: false,
             }),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn hud_fixture() -> Box<dyn LevelController> {
+        slot(&POOL, &[], 0.).ctl
     }
 
     #[test]

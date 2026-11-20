@@ -667,6 +667,14 @@ fn random(seed: &mut u32) -> f32 {
     (*seed >> 8) as f32 / 16777216.
 }
 impl Steam {
+    pub(crate) fn into_parts(self) -> (SteamSim, SteamArt) {
+        (self.sim, self.art)
+    }
+
+    pub(crate) fn from_parts(sim: SteamSim, art: SteamArt) -> Self {
+        Self { sim, art }
+    }
+
     fn new(sim: SteamSim, emitters: Vec<EmitterVisual>, materials: Vec<std::rc::Rc<Material>>) -> Self {
         Self {
             sim,
@@ -3301,6 +3309,33 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod snapshot_render_tests {
     use super::*;
+    #[test]
+    fn steam_parts_round_trip_keeps_live_and_published_puffs() {
+        let mut steam = super::tests::world_test_steam();
+        steam.update(0.05, Vec3::ZERO, &World::fixture(&[]));
+        let visit = crate::render_snapshot::RenderVisit::default().id();
+        assert!(!steam.extract_render_input(visit).1);
+        let signature = |draw: SteamDraw<'_>| {
+            draw.puffs.iter().map(|p| (p.emitter, p.position, p.age, p.life, p.size, p.roll))
+                .collect::<Vec<_>>()
+        };
+        let live = signature(steam.live_draw());
+        let published = signature(steam.draw_input(visit).unwrap());
+        assert!(!live.is_empty());
+        let runtime = steam.runtime();
+        let packet = steam.art.input.as_ref().unwrap().puffs.as_ptr();
+        let (sim, art) = steam.into_parts();
+        let steam = Steam::from_parts(sim, art);
+        assert_eq!(signature(steam.live_draw()), live);
+        assert_eq!(signature(steam.draw_input(visit).unwrap()), published);
+        assert_eq!(steam.art.input.as_ref().unwrap().puffs.as_ptr(), packet);
+        assert_eq!(steam.runtime().seed, runtime.seed);
+        assert_eq!(steam.runtime().emitters.len(), runtime.emitters.len());
+        for (a, b) in steam.runtime().emitters.into_iter().zip(runtime.emitters) {
+            assert_eq!((a.0, a.1, a.2.translation, a.2.rotation, a.3, a.4, a.5, a.6),
+                (b.0, b.1, b.2.translation, b.2.rotation, b.3, b.4, b.5, b.6));
+        }
+    }
     #[test]
     fn captured_world_puffs_survive_live_mutation_and_retire_on_restore() {
         let mut steam=super::tests::world_test_steam();

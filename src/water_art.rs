@@ -259,6 +259,17 @@ impl Art {
             view: RefCell::new((Atmosphere::default(), Vec3::ZERO)),
         })
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn fixture_bubble_count(&mut self, seed: bool) -> usize {
+        if seed {
+            self.bubbles = crate::particles::tests::attached_fixture(1);
+            self.bubbles.sample(0.25, 1.,
+                |_, _| Transform { translation: Vec3::ZERO, rotation: Quat::IDENTITY },
+                |_, _, _| true);
+        }
+        self.bubbles.live_puffs()
+    }
+
     pub(crate) fn reset_emitter(&mut self) {
         self.bubbles = self.bubbles.fork();
     }

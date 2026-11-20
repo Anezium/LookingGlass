@@ -1,7 +1,11 @@
 //! Pickup selection and collection commands resolved before rendering.
 use super::*;
 use macroquad::prelude::*;
+/// Model, origin, collection clock and occurrence id.
+pub(crate) type CollectionEvent = (String, Vec3, f32, u64);
+
 #[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct Input {
     generation:u64, visit:String, clock:f32, overflow:bool,
     props:Vec<(bool,usize,Vec3)>,
@@ -17,13 +21,49 @@ impl Input {
     }
     pub(crate) fn overflow(&self)->bool {self.overflow}
 }
-impl Art {
-    pub(crate) fn extract_input(&mut self,items:&[crate::inventory::Pickup],stats:&crate::inventory::Stats,visit:&str,camera:Vec3,clock:f32,will_draw:bool,out:&mut Input) {
-        if out.visit!=visit {self.snapshot_visit=Default::default();}
-        out.generation=self.snapshot_visit.id();out.visit.clear();out.visit.push_str(visit);out.clock=clock;
+impl Input {
+    /// Capture from plain pickup and collection state. The visit generation is
+    /// sampled on the owner, and the history is read without pruning it.
+    pub(crate) fn capture(
+        &mut self,
+        generation: u64,
+        items: &[crate::inventory::Pickup],
+        stats: &crate::inventory::Stats,
+        visit: &str,
+        camera: Vec3,
+        clock: f32,
+        will_draw: bool,
+        collected: &[CollectionEvent],
+    ) {
+        self.capture_with_slots(generation, items, stats, visit, camera, clock, will_draw,
+            collected, |model| {
+                // Owner resources are a BTreeMap populated from these same names.
+                let mut keys = collection_models();
+                assert!(keys.any(|name| name == model), "resident collection effect");
+                collection_models().filter(|name| *name < model).count()
+            });
+    }
+
+    fn capture_with_slots(
+        &mut self,
+        generation: u64,
+        items: &[crate::inventory::Pickup],
+        stats: &crate::inventory::Stats,
+        visit: &str,
+        camera: Vec3,
+        clock: f32,
+        will_draw: bool,
+        collected: &[CollectionEvent],
+        slot: impl Fn(&str) -> usize,
+    ) {
+        let out = self;
+        out.generation = generation;
+        out.visit.clear();
+        out.visit.push_str(visit);
+        out.clock = clock;
         out.props.clear();out.essences.clear();out.events.clear();out.markers.clear();
         let drops=stats.loot.get(visit).map_or(0,|l|l.drops.len());
-        out.overflow=items.len()+drops+self.collected.len()>16384;
+        out.overflow=items.len()+drops+collected.len()>16384;
         if out.overflow {return;}
         for item in items {
             if stats.collected.contains(&item.id) {continue;}
@@ -44,12 +84,31 @@ impl Art {
         }
         if let Some(loot)=stats.loot.get(visit){out.essences.extend(loot.drops.iter().map(|d|(d.grade,d.origin,format!("drop:{}",d.id))));}
         out.essences.sort_by(|a,b|camera.distance_squared(b.1).total_cmp(&camera.distance_squared(a.1)));
-        // Collection history is simulation-owned on the opt-in path. Prune only
-        // on iterations that would have reached the legacy pickup draw.
-        if will_draw {self.collected.retain(|(_,_,start,_)|(0. ..=4.).contains(&(clock-start)));}
-        for (model,origin,start,id) in &self.collected {
-            let slot=self.collection_fx.keys().position(|m|m==model).expect("resident collection effect");
-            out.events.push((slot,*origin,*start,*id));
+        for (model, origin, start, id) in collected {
+            if !will_draw || collection_active(clock, *start) {
+                out.events.push((slot(model), *origin, *start, *id));
+            }
+        }
+    }
+}
+
+fn collection_active(clock: f32, start: f32) -> bool {
+    (0. ..=4.).contains(&(clock - start))
+}
+
+impl Art {
+    pub(crate) fn capture_history(&self) -> (u64, &[CollectionEvent]) {
+        (self.snapshot_visit.id(), &self.collected)
+    }
+
+    pub(crate) fn extract_input(&mut self,items:&[crate::inventory::Pickup],stats:&crate::inventory::Stats,visit:&str,camera:Vec3,clock:f32,will_draw:bool,out:&mut Input) {
+        if out.visit != visit { self.snapshot_visit = Default::default(); }
+        out.capture_with_slots(self.snapshot_visit.id(), items, stats, visit, camera, clock,
+            will_draw, &self.collected,
+            |model| self.collection_fx.keys().position(|key| key == model).expect("resident collection effect"));
+        // Keep the legacy pruning point and its pre-prune overflow check.
+        if will_draw && !out.overflow {
+            self.collected.retain(|(_, _, start, _)| collection_active(clock, *start));
         }
     }
     pub(crate) fn valid_input(&self,input:&Input)->bool {
@@ -78,4 +137,57 @@ impl Art {
         });
         self.essence.end_frame();for e in self.collection_fx.values(){e.end_frame();}gl_use_default_material();
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn test_pickup_capture(assets: &mut crate::assets::Assets) {
+    use crate::inventory::{Pickup, PickupKind, Stats};
+    use crate::loot::{Drop, Grade, Loot};
+
+    let mut art = Art::load(assets).unwrap();
+    let item = |model: &str, kind, x| Pickup {
+        id: model.into(), model: model.into(), origin: Vec3::X * x, kind, amount: 1.,
+    };
+    let items = [
+        item("p_h1", PickupKind::Sanity, 4.),
+        item("p_m2", PickupKind::Will, 40.),
+        item("w_watch", PickupKind::Weapon(9), 1500.),
+        item("w_lookingglass", PickupKind::Power(Kind::Glass), 2500.),
+        item("w_me_large", PickupKind::Essence, 90.),
+        item("w_me_small", PickupKind::Essence, 2501.),
+    ];
+    let mut stats = Stats::default();
+    stats.collected.insert(items[1].id.clone());
+    stats.loot.insert("fixture".into(), Loot {
+        drops: vec![Drop { id: 17, origin: Vec3::X * 100., grade: Grade::Super, remaining: 2. }],
+        ..Default::default()
+    });
+    let mut owner = Input::default();
+    art.extract_input(&items, &stats, "fixture", Vec3::ZERO, 0., false, &mut owner);
+    for (pickup, time) in [(&items[0], 0.), (&items[4], 1.), (&items[1], 4.)] {
+        art.collected(pickup, time);
+    }
+    let (generation, _) = art.capture_history();
+    let mut pure = Input::default();
+    for (clock, will_draw) in [(2., false), (4., true), (5., true)] {
+        let (_, history) = art.capture_history();
+        pure.capture(generation, &items, &stats, "fixture", Vec3::ZERO, clock, will_draw, history);
+        art.extract_input(&items, &stats, "fixture", Vec3::ZERO, clock, will_draw, &mut owner);
+        assert_eq!(pure, owner);
+        assert!(art.valid_input(&pure));
+    }
+    assert_eq!(pure.events.iter().map(|event| event.3).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(pure.markers.len(), 1);
+    assert_eq!(pure.props.len(), 2);
+    assert_eq!(pure.essences[0].2, "drop:17");
+}
+
+#[cfg(test)]
+#[test]
+fn capture_checks_overflow_before_history_age_filter() {
+    let events = vec![("p_h1".into(), Vec3::ZERO, 0., 0); 16385];
+    let mut input = Input::default();
+    input.capture(7, &[], &crate::inventory::Stats::default(), "fixture", Vec3::ZERO, 20., true, &events);
+    assert!(input.overflow());
+    assert!(input.events.is_empty());
 }
