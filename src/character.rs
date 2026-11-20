@@ -3382,7 +3382,7 @@ mod split_art_tests {
                 sim.recycle_body_input(packet);
             }
         }
-        let deferred = Character::from_parts(sim, art);
+        let mut deferred = Character::from_parts(sim, art);
         assert_eq!(direct_sounds, deferred_sounds);
         assert_eq!(saved(&direct), saved(&deferred));
         assert_eq!(direct.sim.water.render_state(), deferred.sim.water.render_state());
