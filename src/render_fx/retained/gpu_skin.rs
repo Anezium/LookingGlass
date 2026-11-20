@@ -180,20 +180,56 @@ struct Uniforms {
     fields: crate::render::uniform_fields::Cache,
     /// `Bones`, `SkinOrigin`, `SkinEye` locations, resolved on first use with this program current.
     locations: Option<[i32;3]>,
-    /// The occurrence whose bones and origin this program holds (kept alive, so the
-    /// pointer cannot be reused), and the SkinEye bits.
+    /// Fast path for another layer of the same occurrence. Holding the Rc prevents
+    /// pointer reuse. The eye also depends on the current layer.
     occurrence: Option<Rc<Occurrence>>,
     eye: Option<[u32;4]>,
+    /// The initialized prefix of Bones, in shader slot order, and the separate origin.
+    bone_words: Vec<u32>,
+    origin: Option<[u32; 4]>,
 }
 impl Uniforms {
-    fn interrupt(&mut self) {self.fields.interrupt();self.occurrence=None;self.eye=None;}
+    fn interrupt(&mut self, keep_values: bool) {
+        self.occurrence = None;
+        if !keep_values {
+            self.fields.interrupt();
+            self.eye = None;
+            self.bone_words.clear();
+            self.origin = None;
+        }
+    }
+
+    fn upload_bones(&mut self, occurrence: &Occurrence, location: i32, reuse: bool) -> u64 {
+        let n = occurrence.bones();
+        let mut words = [0.; BONES * 8];
+        let words = &mut words[..n * 8];
+        occurrence.bones_into(words);
+        if reuse {
+            if location == -1 || words.is_empty() {
+                return 0;
+            }
+            // A surface can read a shorter prefix of an existing palette, even when
+            // another occurrence filled it. Compare bits so signed zero is preserved.
+            if self.bone_words.get(..words.len()).is_some_and(|old|
+                old.iter().zip(words.iter()).all(|(&a, b)| a == b.to_bits())
+            ) {
+                return 0;
+            }
+            self.bone_words.clear();
+            self.bone_words.extend(words.iter().map(|w| w.to_bits()));
+        }
+        if location != -1 && n > 0 {
+            unsafe { gl::glUniform4fv(location, (n * 2) as i32, words.as_ptr()); }
+        }
+        (n * 32) as u64
+    }
 }
 /// Pipeline (variant, blend, depth equal, depth write) and bindings (stream, texture) the
 /// GL context holds from the last skin draw. Any other draw or GL user clears it.
 #[derive(Default)]
 struct State { pipeline: Option<(usize,usize,bool,bool)>, bindings: Option<(usize,TextureId)> }
 pub(crate) struct Gpu { shaders:[Option<ShaderId>;4],pipelines:BTreeMap<(usize,usize,bool),Pipeline>,buffers:BTreeMap<usize,Buffers>,
-    uniforms:[Uniforms;4], state:State }
+    uniforms:[Uniforms;4], state:State, reuse: bool }
 impl Gpu {
     pub(super) fn new(fragments:[Option<String>;4])->Result<Self> {
         let mut attributes=0;let mut uniforms=0;
@@ -219,14 +255,18 @@ impl Gpu {
         }
         AVAILABLE.with(|v|v.set(v.get()+1));
         println!("[lg/gpu-skin] READY programs={}",shaders.iter().flatten().count());
-        let uniforms=std::array::from_fn(|_|Uniforms {fields:crate::render::uniform_fields::Cache::new(meta()),locations:None,occurrence:None,eye:None});
-        Ok(Self {shaders,pipelines:BTreeMap::new(),buffers:BTreeMap::new(),uniforms,state:State::default()})
+        let reuse = crate::render::vita_renderer::config().gpu_skin_submit_reuse;
+        let uniforms=std::array::from_fn(|_|Uniforms {fields:crate::render::uniform_fields::Cache::new(meta()),
+            locations:None,occurrence:None,eye:None,
+            bone_words:Vec::with_capacity(if reuse { BONES * 8 } else { 0 }),origin:None});
+        Ok(Self {shaders,pipelines:BTreeMap::new(),buffers:BTreeMap::new(),uniforms,state:State::default(),reuse})
     }
     /// Another program, pipeline, binding or depth mask may have been applied since the
     /// last skin draw: apply them again. Uniform values stay (they belong to the program).
     pub(super) fn interrupt_state(&mut self) {self.state=State::default();}
-    /// Pass and frame boundaries, where the CPU programs' uniform caches are cleared too.
-    pub(super) fn interrupt(&mut self) {self.interrupt_state();for u in &mut self.uniforms {u.interrupt();}}
+    /// Pass and frame boundaries clear bindings. The optimized path keeps values in
+    /// its private programs, which other retained and world draws cannot write.
+    pub(super) fn interrupt(&mut self) {self.interrupt_state();for u in &mut self.uniforms {u.interrupt(self.reuse);}}
     pub(super) fn upload(&mut self,skin:&Occurrence) {
         let id=Rc::as_ptr(&skin.input) as usize;
         self.buffers.entry(id).or_insert_with(|| {
@@ -246,27 +286,46 @@ impl Gpu {
         let occurrence=&skin.occurrence;
         let texture=p.mesh.texture.as_ref().unwrap_or(white).raw_miniquad_id();let white=white.raw_miniquad_id();
         let ctx=unsafe{get_internal_gl()}.quad_context;
-        let shader=self.shaders[variant].unwrap();
         let c=crate::render::vita_renderer::config();
-        let pipeline=self.pipelines.entry((variant,p.blend_index,p.depth_equal)).or_insert_with(||{
-            crate::frame_profile::pipeline_creation();
-            ctx.new_pipeline(
-            &[BufferLayout {stride:std::mem::size_of::<Vertex>() as i32,..Default::default()}],
-            &[VertexAttribute::new("Offset0",VertexFormat::Float4),VertexAttribute::new("Offset1",VertexFormat::Float4),VertexAttribute::new("Offset2",VertexFormat::Float4),VertexAttribute::new("Offset3",VertexFormat::Float4),VertexAttribute::new("Offset4",VertexFormat::Float4),VertexAttribute::new("Indices",VertexFormat::Float4),VertexAttribute::new("Fifth",VertexFormat::Float1),VertexAttribute::new("BindNormal",VertexFormat::Float3),VertexAttribute::new("texcoord",VertexFormat::Float2)],shader,
-            PipelineParams {depth_test:if p.depth_equal {Comparison::Equal}else{Comparison::LessOrEqual},..crate::render::depth_pipeline(crate::render::blend(p.blend_index))})});
-        let id=Rc::as_ptr(&occurrence.input) as usize;
-        let b=self.buffers.get_mut(&id).unwrap();
-        let bindings=b.bindings.get_or_insert_with(||Bindings {vertex_buffers:vec![b.vertex],index_buffer:b.index,images:vec![texture,white,white]});
-        bindings.images[0]=texture;
-        // `fx_submit_state_cache`: the CPU programs' rule. A pipeline change reapplies the
-        // bindings (vertex layout); otherwise only a changed stream or texture does.
-        let key=(variant,p.blend_index,p.depth_equal,depth_write);
-        let state=!c.fx_submit_state_cache || self.state.pipeline!=Some(key);
-        let binding=state || self.state.bindings!=Some((id,texture));
-        if state {ctx.apply_pipeline(pipeline);unsafe{gl::glDepthMask(u8::from(depth_write));}count("gpu_skin_pipeline_sets",1);}
-        if binding {ctx.apply_bindings(bindings);count("gpu_skin_binding_sets",1);}
+        let pipeline_key = (variant, p.blend_index, p.depth_equal);
+        let key = (variant, p.blend_index, p.depth_equal, depth_write);
+        let state = !c.fx_submit_state_cache || self.state.pipeline != Some(key);
+        let same_pipeline = self.state.pipeline.is_some_and(|(v, blend, equal, _)|
+            (v, blend, equal) == pipeline_key);
+        if state && (!self.reuse || !c.fx_submit_state_cache || !same_pipeline) {
+            let pipeline = self.pipelines.entry(pipeline_key).or_insert_with(|| {
+                crate::frame_profile::pipeline_creation();
+                ctx.new_pipeline(
+                    &[BufferLayout {stride:std::mem::size_of::<Vertex>() as i32,..Default::default()}],
+                    &[VertexAttribute::new("Offset0",VertexFormat::Float4),VertexAttribute::new("Offset1",VertexFormat::Float4),VertexAttribute::new("Offset2",VertexFormat::Float4),VertexAttribute::new("Offset3",VertexFormat::Float4),VertexAttribute::new("Offset4",VertexFormat::Float4),VertexAttribute::new("Indices",VertexFormat::Float4),VertexAttribute::new("Fifth",VertexFormat::Float1),VertexAttribute::new("BindNormal",VertexFormat::Float3),VertexAttribute::new("texcoord",VertexFormat::Float2)],
+                    self.shaders[variant].unwrap(),
+                    PipelineParams {depth_test:if p.depth_equal {Comparison::Equal}else{Comparison::LessOrEqual},..crate::render::depth_pipeline(crate::render::blend(p.blend_index))},
+                )
+            });
+            ctx.apply_pipeline(pipeline);
+            count("gpu_skin_pipeline_sets",1);
+        }
+        if state { unsafe { gl::glDepthMask(u8::from(depth_write)); } }
+        let id = Rc::as_ptr(&occurrence.input) as usize;
+        // All blend/depth pipelines of one variant use the same attributes and samplers.
+        let same_program = self.state.pipeline.is_some_and(|(v, _, _, _)| v == variant);
+        let binding = self.state.bindings != Some((id, texture))
+            || if self.reuse && c.fx_submit_state_cache { !same_program } else { state };
+        if binding {
+            let b = self.buffers.get_mut(&id).unwrap();
+            if self.reuse {
+                ctx.apply_bindings_from_slice(&[b.vertex], b.index, &[texture, white, white]);
+            } else {
+                let bindings = b.bindings.get_or_insert_with(|| Bindings {
+                    vertex_buffers: vec![b.vertex], index_buffer: b.index, images: vec![texture, white, white],
+                });
+                bindings.images[0] = texture;
+                ctx.apply_bindings(bindings);
+            }
+            count("gpu_skin_binding_sets",1);
+        }
         self.state=State {pipeline:Some(key),bindings:Some((id,texture))};
-        let bytes={let _upload=Clock::new(2);self.uniforms(variant,skin,u,c.uniform_field_cache)};
+        let bytes={let _upload=Clock::new(2);self.uniforms(ctx,variant,skin,u,c.uniform_field_cache)};
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::gpu_skin_packet(occurrence.input.vertices.len(),occurrence.input.source.indices.len(),u,
             &[p.effect as u32,p.blend_index as u32,p.depth_equal as u32,(!depth_write) as u32,p.lit as u32,p.clamp as u32,p.cutout.to_bits(),p.cutout_reference.to_bits(),p.fog.to_bits(),p.model as u32,p.filter_fade.to_bits()],p.mesh.texture.as_ref());
@@ -280,14 +339,14 @@ impl Gpu {
     }
     /// Uploads what this program does not hold yet; returns the bytes sent. With
     /// `uniform_field_cache` the base payload goes per changed field, the bones only for a
-    /// new occurrence and only the `2 x bones` vectors the surface references (the program
-    /// reads no other bone); otherwise the whole table goes every draw, as before.
-    fn uniforms(&mut self,variant:usize,skin:&Skin,u:&[f32;UNIFORM_FLOATS],cache:bool)->u64 {
-        let ctx=unsafe{get_internal_gl()}.quad_context;
+    /// new occurrence and only the `2 x bones` vectors the surface references. With
+    /// submit reuse, identical bone values and origin also survive occurrence changes.
+    /// Without field caching the whole table goes every draw, as before.
+    fn uniforms(&mut self,ctx:&mut dyn RenderingBackend,variant:usize,skin:&Skin,u:&[f32;UNIFORM_FLOATS],cache:bool)->u64 {
         let state=&mut self.uniforms[variant];
         let occurrence=&skin.occurrence;
         if !cache {
-            state.interrupt();
+            state.interrupt(false);
             let mut words=[0.;UNIFORM_FLOATS+EXTRA];words[..UNIFORM_FLOATS].copy_from_slice(u);
             words[UNIFORM_FLOATS..].copy_from_slice(&occurrence.table(skin.environment));
             ctx.apply_uniforms(UniformsSource::table(&words));
@@ -301,12 +360,14 @@ impl Gpu {
             ["Bones","SkinOrigin","SkinEye"].map(|name| {let name=std::ffi::CString::new(name).unwrap();unsafe {gl::glGetUniformLocation(program as u32,name.as_ptr())}})
         });
         if !state.occurrence.as_ref().is_some_and(|o|Rc::ptr_eq(o,occurrence)) {
-            let n=occurrence.bones();let mut words=[0.;BONES*8];occurrence.bones_into(&mut words);
-            unsafe {
-                if bones!=-1 && n>0 {gl::glUniform4fv(bones,(n*2) as i32,words.as_ptr());}
-                if origin!=-1 {gl::glUniform4fv(origin,1,occurrence.palette.origin.as_ptr());}
+            bytes += state.upload_bones(occurrence, bones, self.reuse);
+            let value = &occurrence.palette.origin;
+            let bits = value.map(f32::to_bits);
+            if !self.reuse || state.origin != Some(bits) {
+                if origin != -1 { unsafe { gl::glUniform4fv(origin, 1, value.as_ptr()); } }
+                bytes += 16;
+                state.origin = Some(bits);
             }
-            bytes+=(n*32+16) as u64;
             state.occurrence=Some(occurrence.clone());
         }
         let e=occurrence.eye(skin.environment);

@@ -389,6 +389,8 @@ pub struct Config {
     /// stream (<= 5 influences, <= 28 bones); everything else keeps CPU skinning.
     /// Picture-changing (stored normals instead of rebuilt face normals): opt in only.
     pub gpu_skin_actors: bool,
+    /// Reuse exact program uniforms and binding state across GPU skin draws.
+    pub gpu_skin_submit_reuse: bool,
     /// Diagnostic PNGs at three replay frames; never enabled by the skin key alone.
     pub gpu_skin_capture: bool,
     /// Conservative skin bounds; late overlays and normal-driven layers opt out.
@@ -721,6 +723,7 @@ impl Default for Config {
             bone_palette: false,
             gpu_skin_ants: false,
             gpu_skin_actors: false,
+            gpu_skin_submit_reuse: false,
             gpu_skin_capture: false,
             skin_frustum_cull: true,
             fast_frustum: true,
@@ -3860,7 +3863,7 @@ mod tests {
         for (key,value) in defaults.as_object().unwrap().iter().filter(|(k,_)| round5_key(k)) {
             if key.starts_with("diag_skip_") || key.starts_with("ant_corpse_") || key == "sim_flight_memo"
                 || key == "fx_add_lean" || key == "fx_add_fog_free" || key == "actor_cutout_discard_free" || key == "actor_frontface_cull" || key == "actor_discard_free_shader" || key == "actor_opaque_shader" || key == "actor_consumer_frustum_cull"
-                || matches!(key.as_str(), "gpu_skin_ants" | "gpu_skin_actors" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") {
+                || matches!(key.as_str(), "gpu_skin_ants" | "gpu_skin_actors" | "gpu_skin_submit_reuse" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") {
                 assert_eq!(value, false);
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:true})).is_ok());
                 assert!(serde_json::from_value::<Config>(serde_json::json!({key:1})).is_err());
@@ -4225,7 +4228,7 @@ mod tests {
     // new opt-in is checked as off; every earlier runtime key remains pinned by these tests.
     // The two actor keys arrived after every frozen era file, so those files stay valid
     // unchanged and their omitted opt-in must read as an explicit off.
-    fn round5_key(k: &str) -> bool { matches!(k, "gpu_skin_ants" | "gpu_skin_actors" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") || k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "fx_add_lean" | "fx_add_fog_free" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
+    fn round5_key(k: &str) -> bool { matches!(k, "gpu_skin_ants" | "gpu_skin_actors" | "gpu_skin_submit_reuse" | "gpu_skin_capture" | "diag_actor_timing" | "skin_vector" | "skin_pose_reuse" | "skin_duplicate_reuse") || k.starts_with("diag_skip_") || matches!(k, "sim_flight_memo" | "spike_log_first_frame" | "spike_log_last_frame" | "ant_corpse_triangle_cull" | "ant_corpse_opaque_shader" | "fx_add_lean" | "fx_add_fog_free" | "actor_cutout_discard_free" | "actor_frontface_cull" | "actor_discard_free_shader" | "actor_opaque_shader" | "actor_consumer_frustum_cull") }
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
@@ -4243,6 +4246,7 @@ mod tests {
         assert!(v.get("gpu_skin_ants").is_none_or(|on|on==false));
         assert!(v.get("gpu_skin_capture").is_none_or(|on|on==false));
         assert!(v.get("gpu_skin_actors").is_none_or(|on|on==false));
+        assert!(v.get("gpu_skin_submit_reuse").is_none_or(|on|on==false));
         assert!(v.get("world_adjacent_batch").is_none_or(|on| on == false));
         assert!(v.get("sim_sweep_any").is_none_or(|on| on == false));
         let mut keys = v.as_object().unwrap().keys().filter(|k| *k != "world_adjacent_batch" && *k != "sim_sweep_any"
