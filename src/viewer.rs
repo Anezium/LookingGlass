@@ -111,7 +111,7 @@ struct LevelDispatch {
 }
 const _: fn() = || {
     fn send<T: Send>() {}
-    // School2 mesh clones share a Template with RefCell caches; Interactions is pending.
+    send::<Interactions>();
     send::<crate::story::Story>();
     send::<crate::cheshire::Hints>();
     send::<crate::input::Input>();

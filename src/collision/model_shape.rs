@@ -182,8 +182,8 @@ struct EagerCache {
 #[derive(Debug)]
 pub struct Template {
     geometry: std::sync::Arc<Geometry>,
-    eager: std::cell::RefCell<EagerCache>,
-    last_lazy: std::cell::RefCell<Option<([u32; 7], Collider)>>,
+    eager: std::sync::Mutex<EagerCache>,
+    last_lazy: std::sync::Mutex<Option<([u32; 7], Collider)>>,
 }
 #[derive(Debug)]
 pub(super) struct Placed {
@@ -341,7 +341,7 @@ impl Template {
         let mut key = [0; 7];
         key[..3].copy_from_slice(&origin.to_array().map(f32::to_bits));
         key[3..].copy_from_slice(&rotation.to_array().map(f32::to_bits));
-        let mut last = self.last_lazy.borrow_mut();
+        let mut last = self.last_lazy.lock().unwrap();
         if let Some((old, collider)) = &*last {
             if *old == key { return collider.clone(); }
         }
@@ -407,8 +407,8 @@ impl Template {
             .zip(points.iter().copied().reduce(Vec3::max))
             .map(|(min, max)| Bounds { min, max });
         Self {
-            eager: std::cell::RefCell::default(),
-            last_lazy: std::cell::RefCell::default(),
+            eager: std::sync::Mutex::default(),
+            last_lazy: std::sync::Mutex::default(),
             geometry: std::sync::Arc::new(Geometry {
                 mesh: None,
                 brushes,
@@ -425,7 +425,7 @@ impl Template {
     pub fn at_eager(&self, origin: Vec3, rotation: Quat) -> Collider {
         #[cfg(target_os = "vita")]
         let _transform_profile = crate::frame_profile::span("collider_transform");
-        let mut cache = self.eager.borrow_mut();
+        let mut cache = self.eager.lock().unwrap();
         let origin_key = origin.to_array().map(f32::to_bits);
         if cache.rotation == Some(rotation.to_array().map(f32::to_bits)) {
             if let Some((key, collider)) = &cache.last {
@@ -1098,6 +1098,19 @@ mod mesh_tests {
                 .map(f32::to_bits).collect::<Vec<_>>()
         }).collect()
     }
+    #[test]
+    fn template_clones_share_both_placement_caches() {
+        use std::sync::Arc;
+        let template = Arc::new(Template::triangles(&[[Vec3::ZERO, Vec3::X, Vec3::Y]]));
+        let other = Arc::clone(&template);
+        let a = template.at_eager(Vec3::ZERO, Quat::IDENTITY);
+        let b = other.at_eager(Vec3::ZERO, Quat::IDENTITY);
+        assert!(Arc::ptr_eq(&a.hulls, &b.hulls));
+        let a = template.at_reused(Vec3::ZERO, Quat::IDENTITY);
+        let b = other.at_reused(Vec3::ZERO, Quat::IDENTITY);
+        assert!(Arc::ptr_eq(a.lazy.as_ref().unwrap(), b.lazy.as_ref().unwrap()));
+    }
+
     #[test]
     fn indexed_mesh_placements_preserve_world_hull_bits_and_contacts() {
         let t = vec![

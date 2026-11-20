@@ -365,6 +365,7 @@ impl Pad {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct StepInput {
     // The next step uses the ID and clock bits to seed its worker view.
     #[allow(dead_code)]
@@ -382,6 +383,29 @@ pub(crate) struct StepInput {
 }
 
 impl StepInput {
+    /// Second live pulse of the same physical sample. Repeating the absolute
+    /// pointer position yields zero motion in MouseLook.
+    #[allow(dead_code)]
+    pub(crate) fn derived_sample(&self, step: u64) -> Self {
+        let mut next = self.clone();
+        next.step = step;
+        next.frame.keys_pressed = 0;
+        next.frame.keys_released = 0;
+        next.frame.mouse_pressed = 0;
+        next.frame.mouse_released = 0;
+        next.frame.wheel = (0., 0.);
+        next.frame.chars.clear();
+        next.frame.quit = false;
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        {
+            next.recovery_key = None;
+            for (_, pressed, _) in &mut next.scripted_keys {
+                *pressed = false;
+            }
+        }
+        next
+    }
+
     pub(crate) fn refresh_clock(&mut self) {
         let clock = ClockView::capture();
         self.dt = clock.dt;
@@ -594,6 +618,19 @@ impl Input {
             self.recovery_key.set(None);
             return true;
         }
+        self.ui_binding(key)
+    }
+
+    #[allow(dead_code)]
+    pub fn ui_peek(&self, key: KeyCode) -> bool {
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        if self.recovery_key.get() == Some(key) {
+            return true;
+        }
+        self.ui_binding(key)
+    }
+
+    fn ui_binding(&self, key: KeyCode) -> bool {
         let mask = match key {
             KeyCode::Up => 1,
             KeyCode::Down => 2,
@@ -725,6 +762,53 @@ mod tests {
         })
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    #[test]
+    fn ui_peek_preserves_recovery_key_for_ui() {
+        let control = Input::default();
+        let input = Input::default();
+        control.recovery_key.set(Some(KeyCode::Enter));
+        input.recovery_key.set(Some(KeyCode::Enter));
+        assert!(!input.ui_peek(KeyCode::Up));
+        assert!(input.ui_peek(KeyCode::Enter));
+        assert_eq!(input.ui(KeyCode::Enter), control.ui(KeyCode::Enter));
+        assert!(!input.ui(KeyCode::Enter));
+    }
+
+    #[test]
+    fn derived_sample_keeps_held_input_and_clock() {
+        let physical = StepInput {
+            step: 4,
+            frame: Frame {
+                dt: 0.02, keys_down: 3, keys_pressed: 2, keys_released: 4,
+                mouse_down: 1, mouse_pressed: 1, mouse_released: 2,
+                mouse: (9., 5.), wheel: (1., -2.), pad: Some([13, 22, 59, 32]),
+                desktop_pad: Some(RawPad { buttons: 8, lx: 31000, ..Default::default() }),
+                chars: vec!['a'], quit: true, vita_analog: true,
+            },
+            focused: true, dt: 0.02, clock_bits: 147, instant: std::time::Instant::now(),
+            pointer: PointerFrame { position: (9., 5.), dpi: 2., width: 640., height: 480. },
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            scripted_keys: vec![("Space".into(), true, true)],
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            recovery_key: Some(KeyCode::Enter),
+        };
+        let next = physical.derived_sample(5);
+        assert_eq!(next.frame, Frame {
+            keys_pressed: 0, keys_released: 0, mouse_pressed: 0, mouse_released: 0,
+            wheel: (0., 0.), chars: vec![], quit: false, ..physical.frame.clone()
+        });
+        assert_eq!(next.pointer.position, physical.pointer.position);
+        assert_eq!(next.pointer.dpi, physical.pointer.dpi);
+        assert_eq!((next.step, next.dt, next.clock_bits, next.instant),
+                   (5, physical.dt, physical.clock_bits, physical.instant));
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        {
+            assert_eq!(next.scripted_keys, vec![("Space".into(), false, true)]);
+            assert_eq!(next.recovery_key, None);
+        }
     }
 
     #[test]
