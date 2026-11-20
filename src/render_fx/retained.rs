@@ -11,6 +11,7 @@ mod packet_cull;
 mod fill_cuts;
 mod add_program;
 mod actor_lean;
+pub(crate) mod zero_glow;
 pub(crate) mod gpu_skin;
 use state_cache::{vertices_equal, UploadPlan, UniformCache, SubmitCache};
 use super::{Frame, Pass, FRAME};
@@ -738,7 +739,7 @@ impl Gpu {
         });
         }
     }
-    fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool, ant_dead: Option<bool>) {
+    fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool, ant_dead: Option<bool>, zero_glow: bool) {
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
@@ -906,7 +907,14 @@ impl Gpu {
                 macroquad::miniquad::gl::glEnable(0x0B44); // GL_CULL_FACE
                 macroquad::miniquad::gl::glCullFace(0x0404); // GL_FRONT; experimental authored winding
             } }
-            ctx.draw(0, p.geometry().indices.len() as i32, 1);
+            // Keep the logical packet and the same GL state transitions for this
+            // experiment. Only the certified geometry submission can go away.
+            if zero_glow {
+                count("vita_actor_zero_glow_draws", 1);
+                crate::spike_log::actor_zero_glow();
+            } else {
+                ctx.draw(0, p.geometry().indices.len() as i32, 1);
+            }
             unsafe { if cull { macroquad::miniquad::gl::glDisable(0x0B44); } }
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1757,7 +1765,17 @@ pub(crate) fn finish_world(
                     "label":p.mesh.surface.as_ref().map(|s|s.label.clone()),"bounds":[bounds.0.to_array(),bounds.1.to_array()],
                     "projected_long_side_display_pixels":projected}));
             }
-            gpu.draw(&groups[*group].passes[*pass], *b, u, !groups[id].transparent, groups[id].ant_dead);
+            let p = &groups[*group].passes[*pass];
+            let zero_glow = c.actor_zero_glow && !groups[id].transparent && *pass == 1
+                && ranges[id].len() == 2 && p.blend_index == 2
+                && gpu.actor_lean[0].as_ref().is_some_and(|lean|
+                    lean.pipelines.contains_key(&(1, false)) && lean.pipelines.contains_key(&(2, false)))
+                && {
+                    let (base_group, base_pass, base_slot, base_uniforms) = &packets[i - 1];
+                    base_group == group && *base_pass == 0 && base_slot == b
+                        && zero_glow::certified(&groups[*base_group].passes[*base_pass], base_uniforms, p, u)
+                };
+            gpu.draw(p, *b, u, !groups[id].transparent, groups[id].ant_dead, zero_glow);
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if crate::character::skinning::census::active() && groups[id].passes.iter().any(|p|!p.effect) {

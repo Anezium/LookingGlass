@@ -58,6 +58,8 @@ struct Frame {
     cpu_end: Option<Instant>,
     calls: [u32; 7],
     ms: [f64; 7],
+    #[cfg(feature = "vita_renderer")]
+    actor_zero_glow: u32,
     /// The open simulation block and when it started.
     block: Option<(usize, Instant)>,
     sim_ms: [f64; SIM.len()],
@@ -183,6 +185,10 @@ impl Frame {
         crate::character::skinning::timing::append(out);
         #[cfg(feature="vita_renderer")]
         crate::render_fx::retained::gpu_skin::census_append(out);
+        #[cfg(feature = "vita_renderer")]
+        if self.actor_zero_glow != 0 {
+            let _ = write!(out, " actor_zero_glow={}", self.actor_zero_glow);
+        }
         if self.flight_work[0] > 0 {
             let [calls,tests,traversals,witnesses,short,free]=self.flight_work;
             let _=write!(out," flight_work={calls}/{tests}/{traversals}/{witnesses}/{short}/{free}");
@@ -278,6 +284,12 @@ fn mark(region: usize, set: impl FnOnce(&mut Frame, Instant)) {
         f.gxm_switch(region);
         set(&mut f, now);
     });
+}
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn actor_zero_glow() {
+    if on() {
+        FRAME.with(|f| f.borrow_mut().actor_zero_glow += 1);
+    }
 }
 /// One NPC kind's update this frame, from `npc::profile`: actors updated and milliseconds in think,
 /// movement, animation and combat.
