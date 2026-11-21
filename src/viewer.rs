@@ -3249,7 +3249,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             ("context", context_before != (menu, inventory_menu, console.open, paused)),
             ("visit", frame_stamp.frame.visit_id != level_art.snapshot_visit.id()),
             ("retained_renderer", !scene.retained_active()),
-            ("handoff", level_art.handoff_pose().is_some()),
+            ("handoff", camera_handoff.was_scripted() && level_art.handoff_pose().is_some()),
             ("snapshot_handoff", snapshot_handoff && handoff_return.pose(&level_art.snapshot_visit).is_some()),
             ("frame_limit", options.frames.is_some_and(|limit| frame + 1 >= limit)),
         ]);
@@ -3493,6 +3493,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             gameplay_alice,
         }, _) = run_step!(step_b, step_locals, step_scopes, StepBInput {
             story_active,
+            dispatched: worker_complete,
             map_name: maps[current].clone(),
             preferences: preferences.clone(),
             aspect: screen_width() / screen_height(),
