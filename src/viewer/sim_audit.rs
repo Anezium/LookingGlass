@@ -196,6 +196,8 @@ thread_local! {
     static STACK: Cell<Option<StackSample>> = const { Cell::new(None) };
 }
 
+static STACK_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(target_os = "vita")]
 fn stack_bounds() -> Option<(usize, usize)> {
     crate::skin_worker::current_stack()
@@ -244,6 +246,7 @@ fn stack_bounds() -> Option<(usize, usize)> {
 pub(super) fn begin_stack_sampling() {
     let bounds = stack_bounds();
     if let Some((low, bytes)) = bounds {
+        STACK_ARMED.store(true, std::sync::atomic::Ordering::Relaxed);
         STACK.set(Some(StackSample {
             low,
             bytes,
@@ -257,6 +260,9 @@ pub(super) fn begin_stack_sampling() {
 }
 
 pub(crate) fn sample_stack(site: &'static str) {
+    if !STACK_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     if let Some(mut sample) = STACK.get() {
         let marker = 0u8;
         let here = std::hint::black_box(&marker) as *const u8 as usize;
