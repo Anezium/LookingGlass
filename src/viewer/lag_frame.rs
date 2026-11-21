@@ -82,7 +82,7 @@ impl Frame {
         let stamp = self.stamp;
         let clock_guard = self.clock.enter();
         let started = trace.mark(stamp.frame.frame);
-        if let Some(peer) = peer {
+        if let Some(peer) = &peer {
             peer.enter();
             audit.event("owner_inner", stamp);
         }
@@ -143,6 +143,10 @@ impl Frame {
         #[cfg(feature = "vita_renderer")]
         if crate::replay_capture::wanted(stamp.frame.tape_step) {
             crate::replay_capture::save(stamp.frame.tape_step)?;
+        }
+        if let Some(peer) = peer {
+            audit.event("owner_inner_end", stamp);
+            peer.leave();
         }
         drop(clock_guard);
         crate::frame_phases::mark(9);

@@ -254,14 +254,14 @@ impl Worker {
                         (job, Output::B(output), Scope::StepB)
                     }
                     Input::Lag(input, mut next, acoustic, seal, peer) => {
-                        if let Some(peer) = peer {
+                        if let Some(peer) = &peer {
                             peer.enter();
                             if events {
                                 sim_audit::event("worker_inner", stamp);
                             }
                         }
                         let (job, due) = step_a(job, input, &mut scopes);
-                        if let Ok((story_active, super::step::Due::None)) = &due {
+                        let reply = if let Ok((story_active, super::step::Due::None)) = &due {
                             assert_eq!(
                                 sim_audit::fp_control(),
                                 owner_fp,
@@ -272,7 +272,14 @@ impl Worker {
                             (job, Output::Lag(due, Some(output)), Scope::StepLag)
                         } else {
                             (job, Output::Lag(due, None), Scope::StepLag)
+                        };
+                        if let Some(peer) = peer {
+                            if events {
+                                sim_audit::event("worker_inner_end", stamp);
+                            }
+                            peer.leave();
                         }
+                        reply
                     }
                 };
                 drop(scopes);

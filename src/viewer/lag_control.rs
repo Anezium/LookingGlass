@@ -7,6 +7,8 @@ pub(super) struct Controls {
     pub quit: Option<u64>,
     #[cfg(not(target_os = "vita"))]
     order: Option<Order>,
+    #[cfg(not(target_os = "vita"))]
+    delay: u64,
 }
 
 #[cfg(not(target_os = "vita"))]
@@ -31,12 +33,18 @@ impl Controls {
             fn frame(name: &str) -> anyhow::Result<Option<u64>> {
                 Ok(std::env::var(name).ok().map(|s| s.parse()).transpose()?)
             }
+            let delay = frame("LOOKING_GLASS_SIM_LAG_DELAY_US")?.unwrap_or(0);
+            anyhow::ensure!(
+                [0, 2000, 5000, 12000].contains(&delay),
+                "invalid lag-one delay"
+            );
             Ok(Self {
                 serial: std::env::var_os("LOOKING_GLASS_SIM_LAG_SERIAL").is_some(),
                 wrong_association: frame("LOOKING_GLASS_SIM_LAG_WRONG_ASSOCIATION")?,
                 draw_error: frame("LOOKING_GLASS_SIM_LAG_DRAW_ERROR")?,
                 quit: frame("LOOKING_GLASS_SIM_LAG_QUIT")?,
                 order,
+                delay,
             })
         }
         #[cfg(target_os = "vita")]
@@ -49,19 +57,30 @@ impl Controls {
             use std::sync::mpsc::sync_channel;
             let (owner_tx, owner_rx) = sync_channel(1);
             let (worker_tx, worker_rx) = sync_channel(1);
+            let peer = |tx, rx, first| Peer {
+                tx,
+                rx,
+                before: matches!(order, Order::Rendezvous),
+                after: first,
+                wait: !first,
+                delay: if first || matches!(order, Order::Rendezvous) {
+                    0
+                } else {
+                    self.delay
+                },
+            };
+            let rendezvous = matches!(order, Order::Rendezvous);
             return (
-                Some(Peer {
-                    tx: owner_tx,
-                    rx: worker_rx,
-                    first: matches!(order, Order::OwnerFirst),
-                    second: matches!(order, Order::WorkerFirst),
-                }),
-                Some(Peer {
-                    tx: worker_tx,
-                    rx: owner_rx,
-                    first: matches!(order, Order::WorkerFirst),
-                    second: matches!(order, Order::OwnerFirst),
-                }),
+                Some(peer(
+                    owner_tx,
+                    worker_rx,
+                    !rendezvous && matches!(order, Order::OwnerFirst),
+                )),
+                Some(peer(
+                    worker_tx,
+                    owner_rx,
+                    !rendezvous && matches!(order, Order::WorkerFirst),
+                )),
             );
         }
         let _ = pending;
@@ -75,24 +94,35 @@ pub(super) struct Peer {
     #[cfg(not(target_os = "vita"))]
     rx: std::sync::mpsc::Receiver<()>,
     #[cfg(not(target_os = "vita"))]
-    first: bool,
+    before: bool,
     #[cfg(not(target_os = "vita"))]
-    second: bool,
+    after: bool,
+    #[cfg(not(target_os = "vita"))]
+    wait: bool,
+    #[cfg(not(target_os = "vita"))]
+    delay: u64,
 }
 
 impl Peer {
-    pub(super) fn enter(self) {
+    pub(super) fn enter(&self) {
         #[cfg(not(target_os = "vita"))]
         {
-            if !self.second {
+            if self.before {
                 self.tx.send(()).expect("missing overlap peer");
             }
-            if !self.first {
+            if self.wait {
                 self.rx.recv().expect("missing overlap peer");
             }
-            if self.second {
-                std::thread::sleep(std::time::Duration::from_millis(2));
+            if self.delay != 0 {
+                std::thread::sleep(std::time::Duration::from_micros(self.delay));
             }
+        }
+    }
+
+    pub(super) fn leave(self) {
+        #[cfg(not(target_os = "vita"))]
+        if self.after {
+            self.tx.send(()).expect("missing overlap peer");
         }
     }
 }
