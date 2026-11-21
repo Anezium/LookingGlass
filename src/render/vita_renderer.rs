@@ -887,6 +887,8 @@ impl Config {
         ensure!(self.render_scale.is_finite()&&(0.25..=1.).contains(&self.render_scale),"invalid render_scale");
         ensure!(matches!(self.msaa_samples,1|2|4),"msaa_samples must be 1, 2 or 4");
         ensure!(self.render_scale==1. || self.msaa_samples==1,"scaled target requires msaa_samples=1");
+        ensure!(!self.actor_glow_subset || self.msaa_samples==1,"actor_glow_subset requires msaa_samples=1");
+        ensure!(!self.actor_glow_subset || self.actor_glow_subset_maps.is_some(),"actor_glow_subset requires actor_glow_subset_maps");
         ensure!(matches!(self.scaled_target.as_str(),"resolve"|"direct"|"direct_flip"),"scaled_target must be resolve, direct or direct_flip");
         ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
         ensure!(!(self.low_fog_skip || self.low_fog_cheaper || self.low_fog_per_vertex)
@@ -4262,9 +4264,11 @@ mod tests {
     #[test]
     fn actor_glow_subset_maps_are_optional_and_strict() {
         let parse = |raw: &str| parse_runtime_config(raw.as_bytes()).unwrap().0;
-        let defaults = parse(r#"{"actor_glow_subset":true}"#);
+        assert!(parse_runtime_config(br#"{"actor_glow_subset":true}"#).is_err());
+        assert!(parse_runtime_config(br#"{"actor_glow_subset":true,"actor_glow_subset_maps":["jlair2"],"msaa_samples":2,"render_scale":1.0}"#).is_err());
+        let defaults = parse("{}");
         assert!(defaults.actor_glow_subset_maps.is_none());
-        assert!(defaults.actor_glow_subset_for_map("grounds1"));
+        assert!(!defaults.actor_glow_subset_for_map("grounds1"));
         assert!(serde_json::to_value(&defaults).unwrap().get("actor_glow_subset_maps").is_none());
 
         let listed = parse(r#"{"actor_glow_subset":true,"actor_glow_subset_maps":["jlair2","skool1","*"]}"#);
