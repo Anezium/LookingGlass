@@ -4821,6 +4821,24 @@ mod tests {
     }
 
     #[test]
+    fn lag_one_requires_an_explicit_potears2_replay() {
+        let mut config = Config {
+            sim_overlap: true,
+            skin_overlap: true,
+            skin_workers: 1,
+            audio_pcm_worker: true,
+            sim_overlap_maps: vec!["potears2".into()],
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+        config.replay_play = "a2-04.lgtape".into();
+        assert!(config.validate().is_ok());
+        config.sim_overlap_maps.push("potears1".into());
+        assert!(config.validate().is_err());
+        assert!(serde_json::to_value(Config::default()).unwrap().get("sim_overlap_maps").is_none());
+    }
+
+    #[test]
     fn release_inputs_add_only_their_declared_keys_and_packages_add_their_replay_keys() {
         use sha2::{Digest, Sha256};
         let release_bytes = include_bytes!("../../configs/PL-release.json");

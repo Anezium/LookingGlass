@@ -2247,7 +2247,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut quit_after_frame = is_quit_requested()
             || (replay.as_ref().is_some_and(|r| r.replaying()) && macroquad::input::is_quit_requested());
         quit_after_frame |= host_transition == "quit" || lag_control.quit == Some(frame);
-        if quit_after_frame && !throttle_normal {
+        if lag_control.quit == Some(frame) || (quit_after_frame && !throttle_normal) {
             flush_pending!(frame, step_guards, step_input);
             finish_replay_step!("quit");
             flush_audio!("quit");
