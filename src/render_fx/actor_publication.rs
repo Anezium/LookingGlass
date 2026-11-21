@@ -740,7 +740,7 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
             let transparent=surface.transparent||f.depth_read_only;
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::character::skinning::census::register(f.groups.len());
-            f.groups.push(Group {ant_dead: super::corpse_triangles::active(),glow_cpu_bounded:c.actor_glow_subset && retained::zero_glow::cpu_bounded(),passes:passes.take().unwrap(),transparent});Some(id)
+            f.groups.push(Group {ant_dead: super::corpse_triangles::active(),glow_cpu_bounded:surface.glow_subset.is_some() && retained::zero_glow::cpu_bounded(),passes:passes.take().unwrap(),transparent});Some(id)
         })?;
         if capped>0 {
             retained::count("vita_fx_dropped_layers",capped as u64);
