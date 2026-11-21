@@ -262,6 +262,11 @@ pub fn begin(camera: Vec3, direction: Vec3, time: f32, atmosphere: &Atmosphere, 
         }
     });
 }
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn actor_glow_subset_active() -> bool {
+    FRAME.with(|f| f.borrow().actor_glow_subset)
+}
+
 pub fn begin_view(camera: &Camera3D, time: f32, atmosphere: &Atmosphere, fullbright: bool) {
     crate::game_thread::assert_current();
     use macroquad::camera::Camera;

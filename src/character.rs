@@ -2004,6 +2004,8 @@ fn draw_skin_deformed(
     let setup_profile = crate::frame_profile::span("skin_setup");
     let character_setup_profile = crate::frame_profile::characters_span("characters_skin_setup");
     let (cull, flat) = skinning::visual_options(cull, flat, meshes);
+    #[cfg(feature = "vita_renderer")]
+    let glow_subset = glow_subset && crate::render_fx::actor_glow_subset_active();
     let world_rotation = (use_palette || cull || glow_subset).then(|| skinning::rotation(transform.rotation));
     #[cfg(feature="vita_renderer")]
     if cull { crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
