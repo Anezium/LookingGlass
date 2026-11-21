@@ -497,15 +497,18 @@ pub struct Config {
     pub replay_record: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sim_overlap: bool,
-    /// Lag one is enabled only for these maps during a running replay.
+    /// Maps eligible for lag one during playback or an opted-in live chapter run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sim_overlap_maps: Vec<String>,
+    /// Start a live chapter without a tape. Lag one also needs sim_overlap and a map list.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sim_overlap_live: bool,
     /// Buffer stamped simulation and presentation timings until viewer teardown.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub diag_sim_timing: bool,
     /// Replay this tape file instead of the pad. Empty: off.
     pub replay_play: String,
-    /// Where a recording starts: "save:<slot>" or "chapter:<map>[$<entrance>][@<difficulty>]".
+    /// Where a recording or opted-in live diagnostic starts: "save:<slot>" or "chapter:<map>[$<entrance>][@<difficulty>]".
     pub replay_start: String,
     /// Steps between check values in a recording.
     pub replay_check_every: u32,
@@ -737,6 +740,7 @@ impl Default for Config {
             replay_record: String::new(),
             sim_overlap: false,
             sim_overlap_maps: Vec::new(),
+            sim_overlap_live: false,
             diag_sim_timing: false,
             replay_play: String::new(),
             replay_start: String::new(),
@@ -807,8 +811,18 @@ impl Config {
         ensure!(self.spike_log_last_frame == 0 || self.spike_log_last_frame >= self.spike_log_first_frame, "invalid spike frame window");
         ensure!(!self.sim_overlap || self.replay_record.is_empty(), "replay_record and sim_overlap are exclusive");
         ensure!(!self.sim_overlap || self.renderer == "vita", "sim_overlap requires renderer=vita");
-        ensure!(self.sim_overlap_maps.is_empty() || (self.sim_overlap && !self.replay_play.is_empty()),
-            "sim_overlap_maps requires sim_overlap and a replay tape");
+        ensure!(self.sim_overlap_maps.is_empty()
+            || (self.sim_overlap && (!self.replay_play.is_empty() || self.sim_overlap_live)),
+            if self.sim_overlap_live { "sim_overlap_maps requires sim_overlap in live play" }
+            else { "sim_overlap_maps requires sim_overlap and a replay tape" });
+        if self.sim_overlap_live {
+            ensure!(self.replay_play.is_empty() && self.replay_record.is_empty(),
+                "sim_overlap_live requires live input without playback or recording");
+            ensure!(self.replay_start.starts_with("chapter:"),
+                "sim_overlap_live requires replay_start=chapter:<map>");
+            ensure!(!self.sim_overlap || !self.sim_overlap_maps.is_empty(),
+                "live lag one requires an explicit sim_overlap_maps allowlist");
+        }
         ensure!(self.sim_overlap_maps.iter().all(|map| map == "potears2"),
             "lag-one overlap is available on potears2 only");
         crate::replay::validate_settings(&crate::replay::Settings { record: self.replay_record.clone(),
@@ -4821,7 +4835,7 @@ mod tests {
     }
 
     #[test]
-    fn lag_one_requires_an_explicit_potears2_replay() {
+    fn lag_one_requires_an_explicit_potears2_map_and_input_mode() {
         let mut config = Config {
             sim_overlap: true,
             skin_overlap: true,
@@ -4835,7 +4849,27 @@ mod tests {
         assert!(config.validate().is_ok());
         config.sim_overlap_maps.push("potears1".into());
         assert!(config.validate().is_err());
-        assert!(serde_json::to_value(Config::default()).unwrap().get("sim_overlap_maps").is_none());
+        let defaults = serde_json::to_value(Config::default()).unwrap();
+        assert!(defaults.get("sim_overlap_maps").is_none());
+        assert!(defaults.get("sim_overlap_live").is_none());
+
+        config.sim_overlap_maps.pop();
+        config.sim_overlap_live = true;
+        config.replay_start = "chapter:potears2".into();
+        assert!(config.validate().is_err()); // Live opt-in with playback.
+        config.replay_play.clear();
+        assert!(config.validate().is_ok());
+        config.replay_record = "play.lgtape".into();
+        assert!(config.validate().is_err());
+        config.replay_record.clear();
+        config.sim_overlap_maps.clear();
+        assert!(config.validate().is_err()); // No implicit all-map overlap.
+        config.sim_overlap = false;
+        assert!(config.validate().is_ok()); // Live serial control.
+        config.replay_start.clear();
+        assert!(config.validate().is_err());
+        config.replay_start = "save:auto".into();
+        assert!(config.validate().is_err());
     }
 
     #[test]

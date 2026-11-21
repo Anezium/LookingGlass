@@ -204,6 +204,11 @@ fn configure(options: &mut crate::Options, start: &tape::Start) -> Result<()> {
     options.new_game = start.kind == "chapter";
     Ok(())
 }
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn configure_live_chapter(options: &mut crate::Options, spec: &str) -> Result<()> {
+    configure(options, &parse_start(spec)?)
+}
+
 fn free_name(pattern: &str) -> Result<String> {
     if !pattern.contains('#') { return Ok(pattern.into()); }
     (1..100).map(|n| pattern.replace('#', &format!("{n:02}")))

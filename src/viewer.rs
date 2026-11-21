@@ -1074,6 +1074,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let saves_enabled=saves_enabled && r13_survey.is_none();
     #[cfg(feature="vita_renderer")]
     let mut route_session=crate::route_replay::Session::open(&mut options)?;
+    #[cfg(feature = "vita_renderer")]
+    let live_chapter = {
+        let config = crate::render::vita_renderer::config();
+        if config.sim_overlap_live {
+            anyhow::ensure!(route_session.is_none(), "sim_overlap_live and route diagnostics are exclusive");
+            crate::replay::configure_live_chapter(&mut options, &config.replay_start)?;
+        }
+        config.sim_overlap_live
+    };
+    #[cfg(not(feature = "vita_renderer"))]
+    let live_chapter = false;
     eprintln!("[lg/startup] route options ready; save store begin");
     let save_store_start = std::time::Instant::now();
     let fingerprint = assets.fingerprint()?;
@@ -1125,7 +1136,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let bench_resume: Option<save::Loaded> = None;
     let mut opening_requested = options.new_game && options.map == "gvillage";
     // A tape starts like the menu's Chapter choice or a loaded save: never with the opening film.
-    if replay.is_some() { opening_requested = false; }
+    if replay.is_some() || live_chapter { opening_requested = false; }
     let resume = if let Some(loaded)=route_resume { Some(loaded) } else if let Some(loaded) = replay_resume { Some(loaded) } else if let Some(loaded) = bench_resume {
         Some(loaded)
     } else if let Some(slot) = options.load {
@@ -2019,7 +2030,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         forced_flush = false;
         let head_started = sim_trace.mark(frame);
         let lag_map = lag_maps.iter().any(|name| name == &maps[current])
-            && replay.as_ref().is_some_and(|r| r.running() && r.replaying());
+            && (live_chapter || replay.as_ref().is_some_and(|r| r.running() && r.replaying()));
         #[cfg(feature = "native_timing")]
         let lag_map = lag_map && timing.recorder.is_none();
         debug_assert!(audio_step.ops.is_empty());
@@ -3429,8 +3440,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         };
         let mut joined_b = None;
         let (step_a_result, console_ops) = if lag_dispatch {
-            let due = replay.as_ref().and_then(|r| r.due());
-            let seal = (cfg!(not(target_os = "vita")) || due.is_some()).then_some(due.unwrap_or(false));
+            let seal = replay.as_ref().and_then(|r| {
+                let due = r.due();
+                (cfg!(not(target_os = "vita")) || due.is_some()).then_some(due.unwrap_or(false))
+            });
             let input_b = StepBInput {
                 story_active: false,
                 dispatched: true,

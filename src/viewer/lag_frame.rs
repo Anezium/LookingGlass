@@ -1,4 +1,4 @@
-//! Owner-only presentation retained across the next tape pulse.
+//! Owner-only presentation retained across the next simulation step.
 use super::{
     free_render::{FreeRender, RenderScopes},
     LevelArt, LevelDispatch,
@@ -141,7 +141,7 @@ impl Frame {
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         crate::phase_census::accept(true, stamp.frame.frame >= 60);
         #[cfg(feature = "vita_renderer")]
-        if crate::replay_capture::wanted(stamp.frame.tape_step) {
+        if stamp.frame.tape_step != 0 && crate::replay_capture::wanted(stamp.frame.tape_step) {
             crate::replay_capture::save(stamp.frame.tape_step)?;
         }
         if let Some(peer) = peer {
