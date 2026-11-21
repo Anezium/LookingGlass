@@ -115,6 +115,7 @@ pub(super) fn visual_options(cull: bool, flat: bool, meshes: &[Option<Mesh>]) ->
     (cull && allowed, flat && allowed)
 }
 
+#[cfg(test)]
 pub(super) fn outside_skin_bounds(cull: bool, bounds: &[(Vec3, Vec3)],
     pose: &[Transform], scales: &[f32], world: Mat3, origin: Vec3, scale: f32) -> bool {
     cull && world_bounds_from_pose(bounds, pose, scales, world, origin, scale)

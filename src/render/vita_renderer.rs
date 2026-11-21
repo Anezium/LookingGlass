@@ -106,6 +106,12 @@ pub struct Config {
     /// Lean fragment programs for actor packets with no dynamic light and no appearance effect:
     /// the actor program minus the lines such a packet cannot run. Default off.
     pub actor_lean_shader: bool,
+    /// Skip fully certified zero-RGB actor glow following opaque, depth-writing skin.
+    pub actor_zero_glow: bool,
+    pub actor_glow_subset: bool,
+    /// Restrict glow index omission to these exact map names when supplied.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_map_list")]
+    pub actor_glow_subset_maps: Option<Vec<String>>,
     /// Picture-changing experiment: cull GL front-facing actor triangles. Owner approval required. Default off.
     pub actor_frontface_cull: bool,
     /// Cull script-owned bodies when single preparation has no mutable consumer.
@@ -390,7 +396,7 @@ pub struct Config {
     /// Picture-changing (stored normals instead of rebuilt face normals): opt in only.
     pub gpu_skin_actors: bool,
     /// Restrict actor GPU skinning to these exact map names when supplied.
-    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_gpu_skin_actor_maps")]
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_optional_map_list")]
     pub gpu_skin_actor_maps: Option<Vec<String>>,
     /// Diagnostic PNGs at three replay frames; never enabled by the skin key alone.
     pub gpu_skin_capture: bool,
@@ -586,11 +592,12 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
     });
     Ok(maps)
 }
-fn deserialize_gpu_skin_actor_maps<'de, D: serde::Deserializer<'de>>(
+fn deserialize_optional_map_list<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<String>>, D::Error> {
     <Vec<String> as serde::Deserialize>::deserialize(deserializer).map(Some)
 }
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -617,6 +624,9 @@ impl Default for Config {
             actor_discard_free_shader: false,
             actor_cutout_discard_free: false,
             actor_lean_shader: false,
+            actor_zero_glow: false,
+            actor_glow_subset: false,
+            actor_glow_subset_maps: None,
             actor_frontface_cull: false,
             actor_consumer_frustum_cull: false,
             diag_skip_fx: false,
@@ -804,6 +814,10 @@ impl Config {
             && self.gpu_skin_actor_maps.as_ref().is_none_or(|maps| maps.iter().any(|map| map == name))
     }
 
+    pub(super) fn actor_glow_subset_for_map(&self, name: &str) -> bool {
+        self.actor_glow_subset
+            && self.actor_glow_subset_maps.as_ref().is_none_or(|maps| maps.iter().any(|map| map == name))
+    }
 
     pub(super) fn selection(&self, name: &str) -> (bool, &'static str) {
         if self.renderer != "vita" { return (false, "configuration"); }
@@ -882,6 +896,8 @@ impl Config {
         ensure!(self.render_scale.is_finite()&&(0.25..=1.).contains(&self.render_scale),"invalid render_scale");
         ensure!(matches!(self.msaa_samples,1|2|4),"msaa_samples must be 1, 2 or 4");
         ensure!(self.render_scale==1. || self.msaa_samples==1,"scaled target requires msaa_samples=1");
+        ensure!(!self.actor_glow_subset || self.msaa_samples==1,"actor_glow_subset requires msaa_samples=1");
+        ensure!(!self.actor_glow_subset || self.actor_glow_subset_maps.is_some(),"actor_glow_subset requires actor_glow_subset_maps");
         ensure!(matches!(self.scaled_target.as_str(),"resolve"|"direct"|"direct_flip"),"scaled_target must be resolve, direct or direct_flip");
         ensure!(matches!(self.quality.as_str(),"full"|"low"),"quality must be full or low");
         ensure!(!(self.low_fog_skip || self.low_fog_cheaper || self.low_fog_per_vertex)
@@ -4244,7 +4260,7 @@ mod tests {
     /// Keys added after every frozen era file. Those files stay valid unchanged; an
     /// omitted opt-in reads as an explicit off, and `audio_stats_log` keeps its
     /// default-on release behaviour until a config turns it off.
-    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "low_fog_skip" | "low_fog_cheaper" | "low_fog_per_vertex" | "mover_shape_reuse" | "phase_census_window") }
+    fn later_opt_in_key(k: &str) -> bool { matches!(k, "shader_cache_namespace" | "water_draw_join" | "alpha_model_pvs" | "fx_unlit_exact" | "sim_snark_move_skip" | "sim_snark_sight_blocked" | "sim_pool_name_match" | "audio_stats_log" | "audio_loop_resident" | "audio_cue_prefetch" | "audio_level_cues_extra" | "capture_frames" | "capture_tag" | "sky_live" | "sky_live_alpha" | "sky_live_scale" | "sky_live_lite" | "actor_lean_shader" | "actor_zero_glow" | "actor_glow_subset" | "low_fog_skip" | "low_fog_cheaper" | "low_fog_per_vertex" | "mover_shape_reuse" | "phase_census_window") }
     #[test]
     fn gpu_skin_keys_are_explicitly_default_off_and_strict_booleans() {
         let c=Config::default();assert!(!c.gpu_skin_ants && !c.gpu_skin_actors && !c.gpu_skin_capture);
@@ -4282,6 +4298,39 @@ mod tests {
             assert!(parse_runtime_config(format!(r#"{{"gpu_skin_actor_maps":{invalid}}}"#).as_bytes()).is_err());
         }
     }
+
+    #[test]
+    fn actor_glow_subset_maps_are_optional_and_strict() {
+        let parse = |raw: &str| parse_runtime_config(raw.as_bytes()).unwrap().0;
+        assert!(parse_runtime_config(br#"{"actor_glow_subset":true}"#).is_err());
+        assert!(parse_runtime_config(br#"{"actor_glow_subset":true,"actor_glow_subset_maps":["jlair2"],"msaa_samples":2,"render_scale":1.0}"#).is_err());
+        let defaults = parse("{}");
+        assert!(defaults.actor_glow_subset_maps.is_none());
+        assert!(!defaults.actor_glow_subset_for_map("grounds1"));
+        assert!(serde_json::to_value(&defaults).unwrap().get("actor_glow_subset_maps").is_none());
+
+        let listed = parse(r#"{"actor_glow_subset":true,"actor_glow_subset_maps":["jlair2","skool1","*"]}"#);
+        assert!(listed.actor_glow_subset_for_map("jlair2"));
+        assert!(listed.actor_glow_subset_for_map("skool1"));
+        assert!(!listed.actor_glow_subset_for_map("grounds1"));
+        assert!(!listed.actor_glow_subset_for_map("JLAIR2"));
+        let output = config_log_lines(&listed);
+        let printed: Config = serde_json::from_str(
+            output[0].strip_prefix("[lg/vita-renderer] config ").unwrap(),
+        ).unwrap();
+        assert_eq!(printed.actor_glow_subset_maps, listed.actor_glow_subset_maps);
+
+        let empty = parse(r#"{"actor_glow_subset":true,"actor_glow_subset_maps":[]}"#);
+        assert!(!empty.actor_glow_subset_for_map("jlair2"));
+        let off = parse(r#"{"actor_glow_subset_maps":["jlair2"]}"#);
+        assert!(!off.actor_glow_subset_for_map("jlair2"));
+        for invalid in ["null", "true", "1", r#""jlair2""#, "{}", "[1]", "[null]"] {
+            assert!(parse_runtime_config(
+                format!(r#"{{"actor_glow_subset_maps":{invalid}}}"#).as_bytes(),
+            ).is_err());
+        }
+    }
+
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("gpu_skin_ants").is_none_or(|on|on==false));
         assert!(v.get("gpu_skin_capture").is_none_or(|on|on==false));

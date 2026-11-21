@@ -206,6 +206,13 @@ pub(crate) fn decode_upload_keyed(assets: &mut Assets, path: &str, sampler: Samp
     let image = decode(assets, path)?;
     let texture = upload_rgba8(image.width, image.height, &image.pixels);
     texture.set_filter(macroquad::texture::FilterMode::Linear);
+    #[cfg(feature = "vita_renderer")]
+    {
+        let config = crate::render::vita_renderer::config();
+        if config.actor_zero_glow || config.actor_glow_subset {
+            crate::render_fx::retained::zero_glow::note_texture(path, &texture, &image);
+        }
+    }
     if sampler == Sampler::Repeat {
         set_wrap_repeat(&texture);
     }

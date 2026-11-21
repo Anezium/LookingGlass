@@ -80,6 +80,8 @@ impl Pass {
 struct Group {
     #[cfg(feature="vita_renderer")]
     ant_dead: Option<bool>,
+    #[cfg(feature="vita_renderer")]
+    glow_cpu_bounded: bool,
     #[cfg(feature = "vita_renderer")]
     transparent: bool,
     passes: Vec<Pass>,
@@ -93,6 +95,8 @@ struct Frame {
     depth_read_only: bool,
     #[cfg(feature = "vita_renderer")]
     gpu_skin_actors: bool,
+    #[cfg(feature = "vita_renderer")]
+    actor_glow_subset: bool,
     camera: Vec3,
     direction: Vec3,
     time: f32,
@@ -260,6 +264,11 @@ pub fn begin(camera: Vec3, direction: Vec3, time: f32, atmosphere: &Atmosphere, 
         }
     });
 }
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn actor_glow_subset_active() -> bool {
+    FRAME.with(|f| f.borrow().actor_glow_subset)
+}
+
 pub fn begin_view(camera: &Camera3D, time: f32, atmosphere: &Atmosphere, fullbright: bool) {
     crate::game_thread::assert_current();
     use macroquad::camera::Camera;
@@ -392,10 +401,12 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
             }
             f.vertices += count;
             let transparent = transparent || f.depth_read_only;
+            let glow_cpu_bounded = f.actor_glow_subset && retained::zero_glow::cpu_bounded();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {
                 ant_dead: corpse_triangles::active(),
+                glow_cpu_bounded,
                 passes,
                 transparent,
             });
@@ -424,6 +435,8 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
         f.groups.push(Group {
             #[cfg(feature="vita_renderer")]
             ant_dead: corpse_triangles::active(),
+            #[cfg(feature="vita_renderer")]
+            glow_cpu_bounded: false,
             passes,
             #[cfg(feature = "vita_renderer")]
             transparent: true,
@@ -882,6 +895,8 @@ struct Layer {
     upload_identities: Vec<Option<u64>>,
 }
 pub struct Surface {
+    #[cfg(feature="vita_renderer")]
+    glow_subset: Option<retained::zero_glow::Subset>,
     layers: Vec<Layer>,
     transparent: bool,
     preserve_skin: bool,
@@ -955,9 +970,21 @@ pub(crate) fn register_identified(
         transparent,
         #[cfg(feature="vita_renderer")]
         actors:RefCell::default(),
+        #[cfg(feature="vita_renderer")]
+        glow_subset: None,
     });
     Ok(surface)
 }
+/// The Puppet loader gives each mesh its own material recipe. Skinning changes
+/// positions, normals and lighting on this mesh while preserving its UVs and
+/// topology. Replacing the mesh or material also replaces the certificate.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn certify_actor_glow_subset(surface: &mut Rc<Surface>, source: &crate::skeletal::Surface) -> bool {
+    let surface = Rc::get_mut(surface).expect("new actor material");
+    surface.glow_subset = retained::zero_glow::Subset::load(surface, source);
+    surface.glow_subset.is_some()
+}
+
 fn skin_stage_needs_normals(stage: &Stage) -> bool {
     stage.environment || stage.dot_alpha.is_some()
 }
@@ -1218,6 +1245,8 @@ pub(crate) mod test_support {
             layers, transparent,
             #[cfg(feature="vita_renderer")]
             actors: RefCell::default(),
+            #[cfg(feature="vita_renderer")]
+            glow_subset: None,
         });
         SURFACES.with(|s| s.borrow_mut().push((base.clone(), Rc::downgrade(&surface))));
         surface
@@ -1732,6 +1761,7 @@ mod tests {
             label: (false, None),
             layers: (0..3).map(|_| Layer { stage: Stage::default(), textures: Vec::new(), upload_identities: Vec::new() }).collect(),
             transparent: false, preserve_skin: false, actors: RefCell::default(),
+            glow_subset: None,
         });
         assert_eq!(crate::render::vita_renderer::config().actor_max_layers, 2);
         let per_draw = mesh.vertices.len() * 2;

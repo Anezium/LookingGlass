@@ -154,6 +154,8 @@ pub struct Scene {
     #[cfg(feature = "vita_renderer")]
     pub(crate) gpu_skin_actors: bool,
     #[cfg(feature = "vita_renderer")]
+    actor_glow_subset: bool,
+    #[cfg(feature = "vita_renderer")]
     retained: Option<vita_renderer::Renderer>,
     #[cfg(feature = "vita_renderer")]
     authored_sky: bool,
@@ -2145,6 +2147,8 @@ impl Scene {
         let mut scene = Self {
             #[cfg(feature = "vita_renderer")]
             gpu_skin_actors: vita_renderer::config().gpu_skin_actors_for_map(name),
+    #[cfg(feature = "vita_renderer")]
+            actor_glow_subset: vita_renderer::config().actor_glow_subset_for_map(name),
             #[cfg(feature = "vita_renderer")]
             retained: None,
             #[cfg(feature = "vita_renderer")]
@@ -2456,6 +2460,7 @@ impl Scene {
                 fullbright,
                 flush,
                 self.gpu_skin_actors,
+                self.actor_glow_subset,
             );
             return;
         }

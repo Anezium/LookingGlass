@@ -722,6 +722,7 @@ fn family(def: &Definition, base: &str) -> Vec<String> {
         .collect()
 }
 struct Model {
+    glow_subset: bool,
     skin_identity: crate::character::skinning::identity::ActorId,
     // Keep the inherited Puppet visibility/lighting policy. The optional lever
     // replaces only its mutable-mesh capability guard with actual consumers.
@@ -1272,6 +1273,7 @@ impl Model {
             skin_scale,
             fullbright,
             &scales,
+            self.glow_subset,
         );
         let _census=crate::phase_census::span(crate::phase_census::Region::ActorConsumers);
         let _leaf=crate::phase_census::span(crate::phase_census::Region::ActorNpcOverlays);
@@ -1537,6 +1539,10 @@ impl Model {
         specs: &BTreeMap<String, texture::MaterialSpec>,
     ) -> Result<Self> {
         let data = Data::load(assets, name, extra)?;
+        #[cfg(feature="vita_renderer")]
+        let mut glow_subset = false;
+        #[cfg(not(feature="vita_renderer"))]
+        let glow_subset = false;
         let mut meshes = Vec::new();
         let mut material_layers = Vec::new();
         let mut textures: BTreeMap<String, texture::SharedTexture> = BTreeMap::new();
@@ -1575,12 +1581,21 @@ impl Model {
                 textures.insert(path, t.clone());
                 t
             };
-            material_layers.push(crate::render_fx::register_identified(
+            let surface = crate::render_fx::register_identified(
                 assets,
                 &tex.texture, Some(tex.upload_identity),
                 &[format!("{}/{skin}", data.def.path), skin.clone()],
                 specs,
-            )?);
+            )?;
+            #[cfg(feature="vita_renderer")]
+            let surface = {
+                let mut surface = surface;
+                if crate::render::vita_renderer::config().actor_glow_subset {
+                    glow_subset |= crate::render_fx::certify_actor_glow_subset(&mut surface, s);
+                }
+                surface
+            };
+            material_layers.push(surface);
             meshes.push(Some(Mesh { upload_identity: Some(tex.upload_identity), surface: material_layers.last().cloned(),
                 vertices: s
                     .vertices
@@ -1664,6 +1679,7 @@ impl Model {
             }
         }
         Ok(Self {
+            glow_subset,
             skin_identity: Default::default(),
             late_skin_overlays: false,
             afterimage_normals: false,

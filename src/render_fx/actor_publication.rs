@@ -740,7 +740,7 @@ pub(crate) fn prepare(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u6
             let transparent=surface.transparent||f.depth_read_only;
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::character::skinning::census::register(f.groups.len());
-            f.groups.push(Group {ant_dead: super::corpse_triangles::active(),passes:passes.take().unwrap(),transparent});Some(id)
+            f.groups.push(Group {ant_dead: super::corpse_triangles::active(),glow_cpu_bounded:surface.glow_subset.is_some() && retained::zero_glow::cpu_bounded(),passes:passes.take().unwrap(),transparent});Some(id)
         })?;
         if capped>0 {
             retained::count("vita_fx_dropped_layers",capped as u64);
@@ -790,7 +790,7 @@ fn prepare_deferred(mesh:&Mesh,cpu:Arc<SkinSurface>,unchanged:bool,instance:u64,
             let transparent=surface.transparent||f.depth_read_only;
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::character::skinning::census::register(f.groups.len());
-            f.groups.push(Group {ant_dead: super::corpse_triangles::active(),passes:Vec::new(),transparent});group
+            f.groups.push(Group {ant_dead: super::corpse_triangles::active(),glow_cpu_bounded:false,passes:Vec::new(),transparent});group
         });
         s.deferred.push(Deferred {group,bank,slot,surface,camera,time,appearance,limit,vertices:n,dropped_layers:dropped_layers as u64});
         // The placeholder is committed. Refusal returned before this and left the
@@ -1399,7 +1399,7 @@ mod tests {
             let used=FRAME.with(|f|f.borrow().vertices);
             if s.frame_budget_rejects(id,slot,used,mesh.vertices.len()) {return None;}
             let group=FRAME.with(|f| {let mut f=f.borrow_mut();f.vertices+=mesh.vertices.len();
-                f.groups.push(Group {ant_dead: super::corpse_triangles::active(),passes:vec![pass()],transparent:false});f.groups.len()-1});
+                f.groups.push(Group {ant_dead: super::corpse_triangles::active(),glow_cpu_bounded:false,passes:vec![pass()],transparent:false});f.groups.len()-1});
             s.pending.push((group,id,slot,mesh.vertices.len()));
             Some(output)
         })
@@ -1833,7 +1833,7 @@ mod tests {
             "no FRAME group is holding an unpublished protocol here");
         // A FRAME group that references a bank slot names the same allocation: the
         // external rows grow, the unique class bytes do not.
-        FRAME.with(|f| f.borrow_mut().groups.push(Group {ant_dead: super::corpse_triangles::active(),passes:vec![Pass {geometry:Some(holder.clone()),..pass()}],transparent:false}));
+        FRAME.with(|f| f.borrow_mut().groups.push(Group {ant_dead: super::corpse_triangles::active(),glow_cpu_bounded:false,passes:vec![Pass {geometry:Some(holder.clone()),..pass()}],transparent:false}));
         let r=rows(&mut state);show("frame-holder",None,&r);
         assert_eq!((r["actor_publication_mem_external_frame_groups"],r["actor_publication_mem_external_frame_geometry_refs"],
             r["actor_publication_mem_external_frame_not_bank_owned"]),(1,1,0),"a FRAME holder aliases a bank-owned allocation");
@@ -1852,7 +1852,7 @@ mod tests {
         let r=rows(&mut state);show("released",None,&r);
         assert_eq!((r["actor_publication_mem_slots_free"],r["actor_publication_mem_slots_held"]),(2,0));
         // Nested pass vectors owned by held groups are their own row.
-        state.held.push(Group {ant_dead: super::corpse_triangles::active(),passes:Vec::with_capacity(4),transparent:false});
+        state.held.push(Group {ant_dead: super::corpse_triangles::active(),glow_cpu_bounded:false,passes:Vec::with_capacity(4),transparent:false});
         let r=rows(&mut state);show("held-group",None,&r);
         assert_eq!(r["actor_publication_mem_held_pass_capacity"],4);
         assert_eq!(r["actor_publication_mem_held_pass_bytes"],(4*size_of::<Pass>()) as u64);

@@ -191,7 +191,7 @@ impl Uniforms {
 /// Pipeline (variant, blend, depth equal, depth write) and bindings (stream, texture) the
 /// GL context holds from the last skin draw. Any other draw or GL user clears it.
 #[derive(Default)]
-struct State { pipeline: Option<(usize,usize,bool,bool)>, bindings: Option<(usize,TextureId)> }
+struct State { pipeline: Option<(usize,usize,bool,bool)>, bindings: Option<(usize,TextureId,BufferId)> }
 pub(crate) struct Gpu { shaders:[Option<ShaderId>;4],pipelines:BTreeMap<(usize,usize,bool),Pipeline>,buffers:BTreeMap<usize,Buffers>,
     uniforms:[Uniforms;4], state:State }
 impl Gpu {
@@ -238,7 +238,8 @@ impl Gpu {
     }
     /// One GPU-skinned packet. `variant` is the fragment program the CPU twin would use.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw(&mut self,p:&Pass,skin:&Skin,variant:usize,u:&[f32;UNIFORM_FLOATS],depth_write:bool,white:&Texture2D,cull:bool) {
+    pub(super) fn draw(&mut self,p:&Pass,skin:&Skin,variant:usize,u:&[f32;UNIFORM_FLOATS],depth_write:bool,
+        white:&Texture2D,cull:bool,zero_glow:bool,subset:Option<&zero_glow::Subset>) -> bool {
         let _span=crate::frame_profile::span("gpu_skin_upload_draw");
         let _clock=Clock::new(1);
         let variant=if self.shaders[variant].is_some() {variant} else {count("vita_gpu_skin_variant_fallbacks",1);0};
@@ -258,14 +259,21 @@ impl Gpu {
         let b=self.buffers.get_mut(&id).unwrap();
         let bindings=b.bindings.get_or_insert_with(||Bindings {vertex_buffers:vec![b.vertex],index_buffer:b.index,images:vec![texture,white,white]});
         bindings.images[0]=texture;
+        let subset = subset.filter(|_| variant == 2);
+        let (index, index_count) = subset.map_or((b.index, occurrence.input.source.indices.len() as i32),
+            |subset| subset.draw_count(b.index));
         // `fx_submit_state_cache`: the CPU programs' rule. A pipeline change reapplies the
         // bindings (vertex layout); otherwise only a changed stream or texture does.
         let key=(variant,p.blend_index,p.depth_equal,depth_write);
         let state=!c.fx_submit_state_cache || self.state.pipeline!=Some(key);
-        let binding=state || self.state.bindings!=Some((id,texture));
+        let binding_key = (id, texture, index);
+        let binding=state || self.state.bindings!=Some(binding_key);
         if state {ctx.apply_pipeline(pipeline);unsafe{gl::glDepthMask(u8::from(depth_write));}count("gpu_skin_pipeline_sets",1);}
-        if binding {ctx.apply_bindings(bindings);count("gpu_skin_binding_sets",1);}
-        self.state=State {pipeline:Some(key),bindings:Some((id,texture))};
+        if binding {
+            ctx.apply_bindings_from_slice(&bindings.vertex_buffers, index, &bindings.images);
+            count("gpu_skin_binding_sets",1);
+        }
+        self.state=State {pipeline:Some(key),bindings:Some(binding_key)};
         let bytes={let _upload=Clock::new(2);self.uniforms(variant,skin,u,c.uniform_field_cache)};
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::sim_maps::probe::gpu_skin_packet(occurrence.input.vertices.len(),occurrence.input.source.indices.len(),u,
@@ -273,10 +281,14 @@ impl Gpu {
         if !crate::gpu_timing::masked(crate::gpu_timing::MASK_ACTORS) {
             // Same opt-in front-face cull as the CPU actor draw, restored at once.
             unsafe { if cull { gl::glEnable(0x0B44); gl::glCullFace(0x0404); } }
-            ctx.draw(0,occurrence.input.source.indices.len() as i32,1);
+            if emit_actor_geometry(zero_glow && subset.is_none() && variant == 2) {
+                if let Some(subset) = subset { subset.record(true); }
+                if index_count != 0 { ctx.draw(0, index_count, 1); }
+            }
             unsafe { if cull { gl::glDisable(0x0B44); } }
         }
         count("gpu_skin_draws",1);count("gpu_skin_logical_palette_bytes",(occurrence.bones()*32) as u64);count("gpu_skin_uniform_upload_bytes",bytes);
+        variant == 2
     }
     /// Uploads what this program does not hold yet; returns the bytes sent. With
     /// `uniform_field_cache` the base payload goes per changed field, the bones only for a

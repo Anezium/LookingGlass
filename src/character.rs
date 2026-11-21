@@ -1950,11 +1950,13 @@ pub(crate) fn draw_skin(
     scale: f32,
     fullbright: bool,
 ) -> bool {
-    draw_skin_scaled(skeleton, meshes, pose, transform, scale, fullbright, &[])
+    draw_skin_scaled(skeleton, meshes, pose, transform, scale, fullbright, &[], false)
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_skin_scaled(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
     transform: Transform, scale: f32, fullbright: bool, bone_scales: &[f32],
+    glow_subset: bool,
 ) -> bool {
     draw_skin_deformed(
         skeleton,
@@ -1964,6 +1966,7 @@ pub(crate) fn draw_skin_scaled(
         scale,
         fullbright,
         (bone_scales, 1.),
+        glow_subset,
     )
 }
 pub(crate) fn draw_skin_alpha(
@@ -1978,11 +1981,13 @@ pub(crate) fn draw_skin_alpha(
         scale,
         fullbright,
         (&[], alpha),
+        false,
     )
 }
+#[allow(clippy::too_many_arguments)]
 fn draw_skin_deformed(
     skeleton: &Skeleton, meshes: &mut [Option<Mesh>], pose: &[Transform],
-    transform: Transform, scale: f32, fullbright: bool, (bone_scales, alpha): (&[f32], f32),
+    transform: Transform, scale: f32, fullbright: bool, (bone_scales, alpha): (&[f32], f32), glow_subset: bool,
 ) -> bool {
     #[cfg(feature = "vita_renderer")]
     let use_palette = crate::render::vita_renderer::config().bone_palette;
@@ -1999,12 +2004,22 @@ fn draw_skin_deformed(
     let setup_profile = crate::frame_profile::span("skin_setup");
     let character_setup_profile = crate::frame_profile::characters_span("characters_skin_setup");
     let (cull, flat) = skinning::visual_options(cull, flat, meshes);
-    let world_rotation = (use_palette || cull).then(|| skinning::rotation(transform.rotation));
+    #[cfg(feature = "vita_renderer")]
+    let glow_subset = glow_subset && crate::render_fx::actor_glow_subset_active();
+    let world_rotation = (use_palette || cull || glow_subset).then(|| skinning::rotation(transform.rotation));
     #[cfg(feature="vita_renderer")]
     if cull { crate::light_profile::render_add(crate::light_profile::RenderPhase::Actors,
         crate::light_profile::RenderMetrics { visibility_tests: 1, ..Default::default() }); }
-    let visible = !(cull && skinning::outside_skin_bounds(cull, &skeleton.skin_bounds, pose, bone_scales,
-        world_rotation.unwrap(), transform.translation, scale));
+    // Glow uses the culling box when one is already needed. A certified actor
+    // whose visibility must stay uncullable transforms the same load-time bone
+    // boxes for fog safety, without walking its skinned vertices or triangles.
+    let bounds = (cull || glow_subset).then(|| skinning::world_bounds_from_pose(&skeleton.skin_bounds, pose,
+        bone_scales, world_rotation.unwrap(), transform.translation, scale)).flatten();
+    let visible = !(cull && bounds.is_some_and(|(lo, hi)| crate::render::outside_bounds(lo, hi)));
+    #[cfg(feature="vita_renderer")]
+    let _glow_bounds = glow_subset.then(|| {
+        crate::render_fx::retained::zero_glow::cpu_bounds(bounds)
+    });
     #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
     if std::env::var_os("LOOKING_GLASS_ACTOR_CENSUS").is_some() && crate::sim_maps::probe::frame()==300 {
         println!("[lg/skin-census] identity={:?} bones={} visible={visible} cull={cull} allowed={} preserved_materials={} palette={use_palette} mutable={} surfaces={} triangles={} gathering={}",
