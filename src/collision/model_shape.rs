@@ -247,11 +247,19 @@ impl<T> ShapeCache<T> {
     }
 
     #[inline]
-    fn get_or_init(&self, init: impl FnOnce() -> T) -> &T {
+    fn get_or_init(&self, init: impl FnOnce() -> T, published: impl FnOnce()) -> &T {
         match self {
-            Self::Serial(cell) => cell.get_or_init(init),
+            Self::Serial(cell) => cell.get_or_init(|| {
+                let value = init();
+                published();
+                value
+            }),
             #[cfg(feature = "vita_renderer")]
-            Self::Overlap(cell) => cell.get_or_init(|| Box::new(init())),
+            Self::Overlap(cell) => {
+                if let Some(value) = cell.get() { return value; }
+                if cell.set(Box::new(init())).is_ok() { published(); }
+                cell.get().expect("lazy shape publication missing")
+            }
         }
     }
 }
@@ -260,7 +268,7 @@ impl<T> ShapeCache<T> {
 enum LazyShape { Hulls, Candidates, Bevel }
 
 #[inline]
-fn lazy_shape<T>(cache: &ShapeCache<T>, kind: LazyShape, init: impl FnOnce() -> T) -> &T {
+fn lazy_shape<T>(cache: &ShapeCache<T>, kind: LazyShape, init: impl FnOnce() -> T, published: impl FnOnce()) -> &T {
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     if lazy_profile::enabled() {
         if let Some(value) = cache.get() { return value; }
@@ -269,12 +277,12 @@ fn lazy_shape<T>(cache: &ShapeCache<T>, kind: LazyShape, init: impl FnOnce() -> 
         let value = cache.get_or_init(|| {
             built = true;
             init()
-        });
+        }, published);
         lazy_profile::record(kind, built, start.elapsed().as_nanos() as u64);
         return value;
     }
     let _ = kind;
-    cache.get_or_init(init)
+    cache.get_or_init(init, published)
 }
 
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -346,13 +354,16 @@ pub(crate) mod lazy_profile {
 
 impl Placed {
     fn candidates(&self) -> &Candidates {
-        lazy_shape(&self.candidates, LazyShape::Candidates, || self.build_candidates())
+        lazy_shape(&self.candidates, LazyShape::Candidates, || self.build_candidates(), || {
+            crate::sim_maps::count("triangle_candidate_placements", 1);
+            crate::sim_maps::count("triangle_candidate_bounds", self.geometry.mesh.as_ref()
+                .map_or(self.geometry.patches.len(), |mesh| mesh.triangles.len()) as u64);
+        })
     }
 
     fn build_candidates(&self) -> Candidates {
         #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
         crate::viewer::sim_audit::sample_stack("build_candidates");
-        crate::sim_maps::count("triangle_candidate_placements", 1);
         let brushes = self.geometry.brushes.iter().map(|s| s.at(self.origin, self.rotation)).collect();
         let triangles = if let Some(mesh) = &self.geometry.mesh {
             let points: Vec<_> = mesh.vertices.iter().map(|v| self.origin + self.rotation * *v).collect();
@@ -361,7 +372,6 @@ impl Placed {
             self.geometry.patches.iter().map(|t| t.map(|v| self.origin + self.rotation * v)).collect()
         };
         let triangles = triangles.into_iter().filter_map(|t| {
-            crate::sim_maps::count("triangle_candidate_bounds", 1);
             prism_bounds(t).map(|b| (t, b, self.candidates.empty_like()))
         }).collect();
         Candidates { brushes, triangles }
@@ -378,7 +388,7 @@ impl Placed {
                 crate::sim_maps::count("triangle_candidate_rejections", 1);
                 continue;
             }
-            if let Some(h) = lazy_shape(hull, LazyShape::Bevel, || triangle_hull(triangle[0], triangle[1], triangle[2])) { visit(h); }
+            if let Some(h) = lazy_shape(hull, LazyShape::Bevel, || triangle_hull(triangle[0], triangle[1], triangle[2]), || {}) { visit(h); }
         }
     }
 
@@ -388,12 +398,13 @@ impl Placed {
         lazy_shape(&self.hulls, LazyShape::Hulls, || {
                 #[cfg(target_os = "vita")]
                 let _profile = crate::frame_profile::span("collider_lazy_build");
-                #[cfg(target_os = "vita")]
-                add_counter(Counter::LazyHullBuilds, 1);
-                crate::sim_maps::count("lazy_hull_builds", 1);
                 #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
                 crate::viewer::sim_audit::sample_stack("build_hulls");
                 self.geometry.at(self.origin, self.rotation)
+            }, || {
+                #[cfg(target_os = "vita")]
+                add_counter(Counter::LazyHullBuilds, 1);
+                crate::sim_maps::count("lazy_hull_builds", 1);
             })
     }
 }
@@ -655,18 +666,21 @@ mod tests {
                 let (release, released) = mpsc::channel();
                 let (done, worker_done) = mpsc::channel();
                 threads.spawn(move || {
-                    lazy_shape(cache, kind, || {
+                    let returned = lazy_shape(cache, kind, || {
                         started.send(()).unwrap();
                         released.recv().unwrap();
                         build()
-                    });
+                    }, || {});
+                    assert!(std::ptr::eq(returned, cache.get().unwrap()));
                 });
                 let timeout = Duration::from_secs(5);
                 owner_started.recv_timeout(timeout).expect("owner did not enter initializer");
                 threads.spawn(move || done.send(trace()).unwrap());
                 let result = worker_done.recv_timeout(timeout);
                 // Release and join the owner even if the worker parked.
+                let winner = cache.get();
                 release.send(()).unwrap();
+                assert!(winner.is_some(), "worker returned before publishing the shape");
                 result.expect("worker waited for the owner's lazy shape initializer")
             })
         }
