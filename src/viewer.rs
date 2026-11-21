@@ -1836,7 +1836,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if let Some(image) = pending.take() {
                 let stamp = image.stamp;
                 assert_eq!(stamp.frame.visit_id, level_art.snapshot_visit.id(), "stale pending visit");
-                assert_eq!(Some(stamp.frame.frame), last_present.map_or(Some(0), |n| n.checked_add(1)));
+                assert_eq!(Some(stamp.frame.frame), last_present.map_or(Some(0), |n| n.checked_add(1)),
+                    "presented frame sequence is not contiguous");
                 let map = &maps[current];
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                 let mut next_probe = crate::sim_maps::probe::StepRows::default();
@@ -1851,7 +1852,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     steam: $steam, power: &mut power_art, aim: &mut aim_pointer, handoff: &mut handoff_return,
                     overlap_probe: &mut overlap_probe, hud: &mut hud, pickups: &pickup_input, waves: &wave_input,
                 }, &ui, &catalog, &mut save_frame, &mut sim_trace, map, render_peer.take(),
-                    lag_control).await?;
+                    lag_control, &sim_audit).await?;
                 #[cfg(target_os = "vita")]
                 { profile_report_due = report_due; }
                 #[cfg(not(target_os = "vita"))]
@@ -4328,6 +4329,7 @@ interactions
             { previous_step_exit = "tail"; }
             sim_audit.event("seal", present_stamp);
             sim_audit.event("publish", present_stamp);
+            sim_audit.event("pending", present_stamp);
             sim_audit.frame(present_stamp, step_overlap, dispatch_failures, mid_step, true, true);
             #[cfg(target_os = "vita")]
             let draw_world = !crate::frame_profile::mode().no_world();

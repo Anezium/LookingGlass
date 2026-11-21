@@ -11,7 +11,11 @@ pub(super) struct Controls {
 
 #[cfg(not(target_os = "vita"))]
 #[derive(Clone, Copy)]
-enum Order { Rendezvous, OwnerFirst, WorkerFirst }
+enum Order {
+    Rendezvous,
+    OwnerFirst,
+    WorkerFirst,
+}
 
 impl Controls {
     pub(super) fn read() -> anyhow::Result<Self> {
@@ -46,10 +50,18 @@ impl Controls {
             let (owner_tx, owner_rx) = sync_channel(1);
             let (worker_tx, worker_rx) = sync_channel(1);
             return (
-                Some(Peer { tx: owner_tx, rx: worker_rx, first: matches!(order, Order::OwnerFirst),
-                    second: matches!(order, Order::WorkerFirst) }),
-                Some(Peer { tx: worker_tx, rx: owner_rx, first: matches!(order, Order::WorkerFirst),
-                    second: matches!(order, Order::OwnerFirst) }),
+                Some(Peer {
+                    tx: owner_tx,
+                    rx: worker_rx,
+                    first: matches!(order, Order::OwnerFirst),
+                    second: matches!(order, Order::WorkerFirst),
+                }),
+                Some(Peer {
+                    tx: worker_tx,
+                    rx: owner_rx,
+                    first: matches!(order, Order::WorkerFirst),
+                    second: matches!(order, Order::OwnerFirst),
+                }),
             );
         }
         let _ = pending;
@@ -72,9 +84,15 @@ impl Peer {
     pub(super) fn enter(self) {
         #[cfg(not(target_os = "vita"))]
         {
-            if !self.second { self.tx.send(()).expect("missing overlap peer"); }
-            if !self.first { self.rx.recv().expect("missing overlap peer"); }
-            if self.second { std::thread::sleep(std::time::Duration::from_millis(2)); }
+            if !self.second {
+                self.tx.send(()).expect("missing overlap peer");
+            }
+            if !self.first {
+                self.rx.recv().expect("missing overlap peer");
+            }
+            if self.second {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
         }
     }
 }
