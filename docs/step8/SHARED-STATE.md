@@ -12,7 +12,7 @@ School2 clones share Template.eager and .last_lazy (src/collision/model_shape.rs
 
 ## Source declarations
 
-The step 7c owner-fence analysis supplies the routes for graphics caches, probe rows, clock guards, recovery, transition loads and skin gather. In particular, keep CROQUET distinct from graphics publication, harvest sim probe rows before resetting the worker frame, and forbid owner ID allocation during an in-flight step. Macro headers below group the slots immediately following them.
+The step 7c owner-fence analysis supplies the routes for graphics caches, probe rows, clock guards, recovery, transition loads and skin gather. In particular, keep CROQUET distinct from graphics publication, harvest sim probe rows before resetting the worker frame, and guard actor identity allocation during an in-flight step. Macro headers below group the slots immediately following them.
 
 | Source | Declaration | Class | Reachability and step 8 action |
 |---|---|---|---|
@@ -62,9 +62,10 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/character/skinning/cull_tests.rs:26` | `KEEP` | state | No. Test fixture or override. Keep scoped to its test thread or harness. See line 58. |
 | `src/character/skinning/cull_tests.rs:26` | `thread_local!` | state | TLS block. No. Test fixture or override. Keep scoped to its test thread or harness. |
 | `src/character/skinning/identity.rs:7` | `NEXT` | counter | Process-wide atomic actor counter. A host owner allocation during a step panics. |
-| `src/character/skinning/identity.rs:8` | `NEXT_INSTANCE` | counter | Process-wide atomic skin-instance counter, guarded by the same host rule. |
+| `src/character/skinning/identity.rs:8` | `NEXT_INSTANCE` | counter | Process-wide atomic owner-only counter for skin instances and NPC snapshot generations. |
 | `src/character/skinning/identity.rs:11` | `thread_local!` | state | Owner in-flight guard and current render identity are scoped to their respective threads. |
-| `src/character/skinning/identity.rs:14` | `CURRENT` | state | Draw installs ActorId scope on its thread. |
+| `src/character/skinning/identity.rs:14` | `SIM_WORKER` | state | Worker-local marker set at thread startup. Rejects skin instance and NPC publication ID allocation on the simulation lane. |
+| `src/character/skinning/identity.rs:15` | `CURRENT` | state | Draw installs ActorId scope on its thread. |
 | `src/character/skinning/identity.rs:13` | `OWNER_STEP_IN_FLIGHT` | state | Host owner guard. Held over dispatch and receive. |
 | `src/character/skinning/overlap.rs:30` | `thread_local!` | cache | TLS block. Actor draw enters skin gather, prepare and collect. Keep scratch, workers and draw scopes with the gather owner. |
 | `src/character/skinning/overlap.rs:31` | `PHASE` | cache | Actor draw enters skin gather, prepare and collect. Keep scratch, workers and draw scopes with the gather owner. See line 35. |
