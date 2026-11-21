@@ -99,6 +99,7 @@ impl Worker {
                 let stamp = *reply_stamp;
                 let worker_start = sim_timing::mark(request.timing.is_some());
                 if !initialized {
+                    crate::character::skinning::identity::enter_sim_worker();
                     crate::skin_worker::pin_reserved_cpu1();
                     #[cfg(target_os = "vita")]
                     crate::frame_profile::setup_worker();
