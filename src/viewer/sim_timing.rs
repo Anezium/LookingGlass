@@ -7,6 +7,7 @@ use std::{marker::PhantomData, rc::Rc, thread::ThreadId, time::Instant};
 pub(super) enum Cut {
     A,
     B,
+    Lag,
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -19,6 +20,9 @@ pub(super) enum Scope {
     Worker,
     StepA,
     StepB,
+    StepLag,
+    Render,
+    InputToPresent,
     Present,
     PresentWithoutYield,
 }

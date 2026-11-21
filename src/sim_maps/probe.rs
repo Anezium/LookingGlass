@@ -149,8 +149,12 @@ impl StepRows {
     }
 }
 
-pub(crate) fn begin_worker_step(frame: u64) {
+pub(crate) fn set_step_frame(frame: u64) {
     FRAME_NO.with(|v| v.set(frame));
+}
+
+pub(crate) fn begin_worker_step(frame: u64) {
+    set_step_frame(frame);
     crate::collision::sah_probe::begin();
 }
 

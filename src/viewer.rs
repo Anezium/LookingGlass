@@ -1006,6 +1006,8 @@ mod blocked_step;
 pub(crate) mod sim_audit;
 mod sim_timing;
 mod free_render;
+mod lag_frame;
+mod lag_control;
 use step::{
     step_a, step_b, step_due, Due, SimState, ConsoleOps, StepAInput, StepBInput, StepJob, StepLocals, StepScopes,
     StepView,
@@ -1810,12 +1812,84 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         };
     }
     let mut art_ops = Vec::new();
-    // Owner transactions observe the live bindings between the two simulation cuts.
-    macro_rules! run_step {
-        ($function:ident, $locals:ident, $scopes:ident, $step_input:expr,
-            $stamp:expr, $worker:expr, $clock:expr, $cut:ident, $scope:ident,
-            $send:expr, $reply:pat => $value:expr $(,)?) => {{
-            let (alice_sim, mut alice_art) = alice.into_parts();
+    let mut pending: Option<lag_frame::Frame> = None;
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let mut pending_probe = crate::sim_maps::probe::StepRows::default();
+    #[cfg(feature = "vita_renderer")]
+    let lag_maps = &crate::render::vita_renderer::config().sim_overlap_maps[..];
+    #[cfg(not(feature = "vita_renderer"))]
+    let lag_maps: &[String] = &[];
+    #[cfg(not(target_os = "vita"))]
+    let fence_every = std::env::var("LOOKING_GLASS_SIM_FENCE_EVERY")
+        .ok().map(|s| s.parse::<u64>()).transpose()?.unwrap_or(0);
+    #[cfg(target_os = "vita")]
+    let fence_every = 0;
+    let mut last_present: Option<u64> = None;
+    let mut forced_flush;
+    let lag_control = lag_control::Controls::read()?;
+    let mut render_peer: Option<lag_control::Peer> = None;
+
+    // An owner transaction can flush at its original call site. The tape
+    // sample and the latched input are untouched by the extra framework epoch.
+    macro_rules! render_pending {
+        ($next_frame:expr, $alice:expr, $npcs:expr, $steam:expr) => {
+            if let Some(image) = pending.take() {
+                let stamp = image.stamp;
+                assert_eq!(stamp.frame.visit_id, level_art.snapshot_visit.id(), "stale pending visit");
+                assert_eq!(Some(stamp.frame.frame), last_present.map_or(Some(0), |n| n.checked_add(1)));
+                let map = &maps[current];
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                let mut next_probe = crate::sim_maps::probe::StepRows::default();
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                {
+                    next_probe.swap();
+                    pending_probe.swap();
+                    crate::sim_maps::probe::set_step_frame(stamp.frame.frame);
+                }
+                let report_due = image.present(lag_frame::Art {
+                    scene: &mut scene, level: &mut level_art, alice: $alice, npcs: $npcs,
+                    steam: $steam, power: &mut power_art, aim: &mut aim_pointer, handoff: &mut handoff_return,
+                    overlap_probe: &mut overlap_probe, hud: &mut hud, pickups: &pickup_input, waves: &wave_input,
+                }, &ui, &catalog, &mut save_frame, &mut sim_trace, map, render_peer.take(),
+                    lag_control).await?;
+                #[cfg(target_os = "vita")]
+                { profile_report_due = report_due; }
+                #[cfg(not(target_os = "vita"))]
+                let _ = report_due;
+                sim_audit.event("present", stamp);
+                last_present = Some(stamp.frame.frame);
+                audio.scene_presented();
+                assert!(handoff_return.consume(&level_art.snapshot_visit), "missing pending handoff completion");
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                {
+                    crate::sim_maps::probe::set_frame($next_frame);
+                    crate::sim_maps::probe::begin();
+                    next_probe.swap();
+                }
+                #[cfg(target_os = "vita")]
+                crate::frame_profile::begin_frame(map);
+                crate::frame_profile::begin_viewer_frame();
+                crate::frame_phases::begin();
+                crate::spike_log::begin_frame();
+                crate::light_profile::cpu_begin();
+            }
+        };
+    }
+    macro_rules! flush_pending {
+        ($frame:expr, $guards:ident, $input:ident) => {
+            if pending.is_some() {
+                forced_flush = true;
+                let restore_clock = $guards.take().is_some();
+                render_pending!($frame, alice.art_mut(), npcs.art_mut(), steam.art());
+                if restore_clock {
+                    $guards = Some((StepGuard::enter(), $input.enter_clock()));
+                }
+            }
+        };
+    }
+    macro_rules! take_step {
+        ($locals:ident, $stamp:expr) => {{
+            let (alice_sim, alice_art) = alice.into_parts();
             let (npcs_sim, npcs_art) = npcs.into_parts();
             let (steam_sim, steam_art) = steam.into_parts();
             let sim = Box::new(SimState {
@@ -1859,23 +1933,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 #[cfg(feature = "vita_renderer")]
                 route_control: route_session.as_mut().map(crate::route_replay::Session::take_control),
             };
-            let step_input = $step_input;
-            let (job, result) = if let Some(worker) = $worker {
-                let (job, result) = worker.run(job, $clock, $send(step_input), &mut sim_trace)?;
-                let $reply = result else { unreachable!("unexpected sim worker reply"); };
-                (job, $value)
-            } else {
-                let started = sim_trace.mark(job.stamp.frame.frame);
-                let (job, result) = $function(job, step_input, &mut $scopes);
-                sim_trace.owner(job.stamp, sim_timing::Scope::$scope, Some(sim_timing::Cut::$cut), started);
-                (job, result)
-            };
+            (job, (alice_art, npcs_art, steam_art))
+        }};
+    }
+    macro_rules! restore_step {
+        ($job:expr, $art:expr, $locals:ident) => {{
             let StepJob {
                 stamp: _, sim: mut state, locals, art_ops: ops, hud_ops: hud, audio_step: audio,
                 console: console_ops,
                 #[cfg(feature = "vita_renderer")]
                 route_control,
-            } = job;
+            } = $job;
             $locals = locals;
             art_ops = ops;
             hud_ops = hud;
@@ -1884,6 +1952,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             if let Some(control) = route_control {
                 route_session.as_mut().unwrap().restore_control(control);
             }
+            let (mut alice_art, npcs_art, steam_art) = $art;
             for op in art_ops.drain(..) {
                 if let Some(body) = op.apply(&mut alice_art, &mut power_art) {
                     state.alice.recycle_body_input(body);
@@ -1922,18 +1991,43 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             player = state.player;
             campaign = state.campaign;
             played = state.played;
+            console_ops
+        }};
+    }
+    macro_rules! run_step {
+        ($function:ident, $locals:ident, $scopes:ident, $step_input:expr,
+            $stamp:expr, $worker:expr, $clock:expr, $cut:ident, $scope:ident,
+            $send:expr, $reply:pat => $value:expr $(,)?) => {{
+            let (job, art) = take_step!($locals, $stamp);
+            let step_input = $step_input;
+            let (job, result) = if let Some(worker) = $worker {
+                let (job, result) = worker.run(job, $clock, $send(step_input), &mut sim_trace)?;
+                let $reply = result else { unreachable!("unexpected sim worker reply"); };
+                (job, $value)
+            } else {
+                let started = sim_trace.mark(job.stamp.frame.frame);
+                let (job, result) = $function(job, step_input, &mut $scopes);
+                sim_trace.owner(job.stamp, sim_timing::Scope::$scope, Some(sim_timing::Cut::$cut), started);
+                (job, result)
+            };
+            let console_ops = restore_step!(job, art, $locals);
             (result, console_ops)
         }};
     }
     loop {
+        forced_flush = false;
         let head_started = sim_trace.mark(frame);
+        let lag_map = lag_maps.iter().any(|name| name == &maps[current])
+            && replay.as_ref().is_some_and(|r| r.running() && r.replaying());
+        #[cfg(feature = "native_timing")]
+        let lag_map = lag_map && timing.recorder.is_none();
         debug_assert!(audio_step.ops.is_empty());
         // The tape oracle uses release builds. Check the same invariant there.
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         assert!(audio_step.ops.is_empty());
         audio_step.frame = frame;
         #[cfg(feature="vita_renderer")]
-        let snapshot_handoff = crate::render::vita_renderer::config().diag_snapshot;
+        let snapshot_handoff = crate::render::vita_renderer::config().diag_snapshot || lag_map;
         #[cfg(not(feature="vita_renderer"))]
         let snapshot_handoff = false;
         if snapshot_handoff {
@@ -1946,9 +2040,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         crate::phase_census::begin_configured();
         let mut census_block = crate::phase_census::span(crate::phase_census::Region::Input);
-        crate::frame_profile::begin_viewer_frame();
-        crate::frame_phases::begin();
-        crate::spike_log::begin_frame();
+        if pending.is_none() {
+            crate::frame_profile::begin_viewer_frame();
+            crate::frame_phases::begin();
+            crate::spike_log::begin_frame();
+        }
         #[cfg(feature="vita_renderer")]
         let route_running=route_session.is_some();
         #[cfg(not(feature="vita_renderer"))]
@@ -2011,6 +2107,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 crate::replay::Step::Run { .. } | crate::replay::Step::Off => {}
                 crate::replay::Step::Finish => {
                     replay_end = Some(if r.replaying() { "tape-end" } else { "step-limit" });
+                    render_pending!(frame, alice.art_mut(), npcs.art_mut(), steam.art());
                     flush_audio!("replay-end");
                     break;
                 }
@@ -2029,12 +2126,12 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             previous_step_exit = "unmarked";
         }
         #[cfg(not(target_os="vita"))]
-        crate::frame_profile::begin_creation_frame();
+        if pending.is_none() { crate::frame_profile::begin_creation_frame(); }
         #[cfg(target_os = "vita")]
         {
             // Synthetic companion input does not reset the screen/idle timers.
             unsafe { sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT) };
-            crate::frame_profile::begin_frame(&maps[current]);
+            if pending.is_none() { crate::frame_profile::begin_frame(&maps[current]); }
             if profile_report_due {
                 // The next begin_frame completes the last measured wall interval.
                 // Exit before simulating or drawing an extra gameplay frame.
@@ -2059,12 +2156,20 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-        {crate::sim_maps::probe::set_frame(frame);crate::sim_maps::probe::begin();crate::sim_maps::probe::script_hits(frame,&mut npcs);}
+        {
+            if pending.is_none() {
+                crate::sim_maps::probe::set_frame(frame);
+                crate::sim_maps::probe::begin();
+            } else {
+                crate::sim_maps::probe::begin_worker_step(frame);
+            }
+            crate::sim_maps::probe::script_hits(frame, &mut npcs);
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let mut host_block = crate::frame_profile::span("frame_input");
         #[cfg(feature = "native_timing")]
         timing.with(|r| r.cpu_begin());
-        crate::light_profile::cpu_begin();
+        if pending.is_none() { crate::light_profile::cpu_begin(); }
         if !(menu || inventory_menu || console.open || paused) {crate::character::skinning_bench_begin();}
         crate::frame_phases::mark(1);
         let mut frame_profile = crate::frame_profile::span("frame_cpu");
@@ -2093,6 +2198,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // The frontend remains interactive if the reference save could not load.
         // Inside the bench, retain physics with neutral input, including sticks.
         let mut step_guards = None;
+        let mut input_started = sim_trace.mark(frame);
         let mut step_input = input.capture_step(
             replay.as_ref().filter(|r| r.running()).map_or(frame, |r| r.current_step() - 1),
             physical_input && window_focused() && !bench && !route_running,
@@ -2102,6 +2208,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         timing.with(|r| {if r.schedule.is_some(){r.schedule_input(input.diagnostic_activity());}});
         preview_throttle.advance_frame();
         let host_transition = crate::transition_memory::host_action(frame);
+        if !host_transition.is_empty() {
+            flush_pending!(frame, step_guards, step_input);
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if host_transition.is_empty() && std::env::var_os("LOOKING_GLASS_TRANSITION_RESUME").is_some() { paused = false; }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -2116,6 +2225,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         if host_transition == "chapter" {
+            flush_pending!(frame, step_guards, step_input);
             let destination = crate::transition_memory::host_destination();
             let choice = level_choices.iter().find(|c| maps[c.map] == destination).context("probe destination")?;
             chapter_requested = Some(crate::campaign::LevelChoice { map: choice.map, entry: choice.entry, title: choice.title.clone() });
@@ -2135,8 +2245,9 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let throttle_normal = throttle_normal && crate::frame_profile::mode() == crate::frame_profile::Mode::Full;
         let mut quit_after_frame = is_quit_requested()
             || (replay.as_ref().is_some_and(|r| r.replaying()) && macroquad::input::is_quit_requested());
-        quit_after_frame |= host_transition == "quit";
+        quit_after_frame |= host_transition == "quit" || lag_control.quit == Some(frame);
         if quit_after_frame && !throttle_normal {
+            flush_pending!(frame, step_guards, step_input);
             finish_replay_step!("quit");
             flush_audio!("quit");
             break;
@@ -2146,9 +2257,11 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 && !menu
                 && !inventory_menu
             {
+                flush_pending!(frame, step_guards, step_input);
                 flush_audio!("escape-open");
                 escape_menu.open(crate::menu::Page::Main, &preferences, audio.settings);
             } else if is_key_pressed(KeyCode::F3) {
+                flush_pending!(frame, step_guards, step_input);
                 menu = false;
                 inventory_menu = false;
                 flush_audio!("escape-open");
@@ -2157,6 +2270,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         // Start ends a recording; the menu then runs on the live pad. A replay never opens it.
         if escape_menu.page.is_some() {
+            flush_pending!(frame, step_guards, step_input);
             if let Some(r) = replay.as_mut().filter(|r| r.running()) {
                 r.stop("menu");
                 if r.replaying() { flush_audio!("menu-replay-end"); break; }
@@ -2364,6 +2478,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 "new-game", &maps[current], "gvillage"));
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::OpeningEnter, crate::native_timing::CINEMA));
+            flush_pending!(frame, step_guards, step_input);
             flush_audio!("opening-film");
             match owner_yield!(step_guards, crate::movie::play(
                 &mut assets,
@@ -2627,6 +2742,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         // Retry input; neither may overwrite its selected destination/checkpoint.
         if new_campaign_memory.is_some() || pending_menu_newgame.is_some() { load_requested = None; }
         if let Some(slot) = load_requested {
+            flush_pending!(frame, step_guards, step_input);
             // A load reads the slot as it is now, which a later replay cannot rely on.
             if let Some(r) = replay.as_mut().filter(|r| r.running()) {
                 r.stop("load");
@@ -2704,6 +2820,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }
         let mut audio_changed = false;
         if pressed!(KeyCode::M) {
+            flush_pending!(frame, step_guards, step_input);
             audio.settings.muted = !audio.settings.muted;
             audio_changed = true;
         }
@@ -2924,6 +3041,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             || (bench && skip_id.is_some() && !paused && !menu && !inventory_menu
                 && !console_input && focused && !flying && stats.alive());
         if skip_requested {
+            flush_pending!(frame, step_guards, step_input);
             let speaking = skip_id.is_some_and(|id| story.progress(id).is_some());
             if interactions.skip_cinematic(&scene.map, &mut world, &mut player, &mut story)? {
                 #[cfg(feature = "native_timing")]
@@ -2955,6 +3073,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let mut gameplay = false;
         if new_campaign_memory.is_none() && pending_menu_newgame.is_none()
             && saves_enabled && !stats.alive() && (recover || restart || console_restart) {
+            flush_pending!(frame, step_guards, step_input);
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::LoadAttempt, crate::native_timing::OPERATION));
             let result = match retry.game_for(&save::visit_key(&maps[current], entry_spawn.as_deref())) {
@@ -2996,6 +3115,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }).into()));
         }
         if (recover || restart || console_restart) && !in_transport {
+            flush_pending!(frame, step_guards, step_input);
             #[cfg(feature = "native_timing")]
             timing.with(|r| r.discontinuity(crate::native_timing::Milestone::Recovery, crate::native_timing::OPERATION));
             let entry = interaction::spawn_with_static(&scene.map, entry_spawn.as_deref(), Some(world.audio_geometry()));
@@ -3074,6 +3194,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             }
         }
         if (console_fly || (pressed!(KeyCode::F4) && !menu && !inventory_menu)) && stats.alive() {
+            flush_pending!(frame, step_guards, step_input);
             if flying {
                 let feet = pos - Vec3::Z * EYE_HEIGHT;
                 if world.body_clear(feet) {
@@ -3100,6 +3221,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             clock.pause();
         }
         if menu || console_map {
+            flush_pending!(frame, step_guards, step_input);
             clock.pause();
             let mut chapter_action = None;
             if menu && !console_map {
@@ -3253,10 +3375,18 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             ("handoff", camera_handoff.was_scripted() && level_art.handoff_pose().is_some()),
             ("snapshot_handoff", snapshot_handoff && handoff_return.pose(&level_art.snapshot_visit).is_some()),
             ("frame_limit", options.frames.is_some_and(|limit| frame + 1 >= limit)),
+            ("forced_fence", lag_map && fence_every != 0 && frame % fence_every == 0),
+            ("early_flush", forced_flush),
+            ("lag_handoff", lag_map && camera_handoff.was_scripted()),
         ]);
         let dispatch_failures = dispatch_failures.as_ref().map_or(&[][..], |failures| &failures[..]);
         let w0_eligible = !dispatch_failures.iter().any(|&(_, failed)| failed);
-        let dispatchable = sim_overlap && w0_eligible;
+        let step_overlap = sim_overlap && (lag_maps.is_empty() || lag_map);
+        let dispatchable = step_overlap && w0_eligible;
+        let lag_dispatch = lag_map && dispatchable;
+        if !lag_dispatch {
+            flush_pending!(frame, step_guards, step_input);
+        }
         if dispatchable {
             worker_generation = worker_generation.checked_add(1).expect("sim slot generation exhausted");
             frame_stamp.slot_generation = worker_generation;
@@ -3287,7 +3417,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame: Some(viewer_block),
             census: Some(census_block),
         };
-        let (step_a_result, console_ops) = run_step!(step_a, step_locals, step_scopes, StepAInput {
+        let input_a = StepAInput {
             gameplay,
             map: scene.map.clone(),
             preferences: preferences.clone(),
@@ -3295,8 +3425,53 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             host_natural_exit: host_transition == "natural-exit",
             #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
             force_checkpoint: force_checkpoint_frame == Some(frame),
-        }, frame_stamp, sim_worker.as_mut().filter(|_| dispatchable), step_input.clock(), A, StepA,
-            blocked_step::Input::A, blocked_step::Output::A(result) => result);
+        };
+        let mut joined_b = None;
+        let (step_a_result, console_ops) = if lag_dispatch {
+            let due = replay.as_ref().and_then(|r| r.due());
+            let seal = (cfg!(not(target_os = "vita")) || due.is_some()).then_some(due.unwrap_or(false));
+            let input_b = StepBInput {
+                story_active: false,
+                dispatched: true,
+                map_name: maps[current].clone(),
+                preferences: preferences.clone(),
+                aspect: screen_width() / screen_height(),
+                handoff_pose: None,
+                loot_visit: loot_visit.clone(),
+                loot_before: loot_before.clone(),
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                frame,
+                #[cfg(target_os = "vita")]
+                bench_camera,
+            };
+            let (job, (mut alice_art, mut npcs_art, steam_art)) = take_step!(step_locals, frame_stamp);
+            let worker = sim_worker.as_mut().expect("lag mode requires the sim worker");
+            let (owner_peer, worker_peer) = lag_control.pair(pending.is_some());
+            render_peer = owner_peer;
+            sim_audit.event("dispatch", frame_stamp);
+            worker.submit(job, step_input.clock(),
+                blocked_step::Input::Lag(input_a, input_b, acoustic_view.take(), seal, worker_peer),
+                &mut sim_trace)?;
+            let serial_reply = lag_control.serial.then(|| worker.join(&mut sim_trace)).transpose()?;
+            let restore_clock = step_guards.take().is_some();
+            render_pending!(frame, &mut alice_art, &mut npcs_art, &steam_art);
+            if restore_clock {
+                step_guards = Some((StepGuard::enter(), step_input.enter_clock()));
+            }
+            let (job, output) = match serial_reply {
+                Some(reply) => reply,
+                None => worker.join(&mut sim_trace)?,
+            };
+            let blocked_step::Output::Lag(due, result) = output else { unreachable!("lag worker reply"); };
+            joined_b = result;
+            let console_ops = restore_step!(job, (alice_art, npcs_art, steam_art), step_locals);
+            (due, console_ops)
+        } else {
+            if dispatchable { sim_audit.event("dispatch", frame_stamp); }
+            run_step!(step_a, step_locals, step_scopes, input_a,
+                frame_stamp, sim_worker.as_mut().filter(|_| dispatchable), step_input.clock(), A, StepA,
+                blocked_step::Input::A, blocked_step::Output::A(result) => result)
+        };
         if console_ops.close { console.open = false; }
         if let Some(message) = console_ops.message { console.print(message); }
         let (story_active, mut due) = step_a_result?;
@@ -3489,11 +3664,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         });
         let mut worker_seal = None;
         let mut worker_present = None;
-        let (StepView {
-            stamp: present_stamp, presentation, camera_out, dynamic: mut dynamic_input, active, direction, targets, pand_cinematic, scripted_camera, show_alice,
-            #[cfg(target_os = "vita")]
-            gameplay_alice,
-        }, _) = run_step!(step_b, step_locals, step_scopes, StepBInput {
+        let view = if let Some(result) = joined_b {
+                let (view, acoustic, present, seal) = result?;
+                worker_present = Some(present);
+                acoustic_view = Some(acoustic);
+                worker_seal = seal.map(|(stamp, probe)| (stamp, probe, "tail"));
+                view
+        } else {
+            run_step!(step_b, step_locals, step_scopes, StepBInput {
             story_active,
             dispatched: worker_complete,
             map_name: maps[current].clone(),
@@ -3518,7 +3696,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 acoustic_view = Some(acoustic);
                 worker_seal = seal.map(|(stamp, probe)| (stamp, probe, "tail"));
                 view
-            });
+            }).0
+
+        };
+        let StepView {
+            stamp: present_stamp, presentation, camera_out, dynamic: mut dynamic_input, active, direction, targets, pand_cinematic, scripted_camera, show_alice,
+            #[cfg(target_os = "vita")]
+            gameplay_alice,
+        } = view;
         let present_stamp = worker_present.unwrap_or(present_stamp);
         assert_eq!(present_stamp, frame_stamp, "stale present stamp");
         assert_eq!(present_stamp.frame.visit_id, level_art.snapshot_visit.id(), "stale present visit");
@@ -3810,7 +3995,7 @@ interactions
             colors
         }}; }
         #[cfg(feature="vita_renderer")]
-        let snapshot_enabled = crate::render::vita_renderer::config().diag_snapshot;
+        let snapshot_enabled = snapshot_handoff;
         #[cfg(not(feature="vita_renderer"))]
         let snapshot_enabled = false;
         #[cfg(feature="vita_renderer")]
@@ -4119,6 +4304,66 @@ interactions
         // Remaining families/failures keep the conservative end-of-3D marker.
         let captured_hud_view = snapshot_world_free.then(|| HudView::capture(&input));
         crate::spike_log::world_last_read();
+        let lag_free = lag_dispatch && worker_complete && snapshot_world_free && active && focused
+            && stats.alive() && !paused && !menu && !inventory_menu && !console.open && !console_input
+            && !audio.settings.muted
+            && context_before == (menu, inventory_menu, console.open, paused)
+            && skip_id.is_none() && !pand_cinematic && scripted_camera.is_none() && !story.busy()
+            && !camera_handoff.was_scripted() && !freeze_capture && !opening_escape_menu
+            && hud_snapshot.as_ref().is_some_and(|input| !input.help && !input.skip)
+            && !route_running;
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let lag_free = lag_free && steam_poison_frame != Some(frame);
+        if lag_free {
+            assert!(pending.is_none(), "pending frame was not drawn before publication");
+            // The next pulse consumes this frame's already complete seal.
+            if let Some((stamp, probe, path)) = worker_seal {
+                assert_eq!(stamp, present_stamp, "stale worker seal stamp");
+                assert!(stored_replay_probe.replace((stamp, probe, path, true)).is_none(),
+                    "duplicate replay seal");
+            } else {
+                finish_replay_step!("tail");
+            }
+            #[cfg(not(target_os = "vita"))]
+            { previous_step_exit = "tail"; }
+            sim_audit.event("seal", present_stamp);
+            sim_audit.event("publish", present_stamp);
+            sim_audit.frame(present_stamp, step_overlap, dispatch_failures, mid_step, true, true);
+            #[cfg(target_os = "vita")]
+            let draw_world = !crate::frame_profile::mode().no_world();
+            #[cfg(not(target_os = "vita"))]
+            let draw_world = true;
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            let probe_state = crate::sim_maps::probe::enabled().then(|| serde_json::json!({
+                "player": player, "stats": stats, "interactions": interactions.snapshot(),
+                "npcs": npcs.snapshot(), "story": story.snapshot(), "hints": hints.snapshot(),
+                "character": alice.snapshot(), "environment_clock": environment_clock,
+                "pickup_clock": pickup_clock, "transforms": dynamic_input.transforms,
+            }));
+            pending = Some(lag_frame::Frame {
+                stamp: present_stamp, clock: step_input.clock(), camera: world_camera, dynamic: dynamic_input,
+                level: level_dispatch.expect("validated lag level input"),
+                aim: aim_input.expect("validated lag aim input"),
+                shadow: shadow_input.expect("captured lag shadow"),
+                lights: extracted_lights.expect("captured lag lights"),
+                first_person: first_person_input.expect("captured lag view"),
+                empty_level_effects, fullbright, draw_world, world_only, dt, handoff_minimum_frame, snapshot_log,
+                hud_input: hud_snapshot.expect("validated lag HUD input"),
+                hud_view: captured_hud_view.expect("captured lag HUD view"),
+                hud_ops: std::mem::take(&mut hud_ops), preferences: preferences.clone(), notice: notice.clone(),
+                preview_capture, screenshot: physical_input && !bench && is_key_pressed(KeyCode::F12),
+                input_started,
+                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                probe_state,
+            });
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            pending_probe.swap();
+            frame += 1;
+            continue;
+        }
+        if snapshot_enabled && snapshot_world_free { sim_audit.event("publish", present_stamp); }
+        else { sim_audit.event("fallback", present_stamp); }
+        let render_started = sim_trace.mark(present_stamp.frame.frame);
         let transforms = dynamic_input.transforms.as_slice();
         drop(census_block); census_block=crate::phase_census::span(crate::phase_census::Region::RenderSetup);
         if snapshot_world_free {
@@ -4506,6 +4751,7 @@ interactions
             crate::phase_census::set_owner(crate::phase_census::Owner::Other);
         }
         }
+        sim_trace.owner(present_stamp, sim_timing::Scope::Render, None, render_started);
         if !snapshot_world_free {crate::spike_log::world_last_read();}
         #[cfg(feature="vita_renderer")]
         crate::render::vita_renderer::present_3d();
@@ -4906,6 +5152,7 @@ interactions
         } else {
             finish_replay_step!("tail");
         }
+        sim_audit.event("seal", present_stamp);
         let profiler_path=crate::phase_census::span(crate::phase_census::Region::TailProfiler);
         if !active {
             frame_profile.cancel();
@@ -5002,8 +5249,11 @@ interactions
         }
         if terminal_present.is_some() {
             sim_trace.owner(present_stamp, sim_timing::Scope::PresentWithoutYield, None, terminal_present);
+            sim_trace.owner(present_stamp, sim_timing::Scope::InputToPresent, None, input_started.take());
+            sim_audit.event("present", present_stamp);
+            last_present = Some(present_stamp.frame.frame);
         }
-        sim_audit.frame(present_stamp, sim_overlap, dispatch_failures, mid_step,
+        sim_audit.frame(present_stamp, step_overlap, dispatch_failures, mid_step,
             snapshot_enabled && snapshot_world_free, free_tail);
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
@@ -5051,6 +5301,9 @@ interactions
         let present_started = sim_trace.mark(present_stamp.frame.frame);
         next_frame().await;
         sim_trace.owner(present_stamp, sim_timing::Scope::Present, None, present_started);
+        sim_trace.owner(present_stamp, sim_timing::Scope::InputToPresent, None, input_started);
+        sim_audit.event("present", present_stamp);
+        last_present = Some(present_stamp.frame.frame);
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }
         audio.scene_presented();
@@ -5068,6 +5321,7 @@ interactions
         }
         if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
     }
+    assert!(pending.is_none(), "viewer exited with an unpublished presentation");
     sim_audit.finish(frame);
     if sim_overlap {
         drop(sim_worker.take());
@@ -5075,6 +5329,7 @@ interactions
     }
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     crate::collision::lazy_profile::report();
+    sim_audit.drain(last_present, frame);
     sim_trace.flush();
     crate::spike_log::end_play();
     #[cfg(not(target_os = "vita"))]

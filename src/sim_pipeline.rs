@@ -315,6 +315,23 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
             .map_err(PipelineError::Owner)
     }
 
+    /// The viewer retains the displayed output while the other slot is in flight.
+    pub(crate) fn submit_viewer(
+        &mut self, slot: usize, stamp: Stamp, input: J,
+    ) -> Result<(), PipelineError<std::convert::Infallible>> {
+        self.submit(slot, stamp, input)
+    }
+
+    pub(crate) fn join_viewer(
+        &mut self,
+    ) -> Result<(Stamp, &mut O), PipelineError<std::convert::Infallible>> {
+        let Done { work, step } = self.join()?;
+        assert!(matches!(step, Step::Complete));
+        self.state = Some(work.state);
+        self.slots[work.slot] = Some(work.output);
+        Ok((work.stamp, self.slots[work.slot].as_mut().unwrap()))
+    }
+
     /// W0 uses a single idle slot and returns state before the owner resumes.
     /// A continuation of the same frame uses the same capture stamp.
     pub fn run_blocked(&mut self, stamp: Stamp, input: J, timed: bool)
