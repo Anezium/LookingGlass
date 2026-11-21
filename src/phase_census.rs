@@ -269,6 +269,52 @@ pub(crate) fn accept(accepted:bool,measured:bool) {
         if !accepted && s.pending {s.accepted-=1;}
         s.pending=accepted;s.current.measured=measured;});
 }
+#[derive(serde::Serialize)]
+struct WorkerSpan {
+    region: &'static str,
+    inclusive_ns: u64,
+    exclusive_ns: u64,
+    calls: u32,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct WorkerRow {
+    spans: Vec<WorkerSpan>,
+    coverage_ns: u64,
+    sweep_calls: [u32; 5],
+    sweep_ns: [u64; 5],
+    static_ns: [u64; 5],
+    static_counts: [[u64; 7]; 5],
+    counters: Vec<(&'static str, u64)>,
+    hierarchy_errors: u32,
+}
+
+/// The worker samples one cut at a time. It never accepts an owner frame or
+/// exports the owner census window.
+pub(crate) fn worker_begin() {
+    begin(true);
+}
+
+pub(crate) fn worker_finish() -> WorkerRow {
+    ACTIVE.with(|active| active.set(false));
+    STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.start = None;
+        let r = &state.current;
+        let spans = NAMES.iter().enumerate().filter(|&(i, _)| r.calls[i] != 0)
+            .map(|(i, &region)| WorkerSpan {
+                region, inclusive_ns: r.inclusive[i], exclusive_ns: r.exclusive[i], calls: r.calls[i],
+            }).collect();
+        WorkerRow {
+            spans, coverage_ns: r.coverage,
+            sweep_calls: r.sweeps, sweep_ns: r.sweep_ns,
+            static_ns: r.static_ns, static_counts: r.static_counts,
+            counters: COUNTERS.iter().copied().zip(r.counters).filter(|&(_, n)| n != 0).collect(),
+            hierarchy_errors: r.errors + u32::from(state.depth != 0 || state.sweep_depth != 0),
+        }
+    })
+}
+
 pub(crate) struct Timer {start:Option<Instant>, region:usize, level:usize, _thread: std::marker::PhantomData<std::rc::Rc<()>>}
 /// Publish disjoint Totals intervals. Only the full profiler owns reused reads.
 pub(crate) fn world_publish(ns:&[u64;3], calls:&[u32;3], reused:bool) {

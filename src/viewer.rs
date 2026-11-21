@@ -1004,6 +1004,7 @@ impl SnapshotTiming {
 mod step;
 mod blocked_step;
 pub(crate) mod sim_audit;
+mod sim_timing;
 mod free_render;
 use step::{
     step_a, step_b, step_due, Due, SimState, ConsoleOps, StepAInput, StepBInput, StepJob, StepLocals, StepScopes,
@@ -1210,12 +1211,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let sim_overlap = crate::render::vita_renderer::config().sim_overlap;
     #[cfg(not(feature = "vita_renderer"))]
     let sim_overlap = false;
-    let sim_audit = sim_audit::Audit::new();
+    let mut sim_audit = sim_audit::Audit::new();
     let mut sim_worker = sim_overlap.then(|| blocked_step::Worker::new(&sim_audit)).transpose()?;
     #[cfg(not(target_os = "vita"))]
     let wrong_stamp = sim_worker.as_ref().and_then(|worker| worker.wrong_stamp);
     let mut worker_generation = 0u64;
     let mut dispatched_frames = 0u64;
+    let mut sim_trace = sim_timing::Trace::new();
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    let force_checkpoint_frame = std::env::var("LOOKING_GLASS_SIM_FORCE_CHECKPOINT")
+        .ok().map(|value| value.parse::<u64>()).transpose()?;
     let mut menu = false;
     let mut inventory_menu = false;
     let mut help_until = 0.0;
@@ -1810,7 +1815,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     // Owner transactions observe the live bindings between the two simulation cuts.
     macro_rules! run_step {
         ($function:ident, $locals:ident, $scopes:ident, $step_input:expr,
-            $stamp:expr, $worker:expr, $clock:expr, $send:expr, $reply:pat => $value:expr $(,)?) => {{
+            $stamp:expr, $worker:expr, $clock:expr, $cut:ident, $scope:ident,
+            $send:expr, $reply:pat => $value:expr $(,)?) => {{
             let (alice_sim, mut alice_art) = alice.into_parts();
             let (npcs_sim, npcs_art) = npcs.into_parts();
             let (steam_sim, steam_art) = steam.into_parts();
@@ -1857,11 +1863,14 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             };
             let step_input = $step_input;
             let (job, result) = if let Some(worker) = $worker {
-                let (job, result) = worker.run(job, $clock, $send(step_input))?;
+                let (job, result) = worker.run(job, $clock, $send(step_input), &mut sim_trace)?;
                 let $reply = result else { unreachable!("unexpected sim worker reply"); };
                 (job, $value)
             } else {
-                $function(job, step_input, &mut $scopes)
+                let started = sim_trace.mark(job.stamp.frame.frame);
+                let (job, result) = $function(job, step_input, &mut $scopes);
+                sim_trace.owner(job.stamp, sim_timing::Scope::$scope, Some(sim_timing::Cut::$cut), started);
+                (job, result)
             };
             let StepJob {
                 stamp: _, sim: mut state, locals, art_ops: ops, hud_ops: hud, audio_step: audio,
@@ -1919,6 +1928,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }};
     }
     loop {
+        let head_started = sim_trace.mark(frame);
         debug_assert!(audio_step.ops.is_empty());
         // The tape oracle uses release builds. Check the same invariant there.
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -1977,10 +1987,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                     probe.assert_same_state(&top, frame, r.current_step(), _path);
                     replay_probe_assertions += 1;
                 }
-                if sim_audit.rows && worker_seal {
-                    println!("SIM_W0_SEAL_CONSUMED frame={} tape_step={} check={}",
-                        stamp.frame.frame, stamp.frame.tape_step, u8::from(due.is_some()));
-                }
+                if worker_seal { sim_audit.seal_consumed(stamp, due.is_some()); }
                 due.map(|_| probe)
             } else {
                 #[cfg(not(target_os = "vita"))]
@@ -3226,7 +3233,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let step_survey = r13_survey.is_some();
         #[cfg(not(target_os = "vita"))]
         let step_survey = false;
-        let dispatch_failures = [
+        let dispatch_failures = (sim_overlap || sim_audit.diagnose()).then(|| [
             ("gameplay", !gameplay),
             ("first_replay_step", first_replay_step),
             ("load_probe", step_load_probe),
@@ -3245,13 +3252,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             ("handoff", level_art.handoff_pose().is_some()),
             ("snapshot_handoff", snapshot_handoff && handoff_return.pose(&level_art.snapshot_visit).is_some()),
             ("frame_limit", options.frames.is_some_and(|limit| frame + 1 >= limit)),
-        ];
-        let dispatchable = sim_overlap && !dispatch_failures.iter().any(|&(_, failed)| failed);
+        ]);
+        let dispatch_failures = dispatch_failures.as_ref().map_or(&[][..], |failures| &failures[..]);
+        let w0_eligible = !dispatch_failures.iter().any(|&(_, failed)| failed);
+        let dispatchable = sim_overlap && w0_eligible;
         if dispatchable {
             worker_generation = worker_generation.checked_add(1).expect("sim slot generation exhausted");
             frame_stamp.slot_generation = worker_generation;
             dispatched_frames += 1;
         }
+        sim_trace.owner(frame_stamp, sim_timing::Scope::Head, None, head_started);
         let mut step_locals = StepLocals {
             simulate,
             overlay_before,
@@ -3282,22 +3292,21 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             preferences: preferences.clone(),
             saves_writable,
             host_natural_exit: host_transition == "natural-exit",
-        }, frame_stamp, sim_worker.as_mut().filter(|_| dispatchable), step_input.clock(),
+            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+            force_checkpoint: force_checkpoint_frame == Some(frame),
+        }, frame_stamp, sim_worker.as_mut().filter(|_| dispatchable), step_input.clock(), A, StepA,
             blocked_step::Input::A, blocked_step::Output::A(result) => result);
         if console_ops.close { console.open = false; }
         if let Some(message) = console_ops.message { console.print(message); }
         let (story_active, mut due) = step_a_result?;
         let worker_complete = dispatchable && matches!(due, Due::None);
-        if sim_audit.rows && dispatchable && !worker_complete {
-            let reason = match &due {
-                Due::None => unreachable!(),
-                Due::Checkpoint => "checkpoint",
-                Due::Ending => "ending",
-                Due::Exit(_) => "exit",
-            };
-            println!("SIM_W0_DUE frame={} tape_step={} reason={reason}",
-                frame_stamp.frame.frame, frame_stamp.frame.tape_step);
-        }
+        let mid_step = (dispatchable && !worker_complete).then(|| match &due {
+            Due::None => unreachable!(),
+            Due::Checkpoint => "mid_step_checkpoint",
+            Due::Ending => "mid_step_ending",
+            Due::Exit(_) => "mid_step_exit",
+        });
+        if let Some(reason) = mid_step { sim_audit.mid_step(frame_stamp, reason); }
         if simulate {
         if matches!(due, Due::Checkpoint) {
             if throttle_normal {
@@ -3498,7 +3507,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
             frame,
             #[cfg(target_os = "vita")]
             bench_camera,
-        }, frame_stamp, sim_worker.as_mut().filter(|_| worker_complete), step_input.clock(),
+        }, frame_stamp, sim_worker.as_mut().filter(|_| worker_complete), step_input.clock(), B, StepB,
             |input| blocked_step::Input::B(input, acoustic_view.take(), seal_request),
             blocked_step::Output::B(result) => {
                 let (view, acoustic, seal) = result?;
@@ -3517,6 +3526,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         census_block = step_scopes.census.take().unwrap();
         let (camera, target) = (camera_out.position, camera_out.target);
         // The step, including any Pool of Tears re-publication, is complete.
+        let audio_started = sim_trace.mark(present_stamp.frame.frame);
         if worker_complete {
             audio_step.apply(&mut audio, &mut assets, acoustic_view.as_ref().unwrap());
         } else {
@@ -3538,6 +3548,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 audio_step.apply(&mut audio, &mut assets, &world);
             }
         }
+        sim_trace.owner(present_stamp, sim_timing::Scope::AudioApply, None, audio_started);
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         { drop(host_block); host_block = crate::frame_profile::span("frame_scene"); }
         crate::spike_log::sim(crate::spike_log::Sim::Scene);
@@ -4076,13 +4087,17 @@ interactions
             if quit_after_frame || options.frames.is_some_and(|n|frame+1>=n) { blockers.push("tail.terminal".into()); }
             // Transition loading happens before extraction and is not a rendered tape frame.
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
-            if std::env::var_os("LOOKING_GLASS_SNAPSHOT_FENCE_CENSUS").is_some() {
-            println!("SNAPSHOT_FENCE_CENSUS {}", serde_json::json!({
-                "frame": frame, "map": maps[current], "blockers": blockers, "npc_instances": npc,
-                "save_requested": save, "saves_writable": saves_writable,
-                "registered": registered, "transition_in_render": false, "survey": false,
-                "handoff_boundary": level_art.pool.is_some(),
-            }));
+            if sim_audit.snapshot_census {
+                let failed: Vec<_> = dispatch_failures.iter()
+                    .filter_map(|&(condition, failed)| failed.then_some(condition)).collect();
+                println!("SNAPSHOT_FENCE_CENSUS {}", serde_json::json!({
+                    "frame": frame, "map": maps[current], "blockers": blockers, "npc_instances": npc,
+                    "save_requested": save, "saves_writable": saves_writable,
+                    "registered": registered, "transition_in_render": false, "survey": false,
+                    "handoff_boundary": level_art.pool.is_some(),
+                    "snapshot_accepted": blockers.is_empty() && !snapshot_tail_fenced,
+                    "w0_eligible": w0_eligible, "w0_dispatched": dispatchable, "w0_failed": failed,
+                }));
             }
             blockers
         } else {Vec::new()};
@@ -4952,6 +4967,8 @@ interactions
             || interactions.school.as_ref().is_some_and(|s|s.cinematic()), |s| s.cinema));}
         #[cfg(not(target_os="vita"))]
         if !route_running {crate::frame_profile::end_creation_frame();}
+        let terminal_present = (quit_after_frame || options.frames.is_some_and(|n| frame + 1 >= n))
+            .then(|| sim_trace.mark(present_stamp.frame.frame)).flatten();
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         if !crate::sim_maps::probe::enabled() && crate::replay::input::cross() { crate::sim_maps::probe::shot(present_stamp.frame.frame)?; }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -4982,7 +4999,10 @@ interactions
             println!("TRANSITION_STATE {}", serde_json::json!({"frame":frame,"map":maps[current],
                 "state_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&value)?))}));
         }
-        sim_audit.frame(present_stamp, sim_overlap, &dispatch_failures, worker_complete,
+        if terminal_present.is_some() {
+            sim_trace.owner(present_stamp, sim_timing::Scope::PresentWithoutYield, None, terminal_present);
+        }
+        sim_audit.frame(present_stamp, sim_overlap, dispatch_failures, mid_step,
             snapshot_enabled && snapshot_world_free, free_tail);
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
@@ -5027,7 +5047,9 @@ interactions
             }
         }
         drop(step_guards.take());
+        let present_started = sim_trace.mark(present_stamp.frame.frame);
         next_frame().await;
+        sim_trace.owner(present_stamp, sim_timing::Scope::Present, None, present_started);
         #[cfg(feature = "vita_renderer")]
         if let Some(p) = presented_probe { p.gl("frame-presented"); p.stage("frame-yield-returned"); }
         audio.scene_presented();
@@ -5045,12 +5067,14 @@ interactions
         }
         if snapshot_tail_fenced { crate::spike_log::world_last_read(); }
     }
+    sim_audit.finish(frame);
     if sim_overlap {
         drop(sim_worker.take());
         println!("[lg/sim-overlap] dispatched_frames={dispatched_frames}");
     }
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     crate::collision::lazy_profile::report();
+    sim_trace.flush();
     crate::spike_log::end_play();
     #[cfg(not(target_os = "vita"))]
     if replay.is_some() {

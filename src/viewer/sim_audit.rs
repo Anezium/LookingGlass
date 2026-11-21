@@ -1,9 +1,13 @@
 //! W0 dispatch diagnostics and worker preconditions.
 use crate::sim_pipeline::Stamp;
+use std::collections::BTreeMap;
 
 #[derive(Default)]
 pub(super) struct Audit {
-    pub(super) rows: bool,
+    rows: bool,
+    pub(super) depth: bool,
+    pub(super) snapshot_census: bool,
+    outcomes: BTreeMap<&'static str, u64>,
 }
 
 impl Audit {
@@ -11,15 +15,44 @@ impl Audit {
         Self {
             rows: cfg!(all(feature = "sim_maps_probe", not(target_os = "vita")))
                 && std::env::var_os("LOOKING_GLASS_SIM_AUDIT").is_some(),
+            depth: cfg!(all(feature = "sim_maps_probe", not(target_os = "vita")))
+                && std::env::var_os("LOOKING_GLASS_SIM_DEPTH").is_some(),
+            snapshot_census: cfg!(all(feature = "sim_maps_probe", not(target_os = "vita")))
+                && std::env::var_os("LOOKING_GLASS_SNAPSHOT_FENCE_CENSUS").is_some(),
+            outcomes: BTreeMap::new(),
+        }
+    }
+
+    pub(super) fn diagnose(&self) -> bool {
+        self.rows || self.snapshot_census
+    }
+
+    pub(super) fn seal_consumed(&self, stamp: Stamp, check: bool) {
+        if self.rows {
+            println!(
+                "SIM_W0_SEAL_CONSUMED frame={} tape_step={} check={}",
+                stamp.frame.frame,
+                stamp.frame.tape_step,
+                u8::from(check)
+            );
+        }
+    }
+
+    pub(super) fn mid_step(&self, stamp: Stamp, reason: &'static str) {
+        if self.rows {
+            println!(
+                "SIM_W0_DUE frame={} tape_step={} reason={reason}",
+                stamp.frame.frame, stamp.frame.tape_step
+            );
         }
     }
 
     pub(super) fn frame(
-        &self,
+        &mut self,
         stamp: Stamp,
         overlap: bool,
         failures: &[(&'static str, bool)],
-        complete: bool,
+        mid_step: Option<&'static str>,
         snapshot_accepted: bool,
         free_tail: bool,
     ) {
@@ -35,18 +68,33 @@ impl Audit {
         let reason = if !overlap {
             "disabled"
         } else {
-            failed.first().copied().unwrap_or("dispatched")
+            failed.first().copied().or(mid_step).unwrap_or("dispatched")
         };
+        *self.outcomes.entry(reason).or_default() += 1;
         println!(
             "SIM_W0_FRAME {}",
             serde_json::json!({
-                "frame": stamp.frame.frame, "tape_step": stamp.frame.tape_step,
-                "visit": stamp.frame.visit_id, "generation": stamp.slot_generation,
-                "eligible": eligible, "dispatched": dispatched, "reason": reason, "failed": failed,
-                "snapshot_accepted": snapshot_accepted,
-                "worker_free_tail": dispatched && complete && free_tail && snapshot_accepted,
+                    "frame": stamp.frame.frame, "tape_step": stamp.frame.tape_step,
+                    "visit": stamp.frame.visit_id, "generation": stamp.slot_generation,
+                    "eligible": eligible, "dispatched": dispatched, "reason": reason, "failed": failed,
+                    "snapshot_accepted": snapshot_accepted,
+                    "worker_free_tail": dispatched && mid_step.is_none() && free_tail && snapshot_accepted,
             })
         );
+    }
+
+    pub(super) fn finish(&self, frames: u64) {
+        if self.rows {
+            assert_eq!(
+                self.outcomes.values().sum::<u64>(),
+                frames,
+                "W0 frame census lost a frame"
+            );
+            println!(
+                "SIM_W0_OUTCOMES {}",
+                serde_json::json!({"frames": frames, "outcomes": self.outcomes})
+            );
+        }
     }
 }
 

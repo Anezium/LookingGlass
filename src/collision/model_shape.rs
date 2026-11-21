@@ -336,10 +336,10 @@ pub(crate) mod lazy_profile {
 
     pub(crate) fn report() {
         if !enabled() { return; }
-        for (kind, [wait, build]) in ["hulls", "candidates", "bevel"].into_iter().zip(&SAMPLES) {
-            println!("[lg/sim-lazy] kind={kind} builds={} build_sum_ns={} build_max_ns={} waits={} wait_sum_ns={} wait_max_ns={}",
+        for (kind, [published, build]) in ["hulls", "candidates", "bevel"].into_iter().zip(&SAMPLES) {
+            println!("[lg/sim-lazy] kind={kind} build_attempts={} build_attempt_sum_ns={} build_attempt_max_ns={} found_published={} found_published_sum_ns={} found_published_max_ns={}",
                 build.count.load(Relaxed), build.sum_ns.load(Relaxed), build.max_ns.load(Relaxed),
-                wait.count.load(Relaxed), wait.sum_ns.load(Relaxed), wait.max_ns.load(Relaxed));
+                published.count.load(Relaxed), published.sum_ns.load(Relaxed), published.max_ns.load(Relaxed));
         }
     }
 }

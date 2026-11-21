@@ -161,6 +161,8 @@ pub(super) struct StepAInput {
     pub(super) preferences: Arc<crate::preferences::Preferences>,
     pub(super) saves_writable: bool,
     pub(super) host_natural_exit: bool,
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    pub(super) force_checkpoint: bool,
 }
 
 pub(super) struct StepBInput {
@@ -273,7 +275,11 @@ pub(super) fn step_a(mut job: StepJob, input: StepAInput, scopes: &mut StepScope
         preferences,
         saves_writable,
         host_natural_exit,
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        force_checkpoint,
     } = input;
+    #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+    let force_checkpoint = false;
     let preferences = &preferences;
     let mut advance_dialogue = step.advance_dialogue;
     let mut pending_transition = step.pending_transition.take();
@@ -917,7 +923,11 @@ pub(super) fn step_a(mut job: StepJob, input: StepAInput, scopes: &mut StepScope
                 sim.pos = sim.player.eye();
             }
         }
-        let due = if simulate {
+        // The host control reaches the same owner continuation as an
+        // authored checkpoint without adding a pre-hop fence.
+        let due = if simulate && force_checkpoint {
+            Due::Checkpoint
+        } else if simulate {
             step_due(
                 saves_writable,
                 story_active,

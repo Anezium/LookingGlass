@@ -497,6 +497,9 @@ pub struct Config {
     pub replay_record: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sim_overlap: bool,
+    /// Buffer stamped simulation and presentation timings until viewer teardown.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub diag_sim_timing: bool,
     /// Replay this tape file instead of the pad. Empty: off.
     pub replay_play: String,
     /// Where a recording starts: "save:<slot>" or "chapter:<map>[$<entrance>][@<difficulty>]".
@@ -730,6 +733,7 @@ impl Default for Config {
             route_world_wish: false,
             replay_record: String::new(),
             sim_overlap: false,
+            diag_sim_timing: false,
             replay_play: String::new(),
             replay_start: String::new(),
             replay_check_every: 30,
