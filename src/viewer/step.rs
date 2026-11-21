@@ -115,15 +115,44 @@ pub(super) struct ConsoleOps {
 }
 
 pub(super) struct StepJob {
+    pub(super) stamp: crate::sim_pipeline::Stamp,
     pub(super) sim: Box<SimState>,
     pub(super) locals: StepLocals,
     pub(super) art_ops: Vec<ArtOp>,
     pub(super) hud_ops: Vec<HudOp>,
     pub(super) audio_step: AudioStep,
-    pub(super) scopes: StepScopes,
     pub(super) console: ConsoleOps,
     #[cfg(feature = "vita_renderer")]
     pub(super) route_control: Option<crate::route_replay::Control>,
+}
+
+macro_rules! capture_replay_probe {
+    ($map:expr, $want_state:expr, $player:expr, $stats:expr, $interactions:expr, $npcs:expr, $story:expr, $hints:expr, $alice:expr, $environment_clock:expr, $pickup_clock:expr, $yaw:expr, $pitch:expr, $clock:expr) => {{
+            let gather = std::time::Instant::now();
+            let targets = $npcs.targets();
+            let state = $want_state.then(|| serde_json::to_vec(&serde_json::json!({
+                "player": $player, "stats": $stats, "interactions": $interactions.snapshot(),
+                "npcs": $npcs.snapshot(), "story": $story.snapshot(), "hints": $hints.snapshot(),
+                "character": $alice.snapshot(), "environment_clock": $environment_clock,
+                "pickup_clock": $pickup_clock, "yaw": $yaw, "pitch": $pitch, "ticks": $clock.ticks,
+            }))).transpose()?;
+            crate::replay::OwnedProbe {
+                map: $map.to_owned(), feet: $player.feet, velocity: $player.velocity,
+                yaw: $yaw, pitch: $pitch, sanity: $stats.sanity(), will: $stats.will(), alive: $stats.alive(),
+                weapon: $stats.selected(), ticks: $clock.ticks, environment_clock: $environment_clock, targets, state,
+                cost_us: gather.elapsed().as_micros() as u64,
+            }
+    }};
+}
+pub(super) use capture_replay_probe;
+
+impl StepJob {
+    pub(super) fn replay_probe(&self, map: &str, want_state: bool) -> Result<crate::replay::OwnedProbe> {
+        let sim = &self.sim;
+        Ok(capture_replay_probe!(map, want_state, sim.player, sim.stats, sim.interactions,
+            sim.npcs, sim.story, sim.hints, sim.alice, sim.environment_clock,
+            sim.pickup_clock, sim.yaw, sim.pitch, sim.clock))
+    }
 }
 
 pub(super) struct StepAInput {
@@ -156,6 +185,7 @@ pub(super) struct CameraOut {
 }
 
 pub(super) struct StepView {
+    pub(super) stamp: crate::sim_pipeline::Stamp,
     pub(super) presentation: crate::presentation_input::PresentationInput,
     pub(super) camera_out: CameraOut,
     pub(super) dynamic: crate::render_snapshot::DynamicInput,
@@ -209,17 +239,17 @@ pub(super) fn step_due(
 }
 
 /// Gameplay movement when its arm is active, followed by the common story suffix.
-pub(super) fn step_a(mut job: StepJob, input: StepAInput) -> (StepJob, Result<(bool, Due)>) {
+pub(super) fn step_a(mut job: StepJob, input: StepAInput, scopes: &mut StepScopes) -> (StepJob, Result<(bool, Due)>) {
     let StepJob {
         sim,
         locals: step,
         art_ops,
         hud_ops,
         audio_step,
-        scopes,
         console,
         #[cfg(feature = "vita_renderer")]
         route_control,
+        ..
     } = &mut job;
     let StepLocals {
         simulate,
@@ -908,14 +938,14 @@ pub(super) fn step_a(mut job: StepJob, input: StepAInput) -> (StepJob, Result<(b
 }
 
 /// Particles, combat, camera and listener commands at their original serial cut.
-pub(super) fn step_b(mut job: StepJob, input: StepBInput) -> (StepJob, StepView) {
+pub(super) fn step_b(mut job: StepJob, input: StepBInput, scopes: &mut StepScopes) -> (StepJob, StepView) {
+    let stamp = job.stamp;
     let StepJob {
         sim,
         locals: step,
         art_ops,
         hud_ops,
         audio_step,
-        scopes,
         ..
     } = &mut job;
     let StepLocals {
@@ -1732,6 +1762,7 @@ pub(super) fn step_b(mut job: StepJob, input: StepBInput) -> (StepJob, StepView)
         ..Default::default()
     };
     let view = StepView {
+        stamp,
         presentation,
         camera_out,
         dynamic,

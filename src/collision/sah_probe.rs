@@ -9,6 +9,9 @@ thread_local! {
 fn enabled()->bool {std::env::var_os("LOOKING_GLASS_SAH_CORPUS").is_some()}
 pub(crate) fn owner(owner:usize)->usize {OWNER.with(|v|v.replace(owner))}
 pub(crate) fn begin(){if enabled(){ACTIVE.with(|v|v.set(true));QUERIES.with(|v|v.borrow_mut().clear());}}
+pub(crate) fn swap(rows: &mut Vec<serde_json::Value>) {
+    QUERIES.with(|v| std::mem::swap(&mut *v.borrow_mut(), rows));
+}
 pub(crate) fn end(frame:u64,map:&str){
     if !ACTIVE.with(Cell::get){return;}
     ACTIVE.with(|v|v.set(false));

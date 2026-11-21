@@ -365,6 +365,7 @@ impl Drop for ObjectTimer {
 }
 
 pub struct Span {
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
     label: &'static str,
     start: Option<Instant>,
     #[cfg(target_os = "vita")]
@@ -376,6 +377,7 @@ pub fn span(label: &'static str) -> Span {
     #[cfg(not(target_os = "vita"))]
     if label == "frame_characters" { CHARACTER_DEPTH.with(|d| d.set(d.get() + 1)); }
     Span {
+        _thread: std::marker::PhantomData,
         label,
         start: enabled().then(Instant::now),
         #[cfg(target_os = "vita")]

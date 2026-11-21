@@ -413,8 +413,12 @@ impl StepInput {
         self.instant = clock.instant;
     }
 
+    pub(crate) fn clock(&self) -> ClockView {
+        ClockView { dt: self.dt, clock_bits: self.clock_bits, instant: self.instant }
+    }
+
     pub(crate) fn enter_clock(&self) -> StepClockGuard {
-        ClockView { dt: self.dt, clock_bits: self.clock_bits, instant: self.instant }.enter()
+        self.clock().enter()
     }
 }
 

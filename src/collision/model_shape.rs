@@ -209,11 +209,74 @@ fn prism_bounds([a, b, c]: [Vec3; 3]) -> Option<Bounds> {
     Some(Bounds { min: points.into_iter().reduce(Vec3::min).unwrap(),
         max: points.into_iter().reduce(Vec3::max).unwrap() })
 }
+#[derive(Clone, Copy)]
+enum LazyShape { Hulls, Candidates, Bevel }
+
+#[inline]
+fn lazy_shape<T>(lock: &std::sync::OnceLock<T>, kind: LazyShape, init: impl FnOnce() -> T) -> &T {
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    if lazy_profile::enabled() {
+        if let Some(value) = lock.get() { return value; }
+        let start = std::time::Instant::now();
+        let mut built = false;
+        let value = lock.get_or_init(|| {
+            built = true;
+            init()
+        });
+        lazy_profile::record(kind, built, start.elapsed().as_nanos() as u64);
+        return value;
+    }
+    let _ = kind;
+    lock.get_or_init(init)
+}
+
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+pub(super) mod lazy_profile {
+    use super::LazyShape;
+    use std::sync::{OnceLock, atomic::{AtomicU64, Ordering::Relaxed}};
+
+    // Index by shape and by whether the caller built it or waited for a peer.
+    struct Sample {
+        count: AtomicU64,
+        sum_ns: AtomicU64,
+        max_ns: AtomicU64,
+    }
+
+    impl Sample {
+        const fn new() -> Self {
+            Self { count: AtomicU64::new(0), sum_ns: AtomicU64::new(0), max_ns: AtomicU64::new(0) }
+        }
+    }
+
+    static SAMPLES: [[Sample; 2]; 3] = [const { [const { Sample::new() }; 2] }; 3];
+
+    pub(super) fn enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("LOOKING_GLASS_SIM_LAZY_PROFILE").is_some())
+    }
+
+    pub(super) fn record(kind: LazyShape, built: bool, ns: u64) {
+        let sample = &SAMPLES[kind as usize][usize::from(built)];
+        sample.count.fetch_add(1, Relaxed);
+        sample.sum_ns.fetch_add(ns, Relaxed);
+        sample.max_ns.fetch_max(ns, Relaxed);
+    }
+
+    pub(crate) fn report() {
+        if !enabled() { return; }
+        for (kind, [wait, build]) in ["hulls", "candidates", "bevel"].into_iter().zip(&SAMPLES) {
+            println!("[lg/sim-lazy] kind={kind} builds={} build_sum_ns={} build_max_ns={} waits={} wait_sum_ns={} wait_max_ns={}",
+                build.count.load(Relaxed), build.sum_ns.load(Relaxed), build.max_ns.load(Relaxed),
+                wait.count.load(Relaxed), wait.sum_ns.load(Relaxed), wait.max_ns.load(Relaxed));
+        }
+    }
+}
+
 impl Placed {
     pub(super) fn visit_query(&self, query: &SweepBounds, mut visit: impl FnMut(&Hull)) {
         // Other consumers may already have requested the complete collider.
         if let Some(hulls) = self.hulls.get() { for h in hulls { visit(h); } return; }
-        let candidates = self.candidates.get_or_init(|| {
+        let candidates = lazy_shape(&self.candidates, LazyShape::Candidates, || {
             crate::sim_maps::count("triangle_candidate_placements", 1);
             let brushes = self.geometry.brushes.iter().map(|s| s.at(self.origin, self.rotation)).collect();
             let triangles = if let Some(mesh) = &self.geometry.mesh {
@@ -235,15 +298,14 @@ impl Placed {
                 crate::sim_maps::count("triangle_candidate_rejections", 1);
                 continue;
             }
-            if let Some(h) = hull.get_or_init(|| triangle_hull(triangle[0], triangle[1], triangle[2])) { visit(h); }
+            if let Some(h) = lazy_shape(hull, LazyShape::Bevel, || triangle_hull(triangle[0], triangle[1], triangle[2])) { visit(h); }
         }
     }
 
     #[cfg(test)]
     pub(super) fn pending(&self) -> bool { self.hulls.get().is_none() && self.candidates.get().is_none() }
     pub(super) fn hulls(&self) -> &[Hull] {
-        self.hulls
-            .get_or_init(|| {
+        lazy_shape(&self.hulls, LazyShape::Hulls, || {
                 #[cfg(target_os = "vita")]
                 let _profile = crate::frame_profile::span("collider_lazy_build");
                 #[cfg(target_os = "vita")]
