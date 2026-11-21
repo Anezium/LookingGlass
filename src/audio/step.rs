@@ -114,6 +114,8 @@ impl AudioStep {
     }
 
     pub fn apply(&mut self, audio: &mut Audio, assets: &mut Assets, world: &impl AcousticWorld) {
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let _lazy_profile = crate::collision::lazy_profile::enter(crate::collision::lazy_profile::Lane::Audio);
         for op in self.ops.drain(..) {
             match op {
                 AudioOp::Movement {

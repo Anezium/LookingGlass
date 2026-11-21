@@ -12,7 +12,7 @@ default = []
 frame_total_only = ["vita_renderer"]
 # Passive bounded phase1 timing evidence; also requires private config opt-in.
 native_timing = []
-vita_renderer = []
+vita_renderer = ["dep:once_cell"]
 # Optional actor publication counters; no calls or argument work in regular builds.
 actor_diagnostics = ["vita_renderer"]
 # Host-only deterministic live-window diagnostics; never used for console packages.
@@ -35,6 +35,7 @@ serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
 # Enable serialization on the same math types used by Macroquad.
 glam = { version = "=0.27.0", features = ["serde"] }
 sha2 = "=0.10.9"
+once_cell = { version = "=1.21.4", default-features = false, features = ["alloc"], optional = true }
 
 [build-dependencies]
 sha2 = "=0.10.9"

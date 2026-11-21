@@ -2,7 +2,7 @@
 //! No original executable or gameplay code is called by this module.
 pub mod model_shape;
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-pub(crate) use model_shape::lazy_profile::report as report_lazy_shapes;
+pub(crate) use model_shape::lazy_profile;
 mod sah;
 #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
 pub(crate) mod sah_probe;

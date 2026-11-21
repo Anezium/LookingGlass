@@ -1,5 +1,6 @@
 //! Cached local geometry for opt-in moving brush and patch collision.
 use super::*;
+use std::sync::OnceLock;
 #[derive(Debug)]
 struct Convex {
     source: Vec<Plane>,
@@ -190,15 +191,15 @@ pub(super) struct Placed {
     geometry: std::sync::Arc<Geometry>,
     origin: Vec3,
     rotation: Quat,
-    hulls: std::sync::OnceLock<Vec<Hull>>,
-    candidates: std::sync::OnceLock<Candidates>,
+    hulls: ShapeCache<Vec<Hull>>,
+    candidates: ShapeCache<Candidates>,
 }
 /// Immutable transformed vertices and exact prism bounds, with bevel planes
 /// materialized only for intersecting queries. Order is the original primitive order.
 #[derive(Debug)]
 struct Candidates {
     brushes: Vec<Hull>,
-    triangles: Vec<([Vec3; 3], Bounds, std::sync::OnceLock<Option<Hull>>)>,
+    triangles: Vec<([Vec3; 3], Bounds, ShapeCache<Option<Hull>>)>,
 }
 fn prism_bounds([a, b, c]: [Vec3; 3]) -> Option<Bounds> {
     let cross = (b - a).cross(c - a);
@@ -209,17 +210,63 @@ fn prism_bounds([a, b, c]: [Vec3; 3]) -> Option<Bounds> {
     Some(Bounds { min: points.into_iter().reduce(Vec3::min).unwrap(),
         max: points.into_iter().reduce(Vec3::max).unwrap() })
 }
+// The serial cache keeps the original in-place OnceLock. An overlap
+// placement can be read by the next step while audio still holds its view.
+// Publish only completed values so a descheduled builder holds no claim.
+#[derive(Debug)]
+enum ShapeCache<T> {
+    Serial(OnceLock<T>),
+    #[cfg(feature = "vita_renderer")]
+    Overlap(once_cell::race::OnceBox<T>),
+}
+
+impl<T> ShapeCache<T> {
+    fn for_placement() -> Self {
+        #[cfg(feature = "vita_renderer")]
+        if crate::render::vita_renderer::config().sim_overlap {
+            return Self::Overlap(once_cell::race::OnceBox::new());
+        }
+        Self::Serial(OnceLock::new())
+    }
+
+    fn empty_like<U>(&self) -> ShapeCache<U> {
+        match self {
+            Self::Serial(_) => ShapeCache::Serial(OnceLock::new()),
+            #[cfg(feature = "vita_renderer")]
+            Self::Overlap(_) => ShapeCache::Overlap(once_cell::race::OnceBox::new()),
+        }
+    }
+
+    #[inline]
+    fn get(&self) -> Option<&T> {
+        match self {
+            Self::Serial(cell) => cell.get(),
+            #[cfg(feature = "vita_renderer")]
+            Self::Overlap(cell) => cell.get(),
+        }
+    }
+
+    #[inline]
+    fn get_or_init(&self, init: impl FnOnce() -> T) -> &T {
+        match self {
+            Self::Serial(cell) => cell.get_or_init(init),
+            #[cfg(feature = "vita_renderer")]
+            Self::Overlap(cell) => cell.get_or_init(|| Box::new(init())),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum LazyShape { Hulls, Candidates, Bevel }
 
 #[inline]
-fn lazy_shape<T>(lock: &std::sync::OnceLock<T>, kind: LazyShape, init: impl FnOnce() -> T) -> &T {
+fn lazy_shape<T>(cache: &ShapeCache<T>, kind: LazyShape, init: impl FnOnce() -> T) -> &T {
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     if lazy_profile::enabled() {
-        if let Some(value) = lock.get() { return value; }
+        if let Some(value) = cache.get() { return value; }
         let start = std::time::Instant::now();
         let mut built = false;
-        let value = lock.get_or_init(|| {
+        let value = cache.get_or_init(|| {
             built = true;
             init()
         });
@@ -227,15 +274,32 @@ fn lazy_shape<T>(lock: &std::sync::OnceLock<T>, kind: LazyShape, init: impl FnOn
         return value;
     }
     let _ = kind;
-    lock.get_or_init(init)
+    cache.get_or_init(init)
 }
 
 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-pub(super) mod lazy_profile {
+pub(crate) mod lazy_profile {
     use super::LazyShape;
     use std::sync::{OnceLock, atomic::{AtomicU64, Ordering::Relaxed}};
 
-    // Index by shape and by whether the caller built it or waited for a peer.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Lane { Owner, Audio, Worker }
+
+    thread_local! {
+        static LANE: std::cell::Cell<Lane> = const { std::cell::Cell::new(Lane::Owner) };
+    }
+
+    // These markers stay on the execution thread, including through unwinding.
+    pub(crate) fn enter(lane: Lane) -> Option<impl Drop> {
+        struct Restore(Lane);
+        impl Drop for Restore {
+            fn drop(&mut self) { LANE.set(self.0); }
+        }
+        enabled().then(|| Restore(LANE.replace(lane)))
+    }
+
+    // Index by shape and by whether this cold caller ran the initializer.
+    // A cold caller may also observe a value published before get_or_init.
     struct Sample {
         count: AtomicU64,
         sum_ns: AtomicU64,
@@ -260,6 +324,14 @@ pub(super) mod lazy_profile {
         sample.count.fetch_add(1, Relaxed);
         sample.sum_ns.fetch_add(ns, Relaxed);
         sample.max_ns.fetch_max(ns, Relaxed);
+        if built {
+            let counter = match LANE.get() {
+                Lane::Owner => "lazy_cold_owner_ns",
+                Lane::Audio => "lazy_cold_audio_ns",
+                Lane::Worker => "lazy_cold_worker_ns",
+            };
+            crate::sim_maps::count(counter, ns);
+        }
     }
 
     pub(crate) fn report() {
@@ -273,24 +345,30 @@ pub(super) mod lazy_profile {
 }
 
 impl Placed {
+    fn candidates(&self) -> &Candidates {
+        lazy_shape(&self.candidates, LazyShape::Candidates, || self.build_candidates())
+    }
+
+    fn build_candidates(&self) -> Candidates {
+        crate::sim_maps::count("triangle_candidate_placements", 1);
+        let brushes = self.geometry.brushes.iter().map(|s| s.at(self.origin, self.rotation)).collect();
+        let triangles = if let Some(mesh) = &self.geometry.mesh {
+            let points: Vec<_> = mesh.vertices.iter().map(|v| self.origin + self.rotation * *v).collect();
+            mesh.triangles.iter().map(|t| t.map(|i| points[i])).collect::<Vec<_>>()
+        } else {
+            self.geometry.patches.iter().map(|t| t.map(|v| self.origin + self.rotation * v)).collect()
+        };
+        let triangles = triangles.into_iter().filter_map(|t| {
+            crate::sim_maps::count("triangle_candidate_bounds", 1);
+            prism_bounds(t).map(|b| (t, b, self.candidates.empty_like()))
+        }).collect();
+        Candidates { brushes, triangles }
+    }
+
     pub(super) fn visit_query(&self, query: &SweepBounds, mut visit: impl FnMut(&Hull)) {
         // Other consumers may already have requested the complete collider.
         if let Some(hulls) = self.hulls.get() { for h in hulls { visit(h); } return; }
-        let candidates = lazy_shape(&self.candidates, LazyShape::Candidates, || {
-            crate::sim_maps::count("triangle_candidate_placements", 1);
-            let brushes = self.geometry.brushes.iter().map(|s| s.at(self.origin, self.rotation)).collect();
-            let triangles = if let Some(mesh) = &self.geometry.mesh {
-                let points: Vec<_> = mesh.vertices.iter().map(|v| self.origin + self.rotation * *v).collect();
-                mesh.triangles.iter().map(|t| t.map(|i| points[i])).collect::<Vec<_>>()
-            } else {
-                self.geometry.patches.iter().map(|t| t.map(|v| self.origin + self.rotation * v)).collect()
-            };
-            let triangles = triangles.into_iter().filter_map(|t| {
-                crate::sim_maps::count("triangle_candidate_bounds", 1);
-                prism_bounds(t).map(|b| (t, b, std::sync::OnceLock::new()))
-            }).collect();
-            Candidates { brushes, triangles }
-        });
+        let candidates = self.candidates();
         for h in &candidates.brushes { visit(h); }
         for (triangle, bounds, hull) in &candidates.triangles {
             // Non-finite data cannot certify a broad-phase rejection.
@@ -535,6 +613,8 @@ impl Template {
                 max: (max + padding).to_array().map(f32::next_up).into(),
             }
         });
+        let hulls = ShapeCache::for_placement();
+        let candidates = hulls.empty_like();
         Collider {
             hulls: std::sync::Arc::new(Vec::new()),
             bounds,
@@ -542,8 +622,8 @@ impl Template {
                 geometry: self.geometry.clone(),
                 origin,
                 rotation,
-                hulls: std::sync::OnceLock::new(),
-                candidates: std::sync::OnceLock::new(),
+                hulls,
+                candidates,
             })),
         }
     }
@@ -555,6 +635,76 @@ impl Template {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "vita_renderer")]
+    #[test]
+    fn overlap_worker_traces_while_owner_is_building_each_lazy_shape() {
+        use std::{sync::mpsc, thread, time::Duration};
+
+        fn while_owner_builds<T: Send + Sync>(
+            cache: &ShapeCache<T>,
+            kind: LazyShape,
+            build: impl FnOnce() -> T + Send,
+            trace: impl FnOnce() -> Trace + Send,
+        ) -> Trace {
+            thread::scope(|threads| {
+                let (started, owner_started) = mpsc::channel();
+                let (release, released) = mpsc::channel();
+                let (done, worker_done) = mpsc::channel();
+                threads.spawn(move || {
+                    lazy_shape(cache, kind, || {
+                        started.send(()).unwrap();
+                        released.recv().unwrap();
+                        build()
+                    });
+                });
+                let timeout = Duration::from_secs(5);
+                owner_started.recv_timeout(timeout).expect("owner did not enter initializer");
+                threads.spawn(move || done.send(trace()).unwrap());
+                let result = worker_done.recv_timeout(timeout);
+                // Release and join the owner even if the worker parked.
+                release.send(()).unwrap();
+                result.expect("worker waited for the owner's lazy shape initializer")
+            })
+        }
+
+        let triangle = [Vec3::ZERO, vec3(18., 0., 1.), vec3(0., 18., -1.)];
+        let template = Template::triangles(&[triangle, triangle.map(|p| p + Vec3::X * 100.)]);
+        let at = || template.at(Vec3::ZERO, Quat::IDENTITY);
+        let overlap = || crate::render::vita_renderer::with_config(|c| c.sim_overlap = true, at);
+        let start = vec3(3., 3., 10.);
+        let end = vec3(3., 3., -10.);
+        let trace = |collider: &Collider, candidates| {
+            crate::sim_maps::with_r2_switches([candidates, false, false], || {
+                collider.trace(start, end, Vec3::ZERO)
+            })
+        };
+        let expected = trace(&at(), false);
+        assert!(expected.fraction < 1.);
+
+        let full = overlap();
+        let placement = full.lazy.as_ref().unwrap();
+        let actual = while_owner_builds(&placement.hulls, LazyShape::Hulls,
+            || placement.geometry.at(placement.origin, placement.rotation),
+            || trace(&full, false));
+        assert_eq!(sight_log::bits(actual), sight_log::bits(expected));
+
+        let candidates = overlap();
+        let placement = candidates.lazy.as_ref().unwrap();
+        let actual = while_owner_builds(&placement.candidates, LazyShape::Candidates,
+            || placement.build_candidates(), || trace(&candidates, true));
+        assert_eq!(sight_log::bits(actual), sight_log::bits(expected));
+        assert!(placement.candidates().triangles[1].2.get().is_none());
+
+        let bevels = overlap();
+        let placement = bevels.lazy.as_ref().unwrap();
+        let triangles = &placement.candidates().triangles;
+        let ([a, b, c], _, near) = &triangles[0];
+        let actual = while_owner_builds(near, LazyShape::Bevel, || triangle_hull(*a, *b, *c),
+            || trace(&bevels, true));
+        assert_eq!(sight_log::bits(actual), sight_log::bits(expected));
+        assert!(triangles[1].2.get().is_none());
+    }
+
     #[test]
     fn triangle_candidates_preserve_exact_bounds_order_and_sweeps() {
         let mut triangles = (0..32).map(|i| {
