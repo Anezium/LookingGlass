@@ -64,6 +64,19 @@ pub(crate) fn begin_view(
     fullbright: bool,
     flush: bool,
 ) {
+    let c = crate::render::vita_renderer::config();
+    begin_map_view(camera, time, atmosphere, fullbright, flush,
+        c.actor_glow_subset && c.actor_glow_subset_maps.is_none());
+}
+
+pub(crate) fn begin_map_view(
+    camera: &Camera3D,
+    time: f32,
+    atmosphere: &Atmosphere,
+    fullbright: bool,
+    flush: bool,
+    actor_glow_subset: bool,
+) {
     use macroquad::camera::Camera;
     #[cfg(not(target_os = "vita"))]
     if flush {
@@ -82,6 +95,7 @@ pub(crate) fn begin_view(
         *f = Frame {
             active: true,
             direct: true,
+            actor_glow_subset,
             groups, group_pool, world_puffs,
             camera: camera.position,
             direction: (camera.target - camera.position).normalize_or_zero(),
@@ -1571,7 +1585,7 @@ pub(crate) fn finish_world(
     if let Some(l) = &mut gpu.lite { l.fields.interrupt(); l.uniforms.interrupt(); }
     if let Some(l) = &mut gpu.corpse_opaque { l.fields.interrupt(); l.uniforms.interrupt(); }
     for l in gpu.actor_lean.iter_mut().flatten() { l.fields.interrupt(); l.uniforms.interrupt(); }
-    let (mut groups, mut puffs, camera, direction, dropped) = FRAME.with(|f| {
+    let (mut groups, mut puffs, camera, direction, dropped, actor_glow_subset) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         (
             std::mem::take(&mut f.groups),
@@ -1579,6 +1593,7 @@ pub(crate) fn finish_world(
             f.camera,
             f.direction,
             f.dropped,
+            f.actor_glow_subset,
         )
     });
     if flush {
@@ -1799,7 +1814,7 @@ pub(crate) fn finish_world(
                     base_group == group && *base_pass == 0
                         && zero_glow::certified(&groups[*base_group].passes[*base_pass], base_uniforms, p, u, base_slot == b)
                 };
-            let subset = if c.actor_glow_subset && previous_lean && !groups[id].transparent
+            let subset = if actor_glow_subset && previous_lean && !groups[id].transparent
                 && *pass == 1 && ranges[id].len() == 2
             {
                 let (base_group, base_pass, base_slot, base_uniforms) = &packets[i - 1];

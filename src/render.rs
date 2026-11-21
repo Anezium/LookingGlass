@@ -151,6 +151,8 @@ struct Batch {
 }
 pub struct Scene {
     #[cfg(feature = "vita_renderer")]
+    actor_glow_subset: bool,
+    #[cfg(feature = "vita_renderer")]
     retained: Option<vita_renderer::Renderer>,
     #[cfg(feature = "vita_renderer")]
     authored_sky: bool,
@@ -2141,6 +2143,8 @@ impl Scene {
         println!("Loaded {name}: {triangles} triangles, {} batches, {animated} animated batches, {} fog volumes, distance fog {}, {} fallback images",batches.len(),atmosphere.volumes.len(),atmosphere.distance.w,missing.len());
         let mut scene = Self {
             #[cfg(feature = "vita_renderer")]
+            actor_glow_subset: vita_renderer::config().actor_glow_subset_for_map(name),
+            #[cfg(feature = "vita_renderer")]
             retained: None,
             #[cfg(feature = "vita_renderer")]
             authored_sky: false,
@@ -2444,12 +2448,13 @@ impl Scene {
             && !vita_renderer::world_only()
         {
             self.retained.as_mut().unwrap().begin_fx();
-            crate::render_fx::retained::begin_view(
+            crate::render_fx::retained::begin_map_view(
                 camera,
                 time,
                 &self.atmosphere,
                 fullbright,
                 flush,
+                self.actor_glow_subset,
             );
             return;
         }

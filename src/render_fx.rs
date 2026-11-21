@@ -93,6 +93,8 @@ struct Frame {
     direct: bool,
     #[cfg(feature = "vita_renderer")]
     depth_read_only: bool,
+    #[cfg(feature = "vita_renderer")]
+    actor_glow_subset: bool,
     camera: Vec3,
     direction: Vec3,
     time: f32,
@@ -392,11 +394,12 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
             }
             f.vertices += count;
             let transparent = transparent || f.depth_read_only;
+            let glow_cpu_bounded = f.actor_glow_subset && retained::zero_glow::cpu_bounded();
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
             crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {
                 ant_dead: corpse_triangles::active(),
-                glow_cpu_bounded: c.actor_glow_subset && retained::zero_glow::cpu_bounded(),
+                glow_cpu_bounded,
                 passes,
                 transparent,
             });

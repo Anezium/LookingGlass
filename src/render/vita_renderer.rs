@@ -109,6 +109,9 @@ pub struct Config {
     /// Skip fully certified zero-RGB actor glow following opaque, depth-writing skin.
     pub actor_zero_glow: bool,
     pub actor_glow_subset: bool,
+    /// Restrict glow index omission to these exact map names when supplied.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_actor_glow_subset_maps")]
+    pub actor_glow_subset_maps: Option<Vec<String>>,
     /// Picture-changing experiment: cull GL front-facing actor triangles. Owner approval required. Default off.
     pub actor_frontface_cull: bool,
     /// Cull script-owned bodies when single preparation has no mutable consumer.
@@ -586,6 +589,12 @@ fn deserialize_maps<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::r
     });
     Ok(maps)
 }
+fn deserialize_actor_glow_subset_maps<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error> {
+    <Vec<String> as serde::Deserialize>::deserialize(deserializer).map(Some)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -614,6 +623,7 @@ impl Default for Config {
             actor_lean_shader: false,
             actor_zero_glow: false,
             actor_glow_subset: false,
+            actor_glow_subset_maps: None,
             actor_frontface_cull: false,
             actor_consumer_frustum_cull: false,
             diag_skip_fx: false,
@@ -795,6 +805,11 @@ pub extern "C" fn __wrap_invoke_splashscreen() {
     }
 }
 impl Config {
+    pub(super) fn actor_glow_subset_for_map(&self, name: &str) -> bool {
+        self.actor_glow_subset
+            && self.actor_glow_subset_maps.as_ref().is_none_or(|maps| maps.iter().any(|map| map == name))
+    }
+
     pub(super) fn selection(&self, name: &str) -> (bool, &'static str) {
         if self.renderer != "vita" { return (false, "configuration"); }
         if self.legacy_maps.iter().any(|m| m == "*" || m == name) {
@@ -4244,6 +4259,36 @@ mod tests {
         assert!(serde_json::from_str::<Config>(r#"{"gpu_skin_ants":5}"#).is_err());
         let raw=serde_json::to_value(c).unwrap();assert_eq!(raw["gpu_skin_ants"],false);assert_eq!(raw["gpu_skin_capture"],false);
     }
+    #[test]
+    fn actor_glow_subset_maps_are_optional_and_strict() {
+        let parse = |raw: &str| parse_runtime_config(raw.as_bytes()).unwrap().0;
+        let defaults = parse(r#"{"actor_glow_subset":true}"#);
+        assert!(defaults.actor_glow_subset_maps.is_none());
+        assert!(defaults.actor_glow_subset_for_map("grounds1"));
+        assert!(serde_json::to_value(&defaults).unwrap().get("actor_glow_subset_maps").is_none());
+
+        let listed = parse(r#"{"actor_glow_subset":true,"actor_glow_subset_maps":["jlair2","skool1","*"]}"#);
+        assert!(listed.actor_glow_subset_for_map("jlair2"));
+        assert!(listed.actor_glow_subset_for_map("skool1"));
+        assert!(!listed.actor_glow_subset_for_map("grounds1"));
+        assert!(!listed.actor_glow_subset_for_map("JLAIR2"));
+        let output = config_log_lines(&listed);
+        let printed: Config = serde_json::from_str(
+            output[0].strip_prefix("[lg/vita-renderer] config ").unwrap(),
+        ).unwrap();
+        assert_eq!(printed.actor_glow_subset_maps, listed.actor_glow_subset_maps);
+
+        let empty = parse(r#"{"actor_glow_subset":true,"actor_glow_subset_maps":[]}"#);
+        assert!(!empty.actor_glow_subset_for_map("jlair2"));
+        let off = parse(r#"{"actor_glow_subset_maps":["jlair2"]}"#);
+        assert!(!off.actor_glow_subset_for_map("jlair2"));
+        for invalid in ["null", "true", "1", r#""jlair2""#, "{}", "[1]", "[null]"] {
+            assert!(parse_runtime_config(
+                format!(r#"{{"actor_glow_subset_maps":{invalid}}}"#).as_bytes(),
+            ).is_err());
+        }
+    }
+
     fn historical_keys(v: &serde_json::Value) -> Vec<String> {
         assert!(v.get("gpu_skin_ants").is_none_or(|on|on==false));
         assert!(v.get("gpu_skin_capture").is_none_or(|on|on==false));
