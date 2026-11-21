@@ -203,7 +203,7 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
     fn work_loop(
         jobs: Receiver<Job<J, S, O>>,
         done: SyncSender<Done<S, O, D>>,
-        mut step: impl FnMut(Stamp, J, &mut S, &mut O) -> Step<D>,
+        mut step: impl FnMut(&mut Stamp, J, &mut S, &mut O) -> Step<D>,
     ) {
         while let Ok(Job { input, mut work }) = jobs.recv() {
             let step = step(&mut work.stamp, input, &mut work.state, &mut work.output);

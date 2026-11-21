@@ -5217,8 +5217,8 @@ interactions
             || interactions.school.as_ref().is_some_and(|s|s.cinematic()), |s| s.cinema));}
         #[cfg(not(target_os="vita"))]
         if !route_running {crate::frame_profile::end_creation_frame();}
-        let terminal_present = (quit_after_frame || options.frames.is_some_and(|n| frame + 1 >= n))
-            .then(|| sim_trace.mark(present_stamp.frame.frame)).flatten();
+        let terminal = quit_after_frame || options.frames.is_some_and(|n| frame + 1 >= n);
+        let terminal_present = terminal.then(|| sim_trace.mark(present_stamp.frame.frame)).flatten();
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         if !crate::sim_maps::probe::enabled() && crate::replay::input::cross() { crate::sim_maps::probe::shot(present_stamp.frame.frame)?; }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -5249,7 +5249,7 @@ interactions
             println!("TRANSITION_STATE {}", serde_json::json!({"frame":frame,"map":maps[current],
                 "state_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&value)?))}));
         }
-        if terminal_present.is_some() {
+        if terminal {
             sim_trace.owner(present_stamp, sim_timing::Scope::PresentWithoutYield, None, terminal_present);
             sim_trace.owner(present_stamp, sim_timing::Scope::InputToPresent, None, input_started.take());
             sim_audit.event("present", present_stamp);
