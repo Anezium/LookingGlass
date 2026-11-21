@@ -438,7 +438,7 @@ pub(crate) fn worker_finish() -> WorkerRow {
 }
 
 #[cfg(target_os = "vita")]
-pub(crate) use vita::{setup_worker, worker_begin, worker_finish};
+pub(crate) use vita::{merge_worker_counters, setup_worker, worker_begin, worker_finish};
 
 /// A diagnostic export failure must not interrupt pause or level transition.
 pub(crate) fn log_report_error(report: anyhow::Result<()>) {
@@ -884,6 +884,17 @@ mod vita {
                 .map(|((owner, name), count)| (owner, name, count)).collect();
             WorkerRow { spans, counters, hierarchy_errors: s.hierarchy_errors + s.stack.len() }
         })
+    }
+
+    pub(crate) fn merge_worker_counters(row: &WorkerRow) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.recording {
+                for &(owner, name, count) in &row.counters {
+                    *state.pending_counts.entry((owner, name)).or_default() += count;
+                }
+            }
+        });
     }
 
     // ABI from VitaSDK malloc.h: ten size_t fields, 32-bit on Vita.

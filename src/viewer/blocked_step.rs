@@ -47,6 +47,7 @@ struct Reply {
     job: StepJob,
     output: Output,
     rows: WorkerRows,
+    late_lines: Option<crate::spike_log::WorkerLateLines>,
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     probe: crate::sim_maps::probe::StepRows,
 }
@@ -214,7 +215,12 @@ impl Worker {
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                 probe.swap();
                 let phase = details.phase.then(crate::phase_census::worker_finish);
-                let spike = details.spike.then(crate::spike_log::worker_finish);
+                let (spike, late_lines) = if details.spike {
+                    let (row, lines) = crate::spike_log::worker_finish();
+                    (timing.is_some().then_some(row), Some(lines))
+                } else {
+                    (None, None)
+                };
                 let profile = details.profile.then(crate::frame_profile::worker_finish);
                 let details =
                     (phase.is_some() || spike.is_some() || profile.is_some()).then(|| {
@@ -231,6 +237,7 @@ impl Worker {
                 *slot = Some(Reply {
                     job,
                     output,
+                    late_lines,
                     rows: WorkerRows {
                         work,
                         step: step_row,
@@ -261,11 +268,11 @@ impl Worker {
         let expected = job.stamp;
         let cut = input.cut();
         let timing = trace.clock(expected.frame.frame);
-        let details = timing.map_or_else(DetailSpec::default, |_| DetailSpec {
-            phase: crate::phase_census::active(),
+        let details = DetailSpec {
+            phase: timing.is_some() && crate::phase_census::active(),
             spike: crate::spike_log::on(),
             profile: crate::frame_profile::enabled(),
-        });
+        };
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         let mut probe = crate::sim_maps::probe::StepRows::default();
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -316,7 +323,16 @@ impl Worker {
                 times.join_end,
             )));
         }
-        trace.worker(expected, reply.rows);
+        if let Some(lines) = reply.late_lines {
+            lines.append();
+        }
+        #[cfg(target_os = "vita")]
+        if let Some(profile) = reply.rows.details.as_ref().and_then(|detail| detail.profile.as_ref()) {
+            crate::frame_profile::merge_worker_counters(profile);
+        }
+        if timing.is_some() {
+            trace.worker(expected, reply.rows);
+        }
         Ok((reply.job, reply.output))
     }
 }
