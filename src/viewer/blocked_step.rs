@@ -57,7 +57,7 @@ impl Worker {
         #[cfg(not(target_os = "vita"))]
         let wrong_stamp = WrongStamp::from_env()?;
         #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
-        let sample_stack = crate::render::vita_renderer::config().diag_snapshot_log;
+        let sample_stack = crate::render::vita_renderer::config().diag_snapshot_log == Some(true);
         #[cfg(not(target_os = "vita"))]
         let sample_stack = audit.rows;
         #[cfg(all(target_os = "vita", not(feature = "vita_renderer")))]

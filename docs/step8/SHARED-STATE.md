@@ -656,3 +656,5 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/vita_sim.rs:74` | `CONFIG` | cache | Step and renderer read configured simulation levers. Share initialized configuration. See line 76. |
 | `src/weapons.rs:891` | `PROP_REUSE_TEST` | state | No. Test fixture or override. Keep scoped to its test thread or harness. See line 3969. |
 | `src/weapons.rs:891` | `thread_local!` | state | TLS block. No. Test fixture or override. Keep scoped to its test thread or harness. |
+| `src/viewer/sim_audit.rs:147` | `thread_local!` | diagnostic | The worker owns stack-depth samples. The owner never reads or changes this thread's sampler. |
+| `src/viewer/sim_audit.rs:148` | `STACK` | diagnostic | Caches this worker's OS stack bounds and deepest sampled marker. Only scalar measurements leave the thread. |
