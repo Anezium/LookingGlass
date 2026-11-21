@@ -611,7 +611,7 @@ impl Store {
                 && d.key==skeleton as *const Skeleton as usize && same_transform(d.transform,p.transform)
                 && d.scale.to_bits()==p.scale.to_bits() && d.flat==p.flat && d.fullbright==p.fullbright
                 && d.alpha.to_bits()==p.alpha.to_bits()).map(|d|(&**old,d)));
-        let instance=previous.map_or_else(super::identity::next_instance,|(_,d)|d.instance);
+        let instance=previous.map_or_else(super::identity::next_art_instance,|(_,d)|d.instance);
         let start = i.surfaces.len();
         for (mesh_id, (surface, mesh)) in skeleton.surfaces.iter().zip(meshes).enumerate() {
             let Some(mesh) = mesh else { continue; };

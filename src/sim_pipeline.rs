@@ -154,7 +154,21 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
         state: S,
         slots: [O; 2],
         stack_size: Option<usize>,
-        step: impl FnMut(Stamp, J, &mut S, &mut O) -> Step<D> + Send + 'static,
+        mut step: impl FnMut(Stamp, J, &mut S, &mut O) -> Step<D> + Send + 'static,
+    ) -> std::io::Result<Self> {
+        Self::new_with_reply_stamp(
+            state,
+            slots,
+            stack_size,
+            move |stamp, input, state, output| step(*stamp, input, state, output),
+        )
+    }
+
+    pub(crate) fn new_with_reply_stamp(
+        state: S,
+        slots: [O; 2],
+        stack_size: Option<usize>,
+        step: impl FnMut(&mut Stamp, J, &mut S, &mut O) -> Step<D> + Send + 'static,
     ) -> std::io::Result<Self> {
         Self::spawn(state, slots, stack_size, 1, |jobs, done| {
             Self::work_loop(jobs, done, step);
@@ -189,10 +203,10 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
     fn work_loop(
         jobs: Receiver<Job<J, S, O>>,
         done: SyncSender<Done<S, O, D>>,
-        mut step: impl FnMut(Stamp, J, &mut S, &mut O) -> Step<D>,
+        mut step: impl FnMut(&mut Stamp, J, &mut S, &mut O) -> Step<D>,
     ) {
         while let Ok(Job { input, mut work }) = jobs.recv() {
-            let step = step(work.stamp, input, &mut work.state, &mut work.output);
+            let step = step(&mut work.stamp, input, &mut work.state, &mut work.output);
             if done.send(Done { work, step }).is_err() {
                 break;
             }
@@ -304,21 +318,56 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
             .map_err(PipelineError::Owner)
     }
 
+    /// The viewer retains the displayed output while the other slot is in flight.
+    pub(crate) fn submit_viewer(
+        &mut self,
+        slot: usize,
+        stamp: Stamp,
+        input: J,
+    ) -> Result<(), PipelineError<std::convert::Infallible>> {
+        self.submit(slot, stamp, input)
+    }
+
+    pub(crate) fn join_viewer(
+        &mut self,
+    ) -> Result<(Stamp, &mut O), PipelineError<std::convert::Infallible>> {
+        let Done { work, step } = self.join()?;
+        assert!(matches!(step, Step::Complete));
+        self.state = Some(work.state);
+        self.slots[work.slot] = Some(work.output);
+        Ok((work.stamp, self.slots[work.slot].as_mut().unwrap()))
+    }
+
     /// W0 uses a single idle slot and returns state before the owner resumes.
     /// A continuation of the same frame uses the same capture stamp.
-    pub fn run_blocked(&mut self, stamp: Stamp, input: J, timed: bool)
-        -> Result<(Stamp, Step<D>, &mut O, Option<BlockedTimes>), PipelineError<std::convert::Infallible>>
-    {
+    pub fn run_blocked(
+        &mut self,
+        stamp: Stamp,
+        input: J,
+        timed: bool,
+    ) -> Result<
+        (Stamp, Step<D>, &mut O, Option<BlockedTimes>),
+        PipelineError<std::convert::Infallible>,
+    > {
         let submit_start = timed.then(Instant::now);
         self.submit(0, stamp, input)?;
         let join_start = timed.then(Instant::now);
         let Done { work, step } = self.join()?;
-        let times = submit_start.zip(join_start).map(|(submit_start, join_start)| BlockedTimes {
-            submit_start, join_start, join_end: Instant::now(),
-        });
+        let times = submit_start
+            .zip(join_start)
+            .map(|(submit_start, join_start)| BlockedTimes {
+                submit_start,
+                join_start,
+                join_end: Instant::now(),
+            });
         self.state = Some(work.state);
         self.slots[work.slot] = Some(work.output);
-        Ok((work.stamp, step, self.slots[work.slot].as_mut().unwrap(), times))
+        Ok((
+            work.stamp,
+            step,
+            self.slots[work.slot].as_mut().unwrap(),
+            times,
+        ))
     }
 
     fn dispatch<E>(&mut self, slot: usize, frame: Frame, input: J) -> Result<(), PipelineError<E>> {
@@ -388,8 +437,8 @@ impl<J, S, O, D> Pipeline<J, S, O, D> {
     }
 }
 
-impl<J, S, O, D> Drop for Pipeline<J, S, O, D> {
-    fn drop(&mut self) {
+impl<J, S, O, D> Pipeline<J, S, O, D> {
+    pub(crate) fn finish_worker(&mut self) {
         if let Err(panic) = self.close_and_join() {
             if !thread::panicking() {
                 resume_unwind(panic);
@@ -404,6 +453,12 @@ impl<J, S, O, D> Drop for Pipeline<J, S, O, D> {
             // A custom panic payload can itself panic when dropped.
             std::mem::forget(panic);
         }
+    }
+}
+
+impl<J, S, O, D> Drop for Pipeline<J, S, O, D> {
+    fn drop(&mut self) {
+        self.finish_worker();
     }
 }
 

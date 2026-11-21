@@ -14,11 +14,24 @@ use anyhow::{anyhow, Result};
 pub(super) enum Input {
     A(StepAInput),
     B(StepBInput, Option<AcousticView>, Option<bool>),
+    Lag(
+        StepAInput,
+        StepBInput,
+        Option<AcousticView>,
+        Option<bool>,
+        Option<super::lag_control::Peer>,
+    ),
 }
+
+pub(super) type Seal = (Stamp, crate::replay::OwnedProbe);
 
 pub(super) enum Output {
     A(Result<(bool, super::step::Due)>),
-    B(Result<(StepView, AcousticView, Option<crate::replay::OwnedProbe>)>),
+    B(Result<(StepView, AcousticView, Stamp, Option<Seal>)>),
+    Lag(
+        Result<(bool, super::step::Due)>,
+        Option<Result<(StepView, AcousticView, Stamp, Option<Seal>)>>,
+    ),
 }
 
 impl Input {
@@ -26,6 +39,7 @@ impl Input {
         match self {
             Self::A(_) => Cut::A,
             Self::B(..) => Cut::B,
+            Self::Lag(..) => Cut::Lag,
         }
     }
 }
@@ -45,14 +59,42 @@ struct Reply {
     job: StepJob,
     output: Output,
     rows: WorkerRows,
+    late_lines: Option<crate::spike_log::WorkerLateLines>,
     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
     probe: crate::sim_maps::probe::StepRows,
 }
 
 pub(super) struct Worker {
     pipeline: Pipeline<Request, (), Option<Reply>, ()>,
+    flight: Option<Flight>,
+    next_slot: usize,
+    events: bool,
+}
+
+struct Flight {
+    stamp: Stamp,
+    cut: Cut,
+    timing: Option<Clock>,
     #[cfg(not(target_os = "vita"))]
-    pub(super) wrong_stamp: Option<WrongStamp>,
+    _owner: crate::character::skinning::identity::OwnerStep,
+}
+
+#[derive(Default)]
+struct StackReport(Option<Stamp>);
+
+impl StackReport {
+    fn sampled(&mut self, stamp: Stamp) {
+        self.0 = Some(stamp);
+    }
+}
+
+impl Drop for StackReport {
+    fn drop(&mut self) {
+        #[cfg(target_os = "vita")]
+        if let Some(stamp) = self.0 {
+            sim_audit::stack_sample(stamp);
+        }
+    }
 }
 
 impl Worker {
@@ -70,7 +112,8 @@ impl Worker {
         #[cfg(not(target_os = "vita"))]
         let wrong_stamp = WrongStamp::from_env()?;
         #[cfg(all(target_os = "vita", feature = "vita_renderer"))]
-        let sample_stack = crate::render::vita_renderer::config().diag_snapshot_log == Some(true);
+        let sample_stack = crate::render::vita_renderer::config().diag_sim_timing
+            || crate::render::vita_renderer::config().diag_snapshot_log == Some(true);
         #[cfg(not(target_os = "vita"))]
         let sample_stack = audit.depth;
         #[cfg(all(target_os = "vita", not(feature = "vita_renderer")))]
@@ -89,13 +132,17 @@ impl Worker {
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         let report_slots = audit.depth;
         let mut initialized = false;
-        let worker = Pipeline::new(
+        let events = audit.diagnose();
+        let mut stack_report = StackReport::default();
+        let worker = Pipeline::new_with_reply_stamp(
             (),
             [None, None],
             Some(stack),
-            move |stamp, request: Request, _, slot| {
+            move |reply_stamp, request: Request, _, slot| {
+                let stamp = *reply_stamp;
                 let worker_start = sim_timing::mark(request.timing.is_some());
                 if !initialized {
+                    crate::character::skinning::identity::enter_sim_worker();
                     crate::skin_worker::pin_reserved_cpu1();
                     #[cfg(target_os = "vita")]
                     crate::frame_profile::setup_worker();
@@ -103,7 +150,8 @@ impl Worker {
                         crate::spike_log::setup_worker();
                     }
                     if sample_stack {
-                        crate::skin_worker::inventory("sim-pipeline", Some(0x20000));
+                        #[cfg(target_os = "vita")]
+                        crate::skin_worker::startup_inventory("sim-pipeline");
                         sim_audit::begin_stack_sampling();
                     } else {
                         #[cfg(target_os = "vita")]
@@ -142,6 +190,9 @@ impl Worker {
                 let _lazy_profile = crate::collision::lazy_profile::enter(
                     crate::collision::lazy_profile::Lane::Worker,
                 );
+                if events {
+                    sim_audit::event("worker", stamp);
+                }
                 let cut = input.cut();
                 if details.phase {
                     crate::phase_census::worker_begin();
@@ -157,47 +208,86 @@ impl Worker {
                     #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
                     frame: None,
                 };
-                let step_row;
-                let (job, output) = match input {
-                    Input::A(input) => {
-                        let begin = sim_timing::mark(timing.is_some());
-                        let (job, due) = step_a(job, input, &mut scopes);
-                        drop(scopes);
-                        step_row = timing
-                            .and_then(|clock| clock.finish(stamp, Scope::StepA, Some(cut), begin));
-                        (job, Output::A(due))
-                    }
-                    Input::B(input, mut acoustic, seal) => {
-                        let map = seal.map(|_| input.map_name.clone());
-                        let begin = sim_timing::mark(timing.is_some());
-                        let (job, view) = step_b(job, input, &mut scopes);
-                        drop(scopes);
-                        step_row = timing
-                            .and_then(|clock| clock.finish(stamp, Scope::StepB, Some(cut), begin));
-                        job.sim.world.capture_acoustic_view(&mut acoustic);
-                        #[cfg(not(target_os = "vita"))]
-                        let view = StepView {
-                            stamp: WrongStamp::corrupt(wrong_stamp, "output", view.stamp),
-                            ..view
-                        };
-                        let seal = seal
-                            .map(|want_state| job.replay_probe(map.as_deref().unwrap(), want_state))
-                            .transpose();
-                        let output = match seal {
-                            Ok(seal) => {
-                                let acoustic = acoustic.unwrap();
-                                #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
-                                if report_slots {
-                                    report_payload(stamp, &view, &acoustic, seal.as_ref());
-                                }
-                                Ok((view, acoustic, seal))
+                let finish_b = |job,
+                                input: StepBInput,
+                                mut acoustic,
+                                seal: Option<bool>,
+                                scopes: &mut StepScopes| {
+                    let map = seal.map(|_| input.map_name.clone());
+                    let (job, view) = step_b(job, input, scopes);
+                    job.sim.world.capture_acoustic_view(&mut acoustic);
+                    #[cfg(not(target_os = "vita"))]
+                    let view = StepView {
+                        stamp: WrongStamp::corrupt(wrong_stamp, "output", view.stamp),
+                        ..view
+                    };
+                    let output = seal
+                        .map(|want_state| job.replay_probe(map.as_deref().unwrap(), want_state))
+                        .transpose()
+                        .map(|seal| {
+                            let acoustic = acoustic.unwrap();
+                            #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+                            if report_slots {
+                                report_payload(stamp, &view, &acoustic, seal.as_ref());
                             }
-                            Err(error) => Err(error),
+                            #[cfg(not(target_os = "vita"))]
+                            let corrupt = |field| WrongStamp::corrupt(wrong_stamp, field, stamp);
+                            #[cfg(target_os = "vita")]
+                            let corrupt = |_| stamp;
+                            (
+                                view,
+                                acoustic,
+                                corrupt("present"),
+                                seal.map(|probe| (corrupt("seal"), probe)),
+                            )
+                        });
+                    (job, output)
+                };
+                let begin = sim_timing::mark(timing.is_some());
+                let (job, output, step_scope) = match input {
+                    Input::A(input) => {
+                        let (job, due) = step_a(job, input, &mut scopes);
+                        (job, Output::A(due), Scope::StepA)
+                    }
+                    Input::B(input, acoustic, seal) => {
+                        let (job, output) = finish_b(job, input, acoustic, seal, &mut scopes);
+                        (job, Output::B(output), Scope::StepB)
+                    }
+                    Input::Lag(input, mut next, acoustic, seal, peer) => {
+                        if let Some(peer) = &peer {
+                            peer.enter();
+                            if events {
+                                sim_audit::event("worker_inner", stamp);
+                            }
+                        }
+                        let (job, due) = step_a(job, input, &mut scopes);
+                        let reply = if let Ok((story_active, super::step::Due::None)) = &due {
+                            assert_eq!(
+                                sim_audit::fp_control(),
+                                owner_fp,
+                                "sim worker FP control differs before cut B"
+                            );
+                            next.story_active = *story_active;
+                            let (job, output) = finish_b(job, next, acoustic, seal, &mut scopes);
+                            (job, Output::Lag(due, Some(output)), Scope::StepLag)
+                        } else {
+                            (job, Output::Lag(due, None), Scope::StepLag)
                         };
-                        (job, Output::B(output))
+                        if let Some(peer) = peer {
+                            if events {
+                                sim_audit::event("worker_inner_end", stamp);
+                            }
+                            peer.leave();
+                        }
+                        reply
                     }
                 };
+                drop(scopes);
+                let step_row =
+                    timing.and_then(|clock| clock.finish(stamp, step_scope, Some(cut), begin));
                 if sample_stack {
+                    stack_report.sampled(stamp);
+                    #[cfg(not(target_os = "vita"))]
                     sim_audit::stack_sample(stamp);
                 }
                 #[cfg(not(target_os = "vita"))]
@@ -208,7 +298,12 @@ impl Worker {
                 #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                 probe.swap();
                 let phase = details.phase.then(crate::phase_census::worker_finish);
-                let spike = details.spike.then(crate::spike_log::worker_finish);
+                let (spike, late_lines) = if details.spike {
+                    let (row, lines) = crate::spike_log::worker_finish();
+                    (timing.is_some().then_some(row), Some(lines))
+                } else {
+                    (None, None)
+                };
                 let profile = details.profile.then(crate::frame_profile::worker_finish);
                 let details =
                     (phase.is_some() || spike.is_some() || profile.is_some()).then(|| {
@@ -225,6 +320,7 @@ impl Worker {
                 *slot = Some(Reply {
                     job,
                     output,
+                    late_lines,
                     rows: WorkerRows {
                         work,
                         step: step_row,
@@ -233,14 +329,19 @@ impl Worker {
                     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                     probe,
                 });
+                #[cfg(not(target_os = "vita"))]
+                {
+                    *reply_stamp = WrongStamp::corrupt(wrong_stamp, "transport", stamp);
+                }
                 Step::Complete
             },
         )?;
         println!("[lg/sim-overlap] mode=W0 stack_bytes={stack}");
         Ok(Self {
             pipeline: worker,
-            #[cfg(not(target_os = "vita"))]
-            wrong_stamp,
+            flight: None,
+            next_slot: 0,
+            events,
         })
     }
 
@@ -251,43 +352,73 @@ impl Worker {
         input: Input,
         trace: &mut Trace,
     ) -> Result<(StepJob, Output)> {
-        let expected = job.stamp;
+        self.submit(job, clock, input, trace)?;
+        self.join(trace)
+    }
+
+    pub(super) fn submit(
+        &mut self,
+        job: StepJob,
+        clock: ClockView,
+        input: Input,
+        trace: &mut Trace,
+    ) -> Result<()> {
+        assert!(self.flight.is_none(), "sim slot still in flight");
+        let stamp = job.stamp;
         let cut = input.cut();
-        let timing = trace.clock(expected.frame.frame);
-        let details = timing.map_or_else(DetailSpec::default, |_| DetailSpec {
-            phase: crate::phase_census::active(),
+        let timing = trace.clock(stamp.frame.frame);
+        let started = trace.mark(stamp.frame.frame);
+        let details = DetailSpec {
+            phase: timing.is_some() && crate::phase_census::active(),
             spike: crate::spike_log::on(),
             profile: crate::frame_profile::enabled(),
-        });
+        };
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         let mut probe = crate::sim_maps::probe::StepRows::default();
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         probe.swap();
-        #[cfg(not(target_os = "vita"))]
-        let _owner = crate::character::skinning::identity::OwnerStep::begin();
-        let (stamp, _, slot, blocked_times) = self
-            .pipeline
-            .run_blocked(
-                expected,
+        let flight = Flight {
+            stamp,
+            cut,
+            timing,
+            #[cfg(not(target_os = "vita"))]
+            _owner: crate::character::skinning::identity::OwnerStep::begin(),
+        };
+        self.pipeline
+            .submit_viewer(
+                self.next_slot,
+                stamp,
                 Request {
                     job,
                     clock,
-                    owner_fp: sim_audit::fp_control(),
-                    timing,
-                    details,
                     input,
+                    details,
+                    timing,
+                    owner_fp: sim_audit::fp_control(),
                     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                     probe,
                 },
-                timing.is_some(),
             )
-            .map_err(|error| anyhow!("W0 sim worker: {error:?}"))?;
+            .map_err(|error| anyhow!("sim worker submit: {error:?}"))?;
+        self.next_slot ^= 1;
+        self.flight = Some(flight);
+        trace.owner(stamp, Scope::Submit, Some(cut), started);
+        Ok(())
+    }
+
+    pub(super) fn join(&mut self, trace: &mut Trace) -> Result<(StepJob, Output)> {
+        let flight = self.flight.take().expect("sim join without submit");
+        let expected = flight.stamp;
+        let started = trace.mark(expected.frame.frame);
+        let (stamp, slot) = self
+            .pipeline
+            .join_viewer()
+            .map_err(|error| anyhow!("sim worker join: {error:?}"))?;
+        trace.owner(expected, Scope::Join, Some(flight.cut), started);
         let reply = slot.take().expect("missing blocked step reply");
-        #[cfg(not(target_os = "vita"))]
-        let stamp = WrongStamp::corrupt(self.wrong_stamp, "transport", stamp);
         assert_eq!(stamp, expected, "stale sim transport stamp");
         assert_eq!(reply.job.stamp, expected, "stale sim state stamp");
-        if let Output::B(Ok((view, _, _))) = &reply.output {
+        if let Output::B(Ok((view, ..))) | Output::Lag(_, Some(Ok((view, ..)))) = &reply.output {
             assert_eq!(view.stamp, expected, "stale sim output stamp");
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -295,24 +426,33 @@ impl Worker {
             let mut probe = reply.probe;
             probe.swap();
         }
-        if let Some((clock, times)) = timing.zip(blocked_times) {
-            trace.push(Some(clock.interval(
-                expected,
-                Scope::Submit,
-                Some(cut),
-                times.submit_start,
-                times.join_start,
-            )));
-            trace.push(Some(clock.interval(
-                expected,
-                Scope::Join,
-                Some(cut),
-                times.join_start,
-                times.join_end,
-            )));
+        if let Some(lines) = reply.late_lines {
+            lines.append();
         }
-        trace.worker(expected, reply.rows);
+        #[cfg(target_os = "vita")]
+        if let Some(profile) = reply
+            .rows
+            .details
+            .as_ref()
+            .and_then(|detail| detail.profile.as_ref())
+        {
+            crate::frame_profile::merge_worker_counters(profile);
+        }
+        if flight.timing.is_some() {
+            trace.worker(expected, reply.rows);
+        }
         Ok((reply.job, reply.output))
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.pipeline.finish_worker();
+        if self.events {
+            if let Some(flight) = &self.flight {
+                sim_audit::event("discarded_in_flight", flight.stamp);
+            }
+        }
     }
 }
 

@@ -497,6 +497,9 @@ pub struct Config {
     pub replay_record: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub sim_overlap: bool,
+    /// Lag one is enabled only for these maps during a running replay.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sim_overlap_maps: Vec<String>,
     /// Buffer stamped simulation and presentation timings until viewer teardown.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub diag_sim_timing: bool,
@@ -733,6 +736,7 @@ impl Default for Config {
             route_world_wish: false,
             replay_record: String::new(),
             sim_overlap: false,
+            sim_overlap_maps: Vec::new(),
             diag_sim_timing: false,
             replay_play: String::new(),
             replay_start: String::new(),
@@ -803,6 +807,10 @@ impl Config {
         ensure!(self.spike_log_last_frame == 0 || self.spike_log_last_frame >= self.spike_log_first_frame, "invalid spike frame window");
         ensure!(!self.sim_overlap || self.replay_record.is_empty(), "replay_record and sim_overlap are exclusive");
         ensure!(!self.sim_overlap || self.renderer == "vita", "sim_overlap requires renderer=vita");
+        ensure!(self.sim_overlap_maps.is_empty() || (self.sim_overlap && !self.replay_play.is_empty()),
+            "sim_overlap_maps requires sim_overlap and a replay tape");
+        ensure!(self.sim_overlap_maps.iter().all(|map| map == "potears2"),
+            "lag-one overlap is available on potears2 only");
         crate::replay::validate_settings(&crate::replay::Settings { record: self.replay_record.clone(),
             play: self.replay_play.clone(), start: self.replay_start.clone(), check_every: self.replay_check_every,
             state_every: self.replay_state_every, stop_after: self.replay_stop_after })?;
@@ -4810,6 +4818,24 @@ mod tests {
         let both = br#"{"replay_record":"play.lgtape","replay_start":"chapter:potears2","sim_overlap":true}"#;
         let error = parse_runtime_config(both).err().expect("recording with overlap was accepted");
         assert_eq!(error.to_string(), "replay_record and sim_overlap are exclusive");
+    }
+
+    #[test]
+    fn lag_one_requires_an_explicit_potears2_replay() {
+        let mut config = Config {
+            sim_overlap: true,
+            skin_overlap: true,
+            skin_workers: 1,
+            audio_pcm_worker: true,
+            sim_overlap_maps: vec!["potears2".into()],
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+        config.replay_play = "a2-04.lgtape".into();
+        assert!(config.validate().is_ok());
+        config.sim_overlap_maps.push("potears1".into());
+        assert!(config.validate().is_err());
+        assert!(serde_json::to_value(Config::default()).unwrap().get("sim_overlap_maps").is_none());
     }
 
     #[test]

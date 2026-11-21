@@ -943,7 +943,7 @@ fn shutdown_releases_worker_blocked_sending_done() {
         let (unblocked, result) = sync_channel(1);
         let mut pipeline =
             TestPipeline::spawn(State::default(), slots(), None, 0, move |jobs, done| {
-                let step = worker(
+                let mut step = worker(
                     trace,
                     |_| {},
                     |_| {},
@@ -955,7 +955,9 @@ fn shutdown_releases_worker_blocked_sending_done() {
                 );
                 // With a zero-capacity Done channel, joining before disconnect
                 // would hang: no owner receives the second result.
-                TestPipeline::work_loop(jobs, done, step);
+                TestPipeline::work_loop(jobs, done, |stamp, input, state, output| {
+                    step(*stamp, input, state, output)
+                });
                 unblocked.send(()).unwrap();
             })
             .unwrap();

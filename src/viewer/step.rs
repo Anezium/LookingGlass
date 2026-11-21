@@ -167,6 +167,7 @@ pub(super) struct StepAInput {
 
 pub(super) struct StepBInput {
     pub(super) story_active: bool,
+    pub(super) dispatched: bool,
     pub(super) map_name: String,
     pub(super) preferences: Arc<crate::preferences::Preferences>,
     pub(super) aspect: f32,
@@ -972,6 +973,7 @@ pub(super) fn step_b(mut job: StepJob, input: StepBInput, scopes: &mut StepScope
     } = *step;
     let StepBInput {
         story_active,
+        dispatched,
         map_name,
         preferences,
         aspect,
@@ -1061,6 +1063,9 @@ pub(super) fn step_b(mut job: StepJob, input: StepBInput, scopes: &mut StepScope
             .and_then(|s| s.return_visit.as_ref())
             .is_some_and(|s| s.camera().is_some());
     if simulate && sim.camera_handoff.was_scripted() && !still_scripted {
+        if handoff_pose.is_some() {
+            assert!(!dispatched, "dispatched step consumed a draw-produced handoff pose");
+        }
         if !sim.third_person {
             sim.camera_handoff.skip();
         }

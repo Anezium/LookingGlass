@@ -2271,7 +2271,7 @@ impl SnapshotRegistry {
     }
 
     fn retire(&mut self) {
-        self.generation = crate::character::skinning::identity::next_instance();
+        self.generation = crate::character::skinning::identity::next_art_instance();
         self.slots.clear(); self.owned_slots.clear();
     }
 }

@@ -11,6 +11,7 @@ pub(crate) struct ActorId(u64);
 thread_local! {
     #[cfg(not(target_os = "vita"))]
     static OWNER_STEP_IN_FLIGHT: Cell<bool> = const { Cell::new(false) };
+    static SIM_WORKER: Cell<bool> = const { Cell::new(false) };
     static CURRENT: Cell<Option<ActorId>> = const { Cell::new(None) };
 }
 #[cfg(not(target_os = "vita"))]
@@ -31,21 +32,28 @@ impl Drop for OwnerStep {
     }
 }
 
-fn allocate(counter: &AtomicU64, overflow: &str) -> u64 {
+fn guard_actor_allocation() {
     #[cfg(not(target_os = "vita"))]
     OWNER_STEP_IN_FLIGHT.with(|flag| {
         assert!(!flag.get(), "owner allocated a skin identity while a sim step was in flight");
     });
-    counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .expect(overflow)
 }
 
-pub(crate) fn next_instance() -> u64 {
-    allocate(&NEXT_INSTANCE, "skin instance overflow")
+pub(crate) fn enter_sim_worker() {
+    SIM_WORKER.set(true);
+}
+
+// Render instances and publication generations are allocated on the owner.
+pub(crate) fn next_art_instance() -> u64 {
+    assert!(!SIM_WORKER.get(), "sim worker allocated an art instance");
+    NEXT_INSTANCE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("skin instance overflow")
 }
 impl Default for ActorId {
     fn default() -> Self {
-        Self(allocate(&NEXT, "skin actor identity overflow"))
+        guard_actor_allocation();
+        Self(NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("skin actor identity overflow"))
     }
 }
 impl ActorId {

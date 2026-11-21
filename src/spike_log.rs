@@ -271,8 +271,9 @@ pub(crate) fn worker_begin(number: u64) {
     });
 }
 
-pub(crate) fn worker_finish() -> WorkerRow {
-    FRAME.with(|frame| {
+pub(crate) fn worker_finish() -> (WorkerRow, WorkerLateLines) {
+    let lines = OUT.with(|out| WorkerLateLines(std::mem::take(&mut *out.borrow_mut())));
+    let row = FRAME.with(|frame| {
         let mut frame = std::mem::replace(&mut *frame.borrow_mut(), Frame { worker: true, ..Frame::default() });
         frame.close_block(Instant::now());
         WorkerRow {
@@ -281,7 +282,22 @@ pub(crate) fn worker_finish() -> WorkerRow {
             npc: frame.npc.into_iter().flatten().collect(),
             planners: frame.planners, flight_work: frame.flight_work,
         }
-    })
+    });
+    (row, lines)
+}
+
+pub(crate) struct WorkerLateLines(Out);
+
+impl WorkerLateLines {
+    pub(crate) fn append(self) {
+        OUT.with(|out| {
+            let mut out = out.borrow_mut();
+            out.dropped += self.0.dropped;
+            for line in self.0.text.lines() {
+                out.push(|text| text.push_str(line));
+            }
+        });
+    }
 }
 
 /// Writes the buffered lines, one record each, then one `[lg/spike] flushed` line with the count,
@@ -377,15 +393,14 @@ pub(crate) fn late(kind: usize, ms: f64, name: Option<&str>, bytes: Option<usize
         f.ms[kind] += ms;
         (f.number, f.begin.is_some(), f.worker)
     });
-    // The cut reply includes worker totals. No stdout or owner buffer use here.
-    if worker { return; }
+
     let write = |line: &mut String| {
         let _ = write!(line, "[lg/late-work] frame={number} kind={} ms={ms:.2}", KINDS[kind]);
         if let Some(b) = bytes { let _ = write!(line, " bytes={b}"); }
         if let Some(n) = name { let _ = write!(line, " name={n}"); }
     };
     // Outside play (before the first frame, or after the viewer loop) the line is written at once.
-    if playing {
+    if playing || worker {
         OUT.with(|o| o.borrow_mut().push(write));
     } else {
         let mut line = String::new();

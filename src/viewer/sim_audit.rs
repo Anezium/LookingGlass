@@ -27,6 +27,23 @@ impl Audit {
         self.rows || self.snapshot_census
     }
 
+    pub(super) fn event(&self, event: &str, stamp: Stamp) {
+        if self.rows {
+            self::event(event, stamp);
+        }
+    }
+
+    pub(super) fn drain(&self, last: Option<u64>, frames: u64) {
+        if self.rows {
+            println!(
+                "SIM_EVENT {}",
+                serde_json::json!({
+                    "event": "final_drain", "last_present": last, "frames": frames,
+                })
+            );
+        }
+    }
+
     pub(super) fn seal_consumed(&self, stamp: Stamp, check: bool) {
         if self.rows {
             println!(
@@ -98,6 +115,17 @@ impl Audit {
     }
 }
 
+pub(super) fn event(event: &str, stamp: Stamp) {
+    println!(
+        "SIM_EVENT {}",
+        serde_json::json!({
+            "event": event, "frame": stamp.frame.frame, "tape_step": stamp.frame.tape_step,
+            "visit": stamp.frame.visit_id, "generation": stamp.slot_generation,
+            "thread": format!("{:?}", std::thread::current().id()),
+        })
+    );
+}
+
 /// Only control bits participate: exception status flags may differ after work.
 #[cfg(target_os = "vita")]
 pub(super) fn fp_control() -> u32 {
@@ -106,7 +134,7 @@ pub(super) fn fp_control() -> u32 {
     unsafe {
         core::arch::asm!("vmrs {}, fpscr", out(reg) value, options(nomem, nostack, preserves_flags));
     }
-    value & 0x07ff_9f00
+    value & 0x07ff_df00
 }
 
 #[cfg(all(not(target_os = "vita"), target_arch = "aarch64"))]
