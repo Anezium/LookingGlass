@@ -362,8 +362,14 @@ pub struct Input {
 }
 impl Input {
     pub fn update(&mut self, prefs: &Preferences, focused: bool) {
-        let mut raw = self.slot.and_then(read_pad);
-        if raw.is_none() && get_time() >= self.retry {
+        // The host probe disables live input. Playback still owns its taped controls.
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let tape_controls = crate::sim_maps::probe::enabled() && crate::replay::input::replaying();
+        #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+        let tape_controls = false;
+
+        let mut raw = if tape_controls { None } else { self.slot.and_then(read_pad) };
+        if !tape_controls && raw.is_none() && get_time() >= self.retry {
             self.slot = (0..4).find(|i| {
                 if let Some(p) = read_pad(*i) {
                     raw = Some(p);
@@ -374,6 +380,7 @@ impl Input {
             });
             self.retry = get_time() + 1.;
         }
+        let focused = focused || tape_controls;
         self.disconnected = self.pad.connected && raw.is_none() && self.using_pad;
         self.pad
             .update(raw, focused, prefs.pad_deadzone, get_frame_time().min(0.1));
