@@ -1,6 +1,6 @@
 //! Whole additive packets whose preceding skin draw has already written opaque
 //! alpha and identical depth. Keep mixed-alpha parts on the original route.
-use super::{actor_lean, Pass, UNIFORM_FLOATS};
+use super::*;
 use crate::texture::RgbaImage;
 use macroquad::{miniquad::TextureId, prelude::*};
 use std::{cell::RefCell, collections::HashMap};
@@ -10,6 +10,7 @@ struct TextureProof {
     blocks: [u64; 64],
     side: u16,
     glow: bool,
+    opaque: bool,
 }
 
 thread_local! {
@@ -47,6 +48,7 @@ pub(crate) fn note_texture(path: &str, texture: &Texture2D, image: &RgbaImage) {
         }
         table.insert(texture.raw_miniquad_id(), TextureProof {
             texture: texture.weak_clone(), blocks, side, glow,
+            opaque: glow && image.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255),
         });
     });
 }
@@ -84,17 +86,25 @@ fn bounded(position: Vec3) -> bool {
     position.is_finite() && position.abs().max_element() <= 8192.
 }
 
+fn compatible_pair(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &Pass, gu: &[f32; UNIFORM_FLOATS]) -> bool {
+    !base.effect && !glow.effect
+        && base.blend_index == 1 && glow.blend_index == 2 && !base.depth_equal && !glow.depth_equal
+        && base.cutout == 1. && glow.cutout == 0. && glow.fog == 1.
+        && !base.clamp && !glow.clamp && base.gain.w == 1. && glow.gain == Vec4::ONE
+        && bu[..32] == gu[..32] && bu[..32].iter().all(|x| x.is_finite())
+        && bu[48..52] == [0.; 4] && gu[48..52] == [0.; 4]
+        && actor_lean::admitted(base, bu) && actor_lean::admitted(glow, gu)
+}
+
+fn bounded_fog(gu: &[f32; UNIFORM_FLOATS]) -> bool {
+    gu[122] <= 0. && gu[126] <= 0.
+        && ![gu[136], gu[146]].into_iter().any(|w| w > 0. && w < 1.)
+        && gu[116..].iter().all(|v| v.abs() <= 8192.)
+}
+
 /// The caller checks that both draws select the same linked lean program.
 pub(super) fn certified(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &Pass, gu: &[f32; UNIFORM_FLOATS], same_slot: bool) -> bool {
-    if base.effect || glow.effect
-        || base.blend_index != 1 || glow.blend_index != 2 || base.depth_equal || glow.depth_equal
-        || base.cutout != 1. || glow.cutout != 0. || glow.fog != 1.
-        || base.clamp || glow.clamp || base.gain.w != 1. || glow.gain != Vec4::ONE
-        || bu[..32] != gu[..32] || !bu[..32].iter().all(|x| x.is_finite())
-        || bu[48..52] != [0.; 4] || gu[48..52] != [0.; 4]
-        || !actor_lean::admitted(base, bu) || !actor_lean::admitted(glow, gu) {
-        return false;
-    }
+    if !compatible_pair(base, bu, glow, gu) { return false; }
     let (Some(base_texture), Some(glow_texture)) = (&base.mesh.texture, &glow.mesh.texture) else {
         return false;
     };
@@ -136,4 +146,104 @@ pub(super) fn certified(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &Pass, gu
             base_proof.contains(min, max) && glow_proof.contains(min, max)
         })
     })
+}
+
+/// The load-time material owns the reduced stream alongside its two textures.
+/// The original stream stays available for the base and for a refused pair.
+pub(crate) struct Subset {
+    buffer: Option<BufferId>,
+    original: usize,
+    kept: usize,
+}
+
+impl Drop for Subset {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer {
+            unsafe { get_internal_gl() }.quad_context.delete_buffer(buffer);
+        }
+    }
+}
+
+impl Subset {
+    pub(crate) fn load(surface: &super::super::Surface, source: &crate::skeletal::Surface) -> Option<Self> {
+        let [base, glow] = surface.layers.as_slice() else { return None; };
+        let [base_image] = base.textures.as_slice() else { return None; };
+        let [glow_image] = glow.textures.as_slice() else { return None; };
+        let simple_opaque_alpha = |layer: &super::super::Layer| {
+            super::super::actor_cache::simple(&layer.stage) && !layer.stage.vertex_alpha
+        };
+        if surface.transparent || base.stage.blend != crate::materials::Blend::Alpha
+            || glow.stage.blend != crate::materials::Blend::Add
+            || !simple_opaque_alpha(base) || !simple_opaque_alpha(glow)
+            || source.indices.len() % 3 != 0 {
+            return None;
+        }
+        let kept = TEXTURES.with(|table| {
+            let table = table.borrow();
+            let base = table.get(&base_image.raw_miniquad_id())
+                .filter(|proof| !proof.glow && proof.texture == base_image.weak_clone())?;
+            let glow = table.get(&glow_image.raw_miniquad_id())
+                .filter(|proof| proof.glow && proof.opaque && proof.texture == glow_image.weak_clone())?;
+            let mut kept = Vec::new();
+            for triangle in source.indices.chunks_exact(3) {
+                let a = source.vertices.get(usize::from(triangle[0]))?.uv;
+                let b = source.vertices.get(usize::from(triangle[1]))?.uv;
+                let c = source.vertices.get(usize::from(triangle[2]))?.uv;
+                let omit = a.is_finite() && b.is_finite() && c.is_finite() && {
+                    let min = a.min(b).min(c);
+                    let max = a.max(b).max(c);
+                    base.contains(min, max) && glow.contains(min, max)
+                };
+                if !omit {
+                    kept.extend_from_slice(triangle);
+                }
+            }
+            Some(kept)
+        })?;
+        let original = source.indices.len();
+        let omitted = (original - kept.len()) / 3;
+        println!("[lg/actor-glow-subset] surface={} triangles={} omitted={omitted}",
+            source.name, original / 3);
+        if omitted == 0 {
+            return None;
+        }
+        let buffer = (!kept.is_empty()).then(|| {
+            unsafe { get_internal_gl() }.quad_context.new_buffer(
+                BufferType::IndexBuffer, BufferUsage::Immutable, BufferSource::slice(&kept))
+        });
+        Some(Self { buffer, original, kept: kept.len() })
+    }
+
+    pub(super) fn draw_count(&self, full: BufferId) -> (BufferId, i32) {
+        (self.buffer.unwrap_or(full), self.kept as i32)
+    }
+
+    pub(super) fn record(&self, gpu: bool) {
+        let omitted = (self.original - self.kept) / 3;
+        count(if gpu { "vita_actor_glow_subset_gpu_triangles" } else { "vita_actor_glow_subset_cpu_triangles" },
+            omitted as u64);
+        crate::spike_log::actor_glow_subset(omitted as u32);
+    }
+}
+
+/// Accept only the live bindings from the same load-time recipe. Equal depth
+/// can leave a fractional-alpha base fragment on top of an opaque one. Its
+/// matching glow fragment stays in the list and saturates destination alpha.
+/// Other deleted fragments have already established their own opaque depth.
+pub(super) fn subset<'a>(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &'a Pass,
+    gu: &[f32; UNIFORM_FLOATS], same_slot: bool) -> Option<&'a Subset> {
+    let surface = glow.mesh.surface.as_ref()?;
+    let subset = surface.glow_subset.as_ref()?;
+    if !base.mesh.surface.as_ref().is_some_and(|b| std::rc::Rc::ptr_eq(b, surface))
+        || !compatible_pair(base, bu, glow, gu)
+        || base.geometry().indices.len() != subset.original
+        || glow.geometry().indices.len() != subset.original
+        || base.mesh.texture.as_ref() != surface.layers[0].textures.first()
+        || glow.mesh.texture.as_ref() != surface.layers[1].textures.first()
+        || !skin_pair(base, glow, same_slot)
+        || !bounded_fog(gu)
+        || (glow.gpu_skin.is_none() && (gu[136] > 0. || gu[146] > 0.)) {
+        return None;
+    }
+    Some(subset)
 }

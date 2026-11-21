@@ -103,6 +103,7 @@ mod tests {
         assert!(!discard_free(&p), "ordinary actors retain their original program");
         let layer=|environment|Layer {stage:Stage {environment,..Default::default()},textures:vec![],upload_identities:vec![]};
         p.mesh.surface=Some(Rc::new(Surface {
+            glow_subset: None,
             layers:vec![layer(true),layer(false)],
             transparent:false,preserve_skin:true,
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -112,6 +113,7 @@ mod tests {
         assert!(discard_free(&p), "two-stage environment+skin actor body");
         let pair=p.mesh.surface.take().unwrap();
         p.mesh.surface=Some(Rc::new(Surface {
+            glow_subset: None,
             layers:vec![layer(false),layer(false),layer(true)],
             transparent:false,preserve_skin:true,
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -120,6 +122,7 @@ mod tests {
         }));
         assert!(!discard_free(&p), "trailing environment prop keeps the original program");
         p.mesh.surface=Some(Rc::new(Surface {
+            glow_subset: None,
             layers:vec![layer(true)],
             transparent:false,preserve_skin:true,
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]

@@ -1575,12 +1575,21 @@ impl Model {
                 textures.insert(path, t.clone());
                 t
             };
-            material_layers.push(crate::render_fx::register_identified(
+            let surface = crate::render_fx::register_identified(
                 assets,
                 &tex.texture, Some(tex.upload_identity),
                 &[format!("{}/{skin}", data.def.path), skin.clone()],
                 specs,
-            )?);
+            )?;
+            #[cfg(feature="vita_renderer")]
+            let surface = {
+                let mut surface = surface;
+                if crate::render::vita_renderer::config().actor_glow_subset {
+                    crate::render_fx::certify_actor_glow_subset(&mut surface, s);
+                }
+                surface
+            };
+            material_layers.push(surface);
             meshes.push(Some(Mesh { upload_identity: Some(tex.upload_identity), surface: material_layers.last().cloned(),
                 vertices: s
                     .vertices

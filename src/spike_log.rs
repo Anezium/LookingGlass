@@ -60,6 +60,8 @@ struct Frame {
     ms: [f64; 7],
     #[cfg(feature = "vita_renderer")]
     actor_zero_glow: u32,
+    #[cfg(feature = "vita_renderer")]
+    actor_glow_subset: u32,
     /// The open simulation block and when it started.
     block: Option<(usize, Instant)>,
     sim_ms: [f64; SIM.len()],
@@ -189,6 +191,10 @@ impl Frame {
         if self.actor_zero_glow != 0 {
             let _ = write!(out, " actor_zero_glow={}", self.actor_zero_glow);
         }
+        #[cfg(feature = "vita_renderer")]
+        if self.actor_glow_subset != 0 {
+            let _ = write!(out, " actor_glow_subset_triangles={}", self.actor_glow_subset);
+        }
         if self.flight_work[0] > 0 {
             let [calls,tests,traversals,witnesses,short,free]=self.flight_work;
             let _=write!(out," flight_work={calls}/{tests}/{traversals}/{witnesses}/{short}/{free}");
@@ -289,6 +295,13 @@ fn mark(region: usize, set: impl FnOnce(&mut Frame, Instant)) {
 pub(crate) fn actor_zero_glow() {
     if on() {
         FRAME.with(|f| f.borrow_mut().actor_zero_glow += 1);
+    }
+}
+
+#[cfg(feature = "vita_renderer")]
+pub(crate) fn actor_glow_subset(triangles: u32) {
+    if on() {
+        FRAME.with(|f| f.borrow_mut().actor_glow_subset += triangles);
     }
 }
 /// One NPC kind's update this frame, from `npc::profile`: actors updated and milliseconds in think,

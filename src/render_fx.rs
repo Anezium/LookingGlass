@@ -880,6 +880,8 @@ struct Layer {
     upload_identities: Vec<Option<u64>>,
 }
 pub struct Surface {
+    #[cfg(feature="vita_renderer")]
+    glow_subset: Option<retained::zero_glow::Subset>,
     layers: Vec<Layer>,
     transparent: bool,
     preserve_skin: bool,
@@ -953,9 +955,20 @@ pub(crate) fn register_identified(
         transparent,
         #[cfg(feature="vita_renderer")]
         actors:RefCell::default(),
+        #[cfg(feature="vita_renderer")]
+        glow_subset: None,
     });
     Ok(surface)
 }
+/// The Puppet loader gives each mesh its own material recipe. Skinning changes
+/// positions, normals and lighting on this mesh while preserving its UVs and
+/// topology. Replacing the mesh or material also replaces the certificate.
+#[cfg(feature="vita_renderer")]
+pub(crate) fn certify_actor_glow_subset(surface: &mut Rc<Surface>, source: &crate::skeletal::Surface) {
+    let surface = Rc::get_mut(surface).expect("new actor material");
+    surface.glow_subset = retained::zero_glow::Subset::load(surface, source);
+}
+
 fn skin_stage_needs_normals(stage: &Stage) -> bool {
     stage.environment || stage.dot_alpha.is_some()
 }
@@ -1216,6 +1229,8 @@ pub(crate) mod test_support {
             layers, transparent,
             #[cfg(feature="vita_renderer")]
             actors: RefCell::default(),
+            #[cfg(feature="vita_renderer")]
+            glow_subset: None,
         });
         SURFACES.with(|s| s.borrow_mut().push((base.clone(), Rc::downgrade(&surface))));
         surface
@@ -1730,6 +1745,7 @@ mod tests {
             label: (false, None),
             layers: (0..3).map(|_| Layer { stage: Stage::default(), textures: Vec::new(), upload_identities: Vec::new() }).collect(),
             transparent: false, preserve_skin: false, actors: RefCell::default(),
+            glow_subset: None,
         });
         assert_eq!(crate::render::vita_renderer::config().actor_max_layers, 2);
         let per_draw = mesh.vertices.len() * 2;

@@ -749,7 +749,10 @@ impl Gpu {
         });
         }
     }
-    fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool, ant_dead: Option<bool>, zero_glow: bool) {
+    /// Return whether this packet used the cutout-preserving lean program.
+    #[allow(clippy::too_many_arguments)]
+    fn draw(&mut self, p: &Pass, slot: usize, u: &[f32; UNIFORM_FLOATS], depth_write: bool,
+        ant_dead: Option<bool>, zero_glow: bool, subset: Option<&zero_glow::Subset>) -> bool {
         let _owner = crate::render_tail::owner(if p.effect { crate::light_profile::RenderPhase::Fx } else { crate::light_profile::RenderPhase::Actors });
         let started = crate::render::vita_renderer::config().render_draw_timing
             .then(MetricInstant::now);
@@ -797,8 +800,8 @@ impl Gpu {
         if let Some(skin)=&p.gpu_skin {
             // Only the vertex program changes: keep the fragment route of the CPU twin.
             let variant = match program { Route::CorpseOpaque => 1, Route::ActorLean => 2, Route::ActorLeanOpaque => 3, _ => 0 };
-            self.skin.as_mut().expect("accepted skin program").draw(
-                p, skin, variant, u, depth_write, &self.white, c.actor_frontface_cull, zero_glow);
+            let lean = self.skin.as_mut().expect("accepted skin program").draw(
+                p, skin, variant, u, depth_write, &self.white, c.actor_frontface_cull, zero_glow, subset);
             // The skin program, pipeline and bindings replaced the CPU programs' state. Their
             // uniform values are per program in GL and stay valid: keep the field caches.
             self.submit_cache.interrupt();
@@ -812,7 +815,7 @@ impl Gpu {
             metrics.draws += 1; metrics.pipelines += 1; metrics.depth_states += 1; metrics.bindings += 1;
             metrics.texture_bind_slots += 3; metrics.uniform_uploads += 1;
             if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
-            return;
+            return lean;
         }
         // This draw applies another program's state: the next skin draw reapplies its own.
         if let Some(skin) = &mut self.skin { skin.interrupt_state(); }
@@ -840,10 +843,13 @@ impl Gpu {
         let ctx = unsafe { get_internal_gl() }.quad_context;
         let c = crate::render::vita_renderer::config();
         let b = &self.buffers[slot].bindings;
+        let subset = subset.filter(|_| program == Route::ActorLean);
+        let (index, index_count) = subset.map_or((b.index_buffer, p.geometry().indices.len() as i32),
+            |subset| subset.draw_count(b.index_buffer));
         let apply = if c.fx_submit_state_cache {
             // The lean program's pipelines are other state: offset its key past every blend.
             self.submit_cache.observe(submit_key(key, program, depth_write),
-                (self.buffers[slot].vertex, b.index_buffer, [b.images[0], b.images[1], b.images[2]]), u)
+                (self.buffers[slot].vertex, index, [b.images[0], b.images[1], b.images[2]]), u)
         } else { [true; 3] };
         let skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("state"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -859,7 +865,10 @@ impl Gpu {
         let skin_clock = (!p.effect).then(|| crate::character::skinning::timing::leaf("bindings"));
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let actor_leaf = (!p.effect).then(|| crate::character::skinning::census::leaf("bindings",p.mesh.texture.as_ref().map(Texture2D::raw_miniquad_id)));
-        if apply[1] { ctx.apply_bindings(b); self.stats.binding_sets += 1; }
+        if apply[1] {
+            ctx.apply_bindings_from_slice(&b.vertex_buffers, index, &b.images);
+            self.stats.binding_sets += 1;
+        }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         drop(actor_leaf);
         drop(skin_clock);
@@ -899,7 +908,13 @@ impl Gpu {
         #[cfg(all(feature="sim_maps_probe",target_os="macos"))]
         if crate::sim_maps::probe::skin_proof() {
             let m=p.geometry();
+            // The strict oracle checks that the original stream still uploads
+            // unchanged. Actual subset use is recorded separately below.
+            if index != b.index_buffer { ctx.apply_bindings(b); }
             let (vertices,indices)=crate::sim_maps::probe::gpu_geometry(m.vertices.len(),m.indices.len());
+            if index != b.index_buffer {
+                ctx.apply_bindings_from_slice(&b.vertex_buffers, index, &b.images);
+            }
             crate::sim_maps::probe::packet(slot,&vertices,&indices,&m.vertices,&m.indices,u,
                 &[p.effect as u32,p.blend_index as u32,p.depth_equal as u32,(!depth_write) as u32,
                     p.lit as u32,p.clamp as u32,p.cutout.to_bits(),p.cutout_reference.to_bits(),
@@ -918,8 +933,9 @@ impl Gpu {
                 macroquad::miniquad::gl::glEnable(0x0B44); // GL_CULL_FACE
                 macroquad::miniquad::gl::glCullFace(0x0404); // GL_FRONT; experimental authored winding
             } }
-            if emit_actor_geometry(zero_glow && program == Route::ActorLean) {
-                ctx.draw(0, p.geometry().indices.len() as i32, 1);
+            if emit_actor_geometry(zero_glow && subset.is_none() && program == Route::ActorLean) {
+                if let Some(subset) = subset { subset.record(false); }
+                if index_count != 0 { ctx.draw(0, index_count, 1); }
             }
             unsafe { if cull { macroquad::miniquad::gl::glDisable(0x0B44); } }
         }
@@ -952,6 +968,7 @@ impl Gpu {
                 apply[0],apply[1],traffic.calls,traffic.bytes,started.map_or(0,|t|t.elapsed().as_nanos()));
         }
         if let Some(started) = started { metrics.cpu_ns += started.elapsed().as_nanos() as u64; }
+        program == Route::ActorLean
     }
 }
 fn ring_slot(slot: usize, frame: usize, phase: usize, safe: bool) -> usize {
@@ -1750,6 +1767,7 @@ pub(crate) fn finish_world(
         let _census = crate::phase_census::span(if groups[id].passes.iter().all(|p| p.effect) {crate::phase_census::Region::FxSubmit} else {crate::phase_census::Region::ActorSubmit});
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         let census_start=crate::character::skinning::census::active().then(std::time::Instant::now);
+        let mut previous_lean = false;
         for i in ranges[id].clone() {
             let (group, pass, b, u) = &packets[i];
             #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
@@ -1781,7 +1799,19 @@ pub(crate) fn finish_world(
                     base_group == group && *base_pass == 0
                         && zero_glow::certified(&groups[*base_group].passes[*base_pass], base_uniforms, p, u, base_slot == b)
                 };
-            gpu.draw(p, *b, u, !groups[id].transparent, groups[id].ant_dead, zero_glow);
+            let subset = if c.actor_glow_subset && previous_lean && !groups[id].transparent
+                && *pass == 1 && ranges[id].len() == 2
+            {
+                let (base_group, base_pass, base_slot, base_uniforms) = &packets[i - 1];
+                if base_group == group && *base_pass == 0 {
+                    zero_glow::subset(&groups[*base_group].passes[*base_pass], base_uniforms, p, u, base_slot == b)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            previous_lean = gpu.draw(p, *b, u, !groups[id].transparent, groups[id].ant_dead, zero_glow, subset);
         }
         #[cfg(all(feature="sim_maps_probe",not(target_os="vita")))]
         if crate::character::skinning::census::active() && groups[id].passes.iter().any(|p|!p.effect) {
