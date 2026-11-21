@@ -610,6 +610,12 @@ pub(crate) struct AcousticView {
 }
 
 impl AcousticView {
+    #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+    pub(crate) fn owned_backing_bytes(&self) -> usize {
+        (self.dynamic.capacity() + self.settled_supports.capacity()) * std::mem::size_of::<Collider>()
+            + self.weapon_obstacles.capacity() * std::mem::size_of::<(usize, Collider)>()
+    }
+
     pub(crate) fn acoustic_scene_key(&self) -> usize {
         std::sync::Arc::as_ptr(&self.static_geometry) as usize
     }
@@ -1618,6 +1624,8 @@ impl World {
             .collect();
     }
     pub fn sweep_geometry(&self, start: Vec3, end: Vec3, half: Vec3) -> Trace {
+        #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
+        crate::viewer::sim_audit::sample_stack("sweep_geometry");
         let _census = crate::phase_census::query_sweep(self,start,end,half,2,None);
         self.npc_profile.sweep();
         crate::sim_maps::count("world_sweeps", 1);

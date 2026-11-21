@@ -578,6 +578,7 @@ dependencies = [
  "glam",
  "hound",
  "image",
+ "libc",
  "macroquad",
  "once_cell",
  "rodio",

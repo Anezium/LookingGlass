@@ -1,11 +1,11 @@
-# Step instrumentation ownership (I4)
+# Step instrumentation ownership (I5)
 
 Serial execution keeps the original thread and scopes. W0 runs the sites below on its blocked worker.
-Worker spike and phase timing belong to that thread. I5 owns arming and harvesting them. W0 returns the host frame spans, counters, NPC decision digests and mover rows through the job reply.
+Worker spike, census and frame-profile scopes begin and end on the worker when their diagnostics are active in the timing window. The reply carries completed, stamped rows. W0 also returns the host probe accumulators, including NPC decision digests and mover rows.
 Functional probe switches are process-wide. The worker installs the stamped frame number without touching GL.
 Frame boundaries, render instrumentation, and final probe serialization stay on the owner.
 
-| Site | Call | W0 or I5 handling |
+| Direct site | Call | W0 handling |
 |---|---|---|
 | `step.rs at 7caf763:102` | `crate::frame_profile::span(name));` | Worker-local harvest |
 | `step.rs at 7caf763:107` | `crate::phase_census::span(region));` | Worker-local harvest |
@@ -91,3 +91,35 @@ Frame boundaries, render instrumentation, and final probe serialization stay on 
 | `step.rs at 7caf763:1676` | `scopes.frame("frame_audio_mix");` | Worker-local harvest |
 | `step.rs at 7caf763:1677` | `crate::frame_profile::set_owner(crate::frame_profile::Owner::None);` | Worker-local harvest |
 | `step.rs at 7caf763:1678` | `crate::phase_census::set_owner(crate::phase_census::Owner::Other);` | Worker-local harvest |
+
+## W0 intervals and counters
+
+Private `diag_sim_timing` and the host probe switch `LOOKING_GLASS_SIM_TIMING` enable timing independently of snapshot acceptance. If supplied, the spike frame window selects zero-based viewer IDs for these rows. All clocks are monotonic wall clocks. Each row carries frame ID, tape step, visit, generation, lane and thread. The owner buffers completed rows until the loop closes. Runtimes that exceed the buffer report the dropped count.
+
+| Row | Lane | Boundaries |
+|---|---|---|
+| `head` | Owner | Loop entry through the hop decision, including capture and prologue |
+| `submit`, `join` | Owner | Channel send and blocking receive. Both identify cut A or B. |
+| `worker` | Worker | Request callback entry through reply preparation. Its endpoints are worker start and end. |
+| `step_a`, `step_b` | Executing lane | The simulation function and its scoped observations. The worker B envelope also includes acoustic capture and optional replay seal. A returned `Due` leaves cut B on the owner. |
+| `audio_apply` | Owner | Main post-step audio apply, including capture when a host control requests it |
+| `present` | Owner | Framework yield and return for the stamped image, including any pacing wait |
+| `present_without_yield` | Owner | Terminal capture/tail boundary when the loop exits without a framework yield |
+
+The owner logs one exclusive W0 outcome per viewer frame. W0 dispatch failures are also emitted as a separate set because one frame can fail several conditions. The stage-10 census records hop eligibility, dispatch and snapshot acceptance independently. The snapshot's original blockers still govern acceptance. Worker seals are counted at consumption and mid-step returns are counted at their first join. The host-only `LOOKING_GLASS_SIM_FORCE_CHECKPOINT` control selects a frame and exercises the normal checkpoint continuation after cut A.
+
+## Callee modules
+
+These routes are reachable from the step inventory above. Conditional diagnostics remain bound to their normal enable switches. Existing render, live bank, audio playback and GPU counters stay on their owning paths.
+
+| Callee or route | Instruments and execution |
+|---|---|
+| `collision.rs` world, static and dynamic sweeps | `query_sweep`, `query_category`, static traversal/repeat and publication census. `DynamicSweep::sweep`, geometry and clipping feed render-independent hot frame counters plus sim-map counts. Worker census and frame-profile rows carry these separately from owner audio rays. Host SAH records are part of the returned probe. |
+| `collision/model_shape.rs` placement, candidate, bevel and full-hull builders | Host sim-map candidate and hull work counts. Vita `collider_lazy_build` and `LazyHullBuilds` run where the initializer runs. In overlap mode each racing initializer attempt counts as work, including one whose result is discarded. `found_published` counts cold callers that found a published result without building, and measures elapsed call time. |
+| `skeletal.rs` to `character/skinning/prepared.rs` | Prepared sampling opens the pose census span and consults the execution thread's skin phase. Sim sampling stays on the step lane. Art gather, bank publication and GL submission stay with the owner. |
+| `player/`, `interaction.rs` and `interaction/` | Movement query ownership, fixed ticks, trigger and object counters, mover timings, and solid publication brackets. Step hooks run in cut A; save/load acknowledgement and modal paths stay with the owner. |
+| `npc.rs`, `npc/profile.rs`, NPC controllers and combat | Per-kind update splits, prepared animation, scoped NPC counters, first-use probes, query categories and branch decisions. The worker returns phase/spike/stat rows and lends back the host decision digest. Rendering NPC art and allocating skin instances remain owner transactions. |
+| `combat/navigation.rs` and `flight.rs` | Ground detour and airborne route searches report expansion and clearance work through spike and census rows on the execution lane. |
+| `particles.rs`, steam, and `character.rs` | Puffs, constrained sweeps, particle publication, character animation and character-specific frame-profile timers. Simulation-side samples travel with their cut. Render effects and attached draw submission use owner counters. |
+| `audio.rs`, `audio/static_cache.rs`, and `viewer/step.rs` audio intent | The step records intents and captures the immutable acoustic view. Commands, acoustic sweeps, the mixer and device apply stay on the owner. Host audio evidence remains an independent parity channel. |
+| Replay capture and seal generation | State capture is worker-local on a free W0 frame, and consumption is checked on the owner. Pixel hashes, presentation probes, F12 and input/tape control use the owner's presentation or capture stamp. |

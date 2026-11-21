@@ -5,6 +5,7 @@ use std::{
     panic::resume_unwind,
     sync::mpsc::{sync_channel, Receiver, SyncSender},
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 pub const DEFAULT_STACK_SIZE: usize = 2 * 1024 * 1024;
@@ -124,6 +125,12 @@ struct Job<J, S, O> {
 struct Done<S, O, D> {
     work: Work<S, O>,
     step: Step<D>,
+}
+
+pub struct BlockedTimes {
+    pub submit_start: Instant,
+    pub join_start: Instant,
+    pub join_end: Instant,
 }
 
 pub struct Pipeline<J, S, O, D> {
@@ -299,14 +306,19 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
 
     /// W0 uses a single idle slot and returns state before the owner resumes.
     /// A continuation of the same frame uses the same capture stamp.
-    pub fn run_blocked(&mut self, stamp: Stamp, input: J)
-        -> Result<(Stamp, Step<D>, &mut O), PipelineError<std::convert::Infallible>>
+    pub fn run_blocked(&mut self, stamp: Stamp, input: J, timed: bool)
+        -> Result<(Stamp, Step<D>, &mut O, Option<BlockedTimes>), PipelineError<std::convert::Infallible>>
     {
+        let submit_start = timed.then(Instant::now);
         self.submit(0, stamp, input)?;
+        let join_start = timed.then(Instant::now);
         let Done { work, step } = self.join()?;
+        let times = submit_start.zip(join_start).map(|(submit_start, join_start)| BlockedTimes {
+            submit_start, join_start, join_end: Instant::now(),
+        });
         self.state = Some(work.state);
         self.slots[work.slot] = Some(work.output);
-        Ok((work.stamp, step, self.slots[work.slot].as_mut().unwrap()))
+        Ok((work.stamp, step, self.slots[work.slot].as_mut().unwrap(), times))
     }
 
     fn dispatch<E>(&mut self, slot: usize, frame: Frame, input: J) -> Result<(), PipelineError<E>> {

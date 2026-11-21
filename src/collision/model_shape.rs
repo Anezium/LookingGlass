@@ -336,10 +336,10 @@ pub(crate) mod lazy_profile {
 
     pub(crate) fn report() {
         if !enabled() { return; }
-        for (kind, [wait, build]) in ["hulls", "candidates", "bevel"].into_iter().zip(&SAMPLES) {
-            println!("[lg/sim-lazy] kind={kind} builds={} build_sum_ns={} build_max_ns={} waits={} wait_sum_ns={} wait_max_ns={}",
+        for (kind, [published, build]) in ["hulls", "candidates", "bevel"].into_iter().zip(&SAMPLES) {
+            println!("[lg/sim-lazy] kind={kind} build_attempts={} build_attempt_sum_ns={} build_attempt_max_ns={} found_published={} found_published_sum_ns={} found_published_max_ns={}",
                 build.count.load(Relaxed), build.sum_ns.load(Relaxed), build.max_ns.load(Relaxed),
-                wait.count.load(Relaxed), wait.sum_ns.load(Relaxed), wait.max_ns.load(Relaxed));
+                published.count.load(Relaxed), published.sum_ns.load(Relaxed), published.max_ns.load(Relaxed));
         }
     }
 }
@@ -350,6 +350,8 @@ impl Placed {
     }
 
     fn build_candidates(&self) -> Candidates {
+        #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
+        crate::viewer::sim_audit::sample_stack("build_candidates");
         crate::sim_maps::count("triangle_candidate_placements", 1);
         let brushes = self.geometry.brushes.iter().map(|s| s.at(self.origin, self.rotation)).collect();
         let triangles = if let Some(mesh) = &self.geometry.mesh {
@@ -389,6 +391,8 @@ impl Placed {
                 #[cfg(target_os = "vita")]
                 add_counter(Counter::LazyHullBuilds, 1);
                 crate::sim_maps::count("lazy_hull_builds", 1);
+                #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
+                crate::viewer::sim_audit::sample_stack("build_hulls");
                 self.geometry.at(self.origin, self.rotation)
             })
     }

@@ -51,6 +51,7 @@ const NPC_ROWS: usize = 24;
 #[derive(Default)]
 struct Frame {
     number: u64,
+    worker: bool,
     flight_work: [u32;6],
     begin: Option<Instant>,
     render: Option<Instant>,
@@ -80,7 +81,7 @@ struct Frame {
     /// Milliseconds this frame spent formatting the previous frame's line into the buffer.
     log_ms: f64,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize)]
 struct Npc { name: &'static str, updated: u64, ms: [f64; 4] }
 thread_local! { static FRAME: RefCell<Frame> = RefCell::default(); }
 
@@ -140,6 +141,7 @@ impl Frame {
     }
     /// Charges the GXM time since the last mark to the open region and opens `next`.
     fn gxm_switch(&mut self, next: usize) {
+        if self.worker { return; }
         let now = gxm_now();
         if let (Some(before), Some(after)) = (self.gxm_mark, now) {
             self.end_us[self.region] = self.end_us[self.region].wrapping_add(after[1].wrapping_sub(before[1]));
@@ -247,6 +249,41 @@ pub(crate) fn begin_frame() {
             gxm_mark: mark, log_ms, ..Frame::default() };
     });
 }
+#[derive(serde::Serialize)]
+pub(crate) struct WorkerRow {
+    sim_ms: [(&'static str, f64); SIM.len()],
+    late_calls: [u32; KINDS.len()],
+    late_ms: [f64; KINDS.len()],
+    npc: Vec<Npc>,
+    planners: [(u32, f64, u32, u32); 2],
+    flight_work: [u32; 6],
+}
+
+pub(crate) fn setup_worker() {
+    FRAME.with(|frame| frame.borrow_mut().worker = true);
+}
+
+pub(crate) fn worker_begin(number: u64) {
+    FRAME.with(|frame| {
+        *frame.borrow_mut() = Frame {
+            number, worker: true, begin: Some(Instant::now()), ..Frame::default()
+        };
+    });
+}
+
+pub(crate) fn worker_finish() -> WorkerRow {
+    FRAME.with(|frame| {
+        let mut frame = std::mem::replace(&mut *frame.borrow_mut(), Frame { worker: true, ..Frame::default() });
+        frame.close_block(Instant::now());
+        WorkerRow {
+            sim_ms: std::array::from_fn(|i| (SIM[i], frame.sim_ms[i])),
+            late_calls: frame.calls, late_ms: frame.ms,
+            npc: frame.npc.into_iter().flatten().collect(),
+            planners: frame.planners, flight_work: frame.flight_work,
+        }
+    })
+}
+
 /// Writes the buffered lines, one record each, then one `[lg/spike] flushed` line with the count,
 /// the drops and the time the writes took. `at` names the flush point. Called outside play.
 pub(crate) fn flush(at: &str) {
@@ -334,12 +371,14 @@ pub(crate) fn planner(kind: usize, ms: f64, expanded: u32, tests: u32) {
 /// A loader call outside any load phase. `name` is printed when given.
 pub(crate) fn late(kind: usize, ms: f64, name: Option<&str>, bytes: Option<usize>) {
     if !on() { return; }
-    let (number, playing) = FRAME.with(|f| {
+    let (number, playing, worker) = FRAME.with(|f| {
         let mut f = f.borrow_mut();
         f.calls[kind] += 1;
         f.ms[kind] += ms;
-        (f.number, f.begin.is_some())
+        (f.number, f.begin.is_some(), f.worker)
     });
+    // The cut reply includes worker totals. No stdout or owner buffer use here.
+    if worker { return; }
     let write = |line: &mut String| {
         let _ = write!(line, "[lg/late-work] frame={number} kind={} ms={ms:.2}", KINDS[kind]);
         if let Some(b) = bytes { let _ = write!(line, " bytes={b}"); }

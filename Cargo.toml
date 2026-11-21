@@ -16,7 +16,7 @@ vita_renderer = ["dep:once_cell"]
 # Optional actor publication counters; no calls or argument work in regular builds.
 actor_diagnostics = ["vita_renderer"]
 # Host-only deterministic live-window diagnostics; never used for console packages.
-sim_maps_probe = []
+sim_maps_probe = ["dep:libc"]
 
 [dependencies]
 anyhow = "1.0"
@@ -36,6 +36,9 @@ serde_json = { version = "=1.0.145", features = ["float_roundtrip"] }
 glam = { version = "=0.27.0", features = ["serde"] }
 sha2 = "=0.10.9"
 once_cell = { version = "=1.21.4", default-features = false, features = ["alloc"], optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = { version = "=0.2.189", optional = true }
 
 [build-dependencies]
 sha2 = "=0.10.9"

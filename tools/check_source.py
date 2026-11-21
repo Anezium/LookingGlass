@@ -42,7 +42,7 @@ CONFIG_FILES = {
 PINNED_FILES = {
     # Release documents, notices and review fixtures.
     "CREDITS.txt": "ccbc4212f9fc9a47cbcc3d0db285e3335a20041bc23996ca0f8169b289331b01",
-    "THIRD_PARTY_NOTICES-vita.txt": "ca7b0ec36a346cdc5ec6e17e9b3f9e3743bdac7f941b82e6928607d2b0ed222b",
+    "THIRD_PARTY_NOTICES-vita.txt": "ffac37a0b38cee08ff669a4eafb33d2815b07ab312c4d2cdd6d78cd70466526f",
     "docs/NATIVE-TIMING-PAIR-SPEC.example.json": "0f95e537ad012d54dfba38c63cf3f33f77096688a6a9b296c8744a463a081d3b",
     "examples/transition_texture_lifetime.rs": "8a5bca77466dcd7ded278701f0e0a176118bb8379af71c68021883c6b0d93768",
     "src/frame_total_gl_names.txt": "662e07e8c1886b29626caa105e9d84d25efaec21ad7f61bf5aedacc909aaf6d4",

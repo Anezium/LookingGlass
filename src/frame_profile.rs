@@ -416,6 +416,30 @@ impl Drop for Span {
     }
 }
 
+#[derive(serde::Serialize)]
+pub(crate) struct WorkerRow {
+    /// Label, inclusive milliseconds, exclusive milliseconds. Host scopes do
+    /// not track nesting and leave exclusive milliseconds absent.
+    spans: Vec<(&'static str, f64, Option<f64>)>,
+    counters: Vec<(&'static str, &'static str, u64)>,
+    hierarchy_errors: usize,
+}
+
+#[cfg(not(target_os = "vita"))]
+pub(crate) fn worker_begin() {
+    SAMPLES.with(|samples| samples.borrow_mut().clear());
+}
+
+#[cfg(not(target_os = "vita"))]
+pub(crate) fn worker_finish() -> WorkerRow {
+    let spans = SAMPLES.with(|samples| std::mem::take(&mut *samples.borrow_mut())).into_iter()
+        .flat_map(|(label, times)| times.into_iter().map(move |ms| (label, ms, None))).collect();
+    WorkerRow { spans, counters: Vec::new(), hierarchy_errors: 0 }
+}
+
+#[cfg(target_os = "vita")]
+pub(crate) use vita::{setup_worker, worker_begin, worker_finish};
+
 /// A diagnostic export failure must not interrupt pause or level transition.
 pub(crate) fn log_report_error(report: anyhow::Result<()>) {
     if let Err(e) = report { eprintln!("Frame profile report failed: {e:#}"); }
@@ -552,27 +576,73 @@ mod vita {
     static OWNER: AtomicU8 = AtomicU8::new(0);
     static HOT_COUNTS: [[AtomicU32; COUNTER_NAMES.len() + 1]; OWNER_NAMES.len()] =
         [const { [const { AtomicU32::new(0) }; COUNTER_NAMES.len() + 1] }; OWNER_NAMES.len()];
+    struct WorkerHot {
+        owner: u8,
+        recording: bool,
+        counts: [[u32; COUNTER_NAMES.len() + 1]; OWNER_NAMES.len()],
+    }
+
+    impl WorkerHot {
+        fn new(recording: bool) -> Self {
+            Self {
+                owner: Owner::None as u8,
+                recording,
+                counts: [[0; COUNTER_NAMES.len() + 1]; OWNER_NAMES.len()],
+            }
+        }
+    }
+
+    // Once the sim worker exists, its owner labels and counters are always
+    // local to it. Inactive counters still return before any TLS access.
+    static WORKER_PROFILE_ARMED: AtomicBool = AtomicBool::new(false);
+    static WORKER_RECORDING: AtomicBool = AtomicBool::new(false);
+
+    fn worker_hot<T>(f: impl FnOnce(&mut WorkerHot) -> T) -> Option<T> {
+        if !WORKER_PROFILE_ARMED.load(Relaxed) { return None; }
+        STATE.with(|s| s.borrow_mut().worker_hot.as_mut().map(f))
+    }
+
+    fn set_owner_word(owner: u8) {
+        if worker_hot(|worker| worker.owner = owner).is_none() {
+            OWNER.store(owner, Relaxed);
+        }
+    }
+    fn owner_word() -> u8 {
+        worker_hot(|worker| worker.owner).unwrap_or_else(|| OWNER.load(Relaxed))
+    }
     pub fn set_owner(owner: Owner) {
-        OWNER.store(owner as u8, Relaxed);
+        set_owner_word(owner as u8);
     }
     // Shared skin helpers also draw effects/first-person meshes. These series
     // measure only work nested in frame_characters, so its decomposition closes.
     pub fn characters_span(label: &'static str) -> Option<Span> {
-        (OWNER.load(Relaxed) == Owner::Characters as u8).then(|| span(label))
+        (owner_word() == Owner::Characters as u8).then(|| span(label))
     }
     pub struct CounterOwner(u8);
     pub fn counter_owner(owner: Owner) -> CounterOwner {
-        let previous = OWNER.load(Relaxed);
-        OWNER.store(owner as u8, Relaxed);
+        let previous = owner_word();
+        set_owner(owner);
         CounterOwner(previous)
     }
     impl Drop for CounterOwner {
         fn drop(&mut self) {
-            OWNER.store(self.0, Relaxed);
+            set_owner_word(self.0);
         }
     }
     #[inline]
     pub fn add_counter(counter: Counter, value: u32) {
+        if !HOT_RECORDING.load(Relaxed) && !WORKER_RECORDING.load(Relaxed) { return; }
+        if worker_hot(|worker| {
+            if !worker.recording { return; }
+            let index = counter as usize;
+            let mut add = |owner: usize| {
+                let row: &mut [u32; COUNTER_NAMES.len() + 1] = &mut worker.counts[owner];
+                row[index] += value;
+                row[COUNTER_NAMES.len()] |= 1 << index;
+            };
+            add(0);
+            if worker.owner != 0 { add(worker.owner as usize); }
+        }).is_some() { return; }
         if !HOT_RECORDING.load(Relaxed) {
             return;
         }
@@ -594,7 +664,8 @@ mod vita {
                 cell.store(0, Relaxed);
             }
         }
-        set_owner(Owner::None);
+        // Only begin_frame on the owner resets the global arrays.
+        OWNER.store(Owner::None as u8, Relaxed);
     }
 
     const LABELS: &[&str] = &[
@@ -760,6 +831,7 @@ mod vita {
         heap_before: Option<u64>,
         recording: bool,
         clocks_raised: bool,
+        worker_hot: Option<WorkerHot>,
         pending: Vec<(&'static str, f64, f64)>,
         stack: Vec<(u64, &'static str, f64)>,
         next_token: u64,
@@ -777,6 +849,42 @@ mod vita {
         windows: Vec<serde_json::Value>,
     }
     thread_local! { static STATE: RefCell<State> = RefCell::default(); }
+
+    pub(crate) fn setup_worker() {
+        STATE.with(|state| state.borrow_mut().worker_hot = Some(WorkerHot::new(false)));
+        WORKER_PROFILE_ARMED.store(true, Relaxed);
+    }
+
+    pub(crate) fn worker_begin() {
+        WORKER_RECORDING.store(true, Relaxed);
+        STATE.with(|state| {
+            let mut s = state.borrow_mut();
+            s.worker_hot = Some(WorkerHot::new(true));
+            s.hierarchy_errors = 0;
+            s.recording = true;
+        });
+    }
+
+    pub(crate) fn worker_finish() -> WorkerRow {
+        WORKER_RECORDING.store(false, Relaxed);
+        STATE.with(|state| {
+            let mut s = state.borrow_mut();
+            s.recording = false;
+            let hot = s.worker_hot.replace(WorkerHot::new(false)).expect("worker profiler was not armed");
+            for (&owner, row) in OWNER_NAMES.iter().zip(hot.counts) {
+                for (i, (&name, count)) in COUNTER_NAMES.iter().zip(row).enumerate() {
+                    if row[COUNTER_NAMES.len()] & (1 << i) != 0 {
+                        *s.pending_counts.entry((owner, name)).or_default() += u64::from(count);
+                    }
+                }
+            }
+            let spans = std::mem::take(&mut s.pending).into_iter()
+                .map(|(name, ms, exclusive)| (name, ms, Some(exclusive))).collect();
+            let counters = std::mem::take(&mut s.pending_counts).into_iter()
+                .map(|((owner, name), count)| (owner, name, count)).collect();
+            WorkerRow { spans, counters, hierarchy_errors: s.hierarchy_errors + s.stack.len() }
+        })
+    }
 
     // ABI from VitaSDK malloc.h: ten size_t fields, 32-bit on Vita.
     #[repr(C)]
@@ -939,7 +1047,7 @@ mod vita {
     }
     // Call once after local integer loops. No per-plan or per-triplet timing.
     pub fn counts(values: &[(&'static str, u64)]) {
-        if !HOT_RECORDING.load(Relaxed) { return; }
+        if !HOT_RECORDING.load(Relaxed) && !WORKER_RECORDING.load(Relaxed) { return; }
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             if !s.recording {
@@ -967,7 +1075,7 @@ mod vita {
         });
     }
     pub fn uncounts(values: &[(&'static str, u64)]) {
-        if !HOT_RECORDING.load(Relaxed) { return; }
+        if !HOT_RECORDING.load(Relaxed) && !WORKER_RECORDING.load(Relaxed) { return; }
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             if !s.recording { return; }

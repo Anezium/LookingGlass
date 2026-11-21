@@ -449,6 +449,8 @@ impl Animation {
         time + ((cycles * self.frames.len() as f32 + end_frame) - frame).max(0.) * self.frame_time
     }
     pub fn sample(&self, time: f32, looping: bool) -> Vec<Transform> {
+        #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
+        crate::viewer::sim_audit::sample_stack("skeletal_sample");
         let _npc_work = crate::npc::profile::work(crate::npc::profile::Phase::Animation);
         crate::character::skinning::prepared::sample(self as *const Self as usize, time, looping,
             || self.sample_uncached(time, looping))
