@@ -184,6 +184,12 @@ fn mode() -> u8 {
 pub fn active() -> bool {
     mode() != OFF
 }
+
+#[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+pub(crate) fn replaying() -> bool {
+    mode() == REPLAY
+}
+
 fn store_u128(cells: &[AtomicU64; 2], value: u128) {
     cells[0].store(value as u64, Relaxed);
     cells[1].store((value >> 64) as u64, Relaxed);
