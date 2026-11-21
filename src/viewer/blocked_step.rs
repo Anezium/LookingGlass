@@ -16,9 +16,11 @@ pub(super) enum Input {
     B(StepBInput, Option<AcousticView>, Option<bool>),
 }
 
+pub(super) type Seal = (Stamp, crate::replay::OwnedProbe);
+
 pub(super) enum Output {
     A(Result<(bool, super::step::Due)>),
-    B(Result<(StepView, AcousticView, Option<crate::replay::OwnedProbe>)>),
+    B(Result<(StepView, AcousticView, Stamp, Option<Seal>)>),
 }
 
 impl Input {
@@ -51,8 +53,7 @@ struct Reply {
 
 pub(super) struct Worker {
     pipeline: Pipeline<Request, (), Option<Reply>, ()>,
-    #[cfg(not(target_os = "vita"))]
-    pub(super) wrong_stamp: Option<WrongStamp>,
+
 }
 
 impl Worker {
@@ -89,11 +90,12 @@ impl Worker {
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
         let report_slots = audit.depth;
         let mut initialized = false;
-        let worker = Pipeline::new(
+        let worker = Pipeline::new_with_reply_stamp(
             (),
             [None, None],
             Some(stack),
-            move |stamp, request: Request, _, slot| {
+            move |reply_stamp, request: Request, _, slot| {
+                let stamp = *reply_stamp;
                 let worker_start = sim_timing::mark(request.timing.is_some());
                 if !initialized {
                     crate::skin_worker::pin_reserved_cpu1();
@@ -190,7 +192,11 @@ impl Worker {
                                 if report_slots {
                                     report_payload(stamp, &view, &acoustic, seal.as_ref());
                                 }
-                                Ok((view, acoustic, seal))
+                                #[cfg(not(target_os = "vita"))]
+                                let corrupt = |field| WrongStamp::corrupt(wrong_stamp, field, stamp);
+                                #[cfg(target_os = "vita")]
+                                let corrupt = |_| stamp;
+                                Ok((view, acoustic, corrupt("present"), seal.map(|probe| (corrupt("seal"), probe))))
                             }
                             Err(error) => Err(error),
                         };
@@ -233,14 +239,15 @@ impl Worker {
                     #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
                     probe,
                 });
+                #[cfg(not(target_os = "vita"))]
+                { *reply_stamp = WrongStamp::corrupt(wrong_stamp, "transport", stamp); }
                 Step::Complete
             },
         )?;
         println!("[lg/sim-overlap] mode=W0 stack_bytes={stack}");
         Ok(Self {
             pipeline: worker,
-            #[cfg(not(target_os = "vita"))]
-            wrong_stamp,
+
         })
     }
 
@@ -283,11 +290,9 @@ impl Worker {
             )
             .map_err(|error| anyhow!("W0 sim worker: {error:?}"))?;
         let reply = slot.take().expect("missing blocked step reply");
-        #[cfg(not(target_os = "vita"))]
-        let stamp = WrongStamp::corrupt(self.wrong_stamp, "transport", stamp);
         assert_eq!(stamp, expected, "stale sim transport stamp");
         assert_eq!(reply.job.stamp, expected, "stale sim state stamp");
-        if let Output::B(Ok((view, _, _))) = &reply.output {
+        if let Output::B(Ok((view, ..))) = &reply.output {
             assert_eq!(view.stamp, expected, "stale sim output stamp");
         }
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]

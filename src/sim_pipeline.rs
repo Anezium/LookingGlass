@@ -154,7 +154,18 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
         state: S,
         slots: [O; 2],
         stack_size: Option<usize>,
-        step: impl FnMut(Stamp, J, &mut S, &mut O) -> Step<D> + Send + 'static,
+        mut step: impl FnMut(Stamp, J, &mut S, &mut O) -> Step<D> + Send + 'static,
+    ) -> std::io::Result<Self> {
+        Self::new_with_reply_stamp(state, slots, stack_size, move |stamp, input, state, output| {
+            step(*stamp, input, state, output)
+        })
+    }
+
+    pub(crate) fn new_with_reply_stamp(
+        state: S,
+        slots: [O; 2],
+        stack_size: Option<usize>,
+        step: impl FnMut(&mut Stamp, J, &mut S, &mut O) -> Step<D> + Send + 'static,
     ) -> std::io::Result<Self> {
         Self::spawn(state, slots, stack_size, 1, |jobs, done| {
             Self::work_loop(jobs, done, step);
@@ -192,7 +203,7 @@ impl<J: Send + 'static, S: Send + 'static, O: Send + 'static, D: Send + 'static>
         mut step: impl FnMut(Stamp, J, &mut S, &mut O) -> Step<D>,
     ) {
         while let Ok(Job { input, mut work }) = jobs.recv() {
-            let step = step(work.stamp, input, &mut work.state, &mut work.output);
+            let step = step(&mut work.stamp, input, &mut work.state, &mut work.output);
             if done.send(Done { work, step }).is_err() {
                 break;
             }

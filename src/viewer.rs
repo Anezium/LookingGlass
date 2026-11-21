@@ -1213,8 +1213,6 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let sim_overlap = false;
     let mut sim_audit = sim_audit::Audit::new();
     let mut sim_worker = sim_overlap.then(|| blocked_step::Worker::new(&sim_audit)).transpose()?;
-    #[cfg(not(target_os = "vita"))]
-    let wrong_stamp = sim_worker.as_ref().and_then(|worker| worker.wrong_stamp);
     let mut worker_generation = 0u64;
     let mut dispatched_frames = 0u64;
     let mut sim_trace = sim_timing::Trace::new();
@@ -3490,6 +3488,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 .then_some(due.unwrap_or(false))
         });
         let mut worker_seal = None;
+        let mut worker_present = None;
         let (StepView {
             stamp: present_stamp, presentation, camera_out, dynamic: mut dynamic_input, active, direction, targets, pand_cinematic, scripted_camera, show_alice,
             #[cfg(target_os = "vita")]
@@ -3514,13 +3513,13 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         }, frame_stamp, sim_worker.as_mut().filter(|_| worker_complete), step_input.clock(), B, StepB,
             |input| blocked_step::Input::B(input, acoustic_view.take(), seal_request),
             blocked_step::Output::B(result) => {
-                let (view, acoustic, seal) = result?;
+                let (view, acoustic, present, seal) = result?;
+                worker_present = Some(present);
                 acoustic_view = Some(acoustic);
-                worker_seal = seal.map(|probe| (view.stamp, probe, "tail"));
+                worker_seal = seal.map(|(stamp, probe)| (stamp, probe, "tail"));
                 view
             });
-        #[cfg(not(target_os = "vita"))]
-        let present_stamp = sim_audit::WrongStamp::corrupt(wrong_stamp, "present", present_stamp);
+        let present_stamp = worker_present.unwrap_or(present_stamp);
         assert_eq!(present_stamp, frame_stamp, "stale present stamp");
         assert_eq!(present_stamp.frame.visit_id, level_art.snapshot_visit.id(), "stale present visit");
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -4899,8 +4898,6 @@ interactions
             assert_eq!(tail_hud_len, hud_ops.len(), "free tail pushed a HUD operation");
         }
         if let Some((stamp, probe, path)) = worker_seal.filter(|_| free_tail) {
-            #[cfg(not(target_os = "vita"))]
-            let stamp = sim_audit::WrongStamp::corrupt(wrong_stamp, "seal", stamp);
             assert_eq!(stamp, present_stamp, "stale worker seal stamp");
             assert!(stored_replay_probe.replace((stamp, probe, path, true)).is_none(),
                 "duplicate replay probe for one step");
