@@ -1003,6 +1003,7 @@ impl SnapshotTiming {
 
 mod step;
 mod blocked_step;
+pub(crate) mod sim_audit;
 mod free_render;
 use step::{
     step_a, step_b, step_due, Due, SimState, ConsoleOps, StepAInput, StepBInput, StepJob, StepLocals, StepScopes,
@@ -1209,7 +1210,10 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     let sim_overlap = crate::render::vita_renderer::config().sim_overlap;
     #[cfg(not(feature = "vita_renderer"))]
     let sim_overlap = false;
-    let mut sim_worker = sim_overlap.then(blocked_step::Worker::new).transpose()?;
+    let sim_audit = sim_audit::Audit::new();
+    let mut sim_worker = sim_overlap.then(|| blocked_step::Worker::new(&sim_audit)).transpose()?;
+    #[cfg(not(target_os = "vita"))]
+    let wrong_stamp = sim_worker.as_ref().and_then(|worker| worker.wrong_stamp);
     let mut worker_generation = 0u64;
     let mut dispatched_frames = 0u64;
     let mut menu = false;
@@ -1766,7 +1770,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
     }
     use crate::sim_pipeline::{Frame as StampFrame, Stamp};
     let mut frame_stamp: Stamp;
-    let mut stored_replay_probe: Option<(Stamp, crate::replay::OwnedProbe, &'static str)> = None;
+    let mut stored_replay_probe: Option<(Stamp, crate::replay::OwnedProbe, &'static str, bool)> = None;
     #[cfg(not(target_os = "vita"))]
     let mut replay_probe_fallbacks = 0u64;
     #[cfg(not(target_os = "vita"))]
@@ -1788,7 +1792,7 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 // Host builds compare the lightweight probe even between tape checks.
                 if cfg!(not(target_os = "vita")) || due.is_some() {
                     assert!(stored_replay_probe.is_none(), "duplicate replay probe for one step");
-                    stored_replay_probe = Some((frame_stamp, replay_probe!(due.unwrap_or(false)), $path));
+                    stored_replay_probe = Some((frame_stamp, replay_probe!(due.unwrap_or(false)), $path, false));
                 }
             }
         };
@@ -1965,13 +1969,17 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 }).min_by(|a, b| a.1.total_cmp(&b.1)));
             }
             let due = r.due();
-            let probe = if let Some((stamp, probe, _path)) = stored_replay_probe.take() {
+            let probe = if let Some((stamp, probe, _path, worker_seal)) = stored_replay_probe.take() {
                 assert_eq!(stamp.frame.tape_step, r.current_step(), "stale replay seal stamp");
                 #[cfg(not(target_os = "vita"))]
                 {
                     let top = replay_probe!(due.unwrap_or(false));
                     probe.assert_same_state(&top, frame, r.current_step(), _path);
                     replay_probe_assertions += 1;
+                }
+                if sim_audit.rows && worker_seal {
+                    println!("SIM_W0_SEAL_CONSUMED frame={} tape_step={} check={}",
+                        stamp.frame.frame, stamp.frame.tape_step, u8::from(due.is_some()));
                 }
                 due.map(|_| probe)
             } else {
@@ -3218,16 +3226,27 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         let step_survey = r13_survey.is_some();
         #[cfg(not(target_os = "vita"))]
         let step_survey = false;
-        let dispatchable = sim_overlap && gameplay && !first_replay_step && !step_load_probe
-            && !bench && !route_running && !step_survey && host_transition.is_empty()
-            && !save_requested && !autosave_requested && !quit_after_frame
-            && pending_menu_save.is_none() && pending_menu_newgame.is_none()
-            && context_before == (menu, inventory_menu, console.open, paused)
-            && frame_stamp.frame.visit_id == level_art.snapshot_visit.id()
-            && scene.retained_active()
-            && level_art.handoff_pose().is_none()
-            && (!snapshot_handoff || handoff_return.pose(&level_art.snapshot_visit).is_none())
-            && options.frames.is_none_or(|limit| frame + 1 < limit);
+        let dispatch_failures = [
+            ("gameplay", !gameplay),
+            ("first_replay_step", first_replay_step),
+            ("load_probe", step_load_probe),
+            ("bench", bench),
+            ("route", route_running),
+            ("survey", step_survey),
+            ("host_transition", !host_transition.is_empty()),
+            ("save", save_requested),
+            ("autosave", autosave_requested),
+            ("quit", quit_after_frame),
+            ("menu_save", pending_menu_save.is_some()),
+            ("menu_newgame", pending_menu_newgame.is_some()),
+            ("context", context_before != (menu, inventory_menu, console.open, paused)),
+            ("visit", frame_stamp.frame.visit_id != level_art.snapshot_visit.id()),
+            ("retained_renderer", !scene.retained_active()),
+            ("handoff", level_art.handoff_pose().is_some()),
+            ("snapshot_handoff", snapshot_handoff && handoff_return.pose(&level_art.snapshot_visit).is_some()),
+            ("frame_limit", options.frames.is_some_and(|limit| frame + 1 >= limit)),
+        ];
+        let dispatchable = sim_overlap && !dispatch_failures.iter().any(|&(_, failed)| failed);
         if dispatchable {
             worker_generation = worker_generation.checked_add(1).expect("sim slot generation exhausted");
             frame_stamp.slot_generation = worker_generation;
@@ -3269,6 +3288,16 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
         if let Some(message) = console_ops.message { console.print(message); }
         let (story_active, mut due) = step_a_result?;
         let worker_complete = dispatchable && matches!(due, Due::None);
+        if sim_audit.rows && dispatchable && !worker_complete {
+            let reason = match &due {
+                Due::None => unreachable!(),
+                Due::Checkpoint => "checkpoint",
+                Due::Ending => "ending",
+                Due::Exit(_) => "exit",
+            };
+            println!("SIM_W0_DUE frame={} tape_step={} reason={reason}",
+                frame_stamp.frame.frame, frame_stamp.frame.tape_step);
+        }
         if simulate {
         if matches!(due, Due::Checkpoint) {
             if throttle_normal {
@@ -3477,6 +3506,8 @@ pub async fn run(mut assets: Assets, mut options: Options) -> Result<()> {
                 worker_seal = seal.map(|probe| (view.stamp, probe, "tail"));
                 view
             });
+        #[cfg(not(target_os = "vita"))]
+        let present_stamp = sim_audit::WrongStamp::corrupt(wrong_stamp, "present", present_stamp);
         assert_eq!(present_stamp, frame_stamp, "stale present stamp");
         assert_eq!(present_stamp.frame.visit_id, level_art.snapshot_visit.id(), "stale present visit");
         #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
@@ -4848,9 +4879,12 @@ interactions
         if free_tail {
             assert_eq!(tail_hud_len, hud_ops.len(), "free tail pushed a HUD operation");
         }
-        if let Some(seal) = worker_seal.filter(|_| free_tail) {
-            assert_eq!(seal.0, present_stamp, "stale worker seal stamp");
-            assert!(stored_replay_probe.replace(seal).is_none(), "duplicate replay probe for one step");
+        if let Some((stamp, probe, path)) = worker_seal.filter(|_| free_tail) {
+            #[cfg(not(target_os = "vita"))]
+            let stamp = sim_audit::WrongStamp::corrupt(wrong_stamp, "seal", stamp);
+            assert_eq!(stamp, present_stamp, "stale worker seal stamp");
+            assert!(stored_replay_probe.replace((stamp, probe, path, true)).is_none(),
+                "duplicate replay probe for one step");
             #[cfg(not(target_os = "vita"))]
             { previous_step_exit = "tail"; }
         } else {
@@ -4948,6 +4982,8 @@ interactions
             println!("TRANSITION_STATE {}", serde_json::json!({"frame":frame,"map":maps[current],
                 "state_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&value)?))}));
         }
+        sim_audit.frame(present_stamp, sim_overlap, &dispatch_failures, worker_complete,
+            snapshot_enabled && snapshot_world_free, free_tail);
         frame += 1;
         if physical_input && !bench && is_key_pressed(KeyCode::F12) {
             save_capture(&std::path::PathBuf::from(format!(

@@ -350,6 +350,8 @@ impl Placed {
     }
 
     fn build_candidates(&self) -> Candidates {
+        #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
+        crate::viewer::sim_audit::sample_stack("build_candidates");
         crate::sim_maps::count("triangle_candidate_placements", 1);
         let brushes = self.geometry.brushes.iter().map(|s| s.at(self.origin, self.rotation)).collect();
         let triangles = if let Some(mesh) = &self.geometry.mesh {
@@ -389,6 +391,8 @@ impl Placed {
                 #[cfg(target_os = "vita")]
                 add_counter(Counter::LazyHullBuilds, 1);
                 crate::sim_maps::count("lazy_hull_builds", 1);
+                #[cfg(any(target_os = "vita", feature = "sim_maps_probe"))]
+                crate::viewer::sim_audit::sample_stack("build_hulls");
                 self.geometry.at(self.origin, self.rotation)
             })
     }
