@@ -472,9 +472,15 @@ impl Input {
     }
 
     pub(crate) fn capture_step(&mut self, step: u64, focused: bool) -> StepInput {
+        // The host probe disables live input. Playback still owns its taped controls.
+        #[cfg(all(feature = "sim_maps_probe", not(target_os = "vita")))]
+        let tape_controls = crate::sim_maps::probe::enabled() && replay_input::replaying();
+        #[cfg(not(all(feature = "sim_maps_probe", not(target_os = "vita"))))]
+        let tape_controls = false;
+
         // Desktop XInput capture is outside P0 overlap, which requires renderer=vita.
-        let mut raw = self.slot.and_then(read_pad);
-        if raw.is_none() && replay_input::source_time() >= self.retry {
+        let mut raw = if tape_controls { None } else { self.slot.and_then(read_pad) };
+        if !tape_controls && raw.is_none() && replay_input::source_time() >= self.retry {
             self.slot = (0..4).find(|i| {
                 if let Some(p) = read_pad(*i) {
                     raw = Some(p);
@@ -485,6 +491,7 @@ impl Input {
             });
             self.retry = replay_input::source_time() + 1.;
         }
+        let focused = focused || tape_controls;
         let mut frame = crate::replay::input::capture_controls();
         frame.desktop_pad = raw;
         frame.vita_analog = cfg!(target_os = "vita") || crate::replay::input::cross();
