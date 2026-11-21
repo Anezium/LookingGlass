@@ -106,7 +106,7 @@ pub(super) fn fp_control() -> u32 {
     unsafe {
         core::arch::asm!("vmrs {}, fpscr", out(reg) value, options(nomem, nostack, preserves_flags));
     }
-    value & 0x07ff_9f00
+    value & 0x07ff_df00
 }
 
 #[cfg(all(not(target_os = "vita"), target_arch = "aarch64"))]
