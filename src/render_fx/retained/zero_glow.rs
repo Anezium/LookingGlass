@@ -86,6 +86,22 @@ fn bounded(position: Vec3) -> bool {
     position.is_finite() && position.abs().max_element() <= 8192.
 }
 
+thread_local! {
+    static CPU_BOUNDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Capture the conservative box already computed by skin frustum culling.
+/// The submitter copies this flag into each group while gathering the pose.
+pub(crate) fn cpu_bounds(bounds: Option<(Vec3, Vec3)>) -> impl Drop {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) { CPU_BOUNDED.set(self.0); }
+    }
+    Restore(CPU_BOUNDED.replace(bounds.is_some_and(|(lo, hi)| bounded(lo) && bounded(hi))))
+}
+
+pub(crate) fn cpu_bounded() -> bool { CPU_BOUNDED.get() }
+
 fn compatible_pair(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &Pass, gu: &[f32; UNIFORM_FLOATS]) -> bool {
     !base.effect && !glow.effect
         && base.blend_index == 1 && glow.blend_index == 2 && !base.depth_equal && !glow.depth_equal
@@ -231,7 +247,7 @@ impl Subset {
 /// matching glow fragment stays in the list and saturates destination alpha.
 /// Other deleted fragments have already established their own opaque depth.
 pub(super) fn subset<'a>(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &'a Pass,
-    gu: &[f32; UNIFORM_FLOATS], same_slot: bool) -> Option<&'a Subset> {
+    gu: &[f32; UNIFORM_FLOATS], same_slot: bool, cpu_bounded: bool) -> Option<&'a Subset> {
     let surface = glow.mesh.surface.as_ref()?;
     let subset = surface.glow_subset.as_ref()?;
     if !base.mesh.surface.as_ref().is_some_and(|b| std::rc::Rc::ptr_eq(b, surface))
@@ -242,7 +258,7 @@ pub(super) fn subset<'a>(base: &Pass, bu: &[f32; UNIFORM_FLOATS], glow: &'a Pass
         || glow.mesh.texture.as_ref() != surface.layers[1].textures.first()
         || !skin_pair(base, glow, same_slot)
         || !bounded_fog(gu)
-        || (glow.gpu_skin.is_none() && (gu[136] > 0. || gu[146] > 0.)) {
+        || (glow.gpu_skin.is_none() && !cpu_bounded && (gu[136] > 0. || gu[146] > 0.)) {
         return None;
     }
     Some(subset)

@@ -80,6 +80,8 @@ impl Pass {
 struct Group {
     #[cfg(feature="vita_renderer")]
     ant_dead: Option<bool>,
+    #[cfg(feature="vita_renderer")]
+    glow_cpu_bounded: bool,
     #[cfg(feature = "vita_renderer")]
     transparent: bool,
     passes: Vec<Pass>,
@@ -394,6 +396,7 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
             crate::character::skinning::census::register(f.groups.len());
             f.groups.push(Group {
                 ant_dead: corpse_triangles::active(),
+                glow_cpu_bounded: c.actor_glow_subset && retained::zero_glow::cpu_bounded(),
                 passes,
                 transparent,
             });
@@ -422,6 +425,8 @@ pub fn submit(passes: Vec<Pass>, transparent: bool) {
         f.groups.push(Group {
             #[cfg(feature="vita_renderer")]
             ant_dead: corpse_triangles::active(),
+            #[cfg(feature="vita_renderer")]
+            glow_cpu_bounded: false,
             passes,
             #[cfg(feature = "vita_renderer")]
             transparent: true,
@@ -964,9 +969,10 @@ pub(crate) fn register_identified(
 /// positions, normals and lighting on this mesh while preserving its UVs and
 /// topology. Replacing the mesh or material also replaces the certificate.
 #[cfg(feature="vita_renderer")]
-pub(crate) fn certify_actor_glow_subset(surface: &mut Rc<Surface>, source: &crate::skeletal::Surface) {
+pub(crate) fn certify_actor_glow_subset(surface: &mut Rc<Surface>, source: &crate::skeletal::Surface) -> bool {
     let surface = Rc::get_mut(surface).expect("new actor material");
     surface.glow_subset = retained::zero_glow::Subset::load(surface, source);
+    surface.glow_subset.is_some()
 }
 
 fn skin_stage_needs_normals(stage: &Stage) -> bool {

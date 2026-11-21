@@ -1804,7 +1804,8 @@ pub(crate) fn finish_world(
             {
                 let (base_group, base_pass, base_slot, base_uniforms) = &packets[i - 1];
                 if base_group == group && *base_pass == 0 {
-                    zero_glow::subset(&groups[*base_group].passes[*base_pass], base_uniforms, p, u, base_slot == b)
+                    zero_glow::subset(&groups[*base_group].passes[*base_pass], base_uniforms, p, u,
+                        base_slot == b, groups[id].glow_cpu_bounded)
                 } else {
                     None
                 }
@@ -2393,6 +2394,7 @@ mod tests {
     fn fixture_group() -> super::super::Group {
         super::super::Group {
             ant_dead: None,
+            glow_cpu_bounded: false,
             transparent: true,
             passes: vec![Pass {
                 #[cfg(feature="vita_renderer")] gpu_skin: None, _game_thread: crate::game_thread::GameThread::default(),
