@@ -658,5 +658,6 @@ The step 7c owner-fence analysis supplies the routes for graphics caches, probe 
 | `src/weapons.rs:891` | `thread_local!` | state | TLS block. No. Test fixture or override. Keep scoped to its test thread or harness. |
 | `src/viewer/sim_audit.rs:147` | `thread_local!` | diagnostic | The worker owns stack-depth samples. The owner never reads or changes this thread's sampler. |
 | `src/viewer/sim_audit.rs:148` | `STACK` | diagnostic | Caches this worker's OS stack bounds and deepest sampled marker. Only scalar measurements leave the thread. |
+| `src/viewer/sim_audit.rs:199` | `STACK_ARMED` | diagnostic | Set once when a worker arms stack sampling; unarmed builds return before the thread-local lookup. No simulation state. |
 | `src/frame_profile.rs:586` | `WORKER_PROFILE_ARMED` | diagnostic | Latches when a sim worker initializes. Worker-local profile state and hot counts are harvested separately from the owner arrays. |
 | `src/frame_profile.rs:599` | `WORKER_RECORDING` | diagnostic | Lets hot counters skip TLS access unless the owner or worker is recording. Counter ownership still follows the calling thread. |
